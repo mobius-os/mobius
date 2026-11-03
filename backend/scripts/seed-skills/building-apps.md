@@ -951,7 +951,9 @@ An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius (Möbius · You, or
 `PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
 1,000,000 micro). Another owner's copy pays for each call from its **own
-service**, never its frame, with `"permissions": { "spend_credits": true }`:
+service**, never its frame. Its manifest lists every `"<seller>/<app>"` it pays
+for, which the owner sees at install, and a charge to anything else is refused
+with `seller_not_allowed`: `"permissions": { "spend_credits": ["ana/prompts"] }`.
 
 ```js
 const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charges`, {
@@ -964,10 +966,11 @@ const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charge
 
 Read the price first (`GET /api/identity/credits/prices/<seller>?app_slug=<app>`;
 `spend_credits` covers this read), show it to the owner, and send it as
-`max_price_micro`; a higher current price refuses with `price_changed`. Reuse one `idempotency_key` per call so a retry
-never pays twice. Do the paid work only after a 200, and explain each refusal
-by its `detail.code`: `not_paired` (connect credits in Möbius · You),
-`insufficient_credits`, `price_changed`, or `price_not_found`.
+`max_price_micro`; a higher current price refuses with `price_changed`. Reuse
+one `idempotency_key` per call so a retry never pays twice. Do the paid work
+only after a 200, and explain each refusal by its `detail.code`: `not_paired`
+(connect credits in Möbius · You), `insufficient_credits`, `price_changed`,
+`price_not_found`, `key_spend_cap`, or `key_refused` (connect credits again).
 
 ## Managed-app update events
 

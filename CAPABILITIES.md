@@ -88,13 +88,19 @@ that service; another owner's copy of the app pays for a call with
 `POST /api/identity/credits/charges`
 `{seller, app, action, idempotency_key, max_price_micro}`. Only the app's own
 service may call it, with the reviewed `permissions.spend_credits` grant (a
-critical consent row): never the browser frame, a public invocation, or a
-service a shared-browser guest invoked. The service reads the published price;
-the app cannot choose it, only refuse to pay more than `max_price_micro`, the
+critical consent row listing each `"<seller>/<app>"` it may pay; an update that
+adds one asks again): never the browser frame, a public invocation, or a
+service a shared-browser guest invoked, and never a seller the grant does not
+list (`seller_not_allowed`). Each charge names the paying app (its package id,
+or its slug for an owner-built app) as `buyer_app`. The service reads the
+published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
 price it showed the owner. Retrying the same idempotency key charges once.
 Refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
-`key_spend_cap`).
+`key_spend_cap`). A refused key answers 409 `key_refused` and an address that is
+not a credits service 502 `not_found`, so neither reads as the caller's own
+sign-in failing. Balance, history and purchase reads refuse a shared-browser
+guest.
 
 ## Manifest contract
 

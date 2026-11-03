@@ -103,7 +103,7 @@ def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public
     (("data", "connect_manage"), True),
     (("data", "identity_manage"), True),
     (("data", "railway_manage"), True),
-    (("data", "spend_credits"), True),
+    (("data", "spend_credits"), ["ana/prompts"]),
     (("public", "storage", "read"), True),
     (("public", "storage", "write_prefix"), "public/submissions/"),
   ],
@@ -859,6 +859,22 @@ def test_provider_destination_change_requires_review():
 def test_job_secret_permission_rejects_invalid_names(names):
   with pytest.raises(ManifestContractError, match='job_secret_read'):
     validate_manifest_contract(_manifest(permissions={'job_secret_read': names}))
+
+
+@pytest.mark.parametrize('targets', [True, 'ana/prompts', ['ana'], ['Ana/prompts'],
+                                    ['ana/prompts', 'ana/prompts'], ['a/b'] * 17,
+                                    [None], ['ana/../x']])
+def test_spend_credits_must_name_each_seller_it_pays(targets):
+  with pytest.raises(ManifestContractError, match='spend_credits'):
+    validate_manifest_contract(_manifest(permissions={'spend_credits': targets}))
+
+
+def test_paying_one_more_seller_widens_and_paying_fewer_does_not():
+  one = _contract(permissions={'spend_credits': ['ana/prompts']})
+  two = _contract(permissions={'spend_credits': ['ana/prompts', 'bob/notes']})
+  assert one['data']['spend_credits'] == ['ana/prompts']
+  assert diff_contracts(one, two)['widens'] is True
+  assert diff_contracts(two, one)['widens'] is False
 
 
 def test_job_secret_permission_is_reviewed_normalized_and_omission_revokes():

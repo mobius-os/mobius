@@ -15,16 +15,25 @@ The installation key (``mbc_…``) belongs to the installation, not to an app,
 like every account credential Möbius · You holds: it stays in the Möbius
 backend, and an app receives only its ordinary app token. It lives in
 ``<data_dir>/credits-client/credentials.json``, mode 0600, outside every
-storage route an app frame can read.
+storage route an app frame can read, and sealed with the installation secret
+like the identity link's secrets. The ``spend_credits`` gate and an app's
+``max_price_micro`` hold for honest app code; an app service runs as an
+ordinary process on this machine, so they are not a boundary against a
+hostile one, which is why that grant is critical at install.
 """
 
 from __future__ import annotations
 
+import base64
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
+import tempfile
 from urllib.parse import quote, urlsplit
 
+from cryptography.fernet import Fernet, InvalidToken
 import httpx
 from fastapi import HTTPException
 
@@ -60,6 +69,11 @@ def _credentials_path() -> Path:
   return Path(get_settings().data_dir) / "credits-client" / "credentials.json"
 
 
+def _fernet() -> Fernet:
+  material = f"mobius-credits-key-v1:{get_settings().secret_key}".encode()
+  return Fernet(base64.urlsafe_b64encode(hashlib.sha256(material).digest()))
+
+
 def load_credentials() -> dict | None:
   try:
     stored = json.loads(_credentials_path().read_text())
@@ -67,8 +81,13 @@ def load_credentials() -> dict | None:
     return None
   if not isinstance(stored, dict):
     return None
-  url, key = stored.get("operator_url"), stored.get("key")
-  if not isinstance(url, str) or not isinstance(key, str) or not url or not key:
+  url, sealed = stored.get("operator_url"), stored.get("sealed_key")
+  if not isinstance(url, str) or not isinstance(sealed, str) or not url or not sealed:
+    return None
+  try:
+    key = _fernet().decrypt(sealed.encode()).decode()
+  except (InvalidToken, ValueError):
+    # Sealed under another installation secret: connect again.
     return None
   return {"operator_url": url, "key": key}
 
@@ -77,14 +96,21 @@ def _save_credentials(operator_url: str, key: str) -> None:
   path = _credentials_path()
   path.parent.mkdir(parents=True, exist_ok=True)
   os.chmod(path.parent, 0o700)
-  temporary = path.with_suffix(".tmp")
-  # Created 0600 rather than chmod-ed after, so the key is never briefly
-  # readable by anyone else; replaced atomically so a crash mid-write cannot
-  # leave half a credential behind.
-  descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(descriptor, "w") as handle:
-    handle.write(json.dumps({"operator_url": operator_url, "key": key}))
-  os.replace(temporary, path)
+  # mkstemp creates a unique 0600 file, so the key is never briefly readable
+  # by anyone else and two pairings at once never write into one file; the
+  # replace is atomic, so a crash mid-write cannot leave half a credential.
+  descriptor, temporary = tempfile.mkstemp(
+    dir=path.parent, prefix=".credentials-", suffix=".tmp")
+  try:
+    with os.fdopen(descriptor, "w") as handle:
+      handle.write(json.dumps({
+        "operator_url": operator_url,
+        "sealed_key": _fernet().encrypt(key.encode()).decode(),
+      }))
+    os.replace(temporary, path)
+  except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
 
 
 def normalise_service_url(value: str) -> str:
@@ -135,13 +161,15 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
     code = str(fields.get("code") or "")
     message = str(fields.get("message") or "")
     extra = {key: value for key, value in fields.items() if key not in ("code", "message")}
+    # Neither answer is about this Möbius's own request, so neither keeps its
+    # status: a 401 here would read as the app's own sign-in expiring.
     if response.status_code == 401:
       raise CreditsUnavailable(
         "The credits service refused this installation's key. It may have been revoked.",
-        status=401, code=code or "unauthorized")
+        status=409, code=code or "key_refused")
     if response.status_code == 404 and not code:
       raise CreditsUnavailable(
-        "That address is not running a credits service.", status=404, code="not_found")
+        "That address is not running a credits service.", status=502, code="not_found")
     raise CreditsUnavailable(
       message or f"The credits service answered HTTP {response.status_code}.",
       status=response.status_code, code=code, extra=extra)
@@ -164,14 +192,18 @@ def summary() -> dict:
     "service_host": urlsplit(credentials["operator_url"]).hostname,
     "balance": None, "earnings": None, "error": None,
   }
-  try:
-    result["balance"] = _call("GET", "balance", credentials)
-    result["earnings"] = _call("GET", "payouts", credentials)
-  except CreditsUnavailable as unavailable:
-    # A charge-only key may read the balance but not earnings; that is the
-    # key's scope, not a failure.
-    if unavailable.code != "key_scope":
-      result["error"] = {"code": unavailable.code, "message": unavailable.message}
+  # Both reads at once, so a slow service costs one timeout, not two.
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    reads = {name: pool.submit(_call, "GET", name, credentials)
+             for name in ("balance", "payouts")}
+  for name, field in (("balance", "balance"), ("payouts", "earnings")):
+    try:
+      result[field] = reads[name].result()
+    except CreditsUnavailable as unavailable:
+      # A charge-only key may read the balance but not earnings; that is the
+      # key's scope, not a failure.
+      if unavailable.code != "key_scope" and result["error"] is None:
+        result["error"] = {"code": unavailable.code, "message": unavailable.message}
   return result
 
 
@@ -242,15 +274,17 @@ def publish_price(app: str, action: str, price_micro: int,
 
 
 def charge(seller: str, app: str, action: str, idempotency_key: str,
-           max_price_micro: int) -> dict:
+           max_price_micro: int, buyer_app: str) -> dict:
   """Pay for one call to ``seller``'s priced action from this owner's credits.
 
   ``max_price_micro`` is the price the caller showed; a higher current price
-  refuses with ``price_changed`` instead of charging more.
+  refuses with ``price_changed`` instead of charging more. ``buyer_app`` names
+  the local app that paid, so the owner's history can say which one spent.
   """
   return _call("POST", "charges", _paired(), {
     "seller": seller, "app": app, "action": action,
-    "idempotency_key": idempotency_key, "max_price_micro": int(max_price_micro)})
+    "idempotency_key": idempotency_key, "max_price_micro": int(max_price_micro),
+    "buyer_app": buyer_app})
 
 
 # --- Earnings -----------------------------------------------------------------

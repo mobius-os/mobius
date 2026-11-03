@@ -599,7 +599,6 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
       "location_history_read": bool(perms.get("location_history_read", False)),
-      "spend_credits": bool(perms.get("spend_credits", False)),
     },
     "background": (
       {
@@ -620,6 +619,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   }
   if perms.get("job_secret_read"):
     contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
+  if perms.get("spend_credits"):
+    contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -753,9 +754,7 @@ def contract_from_app_state(
       "location_history_read": bool(
         (contract_permissions or {}).get("location_history_read", False)
       ),
-      "spend_credits": bool(
-        (contract_permissions or {}).get("spend_credits", False)
-      ),
+      "spend_credits": (contract_permissions or {}).get("spend_credits", []),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
@@ -986,12 +985,12 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "data.location_history_read", "data.spend_credits",
+  "data.railway_manage", "data.location_history_read",
   "public.storage.read",
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools", "data.job_secret_read",
+  "agent.skills", "agent.tools", "data.job_secret_read", "data.spend_credits",
   "public.network",
 }
 

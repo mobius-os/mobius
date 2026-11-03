@@ -81,9 +81,6 @@ _FLAGS = (
    "Can manage deployments on your Railway account."),
   ("location_history_read", "location_history_read", "See your location history",
    "Can read the locations your phone recorded."),
-  ("spend_credits", "spend_credits", "Spend your credits on paid features",
-   "Its service can pay for priced calls from your Möbius credits, at the "
-   "price each creator sets."),
   ("helper_activity_read", "helper_activity_read", "Read helper activity",
    "Can see every helper agent's chat, status, open questions, working folder "
    "and full final report."),
@@ -95,7 +92,7 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read"} | {key for key, *_ in _FLAGS}
+   "job_secret_read", "spend_credits"} | {key for key, *_ in _FLAGS}
 )
 
 
@@ -157,6 +154,14 @@ def rows_from_contract(
       "job_secret_read", "Read named secrets in its job",
       "Its background job can read the secrets it names: " + ", ".join(names) + ".",
       scope=[str(name) for name in names],
+    ))
+  targets = data.get("spend_credits")
+  if isinstance(targets, list) and targets:
+    rows.append(_row(
+      "spend_credits", "Spend your credits on paid features",
+      "Its service can pay for priced calls from your Möbius credits, at the "
+      "price each creator sets, to: " + ", ".join(targets) + ".",
+      scope=[str(target) for target in targets],
     ))
   background = contract.get("background")
   if isinstance(background, dict):

@@ -169,7 +169,7 @@ def test_every_contract_permission_has_a_row():
       "shared_memory": "write", "manage_apps": True, "manage_skills": True,
       "github_access": True, "github_connect": True, "connections_manage": True,
       "connect_manage": True, "identity_manage": True, "railway_manage": True,
-      "location_history_read": True, "spend_credits": True,
+      "location_history_read": True, "spend_credits": ["ana/prompts"],
       "job_secret_read": ["TOKEN"],
     },
   }
@@ -192,11 +192,12 @@ def test_helper_activity_read_has_a_non_critical_row():
   assert "helper_activity_read" in app_consent.HANDLED_DATA_KEYS
 
 
-def test_spending_credits_is_a_critical_row():
-  rows = app_consent.rows_from_contract(_contract(spend_credits=True))
-  assert [(r["id"], r["title"], r["critical"]) for r in rows] == [
-    ("spend_credits", "Spend your credits on paid features", True),
+def test_spending_credits_is_a_critical_row_naming_who_it_pays():
+  rows = app_consent.rows_from_contract(_contract(spend_credits=["ana/prompts"]))
+  assert [(r["id"], r["title"], r["critical"], r["scope"]) for r in rows] == [
+    ("spend_credits", "Spend your credits on paid features", True, ["ana/prompts"]),
   ]
+  assert "ana/prompts" in rows[0]["text"]
 
 
 def test_acceptance_stores_rows_and_survives_a_rewording(db, monkeypatch):
@@ -280,6 +281,13 @@ def test_named_secrets_are_part_of_the_accepted_answer(db):
   assert [r["id"] for r in app_consent.needed_rows(app)] == ["job_secret_read"]
   app.capability_contract = _contract(job_secret_read=["B"])
   assert app_consent.status(app) == "required"
+
+
+def test_paying_a_new_seller_asks_again(db):
+  app = _accepted(db, "payer", _contract(spend_credits=["ana/prompts"]))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(spend_credits=["ana/prompts", "bob/notes"])
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["spend_credits"]
 
 
 def test_changed_secret_names_change_the_digest_so_a_stale_accept_fails(db):

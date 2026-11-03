@@ -30,13 +30,16 @@ from app import credits_client, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
+  Principal,
   get_credits_price_reader,
   get_credits_spender,
+  get_principal,
   get_identity_reader,
   get_owner_or_app_with_identity_manage,
   get_owner_or_app_with_railway_manage,
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
+  spend_credits_targets,
 )
 from app.providers import mobius_account_changed
 from app.runtime_identity import (
@@ -1680,7 +1683,8 @@ async def _delete_link(owner: models.Owner, db: Session):
 # The owner, or an app holding the reviewed identity-management grant (the
 # Möbius · You app), as for the rest of this router. Anything that pairs,
 # buys, spends, publishes a price or moves earnings also refuses a delegated
-# helper and a shared-browser guest. Paying for an app call has its own gate,
+# helper and a shared-browser guest, and reading the balance or history refuses
+# that guest too. Paying for an app call has its own gate,
 # ``get_credits_spender``; reading the public prices it pays,
 # ``get_credits_price_reader``, also admits an app holding ``spend_credits``.
 
@@ -1730,7 +1734,16 @@ def _credits(action, *args):
 _credits_control = [Depends(require_nondelegated_owner_or_app_control)]
 
 
-@router.get("/credits")
+def _refuse_shared_browser_guest(principal: Principal = Depends(get_principal)) -> None:
+  """The balance and history are the installation owner's, not a guest's."""
+  if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can see their credits.")
+
+
+_credits_private = [Depends(_refuse_shared_browser_guest)]
+
+
+@router.get("/credits", dependencies=_credits_private)
 def read_credits(_owner: models.Owner = Depends(get_owner_or_app_with_identity_manage)):
   """Balance and earnings from the paired credits service, never stored here."""
   return credits_client.summary()
@@ -1758,7 +1771,7 @@ def start_credits_topup(
     credits_client.start_topup, body.amount_cents, body.waiver_accepted, body.return_url)
 
 
-@router.get("/credits/topups/{topup_id}")
+@router.get("/credits/topups/{topup_id}", dependencies=_credits_private)
 def read_credits_topup(
   topup_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -1767,7 +1780,7 @@ def read_credits_topup(
   return _credits(credits_client.read_topup, topup_id)
 
 
-@router.get("/credits/transactions")
+@router.get("/credits/transactions", dependencies=_credits_private)
 def read_credits_transactions(
   limit: int = 50,
   _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -1810,16 +1823,26 @@ def publish_credits_price(
 @router.post("/credits/charges")
 def charge_credits_for_call(
   body: _CreditsChargeRequest,
-  _owner: models.Owner = Depends(get_credits_spender),
+  app: models.App = Depends(get_credits_spender),
 ):
   """An app's own service pays for one priced call from the owner's credits.
 
   The price is the seller's, read at the credits service, so the app cannot
   choose what a call costs; it can only refuse to pay more than it showed.
+  It pays only the ``"<seller>/<app>"`` entries the owner allowed at install.
   """
+  if f"{body.seller}/{body.app}" not in spend_credits_targets(app):
+    raise HTTPException(403, {
+      "code": "seller_not_allowed",
+      "message": (
+        f"This app may not pay {body.seller}/{body.app}: its spend_credits "
+        "permission does not list it."
+      ),
+    })
   return _credits(
     credits_client.charge,
-    body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro)
+    body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro,
+    app.package_id or app.slug)
 
 
 @router.post("/credits/connect", dependencies=_credits_control)
@@ -1831,10 +1854,25 @@ def start_credits_connect(
   return _credits(credits_client.start_connect, body.return_url if body else None)
 
 
-@router.post("/credits/{action}", dependencies=_credits_control)
-def move_credits_earnings(
-  action: Literal["convert", "withdraw", "disconnect"],
+@router.post("/credits/convert", dependencies=_credits_control)
+def convert_credits_earnings(
   _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
 ):
-  """Keep cleared earnings as credits, withdraw them, or unlink Stripe."""
-  return _credits(credits_client.payout_action, action)
+  """Keep cleared earnings as credits."""
+  return _credits(credits_client.payout_action, "convert")
+
+
+@router.post("/credits/withdraw", dependencies=_credits_control)
+def withdraw_credits_earnings(
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Withdraw cleared earnings to the connected Stripe account."""
+  return _credits(credits_client.payout_action, "withdraw")
+
+
+@router.post("/credits/disconnect", dependencies=_credits_control)
+def disconnect_credits_payouts(
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Unlink the Stripe account that receives withdrawals."""
+  return _credits(credits_client.payout_action, "disconnect")

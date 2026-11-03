@@ -1348,17 +1348,26 @@ def get_owner_or_app_with_location_history_read(
   )
 
 
+def spend_credits_targets(app: models.App) -> list[str]:
+  """The ``"<seller>/<app>"`` entries the owner allowed this app to pay for."""
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  targets = data.get("spend_credits")
+  return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
+
+
 def get_credits_spender(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
-) -> models.Owner:
-  """An app's own service with the reviewed ``spend_credits`` grant.
+) -> models.App:
+  """The paying app: its own service, with a reviewed ``spend_credits`` grant.
 
   A charge spends the owner's money, so only the app's reviewed backend may
   make one: never its browser frame, which untrusted page content can drive,
   and never a public invocation (``get_principal`` refuses that scope), whose
   caller is a visitor. A service a shared-browser guest invoked is refused
-  too: the guest must not spend the installation owner's credits.
+  too: the guest must not spend the installation owner's credits. The route
+  then refuses a seller the grant does not name.
   """
   if principal.app_id is None or not principal.app_is_service:
     raise HTTPException(
@@ -1373,21 +1382,22 @@ def get_credits_spender(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
-  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
-  if data.get("spend_credits") is not True:
+  if not spend_credits_targets(app):
     raise HTTPException(
       status_code=403,
-      detail="This app needs permissions.spend_credits=true in its manifest to spend credits.",
+      detail=(
+        "This app needs permissions.spend_credits in its manifest, listing the "
+        "\"<seller>/<app>\" it pays for, to spend credits."
+      ),
     )
-  return principal.owner
+  return app
 
 
 def get_credits_price_reader(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app with ``identity_manage`` or ``spend_credits``.
+  """Owner JWT, or an app with ``identity_manage`` or a ``spend_credits`` grant.
 
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
@@ -1401,11 +1411,11 @@ def get_credits_price_reader(
     raise HTTPException(status_code=401, detail="App not found.")
   contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
   data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
-  if data.get("identity_manage") is True or data.get("spend_credits") is True:
+  if data.get("identity_manage") is True or spend_credits_targets(app):
     return owner
   raise HTTPException(
     status_code=403,
-    detail="This app needs permissions.spend_credits=true in its manifest to read credit prices.",
+    detail="This app needs permissions.spend_credits in its manifest to read credit prices.",
   )
 
 

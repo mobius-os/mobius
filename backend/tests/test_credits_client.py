@@ -38,12 +38,12 @@ def paired(service):
   return service
 
 
-def _app(db, slug, *, spend_credits=True):
+def _app(db, slug, *, spend_credits=("ana/prompts",)):
   row = models.App(
     slug=slug, source_dir=f"/tmp/mobius-tests/{slug}", name=slug,
     description="", jsx_source="export default function App(){}",
     compiled_path="/tmp/app.js",
-    capability_contract={"data": {"spend_credits": spend_credits}},
+    capability_contract={"data": {"spend_credits": list(spend_credits)}},
   )
   db.add(row)
   db.commit()
@@ -80,6 +80,8 @@ def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
   assert service.calls[-1]["headers"]["Authorization"] == "Bearer mbc_example_key"
   stored = tmp_path / "credits-client" / "credentials.json"
   assert stored.stat().st_mode & 0o777 == 0o600
+  assert "mbc_example_key" not in stored.read_text()
+  assert [p.name for p in stored.parent.iterdir()] == ["credentials.json"]
   assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
 
   assert client.post("/api/identity/credits/unpair", headers=auth).json() == {"paired": False}
@@ -93,9 +95,51 @@ def test_a_key_the_service_refuses_is_not_stored(client, auth, service, tmp_path
     "/api/identity/credits/pair",
     json={"operator_url": "https://www.mobius.you/credits", "key": "mbc_revoked"},
     headers=auth)
-  assert refused.status_code == 401
+  # Not 401: that would read as the caller's own Möbius sign-in expiring.
+  assert refused.status_code == 409
   assert refused.json()["detail"]["code"] == "invalid_api_key"
   assert not (tmp_path / "credits-client" / "credentials.json").exists()
+
+
+def test_an_address_without_a_credits_service_is_a_bad_gateway(client, auth, service):
+  service.answers["balance"] = (404, {"detail": "Not Found"})
+  refused = client.post(
+    "/api/identity/credits/pair",
+    json={"operator_url": "https://example.com", "key": "mbc_example_key"}, headers=auth)
+  assert refused.status_code == 502 and refused.json()["detail"]["code"] == "not_found"
+
+
+def test_a_key_sealed_under_another_installation_secret_reads_as_unpaired(
+  paired, monkeypatch
+):
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+  monkeypatch.setattr(get_settings(), "secret_key", "a-different-installation-secret-0")
+  assert credits_client.load_credentials() is None
+  assert credits_client.summary()["mode"] == "unpaired"
+
+
+def test_overlapping_pairings_never_share_a_temporary_file(service, tmp_path, monkeypatch):
+  real_replace, temporaries = credits_client.os.replace, []
+
+  def record(source, target):
+    temporaries.append(source)
+    real_replace(source, target)
+
+  monkeypatch.setattr(credits_client.os, "replace", record)
+  credits_client.pair("https://www.mobius.you/credits", "mbc_first_key")
+  credits_client.pair("https://www.mobius.you/credits", "mbc_second_key")
+  assert len(set(temporaries)) == 2
+  assert credits_client.load_credentials()["key"] == "mbc_second_key"
+
+  def fail(_source, _target):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(credits_client.os, "replace", fail)
+  with pytest.raises(OSError):
+    credits_client.pair("https://www.mobius.you/credits", "mbc_third_key")
+  folder = tmp_path / "credits-client"
+  assert [p.name for p in folder.iterdir()] == ["credentials.json"]
+  assert credits_client.load_credentials()["key"] == "mbc_second_key"
 
 
 @pytest.mark.parametrize(("url", "key"), [
@@ -178,7 +222,7 @@ def test_owner_actions_before_pairing_say_so(client, auth, service):
 
 
 def test_only_an_app_service_with_spend_credits_can_charge(client, auth, db, paired):
-  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=False)
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
   for headers in (_as(db, granted, None), _as(db, granted, "public"),
                   _as(db, ungranted, "private"), auth):
     assert client.post("/api/identity/credits/charges", json=CHARGE,
@@ -187,11 +231,38 @@ def test_only_an_app_service_with_spend_credits_can_charge(client, auth, db, pai
   paid = client.post("/api/identity/credits/charges", json=CHARGE,
                      headers=_as(db, granted, "private"))
   assert paid.status_code == 200 and paid.json()["charge_id"] == "c1"
-  assert paired.calls[-1]["json"] == CHARGE
+  # The service learns which local app paid, for the owner's history.
+  assert paired.calls[-1]["json"] == {**CHARGE, "buyer_app": "granted"}
+
+
+def test_an_app_pays_only_the_sellers_its_grant_lists(client, auth, db, paired):
+  app = _app(db, "granted")
+  calls = len(paired.calls)
+  for other in ({"seller": "bob"}, {"app": "other-app"}):
+    refused = client.post("/api/identity/credits/charges", json={**CHARGE, **other},
+                          headers=_as(db, app, "private"))
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == "seller_not_allowed"
+  assert len(paired.calls) == calls
+
+
+def test_a_shared_browser_guest_cannot_read_the_owners_balance_or_history(db):
+  from app.routes import identity
+  owner = db.query(models.Owner).first()
+  guest = deps.Principal(owner=owner, app_id=None, browser=BrowserLineage("grant-1"))
+  with pytest.raises(HTTPException) as refused:
+    identity._refuse_shared_browser_guest(principal=guest)
+  assert refused.value.status_code == 403
+  private = {"/credits", "/credits/transactions", "/credits/topups/{topup_id}"}
+  routes = {route.path.removeprefix(identity.router.prefix): route
+            for route in identity.router.routes if hasattr(route, "dependant")}
+  for path in private:
+    calls = [dep.call for dep in routes[path].dependant.dependencies]
+    assert identity._refuse_shared_browser_guest in calls, path
 
 
 def test_an_app_that_spends_credits_can_read_the_price_it_pays(client, auth, db, paired):
-  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=False)
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
   path = "/api/identity/credits/prices/ana?app_slug=prompts"
   paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [{"price_micro": 250_000}]})
   for headers in (_as(db, granted, "private"), _as(db, granted, None)):
