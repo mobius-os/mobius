@@ -190,6 +190,20 @@ def test_only_an_app_service_with_spend_credits_can_charge(client, auth, db, pai
   assert paired.calls[-1]["json"] == CHARGE
 
 
+def test_an_app_that_spends_credits_can_read_the_price_it_pays(client, auth, db, paired):
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=False)
+  path = "/api/identity/credits/prices/ana?app_slug=prompts"
+  paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [{"price_micro": 250_000}]})
+  for headers in (_as(db, granted, "private"), _as(db, granted, None)):
+    answer = client.get(path, headers=headers)
+    assert answer.status_code == 200
+    assert answer.json() == {"prices": [{"price_micro": 250_000}]}
+  calls = len(paired.calls)
+  refused = client.get(path, headers=_as(db, ungranted, "private"))
+  assert refused.status_code == 403 and "spend_credits" in refused.json()["detail"]
+  assert len(paired.calls) == calls
+
+
 def test_a_shared_browser_guest_cannot_spend_the_owners_credits(client, auth, db):
   owner = db.query(models.Owner).first()
   guest = deps.Principal(owner=owner, app_id=1, app_is_service=True,

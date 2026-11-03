@@ -30,6 +30,7 @@ from app import credits_client, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
+  get_credits_price_reader,
   get_credits_spender,
   get_identity_reader,
   get_owner_or_app_with_identity_manage,
@@ -1680,7 +1681,8 @@ async def _delete_link(owner: models.Owner, db: Session):
 # Möbius · You app), as for the rest of this router. Anything that pairs,
 # buys, spends, publishes a price or moves earnings also refuses a delegated
 # helper and a shared-browser guest. Paying for an app call has its own gate,
-# ``get_credits_spender``.
+# ``get_credits_spender``; reading the public prices it pays,
+# ``get_credits_price_reader``, also admits an app holding ``spend_credits``.
 
 
 class _CreditsPairRequest(BaseModel):
@@ -1786,8 +1788,9 @@ def fund_model_balance(
 def read_credits_prices(
   seller: str,
   app_slug: str | None = None,
-  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  _owner: models.Owner = Depends(get_credits_price_reader),
 ):
+  """A seller's published prices, which a paying app shows before it charges."""
   return _credits(credits_client.prices, seller, app_slug)
 
 

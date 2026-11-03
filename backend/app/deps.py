@@ -1383,6 +1383,32 @@ def get_credits_spender(
   return principal.owner
 
 
+def get_credits_price_reader(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with ``identity_manage`` or ``spend_credits``.
+
+  A paying app reads the seller's published price to show the owner before it
+  charges. Prices are public at the credits service, so reading one grants no
+  spending or account authority and needs no identity-management grant.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("identity_manage") is True or data.get("spend_credits") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail="This app needs permissions.spend_credits=true in its manifest to read credit prices.",
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
