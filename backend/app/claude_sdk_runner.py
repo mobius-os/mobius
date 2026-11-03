@@ -1114,8 +1114,12 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 # The owner reads only a turn's text blocks; thinking and tool activity are
 # folded away. Three shapes leave the owner without what the turn was for:
 #
-# - a short visible reply after long reasoning: the agent composed its answer
-#   in thinking and closed with a line such as "Nothing has been changed.";
+# - an answer drafted in thinking: the agent's reasoning since its last
+#   visible text ends with words written for the owner, set apart by blank
+#   lines (summarized reasoning keeps such a draft as its own closing
+#   paragraph), and the agent then saves a card or ends as if it had said
+#   them; or, with no such paragraph, a short visible reply after long
+#   reasoning, such as "Nothing has been changed.";
 # - an image the agent saved to this chat's media and viewed (a screenshot or
 #   a Read), then never embedded: viewing is private, so a reply that says
 #   "here's the before and after" shows nothing;
@@ -1124,11 +1128,16 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 #
 # All are checked where a turn hands control back: when the agent ends its
 # turn, and just before it saves an owner card (a saved card ends the turn, so
-# a later check could never reopen it). The shapes are rare (the first is
-# under 1% of stored replies on one instance), the check speaks at most once
-# per turn, and the agent itself judges whether its reply is complete.
+# a later check could never reopen it). A long progress update can still omit
+# the final conclusion. The check speaks at most once per turn, and the agent
+# itself judges whether its reply is complete.
 _ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
+_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS = 700
 _ANSWER_CHECK_THINKING_MIN_CHARS = 600
+_ANSWER_CHECK_DRAFT_BREAK = re.compile(r"\n[ \t]*\n[ \t]*\n")
+_ANSWER_CHECK_DRAFT_MIN_CHARS = 40
+# Five words in a row shared with the visible reply mean the draft was said.
+_ANSWER_CHECK_SHARED_WORDS = 5
 _ANSWER_CHECK_IMAGE_PATH = re.compile(r"\.(?:gif|jpe?g|png|webp)$", re.IGNORECASE)
 _ANSWER_CHECK_URL = re.compile(r"https?://([^\s/\"'<>()\[\]\\`]+)[^\s\"'<>()\[\]\\`]*")
 _ANSWER_CHECK_LINK_WORD = re.compile(r"\b(?:links?|linked|urls?)\b", re.IGNORECASE)
@@ -1146,12 +1155,19 @@ _ANSWER_CHECK_BEFORE_CARD = (
   "sees only your visible reply; your thinking and tool activity are hidden "
   "from them."
 )
-_ANSWER_CHECK_THINKING = (
-  "This turn's reasoning is long but its visible reply is short, so your "
-  "answer may exist only in your thinking. Re-read the owner's latest "
-  "message. If your visible reply does not already answer it or report the "
-  "result, write that answer now as visible text."
+# Quote only the visible reply, never a thinking excerpt: asking the model to
+# reproduce even summarized thinking can trigger a reasoning-extraction refusal.
+# The detection stays local; the reminder asks for a task-grounded summary.
+_ANSWER_CHECK_MISSING_ANSWER = (
+  "Your visible reply may not yet answer the owner's latest message or "
+  "report the result. {seen} Re-read that message and the verified task "
+  "evidence. If something is missing, write a brief explanation of the "
+  "conclusion or a summary of actions taken. If it already answers the "
+  "owner, leave it."
 )
+_ANSWER_CHECK_SEEN = "Everything the owner sees from this reply, verbatim: «{visible}»."
+_ANSWER_CHECK_SEEN_EXCERPT = "The end of the owner's visible reply, verbatim: «…{visible}»."
+_ANSWER_CHECK_SEEN_NOTHING = "The owner sees no text at all from this reply."
 _ANSWER_CHECK_IMAGES = (
   "You viewed {images} this turn, but your visible reply never shows {them}. "
   "If the owner should see {them} (you described {them}, promised to show "
@@ -1283,8 +1299,19 @@ def _answer_check_reason(
   or a link it points to without showing.
   """
   parts: list[str] = []
-  if _answer_may_be_only_in_thinking(blocks, last_assistant_message):
-    parts.append(_ANSWER_CHECK_THINKING)
+  if (
+    _has_unshown_closing_draft(blocks, last_assistant_message)
+    or _answer_may_be_only_in_thinking(blocks, last_assistant_message)
+  ):
+    visible = " ".join(_visible_reply_chars(blocks, last_assistant_message)[0].split())
+    seen = _ANSWER_CHECK_SEEN_NOTHING
+    if visible:
+      template = (
+        _ANSWER_CHECK_SEEN_EXCERPT
+        if len(visible) > _ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS else _ANSWER_CHECK_SEEN
+      )
+      seen = template.format(visible=visible[-_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS:])
+    parts.append(_ANSWER_CHECK_MISSING_ANSWER.format(seen=seen))
   images = _unshown_viewed_images(blocks, media_dir, last_assistant_message)
   if images:
     one = len(images) == 1
@@ -1304,6 +1331,58 @@ def _answer_check_reason(
   if before_card:
     return " ".join([_ANSWER_CHECK_BEFORE_CARD, *parts, _ANSWER_CHECK_BEFORE_CARD_NEXT])
   return " ".join([_ANSWER_CHECK_END_OF_TURN, *parts, _ANSWER_CHECK_END_OF_TURN_NEXT])
+
+
+def _has_unshown_closing_draft(
+  blocks: object, last_assistant_message: object = None,
+) -> bool:
+  """Whether a closing draft in thinking has not reached the visible reply.
+
+  Only thinking after the last visible text counts: a draft followed by more
+  visible text was superseded by what the agent went on to say. A draft
+  counts as said when any run of a few words from it appears in the visible
+  reply, whitespace aside. Return only the signal, never thinking excerpts
+  that a reminder could inadvertently send back to the model.
+  """
+  if not isinstance(blocks, list):
+    return False
+  visible_text, _ = _visible_reply_chars(blocks, last_assistant_message)
+  undispatched_tail = (
+    isinstance(last_assistant_message, str) and last_assistant_message.strip()
+    and last_assistant_message.strip() not in _visible_reply_chars(blocks)[0]
+  )
+  if undispatched_tail:
+    # Final text the stream reader has not dispatched yet comes after every
+    # thinking block here, so nothing in thinking closes the reply.
+    return False
+  last_text = max(
+    (index for index, block in enumerate(blocks)
+     if isinstance(block, dict) and block.get("type") == "text"
+     and isinstance(block.get("content"), str) and block["content"].strip()),
+    default=-1,
+  )
+  visible = " ".join(visible_text.split())
+  for block in blocks[last_text + 1:]:
+    if not (
+      isinstance(block, dict) and block.get("type") == "thinking"
+      and isinstance(block.get("content"), str)
+    ):
+      continue
+    paragraphs = _ANSWER_CHECK_DRAFT_BREAK.split(block["content"].strip())
+    if len(paragraphs) < 2:
+      continue
+    draft = " ".join(paragraphs[-1].split())
+    if len(draft) < _ANSWER_CHECK_DRAFT_MIN_CHARS:
+      continue
+    words = draft.split()
+    runs = (
+      " ".join(words[start:start + _ANSWER_CHECK_SHARED_WORDS])
+      for start in range(max(1, len(words) - _ANSWER_CHECK_SHARED_WORDS + 1))
+    )
+    if any(run in visible for run in runs):
+      continue
+    return True
+  return False
 
 
 def _answer_may_be_only_in_thinking(

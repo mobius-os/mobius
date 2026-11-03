@@ -3705,6 +3705,21 @@ def test_answer_check_flags_an_answer_written_only_in_thinking():
   )
 
 
+def test_answer_check_quotes_what_the_owner_actually_sees():
+  # An agent that drafted its answer in thinking believes it is on screen;
+  # quoting the visible reply lets it see at once that it is not.
+  from app.claude_sdk_runner import _answer_check_reason
+
+  reason = _answer_check_reason(
+    _ANSWER_ONLY_IN_THINKING, chat_id="c", media_dir="/m", before_card=True,
+  )
+  assert ("verbatim: «I'll check the deploy log before answering."
+          "Nothing has been changed.»") in reason
+  silent = [block for block in _ANSWER_ONLY_IN_THINKING if block["type"] != "text"]
+  reason = _answer_check_reason(silent, chat_id="c", media_dir="/m", before_card=True)
+  assert "The owner sees no text at all from this reply." in reason
+
+
 def test_answer_check_leaves_ordinary_replies_alone():
   from app.claude_sdk_runner import _answer_may_be_only_in_thinking
 
@@ -3724,6 +3739,89 @@ def test_answer_check_leaves_ordinary_replies_alone():
   ])
   for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
     assert not _answer_may_be_only_in_thinking(malformed)
+
+
+_DRAFT = ("The preview build still fails: increase the memory limit in the "
+          "build settings, then retry the deploy.")
+
+
+def _closing_draft_before_card() -> list[dict]:
+  """A reply that drafted its closing words in thinking, then saved a card.
+
+  Summarized thinking keeps such a draft as its own paragraph after blank
+  lines; the visible reply is long enough that length alone looks fine.
+  """
+  return [
+    {"type": "text", "content": "Checking whether the preview build succeeds "
+     "now, in case the memory limit was already increased. " * 6},
+    {"type": "tool", "tool": "Bash", "status": "done"},
+    {"type": "thinking", "content": "Same failure, so the memory limit is still too low."
+     f"\n\n\n\n{_DRAFT}\n"},
+  ]
+
+
+@pytest.mark.parametrize("before_card", [True, False])
+@pytest.mark.parametrize("blocks", [
+  _closing_draft_before_card(), _ANSWER_ONLY_IN_THINKING,
+])
+def test_answer_check_requests_a_summary_without_reproducing_thinking(blocks, before_card):
+  # Both detection paths must still prompt for a missing answer, but must not
+  # send thinking excerpts back as instructions to reproduce them visibly.
+  from app.claude_sdk_runner import _answer_check_reason
+
+  reason = _answer_check_reason(
+    blocks, chat_id="c", media_dir="/m", before_card=before_card,
+  )
+  assert reason is not None
+  prefix = "Möbius check before your card is saved." if before_card else "Möbius end-of-turn check."
+  assert reason.startswith(prefix)
+  assert "brief explanation of the conclusion or a summary of actions taken" in reason
+  assert "verified task evidence" in reason
+  assert _DRAFT not in reason
+  assert "Same failure" not in reason
+  assert "build ran out of memory" not in reason
+  assert "Your thinking since" not in reason
+  assert "only in your thinking" not in reason
+  assert "Everything the owner sees from this reply, verbatim:" in reason
+
+
+def test_answer_check_leaves_said_and_superseded_drafts_alone():
+  from app.claude_sdk_runner import _has_unshown_closing_draft
+
+  blocks = _closing_draft_before_card()
+  assert _has_unshown_closing_draft(blocks)
+  # Said in the visible reply, even re-wrapped across lines.
+  said = [*blocks[:2], {"type": "text", "content": _DRAFT.replace(" in the ", "\nin the ")},
+          blocks[2]]
+  assert not _has_unshown_closing_draft(said)
+  # Followed by visible text, which supersedes it.
+  later = [*blocks, {"type": "text", "content": "Increase the memory limit, then retry the deploy."}]
+  assert not _has_unshown_closing_draft(later)
+  # Final text the stream reader has not dispatched yet also comes after it.
+  assert not _has_unshown_closing_draft(blocks, "Increase memory, then retry the deploy.")
+  # A stale final message already in the blocks does not hide the draft.
+  assert _has_unshown_closing_draft(blocks, blocks[0]["content"])
+  # Ordinary reasoning: one paragraph, or a closing fragment too short to be
+  # words for the owner.
+  for content in ("Same failure, so the memory limit is still too low.",
+                  "Same failure.\n\n\n\nOk, asking."):
+    assert not _has_unshown_closing_draft([*blocks[:2], {"type": "thinking", "content": content}])
+  for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
+    assert not _has_unshown_closing_draft(malformed)
+
+
+def test_answer_check_bounds_visible_quotes_without_exposing_closing_drafts():
+  from app.claude_sdk_runner import _answer_check_reason
+
+  blocks = _closing_draft_before_card()
+  blocks[0] = {"type": "text", "content": "Earlier progress. " * 1000 + "Latest progress."}
+  reason = _answer_check_reason(blocks, chat_id="c", media_dir="/m", before_card=True)
+
+  assert reason is not None
+  assert "The end of the owner's visible reply, verbatim:" in reason
+  assert "Latest progress." in reason
+  assert len(reason) < 1500
+  assert _DRAFT not in reason
 
 
 async def _fire_stop_hook(options, **overrides) -> dict:
@@ -3753,7 +3851,7 @@ async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monk
   assert result["error"] is None
   assert decisions[0]["decision"] == "block"
   assert decisions[0]["reason"].startswith("Möbius end-of-turn check.")
-  assert "only in your thinking" in decisions[0]["reason"]
+  assert "brief explanation of the conclusion" in decisions[0]["reason"]
   assert decisions[1:] == [{"continue_": True}, {"continue_": True}]
 
 
@@ -3918,11 +4016,14 @@ async def _fire_pre_card_hook(options, **overrides) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_answer_check_declines_one_card_save_when_something_is_unshown(monkeypatch):
+@pytest.mark.parametrize("missing", ["image", "answer"])
+async def test_answer_check_declines_one_card_save_when_something_is_unshown(monkeypatch, missing):
   chat_id = "answer-check-before-card-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _viewed_before_after(chat_id)
+  bus.assistant_blocks = (
+    _viewed_before_after(chat_id) if missing == "image" else _closing_draft_before_card()
+  )
 
   class _Client(_FakeClient):
     async def receive_response(self):
@@ -3943,7 +4044,12 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
   denied = decisions[2]["hookSpecificOutput"]
   assert denied["hookEventName"] == "PreToolUse"
   assert denied["permissionDecision"] == "deny"
-  assert "before-after.png" in denied["permissionDecisionReason"]
+  reason = denied["permissionDecisionReason"]
+  if missing == "image":
+    assert "before-after.png" in reason
+  else:
+    assert "brief explanation of the conclusion" in reason
+    assert _DRAFT not in reason
   assert decisions[3:] == [{"continue_": True}, {"continue_": True}]
 
 
