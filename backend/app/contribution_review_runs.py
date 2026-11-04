@@ -720,13 +720,16 @@ def public_merge_blocker(row, item) -> str | None:
   """What a merge grant that also publishes still needs before it may merge.
 
   A requested public action is part of the owner's consent: merging past a
-  missing, uncertain or refused one would silently drop it.
+  missing, uncertain or refused one would silently drop it. A comment, even
+  one the owner sent in place of a proposed approval, is never an approval.
   """
   frozen = row.options_json or {}
   if row.mode != "review_merge" or frozen.get("post_review") is not True:
     return None
   if frozen.get("propose_verdict") is True and item.get("verdict_proposal"):
     proposal = item["verdict_proposal"]
+    if proposal.get("event") == "COMMENT":
+      return "You sent a comment, not an approval, so this PR will not be merged."
     if proposal.get("event") != "APPROVE":
       return "The proposed verdict requests changes, so this PR will not be merged."
     if proposal.get("state") == "proposed":
@@ -740,6 +743,13 @@ def public_merge_blocker(row, item) -> str | None:
   if receipt.get("state") != "posted":
     return "The review comment was not confirmed on GitHub, so this PR was not merged. Nothing was repeated."
   return None
+
+
+OWNER_SUBMITS_NOTE = ("Only the owner submits or discards a proposal, in Contribute; tell "
+  "them it is waiting there and end your turn. Do not ask for approval in chat or retry. ")
+AGENT_SUBMITS_NOTE = ("The owner chose, when starting this review, to let its verdict go out without another "
+  "tap: right after you send publish:true the server submits that proposal itself (never on the owner's own PR). "
+  "If it could not be sent, it waits for the owner in Contribute; never retry it. ")
 
 
 def brief(row):
@@ -777,8 +787,8 @@ def brief(row):
        "and attempts the guarded merge only after GitHub confirms it.\n" if row.mode == "review_merge" else "")
     + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
        "REQUEST_CHANGES for needs_you; your summary is its wording). On the owner's own PRs nothing is proposed or "
-       "posted: publish:true keeps your result private and the owner fixes it or sets it aside. Only the owner submits or discards a proposal, in Contribute; tell "
-       "them it is waiting there and end your turn. Do not ask for approval in chat or retry. "
+       "posted: publish:true keeps your result private and the owner fixes it or sets it aside. "
+       + (AGENT_SUBMITS_NOTE if frozen.get("agent_submits_verdict") is True else OWNER_SUBMITS_NOTE)
        + ("If the owner submits an APPROVE, this chat is resumed: re-send the identical outcome once to run "
           "the guarded merge. " if row.mode == "review_merge" else "")
        + "\n" if verdict else "")

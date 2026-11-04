@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -46,7 +46,7 @@ APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
-                       "push_approval": True}
+                       "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -90,6 +90,8 @@ class ReviewOptions(BaseModel):
   autopilot: bool = False
   post_review: bool | None = None
   propose_verdict: bool | None = None
+  # The owner's own choice, made only when starting a Review: its verdict goes out without another tap.
+  agent_submits_verdict: bool | None = None
 
 
 class ReviewAgentChoice(BaseModel):
@@ -200,7 +202,7 @@ def _options_input(body):
       selected["fix_prompt"] = options["fix_prompt"]
     if "max_rounds" in body.options.model_fields_set:
       selected["max_rounds"] = body.options.max_rounds
-  for flag in ("post_review", "propose_verdict"):
+  for flag in ("post_review", "propose_verdict", "agent_submits_verdict"):
     if options.get(flag) is True:
       selected[flag] = True
   return selected
@@ -540,6 +542,25 @@ def _proposes_verdict(row) -> bool:
   return _posts_review(row) and (row.options_json or {}).get("propose_verdict") is True
 
 
+def _agent_submits_verdict(row) -> bool:
+  """The owner chose up front that this Review sends its verdict without another tap; a merge never does."""
+  return (row.mode == "review" and _proposes_verdict(row)
+          and (row.options_json or {}).get("agent_submits_verdict") is True)
+
+
+async def _submit_agent_verdict(db, row, item_key, target, principal, cwd):
+  """Send the run's own proposal now, under its frozen grant; a refusal leaves it for the owner."""
+  proposal = row.outcomes_json[item_key]["verdict_proposal"]
+  try:
+    receipt = await verdicts.submit(db, row, item_key, target, proposal["id"], gh=_gh, cwd=cwd,
+                                    authorize=lambda: _parent(db, row, principal))
+  except HTTPException as exc:
+    db.refresh(row)
+    return {"run": _run_view(db, row), "blocked": f"{exc.detail} It waits for the owner in Contribute."}
+  db.refresh(row)
+  return {"run": _run_view(db, row), "verdict": receipt}
+
+
 def _merge_continues(row, item) -> bool:
   """Frozen evidence may still reach the merge once its public step is posted.
 
@@ -654,6 +675,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
           _parent(db, row, principal)
           reviews.save_outcome(db, row, item_key, {**outcome, "frozen_evidence": public.evidence(outcome),
             "verdict_proposal": verdicts.propose(outcome, target)}, expected=previous)
+        if _agent_submits_verdict(row):
+          return await _submit_agent_verdict(db, row, item_key, target, principal, cwd)
         return {"run": _run_view(db, row)}
     elif (body.publish and _posts_review(row)
         and (previous.get("public_review") or {}).get("state") not in {"posting", "posted", "unknown"}):
@@ -953,6 +976,14 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
 class VerdictDecision(PullIdentity):
   proposal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
   decision: Literal["submit", "discard", "dismiss"]
+  # Submit the proposal's findings as a plain comment instead of its approve or request-changes.
+  event: Literal["COMMENT"] | None = None
+
+  @model_validator(mode="after")
+  def comment_only_when_submitting(self):
+    if self.event is not None and self.decision != "submit":
+      raise ValueError("Only a submitted verdict can be sent as a comment.")
+    return self
 
 
 def _require_owner_hands(principal: Principal, refusal: str) -> None:
@@ -1013,7 +1044,7 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
       return {"run": _run_view(db, row)}
     cwd = Path(get_settings().data_dir) / "platform"
     receipt = await verdicts.submit(db, row, item_key, target, body.proposal_id, gh=_gh, cwd=cwd,
-                                    authorize=lambda: _owner_decision_authority(db, row))
+                                    authorize=lambda: _owner_decision_authority(db, row), event=body.event)
     resumed = None
     if (receipt.get("state") == "posted" and receipt.get("event") == "APPROVE"
         and row.mode == "review_merge" and not _merge_attempted(row.outcomes_json[item_key])):

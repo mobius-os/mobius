@@ -22,7 +22,7 @@ NEW = "c" * 40
 
 CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                 "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
-                "push_approval": True}
+                "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True}
 
 def takeover(setup, monkeypatch):
   db, row, principal = setup
