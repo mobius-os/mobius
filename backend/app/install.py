@@ -1306,9 +1306,13 @@ async def _kept_local_bundle_unchanged(
     try:
       entry = root / manifest["entry"]
       source = await asyncio.to_thread(write_kept_tree)
-      await compile_jsx(source, source_path=entry, out_path=output)
+      await compile_jsx(
+        source, source_path=entry, source_root=root, out_path=output,
+      )
       kept_bundle, source = await asyncio.to_thread(write_upstream_alternative)
-      await compile_jsx(source, source_path=entry, out_path=output)
+      await compile_jsx(
+        source, source_path=entry, source_root=root, out_path=output,
+      )
       return kept_bundle == await asyncio.to_thread(output.read_bytes)
     except BuildLeaseUnavailable as exc:
       raise HTTPException(503, "JavaScript builder is busy; retry the update.") from exc
@@ -3635,6 +3639,7 @@ async def _activate_install_source(
     entry_source,
     out_path=staged_bundle,
     source_path=source_dir / plan.entry_key,
+    source_root=source_dir,
   )
   _publish_install_bundle(
     app, staged_bundle, journal.rollback_actions, journal.commit_actions,

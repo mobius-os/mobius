@@ -101,7 +101,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
                 </div>
                 <div className="chat-summary__layer-body">
                   {state.layers.summary
-                    ? <StandardMarkdown text={state.layers.summary} />
+                    ? <StandardMarkdown text={state.layers.summary} math={false} />
                     : <p className="chat-summary__empty">No summary has been saved for this chat yet.</p>}
                 </div>
               </section>
@@ -112,7 +112,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
                 </div>
                 <div className="chat-summary__layer-body">
                   {state.layers.digest
-                    ? <StandardMarkdown text={state.layers.digest} />
+                    ? <StandardMarkdown text={state.layers.digest} math={false} />
                     : <p className="chat-summary__empty">No digest entries have been saved for this chat yet.</p>}
                 </div>
               </section>

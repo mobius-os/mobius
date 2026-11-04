@@ -158,11 +158,19 @@ def pending_update_receipt_file(source_dir: str | Path) -> Path:
   return Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "receipt.json"
 
 
+_HEX_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+
 def pending_conflict_update_receipt_present(source_dir: str | Path) -> bool:
   """Whether any pending-receipt filesystem entry needs validation."""
   root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
   receipt_path = root / "receipt.json"
   return os.path.lexists(root) or os.path.lexists(receipt_path)
+
+
+class PendingReceiptUnreadable(Exception):
+  """A pending-update receipt exists but cannot be read or is not valid, so
+  whether its update is still pending is unknown."""
 
 
 def read_pending_conflict_update_receipt(
@@ -172,42 +180,72 @@ def read_pending_conflict_update_receipt(
 
   Receipts written by earlier releases (schemas 1-3) carried a resolution
   policy and a reviewed tree; both are ignored because the resolver's own
-  commit is now the complete answer.
+  commit is now the complete answer. A receipt that cannot be read or is
+  invalid reads as none here; ``checked_pending_conflict_update_receipt``
+  tells those apart from a missing receipt.
+  """
+  try:
+    return checked_pending_conflict_update_receipt(
+      source_dir, app_id=app_id, upstream_commit=upstream_commit,
+    )
+  except PendingReceiptUnreadable:
+    return None
+
+
+def checked_pending_conflict_update_receipt(
+  source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
+) -> dict | None:
+  """The validated receipt pending ``upstream_commit``, or None when proven
+  absent: no receipt, or a well-formed receipt for a different update.
+
+  A receipt that exists but cannot be read, does not parse, is a symlink, or
+  names this update with invalid content raises ``PendingReceiptUnreadable``.
   """
   root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
   receipt_path = root / "receipt.json"
   if root.is_symlink() or receipt_path.is_symlink():
-    return None
+    raise PendingReceiptUnreadable(f"symlinked pending receipt in {source_dir}")
   try:
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
+  except FileNotFoundError:
+    # Only a genuinely absent receipt is "none". Anything else, including a
+    # regular file where the receipt directory belongs, is unreadable.
     return None
+  except (OSError, ValueError) as exc:
+    raise PendingReceiptUnreadable(f"pending receipt in {source_dir}") from exc
   if not isinstance(receipt, dict):
+    raise PendingReceiptUnreadable(f"pending receipt in {source_dir}")
+  named = receipt.get("upstream_commit")
+  if not upstream_commit or (
+    isinstance(named, str) and _HEX_COMMIT.fullmatch(named)
+    and named != upstream_commit
+  ):
+    # Proven absent for this commit: a later update's receipt does not
+    # unseat an earlier one.
     return None
   schema = receipt.get("schema")
   merge_base_override = (
     receipt.get("merge_base_override") if schema in (3, 4) else None
   )
+  candidate_digest = receipt.get("candidate_digest")
   if (
     schema not in (1, 2, 3, 4)
     or receipt.get("app_id") != app_id
-    or not upstream_commit
-    or receipt.get("upstream_commit") != upstream_commit
+    or named != upstream_commit
     or not isinstance(receipt.get("manifest"), dict)
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
-    or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
+    or not isinstance(candidate_digest, str)
+    or not re.fullmatch(r"[0-9a-f]{64}", candidate_digest)
     or (
       merge_base_override is not None
       and (
         not isinstance(merge_base_override, str)
-        or not re.fullmatch(
-          r"(?:[0-9a-f]{40}|[0-9a-f]{64})", merge_base_override,
-        )
+        or not _HEX_COMMIT.fullmatch(merge_base_override)
       )
     )
   ):
-    return None
+    raise PendingReceiptUnreadable(f"invalid pending receipt in {source_dir}")
   receipt["merge_base_override"] = merge_base_override
   return receipt
 

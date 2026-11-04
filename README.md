@@ -117,7 +117,7 @@ docker compose up -d --build
 sudo scripts/install-rebuild-helper.sh
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com`, connect your provider, and start asking. Settings → Möbius applies platform updates; `docker compose exec -u 0 app bash` opens a root shell in the running container. See [.env.example](.env.example) and [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries.
+Caddy configures HTTPS. Open `https://mobius.example.com` and create your owner account. The setup page asks for a one-time setup code so that nobody else who finds the address first can claim your instance; read it with `docker compose exec app cat /data/setup-code` (it is also printed by `docker compose logs app`). Then connect your provider and start asking. Settings → Möbius applies platform updates; `docker compose exec -u 0 app bash` opens a root shell in the running container. See [.env.example](.env.example) and [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries.
 
 The final setup step installs the narrow host controller used by **Settings →
 Rebuild container**. It grants only that fixed operation, not general host or

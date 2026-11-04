@@ -487,7 +487,9 @@ def owner_token(client):
   with `sub='test'`; keeping the username aligned avoids 401s on
   download endpoints that look up the owner by sub.
   """
-  r = client.post("/api/auth/setup", json={
+  from app import setup_code
+
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "test",
     "password": "testpassword123",
   })

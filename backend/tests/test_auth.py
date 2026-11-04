@@ -7,9 +7,11 @@ import time
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import bcrypt
 import httpx
+from app import setup_code
 from test_app_fixtures import create_local_app
 
 
@@ -239,7 +241,7 @@ def test_managed_web_login_rejects_a_different_local_model_identity(monkeypatch,
 
 
 def test_setup_creates_owner(client):
-  r = client.post("/api/auth/setup", json={
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -271,7 +273,7 @@ def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
   configure_managed_sso(monkeypatch)
 
   status = client.get("/api/auth/setup/status")
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "attacker",
     "password": "not-the-owner",
   })
@@ -356,7 +358,7 @@ def test_managed_bootstrap_repairs_an_accidental_local_owner(
 ):
   from app import auth as auth_service, models
 
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "accidental-local-owner",
     "password": "securepassword123",
   })
@@ -392,7 +394,7 @@ def test_managed_bootstrap_repairs_an_accidental_local_owner(
 def test_managed_configuration_blocks_local_login_before_broker_recovery(
   client, monkeypatch,
 ):
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "accidental-local-owner",
     "password": "securepassword123",
   })
@@ -416,7 +418,7 @@ def test_managed_bootstrap_never_rebinds_a_local_owner(
 ):
   from app import models
 
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "owner",
     "password": "securepassword123",
   })
@@ -483,12 +485,12 @@ def test_managed_bootstrap_rejects_a_mismatched_broker_identity(
 
 
 def test_setup_rejects_duplicate(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
   # Owner already exists, so a second setup is rejected.
-  r = client.post("/api/auth/setup", json={
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin2",
     "password": "anotherpassword",
   })
@@ -553,7 +555,7 @@ def test_mobius_login_secret_cannot_cross_into_shell_install_protocol(client, db
 
 
 def test_login_success(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -566,7 +568,7 @@ def test_login_success(client):
 
 
 def test_login_wrong_password(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -1098,7 +1100,7 @@ def test_setup_rejects_cross_site_request(client):
   send Sec-Fetch-Site at all, so the guard passes the request through."""
   r = client.post(
     "/api/auth/setup",
-    json={"username": "admin", "password": "securepassword123"},
+    json={"setup_code": setup_code.current(), "username": "admin", "password": "securepassword123"},
     headers={"Sec-Fetch-Site": "cross-site"},
   )
   assert r.status_code == 403
@@ -1108,7 +1110,7 @@ def test_setup_rejects_opaque_cross_site_request_without_bearer(client):
   """Origin null alone is not the authenticated app-sandbox exception."""
   r = client.post(
     "/api/auth/setup",
-    json={"username": "admin", "password": "securepassword123"},
+    json={"setup_code": setup_code.current(), "username": "admin", "password": "securepassword123"},
     headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"},
   )
   assert r.status_code == 403
@@ -1118,7 +1120,7 @@ def test_setup_allows_curl_style_request(client):
   """Setup with no Sec-Fetch-Site header (e.g. curl) must still work."""
   r = client.post(
     "/api/auth/setup",
-    json={
+    json={"setup_code": setup_code.current(),
       "username": "admin",
       "password": "securepassword123",
     },
@@ -1185,9 +1187,10 @@ def test_concurrent_first_setups_leave_exactly_one_owner(client, monkeypatch):
 
   monkeypatch.setattr(Session, "add", add_after_both_checked)
   statuses = {}
+  code = setup_code.current()
 
   def setup(username):
-    statuses[username] = client.post("/api/auth/setup", json={
+    statuses[username] = client.post("/api/auth/setup", json={"setup_code": code,
       "username": username, "password": "testpassword123",
     }).status_code
 
@@ -1202,3 +1205,88 @@ def test_concurrent_first_setups_leave_exactly_one_owner(client, monkeypatch):
     owners = [row.username for row in db.query(models.Owner).all()]
   winner = next(name for name, status in statuses.items() if status == 200)
   assert owners == [winner]
+
+
+def test_setup_requires_the_one_time_code_from_the_server(client):
+  """Reaching the URL first is not enough to claim a self-hosted instance."""
+  body = {"username": "admin", "password": "securepassword123"}
+  assert client.post("/api/auth/setup", json=body).status_code == 403
+  assert client.post(
+    "/api/auth/setup", json={**body, "setup_code": "AAAA-AAAA-AAAA-AAAA"},
+  ).status_code == 403
+  assert client.get("/api/auth/setup/status").json()["configured"] is False
+
+
+def test_setup_rejects_a_non_ascii_code_as_an_ordinary_wrong_code(client):
+  """Unicode letters must fail like any wrong code, not crash the comparison."""
+  code = setup_code.current()
+  body = {"username": "admin", "password": "securepassword123"}
+  for typed in ("é", "Ａ" * 16, code[:15] + "é", code + "é"):
+    r = client.post("/api/auth/setup", json={**body, "setup_code": typed})
+    assert r.status_code == 403, (typed, r.status_code, r.text)
+  assert client.get("/api/auth/setup/status").json()["configured"] is False
+  assert setup_code.code_path().exists()
+
+
+def test_setup_code_is_forgiving_about_case_and_dashes_and_works_once(client):
+  code = setup_code.current()
+  assert len(code) == 16
+  typed = " " + "-".join(code[i:i + 4] for i in range(0, 16, 4)).lower() + " "
+  r = client.post("/api/auth/setup", json={
+    "username": "admin", "password": "securepassword123", "setup_code": typed,
+  })
+  assert r.status_code == 200, r.text
+  assert not setup_code.code_path().exists()
+  assert client.post("/api/auth/setup", json={
+    "username": "other", "password": "securepassword123", "setup_code": typed,
+  }).status_code == 400
+
+
+def test_setup_status_issues_a_stable_owner_only_code(client):
+  setup_code.retire()
+  client.get("/api/auth/setup/status")
+  path = setup_code.code_path()
+  assert path.exists()
+  assert path.stat().st_mode & 0o777 == 0o600
+  first = setup_code.current()
+  client.get("/api/auth/setup/status")
+  assert setup_code.current() == first
+
+
+def test_setup_code_is_logged_for_the_operator(client, caplog):
+  setup_code.retire()
+  with caplog.at_level("WARNING", logger="moebius.auth"):
+    code = setup_code.current()
+  formatted = "-".join(code[i:i + 4] for i in range(0, 16, 4))
+  assert formatted in caplog.text
+
+
+def test_boot_announces_the_code_only_while_a_self_hosted_owner_is_missing(
+  client, monkeypatch, caplog,
+):
+  import logging
+  from app import startup
+
+  ctx = SimpleNamespace(logger=logging.getLogger("test.startup"))
+  setup_code.retire()
+  with caplog.at_level("WARNING", logger="moebius.auth"):
+    startup._announce_setup_code(ctx)
+  assert setup_code.code_path().exists()
+  assert "Möbius setup code" in caplog.text
+
+  client.post("/api/auth/setup", json={
+    "setup_code": setup_code.current(),
+    "username": "admin", "password": "securepassword123",
+  })
+  setup_code.current()  # a stray code left behind must not survive a boot
+  startup._announce_setup_code(ctx)
+  assert not setup_code.code_path().exists()
+
+
+def test_managed_boot_never_issues_a_setup_code(client, monkeypatch):
+  from app import startup
+
+  configure_managed_sso(monkeypatch)
+  setup_code.retire()
+  startup._announce_setup_code(SimpleNamespace(logger=None))
+  assert not setup_code.code_path().exists()

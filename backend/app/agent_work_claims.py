@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import re
 import uuid
 
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -451,9 +452,17 @@ def stage_settle_goal_claims(
     return []
   finished = set(finished_keys)
   settled = []
+  # A claim the chat took before this Goal existed (an approval answered
+  # before promote_goal) stays Goal-less; completion finishes it only when
+  # the Goal names it, and never releases it otherwise.
+  owned_by_goal = models.AgentWorkClaim.owner_goal_id == goal_id
+  named_chat_claim = and_(
+    models.AgentWorkClaim.owner_goal_id.is_(None),
+    models.AgentWorkClaim.work_key.in_(finished),
+  )
   for row in db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,
-    models.AgentWorkClaim.owner_goal_id == goal_id,
+    or_(owned_by_goal, named_chat_claim) if finished else owned_by_goal,
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).all():
@@ -476,6 +485,20 @@ def open_claim_keys(
   )
   if goal_id is not None:
     query = query.filter(models.AgentWorkClaim.owner_goal_id == goal_id)
+  return {key for (key,) in query.all()}
+
+
+def completable_claim_keys(db: Session, *, chat_id: str, goal_id: str) -> set[str]:
+  """Open keys a completing Goal may name: its own and the chat's Goal-less ones."""
+  query = db.query(models.AgentWorkClaim.work_key).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    or_(
+      models.AgentWorkClaim.owner_goal_id == goal_id,
+      models.AgentWorkClaim.owner_goal_id.is_(None),
+    ),
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  )
   return {key for (key,) in query.all()}
 
 

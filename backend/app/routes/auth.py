@@ -29,7 +29,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app import app_consent, auth, models, runtime_identity, schemas
+from app import app_consent, auth, models, runtime_identity, schemas, setup_code
 from app.broadcast import get_system_broadcast
 from app.config import get_settings
 from app.database import get_db
@@ -161,6 +161,9 @@ def setup_status(db: Session = Depends(get_db)):
   """
   settings = get_settings()
   owner = _ensure_managed_owner(db, settings)
+  if owner is None and not settings.mobius_sso_enabled:
+    # Make sure a code exists (and is in the log) while the setup page is open.
+    setup_code.current()
   return schemas.SetupStatus(
     configured=owner is not None,
     auth_mode=(
@@ -265,11 +268,12 @@ def _ensure_managed_owner(db: Session, settings=None):
   return owner
 
 
-# Self-hosted ownership contract: without managed SSO, possession of the
-# instance URL is the security boundary for the short first-setup window. A
-# Railway-managed instance never reaches this path: injected SSO configuration
-# closes local setup and the root broker's one-use enrollment receipt binds the
-# managed owner.
+# Self-hosted ownership contract: without managed SSO, the first owner must
+# present the one-time setup code from the server log (setup_code.py), so
+# reaching the URL first is not enough to claim the instance. A Railway-managed
+# instance never reaches this path: injected SSO configuration closes local
+# setup and the root broker's one-use enrollment receipt binds the managed
+# owner.
 @router.post("/setup", response_model=schemas.TokenResponse,
              dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("3/minute")
@@ -285,6 +289,14 @@ def setup(
     )
   if db.query(models.Owner).first():
     raise HTTPException(status_code=400, detail="Already configured.")
+  if not setup_code.matches(body.setup_code):
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "Enter the setup code from the server log. It is also saved in "
+        "the setup-code file in the data folder."
+      ),
+    )
   owner = models.Owner(
     username=body.username,
     hashed_password=auth.hash_password(body.password),
@@ -305,6 +317,7 @@ def setup(
   except IntegrityError:
     db.rollback()
     raise HTTPException(status_code=400, detail="Already configured.")
+  setup_code.retire()
   db.refresh(owner)
   try:
     auth.write_service_token(owner.username, owner.token_epoch)

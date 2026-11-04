@@ -2604,6 +2604,8 @@ def test_mark_ready_recovery_releases_a_changed_live_target(
 
   assert response.status_code == 409, response.text
   assert response.json()["detail"]["code"] == "ready_target_changed"
+  # A moved head says what happened instead of a generic mismatch.
+  assert "changed on GitHub after it was reviewed" in response.text
   stored = json.loads(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
      "contributions" / f"{record['id']}.json").read_text()
@@ -3184,6 +3186,24 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     github_contributions._git_ops._resolve_reviewed_commit(
       tmp_path, reviewed, "head sha",
     )
+
+
+def test_missing_trailer_on_a_github_made_commit_says_github_added_it(
+  monkeypatch,
+):
+  """Update branch commits lack the trailer; the refusal names that cause."""
+  outputs = {"%B": "Merge branch 'main' into fix/demo\n",
+             "%ce": "noreply@github.com\n"}
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, **_kwargs: _cp(outputs[args[2].split("=", 1)[1]]),
+  )
+  with pytest.raises(ContributionSubmitError) as exc:
+    github_contributions._git_ops._assert_coauthor_trailer(
+      Path("/unused"), "fix/demo", None,
+    )
+  assert exc.value.code == "missing_coauthor"
+  assert "added on GitHub" in str(exc.value)
 
 
 def test_coauthor_trailer_is_required_unless_the_reviewed_plan_opts_out(

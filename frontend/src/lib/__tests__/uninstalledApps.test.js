@@ -2,9 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationObserver, QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
-import UninstalledApps from '../../components/Drawer/UninstalledApps.jsx'
+import AppsDirectory from '../../components/Drawer/AppsDirectory.jsx'
+import {
+  latestActionState,
+  runUninstalledAction,
+  selectActionState,
+  uninstalledActionKey,
+} from '../../components/Drawer/uninstalledAppActions.js'
 import { expiryCountdown, failureMessage, removedLabel } from '../../components/Drawer/uninstalledApps.js'
 
 const NOW = Date.parse('2026-10-27T12:00:00Z')
@@ -64,41 +71,38 @@ test('a failed recover or delete shows the server reason, or the given fallback'
   assert.equal(generic, 'Could not delete this app. Try again.')
 })
 
-function render(rows) {
+function render(rows, query = '') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   client.setQueryData(appQueries.uninstalled.key, rows)
   return renderToStaticMarkup(
-    React.createElement(QueryClientProvider, { client }, React.createElement(UninstalledApps)),
+    React.createElement(QueryClientProvider, { client }, React.createElement(AppsDirectory, {
+      empty: false, status: 'success', resultCount: 0, query, onQueryChange() {}, onRetry() {},
+    })),
   )
 }
 
-test('the section lists each uninstalled app with a Recover button, and is absent when there are none', () => {
-  assert.equal(render([]), '')
-  const html = render([
-    { id: 7, name: 'News', slug: 'news', version: '1.2.0', icon_data_url: null, background_color: '#336699', theme_color: null, deleted_at: '2026-10-26T12:00:00Z', expires_at: '2026-11-02T12:00:00Z', seconds_left: 6 * DAY / SEC },
-    { id: 9, name: 'Kanban', slug: 'kanban', version: null, deleted_at: '2026-10-27T08:00:00Z', expires_at: '2026-11-03T08:00:00Z', seconds_left: 7 * DAY / SEC },
-  ])
-  assert.match(html, /Recently uninstalled/)
-  assert.match(html, /News/)
-  assert.match(html, /Kanban/)
-  assert.match(html, /aria-label="Recover News"/)
-  assert.match(html, /aria-label="Recover Kanban"/)
-  assert.match(html, /aria-label="Delete News permanently"/)
-  assert.match(html, /recover an uninstalled app, with its data, for 7 days/)
-  assert.match(html, /Uninstalled on /)
+const news = { id: 7, name: 'News', slug: 'news', version: '1.2.0', icon_data_url: null, background_color: '#336699', theme_color: null, deleted_at: '2026-10-26T12:00:00Z', expires_at: '2026-11-02T12:00:00Z', seconds_left: 6 * DAY / SEC + 60 }
+const kanban = { id: 9, name: 'Kanban', slug: 'kanban', version: null, deleted_at: '2026-10-27T08:00:00Z', expires_at: '2026-11-03T08:00:00Z', seconds_left: 7 * DAY / SEC + 60 }
+
+test('each uninstalled app is a tile in the apps grid with its days left', () => {
+  const html = render([news, kanban])
+  assert.match(html, /apps-directory__card--uninstalled/)
+  assert.match(html, /aria-label="News, uninstalled, 6 days left\. Show actions"/)
+  assert.match(html, /aria-label="Kanban, uninstalled, 7 days left\. Show actions"/)
 })
 
-test('an app the server says has no time left is not listed', () => {
+test('search narrows the uninstalled tiles like the installed ones', () => {
+  const html = render([news, kanban], 'kan')
+  assert.match(html, /Kanban/)
+  assert.doesNotMatch(html, /News/)
+})
+
+test('an app the server says has no time left is not shown', () => {
   const gone = { id: 3, name: 'Gone', slug: 'gone', deleted_at: '2026-10-20T12:00:00Z', expires_at: '2026-10-27T12:00:00Z', seconds_left: 0 }
-  assert.equal(render([gone]), '')
-  const html = render([
-    gone,
-    { id: 4, name: 'Kept', slug: 'kept', deleted_at: '2026-10-25T12:00:00Z', expires_at: '2026-11-01T12:00:00Z', seconds_left: 2 * DAY / SEC + 60 },
-  ])
+  assert.doesNotMatch(render([gone]), /Gone/)
+  const html = render([gone, { id: 4, name: 'Kept', slug: 'kept', deleted_at: '2026-10-25T12:00:00Z', expires_at: '2026-11-01T12:00:00Z', seconds_left: 2 * DAY / SEC + 60 }])
   assert.doesNotMatch(html, /Gone/)
-  assert.match(html, /Kept/)
-  assert.match(html, /2 days left/)
-  assert.match(html, /uninstalled-apps__count">1</)
+  assert.match(html, /Kept, uninstalled, 2 days left/)
 })
 
 test('a device clock that runs ahead does not hide an app the server would still recover', () => {
@@ -106,7 +110,27 @@ test('a device clock that runs ahead does not hide an app the server would still
   const html = render([
     { id: 5, name: 'Skewed', slug: 'skewed', deleted_at: new Date(Date.now() - 7 * DAY - HOUR).toISOString(), expires_at: new Date(Date.now() - HOUR).toISOString(), seconds_left: 3 * HOUR / SEC },
   ])
-  assert.match(html, /Skewed/)
-  assert.match(html, /~6 hrs left/)
-  assert.match(html, /aria-label="Recover Skewed"/)
+  assert.match(html, /Skewed, uninstalled, ~6 hrs left/)
+})
+
+test('a request outlives its tile: a tile mounted later sees it running, and keeps its failure', async () => {
+  const client = new QueryClient()
+  const key = uninstalledActionKey(7)
+  const original = api.apps.recover
+  let finish
+  api.apps.recover = () => new Promise(resolve => { finish = resolve })
+  try {
+    // The tile that started it is gone (a search filtered it out); only the query client remembers.
+    const done = new MutationObserver(client, { mutationKey: key, mutationFn: kind => runUninstalledAction(client, 7, kind) })
+      .mutate('recover').catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const shown = () => latestActionState(client.getMutationCache().findAll({ mutationKey: key }).map(selectActionState))
+    assert.deepEqual(shown(), { working: 'recover', error: '' })
+
+    finish(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }))
+    await done
+    assert.deepEqual(shown(), { working: null, error: 'Recovery window has expired.' })
+  } finally {
+    api.apps.recover = original
+  }
 })

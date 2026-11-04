@@ -146,7 +146,7 @@ EXCLUDE_STARTSWITH = (
 # else non-excluded goes into data.tar.gz.
 SECRET_NAMES = {
   "cli-auth", "app-secrets", "push", ".vault",
-  "service-token.txt", ".secret-key",
+  "service-token.txt", ".secret-key", "setup-code",
 }
 
 # The live DB dir is handled specially: we inject a consistent snapshot
