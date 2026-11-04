@@ -12,8 +12,8 @@ from app import contribution_review_runs as domain, contribution_review_repairs 
 from app.contribution_review_effects import NotDispatched
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, report
-from tests.test_contribution_review_workflows import takeover, configure_repair, publish_body, checkout_body, overlapping_grant, NEW
+from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, report, settle_fixture_review
+from tests.test_contribution_review_workflows import takeover, configure_repair, publish_body, checkout_body, overlapping_grant, NEW, MAINTAINER_REPO
 
 
 def ready_body(**changes):
@@ -83,13 +83,14 @@ def test_new_scope_is_distinct_frozen_capability_and_repair_stays_available(setu
 
 
 def test_new_draft_scope_admits_open_draft_without_widening_old_request_id(setup, monkeypatch):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   monkeypatch.setattr(domain, "inspect_target", lambda *a: {**TARGET, "head_repo": REPO["full_name"],
     "head_repo_id": 1, "head_ref": "topic"})
   monkeypatch.setattr(domain, "repair_file_scope", lambda *a: ["owned.py"])
-  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "draft": True}))
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (MAINTAINER_REPO, {**PULL, "draft": True}))
   async def admit(**kwargs):
     db.add(models.ChatRun(id="draft-admitted", chat_id=kwargs["chat_id"], status="stopped"))
     db.commit()
@@ -98,7 +99,7 @@ def test_new_draft_scope_admits_open_draft_without_widening_old_request_id(setup
   preview = routes.review_preview(1, routes.ReviewPreview(mode="review_fix_merge"), db, owner)
   body = routes.StartReviews(request_id="draft-grant-123", mode="review_fix_merge", items=[ITEM],
     confirmation_scope="named_pr_repairs_ready_and_reviewed_successors",
-    preview_sha256=preview["preview_sha256"])
+    takeover_reason="The author asked for this.", preview_sha256=preview["preview_sha256"])
   result = asyncio.run(routes.start_reviews(1, body, db, owner))
   assert result["run"]["options"]["confirmation_scope"] == body.confirmation_scope
   assert "POST /api/github/contributions/1/review-runs/" in result["brief"]

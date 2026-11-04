@@ -15,7 +15,9 @@ from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from app import contribution_pr_facts as pr_facts
-from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, APPROVAL, report
+from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, APPROVAL, report, settle_fixture_review
+# Taking over someone else's PR is for maintainers only (the PR machine's take_over guard).
+MAINTAINER_REPO = {**REPO, "permissions": {"push": True, "maintain": True}}
 
 NEW = "c" * 40
 
@@ -100,7 +102,9 @@ def test_cli_frozen_review_options_reproduce_the_server_preview(setup, monkeypat
 
 @pytest.mark.parametrize("options", [None, {}, {"max_rounds": None}])
 def test_uncapped_preview_admission_and_retry_freeze_the_same_hash(setup, monkeypatch, options):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (MAINTAINER_REPO, PULL))
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   monkeypatch.setattr(domain, "inspect_target", lambda *a: TARGET)
@@ -114,7 +118,7 @@ def test_uncapped_preview_admission_and_retry_freeze_the_same_hash(setup, monkey
   assert preview["options"]["max_rounds"] is None
   body = routes.StartReviews(request_id="uncapped-123", mode="review_fix_merge", items=[ITEM],
     options=options, confirmation_scope="named_pr_repairs_and_reviewed_successors",
-    preview_sha256=preview["preview_sha256"])
+    takeover_reason="The author is away and asked for this fix.", preview_sha256=preview["preview_sha256"])
   first = asyncio.run(routes.start_reviews(1, body, db, owner))
   frozen = first["run"]["options"]
   assert frozen["max_rounds"] is None
@@ -337,7 +341,8 @@ def test_preview_fingerprint_freezes_bytes_and_model(setup, monkeypatch):
 
 
 def test_retry_uses_frozen_snapshot_not_changed_defaults(setup, monkeypatch):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   monkeypatch.setattr(domain, "inspect_target", lambda *a: TARGET)
@@ -356,7 +361,8 @@ def test_retry_uses_frozen_snapshot_not_changed_defaults(setup, monkeypatch):
 
 
 def test_core_app_less_owner_admission_and_auth(setup, monkeypatch):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   monkeypatch.setattr(domain, "inspect_target", lambda *a: TARGET)
   owner = Principal(owner=principal.owner, app_id=None)

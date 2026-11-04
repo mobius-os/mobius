@@ -26,6 +26,7 @@ from app.contribution_review_public import EVIDENCE_MAX_CHARS
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
 from app import contribution_direct_merge as direct_merge
+from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
 from app import contribution_review_merge_actions as merge_actions
 from app import contribution_review_verdicts as verdicts
 from app.chat_start import start_programmatic_chat_turn
@@ -103,8 +104,17 @@ class StartReviews(BaseModel):
   mode: Literal["review", "review_merge", "review_fix_merge"]
   options: ReviewOptions | None = None
   confirmation_scope: Literal["named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"] | None = None
+  # Why the owner takes over someone else's PR; frozen into the grant and shown in its brief.
+  takeover_reason: str | None = Field(default=None, min_length=1, max_length=500)
   items: list[SelectedPR] = Field(min_length=1, max_length=20)
   chat_approval: ChatApproval | None = None
+
+  @field_validator("takeover_reason")
+  @classmethod
+  def meaningful_reason(cls, value):
+    if value is not None and not value.strip():
+      raise ValueError("Say why you are taking over this PR.")
+    return value.strip() if value is not None else None
 
 
 class ReviewOutcome(PullIdentity):
@@ -266,6 +276,92 @@ def _chat_approval(db, body, principal):
           "run_id": principal.run_id, "context": body.chat_approval.context}
 
 
+# The PR machine action each admission is, by mode and the owner's role on the PR.
+# Review and merge on the owner's own PR has no action: the author never reviews in public.
+_ADMISSION_ACTIONS = {("review", "author"): "check_my_pr", ("review", "reviewer"): "review",
+                      ("review_merge", "reviewer"): "review",
+                      ("review_fix_merge", "author"): "finish_it", ("review_fix_merge", "reviewer"): "take_over"}
+OWN_PR_REVIEW_MERGE = ("Review and merge is for someone else's PR. Check your own PR instead, and merge "
+                       "it yourself once someone else approves it.")
+TAKEOVER_REASON_NEEDED = "Say why you are taking over someone else's PR. The reason goes with the takeover."
+
+
+def _require_new_grant_shape(body):
+  """Rules a new run must meet; repeating an admitted request still returns its saved run."""
+  options = body.options or ReviewOptions()
+  if body.mode == "review_merge" and options.propose_verdict is not True:
+    raise HTTPException(422, "Review and merge needs verdict proposals (propose_verdict): it merges only "
+                             "after you submit the approval yourself.")
+  if body.takeover_reason is not None and body.mode != "review_fix_merge":
+    raise HTTPException(422, "A takeover reason belongs to a takeover (review_fix_merge) only.")
+
+
+async def _admission_facts(cwd, target, actor_id) -> dict:
+  """The PR machine's facts for one selected PR, read now (its job is checked at admission)."""
+  repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
+  return await asyncio.to_thread(pr_facts.read_facts, _gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews and checks)
+                                 actor_id=actor_id, job=None)
+
+
+def _admission_action(body, facts) -> str:
+  """The machine action this run takes on one PR, given the owner's role there."""
+  if body.mode == "review_merge" and facts["role"] == "author":
+    raise HTTPException(409, OWN_PR_REVIEW_MERGE)
+  action = _ADMISSION_ACTIONS[(body.mode, facts["role"])]
+  if action == "take_over" and not body.takeover_reason:
+    raise HTTPException(422, TAKEOVER_REASON_NEEDED)
+  return action
+
+
+def _require_allowed(facts, action):
+  blocker = machine.action_blocker(facts, action)
+  if blocker:
+    raise HTTPException(409, blocker)
+
+
+def _require_no_other_agent(db, owner_id, admitted):
+  """One agent job per PR: the caller holds the owner's admission lock through the run's insert."""
+  for target, facts, action in admitted:
+    _require_allowed({**facts, "job": _pr_job(db, owner_id, target["repo"], target["number"])}, action)
+
+
+async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets, admitted):
+  """Insert the run under the owner's admission lock, after its last one-job-per-PR check."""
+  async with chat_queue.get_transition_lock(f"review-pr-admission:{principal.owner.id}"):
+    db.rollback()
+    _require_no_other_agent(db, principal.owner.id, admitted)
+    # Consent in chat stays in that chat. An app selection without a source
+    # conversation still receives its own durable review conversation.
+    approval = _chat_approval(db, body, principal)
+    _assert_app_current(db, app_id, app_nonce)
+    if approval:
+      chat_id = principal.chat_id
+      targets = [{**target, "approval": approval} for target in targets]
+    else:
+      chat_id = _new_review_chat(db, snapshot["choice"], app_id)
+    row = models.ContributionReviewRun(id=str(uuid.uuid4()), app_id=app_id,
+      owner_id=principal.owner.id, request_id=body.request_id, mode=body.mode,
+      targets_json=targets, outcomes_json={}, chat_id=chat_id,
+      github_actor_id=str(actor["id"]),
+      app_nonce=app_nonce, options_json={**snapshot, "input_options": _options_input(body) or {},
+        "confirmation_scope": body.confirmation_scope, "takeover_reason": body.takeover_reason,
+        "preview_sha256": _fingerprint(snapshot),
+        "input_agent": body.agent.model_dump() if body.agent else None})
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _new_review_chat(db, choice, app_id) -> str:
+  chat = chat_writer.create_chat(id=str(uuid.uuid4()), title="Review selected contributions",
+                                 provider=choice["provider"], created_by_app_id=app_id,
+                                 agent_settings_json={key: value for key, value in choice.items()
+                                                      if key != "provider"})
+  db.add(chat)
+  return chat.id
+
+
 @router.post(APP_PREFIX + "/{app_id}/review-runs", dependencies=[Depends(reject_cross_site),
              Depends(require_nondelegated_owner_or_app_control)])
 async def start_reviews(app_id: int | None, body: StartReviews,
@@ -295,6 +391,7 @@ async def start_reviews(app_id: int | None, body: StartReviews,
             _saved_options_input(row) != (_options_input(body) or {})
             or row.options_json.get("input_agent") != (body.agent.model_dump() if body.agent else None)
             or row.options_json.get("confirmation_scope") != body.confirmation_scope
+            or row.options_json.get("takeover_reason") != body.takeover_reason
             or (body.preview_sha256 and row.options_json.get("preview_sha256") != body.preview_sha256)))):
         raise HTTPException(409, "This request already approves a different selection.")
       if approval and row.chat_id != principal.chat_id:
@@ -303,6 +400,7 @@ async def start_reviews(app_id: int | None, body: StartReviews,
     else:
       if body.options is not None:
         _reject_takeover_options(body.mode, body.options)
+      _require_new_grant_shape(body)
       if body.mode == "review_fix_merge" and not body.preview_sha256:
         raise HTTPException(422, "Preview and confirm the exact frozen takeover prompts/model before admission.")
       snapshot = _snapshot(db, body, principal)
@@ -314,40 +412,19 @@ async def start_reviews(app_id: int | None, body: StartReviews,
         raise HTTPException(409, "Connect GitHub before starting this review.")
       targets = [await asyncio.to_thread(reviews.inspect_target, _gh, cwd, item, body.mode)  # unsettled: read-only (GitHub observation; no mutation)
                  for item in selection]
-      if body.mode == "review_fix_merge" and any(t.get("is_draft") for t in targets) and body.confirmation_scope != "named_pr_repairs_ready_and_reviewed_successors":
-        raise HTTPException(422, "Draft takeover requires explicit permission to mark ready after fresh review and checks.")
+      admitted = []
+      for target in targets:
+        facts = await _admission_facts(cwd, target, actor["id"])
+        action = _admission_action(body, facts)
+        _require_allowed(facts, action)
+        target["role"] = facts["role"]
+        admitted.append((target, facts, action))
       if body.mode == "review_fix_merge":
         for target in targets:
           target["allowed_files"] = await asyncio.to_thread(reviews.repair_file_scope, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
-          await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
           await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
-      # Consent in chat stays in that chat. An app selection without a source
-      # conversation still receives its own durable review conversation.
-      approval = _chat_approval(db, body, principal)
-      _assert_app_current(db, app_id, app_nonce)
-      if approval:
-        chat_id = principal.chat_id
-        targets = [{**target, "approval": approval} for target in targets]
-      else:
-        choice = snapshot["choice"]
-        chat = chat_writer.create_chat(id=str(uuid.uuid4()), title="Review selected contributions",
-                           provider=choice["provider"], created_by_app_id=app_id,
-                           agent_settings_json={
-                             key: value for key, value in choice.items()
-                             if key != "provider"
-                           })
-        db.add(chat)
-        chat_id = chat.id
-      row = models.ContributionReviewRun(id=str(uuid.uuid4()), app_id=app_id,
-        owner_id=principal.owner.id, request_id=body.request_id, mode=body.mode,
-        targets_json=targets, outcomes_json={}, chat_id=chat_id,
-        github_actor_id=str(actor["id"]),
-        app_nonce=app_nonce, options_json={**snapshot, "input_options": _options_input(body) or {},
-          "confirmation_scope": body.confirmation_scope, "preview_sha256": _fingerprint(snapshot),
-          "input_agent": body.agent.model_dump() if body.agent else None})
-      db.add(row)
-      db.commit()
-      db.refresh(row)
+      row = await _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets, admitted)
+
     # Any durable first turn owns recovery; clicking twice never starts a second
     # review or revives a stopped run. An admission failure retries the empty chat.
     if not db.query(models.ChatRun).filter_by(chat_id=row.chat_id).first():

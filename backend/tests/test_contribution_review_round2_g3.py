@@ -12,8 +12,8 @@ from app import models
 from app.chat_writer import create_chat
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import setup, ITEM, SHA, BASE, TARGET, report
-from tests.test_contribution_review_workflows import configure_repair, publish_body, takeover, register_reviewer
+from tests.test_contribution_review_runs import setup, ITEM, SHA, BASE, TARGET, PULL, report, settle_fixture_review
+from tests.test_contribution_review_workflows import configure_repair, publish_body, takeover, register_reviewer, MAINTAINER_REPO
 
 
 def test_publish_repair_rejects_rewritten_base_before_push(setup, monkeypatch):
@@ -209,6 +209,8 @@ def test_failed_base_observation_does_not_erase_new_receipt(setup, monkeypatch):
 def test_canonical_cli_finite_repair_preview_start_retry_and_limit(setup, monkeypatch):
   from scripts import github_review as cli
   db, _row, principal = setup
+  settle_fixture_review(db, _row)
+  monkeypatch.setattr(reviews, "current_pull", lambda *a: (MAINTAINER_REPO, PULL))
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(cli, "inspect_pr", lambda *_args: TARGET)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *_args:
@@ -226,7 +228,8 @@ def test_canonical_cli_finite_repair_preview_start_retry_and_limit(setup, monkey
   monkeypatch.setattr(cli, "api", lambda _path, **kwargs: routes.review_preview(1,
     routes.ReviewPreview(**kwargs["data"]), db, owner))
   selection = cli.prepare_selection(["example/project#7"], "review_fix_merge", None, 1)
-  frozen = cli.freeze_preview(selection, {"fix_prompt": "Fix precisely", "max_rounds": 2})
+  frozen = cli.freeze_preview(selection, {"fix_prompt": "Fix precisely", "max_rounds": 2},
+                              takeover_reason="The author asked a maintainer to finish it.")
   assert frozen["options"]["fix_prompt"] == "Fix precisely"
   assert frozen["options"]["max_rounds"] == 2
   body = routes.StartReviews(**cli.start_body(frozen))

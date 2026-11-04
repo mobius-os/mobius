@@ -9,7 +9,7 @@ from app import contribution_review_runs as domain, models
 from app import schema_migrations
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import ITEM, CHECKS, REPO, PULL, TARGET, setup, report, snapshot_owning_chat
+from tests.test_contribution_review_runs import ITEM, CHECKS, REPO, PULL, TARGET, setup, report, snapshot_owning_chat, settle_fixture_review
 from scripts import github_review as cli
 from scripts.github_review_selection import review_path, start_body, verify_selection
 from app.contribution_review_effects import NotDispatched, classify_dispatch_error, graphql_mutation_result
@@ -33,7 +33,8 @@ def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
   for name in ("api", "prepare_selection", "freeze_preview", "verify_selection", "start_body", "review_path"):
     assert callable(getattr(cli, name))
   assert tuple(signature(cli.prepare_selection).parameters) == ("references", "mode", "chat_id", "app_id")
-  assert tuple(signature(cli.freeze_preview).parameters) == ("selection", "options", "agent", "allow_mark_ready")
+  assert tuple(signature(cli.freeze_preview).parameters) == ("selection", "options", "agent", "allow_mark_ready",
+                                                             "takeover_reason")
   assert signature(cli.freeze_preview).parameters["allow_mark_ready"].default is False
   monkeypatch.setattr(cli, "inspect_pr", lambda ref: {**ITEM, "title": "Safe change", "url": "https://github.com/example/project/pull/7"})
   snapshot = {"review_prompt": "Review", "merge_prompt": "Merge",
@@ -55,6 +56,7 @@ def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
 
 def test_core_admission_is_null_app_and_app_context_is_read_only(setup, monkeypatch):
   db, existing, principal = setup
+  settle_fixture_review(db, existing)
   snapshot_owning_chat(db, principal)
   principal.scope = "owner"
   monkeypatch.setattr(domain, "inspect_target", lambda *a: existing.targets_json[0])
@@ -526,7 +528,7 @@ def test_cli_preview_flag_reaches_frozen_ready_scope(monkeypatch, tmp_path, caps
   seen = []
   monkeypatch.setenv("CHAT_ID", "owning-chat")
   monkeypatch.setattr(cli, "prepare_selection", lambda *a: {"mode": "review_fix_merge"})
-  def freeze(selection, options=None, agent=None, *, allow_mark_ready=False):
+  def freeze(selection, options=None, agent=None, *, allow_mark_ready=False, takeover_reason=None):
     seen.append(allow_mark_ready)
     return {"confirmation_scope": "named_pr_repairs_ready_and_reviewed_successors"}
   monkeypatch.setattr(cli, "freeze_preview", freeze)

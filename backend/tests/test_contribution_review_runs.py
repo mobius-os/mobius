@@ -61,6 +61,16 @@ def setup(fresh_db, monkeypatch):
   db.close()
 
 
+# Review and merge only merges after the owner's own Approve: new runs propose verdicts.
+VERDICTS = {"post_review": True, "propose_verdict": True}
+
+
+def settle_fixture_review(db, row):
+  """The fixture run finished its own review of the PR, so its agent no longer holds it."""
+  domain.save_outcome(db, row, domain.key(ITEM), {"state": "needs_you", "head_sha": SHA,
+                                                  "summary": "Findings reported to the owner"})
+
+
 def report(setup, **changes):
   db, row, principal = setup
   data = {**ITEM, "state": "all_clear", "summary": "Full diff reviewed",
@@ -393,6 +403,7 @@ def test_start_idempotency_reuses_exact_chat_and_does_not_regrant_mode(setup, mo
 
 def test_start_persists_selection_before_task_admission(setup, monkeypatch):
   db, row, principal = setup
+  settle_fixture_review(db, row)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda db: {
     "provider": "codex", "model": "gpt-5", "effort": "xhigh",
@@ -437,7 +448,7 @@ def test_agent_without_explicit_chat_consent_cannot_mint_merge_grant(setup):
 
 
 def approved_body(request_id="chat-approved"):
-  return routes.StartReviews(request_id=request_id, mode="review_merge", items=[ITEM],
+  return routes.StartReviews(request_id=request_id, mode="review_merge", items=[ITEM], options=VERDICTS,
     chat_approval={"context": "The owner said: review this exact PR and merge it if safe."})
 
 
@@ -450,7 +461,8 @@ def snapshot_owning_chat(db, principal):
 
 
 def test_explicit_chat_consent_stays_in_owning_chat_with_durable_provenance(setup, monkeypatch):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
   async def forbidden(**kwargs):
@@ -528,7 +540,8 @@ def test_real_app_scope_guard_still_rejects_other_apps(setup, monkeypatch):
 def test_http_admission_accepts_explicit_chat_consent_but_not_an_unapproved_agent(setup, monkeypatch):
   from fastapi import FastAPI
   from fastapi.testclient import TestClient
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   application = FastAPI()
   application.include_router(routes.router)
@@ -561,7 +574,8 @@ def test_chat_cannot_rebind_an_existing_other_conversations_selection(setup):
 
 @pytest.mark.parametrize("revoke", ["stop", "capability", "nonce", "uninstall"])
 def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monkeypatch, revoke):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   def inspect(*args):
     if revoke == "stop":
       db.get(models.ChatRun, principal.run_id).status = "stopped"
@@ -580,6 +594,7 @@ def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monke
   with pytest.raises(HTTPException) as error:
     asyncio.run(routes.start_reviews(1, approved_body(), db, principal))
   assert error.value.status_code == 409
+  assert error.value.detail != "An agent is already working on this PR."
   assert db.query(models.ContributionReviewRun).count() == 1
 
 
@@ -953,18 +968,20 @@ def test_post_review_writes_a_comment_review_bound_to_the_head():
 def test_contribute_no_op_takeover_options_still_start_plain_reviews(setup, monkeypatch, mode):
   """The installed Contribute app always sends max_rounds: null; main accepted it."""
   from app import contribution_review_presets as presets
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
-  sent = {"max_rounds": None, "fix_prompt": presets.FIX_PROMPT, "autopilot": False}
+  verdicts = VERDICTS if mode == "review_merge" else {}
+  sent = {"max_rounds": None, "fix_prompt": presets.FIX_PROMPT, "autopilot": False, **verdicts}
   preview = routes.review_preview(1, routes.ReviewPreview(mode=mode, options=sent), db, principal)
-  assert preview == routes.review_preview(1, routes.ReviewPreview(mode=mode), db, principal)
+  assert preview == routes.review_preview(1, routes.ReviewPreview(mode=mode, options=verdicts), db, principal)
   assert not {"max_rounds", "fix_prompt"} & preview["options"].keys()
   body = approved_body().model_copy(update={"mode": mode, "options": routes.ReviewOptions(**sent)})
   row = db.get(models.ContributionReviewRun,
                 asyncio.run(routes.start_reviews(1, body, db, principal))["run"]["id"])
   assert not {"max_rounds", "fix_prompt"} & row.options_json.keys()
-  assert row.options_json["input_options"] == {}
+  assert row.options_json["input_options"] == verdicts
   with pytest.raises(HTTPException) as refused:
     routes.review_preview(1, routes.ReviewPreview(mode=mode, options={"max_rounds": 2}), db, principal)
   assert refused.value.status_code == 422
