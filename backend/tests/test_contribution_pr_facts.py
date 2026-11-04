@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
 from app import contribution_review_runs as domain
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import setup, CHECKS, PULL, REPO, SHA  # noqa: F401  (fixture)
+from tests.test_contribution_review_runs import setup, CHECKS, PULL, REPO, SHA, TARGET  # noqa: F401  (fixture)
 
 OLD = "c" * 40
 AUTHOR = {"id": 9, "login": "Alex", "type": "User"}
@@ -95,7 +95,7 @@ def test_lifecycle_reads_merged_closed_draft_and_open():
 def test_read_facts_reuses_checks_the_caller_already_read(monkeypatch):
   monkeypatch.setattr(domain, "pull_checks", lambda *a: (_ for _ in ()).throw(AssertionError("read twice")))
   gh = lambda _cwd, *args, **kw: SimpleNamespace(stdout=json.dumps([review("sam", "APPROVED")]))  # noqa: E731
-  found = pr_facts.read_facts(gh, None, REPO, {**PULL, "number": 7}, actor_id=42, job=None, checks=CHECKS)
+  found = pr_facts.read_facts(gh, None, TARGET, REPO, PULL, actor_id=42, job=None, checks=CHECKS)
   assert found["readComplete"] is True and found["reviews"][0]["by"] == "sam"
 
 

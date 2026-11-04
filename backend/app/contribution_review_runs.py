@@ -273,8 +273,9 @@ def merge_blocker(target, repo, pull, pr) -> str | None:
   allowed_states = {"CLEAN", "BEHIND"} if pr["isMergeQueueEnabled"] else {"CLEAN"}
   if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") not in allowed_states:
     return "GitHub has not cleared this pull request for a normal merge; check its rules or merge queue."
-  if pr.get("reviewDecision") not in (None, "APPROVED"):
-    return "GitHub still requires a review or has requested changes."
+  # Who approved which version is the PR machine's merge guard (contribution_pr_machine),
+  # asked on facts read right after this: GitHub's reviewDecision is empty in a repository
+  # that requires no review, and would let a merge through that nobody else approved.
   return checks_blocker(pr)
 
 
@@ -295,7 +296,7 @@ def checks_blocker(pr) -> str | None:
 
 
 def pull_checks(gh, cwd, target):
-  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
+  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
                          "-f", f"id={target['pr_id']}").stdout)
   if result.get("errors") or not (result.get("data") or {}).get("node"):

@@ -57,10 +57,10 @@ def read_reviews(gh, cwd, repo: str, number: int) -> list[dict] | None:
   return None  # Past the page cap: an incomplete list could hide a change request.
 
 
-def read_checks(gh, cwd, pull: dict) -> dict | None:
+def read_checks(gh, cwd, target: dict) -> dict | None:
   """GitHub's check and merge read for this pull request, or None when it could not be read."""
   try:
-    return reviews.pull_checks(gh, cwd, {"pr_id": pull.get("node_id")})
+    return reviews.pull_checks(gh, cwd, target)
   except READ_FAILURES:
     return None
 
@@ -154,13 +154,14 @@ def pr_facts(*, actor_id, repo: dict, pull: dict, checks: dict | None,
   }
 
 
-def read_facts(gh, cwd, repo: dict, pull: dict, *, actor_id, job: dict | None,
+def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, job: dict | None,
                checks: dict | None = None) -> dict:
   """Facts for a pull request the caller just read, adding its review list and checks.
 
+  ``target`` names it as the review machinery does (repo, number, pr_id).
   Pass ``checks`` when the caller already read them, so GitHub is asked once.
   """
-  checks = checks if checks is not None else read_checks(gh, cwd, pull)
-  review_list = read_reviews(gh, cwd, repo.get("full_name") or "", pull.get("number"))
+  checks = checks if checks is not None else read_checks(gh, cwd, target)
+  review_list = read_reviews(gh, cwd, target["repo"], target["number"])
   return pr_facts(actor_id=actor_id, repo=repo, pull=pull, checks=checks,
                   review_list=review_list, job=job)

@@ -3,9 +3,12 @@
 There is no review run, agent or stored consent here: the owner's tap is the
 authority, so GitHub is read again right before the one write and the write is
 pinned to the head the owner saw. GitHub's own rules decide, through the review
-machinery's merge_blocker: never an admin bypass or a force. Nothing here
-approves, edits or comments, and one call touches one pull request. A write
-whose outcome cannot be read is reported as unconfirmed and is never repeated.
+machinery's merge_blocker, and so does the PR machine's merge guard on the
+facts just read: someone other than the author approved this exact version, no
+change request still stands, and no agent is working on the PR. Never an admin
+bypass or a force. Nothing here approves, edits or comments, and one call
+touches one pull request. A write whose outcome cannot be read is reported as
+unconfirmed and is never repeated.
 """
 import asyncio
 import logging
@@ -13,6 +16,7 @@ import subprocess
 
 from fastapi import HTTPException
 
+from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
 from app import contribution_review_merge_actions as merge_actions
 from app import contribution_review_runs as reviews
 from app.contribution_errors import ContributionSubmitError
@@ -62,19 +66,20 @@ def _merge_target(gh, cwd, body, repo: dict, pull: dict) -> dict:
           "base_ref": base_ref, "base_sha": reviews.base_head(gh, cwd, name, base_ref)}
 
 
-def _require_clear(target: dict, repo: dict, pull: dict, checks: dict) -> None:
+def _require_clear(target: dict, repo: dict, pull: dict, checks: dict, facts: dict) -> None:
   if reviews.queue_entry(checks, target):
     raise HTTPException(409, "This pull request is already in the merge queue.")
-  blocker = reviews.merge_blocker(target, repo, pull, checks)
+  blocker = reviews.merge_blocker(target, repo, pull, checks) or machine.action_blocker(facts, "merge")
   if blocker:
     raise HTTPException(409, blocker)
 
 
-def _read_mergeable_pull(gh, cwd, body) -> tuple[dict, dict, dict]:
+def _read_mergeable_pull(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   """Read GitHub now and refuse, in plain words, unless the exact head named can be merged.
 
   Returns what dispatch_merge takes: the merge target, the repository and the
-  pull request's checks. This only reads.
+  pull request's checks. This only reads. ``job`` is the agent job a review
+  run holds on this PR, if any.
   """
   try:
     repo = _read_object(gh, cwd, f"repos/{body.repo}")
@@ -85,7 +90,9 @@ def _read_mergeable_pull(gh, cwd, body) -> tuple[dict, dict, dict]:
     checks = reviews.pull_checks(gh, cwd, target)
   except _READ_FAILURES as exc:
     raise HTTPException(404, UNREADABLE) from exc
-  _require_clear(target, repo, pull, checks)
+  # The merge guard does not depend on who presses Merge, so no account read is needed.
+  facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=None, job=job, checks=checks)
+  _require_clear(target, repo, pull, checks, facts)
   return target, repo, checks
 
 
@@ -114,10 +121,10 @@ def _answer(result, body, method: str | None) -> dict:
           "method": method, "repo": body.repo, "number": body.number, "head_sha": body.head_sha}
 
 
-async def _merge(gh, cwd, body, authorize) -> dict:
+async def _merge(gh, cwd, body, authorize, job) -> dict:
   authorize()
   async with _github_connection_transaction():
-    target, repo, checks = await asyncio.to_thread(_read_mergeable_pull, gh, cwd, body)  # unsettled: read-only (GitHub pull request, checks and base tip)
+    target, repo, checks = await asyncio.to_thread(_read_mergeable_pull, gh, cwd, body, job)  # unsettled: read-only (GitHub pull request, reviews, checks and base tip)
     method = _method_to_send(body.method, repo, checks)
     result = await merge_actions.dispatch_merge(gh, cwd, target, repo, checks, authorize, method)
   # dispatch_merge turns a cancellation before the write into a refusal. The
@@ -132,18 +139,19 @@ def _refusal_summary(exc: HTTPException) -> str:
   return f"HTTP {exc.status_code}, {detail}"
 
 
-async def merge_exact_pull(gh, cwd, body, authorize) -> dict:
+async def merge_exact_pull(gh, cwd, body, authorize, job: dict | None = None) -> dict:
   """Merge or enqueue the exact head the owner named, once, and report what GitHub confirmed.
 
   `body` carries repo, number, head_sha and an optional method. `authorize`
   raises an HTTPException once the caller's authority no longer stands; it runs
-  before any GitHub call and again right before the write. Raises HTTPException:
-  404 when GitHub cannot be read, 409 for a refusal that changed nothing and 502
-  when the write's outcome is unconfirmed. Logs one line per attempt.
+  before any GitHub call and again right before the write. `job` is the agent
+  job a review run holds on this PR (the PR machine's job fact). Raises
+  HTTPException: 404 when GitHub cannot be read, 409 for a refusal that changed
+  nothing and 502 when the write's outcome is unconfirmed. Logs one line per attempt.
   """
   outcome = "ended without an answer; GitHub may or may not have applied it"
   try:
-    answer = await _merge(gh, cwd, body, authorize)
+    answer = await _merge(gh, cwd, body, authorize, job)
     outcome = answer["state"]
     return answer
   except HTTPException as exc:

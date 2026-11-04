@@ -588,7 +588,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
         return {"run": _run_view(db, row)}
       _require_ready_attempt_resolved(previous, target)
       await merge_actions.merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
-        gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal))
+        gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal),
+        job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id))
       return {"run": _run_view(db, row)}
     if outcome.get("merge_attempted") or outcome.get("public_review"):
       reviews.save_effect_outcome(db, row, item_key, outcome)
@@ -702,10 +703,12 @@ def _review_stop_requested(row):
 
 
 # Item states that leave a PR to the owner or to GitHub, not to the run's agent
-# (the same split as Contribute's reviewItemProgress).
+# (the same split as Contribute's reviewItemProgress). An attempt still on its
+# way to GitHub is not an agent's job either: its receipt fences what follows.
 _SETTLED_ITEMS = {"all_clear", "merged", "queued"}
 _OWNER_ITEMS = {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable",
-                "verdict_pending", "verdict_posting", "verdict_unknown"}
+                "verdict_pending", "verdict_unknown"}
+_SENDING_ITEMS = {"merging", "pushing", "marking_ready", "verdict_posting"}
 _HALTED_RUNS = {"stopped", "failed", "interrupted"}
 
 
@@ -720,7 +723,9 @@ def _job_on_pull(view, repo, number) -> dict | None:
     return {"state": "needs_answer", "run_id": view["id"]}
   if execution in _HALTED_RUNS:
     return {"state": "stalled", "run_id": view["id"]}
-  return None if item.get("state") in _OWNER_ITEMS else {"state": "running", "run_id": view["id"]}
+  if item.get("state") in _OWNER_ITEMS | _SENDING_ITEMS:
+    return None
+  return {"state": "running", "run_id": view["id"]}
 
 
 def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None) -> dict | None:
@@ -944,13 +949,15 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   """The owner's own tap: merge exactly the pull-request head named, now, with no agent run.
 
   200 {state: merged|queued, merge_sha, method, repo, number, head_sha}; 409 with a
-  plain reason when GitHub's live answer refuses it; 502 merge_unconfirmed when the
-  write's outcome is unknown. See contribution_direct_merge.
+  plain reason when GitHub's live answer or the PR machine's merge guard refuses it
+  (the reason is the machine's own words); 502 merge_unconfirmed when the write's
+  outcome is unknown. See contribution_direct_merge.
   """
   _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce))
+  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce),
+                                             job=_pr_job(db, principal.owner.id, body.repo, body.number))
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",

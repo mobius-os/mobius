@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, contribution_review_public as public, models
+from app import contribution_pr_facts as pr_facts
 from app.contribution_review_effects import DispatchResult
 from app.contribution_errors import ContributionSubmitError
 from app.database import SessionLocal
@@ -27,8 +28,10 @@ PULL = {"node_id": "PR_7", "state": "open", "head": {"sha": SHA},
         "base": {"ref": "main", "sha": BASE}, "title": "A change", "html_url": TARGET["url"]}
 REF = {"object": {"sha": BASE}}
 CHECKS = {"headRefOid": SHA, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
-          "reviewDecision": "APPROVED", "isMergeQueueEnabled": False,
+          "isMergeQueueEnabled": False,
           "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
+# Someone other than the author approved the selected head: the PR machine's merge guard.
+APPROVAL = {"user": {"id": 7, "login": "sam", "type": "User"}, "state": "APPROVED", "commit_id": SHA}
 
 
 @pytest.fixture
@@ -53,6 +56,7 @@ def setup(fresh_db, monkeypatch):
   monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
   monkeypatch.setattr(domain, "assert_current_base", lambda *args: None)
   monkeypatch.setattr(domain, "pull_checks", lambda *args: CHECKS)
+  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: [APPROVAL])
   yield db, row, principal
   db.close()
 
@@ -225,13 +229,50 @@ def test_queue_is_used_instead_of_direct_merge(setup, monkeypatch):
 
 
 @pytest.mark.parametrize("changes", [
-  {"reviewDecision": "CHANGES_REQUESTED"}, {"reviewDecision": "REVIEW_REQUIRED"},
   {"mergeStateStatus": "UNKNOWN"}, {"mergeStateStatus": "BLOCKED"},
   {"headRefOid": "c" * 40}, {"mergeable": "CONFLICTING"},
   {"commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING"}}}]}},
 ])
 def test_github_blockers_stop_before_merge(changes):
   assert domain.merge_blocker(TARGET, REPO, PULL, {**CHECKS, **changes})
+
+
+def opinion(login, state, commit=SHA, user_id=8, kind="User"):
+  return {"user": {"id": user_id, "login": login, "type": kind}, "state": state, "commit_id": commit}
+
+
+@pytest.mark.parametrize("reviews, reason", [
+  ([], "Nobody but the author has approved it yet."),
+  ([opinion("qa-bot", "APPROVED", kind="Bot")], "Nobody but the author has approved it yet."),
+  ([APPROVAL, opinion("bob", "CHANGES_REQUESTED", "c" * 40)], "bob asked for changes and hasn’t approved since."),
+  (None, "This PR could not be read. Try again."),
+], ids=["nobody", "only_a_bot", "older_change_request_stands", "reviews_unreadable"])
+def test_merge_refused_unless_someone_else_approved_this_exact_head(setup, monkeypatch, reviews, reason):
+  """The PR machine's merge guard replaces GitHub's reviewDecision, which is empty when no review is required."""
+  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: reviews)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged without an approval of this head"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", reason)
+
+
+def test_merge_refused_when_only_approval_is_on_an_older_commit(setup, monkeypatch):
+  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: [opinion("sam", "APPROVED", "c" * 40)])
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged on a stale approval"))
+  assert report(setup)["run"]["items"][0]["summary"] == "The approval is for an older version."
+
+
+def test_merge_refused_while_another_agent_works_on_the_same_pr(setup, monkeypatch):
+  db, row, principal = setup
+  chat = create_chat(id="other-review-chat", title="Other review")
+  db.add(chat)
+  db.add(models.ChatRun(id="other-run", chat_id=chat.id, status="running"))
+  db.add(models.ContributionReviewRun(id="other", app_id=1, owner_id=row.owner_id,
+    request_id="request-2", mode="review", targets_json=[TARGET], outcomes_json={},
+    chat_id=chat.id, github_actor_id="42", app_nonce="nonce"))
+  db.commit()
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged under another agent"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", "An agent is already working on this PR.")
 
 
 @pytest.mark.parametrize("rollup", [None, {"state": "SUCCESS"}])

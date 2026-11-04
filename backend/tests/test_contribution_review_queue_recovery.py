@@ -261,6 +261,9 @@ def test_archived_removed_head_cannot_merge_under_another_grant_after_claim_rele
     outcomes_json={}, chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
   db.add(second)
   db.commit()
+  # The PR machine's one-job lock refuses first while the takeover works on this
+  # PR; this pins the saved-receipt fence that still holds beneath it.
+  monkeypatch.setattr(routes, "_pr_job", lambda *a, **kw: None)
   item = report((db, second, principal))["run"]["items"][0]
   assert item["state"] == "needs_you" and item["review_selection_id"] == row.id
 

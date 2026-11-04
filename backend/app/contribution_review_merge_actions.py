@@ -4,6 +4,7 @@ import asyncio
 from fastapi import HTTPException
 
 from app import chat_queue, contribution_review_runs as reviews, settled
+from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
 from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
 from app.github_connection import _github_connection_transaction
 
@@ -63,7 +64,20 @@ async def _reserve_and_dispatch(db, row, target, outcome, repo, checks, principa
   return {**armed, "state": "merge_unknown", "summary": result.reason}
 
 
-async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize):
+async def _merge_refusal(gh, cwd, row, target, repo, pull, checks, job) -> str | None:
+  """GitHub's own merge rules, then the PR machine's merge guard on facts read now.
+
+  ``job`` excludes this run itself: its own merge is not a second agent on the PR.
+  """
+  blocker = reviews.merge_blocker(target, repo, pull, checks)
+  if blocker:
+    return blocker
+  facts = await asyncio.to_thread(pr_facts.read_facts, gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews)
+                                  actor_id=row.github_actor_id, job=job, checks=checks)
+  return machine.action_blocker(facts, "merge") or None
+
+
+async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize, job=None):
   """Persist the current gate result or one typed public effect, never replay."""
   if pull.get("merged"):
     reviews.save_effect_outcome(db, row, reviews.key(target), {
@@ -76,7 +90,7 @@ async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
     authorize()
     reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "queued", **reviews.queue_receipt(entry)})
     return
-  blocker = reviews.merge_blocker(target, repo, pull, checks)
+  blocker = await _merge_refusal(gh, cwd, row, target, repo, pull, checks, job)
   if blocker:
     authorize()
     reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "needs_you", "summary": blocker})
