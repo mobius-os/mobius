@@ -73,6 +73,12 @@ def no_second_agent_job(decision, facts):
           or all(not item["enabled"] for item in decision["actions"] if item["by"] == "agent"))
 
 
+def no_agent_job_races_an_unconfirmed_send(decision, facts):
+  outbox = facts.get("outbox") or {}
+  in_flight = outbox.get("head") == facts["head"] and outbox.get("state") in ("sending", "unconfirmed")
+  return not in_flight or all(not item["enabled"] for item in decision["actions"] if item["by"] == "agent")
+
+
 def unknown_facts_never_enable_merge(decision, facts):
   unknown = (facts["checks"] == "unknown" or facts["mergeable"] == "unknown"
              or facts.get("readComplete") is False or facts["lifecycle"] == "unknown")
@@ -86,6 +92,7 @@ INVARIANTS = {
     merge_needs_approval_green_and_no_conflicts,
   "merge waits while anyone (but a bot) still asks for changes": merge_waits_for_every_change_request,
   "no agent job starts while one is running on the PR": no_second_agent_job,
+  "no agent job starts while something sent to GitHub is unconfirmed": no_agent_job_races_an_unconfirmed_send,
   "unknown facts never enable merge": unknown_facts_never_enable_merge,
   "take over is for maintainers only": lambda decision, facts: not (action(decision, "take_over") or {}).get("enabled")
     or facts["permission"] in ("MAINTAIN", "ADMIN"),
@@ -137,6 +144,13 @@ def test_a_reply_alone_never_brings_their_pr_back_for_re_review_but_a_new_commit
   base = next(case["facts"] for case in CASES if case["name"] == "You requested changes at this version")
   assert machine.decide({**base, "openThreads": 4})["state"] == "reviewer.waiting_author"
   assert machine.decide({**base, "head": "h3"})["state"] == "reviewer.re_review"
+
+
+def test_reviewer_and_author_names_compare_without_case():
+  facts = {"role": "author", "author": "Alex", "head": "h2", "lifecycle": "open", "checks": "pass",
+           "mergeable": "yes", "permission": "WRITE", "readComplete": True, "openThreads": 0,
+           "reviews": [{"by": "alex", "state": "APPROVED", "commit": "h2"}]}
+  assert machine.action_blocker(facts, "merge") == "Nobody but the author has approved it yet."
 
 
 def test_a_stalled_job_never_blocks_starting_again_but_a_running_one_does():

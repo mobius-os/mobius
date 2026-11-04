@@ -525,7 +525,6 @@
    "next": "",
    "enabled": [
     "check_my_pr",
-    "finish_it",
     "back_to_draft",
     "close"
    ]
@@ -819,7 +818,6 @@
    "state": "unconfirmed",
    "next": "check_github",
    "enabled": [
-    "review",
     "check_github",
     "dismiss",
     "close"
@@ -951,6 +949,123 @@
    ]
   },
   {
+   "name": "Your re-review of the new version is done",
+   "rule": "D03",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "clear"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.result_ready",
+   "next": "draft_verdict",
+   "enabled": [
+    "review",
+    "draft_verdict",
+    "set_aside",
+    "close"
+   ]
+  },
+  {
+   "name": "An unconfirmed push is checked, never dismissed",
+   "rule": "D01",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": {
+     "kind": "push",
+     "head": "h2",
+     "state": "unconfirmed"
+    },
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "unconfirmed",
+   "next": "check_github",
+   "enabled": [
+    "check_github",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Finishing your PR needs write access",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "READ",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "An unreadable PR offers no status change",
+   "rule": "D04",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": false,
+    "role": "author"
+   },
+   "state": "unknown",
+   "next": "retry",
+   "enabled": [
+    "retry"
+   ]
+  },
+  {
    "name": "An agent is reviewing their PR",
    "rule": "R9",
    "facts": {
@@ -1056,7 +1171,6 @@
    "state": "unknown",
    "next": "retry",
    "enabled": [
-    "close",
     "retry"
    ]
   },
@@ -1119,7 +1233,6 @@
    "state": "sending",
    "next": "",
    "enabled": [
-    "review",
     "close"
    ]
   },
@@ -1149,10 +1262,7 @@
    "state": "unconfirmed",
    "next": "check_github",
    "enabled": [
-    "check_my_pr",
-    "finish_it",
     "check_github",
-    "dismiss",
     "back_to_draft",
     "close"
    ]

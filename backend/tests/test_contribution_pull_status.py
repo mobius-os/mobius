@@ -132,12 +132,11 @@ def test_a_head_that_moved_since_the_owner_looked_is_refused_before_any_write():
   assert github.writes_seen == []
 
 
-def test_opening_for_review_reads_the_pr_not_its_reviews_but_asking_for_rereview_needs_them():
+def test_an_unreadable_review_list_refuses_a_status_change_in_the_machines_words():
   github = StatusGitHub(draft=True)
   github.unreadable.add("reviews")
-  assert change(github, "ready")["state"] == "ready"
-  # With no review list there is no older review to ask about (the machine's own words).
-  assert refused(github, "request-reviewers", asking(["sam"])) == (409, "Nobody reviewed an older version.")
+  assert refused(github, "ready") == (409, "This PR could not be read. Try again.")
+  assert github.writes_seen == []
 
 
 @pytest.mark.parametrize("name, write, code", [

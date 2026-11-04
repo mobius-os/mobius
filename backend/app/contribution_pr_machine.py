@@ -35,9 +35,18 @@ def may_write(permission) -> bool:
   return permission in WRITE
 
 
+def _same(a, b) -> bool:
+  """GitHub logins compare without case."""
+  return str(a or "").lower() == str(b or "").lower()
+
+
 def _names(people: list[dict], test: Callable[[dict], bool]) -> list[str]:
-  """Distinct reviewer names in first-seen order (the app's Set semantics)."""
-  return list(dict.fromkeys(review.get("by") for review in people if test(review)))
+  """Distinct reviewer names, without case, in first-seen order, spelled as last seen (the app's Map)."""
+  names: dict[str, str] = {}
+  for review in people:
+    if test(review):
+      names[str(review.get("by")).lower()] = review.get("by")
+  return list(names.values())
 
 
 def _record(value) -> dict | None:
@@ -54,7 +63,7 @@ def derive(facts: dict) -> dict:
   """The few values every rule below is written in."""
   head = facts.get("head")
   reviews = facts.get("reviews") or []
-  people = [r for r in reviews if not r.get("bot") and r.get("by") != facts.get("author")]
+  people = [r for r in reviews if not r.get("bot") and not _same(r.get("by"), facts.get("author"))]
 
   def at_head(review: dict) -> bool:
     return review.get("commit") == head
@@ -85,7 +94,7 @@ STATES = {
   "merged": _state("none", "Merged", "Merged"),
   "closed": _state("none", "Closed", "Closed"),
   "unknown": _state("you", "Couldn’t read", "Couldn’t read this PR from GitHub. Try again", "retry"),
-  "unconfirmed": _state("you", "Not confirmed", "GitHub didn’t confirm what was sent. Check GitHub, or dismiss it", "check_github"),
+  "unconfirmed": _state("you", "Not confirmed", "GitHub didn’t confirm what was sent. Check GitHub before trying again", "check_github"),
   "sending": _state("agent", "Sending", "Sending to GitHub…"),
   "to_confirm": _state("you", "Draft to send", "A draft is ready. Read it, then send it or throw it away", "send_draft"),
   "working": _state("agent", "Agent working", "An agent is working on it"),
@@ -101,8 +110,8 @@ STATES = {
   "author.approval_stale": _state("other", "Approval is old", "Your PR · approved on an older version. Waiting on {who} to look again"),
   "author.waiting_review": _state("other", "Waiting on reviewers", "Your PR · waiting on reviewers"),
   "author.approved_checks": _state("other", "Approved", "Your PR · approved. {checks}"),
-  "author.approved": _state("you", "Ready to merge", "Your PR · approved by {who} at this version, checks green. Merge it", "merge"),
-  "author.approved_no_rights": _state("other", "Approved", "Your PR · approved and green. Waiting on someone who can merge"),
+  "author.approved": _state("you", "Ready to merge", "Your PR · approved by {who} at this version, {green}. Merge it", "merge"),
+  "author.approved_no_rights": _state("other", "Approved", "Your PR · approved, {green}. Waiting on someone who can merge"),
 
   "reviewer.draft": _state("other", "Draft", "Their PR · still a draft"),
   "reviewer.to_review": _state("you", "To review", "Their PR · your turn: review it", "review"),
@@ -111,7 +120,7 @@ STATES = {
   "reviewer.re_review": _state("you", "New commits · review again", "Their PR · new commits since your review. Re-review", "review"),
   "reviewer.reviewed": _state("none", "Reviewed", "Their PR · you reviewed this version"),
   "reviewer.kept_private": _state("none", "Kept private", "Their PR · you kept your review of this version private"),
-  "reviewer.mergeable": _state("you", "Ready to merge", "Their PR · approved at this version, checks green. Merge it", "merge"),
+  "reviewer.mergeable": _state("you", "Ready to merge", "Their PR · approved at this version, {green}. Merge it", "merge"),
 }
 
 OUTBOX_STATES = {"unconfirmed": "unconfirmed", "sending": "sending", "drafted": "to_confirm"}
@@ -169,15 +178,16 @@ def _approved_standing(facts: dict) -> str:
 
 
 def _reviewer_standing(facts: dict, d: dict) -> str:
-  mine = d["mine"]
-  if mine is not None and not d["mine_at_head"]:
-    return "reviewer.re_review"
-  if d["mine_at_head"] and mine.get("state") == "CHANGES_REQUESTED":
+  """Your verdict on this version first, then a finished review of this version (a
+  re-review that is done is no longer "new commits"), then an older review of yours."""
+  if d["mine_at_head"] and d["mine"].get("state") == "CHANGES_REQUESTED":
     return "reviewer.waiting_author"
   if d["mine_at_head"]:
     return "reviewer.reviewed" if merge_blocker(facts, d) else "reviewer.mergeable"
   if d["result"] is not None:
     return "reviewer.kept_private" if d["result"].get("setAside") else "reviewer.result_ready"
+  if d["mine"] is not None:
+    return "reviewer.re_review"
   return "reviewer.draft" if facts.get("lifecycle") == "draft" else "reviewer.to_review"
 
 
@@ -202,6 +212,12 @@ def _job_idle(facts: dict) -> str:
   return JOB_BUSY if job is not None and job.get("state") != "stalled" else ""
 
 
+def _nothing_in_flight(d: dict) -> str:
+  # Something sent to GitHub but not yet confirmed: no new agent job may race it.
+  outbox = d["outbox"]
+  return "Something sent to GitHub is not confirmed yet." if outbox and outbox.get("state") != "drafted" else ""
+
+
 def _still_open(facts: dict) -> str:
   return "" if facts.get("lifecycle") in ("open", "draft") else "This PR is no longer open."
 
@@ -223,7 +239,6 @@ def merge_blocker(facts: dict, d: dict | None = None) -> str:
   """Why Merge cannot run, in order; '' when it may."""
   d = d if d is not None else derive(facts)
   standing = [*d["changes_at_head"], *d["changes_older"]]
-  outbox = d["outbox"]
   return _first_reason(
     _readable(facts),
     "Open it for review first." if facts.get("lifecycle") == "draft" else _still_open(facts),
@@ -232,7 +247,7 @@ def merge_blocker(facts: dict, d: dict | None = None) -> str:
     f"{', '.join(standing)} asked for changes and hasn’t approved since." if standing else "",
     CHECK_WORDS.get(facts.get("checks"), CHECK_WORDS["unknown"]),
     CONFLICT_WORDS.get(facts.get("mergeable"), CONFLICT_WORDS["unknown"]),
-    "Something sent to GitHub is not confirmed yet." if outbox and outbox.get("state") != "drafted" else "",
+    _nothing_in_flight(d),
     _job_idle(facts),
   )
 
@@ -247,36 +262,52 @@ def _outbox_is(d: dict, state: str) -> str:
 
 
 def _agent_job_guard(facts: dict, d: dict) -> str:
-  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts))
+  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts), _nothing_in_flight(d))
 
 
 def _respond_guard(facts: dict, d: dict) -> str:
   answer = "" if _something_to_answer(facts, d) else "Nothing to respond to."
-  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts), answer)
+  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts), _nothing_in_flight(d), answer)
+
+
+def _finish_it_guard(facts: dict, d: dict) -> str:
+  writer = "" if may_write(facts.get("permission")) else "Needs write access to this repository."
+  return _first_reason(_readable(facts), _still_open(facts), writer, _job_idle(facts), _nothing_in_flight(d))
 
 
 def _take_over_guard(facts: dict, d: dict) -> str:
   maintainer = "" if facts.get("permission") in MAINTAINER else "Only maintainers can take over someone else’s PR."
-  return _first_reason(_readable(facts), _still_open(facts), maintainer, _job_idle(facts))
+  return _first_reason(_readable(facts), _still_open(facts), maintainer, _job_idle(facts), _nothing_in_flight(d))
+
+
+def _dismiss_guard(facts: dict, d: dict) -> str:
+  # Only an unconfirmed verdict can be set aside here; other outcomes settle by checking GitHub.
+  waiting = _outbox_is(d, "unconfirmed")
+  if waiting:
+    return waiting
+  return "" if d["outbox"].get("kind") == "verdict" else "Only a verdict can be dismissed."
 
 
 def _draft_verdict_guard(facts: dict, d: dict) -> str:
   reviewed_here = d["result"] is not None and not d["mine_at_head"] and d["outbox"] is None
-  return "" if reviewed_here else "Review this version first."
+  return _first_reason(_readable(facts), "" if reviewed_here else "Review this version first.")
 
 
 def _set_aside_guard(facts: dict, d: dict) -> str:
   result = d["result"]
   open_result = result is not None and not result.get("setAside")
-  return "" if open_result and (facts.get("role") == "reviewer" or d["open_findings"]) else "Nothing to set aside."
+  allowed = open_result and (facts.get("role") == "reviewer" or d["open_findings"])
+  return _first_reason(_readable(facts), "" if allowed else "Nothing to set aside.")
 
 
 def _open_for_review_guard(facts: dict, d: dict) -> str:
-  return _job_idle(facts) if facts.get("lifecycle") == "draft" else "It is already open for review."
+  draft = _job_idle(facts) if facts.get("lifecycle") == "draft" else "It is already open for review."
+  return _first_reason(_readable(facts), draft)
 
 
 def _back_to_draft_guard(facts: dict, d: dict) -> str:
-  return _job_idle(facts) if facts.get("lifecycle") == "open" else "It is not open for review."
+  is_open = _job_idle(facts) if facts.get("lifecycle") == "open" else "It is not open for review."
+  return _first_reason(_readable(facts), is_open)
 
 
 def _ask_rereview_guard(facts: dict, d: dict) -> str:
@@ -287,7 +318,7 @@ def _ask_rereview_guard(facts: dict, d: dict) -> str:
 
 def _close_guard(facts: dict, d: dict) -> str:
   rights = "" if facts.get("role") == "author" or may_write(facts.get("permission")) else "Needs write access."
-  return _first_reason(_still_open(facts), rights, _job_idle(facts))
+  return _first_reason(_readable(facts), _still_open(facts), rights, _job_idle(facts))
 
 
 def _job_is(state: str, refusal: str) -> Callable[[dict, dict], str]:
@@ -309,7 +340,7 @@ ACTIONS = (
   Action("check_my_pr", "agent", ("author",), "Check my PR", _agent_job_guard, "Private. Nothing is posted."),
   Action("respond", "agent", ("author",), "Respond to feedback", _respond_guard,
          "Answers every point, then one approval sheet for the pushes and replies."),
-  Action("finish_it", "agent", ("author",), "Finish it for me", _agent_job_guard,
+  Action("finish_it", "agent", ("author",), "Finish it for me", _finish_it_guard,
          "Responds, checks and fixes. Stops for your approval before each push."),
   Action("review", "agent", ("reviewer",), lambda d: "Re-review" if d["mine"] is not None or d["result"] is not None else "Review",
          _agent_job_guard, "Private, drafted for you, or posted by the agent if you allow it."),
@@ -317,7 +348,7 @@ ACTIONS = (
          "Maintainers only. Needs a reason, and says so on the PR. Each push needs your approval."),
   Action("send_draft", "you", BOTH, "Send…", lambda facts, d: _outbox_is(d, "drafted")),
   Action("check_github", "you", BOTH, "Check GitHub", lambda facts, d: _outbox_is(d, "unconfirmed")),
-  Action("dismiss", "you", BOTH, "Dismiss", lambda facts, d: _outbox_is(d, "unconfirmed")),
+  Action("dismiss", "you", BOTH, "Dismiss", _dismiss_guard),
   Action("draft_verdict", "you", ("reviewer",), "Approve, request changes or comment…", _draft_verdict_guard),
   Action("set_aside", "you", BOTH, "Set aside…", _set_aside_guard),
   Action("open_for_review", "you", ("author",), "Open for review", _open_for_review_guard),
@@ -331,15 +362,21 @@ ACTIONS = (
 )
 
 
+def _headline_who(key: str, d: dict) -> list[str]:
+  """The people a headline names: who approved this version, or whose review is of an older one."""
+  return {"author.waiting_rereview": d["changes_older"], "author.approval_stale": d["approved_older"],
+          "author.approved": d["approved_at_head"]}.get(key, [])
+
+
 def _headline(key: str, facts: dict, d: dict) -> str:
-  who = {"author.waiting_rereview": d["changes_older"], "author.approval_stale": d["approved_older"],
-         "author.approved": d["approved_at_head"]}.get(key, [])
   if facts.get("mergeable") == "yes":
     checks = CHECK_WORDS.get(facts.get("checks")) or "Checks are still running."
   else:
     checks = CONFLICT_WORDS.get(facts.get("mergeable")) or CONFLICT_WORDS["unknown"]
-  return (STATES[key]["headline"].replace("{who}", ", ".join(who) or "reviewers")
-          .replace("{author}", facts.get("author") or "the author").replace("{checks}", checks))
+  green = "no checks" if facts.get("checks") == "none" else "checks green"
+  return (STATES[key]["headline"].replace("{who}", ", ".join(_headline_who(key, d)) or "reviewers")
+          .replace("{author}", facts.get("author") or "the author").replace("{checks}", checks)
+          .replace("{green}", green))
 
 
 def _waiting_on(key: str, facts: dict, d: dict) -> str:
@@ -347,8 +384,7 @@ def _waiting_on(key: str, facts: dict, d: dict) -> str:
     return ""
   if facts.get("role") == "reviewer":
     return facts.get("author") or "the author"
-  who = {"author.waiting_rereview": d["changes_older"], "author.approval_stale": d["approved_older"]}.get(key, [])
-  return ", ".join(who) or "reviewers"
+  return ", ".join(_headline_who(key, d)) or "reviewers"
 
 
 def _action_view(action: Action, facts: dict, d: dict, next_action: str) -> dict:
