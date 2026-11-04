@@ -665,6 +665,10 @@ def _run_view(db, row, *, context_app_id=None):
     value.update(state="needs_you", execution_state=last.status, summary=(
       f"The review conversation stopped: {reason}" if reason
       else "The review conversation stopped. Open it to continue the remaining work."))
+  elif value["state"] == "reviewing" and last and last.status == "completed" and not _has_next_move(db, chat):
+    value.update(state="needs_you", execution_state="interrupted", summary=(
+      "Nothing is working on this review any more: its reviewer stopped before it reported, "
+      "for example when Möbius restarted. Open the review conversation to continue it, or start the review again."))
   elif last:
     value["execution_state"] = last.status
   if value["state"] != "complete" and _review_stop_requested(row):
@@ -689,6 +693,35 @@ def _run_view(db, row, *, context_app_id=None):
 
 def _review_stop_requested(row):
   return (row.outcomes_json or {}).get(REVIEW_STOP_KEY, {}).get("state") == "requested"
+
+
+def _has_next_move(db, chat) -> bool:
+  """Whether anything will still move the owning chat: a turn, an armed Wait, a
+  self-resuming helper, a parked continuation or an owner card.
+
+  A review ends its own turn once its independent reviewer starts and sleeps
+  until that helper reports, so the chat's last run reads "completed" for the
+  whole review. A helper killed with the process (an unplanned restart stays
+  manual by design) leaves the chat with no next move and the run "reviewing"
+  for good. The same handoff projection the chat list shows says so honestly.
+  """
+  from app import secure_inputs
+  from app.chat import continuation_handoff_for_chat, is_chat_running
+  from app.chat_handoffs import project_handoff
+  from app.chat_waits import outstanding_waits_for_chat, serialize_wait
+  from app.delegations import serialize_background_helpers
+  from app.goal_plans import presented_goal
+  if chat is None:
+    return False
+  handoff = project_handoff(
+    owner_input=chat.id in secure_inputs.pending_chat_ids(),
+    running=is_chat_running(chat.id),
+    waits=[serialize_wait(wait, db=db) for wait in outstanding_waits_for_chat(db, chat.id)],
+    helper_count=serialize_background_helpers(db, chat.id)["count"],
+    park=continuation_handoff_for_chat(db, chat.id),
+    goal=presented_goal(db, chat.id),
+  )
+  return handoff["kind"] != "none"
 
 
 def _parent(db, row, principal):
