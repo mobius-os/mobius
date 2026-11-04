@@ -17,7 +17,7 @@ import subprocess
 
 from fastapi import HTTPException
 
-from app import contribution_review_runs as reviews
+from app import contribution_pr_machine as machine, contribution_review_runs as reviews
 from app.contribution_errors import ContributionSubmitError
 
 READ_FAILURES = (HTTPException, ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError)
@@ -152,6 +152,13 @@ def pr_facts(*, actor_id, repo: dict, pull: dict, checks: dict | None,
     "openThreads": 0, "job": job, "result": None, "outbox": None,
     "readComplete": checks is not None and review_list is not None,
   }
+
+
+def require_allowed(facts: dict, action_id: str) -> None:
+  """Refuse an effect the PR machine does not allow, in the machine's own words (the app shows them)."""
+  blocker = machine.action_blocker(facts, action_id)
+  if blocker:
+    raise HTTPException(409, blocker)
 
 
 def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, job: dict | None,

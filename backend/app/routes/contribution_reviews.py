@@ -26,7 +26,8 @@ from app.contribution_review_public import EVIDENCE_MAX_CHARS
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
 from app import contribution_direct_merge as direct_merge
-from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
+from app import contribution_pr_facts as pr_facts
+from app import contribution_pull_status as pull_status
 from app import contribution_review_merge_actions as merge_actions
 from app import contribution_review_verdicts as verdicts
 from app.chat_start import start_programmatic_chat_turn
@@ -46,7 +47,9 @@ APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
-                       "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True}
+                       "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
+                       "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
+                       "request_rereview_now": True, "pr_machine": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -318,16 +321,10 @@ def _admission_action(body, facts) -> str:
   return action
 
 
-def _require_allowed(facts, action):
-  blocker = machine.action_blocker(facts, action)
-  if blocker:
-    raise HTTPException(409, blocker)
-
-
 def _require_no_other_agent(db, owner_id, admitted):
   """One agent job per PR: the caller holds the owner's admission lock through the run's insert."""
   for target, facts, action in admitted:
-    _require_allowed({**facts, "job": _pr_job(db, owner_id, target["repo"], target["number"])}, action)
+    pr_facts.require_allowed({**facts, "job": _pr_job(db, owner_id, target["repo"], target["number"])}, action)
 
 
 async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets, admitted):
@@ -421,7 +418,7 @@ async def start_reviews(app_id: int | None, body: StartReviews,
       for target in targets:
         facts = await _admission_facts(cwd, target, actor["id"])
         action = _admission_action(body, facts)
-        _require_allowed(facts, action)
+        pr_facts.require_allowed(facts, action)
         target["role"] = facts["role"]
         admitted.append((target, facts, action))
       if body.mode == "review_fix_merge":
@@ -1084,6 +1081,69 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
                                              job=_pr_job(db, principal.owner.id, body.repo, body.number))
 
 
+class PullStatusChange(PullIdentity):
+  # A public tap Contribute cannot take back: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+
+
+class ReviewerRequest(PullStatusChange):
+  reviewers: list[str] = Field(min_length=1, max_length=15)
+
+  @field_validator("reviewers")
+  @classmethod
+  def github_logins(cls, value):
+    if any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) for login in value):
+      raise ValueError("Name each reviewer by their GitHub login.")
+    return list(dict.fromkeys(value))
+
+
+async def _owner_status_change(app_id, name, body, db, principal):
+  """One owner tap on a PR's status: never an agent, and refused when the PR machine says no.
+
+  200 {state, observed_head_sha, repo, number, head_sha}; 409 with the plain
+  reason (the machine's own words when it refuses); 404 when GitHub cannot be
+  read; 502 {code: <ready|draft|close|reviewers>_unconfirmed, message} when the
+  write's outcome is unknown. See contribution_pull_status.
+  """
+  _require_owner_hands(principal, "Only you can change a pull request's status from here. An agent cannot press it.")
+  nonce = _authorize_context(db, app_id, principal)
+  cwd = Path(get_settings().data_dir) / "platform"
+  return await pull_status.change_pull_status(_gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
+                                              job=_pr_job(db, principal.owner.id, body.repo, body.number))
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/ready",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def mark_pull_ready_now(app_id: int, body: PullStatusChange, db: Session = Depends(get_db),
+                              principal: Principal = Depends(get_principal)):
+  """The owner's own Open for review of their draft (the PR machine's open_for_review)."""
+  return await _owner_status_change(app_id, "ready", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/draft",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def back_to_draft_now(app_id: int, body: PullStatusChange, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """The owner's own Back to draft of their open pull request (back_to_draft)."""
+  return await _owner_status_change(app_id, "draft", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/close",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def close_pull_now(app_id: int, body: PullStatusChange, db: Session = Depends(get_db),
+                         principal: Principal = Depends(get_principal)):
+  """The owner's own Close, unmerged (close): their own PR, or one they can write to."""
+  return await _owner_status_change(app_id, "close", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/request-reviewers",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def request_rereview_now(app_id: int, body: ReviewerRequest, db: Session = Depends(get_db),
+                               principal: Principal = Depends(get_principal)):
+  """The owner's own Ask for re-review (ask_rereview), only of people whose review is of an older version."""
+  return await _owner_status_change(app_id, "request-reviewers", body, db, principal)
+
+
 @router.post("/api/github/review-runs/{run_id}/stop",
              dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
 async def core_stop_review(run_id: str, db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
@@ -1504,7 +1564,7 @@ async def _push_repair_once(db, row, target, attempt, cwd) -> str | None:
     repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
     facts = await asyncio.to_thread(pr_facts.read_facts, _gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews and checks)
       actor_id=row.github_actor_id, job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id))
-    _require_allowed(facts, "finish_it" if facts["role"] == "author" else "take_over")
+    pr_facts.require_allowed(facts, "finish_it" if facts["role"] == "author" else "take_over")
     validation = await _validated_repair(db, row, owner, target, previous, cwd)
     if (validation["head_sha"], validation["diff_sha256"], validation["base_sha"]) != (
         attempt["head_sha"], attempt["diff_sha256"], attempt["base_sha"]):
