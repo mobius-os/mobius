@@ -821,7 +821,7 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
 
 class VerdictDecision(PullIdentity):
   proposal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
-  decision: Literal["submit", "discard"]
+  decision: Literal["submit", "discard", "dismiss"]
 
 
 def _require_owner_hands(principal: Principal, refusal: str) -> None:
@@ -854,12 +854,15 @@ async def _resume_for_merge(db, row, item):
              dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
 async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
                          db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
-  """The owner's own submit or discard of one exact proposed verdict."""
-  _require_owner_hands(principal, "Only you can submit or discard a verdict. An agent cannot confirm its own proposal.")
+  """The owner's own submit or discard of one exact proposed verdict, or dismissal of an unconfirmed one."""
+  _require_owner_hands(principal, "Only you can submit, discard or dismiss a verdict. An agent cannot decide its own proposal.")
   row = _row(db, app_id, run_id, principal)
   item_key = reviews.key(body.model_dump())
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
-    _owner_verdict_authority(db, row)
+    if body.decision == "dismiss":
+      db.refresh(row)  # a dismissal sends nothing, so even a stopped review may be dismissed
+    else:
+      _owner_verdict_authority(db, row)
     original = next((t for t in row.targets_json if reviews.key(t) == item_key), None)
     target = reviews.effective_target(row, original) if original else None
     item = (row.outcomes_json or {}).get(item_key) or {}
@@ -867,8 +870,8 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
     if (target is None or target["head_sha"] != body.head_sha or proposal.get("id") != body.proposal_id
         or proposal.get("head_sha") != body.head_sha):
       raise HTTPException(409, "This verdict no longer matches the reviewed version. Refresh before deciding.")
-    if body.decision == "discard":
-      verdicts.discard(db, row, item_key, body.proposal_id)
+    if body.decision in {"discard", "dismiss"}:
+      (verdicts.discard if body.decision == "discard" else verdicts.dismiss)(db, row, item_key, body.proposal_id)
       return {"run": _run_view(db, row)}
     cwd = Path(get_settings().data_dir) / "platform"
     receipt = await verdicts.submit(db, row, item_key, target, body.proposal_id, gh=_gh, cwd=cwd,
@@ -945,9 +948,10 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
         continue
       verdict = previous.get("verdict_proposal") or {}
       if verdict.get("state") in {"posting", "unknown"}:
-        observed = await asyncio.to_thread(public.reconcile_review, _gh, cwd, {**original, "head_sha": verdict["head_sha"]},  # unsettled: read-only (verdict receipt observation)
-                                           verdict, row.github_actor_id, verdict["event"])
-        verdicts.confirm_observed(db, row, reviews.key(original), verdict["id"], observed)
+        read_at = time.time()
+        review, complete = await asyncio.to_thread(public.find_review, _gh, cwd, {**original, "head_sha": verdict["head_sha"]},  # unsettled: read-only (verdict receipt observation)
+                                                   verdict, row.github_actor_id, verdict["event"])
+        verdicts.settle_observed(db, row, reviews.key(original), verdict, review, complete_scan=complete, read_at=read_at)
         previous = row.outcomes_json.get(reviews.key(original), {})
       pending = next((a for a in previous.get("repair_attempts", [])
                       if a.get("state") in {"pushing", "push_unknown"}), None)
