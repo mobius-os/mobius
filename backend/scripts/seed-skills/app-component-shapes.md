@@ -244,10 +244,8 @@ containment, the inert page behind it and the Escape (`cancel`) event; the
 effect below adds focus return and a shell Back target.
 
 ```jsx
-function ConfirmSheet({ open, busy, onCancel, onConfirm, appName }) {
+function ConfirmSheet({ open, busy, error, onClose, onConfirm, appName }) {
   const ref = useRef(null)
-  const cancelRef = useRef(onCancel)
-  cancelRef.current = busy ? () => {} : onCancel
 
   useEffect(() => {
     const dialog = ref.current
@@ -256,34 +254,52 @@ function ConfirmSheet({ open, busy, onCancel, onConfirm, appName }) {
     dialog.showModal()
     // Back closes the sheet (building-apps.md, Back-gesture support).
     let back = window.mobius?.nav?.open('ma-sheet', {
-      onBack: () => { back = null; cancelRef.current() },
+      onBack: () => { back = null; dialog.close() },
     })
     return () => {
       back?.close()
-      if (dialog.open) dialog.close()
-      opener?.focus?.()
+      opener?.focus?.()   // the dialog is already unmounted, which removed it from the top layer
     }
   }, [open])
 
   if (!open) return null
   return (
-    <dialog ref={ref} className="ma-sheet" aria-labelledby="ma-sheet-title"
-            onCancel={(e) => { e.preventDefault(); cancelRef.current() }}
-            onClick={(e) => { if (e.target === e.currentTarget) cancelRef.current() }}>
+    // Every dismissal closes the native dialog, and its close event alone tells the parent.
+    <dialog ref={ref} className="ma-sheet" aria-labelledby="ma-sheet-title" onClose={onClose}
+            onClick={(e) => { if (e.target === e.currentTarget) e.currentTarget.close() }}>
       <div className="ma-sheet-inner">
         <h3 id="ma-sheet-title" className="ma-sheet-title">Uninstall {appName}?</h3>
         <p className="ma-sheet-body">This removes the app and its stored data.</p>
         {/* optional <input className="ma-input" …/> for a prompt-style sheet */}
         <div className="ma-sheet-actions">
-          <button className="ma-btn ma-btn-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="ma-btn ma-btn-secondary" onClick={() => ref.current.close()} disabled={busy}>Cancel</button>
           <button className="ma-btn ma-btn-danger" onClick={onConfirm} disabled={busy}>
             {busy ? 'Removing…' : 'Uninstall'}
           </button>
         </div>
+        {error && <p className="ma-sheet-error" role="alert">{error}</p>}
       </div>
     </dialog>
   )
 }
+
+// The parent owns `open` and the operation. Closing the sheet never cancels a removal
+// already running; its error shows in the sheet if open, otherwise as a toast.
+const [confirming, setConfirming] = useState(false)
+const [busy, setBusy] = useState(false)
+const [error, setError] = useState(null)
+
+async function uninstall() {
+  setBusy(true); setError(null)
+  try { await removeApp(app.id); setConfirming(false) }
+  catch { setError(`Couldn't remove ${app.name}. Try again.`) }
+  finally { setBusy(false) }
+}
+
+<button className="ma-btn ma-btn-danger" onClick={() => { setError(null); setConfirming(true) }}>Uninstall</button>
+<ConfirmSheet open={confirming} busy={busy} error={error} appName={app.name}
+              onClose={() => setConfirming(false)} onConfirm={uninstall} />
+{error && !confirming && <div className="ma-toast is-error" role="alert">{error}</div>}
 ```
 
 ```css
@@ -304,8 +320,19 @@ function ConfirmSheet({ open, busy, onCancel, onConfirm, appName }) {
 .ma-sheet-body { margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: var(--muted); }
 .ma-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
 .ma-sheet-actions .ma-btn { flex: 1; }
+.ma-sheet-error { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--danger-text, var(--danger)); }
 /* /mobius-ui:Sheet */
 ```
+
+Back, Escape, a backdrop tap and Cancel all close the native dialog, and its
+`close` event is the one place that tells the parent, so `open` cannot drift
+from the screen. Do not ignore a dismissal while busy: the runtime has already
+retired the Back target when `onBack` runs, and a repeated Escape can close the
+dialog despite `preventDefault()`. Closing only hides the sheet; work already
+running finishes, and the parent shows a failure inside the sheet while it is
+open, or as a toast once it is closed. Never toast over an open sheet:
+`showModal()` puts the dialog in the top layer, above every `z-index`, so the
+toast would sit under the backdrop.
 
 The padding lives on the inner wrapper so a click that lands on the dialog
 element itself is a backdrop click. Prefer the bottom sheet for pickers and
@@ -441,7 +468,6 @@ generic "featured" or "latest" decoration.
 .ma-btn-secondary { background: var(--surface-2, var(--surface)); }
 .ma-btn-ghost { background: transparent; color: var(--accent-text, var(--accent)); }
 .ma-btn-danger { background: var(--danger-fill, var(--danger)); color: var(--accent-fg); }
-.ma-btn-success { background: var(--green-fill, var(--green)); color: var(--accent-fg); }
 .ma-btn-icon { width: 44px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); }   /* icon-only → needs aria-label */
 @media (hover: hover) {
   .ma-btn-primary:hover:not(:disabled) { background: var(--accent-fill-hover, var(--accent-hover)); }
@@ -452,10 +478,10 @@ generic "featured" or "latest" decoration.
 ```
 
 The highest-value shared shape. A labelled fill uses a fill role —
-`--accent-fill`, `--danger-fill` or `--green-fill` — with `--accent-fg` as its
+`--accent-fill` or `--danger-fill` — with `--accent-fg` as its
 label, and ghost or link text uses `--accent-text`. These roles keep labels and
 coloured text readable in both modes; each example falls back to the base
-colour (`--accent`, `--danger`, `--green`) on a theme that does not define the
+colour (`--accent`, `--danger`) on a theme that does not define the
 role. Outside that fallback, never put `--accent-fg` on a base colour or use a
 base colour as small text. Theme the pair once at the token, not per app.
 Where a view has one clear main task, give that action the filled primary and
@@ -655,7 +681,8 @@ section for the one-call helper (`persist` + `onTurnDone`).
 @media (prefers-reduced-motion: reduce) { .ma-spinner { animation: none; } }   /* mandatory */
 /* /mobius-ui:Spinner */
 
-/* mobius-ui:Toast — app-owned (no sync owed). */
+/* mobius-ui:Toast — app-owned (no sync owed).
+   It renders under an open modal <dialog>; report a sheet's errors inside the sheet (§3). */
 .ma-toast {
   position: absolute; left: 16px; right: 16px; bottom: 16px; z-index: 200;   /* absolute → inside the app */
   display: flex; align-items: center; gap: 12px; padding: 12px 16px;
