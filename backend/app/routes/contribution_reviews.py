@@ -701,6 +701,40 @@ def _review_stop_requested(row):
   return (row.outcomes_json or {}).get(REVIEW_STOP_KEY, {}).get("state") == "requested"
 
 
+# Item states that leave a PR to the owner or to GitHub, not to the run's agent
+# (the same split as Contribute's reviewItemProgress).
+_SETTLED_ITEMS = {"all_clear", "merged", "queued"}
+_OWNER_ITEMS = {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable",
+                "verdict_pending", "verdict_posting", "verdict_unknown"}
+_HALTED_RUNS = {"stopped", "failed", "interrupted"}
+
+
+def _job_on_pull(view, repo, number) -> dict | None:
+  """The PR machine's job fact one run holds on a PR: running, needs_answer, stalled, or none."""
+  item = next((i for i in view["items"]
+               if i["repo"].lower() == repo.lower() and i["number"] == number), None)
+  if item is None or item.get("state") in _SETTLED_ITEMS:
+    return None
+  execution = view.get("execution_state")
+  if execution == "awaiting_owner":
+    return {"state": "needs_answer", "run_id": view["id"]}
+  if execution in _HALTED_RUNS:
+    return {"state": "stalled", "run_id": view["id"]}
+  return None if item.get("state") in _OWNER_ITEMS else {"state": "running", "run_id": view["id"]}
+
+
+def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None) -> dict | None:
+  """The agent job another review run holds on this PR, a live one before a stalled one.
+
+  One agent job per PR: the machine refuses new jobs, merges and status
+  changes while a live one holds the PR. A stalled job holds nothing.
+  """
+  jobs = [_job_on_pull(_run_view(db, row), repo, number)
+          for row in reviews.runs_naming_pull(db, owner_id, repo, number) if row.id != exclude_run_id]
+  jobs = [job for job in jobs if job]
+  return next((job for job in jobs if job["state"] != "stalled"), jobs[0] if jobs else None)
+
+
 def _has_next_move(db, chat) -> bool:
   """Whether anything will still move the owning chat: a turn, an armed Wait, a
   self-resuming helper, a parked continuation or an owner card.

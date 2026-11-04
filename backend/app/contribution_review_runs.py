@@ -407,6 +407,20 @@ def _transition_candidates(db, owner_id, target):
   return query.all()
 
 
+def runs_naming_pull(db, owner_id, repo: str, number: int) -> list:
+  """This owner's review runs whose immutable selection names this pull request.
+
+  The candidates for the PR machine's one-job-per-PR fact; the caller decides
+  which of them still has a live agent on it.
+  """
+  run = models.ContributionReviewRun
+  frozen = func.json_each(run.targets_json).table_valued("value").alias("named_target")
+  names_it = and_(func.lower(func.json_extract(frozen.c.value, "$.repo")) == repo.lower(),
+                  func.json_extract(frozen.c.value, "$.number") == number)
+  return db.query(run).filter(run.owner_id == owner_id,
+    select(1).select_from(frozen).where(names_it).correlate(run).exists()).all()
+
+
 def require_public_transition_clear(db, row, target, *, repair=False):
   """New mutations must not cross an unresolved item or head-branch attempt.
 

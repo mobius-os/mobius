@@ -15,7 +15,7 @@ import uuid
 from fastapi import HTTPException
 
 from app import chat_queue, models, settled, contribution_review_runs as reviews
-from app import contribution_review_public as public
+from app import contribution_pr_facts as pr_facts, contribution_review_public as public
 from app.contribution_errors import ContributionSubmitError
 from app.decision_cards import fence_owner
 from app.github_connection import _github_connection_transaction
@@ -25,7 +25,7 @@ EVENTS = {"all_clear": "APPROVE", "needs_you": "REQUEST_CHANGES"}
 
 def own_pull(row, pull) -> bool:
   """GitHub refuses approve and request-changes from the PR's own author."""
-  return str((pull.get("user") or {}).get("id") or "") == str(row.github_actor_id)
+  return pr_facts.authored_by(pull, row.github_actor_id)
 
 
 def propose(outcome, target) -> dict:
