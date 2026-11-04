@@ -24,7 +24,6 @@ from app import contribution_review_repair_actions as repair_actions
 from app.contribution_review_public_actions import post_public_review
 from app.contribution_review_public import EVIDENCE_MAX_CHARS
 from app.contribution_errors import ContributionSubmitError
-from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
 from app import contribution_direct_merge as direct_merge
 from app import contribution_pr_facts as pr_facts
 from app import contribution_pull_status as pull_status
@@ -1470,6 +1469,19 @@ def _require_repair_evidence(body, previous, target):
     raise HTTPException(409, "Prepare this exact head in its dedicated server checkout first.")
 
 
+async def _earlier_repair_answer(db, row, original, attempts, head_sha, cwd) -> dict | None:
+  """A repair of this head already pushed or waiting for the owner: reconcile or wait, never repeat."""
+  pending = next((r for r in attempts if r.get("from_sha") == head_sha
+                  and r.get("state") in {"pushing", "push_unknown", "pushed"}), None)
+  if pending:
+    confirmed = await repair_actions.reconcile_push(db, row, original, pending, gh=_gh, cwd=cwd)
+    return {"run": _run_view(db, row), **({} if confirmed else {
+      "blocked": "The earlier push is not confirmed. It was not repeated."})}
+  if any(r.get("from_sha") == head_sha and r.get("state") == reviews.REPAIR_PROPOSED for r in attempts):
+    return {"run": _run_view(db, row), "blocked": AWAITING_PUSH_DECISION}
+  return None
+
+
 class _RunAuthority:
   """Who may continue a repair step: the run's own live agent, or the owner's own tap."""
 
@@ -1497,15 +1509,10 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
       raise HTTPException(409, "This PR is not named in the takeover grant.")
     previous = row.outcomes_json.get(reviews.key(original), {})
     attempts = list(previous.get("repair_attempts", []))
-    pending = next((r for r in attempts if r.get("from_sha") == body.head_sha
-                    and r.get("state") in {"pushing", "push_unknown", "pushed"}), None)
     cwd = Path(get_settings().data_dir) / "platform"
-    if pending:
-      confirmed = await repair_actions.reconcile_push(db, row, original, pending, gh=_gh, cwd=cwd)
-      return {"run": _run_view(db, row), **({} if confirmed else {
-        "blocked": "The earlier push is not confirmed. It was not repeated."})}
-    if any(r.get("from_sha") == body.head_sha and r.get("state") == reviews.REPAIR_PROPOSED for r in attempts):
-      return {"run": _run_view(db, row), "blocked": AWAITING_PUSH_DECISION}
+    earlier = await _earlier_repair_answer(db, row, original, attempts, body.head_sha, cwd)
+    if earlier is not None:
+      return earlier
     target = _target(row, body)
     _require_ready_attempt_resolved(previous, target)
     _require_repair_evidence(body, previous, target)

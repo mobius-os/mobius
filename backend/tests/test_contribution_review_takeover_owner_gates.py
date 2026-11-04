@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-from app import contribution_review_repairs as repairs, contribution_review_runs as domain, models
+from app import contribution_review_repairs as repairs, contribution_review_runs as domain
 from app.contribution_review_effects import DispatchResult
 from app.deps import Principal
 from app.routes import contribution_reviews as routes

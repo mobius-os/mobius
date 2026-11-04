@@ -10,7 +10,7 @@ from app import contribution_pull_status as subject
 from app.contribution_errors import ContributionSubmitError
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_direct_merge import FakeGitHub, NAME, NUMBER, REVIEWS_ENDPOINT, _flags
+from tests.test_contribution_direct_merge import FakeGitHub, NAME, NUMBER, _flags
 from tests.test_contribution_review_runs import APPROVAL, PULL, SHA
 
 ME = {"id": 42, "login": "alex", "type": "User"}
