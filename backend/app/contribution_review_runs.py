@@ -728,10 +728,20 @@ def brief(row):
     "preview/approval is needed for the new programmatic reviewer workflow."
   )
   verdict = frozen.get("propose_verdict") is True
-  public_note = ((
+  # A proposal posts nothing until the owner's own tap, so "report privately" must
+  # not read as "keep a verdict private": a verdict is exactly what to hand them.
+  publish_rule = (
+    "The owner opted into verdict proposals for this run. When your result for a PR is a verdict (all_clear, or "
+    "needs_you with findings), set publish:true in /outcomes: that only saves a proposal for the owner, and nothing "
+    "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
+    "never only a private note. Owner questions and blocked work use publish:false (the default) and stay private. "
+  ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) and stay private. "
+  )
+  public_note = ((
+    publish_rule +
     "Evidence freezes once dispatch is armed; identical retry is read-only. "
     "Keep owner-only questions and private data out of public evidence.\n"
     + ("This grant also merges: an all_clear result must use publish:true. The server posts the review first "
