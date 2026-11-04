@@ -943,6 +943,12 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
         observed = await asyncio.to_thread(public.reconcile_review, _gh, cwd, original, receipt, row.github_actor_id)  # unsettled: read-only (public review receipt observation)
         reviews.save_effect_outcome(db, row, reviews.key(original), {**previous, "public_review": observed})
         continue
+      verdict = previous.get("verdict_proposal") or {}
+      if verdict.get("state") in {"posting", "unknown"}:
+        observed = await asyncio.to_thread(public.reconcile_review, _gh, cwd, {**original, "head_sha": verdict["head_sha"]},  # unsettled: read-only (verdict receipt observation)
+                                           verdict, row.github_actor_id, verdict["event"])
+        verdicts.confirm_observed(db, row, reviews.key(original), verdict["id"], observed)
+        previous = row.outcomes_json.get(reviews.key(original), {})
       pending = next((a for a in previous.get("repair_attempts", [])
                       if a.get("state") in {"pushing", "push_unknown"}), None)
       if pending:

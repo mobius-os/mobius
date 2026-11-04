@@ -1214,7 +1214,10 @@ def _keep_verdict(current, outcome):
   if not incoming or incoming.get("id") != saved.get("id"):
     return {**outcome, "verdict_proposal": saved}
   if saved.get("state") in VERDICT_SETTLED and incoming != saved:
-    return None
+    # One exception: GitHub's own exact review is the fact an unconfirmed
+    # attempt was waiting for (contribution_review_verdicts.confirm_observed).
+    confirmed = saved.get("state") == "unknown" and incoming.get("state") == "posted" and incoming.get("review_id")
+    return outcome if confirmed else None
   return outcome
 
 

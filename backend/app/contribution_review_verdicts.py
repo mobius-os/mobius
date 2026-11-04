@@ -116,6 +116,25 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
   return row.outcomes_json[item_key]["verdict_proposal"]
 
 
+def confirm_observed(db, row, item_key, proposal_id, observed):
+  """Settle an unconfirmed verdict only when GitHub shows its exact review.
+
+  ``observed`` is the read-only ``public.reconcile_review`` answer for this
+  attempt's marker. Not finding the review changes nothing: absence is never
+  permission to submit again, and an unconfirmed verdict stays unconfirmed.
+  """
+  if observed.get("state") != "posted":
+    return
+  fields = {"state": "posted", "review_id": observed["id"], "url": observed.get("url"),
+            "summary": observed["summary"]}
+  def apply(current):
+    saved = current.get("verdict_proposal") or {}
+    if saved.get("id") != proposal_id or saved.get("state") not in {"posting", "unknown"}:
+      return None
+    return {**current, "verdict_proposal": {**saved, **fields}}
+  reviews.save_effect_outcome(db, row, item_key, apply)
+
+
 def discard(db, row, item_key, proposal_id):
   saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
   if saved.get("id") != proposal_id or saved.get("state") != "proposed":

@@ -192,6 +192,64 @@ def test_a_stale_or_stopped_decision_posts_nothing(setup, monkeypatch):
   assert stopped.value.status_code == 409 and events == []
 
 
+def _unconfirmed_verdict(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events, state="unknown")
+  _resumes(monkeypatch)
+  proposal = report(setup, publish=True, state="needs_you", summary="Blocking bug")["run"]["items"][0]["verdict_proposal"]
+  _decide(setup, "submit", proposal["id"])
+  assert _observe_saved(setup)["state"] == "unknown"
+  return events, proposal
+
+
+def _observe_saved(setup):
+  db, row, _ = setup
+  db.refresh(row)
+  return row.outcomes_json[KEY]["verdict_proposal"]
+
+
+def _observe(setup):
+  db, row, _ = setup
+  return asyncio.run(routes.observe_review(1, row.id, db, _owner(setup)))["run"]["items"][0]["verdict_proposal"]
+
+
+def test_an_unconfirmed_verdict_that_github_shows_is_settled_as_posted_without_a_second_post(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  seen = []
+  def reconcile(gh, cwd, target, receipt, actor_id, event="COMMENT"):
+    seen.append((target["head_sha"], receipt["marker"], event))
+    return {**receipt, "state": "posted", "id": 77, "url": "https://github.com/x/pull/7#pullrequestreview-77",
+            "summary": "The exact public review was confirmed by a read-only observation."}
+  monkeypatch.setattr(public, "reconcile_review", reconcile)
+  settled = _observe(setup)
+  assert (settled["state"], settled["review_id"], settled["id"]) == ("posted", 77, proposal["id"])
+  assert settled["url"].endswith("pullrequestreview-77") and "read-only" in settled["summary"]
+  assert seen[0][0] == ITEM["head_sha"] and seen[0][2] == "REQUEST_CHANGES" and "mobius-review:" in seen[0][1]
+  assert [e[0] for e in events] == ["post"], "observing never posts again"
+
+
+def test_an_unconfirmed_verdict_missing_from_github_stays_unconfirmed_and_is_never_resent(setup, monkeypatch):
+  events, _ = _unconfirmed_verdict(setup, monkeypatch)
+  monkeypatch.setattr(public, "reconcile_review", lambda gh, cwd, target, receipt, actor_id, event="COMMENT":
+                      {**receipt, "state": "unknown", "summary": "The exact public review is not confirmed; no write was repeated."})
+  assert _observe(setup)["state"] == "unknown"
+  assert _observe(setup)["state"] == "unknown"
+  assert [e[0] for e in events] == ["post"]
+  with pytest.raises(HTTPException) as again:
+    _decide(setup, "submit", _observe(setup)["id"])
+  assert again.value.status_code == 409
+
+
+def test_a_confirmed_verdict_is_never_rewound_by_a_later_unconfirmed_observation(setup, monkeypatch):
+  events, _ = _unconfirmed_verdict(setup, monkeypatch)
+  monkeypatch.setattr(public, "reconcile_review", lambda gh, cwd, target, receipt, actor_id, event="COMMENT":
+                      {**receipt, "state": "posted", "id": 5, "url": None, "summary": "confirmed"})
+  assert _observe(setup)["state"] == "posted"
+  monkeypatch.setattr(public, "reconcile_review", lambda *a, **k: pytest.fail("a posted verdict is not observed again"))
+  assert _observe(setup)["state"] == "posted"
+
+
 def test_a_writer_that_never_saw_the_proposal_cannot_drop_it(setup, monkeypatch):
   db, row = _grant(setup, propose_verdict=True)
   _record(monkeypatch, [])
