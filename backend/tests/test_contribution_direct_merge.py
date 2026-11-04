@@ -22,11 +22,11 @@ MOVED = "d" * 40
 RESPONSE_BODY = "RESPONSE-BODY-THAT-MUST-NOT-BE-LOGGED"
 QUEUE_ENTRY = {"id": "QUEUE_1", "enqueuedAt": "2026-11-04T09:00:00Z"}
 MERGE_ENDPOINT = f"repos/{NAME}/pulls/{NUMBER}/merge"
-REVIEWS_ENDPOINT = f"repos/{NAME}/pulls/{NUMBER}/reviews?per_page=100&page=1"
 ALLOWED_ENDPOINTS = {f"repos/{NAME}", f"repos/{NAME}/pulls/{NUMBER}", f"repos/{NAME}/git/ref/heads/main",
-                     REVIEWS_ENDPOINT, MERGE_ENDPOINT, "graphql"}
+                     MERGE_ENDPOINT, "graphql"}
 
 GATE = "GitHub has not cleared this pull request for a normal merge; check its rules or merge queue."
+REVIEW = "GitHub still requires a review or has requested changes."
 CHECKS_FAILED = "The current checks have not all passed."
 NO_PERMISSION = "Your repository merge permission is no longer available."
 
@@ -47,8 +47,8 @@ class FakeGitHub:
   def __init__(self):
     self.repo = {**REPO, "allow_merge_commit": True}
     self.pull = {**PULL}
-    self.checks = {**CHECKS}
-    self.reviews = [APPROVAL]
+    self.checks = {key: value for key, value in CHECKS.items() if key != "latestOpinionatedReviews"}
+    self.reviews = [APPROVAL]  # the writers' standing opinions the check read carries
     self.base_tips = [BASE]  # each base-branch read takes the next; the last repeats
     self.merge_answer = {"merged": True, "sha": MERGED_SHA, "message": RESPONSE_BODY}
     self.enqueue_answer = {"data": {"enqueuePullRequest": {"mergeQueueEntry": QUEUE_ENTRY}}}
@@ -71,7 +71,7 @@ class FakeGitHub:
 
   def _read(self, endpoint):
     reads = {f"repos/{NAME}": ("repo", self.repo), f"repos/{NAME}/pulls/{NUMBER}": ("pull", self.pull),
-             f"repos/{NAME}/git/ref/heads/main": ("base", None), REVIEWS_ENDPOINT: ("reviews", self.reviews)}
+             f"repos/{NAME}/git/ref/heads/main": ("base", None)}
     if endpoint not in reads:
       pytest.fail(f"unexpected GitHub read: {endpoint}")
     kind, payload = reads[endpoint]
@@ -89,7 +89,8 @@ class FakeGitHub:
       self.enqueues.append({"id": flags["id"], "head": flags["head"]})
       return self._answer(self.enqueue_answer)
     self._must_be_readable("checks")
-    return self._answer({"data": {"node": self.checks}})
+    reviews = {} if "reviews" in self.unreadable else {"latestOpinionatedReviews": {"nodes": self.reviews}}
+    return self._answer({"data": {"node": {**self.checks, **reviews}}})
 
   def _merge(self, flags):
     self.merges.append(flags)
@@ -115,7 +116,7 @@ def body(**changes):
 
 
 def press(github, authorize=lambda: None, **changes):
-  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize))
+  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize, job=None))
 
 
 def refused(github, authorize=lambda: None, **changes):
@@ -219,18 +220,23 @@ REFUSALS = {
                                                       "The pull request changed during the merge check."),
   "nobody but the author approved": (lambda g: setattr(g, "reviews", []), "Nobody but the author has approved it yet."),
   "an approval only of an older version": (
-    lambda g: setattr(g, "reviews", [{**APPROVAL, "commit_id": MOVED}]), "The approval is for an older version."),
-  "only a bot approved": (lambda g: setattr(g, "reviews", [{**APPROVAL, "user": {"id": 5, "login": "ci", "type": "Bot"}}]),
+    lambda g: setattr(g, "reviews", [{**APPROVAL, "commit": {"oid": MOVED}}]), "The approval is for an older version."),
+  "only a bot approved": (lambda g: setattr(g, "reviews", [{**APPROVAL, "author": {"login": "ci", "__typename": "Bot"}}]),
                           "Nobody but the author has approved it yet."),
   "the author's own approval": (lambda g: (g.pull.update(user={"id": 7, "login": "sam"})),
                                 "Nobody but the author has approved it yet."),
   "an older change request still standing": (
-    lambda g: g.reviews.append({"user": {"id": 8, "login": "bob", "type": "User"}, "state": "CHANGES_REQUESTED",
-                                "commit_id": MOVED}), "bob asked for changes and hasn’t approved since."),
+    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": {"login": "bob", "__typename": "User"},
+                                "commit": {"oid": MOVED}}), "bob asked for changes and hasn’t approved since."),
+  "a change request whose commit GitHub no longer has": (
+    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": None, "commit": None}),
+    "ghost asked for changes and hasn’t approved since."),
   "reviews that cannot be read": (lambda g: g.unreadable.add("reviews"), "This PR could not be read. Try again."),
   "failing checks": (lambda g: g.checks.update(_rollup("FAILURE")), CHECKS_FAILED),
   "pending checks": (lambda g: g.checks.update(_rollup("PENDING")), CHECKS_FAILED),
   "no check result": (lambda g: g.checks.update(commits={"nodes": []}), "GitHub did not provide the current check result."),
+  "changes requested": (lambda g: g.checks.update(reviewDecision="CHANGES_REQUESTED"), REVIEW),
+  "a review still required": (lambda g: g.checks.update(reviewDecision="REVIEW_REQUIRED"), REVIEW),
   "merge conflicts": (lambda g: g.checks.update(mergeable="CONFLICTING", mergeStateStatus="DIRTY"), GATE),
   "a branch that is behind": (lambda g: g.checks.update(mergeStateStatus="BEHIND"), GATE),
   "a pull request GitHub's rules still block": (lambda g: g.checks.update(mergeStateStatus="BLOCKED"), GATE),
@@ -390,7 +396,7 @@ def test_a_cancelled_request_never_starts_the_write_and_its_cancellation_is_not_
       assert release.wait(5)
   github.on_base_read = hold_the_final_base_check
   async def scenario():
-    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None))
+    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, job=None))
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     release.set()

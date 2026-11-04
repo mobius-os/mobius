@@ -9,7 +9,6 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, contribution_review_public as public, models
-from app import contribution_pr_facts as pr_facts
 from app.contribution_review_effects import DispatchResult
 from app.contribution_errors import ContributionSubmitError
 from app.database import SessionLocal
@@ -28,11 +27,12 @@ REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True, "maint
 PULL = {"node_id": "PR_7", "state": "open", "head": {"sha": SHA},
         "base": {"ref": "main", "sha": BASE}, "title": "A change", "html_url": TARGET["url"]}
 REF = {"object": {"sha": BASE}}
-CHECKS = {"headRefOid": SHA, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
-          "isMergeQueueEnabled": False,
-          "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
 # Someone other than the author approved the selected head: the PR machine's merge guard.
-APPROVAL = {"user": {"id": 7, "login": "sam", "type": "User"}, "state": "APPROVED", "commit_id": SHA}
+APPROVAL = {"state": "APPROVED", "author": {"login": "sam", "__typename": "User"}, "commit": {"oid": SHA}}
+CHECKS = {"headRefOid": SHA, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+          "reviewDecision": "APPROVED", "isMergeQueueEnabled": False,
+          "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+          "latestOpinionatedReviews": {"nodes": [APPROVAL]}, "viewerLatestReview": None}
 
 
 @pytest.fixture
@@ -57,7 +57,6 @@ def setup(fresh_db, monkeypatch):
   monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
   monkeypatch.setattr(domain, "assert_current_base", lambda *args: None)
   monkeypatch.setattr(domain, "pull_checks", lambda *args: CHECKS)
-  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: [APPROVAL])
   yield db, row, principal
   db.close()
 
@@ -240,6 +239,7 @@ def test_queue_is_used_instead_of_direct_merge(setup, monkeypatch):
 
 
 @pytest.mark.parametrize("changes", [
+  {"reviewDecision": "CHANGES_REQUESTED"}, {"reviewDecision": "REVIEW_REQUIRED"},
   {"mergeStateStatus": "UNKNOWN"}, {"mergeStateStatus": "BLOCKED"},
   {"headRefOid": "c" * 40}, {"mergeable": "CONFLICTING"},
   {"commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING"}}}]}},
@@ -248,8 +248,14 @@ def test_github_blockers_stop_before_merge(changes):
   assert domain.merge_blocker(TARGET, REPO, PULL, {**CHECKS, **changes})
 
 
-def opinion(login, state, commit=SHA, user_id=8, kind="User"):
-  return {"user": {"id": user_id, "login": login, "type": kind}, "state": state, "commit_id": commit}
+def opinion(login, state, commit=SHA, kind="User"):
+  return {"state": state, "author": {"login": login, "__typename": kind}, "commit": {"oid": commit}}
+
+
+def with_reviews(nodes):
+  """GitHub's check read carrying these standing opinions; None when it carried none."""
+  checks = {key: value for key, value in CHECKS.items() if key != "latestOpinionatedReviews"}
+  return checks if nodes is None else {**checks, "latestOpinionatedReviews": {"nodes": nodes}}
 
 
 @pytest.mark.parametrize("reviews, reason", [
@@ -260,14 +266,14 @@ def opinion(login, state, commit=SHA, user_id=8, kind="User"):
 ], ids=["nobody", "only_a_bot", "older_change_request_stands", "reviews_unreadable"])
 def test_merge_refused_unless_someone_else_approved_this_exact_head(setup, monkeypatch, reviews, reason):
   """The PR machine's merge guard replaces GitHub's reviewDecision, which is empty when no review is required."""
-  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: reviews)
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: with_reviews(reviews))
   monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged without an approval of this head"))
   item = report(setup)["run"]["items"][0]
   assert (item["state"], item["summary"]) == ("needs_you", reason)
 
 
 def test_merge_refused_when_only_approval_is_on_an_older_commit(setup, monkeypatch):
-  monkeypatch.setattr(pr_facts, "read_reviews", lambda *args: [opinion("sam", "APPROVED", "c" * 40)])
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: with_reviews([opinion("sam", "APPROVED", "c" * 40)]))
   monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged on a stale approval"))
   assert report(setup)["run"]["items"][0]["summary"] == "The approval is for an older version."
 

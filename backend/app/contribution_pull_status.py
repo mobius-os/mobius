@@ -133,7 +133,8 @@ def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   # GitHub's own spelling: a renamed repository's old name cannot take a write.
   target = {"repo": repo.get("full_name") or body.repo, "number": body.number,
             "head_sha": body.head_sha, "pr_id": pr_id}
-  facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"], job=job)
+  facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"],
+                              actor_login=str(actor.get("login") or ""), job=job)
   return target, pull, facts
 
 

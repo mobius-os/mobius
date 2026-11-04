@@ -139,7 +139,7 @@ def _refusal_summary(exc: HTTPException) -> str:
   return f"HTTP {exc.status_code}, {detail}"
 
 
-async def merge_exact_pull(gh, cwd, body, authorize, job: dict | None = None) -> dict:
+async def merge_exact_pull(gh, cwd, body, authorize, *, job: dict | None) -> dict:
   """Merge or enqueue the exact head the owner named, once, and report what GitHub confirmed.
 
   `body` carries repo, number, head_sha and an optional method. `authorize`

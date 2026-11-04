@@ -77,7 +77,8 @@ async def _merge_refusal(gh, cwd, row, target, repo, pull, checks, job) -> str |
   return machine.action_blocker(facts, "merge") or None
 
 
-async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize, job=None):
+async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize,
+                                job: dict | None):
   """Persist the current gate result or one typed public effect, never replay."""
   if pull.get("merged"):
     reviews.save_effect_outcome(db, row, reviews.key(target), {

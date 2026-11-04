@@ -2,7 +2,9 @@
 
 The app builds the same facts from its own batched GraphQL read (pr-facts.js);
 the server builds them from the REST pull request and repository it already
-reads, its GraphQL check and merge read, and the pull request's review list.
+reads and its GraphQL check and merge read, which also carries the writers'
+standing opinions (latestOpinionatedReviews, writers only, as in the app) and
+the connected account's own latest review.
 A read that failed is never a guess: its fact is 'unknown' and readComplete
 is False, which the machine never lets enable anything that needs it.
 
@@ -13,6 +15,7 @@ fence (contribution_review_runs.require_public_transition_clear).
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 
 from fastapi import HTTPException
@@ -20,10 +23,9 @@ from fastapi import HTTPException
 from app import contribution_pr_machine as machine, contribution_review_runs as reviews
 from app.contribution_errors import ContributionSubmitError
 
+_log = logging.getLogger(__name__)
+
 READ_FAILURES = (HTTPException, ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError)
-REVIEW_PAGE_SIZE = 100
-REVIEW_PAGES = 10
-OPINIONS = ("APPROVED", "CHANGES_REQUESTED")
 ROLLUP_CHECKS = {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail", "PENDING": "pending", "EXPECTED": "pending"}
 MERGEABLE = {"MERGEABLE": "yes", "CONFLICTING": "conflict"}
 # The strongest permission GitHub reports for the connected account, in GitHub's viewerPermission words.
@@ -36,63 +38,48 @@ def authored_by(pull: dict, actor_id) -> bool:
   return bool(actor) and str((pull.get("user") or {}).get("id") or "") == actor
 
 
-def _review_page(gh, cwd, repo: str, number: int, page: int) -> list | None:
-  try:
-    rows = reviews.read(gh, cwd, f"repos/{repo}/pulls/{number}/reviews?per_page={REVIEW_PAGE_SIZE}&page={page}")
-  except READ_FAILURES:
-    return None
-  return rows if isinstance(rows, list) else None
-
-
-def read_reviews(gh, cwd, repo: str, number: int) -> list[dict] | None:
-  """Every review on the pull request, oldest first; None unless GitHub's whole list was read."""
-  found: list[dict] = []
-  for page in range(1, REVIEW_PAGES + 1):
-    rows = _review_page(gh, cwd, repo, number, page)
-    if rows is None:
-      return None
-    found.extend(row for row in rows if isinstance(row, dict))
-    if len(rows) < REVIEW_PAGE_SIZE:
-      return found
-  return None  # Past the page cap: an incomplete list could hide a change request.
-
-
 def read_checks(gh, cwd, target: dict) -> dict | None:
-  """GitHub's check and merge read for this pull request, or None when it could not be read."""
+  """GitHub's check, merge and review read for this pull request, or None when it could not be read."""
   try:
     return reviews.pull_checks(gh, cwd, target)
-  except READ_FAILURES:
+  except READ_FAILURES as exc:
+    _log.info("PR machine facts: GitHub check read failed for %s#%s (%s)",
+              target.get("repo"), target.get("number"), type(exc).__name__)
     return None
+
+
+def _opinion(node: dict) -> dict:
+  # A deleted account is GitHub's "ghost", never skipped; a review with no commit
+  # counts as older: it blocks as a change request and never approves.
+  author = node.get("author") or {}
+  return {"by": author.get("login") or "ghost", "state": node["state"],
+          "commit": (node.get("commit") or {}).get("oid") or "", "bot": author.get("__typename") == "Bot"}
+
+
+def opinions(checks: dict | None) -> list[dict] | None:
+  """Each writer's standing opinion, as GitHub keeps it; None when it was not read."""
+  nodes = ((checks or {}).get("latestOpinionatedReviews") or {}).get("nodes") if isinstance(checks, dict) else None
+  if not isinstance(nodes, list):
+    return None
+  return [_opinion(node) for node in nodes if isinstance(node, dict) and node.get("state")]
+
+
+def my_review(checks: dict | None, review_list: list[dict], login: str) -> dict | None:
+  """The connected account's latest review (the app's myReviewOf): a later comment or a
+  pending draft never hides its standing opinion."""
+  opinion = next((r for r in review_list if login and r["by"].lower() == login.lower()), None)
+  standing = {"state": opinion["state"], "commit": opinion["commit"]} if opinion else None
+  latest = (checks or {}).get("viewerLatestReview") if isinstance(checks, dict) else None
+  oid = ((latest or {}).get("commit") or {}).get("oid")
+  if not oid or latest.get("state") == "PENDING":
+    return standing
+  if latest.get("state") == "COMMENTED" and standing:
+    return standing
+  return {"state": latest.get("state"), "commit": oid}
 
 
 def _login(user: dict) -> str:
   return str(user.get("login") or "").lower()
-
-
-def opinions(review_list: list[dict], author_id) -> list[dict]:
-  """Each non-author's standing opinion: their latest approval or change request.
-
-  A later dismissal clears it, and a comment never replaces an opinion. Bots
-  are tagged; the machine never counts them as approvals or blockers.
-  """
-  standing: dict[str, dict] = {}
-  for review in review_list:
-    user = review.get("user") or {}
-    if not _login(user) or str(user.get("id")) == str(author_id):
-      continue
-    if review.get("state") == "DISMISSED":
-      standing.pop(_login(user), None)
-    elif review.get("state") in OPINIONS:
-      standing[_login(user)] = {"by": _login(user), "state": review["state"],
-                                "commit": review.get("commit_id"), "bot": user.get("type") == "Bot"}
-  return list(standing.values())
-
-
-def my_review(review_list: list[dict], actor_id) -> dict | None:
-  """The connected account's latest submitted review of any state (a pending draft is not one)."""
-  mine = [review for review in review_list
-          if str((review.get("user") or {}).get("id")) == str(actor_id) and review.get("state") != "PENDING"]
-  return {"state": mine[-1].get("state"), "commit": mine[-1].get("commit_id")} if mine else None
 
 
 def lifecycle_of(pull: dict) -> str:
@@ -133,24 +120,24 @@ def permission_of(repo: dict) -> str:
   return next((level for name, level in PERMISSIONS if granted.get(name) is True), "READ")
 
 
-def pr_facts(*, actor_id, repo: dict, pull: dict, checks: dict | None,
-             review_list: list[dict] | None, job: dict | None) -> dict:
+def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks: dict | None,
+             job: dict | None) -> dict:
   """The machine's facts for one pull request, as the connected account sees it now.
 
-  ``checks`` and ``review_list`` are None when their read failed; ``job`` is
-  the live agent job another review run holds on this PR, if any.
+  ``checks`` is GitHub's check, merge and review read, None when it failed;
+  ``job`` is the live agent job another review run holds on this PR, if any.
   """
   own = authored_by(pull, actor_id)
-  author = pull.get("user") or {}
   head = (pull.get("head") or {}).get("sha") or ""
+  review_list = opinions(checks)
   return {
-    "role": "author" if own else "reviewer", "author": _login(author), "head": head,
+    "role": "author" if own else "reviewer", "author": _login(pull.get("user") or {}), "head": head,
     "lifecycle": lifecycle_of(pull), "checks": checks_of(checks, head),
     "mergeable": mergeable_of(checks, head), "permission": permission_of(repo),
-    "reviews": opinions(review_list or [], author.get("id")),
-    "myReview": None if own else my_review(review_list or [], actor_id),
+    "reviews": review_list or [],
+    "myReview": None if own else my_review(checks, review_list or [], actor_login),
     "openThreads": 0, "job": job, "result": None, "outbox": None,
-    "readComplete": checks is not None and review_list is not None,
+    "readComplete": review_list is not None,
   }
 
 
@@ -161,14 +148,14 @@ def require_allowed(facts: dict, action_id: str) -> None:
     raise HTTPException(409, blocker)
 
 
-def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, job: dict | None,
-               checks: dict | None = None) -> dict:
-  """Facts for a pull request the caller just read, adding its review list and checks.
+def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, actor_login: str = "",
+               job: dict | None, checks: dict | None = None) -> dict:
+  """Facts for a pull request the caller just read, adding its checks and reviews.
 
   ``target`` names it as the review machinery does (repo, number, pr_id).
   Pass ``checks`` when the caller already read them, so GitHub is asked once.
+  ``actor_login`` finds the account's own standing opinion; without it only
+  its latest review counts.
   """
   checks = checks if checks is not None else read_checks(gh, cwd, target)
-  review_list = read_reviews(gh, cwd, target["repo"], target["number"])
-  return pr_facts(actor_id=actor_id, repo=repo, pull=pull, checks=checks,
-                  review_list=review_list, job=job)
+  return pr_facts(actor_id=actor_id, actor_login=actor_login, repo=repo, pull=pull, checks=checks, job=job)

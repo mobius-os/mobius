@@ -303,11 +303,11 @@ def _require_new_grant_shape(body):
     raise HTTPException(422, "A takeover reason belongs to a takeover (review_fix_merge) only.")
 
 
-async def _admission_facts(cwd, target, actor_id) -> dict:
+async def _admission_facts(cwd, target, actor: dict) -> dict:
   """The PR machine's facts for one selected PR, read now (its job is checked at admission)."""
   repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
   return await asyncio.to_thread(pr_facts.read_facts, _gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews and checks)
-                                 actor_id=actor_id, job=None)
+                                 actor_id=actor["id"], actor_login=actor.get("login") or "", job=None)
 
 
 def _admission_action(body, facts) -> str:
@@ -415,7 +415,7 @@ async def start_reviews(app_id: int | None, body: StartReviews,
                  for item in selection]
       admitted = []
       for target in targets:
-        facts = await _admission_facts(cwd, target, actor["id"])
+        facts = await _admission_facts(cwd, target, actor)
         action = _admission_action(body, facts)
         pr_facts.require_allowed(facts, action)
         target["role"] = facts["role"]

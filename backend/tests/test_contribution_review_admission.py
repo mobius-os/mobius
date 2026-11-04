@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from app import contribution_review_runs as domain, models
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import (ITEM, PULL, REPO, TARGET, VERDICTS, settle_fixture_review,
+from tests.test_contribution_review_runs import (CHECKS, ITEM, PULL, REPO, TARGET, VERDICTS, settle_fixture_review,
                                                  setup)  # noqa: F401  (fixture)
 
 REASON = "The author is away for a month and asked a maintainer to finish it."
@@ -119,8 +119,7 @@ def test_a_takeover_reason_outside_a_takeover_is_refused(owner):
 
 
 def test_an_unreadable_pr_is_never_admitted(owner, monkeypatch):
-  from app import contribution_pr_facts as pr_facts
   db, fixture_run, principal, _ = owner
   settle_fixture_review(db, fixture_run)
-  monkeypatch.setattr(pr_facts, "read_reviews", lambda *a: None)
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "latestOpinionatedReviews": None})
   assert refusal(db, principal) == (409, "This PR could not be read. Try again.")

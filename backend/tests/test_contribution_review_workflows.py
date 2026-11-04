@@ -14,7 +14,6 @@ from app import contribution_review_runs as domain, contribution_review_repairs 
 from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from app import contribution_pr_facts as pr_facts
 from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, APPROVAL, report, settle_fixture_review
 
 NEW = "c" * 40
@@ -960,7 +959,8 @@ def test_confirmed_successor_with_fresh_independent_review_waits_for_the_owners_
   receipt = asyncio.run(routes.independent_review(1, row.id, body, db, child_principal))["independent_receipt_id"]
   monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "headRefOid": NEW})
   monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "head": {"sha": NEW}}))
-  monkeypatch.setattr(pr_facts, "read_reviews", lambda *a: [{**APPROVAL, "commit_id": NEW}])
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "headRefOid": NEW,
+    "latestOpinionatedReviews": {"nodes": [{**APPROVAL, "commit": {"oid": NEW}}]}})
   merged = []
   monkeypatch.setattr(domain, "perform_merge", lambda *a: merged.append(a[2]["head_sha"]) or {"merged": True, "sha": "landed"})
   result = report(setup, head_sha=NEW, tests_passed=True, reviewed_base_sha=BASE, independent_receipt_id=receipt)

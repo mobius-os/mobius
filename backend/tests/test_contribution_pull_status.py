@@ -116,7 +116,7 @@ def test_close_is_the_authors_or_a_writers():
 
 def test_ask_for_rereview_only_of_people_whose_review_is_of_an_older_version():
   github = StatusGitHub()
-  github.reviews = [{**APPROVAL, "commit_id": OLDER}]
+  github.reviews = [{**APPROVAL, "commit": {"oid": OLDER}}]
   assert change(github, "request-reviewers", asking(["Sam"]))["state"] == "requested"
   assert github.writes_seen == [("reviewers", ["Sam"])]
   status, reason = refused(github, "request-reviewers", asking(["bob"]))
@@ -147,7 +147,7 @@ def test_an_unreadable_review_list_refuses_a_status_change_in_the_machines_words
 ])
 def test_an_unconfirmed_write_is_a_502_with_its_code_and_is_never_retried(name, write, code):
   github = StatusGitHub(draft=name == "ready")
-  github.reviews = [{**APPROVAL, "commit_id": OLDER}]
+  github.reviews = [{**APPROVAL, "commit": {"oid": OLDER}}]
   github.answers[write] = "not json"
   request = asking(["sam"]) if name == "request-reviewers" else None
   status, detail = refused(github, name, request)
