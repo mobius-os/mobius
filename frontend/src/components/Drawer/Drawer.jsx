@@ -41,6 +41,7 @@ import {
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
   settleDrawerSwipe,
+  watchDismissPointerEnd,
 } from '../../lib/drawerLifecycle.js'
 import {
   PRESS_MENU_HOLD_MS,
@@ -641,24 +642,7 @@ export default function Drawer({
 
   useEffect(() => {
     if (dismissPointerId == null) return undefined
-    function release(e) {
-      if (e && e.pointerId != null && e.pointerId !== dismissPointerId) return
-      setDismissPointerId(null)
-    }
-    // pointerup/pointercancel is the real end. A lost end event (the page was
-    // hidden mid-gesture) must never leave an invisible full-screen blocker.
-    const watchdog = setTimeout(release, 3000)
-    window.addEventListener('pointerup', release, true)
-    window.addEventListener('pointercancel', release, true)
-    window.addEventListener('blur', release)
-    document.addEventListener('visibilitychange', release)
-    return () => {
-      clearTimeout(watchdog)
-      window.removeEventListener('pointerup', release, true)
-      window.removeEventListener('pointercancel', release, true)
-      window.removeEventListener('blur', release)
-      document.removeEventListener('visibilitychange', release)
-    }
+    return watchDismissPointerEnd(dismissPointerId, () => setDismissPointerId(null))
   }, [dismissPointerId])
 
   useEffect(() => {

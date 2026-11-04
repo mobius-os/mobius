@@ -8,6 +8,9 @@
 export const DRAWER_CLOSE_WATCHDOG_BUFFER_MS = 80
 export const DRAWER_SWIPE_THRESHOLD_PX = 10
 export const DRAWER_SWIPE_DOMINANCE = 1.15
+// The scrim keeps the touch that dismissed it until that pointer ends. This
+// bounds the hold when the end event is lost; it is not the normal release.
+export const DISMISS_POINTER_HOLD_MAX_MS = 3000
 
 /**
  * Only the always-visible sidebar follows chat selections made elsewhere.
@@ -169,5 +172,33 @@ export function settleDrawerSwipe(element, { closeAccepted }) {
   clearDrawerGestureStyles(element)
   if (closeAccepted === true && element?.style) {
     element.style.transform = 'translateX(-100%)'
+  }
+}
+
+/**
+ * Call `release` once the pointer that dismissed the drawer has ended.
+ *
+ * Only that pointer's pointerup/pointercancel ends the hold; another finger
+ * lifting does not. Window blur, a visibility change, or the max-hold
+ * watchdog also release, so a lost end event (the page was hidden
+ * mid-gesture) can never leave an invisible full-screen blocker. Returns the
+ * cleanup that removes every listener and the watchdog.
+ */
+export function watchDismissPointerEnd(pointerId, release, { win = window, doc = document } = {}) {
+  function end(event) {
+    if (event?.pointerId != null && event.pointerId !== pointerId) return
+    release()
+  }
+  const watchdog = setTimeout(end, DISMISS_POINTER_HOLD_MAX_MS)
+  win.addEventListener('pointerup', end, true)
+  win.addEventListener('pointercancel', end, true)
+  win.addEventListener('blur', end)
+  doc.addEventListener('visibilitychange', end)
+  return () => {
+    clearTimeout(watchdog)
+    win.removeEventListener('pointerup', end, true)
+    win.removeEventListener('pointercancel', end, true)
+    win.removeEventListener('blur', end)
+    doc.removeEventListener('visibilitychange', end)
   }
 }
