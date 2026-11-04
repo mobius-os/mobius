@@ -11,7 +11,7 @@ from app.routes import contribution_reviews as routes
 from app.deps import Principal
 from app.chat_writer import create_chat
 from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, report
-from tests.test_contribution_review_workflows import takeover, configure_repair, publish_body, checkout_body, overlapping_grant, NEW
+from tests.test_contribution_review_workflows import takeover, configure_repair, publish_body, checkout_body, overlapping_grant, propose_and_push, NEW
 from tests.test_contribution_review_queue import queue_timeline, saved_queue_receipt, queue_graphql, loaded_before_window, QUEUE_TIME, REMOVED_TIME
 CURRENT_PULL = domain.current_pull
 
@@ -172,7 +172,7 @@ def test_recovery_revalidates_at_every_action_boundary(setup, monkeypatch, gate,
         return DispatchResult.not_dispatched(str(exc))
       pytest.fail("stale proof reached public push")
     monkeypatch.setattr(repairs, "push_repair", push)
-    item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+    item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
     assert not item.get("repair_attempts")
   else:
     drift()
@@ -198,7 +198,7 @@ def test_removed_attempt_history_survives_push_and_confirmed_successor(setup, mo
     if finish != "success": return DispatchResult.unknown("lost push response")
     return DispatchResult.confirmed({})
   monkeypatch.setattr(repairs, "push_repair", push)
-  item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+  item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
   if finish != "success":
     assert item["merge_attempted"] is True and item["queue_removal"]
     assert item["merge_attempts"] == history
@@ -207,13 +207,13 @@ def test_removed_attempt_history_survives_push_and_confirmed_successor(setup, mo
         if a[2]["head_sha"] != SHA: raise HTTPException(409, "Not pushed")
         return REPO, PULL
       monkeypatch.setattr(domain, "current_pull", unchanged)
-      item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+      item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
       assert not item.get("successor") and item["merge_attempts"] == history
       assert pushes == [1]
       return
     monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "head": {"sha": NEW}}))
     if finish == "lost_then_publish":
-      item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+      item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
     else:
       db.get(models.ChatRun, principal.run_id).status = "stopped"
       db.commit()
@@ -242,7 +242,7 @@ def test_removed_repair_cannot_publish_unchanged_head(setup, monkeypatch):
   monkeypatch.setattr(repairs, "validate_repair", lambda *a, **kw: {"head_sha": SHA})
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("same-head repair"))
   with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    propose_and_push(db, row, principal, publish_body())
   assert error.value.status_code == 409
 
 
@@ -255,12 +255,15 @@ def test_archived_removed_head_cannot_merge_under_another_grant_after_claim_rele
   agent_work_claims.finish_work(db, owner_id=row.owner_id, chat_id=row.chat_id,
     work_key=work_key, outcome="Queue removed", release=True)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: DispatchResult.confirmed({}))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   second = models.ContributionReviewRun(id="old-head-grant", app_id=1, owner_id=row.owner_id,
     request_id="old-head-request", mode="review_merge", targets_json=[TARGET],
     outcomes_json={}, chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
   db.add(second)
   db.commit()
+  # The PR machine's one-job lock refuses first while the takeover works on this
+  # PR; this pins the saved-receipt fence that still holds beneath it.
+  monkeypatch.setattr(routes, "_pr_job", lambda *a, **kw: None)
   item = report((db, second, principal))["run"]["items"][0]
   assert item["state"] == "needs_you" and item["review_selection_id"] == row.id
 
@@ -285,7 +288,7 @@ def test_successor_never_inherits_the_predecessors_settlement(setup, monkeypatch
     before_push()
     return DispatchResult.confirmed({})
   monkeypatch.setattr(repairs, "push_repair", push)
-  item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+  item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
   saved = row.outcomes_json[domain.key(ITEM)]
   assert item["head_sha"] == NEW and item["state"] == "reviewing"
   assert not {*domain.MERGE_SETTLEMENTS, "queue_removal", "merge_attempted"}.intersection(saved)

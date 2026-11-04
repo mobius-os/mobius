@@ -1,11 +1,15 @@
-"""Formal review verdicts: the agent proposes, only the owner submits.
+"""Formal review verdicts: the agent proposes, the owner submits.
 
 A run with the frozen ``propose_verdict`` opt-in never posts APPROVE or
 REQUEST_CHANGES by itself. Its ``publish:true`` outcome saves one immutable
-proposal (event, exact wording, pinned head and base). The owner's own submit
-of that exact proposal is the only authority to post it, once, at the pinned
-head; an uncertain dispatch is never retried. A proposal is not consent to
-merge: a merge grant still needs the posted APPROVE and its usual gates.
+proposal (event, exact wording, pinned head and base), plus the same findings
+worded as a plain COMMENT. The owner's own submit of that exact proposal, as
+proposed or downgraded to the COMMENT, is the authority to post it, once, at
+the pinned head; an uncertain dispatch is never retried. The one exception is
+the owner's own choice when starting the review (``agent_submits_verdict``):
+the run then submits its proposal under that frozen grant. A proposal is not
+consent to merge: a merge grant still needs the posted APPROVE and its gates;
+a COMMENT is never an approval.
 """
 import asyncio
 import hashlib
@@ -15,7 +19,7 @@ import uuid
 from fastapi import HTTPException
 
 from app import chat_queue, models, settled, contribution_review_runs as reviews
-from app import contribution_review_public as public
+from app import contribution_pr_facts as pr_facts, contribution_review_public as public
 from app.contribution_errors import ContributionSubmitError
 from app.decision_cards import fence_owner
 from app.github_connection import _github_connection_transaction
@@ -25,16 +29,31 @@ EVENTS = {"all_clear": "APPROVE", "needs_you": "REQUEST_CHANGES"}
 
 def own_pull(row, pull) -> bool:
   """GitHub refuses approve and request-changes from the PR's own author."""
-  return str((pull.get("user") or {}).get("id") or "") == str(row.github_actor_id)
+  return pr_facts.authored_by(pull, row.github_actor_id)
+
+
+def _sha256(text: str) -> str:
+  return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def propose(outcome, target) -> dict:
+  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
   event = EVENTS[outcome["state"]]
   body = public.review_comment_body(outcome, event=event)
+  comment_body = public.review_comment_body(outcome, event="COMMENT")
   return {"id": uuid.uuid4().hex, "state": "proposed", "event": event, "body": body,
-          "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+          "body_sha256": _sha256(body), "comment_body": comment_body, "comment_body_sha256": _sha256(comment_body),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
           "proposed_at": reviews.utc_now_iso()}
+
+
+def _sent_as(saved: dict, event: str | None) -> dict:
+  """The fields that change when the owner sends the proposal as a plain comment instead."""
+  if event is None or event == saved.get("event"):
+    return {}
+  if event != "COMMENT" or not saved.get("comment_body"):
+    raise HTTPException(409, "This verdict can only be sent as proposed. Nothing was posted.")
+  return {"event": "COMMENT", "proposed_event": saved["event"]}
 
 
 def _settle(db, row, item_key, proposal_id, fields):
@@ -47,7 +66,7 @@ def _settle(db, row, item_key, proposal_id, fields):
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
-def _arm(db, row, item_key, proposal_id, marker, authorize):
+def _arm(db, row, item_key, proposal_id, marker, authorize, event=None):
   """Reserve the one dispatch for this proposal, fenced across grants."""
   fence_owner(db, row.owner_id)
   try:
@@ -69,8 +88,13 @@ def _arm(db, row, item_key, proposal_id, marker, authorize):
   if holder:
     db.rollback()
     raise HTTPException(409, f"Another review run ({holder.id}) already submitted a verdict for this exact version.")
+  try:
+    sent_as = _sent_as(saved, event)
+  except HTTPException:
+    db.rollback()
+    raise
   current = row.outcomes_json[item_key]
-  armed = {**current, "verdict_proposal": {**saved, "state": "posting", "marker": marker,
+  armed = {**current, "verdict_proposal": {**saved, **sent_as, "state": "posting", "marker": marker,
                                            "submitted_at": reviews.utc_now_iso()}}
   if not reviews._cas_outcome(db, row, item_key, armed):
     raise HTTPException(409, "This review changed. Refresh before submitting.")
@@ -88,8 +112,11 @@ def _preflight(gh, cwd, row, target):
     raise HTTPException(409, "GitHub does not allow a verdict on your own pull request. Nothing was posted.")
 
 
-async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
-  """Post the owner-submitted proposal once; return its settled receipt."""
+async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
+  """Post the submitted proposal once, as proposed or (event COMMENT) as its plain comment.
+
+  Returns its settled receipt; its ``event`` is what was actually sent.
+  """
   async with _github_connection_transaction():
     try:
       await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
@@ -97,13 +124,14 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
       raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
     marker = f"<!-- mobius-review:{uuid.uuid4().hex} -->"
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      armed = _arm(db, row, item_key, proposal_id, marker, authorize)
+      armed = _arm(db, row, item_key, proposal_id, marker, authorize, event)
     try:
       authorize()
     except HTTPException as exc:
       _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
       raise
-    body = f"{armed['body']}\n\n{marker}"
+    wording = armed["comment_body"] if armed["event"] == "COMMENT" else armed["body"]
+    body = f"{wording}\n\n{marker}"
     result = await settled.run_settled(public.post_review, gh, cwd, target, body, armed["event"])
   fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state]}
   receipt = result.receipt or {}

@@ -21,14 +21,18 @@ ITEM = {"repo": "example/project", "number": 7, "head_sha": SHA,
         "base_ref": "main", "base_sha": BASE}
 TARGET = {**ITEM, "repo_id": 1, "pr_id": "PR_7", "base_ref": "main",
           "base_sha": BASE, "title": "A change", "url": "https://github.com/example/project/pull/7"}
-REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True},
+# The connected account maintains the repository: it may merge, and take over someone else's PR.
+REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True, "maintain": True},
         "allow_squash_merge": True}
 PULL = {"node_id": "PR_7", "state": "open", "head": {"sha": SHA},
         "base": {"ref": "main", "sha": BASE}, "title": "A change", "html_url": TARGET["url"]}
 REF = {"object": {"sha": BASE}}
+# Someone other than the author approved the selected head: the PR machine's merge guard.
+APPROVAL = {"state": "APPROVED", "author": {"login": "sam", "__typename": "User"}, "commit": {"oid": SHA}}
 CHECKS = {"headRefOid": SHA, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
           "reviewDecision": "APPROVED", "isMergeQueueEnabled": False,
-          "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
+          "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+          "latestOpinionatedReviews": {"nodes": [APPROVAL]}, "viewerLatestReview": None}
 
 
 @pytest.fixture
@@ -53,8 +57,20 @@ def setup(fresh_db, monkeypatch):
   monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
   monkeypatch.setattr(domain, "assert_current_base", lambda *args: None)
   monkeypatch.setattr(domain, "pull_checks", lambda *args: CHECKS)
+  # GitHub accepts the one comment that announces a takeover of someone else's PR.
+  monkeypatch.setattr(public, "post_issue_comment", lambda *args: DispatchResult.confirmed({"id": 1}))
   yield db, row, principal
   db.close()
+
+
+# Review and merge only merges after the owner's own Approve: new runs propose verdicts.
+VERDICTS = {"post_review": True, "propose_verdict": True}
+
+
+def settle_fixture_review(db, row):
+  """The fixture run finished its own review of the PR, so its agent no longer holds it."""
+  domain.save_outcome(db, row, domain.key(ITEM), {"state": "needs_you", "head_sha": SHA,
+                                                  "summary": "Findings reported to the owner"})
 
 
 def report(setup, **changes):
@@ -234,6 +250,50 @@ def test_github_blockers_stop_before_merge(changes):
   assert domain.merge_blocker(TARGET, REPO, PULL, {**CHECKS, **changes})
 
 
+def opinion(login, state, commit=SHA, kind="User"):
+  return {"state": state, "author": {"login": login, "__typename": kind}, "commit": {"oid": commit}}
+
+
+def with_reviews(nodes):
+  """GitHub's check read carrying these standing opinions; None when it carried none."""
+  checks = {key: value for key, value in CHECKS.items() if key != "latestOpinionatedReviews"}
+  return checks if nodes is None else {**checks, "latestOpinionatedReviews": {"nodes": nodes}}
+
+
+@pytest.mark.parametrize("reviews, reason", [
+  ([], "Nobody but the author has approved it yet."),
+  ([opinion("qa-bot", "APPROVED", kind="Bot")], "Nobody but the author has approved it yet."),
+  ([APPROVAL, opinion("bob", "CHANGES_REQUESTED", "c" * 40)], "bob asked for changes and hasn’t approved since."),
+  (None, "This PR could not be read. Try again."),
+], ids=["nobody", "only_a_bot", "older_change_request_stands", "reviews_unreadable"])
+def test_merge_refused_unless_someone_else_approved_this_exact_head(setup, monkeypatch, reviews, reason):
+  """The PR machine's merge guard replaces GitHub's reviewDecision, which is empty when no review is required."""
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: with_reviews(reviews))
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged without an approval of this head"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", reason)
+
+
+def test_merge_refused_when_only_approval_is_on_an_older_commit(setup, monkeypatch):
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: with_reviews([opinion("sam", "APPROVED", "c" * 40)]))
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged on a stale approval"))
+  assert report(setup)["run"]["items"][0]["summary"] == "The approval is for an older version."
+
+
+def test_merge_refused_while_another_agent_works_on_the_same_pr(setup, monkeypatch):
+  db, row, principal = setup
+  chat = create_chat(id="other-review-chat", title="Other review")
+  db.add(chat)
+  db.add(models.ChatRun(id="other-run", chat_id=chat.id, status="running"))
+  db.add(models.ContributionReviewRun(id="other", app_id=1, owner_id=row.owner_id,
+    request_id="request-2", mode="review", targets_json=[TARGET], outcomes_json={},
+    chat_id=chat.id, github_actor_id="42", app_nonce="nonce"))
+  db.commit()
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged under another agent"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", "An agent is already working on this PR.")
+
+
 @pytest.mark.parametrize("rollup", [None, {"state": "SUCCESS"}])
 def test_merge_accepts_passing_or_absent_checks(rollup):
   checks = {**CHECKS, "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
@@ -352,6 +412,7 @@ def test_start_idempotency_reuses_exact_chat_and_does_not_regrant_mode(setup, mo
 
 def test_start_persists_selection_before_task_admission(setup, monkeypatch):
   db, row, principal = setup
+  settle_fixture_review(db, row)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda db: {
     "provider": "codex", "model": "gpt-5", "effort": "xhigh",
@@ -396,7 +457,7 @@ def test_agent_without_explicit_chat_consent_cannot_mint_merge_grant(setup):
 
 
 def approved_body(request_id="chat-approved"):
-  return routes.StartReviews(request_id=request_id, mode="review_merge", items=[ITEM],
+  return routes.StartReviews(request_id=request_id, mode="review_merge", items=[ITEM], options=VERDICTS,
     chat_approval={"context": "The owner said: review this exact PR and merge it if safe."})
 
 
@@ -409,7 +470,8 @@ def snapshot_owning_chat(db, principal):
 
 
 def test_explicit_chat_consent_stays_in_owning_chat_with_durable_provenance(setup, monkeypatch):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
   async def forbidden(**kwargs):
@@ -487,7 +549,8 @@ def test_real_app_scope_guard_still_rejects_other_apps(setup, monkeypatch):
 def test_http_admission_accepts_explicit_chat_consent_but_not_an_unapproved_agent(setup, monkeypatch):
   from fastapi import FastAPI
   from fastapi.testclient import TestClient
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   application = FastAPI()
   application.include_router(routes.router)
@@ -520,7 +583,8 @@ def test_chat_cannot_rebind_an_existing_other_conversations_selection(setup):
 
 @pytest.mark.parametrize("revoke", ["stop", "capability", "nonce", "uninstall"])
 def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monkeypatch, revoke):
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   def inspect(*args):
     if revoke == "stop":
       db.get(models.ChatRun, principal.run_id).status = "stopped"
@@ -539,6 +603,7 @@ def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monke
   with pytest.raises(HTTPException) as error:
     asyncio.run(routes.start_reviews(1, approved_body(), db, principal))
   assert error.value.status_code == 409
+  assert error.value.detail != "An agent is already working on this PR."
   assert db.query(models.ContributionReviewRun).count() == 1
 
 
@@ -912,18 +977,20 @@ def test_post_review_writes_a_comment_review_bound_to_the_head():
 def test_contribute_no_op_takeover_options_still_start_plain_reviews(setup, monkeypatch, mode):
   """The installed Contribute app always sends max_rounds: null; main accepted it."""
   from app import contribution_review_presets as presets
-  db, _, principal = setup
+  db, fixture_run, principal = setup
+  settle_fixture_review(db, fixture_run)
   snapshot_owning_chat(db, principal)
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
-  sent = {"max_rounds": None, "fix_prompt": presets.FIX_PROMPT, "autopilot": False}
+  verdicts = VERDICTS if mode == "review_merge" else {}
+  sent = {"max_rounds": None, "fix_prompt": presets.FIX_PROMPT, "autopilot": False, **verdicts}
   preview = routes.review_preview(1, routes.ReviewPreview(mode=mode, options=sent), db, principal)
-  assert preview == routes.review_preview(1, routes.ReviewPreview(mode=mode), db, principal)
+  assert preview == routes.review_preview(1, routes.ReviewPreview(mode=mode, options=verdicts), db, principal)
   assert not {"max_rounds", "fix_prompt"} & preview["options"].keys()
   body = approved_body().model_copy(update={"mode": mode, "options": routes.ReviewOptions(**sent)})
   row = db.get(models.ContributionReviewRun,
                 asyncio.run(routes.start_reviews(1, body, db, principal))["run"]["id"])
   assert not {"max_rounds", "fix_prompt"} & row.options_json.keys()
-  assert row.options_json["input_options"] == {}
+  assert row.options_json["input_options"] == verdicts
   with pytest.raises(HTTPException) as refused:
     routes.review_preview(1, routes.ReviewPreview(mode=mode, options={"max_rounds": 2}), db, principal)
   assert refused.value.status_code == 422

@@ -107,6 +107,24 @@ def post_review(gh, cwd, target, body, event="COMMENT"):
     return classify_dispatch_error(exc)
 
 
+def post_issue_comment(gh, cwd, target, body):
+  """One plain comment on the pull request's conversation, from the connected account.
+
+  The first transport call is the dispatch boundary: only a proved refusal is
+  not_dispatched; anything after it that GitHub did not confirm is unknown.
+  """
+  try:
+    response = gh(cwd, "api", "--method", "POST", f"repos/{target['repo']}/issues/{target['number']}/comments",
+                  "--input", "-", input_text=json.dumps({"body": body})).stdout
+    result = json.loads(response)
+    if (not isinstance(result, dict) or not isinstance(result.get("id"), int)
+        or isinstance(result["id"], bool) or result["id"] <= 0):
+      return DispatchResult.unknown("GitHub did not confirm the comment.")
+    return DispatchResult.confirmed({"id": result["id"], "url": result.get("html_url")})
+  except (ContributionSubmitError, subprocess.SubprocessError, OSError, json.JSONDecodeError) as exc:
+    return classify_dispatch_error(exc)
+
+
 REVIEW_STATES = {"COMMENT": "COMMENTED", "APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}
 
 

@@ -1,0 +1,1297 @@
+{
+ "about": "Shared cases for the Contribute PR machine. The app (pr-machine.js) and the platform (contribution_pr_machine.py) must both pass every case; keep this file byte-identical in both repositories.",
+ "version": 1,
+ "cases": [
+  {
+   "name": "Their PR, not reviewed by you",
+   "rule": "R4",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.to_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "You requested changes at this version",
+   "rule": "R4",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "CHANGES_REQUESTED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.waiting_author",
+   "next": "",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "They pushed after you requested changes",
+   "rule": "R4 · D03",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "CHANGES_REQUESTED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.re_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "They pushed after you approved",
+   "rule": "R4 · D03 · bug 6",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.re_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "They only replied after your request (no commit)",
+   "rule": "D03",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 2,
+    "myReview": {
+     "state": "CHANGES_REQUESTED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.waiting_author",
+   "next": "",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone requested changes on your PR",
+   "rule": "R4",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.feedback",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone left open review threads on your PR",
+   "rule": "R4",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 3,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.feedback",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "You pushed fixes and answered every thread",
+   "rule": "R4 · bug 1",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved at this version, checks green (your PR)",
+   "rule": "R2 · R4",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved",
+   "next": "merge",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved at this version, checks green (their PR)",
+   "rule": "R4",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "alex",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.mergeable",
+   "next": "merge",
+   "enabled": [
+    "review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "New commits after an approval (your PR)",
+   "rule": "R4 · R7 · bug 3",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approval_stale",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Sam approved this version, Bob’s older change request still stands",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     },
+     {
+      "by": "bob",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Your PR, nobody approved, repo needs no reviews",
+   "rule": "R2 · bug 3",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Your PR approved, check data unreadable",
+   "rule": "D04 · bug 2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "unknown",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved_checks",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Your PR approved, repo has no checks at all",
+   "rule": "D04",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "none",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved",
+   "next": "merge",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Your PR approved, but you lack merge rights",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "READ",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved_no_rights",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Only a bot approved your PR",
+   "rule": "R8",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "qa-bot",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "A bot requested changes on your PR",
+   "rule": "R8",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "qa-bot",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h2",
+      "bot": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Your draft, not checked yet",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "draft",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.draft",
+   "next": "check_my_pr",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "open_for_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your draft, check found problems",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "draft",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "findings"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.findings",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "set_aside",
+    "open_for_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your draft, check clean",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "draft",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "clear"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.draft_ready",
+   "next": "open_for_review",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "open_for_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your check findings set aside",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "findings",
+     "setAside": true
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Findings from an older version of your PR",
+   "rule": "R7",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h1",
+     "outcome": "findings"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Agent drafted a verdict for you",
+   "rule": "R5",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "findings"
+    },
+    "outbox": {
+     "kind": "verdict",
+     "event": "REQUEST_CHANGES",
+     "head": "h2",
+     "state": "drafted"
+    },
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "to_confirm",
+   "next": "send_draft",
+   "enabled": [
+    "review",
+    "send_draft",
+    "set_aside",
+    "close"
+   ]
+  },
+  {
+   "name": "GitHub didn’t confirm the verdict",
+   "rule": "D01 · bug 4",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": {
+     "kind": "verdict",
+     "event": "APPROVE",
+     "head": "h2",
+     "state": "unconfirmed"
+    },
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "unconfirmed",
+   "next": "check_github",
+   "enabled": [
+    "check_github",
+    "dismiss",
+    "close"
+   ]
+  },
+  {
+   "name": "Drafted verdict, then they pushed",
+   "rule": "R7",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h1",
+     "outcome": "clear"
+    },
+    "outbox": {
+     "kind": "verdict",
+     "event": "APPROVE",
+     "head": "h1",
+     "state": "drafted"
+    },
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.to_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "Private review ready, not sent",
+   "rule": "R3",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "findings"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.result_ready",
+   "next": "draft_verdict",
+   "enabled": [
+    "review",
+    "draft_verdict",
+    "set_aside",
+    "close"
+   ]
+  },
+  {
+   "name": "You kept your review private (set aside)",
+   "rule": "bug 8",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "clear",
+     "setAside": true
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.kept_private",
+   "next": "",
+   "enabled": [
+    "review",
+    "draft_verdict",
+    "close"
+   ]
+  },
+  {
+   "name": "You reviewed it on GitHub directly",
+   "rule": "bug 7",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "COMMENTED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.reviewed",
+   "next": "",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your re-review of the new version is done",
+   "rule": "D03",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "clear"
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.result_ready",
+   "next": "draft_verdict",
+   "enabled": [
+    "review",
+    "draft_verdict",
+    "set_aside",
+    "close"
+   ]
+  },
+  {
+   "name": "An unconfirmed push is checked, never dismissed",
+   "rule": "D01",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": {
+     "kind": "push",
+     "head": "h2",
+     "state": "unconfirmed"
+    },
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "unconfirmed",
+   "next": "check_github",
+   "enabled": [
+    "check_github",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Finishing your PR needs write access",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "READ",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "An unreadable PR offers no status change",
+   "rule": "D04",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": false,
+    "role": "author"
+   },
+   "state": "unknown",
+   "next": "retry",
+   "enabled": [
+    "retry"
+   ]
+  },
+  {
+   "name": "An agent is reviewing their PR",
+   "rule": "R9",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": {
+     "kind": "review",
+     "state": "running"
+    },
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "working",
+   "next": "",
+   "enabled": []
+  },
+  {
+   "name": "The agent stopped before finishing",
+   "rule": "bug 5",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": {
+     "kind": "check",
+     "state": "stalled"
+    },
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "stalled",
+   "next": "rerun_job",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close",
+    "rerun_job"
+   ]
+  },
+  {
+   "name": "Their PR still a draft",
+   "rule": "R3",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "draft",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.draft",
+   "next": "",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "PR could not be read",
+   "rule": "D04",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": false,
+    "role": "reviewer"
+   },
+   "state": "unknown",
+   "next": "retry",
+   "enabled": [
+    "retry"
+   ]
+  },
+  {
+   "name": "Merged",
+   "rule": "",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "merged",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "merged",
+   "next": "",
+   "enabled": []
+  },
+  {
+   "name": "Their PR in the merge queue",
+   "rule": "D04",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "alex",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": {
+     "kind": "merge",
+     "head": "h2",
+     "state": "sending"
+    },
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "sending",
+   "next": "",
+   "enabled": [
+    "close"
+   ]
+  },
+  {
+   "name": "Outcome of a push unconfirmed on your PR",
+   "rule": "D01",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": {
+     "kind": "push",
+     "head": "h2",
+     "state": "unconfirmed"
+    },
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "unconfirmed",
+   "next": "check_github",
+   "enabled": [
+    "check_github",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Only a reader on their PR cannot take over",
+   "rule": "R3",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.to_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  }
+ ]
+}

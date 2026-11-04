@@ -357,3 +357,129 @@ def test_verdict_option_freezes_its_own_instructions():
     presets.resolve_options(None, {"propose_verdict": True}, choice=choice, mode="review")
   with pytest.raises(ValueError):
     presets.resolve_options(None, {"post_review": True}, choice=choice, mode="review_fix_merge")
+
+
+# A plain comment instead of the proposed verdict, and verdicts the owner let the agent send
+
+def _decide_as_comment(setup, proposal_id):
+  db, row, _ = setup
+  body = routes.VerdictDecision(**{k: ITEM[k] for k in ("repo", "number", "head_sha")},
+                                proposal_id=proposal_id, decision="submit", event="COMMENT")
+  return asyncio.run(routes.decide_verdict(1, row.id, body, db, _owner(setup)))
+
+
+def test_comment_verdict_submits_comment_body(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  setup[1].mode = "review"
+  setup[0].commit()
+  events = []
+  _record(monkeypatch, events)
+  proposal = report(setup, publish=True, state="needs_you", summary="Two small nits")["run"]["items"][0]["verdict_proposal"]
+  assert proposal["comment_body"].startswith("**Möbius review: Changes suggested**")
+  assert proposal["comment_body_sha256"] and proposal["comment_body"] != proposal["body"]
+  receipt = _decide_as_comment(setup, proposal["id"])["verdict"]
+  (kind, event, head, body), = events
+  assert (kind, event, head) == ("post", "COMMENT", ITEM["head_sha"]) and body.startswith(proposal["comment_body"])
+  assert (receipt["state"], receipt["event"], receipt["proposed_event"]) == ("posted", "COMMENT", "REQUEST_CHANGES")
+
+
+def test_an_approval_sent_as_a_comment_is_never_the_approval_a_merge_needs(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events)
+  resumed = _resumes(monkeypatch)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  result = _decide_as_comment(setup, proposal["id"])
+  assert result["merge_resumed"] is None and resumed == []
+  report(setup, publish=True)
+  assert [e[:2] for e in events] == [("post", "COMMENT")]
+  item = setup[1].outcomes_json[KEY]
+  assert domain.public_merge_blocker(setup[1], item) == "You sent a comment, not an approval, so this PR will not be merged."
+
+
+def test_a_comment_is_only_how_a_verdict_is_submitted():
+  from pydantic import ValidationError
+  with pytest.raises(ValidationError):
+    routes.VerdictDecision(**{k: ITEM[k] for k in ("repo", "number", "head_sha")},
+                           proposal_id="0" * 32, decision="discard", event="COMMENT")
+
+
+def test_a_proposal_saved_without_comment_wording_is_only_sent_as_proposed(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  item = row.outcomes_json[KEY]
+  older = {k: v for k, v in item["verdict_proposal"].items() if not k.startswith("comment_body")}
+  assert domain._cas_outcome(db, row, KEY, {**item, "verdict_proposal": older}), "a proposal from an older build"
+  with pytest.raises(HTTPException) as refused:
+    _decide_as_comment(setup, proposal["id"])
+  assert refused.value.status_code == 409 and events == []
+  assert row.outcomes_json[KEY]["verdict_proposal"]["state"] == "proposed"
+
+
+def test_an_agent_sends_its_verdict_only_when_the_owner_chose_that_up_front(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True, agent_submits_verdict=True)
+  row.mode = "review"
+  db.commit()
+  events = []
+  _record(monkeypatch, events)
+  result = report(setup, publish=True, state="needs_you", summary="Blocking bug")
+  assert [e[:2] for e in events] == [("post", "REQUEST_CHANGES")]
+  assert result["verdict"]["state"] == "posted" and result["run"]["items"][0]["verdict_proposal"]["state"] == "posted"
+  report(setup, publish=True, state="needs_you", summary="Blocking bug")
+  assert len(events) == 1, "an identical retry never sends again"
+
+
+def test_an_agent_never_sends_a_verdict_on_the_owners_own_pr(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True, agent_submits_verdict=True)
+  row.mode = "review"
+  db.commit()
+  events = []
+  _record(monkeypatch, events)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42}}))
+  item = report(setup, publish=True)["run"]["items"][0]
+  assert events == [] and "verdict_proposal" not in item
+
+
+def test_without_the_owners_choice_the_verdict_still_waits_for_their_tap(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True)
+  row.mode = "review"
+  db.commit()
+  events = []
+  _record(monkeypatch, events)
+  item = report(setup, publish=True)["run"]["items"][0]
+  assert events == [] and item["verdict_proposal"]["state"] == "proposed"
+
+
+@pytest.mark.parametrize("mode, options", [
+  ("review_merge", {"post_review": True, "propose_verdict": True, "agent_submits_verdict": True}),
+  ("review", {"post_review": True, "agent_submits_verdict": True}),
+])
+def test_an_agent_sent_verdict_needs_proposals_and_is_never_part_of_a_merge(setup, mode, options):
+  db, _, principal = setup
+  with pytest.raises(HTTPException) as refused:
+    routes.review_preview(1, routes.ReviewPreview(mode=mode, options=options), db, _owner(setup))
+  assert refused.value.status_code == 422
+
+
+def test_the_brief_tells_the_agent_who_sends_its_verdict(setup):
+  db, row = _grant(setup, propose_verdict=True)
+  row.mode = "review"
+  db.commit()
+  assert domain.OWNER_SUBMITS_NOTE in domain.brief(row)
+  row.options_json = {**row.options_json, "agent_submits_verdict": True}
+  db.commit()
+  assert domain.AGENT_SUBMITS_NOTE in domain.brief(row) and domain.OWNER_SUBMITS_NOTE not in domain.brief(row)
+
+
+def test_an_unconfirmed_comment_verdict_is_looked_for_as_a_comment(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events, state="unknown")
+  _resumes(monkeypatch)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  _decide_as_comment(setup, proposal["id"])
+  seen = _look(monkeypatch, {"id": 81, "html_url": "https://github.com/x/pull/7#pullrequestreview-81"})
+  assert _observe(setup)["state"] == "posted"
+  assert seen[0][2] == "COMMENT" and [e[:2] for e in events] == [("post", "COMMENT")]

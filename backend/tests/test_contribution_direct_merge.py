@@ -14,7 +14,7 @@ from app import auth as auth_mod, contribution_direct_merge as subject, contribu
 from app.chat_writer import create_chat
 from app.contribution_errors import ContributionSubmitError
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import BASE, CHECKS, ITEM, PULL, REPO, SHA, TARGET
+from tests.test_contribution_review_runs import APPROVAL, BASE, CHECKS, ITEM, PULL, REPO, SHA, TARGET
 
 NAME, NUMBER = ITEM["repo"], ITEM["number"]
 MERGED_SHA = "c" * 40
@@ -47,11 +47,12 @@ class FakeGitHub:
   def __init__(self):
     self.repo = {**REPO, "allow_merge_commit": True}
     self.pull = {**PULL}
-    self.checks = {**CHECKS}
+    self.checks = {key: value for key, value in CHECKS.items() if key != "latestOpinionatedReviews"}
+    self.reviews = [APPROVAL]  # the writers' standing opinions the check read carries
     self.base_tips = [BASE]  # each base-branch read takes the next; the last repeats
     self.merge_answer = {"merged": True, "sha": MERGED_SHA, "message": RESPONSE_BODY}
     self.enqueue_answer = {"data": {"enqueuePullRequest": {"mergeQueueEntry": QUEUE_ENTRY}}}
-    self.unreadable = set()  # any of "repo", "pull", "base", "checks"
+    self.unreadable = set()  # any of "repo", "pull", "base", "checks", "reviews"
     self.on_base_read = lambda count: None
     self.base_reads = 0
     self.calls, self.merges, self.enqueues = [], [], []
@@ -88,7 +89,8 @@ class FakeGitHub:
       self.enqueues.append({"id": flags["id"], "head": flags["head"]})
       return self._answer(self.enqueue_answer)
     self._must_be_readable("checks")
-    return self._answer({"data": {"node": self.checks}})
+    reviews = {} if "reviews" in self.unreadable else {"latestOpinionatedReviews": {"nodes": self.reviews}}
+    return self._answer({"data": {"node": {**self.checks, **reviews}}})
 
   def _merge(self, flags):
     self.merges.append(flags)
@@ -114,7 +116,7 @@ def body(**changes):
 
 
 def press(github, authorize=lambda: None, **changes):
-  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize))
+  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize, job=None))
 
 
 def refused(github, authorize=lambda: None, **changes):
@@ -216,11 +218,25 @@ REFUSALS = {
   "a draft": (lambda g: g.pull.update(draft=True), "This pull request is still a draft."),
   "a head that moved between GitHub's two answers": (lambda g: g.checks.update(headRefOid=MOVED),
                                                       "The pull request changed during the merge check."),
-  "changes requested": (lambda g: g.checks.update(reviewDecision="CHANGES_REQUESTED"), REVIEW),
-  "a review still required": (lambda g: g.checks.update(reviewDecision="REVIEW_REQUIRED"), REVIEW),
+  "nobody but the author approved": (lambda g: setattr(g, "reviews", []), "Nobody but the author has approved it yet."),
+  "an approval only of an older version": (
+    lambda g: setattr(g, "reviews", [{**APPROVAL, "commit": {"oid": MOVED}}]), "The approval is for an older version."),
+  "only a bot approved": (lambda g: setattr(g, "reviews", [{**APPROVAL, "author": {"login": "ci", "__typename": "Bot"}}]),
+                          "Nobody but the author has approved it yet."),
+  "the author's own approval": (lambda g: (g.pull.update(user={"id": 7, "login": "sam"})),
+                                "Nobody but the author has approved it yet."),
+  "an older change request still standing": (
+    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": {"login": "bob", "__typename": "User"},
+                                "commit": {"oid": MOVED}}), "bob asked for changes and hasn’t approved since."),
+  "a change request whose commit GitHub no longer has": (
+    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": None, "commit": None}),
+    "ghost asked for changes and hasn’t approved since."),
+  "reviews that cannot be read": (lambda g: g.unreadable.add("reviews"), "This PR could not be read. Try again."),
   "failing checks": (lambda g: g.checks.update(_rollup("FAILURE")), CHECKS_FAILED),
   "pending checks": (lambda g: g.checks.update(_rollup("PENDING")), CHECKS_FAILED),
   "no check result": (lambda g: g.checks.update(commits={"nodes": []}), "GitHub did not provide the current check result."),
+  "changes requested": (lambda g: g.checks.update(reviewDecision="CHANGES_REQUESTED"), REVIEW),
+  "a review still required": (lambda g: g.checks.update(reviewDecision="REVIEW_REQUIRED"), REVIEW),
   "merge conflicts": (lambda g: g.checks.update(mergeable="CONFLICTING", mergeStateStatus="DIRTY"), GATE),
   "a branch that is behind": (lambda g: g.checks.update(mergeStateStatus="BEHIND"), GATE),
   "a pull request GitHub's rules still block": (lambda g: g.checks.update(mergeStateStatus="BLOCKED"), GATE),
@@ -241,6 +257,16 @@ def test_a_pull_request_that_cannot_be_merged_is_refused_in_plain_words_and_noth
   refusal = refused(github)
   assert (refusal.status_code, refusal.detail) == (409, sentence)
   assert github.writes == 0
+
+
+def test_a_merge_waits_while_an_agent_works_on_the_pull_request_but_not_for_a_stalled_one():
+  github = FakeGitHub()
+  with pytest.raises(HTTPException) as refusal:
+    asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, job={"state": "running"}))
+  assert (refusal.value.status_code, refusal.value.detail) == (409, "An agent is already working on this PR.")
+  assert github.writes == 0
+  answer = asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, job={"state": "stalled"}))
+  assert answer["state"] == "merged"
 
 
 def test_a_method_the_repository_does_not_allow_is_refused_with_the_ones_it_does():
@@ -370,7 +396,7 @@ def test_a_cancelled_request_never_starts_the_write_and_its_cancellation_is_not_
       assert release.wait(5)
   github.on_base_read = hold_the_final_base_check
   async def scenario():
-    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None))
+    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, job=None))
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     release.set()
