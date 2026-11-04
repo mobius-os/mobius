@@ -58,7 +58,7 @@ import signal
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
@@ -81,7 +81,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity, generated_files, settled, tracing
+from app import activity, answer_check, generated_files, settled, tracing
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
 from app.claude_events import (
   NativeContinuationTracker,
@@ -107,7 +107,6 @@ from app.process_groups import (
 )
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
-from app.screenshot_steps import SAVED_IMAGE_FIELD, SCREENSHOT_TOOLS
 from app.viewed_images import chat_media_dir
 
 log = logging.getLogger(__name__)
@@ -268,7 +267,7 @@ _CLAUDE_TURN_END_TOOLS = (
   "Bash",
 )
 # Owner cards whose save hands the turn to the owner; the visible-answer check
-# runs just before one is saved (see `_answer_check_reason`).
+# runs just before one is saved (see `answer_check.reason`).
 _ANSWER_CHECK_CARD_TOOLS = frozenset(
   f"mcp__{CONTROL_SERVER_NAME}__{name}"
   for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
@@ -1111,389 +1110,6 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
-# The owner reads only a turn's text blocks; thinking and tool activity are
-# folded away. Three shapes leave the owner without what the turn was for:
-#
-# - an answer drafted in thinking: the agent's reasoning since its last
-#   visible text ends with words written for the owner, set apart by blank
-#   lines (summarized reasoning keeps such a draft as its own closing
-#   paragraph), and the agent then saves a card or ends as if it had said
-#   them; or, with no such paragraph, a short visible reply after long
-#   reasoning, such as "Nothing has been changed.";
-# - an image the agent saved to this chat's media and viewed (a screenshot or
-#   a Read), then never embedded: viewing is private, so a reply that says
-#   "here's the before and after" shows nothing;
-# - a link the agent fetched into tool output and then pointed to ("pay on the
-#   page linked above") without ever writing it in visible text.
-#
-# All are checked where a turn hands control back: when the agent ends its
-# turn, and just before it saves an owner card (a saved card ends the turn, so
-# a later check could never reopen it). A long progress update can still omit
-# the final conclusion. The check speaks again only about evidence newer than
-# its last reminder, a few times per turn at most, and the agent itself judges
-# whether its reply is complete. After each work step, a narrower check notes
-# words written as an extra thinking part (see `_extra_thinking_part`).
-_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
-_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS = 700
-_ANSWER_CHECK_THINKING_MIN_CHARS = 600
-_ANSWER_CHECK_DRAFT_BREAK = re.compile(r"\n[ \t]*\n[ \t]*\n")
-_ANSWER_CHECK_DRAFT_MIN_CHARS = 40
-# Five words in a row shared with the visible reply mean the draft was said.
-_ANSWER_CHECK_SHARED_WORDS = 5
-_ANSWER_CHECK_IMAGE_PATH = re.compile(r"\.(?:gif|jpe?g|png|webp)$", re.IGNORECASE)
-_ANSWER_CHECK_URL = re.compile(r"https?://([^\s/\"'<>()\[\]\\`]+)[^\s\"'<>()\[\]\\`]*")
-_ANSWER_CHECK_LINK_WORD = re.compile(r"\b(?:links?|linked|urls?)\b", re.IGNORECASE)
-# Loopback addresses in tool output are the agent's own plumbing, never a link
-# the owner could open.
-_ANSWER_CHECK_PRIVATE_HOSTS = re.compile(
-  r"^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(?::\d+)?$", re.IGNORECASE,
-)
-_ANSWER_CHECK_END_OF_TURN = (
-  "Möbius end-of-turn check. The owner sees only your visible reply; your "
-  "thinking and tool activity are hidden from them."
-)
-_ANSWER_CHECK_BEFORE_CARD = (
-  "Möbius check before your card is saved. The card was NOT saved. The owner "
-  "sees only your visible reply; your thinking and tool activity are hidden "
-  "from them."
-)
-# Quote only the visible reply, never a thinking excerpt: asking the model to
-# reproduce even summarized thinking can trigger a reasoning-extraction refusal.
-# The detection stays local; the reminder asks for a task-grounded summary.
-_ANSWER_CHECK_MISSING_ANSWER = (
-  "Your visible reply may not yet answer the owner's latest message or "
-  "report the result. {seen} Re-read that message and the verified task "
-  "evidence. If something is missing, write a brief explanation of the "
-  "conclusion or a summary of actions taken. If it already answers the "
-  "owner, leave it."
-)
-_ANSWER_CHECK_SEEN = "Everything the owner sees from this reply, verbatim: «{visible}»."
-_ANSWER_CHECK_SEEN_EXCERPT = "The end of the owner's visible reply, verbatim: «…{visible}»."
-_ANSWER_CHECK_SEEN_NOTHING = "The owner sees no text at all from this reply."
-_ANSWER_CHECK_IMAGES = (
-  "You viewed {images} this turn, but your visible reply never shows {them}. "
-  "If the owner should see {them} (you described {them}, promised to show "
-  "{them}, or are asking about {them}), embed each now in visible text as "
-  "![short description](/api/chats/{chat_id}/media/<file name>). If {them_was} "
-  "only for your own checking, leave {them} out."
-)
-_ANSWER_CHECK_LINKS = (
-  "Your visible reply mentions a link but shows none, while this turn's tool "
-  "output contained one ({hosts}). Tool output is hidden from the owner, so a "
-  "link there is not \"above\" for them. If the owner needs a link, write it "
-  "in visible text as [short label](full address). If you meant something "
-  "else, leave it."
-)
-_ANSWER_CHECK_END_OF_TURN_NEXT = (
-  "Do not mention this check. If nothing is missing, end your turn without "
-  "writing anything more."
-)
-_ANSWER_CHECK_BEFORE_CARD_NEXT = (
-  "Do not mention this check. Then call the same card tool again with the "
-  "same arguments; this check speaks again only about something new."
-)
-# Attached to a work step's result (never blocking it), so a note the model
-# wrote as thinking mid-reply is caught without costing an extra model step.
-_ANSWER_CHECK_AFTER_STEP = (
-  "Möbius check after this step. The owner sees only your visible reply; your "
-  "thinking and tool activity are hidden from them. Before this step you may "
-  "have meant to tell the owner something, but no visible text reached them. "
-  "{seen} If the owner should know something from that step, write a brief "
-  "visible note now, then continue. Otherwise just continue. Do not mention "
-  "this check."
-)
-# A model that writes its answer into thinking often does it again after the
-# reminder, so the check re-arms on new evidence instead of speaking once per
-# turn. The cap bounds the extra model steps if a reply keeps tripping it.
-_ANSWER_CHECK_MAX_REMINDERS = 3
-
-
-def _visible_reply_chars(
-  blocks: list, last_assistant_message: object = None,
-) -> tuple[str, int]:
-  """The text the owner can read in this segment, and its stripped length.
-
-  The Stop hook can run before the stream reader has dispatched the final
-  text, so the CLI's own ``last_assistant_message`` is counted when the
-  blocks do not contain it yet.
-  """
-  visible = "".join(
-    block["content"] for block in blocks
-    if isinstance(block, dict) and block.get("type") == "text"
-    and isinstance(block.get("content"), str)
-  )
-  visible_chars = len(visible.strip())
-  if isinstance(last_assistant_message, str):
-    tail = last_assistant_message.strip()
-    if tail and tail not in visible:
-      visible += "\n" + tail
-      visible_chars += len(tail)
-  return visible, visible_chars
-
-
-def _viewed_media_image(block: object, media_dir: str) -> str | None:
-  """The chat-media image file name this tool block showed the agent, if any.
-
-  A screenshot step names the picture it saved; a Read names a path, which
-  counts only when it is an image directly in this chat's media — the files
-  that exist to be shown. Images elsewhere (``/tmp`` verification frames, the
-  owner's own uploads) are not something the owner is waiting to see.
-  """
-  if not isinstance(block, dict) or block.get("type") != "tool":
-    return None
-  tool = block.get("tool")
-  if tool in SCREENSHOT_TOOLS:
-    saved = block.get(SAVED_IMAGE_FIELD)
-    return saved if isinstance(saved, str) and saved else None
-  if tool != "Read":
-    return None
-  raw = block.get("input")
-  if isinstance(raw, dict):
-    raw = raw.get("file_path")
-  if not isinstance(raw, str) or not _ANSWER_CHECK_IMAGE_PATH.search(raw):
-    return None
-  path = os.path.normpath(raw)
-  if os.path.dirname(path) != media_dir:
-    return None
-  return os.path.basename(path)
-
-
-def _unshown_viewed_images(
-  blocks: object, media_dir: str, last_assistant_message: object = None,
-) -> list[str]:
-  """Chat-media images the agent viewed this segment but never embedded."""
-  if not isinstance(blocks, list):
-    return []
-  visible, _ = _visible_reply_chars(blocks, last_assistant_message)
-  unshown: list[str] = []
-  for block in blocks:
-    name = _viewed_media_image(block, media_dir)
-    if name and f"/media/{name}" not in visible and name not in unshown:
-      unshown.append(name)
-  return unshown
-
-
-def _tool_output_link_hosts_the_reply_points_to(
-  blocks: object, last_assistant_message: object = None,
-) -> list[str]:
-  """Hosts of links seen only in tool output when the reply refers to a link.
-
-  Fires only when the visible reply talks about a link yet contains no web
-  address at all: tool output routinely holds addresses nobody needs, so their
-  mere presence says nothing; a reply that mentions one and shows none does.
-  """
-  if not isinstance(blocks, list):
-    return []
-  visible, _ = _visible_reply_chars(blocks, last_assistant_message)
-  if not _ANSWER_CHECK_LINK_WORD.search(visible) or _ANSWER_CHECK_URL.search(visible):
-    return []
-  hosts: list[str] = []
-  for block in blocks:
-    if not isinstance(block, dict) or block.get("type") != "tool":
-      continue
-    output = block.get("output")
-    if not isinstance(output, str):
-      continue
-    for match in _ANSWER_CHECK_URL.finditer(output):
-      host = match.group(1).lower()
-      if not _ANSWER_CHECK_PRIVATE_HOSTS.match(host) and host not in hosts:
-        hosts.append(host)
-  return hosts[:3]
-
-
-def _unreviewed_answer_evidence(blocks: object, reviewed_through: int) -> object:
-  """This segment as a check after an earlier reminder should see it.
-
-  Every text block stays, because all of it is on the owner's screen; thinking
-  and tool blocks before ``reviewed_through`` were already covered by that
-  reminder and are dropped, so the check speaks again only about something new.
-  """
-  if not isinstance(blocks, list) or reviewed_through <= 0:
-    return blocks
-  return [
-    block for index, block in enumerate(blocks)
-    if index >= reviewed_through
-    or (isinstance(block, dict) and block.get("type") == "text")
-  ]
-
-
-def _answer_check_seen(blocks: list, last_assistant_message: object = None) -> str:
-  """What the owner can read of this reply, quoted (bounded) for a reminder."""
-  visible = " ".join(_visible_reply_chars(blocks, last_assistant_message)[0].split())
-  if not visible:
-    return _ANSWER_CHECK_SEEN_NOTHING
-  template = (
-    _ANSWER_CHECK_SEEN_EXCERPT
-    if len(visible) > _ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS else _ANSWER_CHECK_SEEN
-  )
-  return template.format(visible=visible[-_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS:])
-
-
-def _answer_check_after_step_reason(blocks: object) -> str | None:
-  """A note for the agent when the step it just took swallowed its words.
-
-  Mid-reply only the narrow two-thinking-parts signal counts: long reasoning,
-  unshown images, and unmentioned links are normal before a reply is done.
-  ``blocks`` should already be narrowed to this step's new evidence.
-  """
-  if not isinstance(blocks, list) or not _has_unshown_closing_draft(
-    blocks, drafts_in=_extra_thinking_part,
-  ):
-    return None
-  return _ANSWER_CHECK_AFTER_STEP.format(seen=_answer_check_seen(blocks))
-
-
-def _answer_check_reason(
-  blocks: object,
-  *,
-  chat_id: str,
-  media_dir: str,
-  before_card: bool,
-  last_assistant_message: object = None,
-) -> str | None:
-  """What the owner may be missing from this reply, phrased for the agent.
-
-  None means the reply shows no sign of a hidden answer, an unshown image,
-  or a link it points to without showing.
-  """
-  parts: list[str] = []
-  if (
-    _has_unshown_closing_draft(blocks, last_assistant_message)
-    or _answer_may_be_only_in_thinking(blocks, last_assistant_message)
-  ):
-    parts.append(_ANSWER_CHECK_MISSING_ANSWER.format(
-      seen=_answer_check_seen(blocks, last_assistant_message),
-    ))
-  images = _unshown_viewed_images(blocks, media_dir, last_assistant_message)
-  if images:
-    one = len(images) == 1
-    parts.append(_ANSWER_CHECK_IMAGES.format(
-      images=", ".join(images),
-      them="it" if one else "them",
-      them_was="it was" if one else "they were",
-      chat_id=chat_id,
-    ))
-  link_hosts = _tool_output_link_hosts_the_reply_points_to(
-    blocks, last_assistant_message,
-  )
-  if link_hosts:
-    parts.append(_ANSWER_CHECK_LINKS.format(hosts=", ".join(link_hosts)))
-  if not parts:
-    return None
-  if before_card:
-    return " ".join([_ANSWER_CHECK_BEFORE_CARD, *parts, _ANSWER_CHECK_BEFORE_CARD_NEXT])
-  return " ".join([_ANSWER_CHECK_END_OF_TURN, *parts, _ANSWER_CHECK_END_OF_TURN_NEXT])
-
-
-def _has_unshown_closing_draft(
-  blocks: object,
-  last_assistant_message: object = None,
-  *,
-  drafts_in: Callable[[dict], list[str]] | None = None,
-) -> bool:
-  """Whether a closing draft in thinking has not reached the visible reply.
-
-  Only thinking after the last visible text counts: a draft followed by more
-  visible text was superseded by what the agent went on to say. A draft
-  counts as said when any run of a few words from it appears in the visible
-  reply, whitespace aside. ``drafts_in`` picks the candidate drafts in one
-  thinking block (default ``_closing_draft_candidates``). Return only the
-  signal, never thinking excerpts that a reminder could inadvertently send
-  back to the model.
-  """
-  drafts_in = drafts_in or _closing_draft_candidates
-  if not isinstance(blocks, list):
-    return False
-  visible_text, _ = _visible_reply_chars(blocks, last_assistant_message)
-  undispatched_tail = (
-    isinstance(last_assistant_message, str) and last_assistant_message.strip()
-    and last_assistant_message.strip() not in _visible_reply_chars(blocks)[0]
-  )
-  if undispatched_tail:
-    # Final text the stream reader has not dispatched yet comes after every
-    # thinking block here, so nothing in thinking closes the reply.
-    return False
-  last_text = max(
-    (index for index, block in enumerate(blocks)
-     if isinstance(block, dict) and block.get("type") == "text"
-     and isinstance(block.get("content"), str) and block["content"].strip()),
-    default=-1,
-  )
-  visible = " ".join(visible_text.split())
-  for block in blocks[last_text + 1:]:
-    if not (
-      isinstance(block, dict) and block.get("type") == "thinking"
-      and isinstance(block.get("content"), str)
-    ):
-      continue
-    for draft in drafts_in(block):
-      if len(draft) < _ANSWER_CHECK_DRAFT_MIN_CHARS:
-        continue
-      words = draft.split()
-      runs = (
-        " ".join(words[start:start + _ANSWER_CHECK_SHARED_WORDS])
-        for start in range(max(1, len(words) - _ANSWER_CHECK_SHARED_WORDS + 1))
-      )
-      if any(run in visible for run in runs):
-        continue
-      return True
-  return False
-
-
-def _closing_draft_candidates(block: dict) -> list[str]:
-  """Words in one thinking block that may have been meant for the owner.
-
-  The closing paragraph set apart by blank lines, plus the answer written as
-  an extra thinking part (`_extra_thinking_part`).
-  """
-  candidates: list[str] = []
-  paragraphs = _ANSWER_CHECK_DRAFT_BREAK.split(block["content"].strip())
-  if len(paragraphs) >= 2:
-    candidates.append(" ".join(paragraphs[-1].split()))
-  return candidates + _extra_thinking_part(block)
-
-
-def _extra_thinking_part(block: dict) -> list[str]:
-  """The last thinking part of a response that thought twice without replying.
-
-  The narrowest swallowed-answer signal: in the raw Claude sessions examined,
-  every response with two thinking parts back to back and no reply text was an
-  answer the owner never saw, which makes it precise enough to check after
-  every work step. The live block keeps those parts in ``_thinking_segments``
-  (stripped before persistence).
-  """
-  segments = block.get("_thinking_segments")
-  if not isinstance(segments, list) or len(segments) < 2:
-    return []
-  last = segments[-1]
-  if isinstance(last, (list, tuple)) and len(last) == 2 and isinstance(last[1], str):
-    return [" ".join(last[1].split())]
-  return []
-
-
-def _answer_may_be_only_in_thinking(
-  blocks: object, last_assistant_message: object = None,
-) -> bool:
-  """Whether this reply's reasoning dwarfs what the owner can actually read.
-
-  ``blocks`` is the sink's current assistant segment.
-  """
-  if not isinstance(blocks, list):
-    return False
-  _, visible_chars = _visible_reply_chars(blocks, last_assistant_message)
-  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
-    return False
-  longest_thinking = max(
-    (
-      len(block["content"].strip()) for block in blocks
-      if isinstance(block, dict) and block.get("type") == "thinking"
-      and isinstance(block.get("content"), str)
-    ),
-    default=0,
-  )
-  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
-
-
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1737,13 +1353,13 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-  # The visible-answer check (see `_answer_check_reason`) runs at each
+  # The visible-answer check (see `answer_check.reason`) runs at each
   # hand-back: just before the root agent saves an owner card, and when it
   # ends its turn. Before a card it declines that one tool call, so the agent
   # can write what is missing and call the card again; at the end it returns
   # the turn. After it speaks, it considers only blocks that arrived since (plus
   # all visible text), so an unchanged retry passes and a second swallowed
-  # answer is caught, up to _ANSWER_CHECK_MAX_REMINDERS per turn. A steer
+  # answer is caught, up to answer_check.MAX_REMINDERS per turn. A steer
   # starts a fresh block list, which the identity check below treats as new.
   # A Stop or a saved owner card owns the turn's end, so neither is reopened.
   answer_check_reminders = 0
@@ -1757,15 +1373,15 @@ async def run_claude_sdk_turn(
   ) -> str | None:
     nonlocal answer_check_reminders, answer_check_reviewed
     if (
-      answer_check_reminders >= _ANSWER_CHECK_MAX_REMINDERS
+      answer_check_reminders >= answer_check.MAX_REMINDERS
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
       return None
     blocks = getattr(bc, "assistant_blocks", None)
     reviewed_list, reviewed_through = answer_check_reviewed
-    reason = _answer_check_reason(
-      _unreviewed_answer_evidence(
+    reason = answer_check.reason(
+      answer_check.unreviewed_evidence(
         blocks, reviewed_through if blocks is reviewed_list else 0,
       ),
       chat_id=chat_id,
@@ -1843,7 +1459,7 @@ async def run_claude_sdk_turn(
     blocks = getattr(bc, "assistant_blocks", None)
     stepped_list, stepped_through = answer_check_stepped
     answer_check_stepped = (blocks, len(blocks) if isinstance(blocks, list) else 0)
-    note = _answer_check_after_step_reason(_unreviewed_answer_evidence(
+    note = answer_check.after_step_reason(answer_check.unreviewed_evidence(
       blocks, stepped_through if blocks is stepped_list else 0,
     ))
     if note is None:

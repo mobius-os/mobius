@@ -56,6 +56,13 @@ from app.claude_sdk_runner import (
 )
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
+from tests.test_answer_check import (
+  _ANSWER_ONLY_IN_THINKING,
+  _DRAFT,
+  _answer_as_second_thinking_part,
+  _closing_draft_before_card,
+  _viewed_before_after,
+)
 
 
 class _Bus:
@@ -3684,148 +3691,6 @@ async def test_cancel_during_turn_teardown_still_disconnects_and_unregisters(mon
   assert runners.get_handle("teardown-cancel-chat", RunnerKind.CLAUDE_SDK) is None
 
 
-# The owner reads only text blocks. This is the stored shape of a reply whose
-# answer lived only in its thinking: a closing line after a checkpoint.
-_ANSWER_ONLY_IN_THINKING = [
-  {"type": "thinking", "content": "Checking the deploy log for the failure."},
-  {"type": "text", "content": "I'll check the deploy log before answering."},
-  {"type": "tool", "tool": "Bash", "status": "done"},
-  {"type": "thinking", "content": "Confirmed: the deploy failed because the "
-   "build ran out of memory while bundling the frontend. " * 10},
-  {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"},
-  {"type": "text", "content": "Nothing has been changed."},
-]
-
-
-def test_answer_check_flags_an_answer_written_only_in_thinking():
-  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
-
-  assert _answer_may_be_only_in_thinking(_ANSWER_ONLY_IN_THINKING)
-  # The CLI's final message may not have reached the sink yet; a short one
-  # does not hide the problem.
-  assert _answer_may_be_only_in_thinking(
-    _ANSWER_ONLY_IN_THINKING[:-1], "Nothing has been changed.",
-  )
-
-
-def test_answer_check_quotes_what_the_owner_actually_sees():
-  # An agent that drafted its answer in thinking believes it is on screen;
-  # quoting the visible reply lets it see at once that it is not.
-  from app.claude_sdk_runner import _answer_check_reason
-
-  reason = _answer_check_reason(
-    _ANSWER_ONLY_IN_THINKING, chat_id="c", media_dir="/m", before_card=True,
-  )
-  assert ("verbatim: «I'll check the deploy log before answering."
-          "Nothing has been changed.»") in reason
-  silent = [block for block in _ANSWER_ONLY_IN_THINKING if block["type"] != "text"]
-  reason = _answer_check_reason(silent, chat_id="c", media_dir="/m", before_card=True)
-  assert "The owner sees no text at all from this reply." in reason
-
-
-def test_answer_check_leaves_ordinary_replies_alone():
-  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
-
-  answered = [*_ANSWER_ONLY_IN_THINKING, {
-    "type": "text",
-    "content": "The deploy failed: the build ran out of memory. " * 10,
-  }]
-  assert not _answer_may_be_only_in_thinking(answered)
-  # An answer the stream reader has not dispatched yet still counts.
-  assert not _answer_may_be_only_in_thinking(
-    _ANSWER_ONLY_IN_THINKING, answered[-1]["content"],
-  )
-  # A short answer after brief reasoning is a normal short reply.
-  assert not _answer_may_be_only_in_thinking([
-    {"type": "thinking", "content": "Simple greeting."},
-    {"type": "text", "content": "Hi!"},
-  ])
-  for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
-    assert not _answer_may_be_only_in_thinking(malformed)
-
-
-_DRAFT = ("The preview build still fails: increase the memory limit in the "
-          "build settings, then retry the deploy.")
-
-
-def _closing_draft_before_card() -> list[dict]:
-  """A reply that drafted its closing words in thinking, then saved a card.
-
-  Summarized thinking keeps such a draft as its own paragraph after blank
-  lines; the visible reply is long enough that length alone looks fine.
-  """
-  return [
-    {"type": "text", "content": "Checking whether the preview build succeeds "
-     "now, in case the memory limit was already increased. " * 6},
-    {"type": "tool", "tool": "Bash", "status": "done"},
-    {"type": "thinking", "content": "Same failure, so the memory limit is still too low."
-     f"\n\n\n\n{_DRAFT}\n"},
-  ]
-
-
-@pytest.mark.parametrize("before_card", [True, False])
-@pytest.mark.parametrize("blocks", [
-  _closing_draft_before_card(), _ANSWER_ONLY_IN_THINKING,
-])
-def test_answer_check_requests_a_summary_without_reproducing_thinking(blocks, before_card):
-  # Both detection paths must still prompt for a missing answer, but must not
-  # send thinking excerpts back as instructions to reproduce them visibly.
-  from app.claude_sdk_runner import _answer_check_reason
-
-  reason = _answer_check_reason(
-    blocks, chat_id="c", media_dir="/m", before_card=before_card,
-  )
-  assert reason is not None
-  prefix = "Möbius check before your card is saved." if before_card else "Möbius end-of-turn check."
-  assert reason.startswith(prefix)
-  assert "brief explanation of the conclusion or a summary of actions taken" in reason
-  assert "verified task evidence" in reason
-  assert _DRAFT not in reason
-  assert "Same failure" not in reason
-  assert "build ran out of memory" not in reason
-  assert "Your thinking since" not in reason
-  assert "only in your thinking" not in reason
-  assert "Everything the owner sees from this reply, verbatim:" in reason
-
-
-def test_answer_check_leaves_said_and_superseded_drafts_alone():
-  from app.claude_sdk_runner import _has_unshown_closing_draft
-
-  blocks = _closing_draft_before_card()
-  assert _has_unshown_closing_draft(blocks)
-  # Said in the visible reply, even re-wrapped across lines.
-  said = [*blocks[:2], {"type": "text", "content": _DRAFT.replace(" in the ", "\nin the ")},
-          blocks[2]]
-  assert not _has_unshown_closing_draft(said)
-  # Followed by visible text, which supersedes it.
-  later = [*blocks, {"type": "text", "content": "Increase the memory limit, then retry the deploy."}]
-  assert not _has_unshown_closing_draft(later)
-  # Final text the stream reader has not dispatched yet also comes after it.
-  assert not _has_unshown_closing_draft(blocks, "Increase memory, then retry the deploy.")
-  # A stale final message already in the blocks does not hide the draft.
-  assert _has_unshown_closing_draft(blocks, blocks[0]["content"])
-  # Ordinary reasoning: one paragraph, or a closing fragment too short to be
-  # words for the owner.
-  for content in ("Same failure, so the memory limit is still too low.",
-                  "Same failure.\n\n\n\nOk, asking."):
-    assert not _has_unshown_closing_draft([*blocks[:2], {"type": "thinking", "content": content}])
-  for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
-    assert not _has_unshown_closing_draft(malformed)
-
-
-def test_answer_check_bounds_visible_quotes_without_exposing_closing_drafts():
-  from app.claude_sdk_runner import _answer_check_reason
-
-  blocks = _closing_draft_before_card()
-  blocks[0] = {"type": "text", "content": "Earlier progress. " * 1000 + "Latest progress."}
-  reason = _answer_check_reason(blocks, chat_id="c", media_dir="/m", before_card=True)
-
-  assert reason is not None
-  assert "The end of the owner's visible reply, verbatim:" in reason
-  assert "Latest progress." in reason
-  assert len(reason) < 1500
-  assert _DRAFT not in reason
-
 
 async def _fire_stop_hook(options, **overrides) -> dict:
   hook_input = {"hook_event_name": "Stop", "stop_hook_active": False}
@@ -3874,137 +3739,6 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
   await _run_turn("answer-check-card-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
-
-
-def _media_dir(chat_id: str) -> str:
-  from app.config import get_settings
-  from app.viewed_images import chat_media_dir
-
-  return os.path.normpath(str(chat_media_dir(get_settings().data_dir, chat_id)))
-
-
-def _viewed_before_after(chat_id: str) -> list[dict]:
-  """A reply that promises a comparison, views it, and never embeds it."""
-  return [
-    {"type": "text", "content": "I'll put the two versions side by side."},
-    {"type": "tool", "tool": "Bash", "status": "done"},
-    {"type": "tool", "tool": "Read", "status": "done",
-     "input": f"{_media_dir(chat_id)}/before-after.png"},
-  ]
-
-
-def test_answer_check_flags_a_viewed_chat_image_the_reply_never_shows():
-  from app.claude_sdk_runner import _answer_check_reason
-
-  chat_id = "image-check-chat"
-  blocks = _viewed_before_after(chat_id)
-  reason = _answer_check_reason(
-    blocks, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=True,
-  )
-  assert reason is not None
-  assert reason.startswith("Möbius check before your card is saved. The card was NOT saved.")
-  assert "before-after.png" in reason
-  assert f"/api/chats/{chat_id}/media/" in reason
-  assert "only in your thinking" not in reason
-  assert "call the same card tool again" in reason
-
-  # A screenshot step names its saved picture instead of a path.
-  shot = [
-    {"type": "text", "content": "Here is how it looks now."},
-    {"type": "tool", "tool": "mcp__mobius_control__screenshot",
-     "status": "done", "saved_image": "shot-1.png"},
-  ]
-  reason = _answer_check_reason(
-    shot, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=False,
-  )
-  assert reason is not None and "shot-1.png" in reason
-  assert reason.startswith("Möbius end-of-turn check.")
-
-
-def test_answer_check_leaves_shown_and_private_images_alone():
-  from app.claude_sdk_runner import _answer_check_reason
-
-  chat_id = "image-check-chat"
-  media = _media_dir(chat_id)
-
-  def reason_for(blocks, last=None):
-    return _answer_check_reason(
-      blocks, chat_id=chat_id, media_dir=media, before_card=True,
-      last_assistant_message=last,
-    )
-
-  embed = f"![Before and after](/api/chats/{chat_id}/media/before-after.png)"
-  shown = [*_viewed_before_after(chat_id), {"type": "text", "content": embed}]
-  assert reason_for(shown) is None
-  # An embed the stream reader has not dispatched yet still counts.
-  assert reason_for(_viewed_before_after(chat_id), embed) is None
-  # Verification frames outside chat media, the owner's uploads, another
-  # chat's media, and non-image reads are not something the owner awaits.
-  for path in (
-    "/tmp/check.png",
-    f"{os.path.dirname(media)}/uploads/image.png",
-    f"{_media_dir('another-chat')}/before-after.png",
-    f"{media}/notes.md",
-  ):
-    assert reason_for([
-      {"type": "text", "content": "Checked it."},
-      {"type": "tool", "tool": "Read", "status": "done", "input": path},
-    ]) is None, path
-
-
-_CHECKOUT = "https://checkout.stripe.com/c/pay/cs_test_example#fid"
-
-
-def _link_only_in_tool_output(text: str) -> list[dict]:
-  """A reply that fetched a payment link and pointed to it without showing it."""
-  return [
-    {"type": "text", "content": "Starting the test purchase."},
-    {"type": "tool", "tool": "Bash", "status": "done",
-     "output": f"checkout ready\n{_CHECKOUT}\n"},
-    {"type": "text", "content": text},
-  ]
-
-
-def test_answer_check_flags_a_link_the_reply_points_to_but_never_shows():
-  from app.claude_sdk_runner import _answer_check_reason
-
-  chat_id = "link-check-chat"
-  reason = _answer_check_reason(
-    _link_only_in_tool_output("Pay on the test checkout page linked above."),
-    chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=True,
-  )
-  assert reason is not None
-  assert reason.startswith("Möbius check before your card is saved.")
-  assert "checkout.stripe.com" in reason
-  # The address itself stays out of the reason; the agent already has it.
-  assert "cs_test_" not in reason
-  assert "only in your thinking" not in reason
-
-
-def test_answer_check_leaves_shown_and_unmentioned_links_alone():
-  from app.claude_sdk_runner import _answer_check_reason
-
-  chat_id = "link-check-chat"
-
-  def reason_for(blocks, last=None):
-    return _answer_check_reason(
-      blocks, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=False,
-      last_assistant_message=last,
-    )
-
-  # The link is shown, or the reply never mentions one.
-  assert reason_for(_link_only_in_tool_output(f"[Open the checkout]({_CHECKOUT})")) is None
-  assert reason_for(_link_only_in_tool_output("Checked the balance: 0.00.")) is None
-  # A link the stream reader has not dispatched yet still counts.
-  assert reason_for(
-    _link_only_in_tool_output("Here is the link:"), f"<{_CHECKOUT}>",
-  ) is None
-  # Loopback addresses are the agent's plumbing, not something to open.
-  assert reason_for([
-    {"type": "tool", "tool": "Bash", "status": "done",
-     "output": "GET http://127.0.0.1:8000/api/apps/ 200\nhttp://localhost:5173/"},
-    {"type": "text", "content": "The broken link in your app is fixed."},
-  ]) is None
 
 
 async def _fire_pre_card_hook(options, **overrides) -> dict:
@@ -4076,51 +3810,9 @@ async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monke
   assert decisions == [{"continue_": True}]
 
 
-def _answer_as_second_thinking_part(answer: str = _DRAFT) -> dict:
-  """One model response that thought, then wrote its answer as more thinking.
-
-  The reducer joins the response's thinking parts with a single paragraph
-  break and keeps each part in ``_thinking_segments``; no reply text follows.
-  """
-  reasoning = "Same failure, so the memory limit is still too low; asking the owner."
-  return {
-    "type": "thinking",
-    "content": f"{reasoning}\n\n{answer}",
-    "_thinking_segments": [["m1:0", reasoning], ["m1:1", answer]],
-  }
-
-
-def test_answer_check_flags_an_answer_written_as_a_second_thinking_part():
-  from app.claude_sdk_runner import _has_unshown_closing_draft
-
-  earlier = _closing_draft_before_card()[:2]
-  assert _has_unshown_closing_draft([*earlier, _answer_as_second_thinking_part()])
-  # Said in the visible reply after all, or a lone thinking part: ordinary.
-  said = [{"type": "text", "content": _DRAFT}, earlier[1], _answer_as_second_thinking_part()]
-  assert not _has_unshown_closing_draft(said)
-  lone = {"type": "thinking", "content": _DRAFT, "_thinking_segments": [["m1:0", _DRAFT]]}
-  assert not _has_unshown_closing_draft([*earlier, lone])
-  assert not _has_unshown_closing_draft([*earlier, _answer_as_second_thinking_part("Ok.")])
-
-
-def test_unreviewed_answer_evidence_keeps_all_visible_text_but_only_new_work():
-  from app.claude_sdk_runner import _unreviewed_answer_evidence
-
-  blocks = [
-    {"type": "text", "content": "Checking."},
-    {"type": "thinking", "content": "reported already"},
-    {"type": "tool", "tool": "mcp__mobius_control__request_question"},
-    {"type": "text", "content": "Here is the answer."},
-    {"type": "thinking", "content": "new"},
-  ]
-  assert _unreviewed_answer_evidence(blocks, 0) is blocks
-  assert _unreviewed_answer_evidence(blocks, 3) == [blocks[0], blocks[3], blocks[4]]
-  assert _unreviewed_answer_evidence(None, 3) is None
-
-
 @pytest.mark.asyncio
 async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder(monkeypatch):
-  from app.claude_sdk_runner import _ANSWER_CHECK_MAX_REMINDERS
+  from app.answer_check import MAX_REMINDERS
 
   decisions: list[dict] = []
   bus = _ChatBus()
@@ -4140,7 +3832,7 @@ async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder
       decisions.append(await _fire_pre_card_hook(self.options))
       # An unchanged retry is the agent judging its reply complete: it passes.
       decisions.append(await _fire_pre_card_hook(self.options))
-      for _ in range(_ANSWER_CHECK_MAX_REMINDERS):
+      for _ in range(MAX_REMINDERS):
         swallow_again()
         decisions.append(await _fire_pre_card_hook(self.options))
       yield _success_result()
@@ -4153,33 +3845,13 @@ async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder
   # First miss caught, unchanged retry passes, each later swallow caught until
   # the per-turn cap, after which the card goes through.
   assert denied == [
-    True, False, *[True] * (_ANSWER_CHECK_MAX_REMINDERS - 1), False,
+    True, False, *[True] * (MAX_REMINDERS - 1), False,
   ]
   for decision in decisions:
     output = decision.get("hookSpecificOutput")
     if output:
       assert output["permissionDecision"] == "deny"
       assert "preview build memory limit" not in output["permissionDecisionReason"]
-
-
-def test_answer_check_after_a_step_flags_only_words_written_as_extra_thinking():
-  from app.claude_sdk_runner import _answer_check_after_step_reason
-
-  progress = {"type": "text", "content": "Checking the preview build."}
-  step = {"type": "tool", "tool": "Bash", "status": "done"}
-  note = _answer_check_after_step_reason([progress, _answer_as_second_thinking_part(), step])
-  assert note is not None
-  assert note.startswith("Möbius check after this step.")
-  assert "verbatim: «Checking the preview build.»" in note
-  assert _DRAFT not in note and "Same failure" not in note
-  # Ordinary mid-reply shapes are left alone: one thinking part, even long or
-  # with a closing paragraph, and an extra part the agent then said.
-  closing_paragraph = {"type": "thinking", "content": f"Same failure.\n\n\n\n{_DRAFT}"}
-  assert _answer_check_after_step_reason([progress, closing_paragraph, step]) is None
-  assert _answer_check_after_step_reason([
-    progress, _answer_as_second_thinking_part(), {"type": "text", "content": _DRAFT}, step,
-  ]) is None
-  assert _answer_check_after_step_reason(None) is None
 
 
 @pytest.mark.asyncio
