@@ -7,6 +7,7 @@ import {
   drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
+  suspendDrawerComposer,
   shouldRestoreDrawerFocus,
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
@@ -204,4 +205,36 @@ test('the click guard fails open for keyboard and assistive activation', () => {
     sourceCapabilities: { firesTouchEvents: true },
   }), true)
   assert.equal(isGeneratedTouchClick({ detail: 1 }), true)
+})
+
+test('opening the drawer suspends an active touch composer without changing its draft', () => {
+  let blurred = 0
+  const composer = {
+    value: 'unfinished message',
+    matches: selector => selector === 'textarea.chat__input',
+    closest: () => ({ getAttribute: () => 'chat-42' }),
+    blur: () => { blurred += 1 },
+  }
+  assert.equal(suspendDrawerComposer({ activeElement: composer, touchPrimary: true }), 'chat-42')
+  assert.equal(blurred, 1)
+  assert.equal(composer.value, 'unfinished message')
+  composer.value = ''
+  assert.equal(suspendDrawerComposer({ activeElement: composer, touchPrimary: true }), 'chat-42')
+  assert.equal(blurred, 2, 'an empty focused composer still has a keyboard to restore')
+  assert.equal(suspendDrawerComposer({ activeElement: composer, touchPrimary: false }), null)
+  assert.equal(blurred, 2, 'desktop focus remains owned by the drawer accessibility path')
+  assert.equal(suspendDrawerComposer({ touchPrimary: true }), null)
+  assert.equal(suspendDrawerComposer({ activeElement: { matches: () => false }, touchPrimary: true }), null)
+})
+
+test('a rapid drawer reopen suspends the in-flight composer handoff', () => {
+  let blurred = 0
+  const lease = { blur: () => { blurred += 1 } }
+  assert.equal(suspendDrawerComposer({
+    activeElement: lease, touchPrimary: true, leaseElement: lease, leaseChatId: 'next-chat',
+  }), 'next-chat')
+  assert.equal(blurred, 1)
+  assert.equal(suspendDrawerComposer({
+    activeElement: lease, touchPrimary: true, leaseElement: lease, leaseChatId: null,
+  }), null)
 })
