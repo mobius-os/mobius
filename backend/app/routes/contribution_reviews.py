@@ -555,7 +555,13 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
         return {"run": _run_view(db, row)}
       _parent(db, row, principal)
       reviews.require_independent_clear(row, target, body)
-    if body.publish and _proposes_verdict(row) and not verdicts.own_pull(row, pull):
+    if body.publish and verdicts.own_pull(row, pull):
+      # The owner never reviews their own PR in public: GitHub refuses a verdict, and a plain
+      # comment from themselves is not a review. The result stays private; they fix or set it aside.
+      _parent(db, row, principal)
+      reviews.save_outcome(db, row, item_key, outcome, expected=previous)
+      return {"run": _run_view(db, row)}
+    if body.publish and _proposes_verdict(row):
       if not previous.get("verdict_proposal"):
         # Proposing posts nothing and freezes the evidence the owner will read.
         async with chat_queue.get_transition_lock(f"review-admission:{run_id}"):

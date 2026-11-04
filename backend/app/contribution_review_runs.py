@@ -747,8 +747,8 @@ def brief(row):
     + ("This grant also merges: an all_clear result must use publish:true. The server posts the review first "
        "and attempts the guarded merge only after GitHub confirms it.\n" if row.mode == "review_merge" else "")
     + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
-       "REQUEST_CHANGES for needs_you; your summary is its wording). Your own PRs fall back to a COMMENT, since "
-       "GitHub refuses self-review verdicts. Only the owner submits or discards a proposal, in Contribute; tell "
+       "REQUEST_CHANGES for needs_you; your summary is its wording). On the owner's own PRs nothing is proposed or "
+       "posted: publish:true keeps your result private and the owner fixes it or sets it aside. Only the owner submits or discards a proposal, in Contribute; tell "
        "them it is waiting there and end your turn. Do not ask for approval in chat or retry. "
        + ("If the owner submits an APPROVE, this chat is resumed: re-send the identical outcome once to run "
           "the guarded merge. " if row.mode == "review_merge" else "")

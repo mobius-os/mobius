@@ -167,14 +167,26 @@ def test_request_changes_is_submitted_but_never_merges(setup, monkeypatch):
   assert [e[:2] for e in events] == [("post", "REQUEST_CHANGES")]
 
 
-def test_own_pull_request_falls_back_to_a_comment(setup, monkeypatch):
+def test_own_pull_request_is_never_reviewed_in_public(setup, monkeypatch):
   _grant(setup, propose_verdict=True)
   events = []
   _record(monkeypatch, events)
   monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42}}))
-  item = report(setup, publish=True)["run"]["items"][0]
-  assert [e[:2] for e in events] == [("post", "COMMENT"), ("merge",)]
-  assert "verdict_proposal" not in item
+  run = report(setup, publish=True)["run"]
+  item = run["items"][0]
+  assert events == []
+  assert item["state"] == "all_clear" and "verdict_proposal" not in item and "public_review" not in item
+
+
+def test_own_pull_request_findings_stay_private_even_for_a_plain_comment_grant(setup, monkeypatch):
+  _grant(setup)
+  events = []
+  _record(monkeypatch, events)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42}}))
+  item = report(setup, publish=True, state="needs_you", summary="Blocking bug")["run"]["items"][0]
+  assert events == []
+  assert item["state"] == "needs_you" and item["summary"] == "Blocking bug"
+  assert "public_review" not in item and "verdict_proposal" not in item
 
 
 def test_a_stale_or_stopped_decision_posts_nothing(setup, monkeypatch):
