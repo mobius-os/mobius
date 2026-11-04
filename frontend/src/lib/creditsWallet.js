@@ -51,6 +51,19 @@ export function openStripeWindow() {
 }
 
 /**
+ * The checkout address to open, or null. The server already accepts only
+ * Stripe's own page; this keeps the window, which starts on Möbius's origin,
+ * from ever being sent to a script or non-https address if that changes.
+ */
+export function checkoutPage(address) {
+  try {
+    return new URL(address).protocol === 'https:' ? address : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the

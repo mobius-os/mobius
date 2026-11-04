@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import WalletSection from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, openStripeWindow, settleTopup } from '../creditsWallet.js'
+import { activityLabel, checkoutPage, openStripeWindow, settleTopup } from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -80,4 +80,12 @@ test('the Stripe window cannot reach back into Möbius', t => {
 test('a blocked Stripe window is reported, not written into', t => {
   withWindowOpen(t, null)
   assert.equal(openStripeWindow(), null)
+})
+
+test('only an https checkout address is ever opened', () => {
+  const stripe = 'https://checkout.stripe.com/c/pay/cs_test_a1#fid=x'
+  assert.equal(checkoutPage(stripe), stripe)
+  for (const address of ['javascript:alert(1)', 'data:text/html,x', 'http://checkout.stripe.com/c', '', null, undefined]) {
+    assert.equal(checkoutPage(address), null, String(address))
+  }
 })

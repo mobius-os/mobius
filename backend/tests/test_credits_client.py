@@ -224,6 +224,8 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
   "https://checkout.stripe.com.example.net/c/pay",
   "https://checkout.stripe.com@example.net/c/pay",
   "https://checkout.stripe.com:8443/c/pay",
+  "https://checkout.stripe.com:bad/c/pay",
+  "https://[checkout.stripe.com/c/pay",
   "https://connect.stripe.com/setup/e/acct_1/abc",
   "",
   None,

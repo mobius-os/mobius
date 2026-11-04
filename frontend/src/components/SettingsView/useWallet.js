@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, jsonOrThrow } from '../../api/client.js'
-import { openStripeWindow, settleTopup } from '../../lib/creditsWallet.js'
+import { checkoutPage, openStripeWindow, settleTopup } from '../../lib/creditsWallet.js'
 
 const read = async path => jsonOrThrow(await apiFetch(path))
 
@@ -81,8 +81,9 @@ export function useWallet({ active }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amount_cents: amountCents, waiver_accepted: Boolean(waiverAccepted) }),
       }))
-      if (!started?.checkout_url) throw new Error('Stripe did not return a page to open.')
-      popup.location.href = started.checkout_url
+      const page = checkoutPage(started?.checkout_url)
+      if (!page) throw new Error('Stripe did not return a page to open.')
+      popup.location.href = page
       await new Promise(resolve => {
         const watch = setInterval(() => {
           if (popup.closed) { clearInterval(watch); resolve() }

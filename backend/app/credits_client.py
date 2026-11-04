@@ -240,9 +240,13 @@ def _stripe_page(value: object, host: str) -> str:
   their own hosts; anything else is refused rather than opened. The address is
   rebuilt from what was checked, so the browser gets exactly that.
   """
-  parts = urlsplit(value if isinstance(value, str) else "")
-  if (parts.scheme != "https" or parts.hostname != host
-      or parts.username is not None or parts.password is not None or parts.port is not None):
+  try:
+    parts = urlsplit(value if isinstance(value, str) else "")
+    stripes = (parts.scheme == "https" and parts.hostname == host
+               and parts.username is None and parts.password is None and parts.port is None)
+  except ValueError:  # an unreadable port or bracketed host
+    stripes = False
+  if not stripes:
     raise CreditsUnavailable(
       "The credits service sent a payment page that is not Stripe's.",
       code="unexpected_page")
