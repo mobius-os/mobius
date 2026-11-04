@@ -87,8 +87,8 @@ owner submits or discards it, through `POST <run>/verdict` from their own
 session; an agent bearer is refused. A pending, discarded, unconfirmed or
 REQUEST_CHANGES verdict never merges. After the owner submits an APPROVE in a
 merge grant, the server resumes the review chat, which re-sends the identical
-outcome once to run the usual merge gates. GitHub refuses verdicts on the
-connected account's own PR, so those fall back to a COMMENT. Once posting is armed the recorded
+outcome once to run the usual merge gates. On the connected account's
+own PR nothing is proposed or posted, whatever the grant says: the result stays private for the owner to fix or set aside. Once posting is armed the recorded
 verdict and evidence are immutable; identical replay only reads the saved
 receipt. Transport uncertainty never permits another post. Call `/observe` to
 find the exact review by its server-generated marker, connected actor and head.
