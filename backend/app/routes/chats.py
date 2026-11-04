@@ -195,6 +195,7 @@ def _lifecycle_projection_key(
     models.ChatRunUpdate.chat_id.in_({row.child_chat_id for row in helpers}),
   ).scalar() if helpers else None
   parts = [
+    # Wait and Goal cards also read this chat's run rows (receipts, goal links).
     _latest_run_snapshot(db, chat_id)[2],
     *([list(row) for row in rows] for rows in (waits, goals, dependencies, helpers)),
     helper_runs,

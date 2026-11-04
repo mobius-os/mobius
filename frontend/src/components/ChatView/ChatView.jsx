@@ -1760,7 +1760,8 @@ export default function ChatView({
         })
       }
       // Reaching here idle and without a local owner means the retained
-      // transcript matched the durable version (otherwise it was re-read above).
+      // page matched its transcript version and lifecycle cards (otherwise it
+      // was re-read above).
       return { ...runtime, transcriptCurrent: !data.running && !localAuthoritative }
     } catch { /* background reconciliation is best-effort */ }
     return null
