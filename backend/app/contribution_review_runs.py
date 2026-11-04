@@ -783,8 +783,9 @@ def brief(row):
     publish_rule +
     "Evidence freezes once dispatch is armed; identical retry is read-only. "
     "Keep owner-only questions and private data out of public evidence.\n"
-    + ("This grant also merges: an all_clear result must use publish:true. The server posts the review first "
-       "and attempts the guarded merge only after GitHub confirms it.\n" if row.mode == "review_merge" else "")
+    + ("This grant also merges: an all_clear result must use publish:true. Nothing merges before the owner's "
+       "own approval of it is confirmed on GitHub; only then does the server attempt the guarded merge.\n"
+       if row.mode == "review_merge" else "")
     + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
        "REQUEST_CHANGES for needs_you; your summary is its wording). On the owner's own PRs nothing is proposed or "
        "posted: publish:true keeps your result private and the owner fixes it or sets it aside. "

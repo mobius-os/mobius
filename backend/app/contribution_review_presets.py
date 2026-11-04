@@ -55,7 +55,8 @@ POST_REVIEW_INSTRUCTIONS = (
   "Keep secrets and owner-only questions out of public verdict evidence. "
   "Once the server arms posting, evidence is immutable and retries are read-only. "
   "The guarded merge endpoint alone may merge when separately authorized; an unknown public receipt must never be replayed. "
-  "When the grant merges too, an all-clear result must publish first: the server merges only after GitHub confirms the posted review."
+  "When the grant merges too, an all-clear result must publish first: nothing merges before the owner's own "
+  "approval is confirmed on GitHub, and a comment is never an approval."
 )
 
 VERDICT_INSTRUCTIONS = (
