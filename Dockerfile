@@ -526,5 +526,11 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
 # reaped on every runtime, including hosts that inject no init of their own
 # (Railway). `-s` (subreaper) keeps reaping working whether tini is PID 1 or a
 # child of another init (Compose's docker-init).
-ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+# `-e 143` reports a SIGTERM stop as a clean exit 0. Every planned stop (an
+# in-app restart, a host or Railway redeploy) ends in SIGTERM, and both `su`
+# and uvicorn re-raise it after shutting down, so without the remap Railway
+# records each planned restart as "Deployment crashed" and emails the owner.
+# Real failures keep their own status, and SIGKILL/OOM still exits 137. Both
+# restart policies (railway.toml ALWAYS, Compose unless-stopped) revive exit 0.
+ENTRYPOINT ["/usr/bin/tini", "-s", "-e", "143", "--"]
 CMD ["./scripts/entrypoint.sh"]
