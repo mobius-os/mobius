@@ -1,6 +1,7 @@
 """A retained review folder must never borrow a replacement review's Git state."""
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -130,3 +131,38 @@ def test_missing_or_invalid_administrative_state_is_refused(tmp_path, pointer):
 
 def test_missing_checkout_keeps_existing_callers_missing_repo_handling(tmp_path):
   assert git_checkout.checkout_ownership_error(tmp_path / "absent") is None
+
+
+@pytest.mark.parametrize("shape", ["linked", "ordinary"])
+def test_symbolic_git_marker_cannot_borrow_another_checkouts_identity(recycled, shape):
+  source, _, current = recycled
+  alias = source.parent / "alias"
+  alias.mkdir()
+  target = current if shape == "linked" else source
+  (alias / ".git").symlink_to(target / ".git", target_is_directory=shape == "ordinary")
+  before = snapshot(source.parent)
+  assert git_checkout.checkout_ownership_error(alias)
+  assert git_checkout.checkout_ownership_error(target) is None
+  assert snapshot(source.parent) == before
+
+
+def test_cli_does_not_create_bytecode_in_the_checkout_it_checks(tmp_path):
+  backend = Path(__file__).parents[1]
+  package = tmp_path / "backend" / "app"
+  scripts = tmp_path / "backend" / "scripts"
+  package.mkdir(parents=True)
+  scripts.mkdir()
+  (package / "__init__.py").write_text("")
+  shutil.copyfile(backend / "app" / "git_checkout.py", package / "git_checkout.py")
+  script = scripts / "check-review-checkout.py"
+  shutil.copyfile(backend / "scripts" / script.name, script)
+  (tmp_path / ".git").mkdir()
+  before = snapshot(tmp_path)
+  env = {k: v for k, v in os.environ.items()
+         if k not in {"PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"}}
+  result = subprocess.run(
+    [sys.executable, str(script), str(tmp_path)],
+    capture_output=True, text=True, env=env,
+  )
+  assert result.returncode == 0, result.stderr
+  assert snapshot(tmp_path) == before

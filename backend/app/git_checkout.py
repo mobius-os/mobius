@@ -34,6 +34,8 @@ def checkout_ownership_error(repo: Path) -> str | None:
   existing missing-repository handling; this is not a Git validity checker.
   """
   marker = repo / ".git"
+  if marker.is_symlink():
+    return "The checkout's .git marker is a symbolic link, so ownership is ambiguous."
   if not marker.is_file():
     return None
   try:
