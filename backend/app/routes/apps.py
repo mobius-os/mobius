@@ -692,8 +692,10 @@ async def list_apps(
   cutoff = now_naive_utc() - APP_SOFT_DELETE_TTL
   # Every shell load and app-list refresh lands here. Both reads run in a
   # worker thread: on a busy disk they can take seconds, and on the event loop
-  # that would stall every other request and stream with them.
-  has_stale = await asyncio.to_thread(_has_expired_app_tombstone, db, cutoff)
+  # that would stall every other request and stream with them. They are
+  # settled because the worker uses the request session: a cancelled request
+  # must not close it until the read is done.
+  has_stale = await settled.run_settled(_has_expired_app_tombstone, db, cutoff)
   if has_stale:
     async with fs_locks.install_uninstall_lock():
       stale = (
@@ -721,7 +723,7 @@ async def list_apps(
               "hard-delete purge failed for app %s; leaving tombstone", app.id
             )
             db.rollback()
-  return await asyncio.to_thread(_live_apps_for_drawer, db)
+  return await settled.run_settled(_live_apps_for_drawer, db)
 
 
 @router.get(
