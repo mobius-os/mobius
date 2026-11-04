@@ -181,10 +181,13 @@ def test_an_unreachable_service_is_an_error_not_a_zero(client, auth, paired, mon
 
 
 def test_owner_actions_reach_the_service_routes(client, auth, paired):
-  paired.answers["topups"] = (200, {"topup_id": "t1", "checkout_url": "https://checkout"})
+  checkout = "https://checkout.stripe.com/c/pay/cs_test_a1#fid=x"
+  paired.answers["topups"] = (200, {"topup_id": "t1", "checkout_url": checkout})
+  paired.answers["payouts/connect"] = (
+    200, {"connect_url": "https://connect.stripe.com/setup/e/acct_1/abc"})
   started = client.post("/api/identity/credits/topup", headers=auth, json={
     "amount_cents": 1000, "waiver_accepted": True, "return_url": "https://me.example/x"})
-  assert started.json() == {"checkout_url": "https://checkout", "topup_id": "t1"}
+  assert started.json() == {"checkout_url": checkout, "topup_id": "t1"}
   assert paired.calls[-1]["json"] == {
     "amount_cents": 1000, "waiver_accepted": True, "return_url": "https://me.example/x"}
 
@@ -212,6 +215,39 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
   assert paired.calls[-5]["json"] == {
     "price_micro": 250_000, "description": None, "enabled": True}
   assert paired.calls[-4]["json"] == {"return_url": "https://me.example/y"}
+
+
+@pytest.mark.parametrize("page", [
+  "javascript:alert(document.cookie)",
+  "data:text/html,<script>alert(1)</script>",
+  "http://checkout.stripe.com/c/pay/cs_test_a1",
+  "https://checkout.stripe.com.example.net/c/pay",
+  "https://checkout.stripe.com@example.net/c/pay",
+  "https://checkout.stripe.com:8443/c/pay",
+  "https://connect.stripe.com/setup/e/acct_1/abc",
+  "",
+  None,
+])
+def test_a_checkout_page_that_is_not_stripes_is_never_passed_on(client, auth, paired, page):
+  paired.answers["topups"] = (200, {"topup_id": "t1", "checkout_url": page})
+  refused = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 1000, "waiver_accepted": True})
+  assert refused.status_code == 502
+  assert refused.json()["detail"]["code"] == "unexpected_page"
+
+
+@pytest.mark.parametrize("page", [
+  "javascript:alert(1)",
+  "https://checkout.stripe.com/c/pay/cs_test_a1",
+  "https://connect.stripe.com.example.net/setup",
+])
+def test_a_payout_setup_page_that_is_not_stripes_is_never_passed_on(
+  client, auth, paired, page,
+):
+  paired.answers["payouts/connect"] = (200, {"connect_url": page})
+  refused = client.post("/api/identity/credits/connect", headers=auth, json={})
+  assert refused.status_code == 502
+  assert refused.json()["detail"]["code"] == "unexpected_page"
 
 
 def test_owner_actions_before_pairing_say_so(client, auth, service):

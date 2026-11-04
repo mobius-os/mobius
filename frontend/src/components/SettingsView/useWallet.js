@@ -8,25 +8,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, jsonOrThrow } from '../../api/client.js'
-import { settleTopup } from '../../lib/creditsWallet.js'
+import { openStripeWindow, settleTopup } from '../../lib/creditsWallet.js'
 
 const read = async path => jsonOrThrow(await apiFetch(path))
-
-/**
- * Stripe Checkout refuses to load in a frame and a new window must open inside
- * the tap, before its address is known, or the browser blocks it as a popup.
- */
-function openStripeWindow() {
-  const popup = window.open('about:blank', 'mobius-stripe-checkout', 'width=560,height=780')
-  try {
-    popup.document.title = 'Opening Stripe…'
-    popup.document.body.innerHTML =
-      '<p style="font:16px system-ui,sans-serif;padding:28px;color:#555">Opening Stripe…</p>'
-  } catch {
-    // A browser may forbid writing into it; the window still works.
-  }
-  return popup
-}
 
 export function useWallet({ active }) {
   const [summary, setSummary] = useState(null)

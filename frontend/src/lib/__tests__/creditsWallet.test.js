@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import WalletSection from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, settleTopup } from '../creditsWallet.js'
+import { activityLabel, openStripeWindow, settleTopup } from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -58,4 +58,26 @@ test('settling stops at the first settled status and survives a failed read', as
 test('an unsettled purchase reports pending rather than failure', async () => {
   const status = await settleTopup('t', async () => ({ status: 'pending' }), { attempts: 2, sleep: async () => {} })
   assert.equal(status, 'pending')
+})
+
+/** A browser whose window.open returns `popup`, for one test. */
+function withWindowOpen(t, popup) {
+  const before = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  globalThis.window = { open: () => popup }
+  t.after(() => {
+    if (before) Object.defineProperty(globalThis, 'window', before)
+    else delete globalThis.window
+  })
+}
+
+test('the Stripe window cannot reach back into Möbius', t => {
+  const popup = { opener: {}, document: { title: '', body: {} } }
+  withWindowOpen(t, popup)
+  assert.equal(openStripeWindow(), popup)
+  assert.equal(popup.opener, null)
+})
+
+test('a blocked Stripe window is reported, not written into', t => {
+  withWindowOpen(t, null)
+  assert.equal(openStripeWindow(), null)
 })

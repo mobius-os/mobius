@@ -231,6 +231,24 @@ def unpair() -> dict:
 # --- Buying and spending ------------------------------------------------------
 
 
+def _stripe_page(value: object, host: str) -> str:
+  """A page the service sends the owner to, passed on only if it is Stripe's.
+
+  The browser opens it in a window that starts on this Möbius's own origin, so
+  a ``javascript:`` or look-alike address from a compromised service would act
+  as the owner. Stripe Checkout and Connect onboarding are plain https pages on
+  their own hosts; anything else is refused rather than opened. The address is
+  rebuilt from what was checked, so the browser gets exactly that.
+  """
+  parts = urlsplit(value if isinstance(value, str) else "")
+  if (parts.scheme != "https" or parts.hostname != host
+      or parts.username is not None or parts.password is not None or parts.port is not None):
+    raise CreditsUnavailable(
+      "The credits service sent a payment page that is not Stripe's.",
+      code="unexpected_page")
+  return parts.geturl()
+
+
 def start_topup(amount_cents: int, waiver_accepted: bool,
                 return_url: str | None = None) -> dict:
   """A Stripe Checkout page for buying credits, and the purchase's id."""
@@ -240,7 +258,8 @@ def start_topup(amount_cents: int, waiver_accepted: bool,
     # Where Stripe sends the buyer back; the service appends the purchase id.
     "return_url": return_url,
   })
-  return {"checkout_url": started.get("checkout_url"), "topup_id": started.get("topup_id")}
+  return {"checkout_url": _stripe_page(started.get("checkout_url"), "checkout.stripe.com"),
+          "topup_id": started.get("topup_id")}
 
 
 def read_topup(topup_id: str) -> dict:
@@ -298,7 +317,7 @@ def charge(seller: str, app: str, action: str, idempotency_key: str,
 def start_connect(return_url: str | None = None) -> dict:
   """Stripe's page for connecting the account that receives withdrawals."""
   started = _call("POST", "payouts/connect", _paired(), {"return_url": return_url})
-  return {"connect_url": started.get("connect_url")}
+  return {"connect_url": _stripe_page(started.get("connect_url"), "connect.stripe.com")}
 
 
 def payout_action(action: str) -> dict:

@@ -31,6 +31,26 @@ export async function settleTopup(topupId, read, { attempts = 6, waitMs = 1_500,
 }
 
 /**
+ * Stripe Checkout refuses to load in a frame and a new window must open inside
+ * the tap, before its address is known, or the browser blocks it as a popup.
+ * `noopener` would hide that window from us, so the link back to this window
+ * is cut by hand: the page that loads there cannot reach or redirect Möbius.
+ */
+export function openStripeWindow() {
+  const popup = window.open('about:blank', 'mobius-stripe-checkout', 'width=560,height=780')
+  if (!popup) return null
+  popup.opener = null
+  try {
+    popup.document.title = 'Opening Stripe…'
+    popup.document.body.innerHTML =
+      '<p style="font:16px system-ui,sans-serif;padding:28px;color:#555">Opening Stripe…</p>'
+  } catch {
+    // A browser may forbid writing into it; the window still works.
+  }
+  return popup
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the
