@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import JSON, Text, case, cast, func, select
@@ -1043,7 +1043,10 @@ def list_chats(
         if chat.project_ref_id is not None else None
       ),
     ))
-  return result
+  # Every row is already plain JSON (isoformat strings, dicts, lists), so skip
+  # FastAPI's generic re-encoding walk: on the full drawer list it cost about
+  # as much as building the rows.
+  return JSONResponse(result)
 
 
 class ChatFailureSeenRequest(BaseModel):
