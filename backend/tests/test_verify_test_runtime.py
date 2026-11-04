@@ -892,8 +892,8 @@ def test_hosted_concurrency_is_scoped_to_the_pull_request():
 def test_installed_codex_sdk_matches_the_release_pin():
   """A stale shared venv must not run SDK-shape tests against another pin.
 
-  Slim host CI installs no Codex SDK (its contract runs in the image), so
-  there is nothing to compare there.
+  Hosted CI installs exactly this pin (.github/actions/backend-env). A local
+  venv built from requirements.lock alone has no SDK and nothing to compare.
   """
   import importlib.metadata
 
@@ -902,7 +902,7 @@ def test_installed_codex_sdk_matches_the_release_pin():
   try:
     installed = importlib.metadata.version("openai-codex")
   except importlib.metadata.PackageNotFoundError:
-    pytest.skip("openai-codex is installed only in the production image")
+    pytest.skip("openai-codex is not installed in this runtime")
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   match = re.search(r"(?m)^ARG CODEX_SDK_VERSION=(\S+)$", dockerfile)
   assert match, "Dockerfile must pin CODEX_SDK_VERSION"
