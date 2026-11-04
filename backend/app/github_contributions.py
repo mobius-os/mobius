@@ -31,6 +31,7 @@ from app import (
   contribution_staging,
   fs_locks,
   github_auth,
+  git_checkout,
   github_contribution_git as _git_ops,
   models,
   settled,
@@ -741,7 +742,7 @@ def _recheck_submit_app(db: Session, app_id: int, expected_nonce: str | None) ->
     raise HTTPException(status_code=404, detail="App not found.")
 
 
-def _safe_repo_path(raw: object) -> Path:
+def _durable_repo_path(raw: object) -> Path:
   if not isinstance(raw, str) or not raw:
     raise ContributionSubmitError(
       "This record needs to be prepared again: it has no durable repo_path."
@@ -774,6 +775,13 @@ def _safe_repo_path(raw: object) -> Path:
     "/data/contributions, /data/apps, or /data/platform; nothing was sent "
     "to GitHub."
   )
+
+
+def _safe_repo_path(raw: object) -> Path:
+  """A durable review folder whose Git state still belongs to that folder."""
+  repo = _durable_repo_path(raw)
+  contribution_staging.require_checkout_ownership(repo)
+  return repo
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
@@ -1258,7 +1266,9 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
-  repo = _safe_repo_path(raw_repo)
+  # Cleanup must still handle stale folders without touching the replacement
+  # checkout's administrative state; its reciprocal check below owns that case.
+  repo = _durable_repo_path(raw_repo)
   recorded_repo = Path(raw_repo)
   if not recorded_repo.is_absolute() or recorded_repo != repo:
     return False
@@ -1315,17 +1325,7 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
     # Git can recycle a pruned worktree admin slot for a newer checkout. Every
     # linked admin directory must still point back to this exact checkout.
-    back_reference = marker_git_dir / "gitdir"
-    owns_checkout = False
-    if back_reference.is_file() and not back_reference.is_symlink():
-      try:
-        registered_marker = Path(back_reference.read_text().strip())
-        if not registered_marker.is_absolute():
-          registered_marker = back_reference.parent / registered_marker
-        owns_checkout = registered_marker.resolve() == marker.resolve()
-      except (OSError, RuntimeError):
-        owns_checkout = False
-    if not owns_checkout:
+    if not git_checkout.linked_worktree_owns_checkout(repo, marker_git_dir):
       shutil.rmtree(repo)
       return True
 

@@ -126,6 +126,7 @@ from app.github_contributions import (
   _validate_submit_app,
   _recheck_submit_app,
   _safe_repo_path,
+  _durable_repo_path,
   _safe_equivalence_source_path,
   _equivalence_source_repo,
   _assert_pending_equivalence_preflight,
@@ -4307,7 +4308,7 @@ async def cleanup_contribution_staging(
     # Issues and comments never own a review checkout. Treat their terminal
     # cleanup as the same idempotent no-op as an already-removed PR worktree.
     return {"cleaned": False}
-  repo = _safe_repo_path(plan.get("repo_path"))
+  repo = _durable_repo_path(plan.get("repo_path"))
   try:
     equivalence_repos = await asyncio.to_thread(
       _equivalence_source_repo, settled_record,
