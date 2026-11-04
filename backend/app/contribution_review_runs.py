@@ -728,17 +728,27 @@ def brief(row):
     "preview/approval is needed for the new programmatic reviewer workflow."
   )
   verdict = frozen.get("propose_verdict") is True
-  public_note = ((
+  # A proposal posts nothing until the owner's own tap, so "report privately" must
+  # not read as "keep a verdict private": a verdict is exactly what to hand them.
+  publish_rule = (
+    "The owner opted into verdict proposals for this run. When your result for a PR is a verdict (all_clear, or "
+    "needs_you with findings), set publish:true in /outcomes: that only saves a proposal for the owner, and nothing "
+    "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
+    "never only a private note. Owner questions and blocked work use publish:false (the default) and stay private. "
+  ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) and stay private. "
+  )
+  public_note = ((
+    publish_rule +
     "Evidence freezes once dispatch is armed; identical retry is read-only. "
     "Keep owner-only questions and private data out of public evidence.\n"
     + ("This grant also merges: an all_clear result must use publish:true. The server posts the review first "
        "and attempts the guarded merge only after GitHub confirms it.\n" if row.mode == "review_merge" else "")
     + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
-       "REQUEST_CHANGES for needs_you; your summary is its wording). Your own PRs fall back to a COMMENT, since "
-       "GitHub refuses self-review verdicts. Only the owner submits or discards a proposal, in Contribute; tell "
+       "REQUEST_CHANGES for needs_you; your summary is its wording). On the owner's own PRs nothing is proposed or "
+       "posted: publish:true keeps your result private and the owner fixes it or sets it aside. Only the owner submits or discards a proposal, in Contribute; tell "
        "them it is waiting there and end your turn. Do not ask for approval in chat or retry. "
        + ("If the owner submits an APPROVE, this chat is resumed: re-send the identical outcome once to run "
           "the guarded merge. " if row.mode == "review_merge" else "")
@@ -1090,14 +1100,19 @@ def confirmed_successor(previous, attempts, receipt):
     "summary": "Repair published; fresh independent full-diff review required."}
 
 
-def merge_method(repo):
-  method = next((method for method, setting in (
+def allowed_merge_methods(repo) -> list[str]:
+  """The methods the repository's own settings allow, in the order Möbius prefers them."""
+  return [method for method, setting in (
     ("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"),
     ("rebase", "allow_rebase_merge"),
-  ) if repo.get(setting) is True), None)
-  if method is None:
+  ) if repo.get(setting) is True]
+
+
+def merge_method(repo):
+  allowed = allowed_merge_methods(repo)
+  if not allowed:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return method
+  return allowed[0]
 
 
 def disarm_merge(db, row, target, reason):
@@ -1209,7 +1224,13 @@ def _keep_verdict(current, outcome):
   if not incoming or incoming.get("id") != saved.get("id"):
     return {**outcome, "verdict_proposal": saved}
   if saved.get("state") in VERDICT_SETTLED and incoming != saved:
-    return None
+    # One exception: an unconfirmed attempt settles from a read-only look at
+    # GitHub (contribution_review_verdicts.settle_observed): its exact review
+    # was found, or none exists after the dispatch window.
+    settles = saved.get("state") == "unknown" and (
+      (incoming.get("state") == "posted" and incoming.get("review_id"))
+      or incoming.get("state") == "not_dispatched")
+    return outcome if settles else None
   return outcome
 
 

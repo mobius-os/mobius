@@ -116,6 +116,52 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
   return row.outcomes_json[item_key]["verdict_proposal"]
 
 
+NEVER_SENT = "This verdict was never sent to GitHub, so nothing is waiting on you."
+DISMISSED = "You dismissed this verdict. GitHub never confirmed it and nothing more will be sent."
+
+
+def _settle_unconfirmed(db, row, item_key, proposal_id, fields):
+  """Move one unconfirmed attempt to a final state on the refreshed item."""
+  def apply(current):
+    saved = current.get("verdict_proposal") or {}
+    if saved.get("id") != proposal_id or saved.get("state") not in {"posting", "unknown"}:
+      return None
+    return {**current, "verdict_proposal": {**saved, **fields}}
+  reviews.save_effect_outcome(db, row, item_key, apply)
+
+
+def settle_observed(db, row, item_key, proposal, review, *, complete_scan, read_at):
+  """Settle an unconfirmed verdict from one read-only look at GitHub's reviews.
+
+  ``review`` is the exact review carrying this attempt's marker, if GitHub shows
+  it: the verdict is then posted. With no such review the verdict is released as
+  never sent only once the read covered GitHub's whole list and began after the
+  one-hour dispatch window that bounds how long a request can still land. Both
+  settle this one record; nothing here ever submits again.
+  """
+  if review is not None:
+    fields = {"state": "posted", "review_id": review["id"], "url": review.get("html_url"),
+              "summary": "The exact public review was confirmed by a read-only observation."}
+  elif complete_scan and reviews.dispatch_window_closed(proposal.get("submitted_at"), read_at):
+    fields = {"state": "not_dispatched", "summary": NEVER_SENT}
+  else:
+    return
+  _settle_unconfirmed(db, row, item_key, proposal["id"], fields)
+
+
+def dismiss(db, row, item_key, proposal_id):
+  """The owner's word that an unconfirmed verdict is not worth waiting on.
+
+  Only a settled uncertainty qualifies: a verdict still posting has a live
+  request whose own result must land. This records the decision and sends nothing.
+  """
+  saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
+  if saved.get("id") != proposal_id or saved.get("state") != "unknown":
+    raise HTTPException(409, "Only a verdict GitHub never confirmed can be dismissed. Refresh to see its result.")
+  _settle_unconfirmed(db, row, item_key, proposal_id,
+                      {"state": "not_dispatched", "summary": DISMISSED, "dismissed_at": reviews.utc_now_iso()})
+
+
 def discard(db, row, item_key, proposal_id):
   saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
   if saved.get("id") != proposal_id or saved.get("state") != "proposed":

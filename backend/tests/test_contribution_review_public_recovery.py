@@ -115,6 +115,17 @@ def test_recovery_scans_later_page_and_keeps_legacy_uncertainty():
   assert legacy['state'] == 'unknown'
 
 
+def test_find_review_proves_absence_only_when_the_whole_list_was_read():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='[]'), None, ITEM, receipt, '42') == (None, True)
+  full = lambda *a: SimpleNamespace(stdout=json.dumps([{}] * 100))
+  assert public.find_review(full, None, ITEM, receipt, '42') == (None, False), 'ten full pages cap the scan: absence is unproven'
+  broken = lambda *a: (_ for _ in ()).throw(OSError('network'))
+  assert public.find_review(broken, None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='{}'), None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: pytest.fail('no marker, nothing to look for'), None, ITEM, {'state': 'unknown'}, '42') == (None, False)
+
+
 def test_marker_is_within_unicode_body_limit():
   marker = '<!-- mobius-review:unique -->'
   body = public.review_comment_body({'head_sha': ITEM['head_sha'], 'summary': '😀'*200_000, 'tests': '😀'*200_000}, marker=marker)
