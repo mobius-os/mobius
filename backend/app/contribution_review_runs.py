@@ -1090,14 +1090,19 @@ def confirmed_successor(previous, attempts, receipt):
     "summary": "Repair published; fresh independent full-diff review required."}
 
 
-def merge_method(repo):
-  method = next((method for method, setting in (
+def allowed_merge_methods(repo) -> list[str]:
+  """The methods the repository's own settings allow, in the order Möbius prefers them."""
+  return [method for method, setting in (
     ("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"),
     ("rebase", "allow_rebase_merge"),
-  ) if repo.get(setting) is True), None)
-  if method is None:
+  ) if repo.get(setting) is True]
+
+
+def merge_method(repo):
+  allowed = allowed_merge_methods(repo)
+  if not allowed:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return method
+  return allowed[0]
 
 
 def disarm_merge(db, row, target, reason):

@@ -8,6 +8,7 @@ import logging
 import time
 import uuid
 from contextlib import AsyncExitStack
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -24,6 +25,7 @@ from app.contribution_review_public_actions import post_public_review
 from app.contribution_review_public import EVIDENCE_MAX_CHARS
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
+from app import contribution_direct_merge as direct_merge
 from app import contribution_review_merge_actions as merge_actions
 from app import contribution_review_verdicts as verdicts
 from app.chat_start import start_programmatic_chat_turn
@@ -42,7 +44,7 @@ _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
-                       "review_fix_merge": True, "draft_takeover": True}
+                       "review_fix_merge": True, "draft_takeover": True, "merge_now": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPES = {"named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"}
 REVIEW_STOP_KEY = "_review_stop"
@@ -789,6 +791,12 @@ class VerdictDecision(PullIdentity):
   decision: Literal["submit", "discard"]
 
 
+def _require_owner_hands(principal: Principal, refusal: str) -> None:
+  """A public action only the owner's own tap may take: any agent bearer is refused."""
+  if principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None:
+    raise HTTPException(403, refusal)
+
+
 def _owner_verdict_authority(db, row):
   """Re-prove the run is live for an owner decision; the agent is not involved."""
   db.refresh(row)
@@ -814,8 +822,7 @@ async def _resume_for_merge(db, row, item):
 async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
                          db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
   """The owner's own submit or discard of one exact proposed verdict."""
-  if principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None:
-    raise HTTPException(403, "Only you can submit or discard a verdict. An agent cannot confirm its own proposal.")
+  _require_owner_hands(principal, "Only you can submit or discard a verdict. An agent cannot confirm its own proposal.")
   row = _row(db, app_id, run_id, principal)
   item_key = reviews.key(body.model_dump())
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -846,6 +853,28 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
 async def core_decide_verdict(run_id: str, body: VerdictDecision, db: Session = Depends(get_db),
                               principal: Principal = Depends(get_principal)):
   return await decide_verdict(None, run_id, body, db, principal)
+
+
+class DirectMerge(PullIdentity):
+  # An irreversible tap: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+  method: Literal["squash", "merge", "rebase"] | None = None
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/merge",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(get_db),
+                         principal: Principal = Depends(get_principal)):
+  """The owner's own tap: merge exactly the pull-request head named, now, with no agent run.
+
+  200 {state: merged|queued, merge_sha, method, repo, number, head_sha}; 409 with a
+  plain reason when GitHub's live answer refuses it; 502 merge_unconfirmed when the
+  write's outcome is unknown. See contribution_direct_merge.
+  """
+  _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
+  nonce = _authorize_context(db, app_id, principal)
+  cwd = Path(get_settings().data_dir) / "platform"
+  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce))
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",

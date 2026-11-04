@@ -17,7 +17,7 @@ from app.contribution_errors import ContributionSubmitError
 
 
 CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
-                "review_fix_merge": True, "draft_takeover": True}
+                "review_fix_merge": True, "draft_takeover": True, "merge_now": True}
 
 def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
