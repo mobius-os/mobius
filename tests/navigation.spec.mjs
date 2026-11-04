@@ -2747,6 +2747,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
     expect((await getNavState(page)).drawerOpen).toBe(false)
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: 'touch',
+    })
 
     // WebKit can retarget the compatibility click after the pointerdown has
     // removed the scrim. That click still belongs to the drawer dismissal.
@@ -2761,6 +2767,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     await openDrawer(page)
     await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 5,
+      pointerType: 'touch',
+    })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
       button: 0,
       isPrimary: true,
       pointerId: 5,
@@ -2930,6 +2942,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerId: 7,
       pointerType: 'touch',
     })
+    // The scrim holds the touch that dismissed it until that touch lifts (22i).
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 7,
+      pointerType: 'touch',
+    })
 
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
@@ -2972,7 +2991,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
         observer.disconnect()
         resolve({
           blocking: overlay.classList.contains('drawer-overlay--blocking'),
-          pointerEvents: getComputedStyle(overlay).pointerEvents,
+          dismissing: overlay.classList.contains('drawer-overlay--dismissing'),
           transitionProperty: getComputedStyle(drawer).transitionProperty,
         })
       })
@@ -2987,11 +3006,21 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
 
+    // Only the touch that dismissed the drawer still holds the scrim.
     expect(await committedClose).toEqual({
       blocking: false,
-      pointerEvents: 'none',
+      dismissing: true,
       transitionProperty: 'none',
     })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 8,
+      pointerType: 'touch',
+    })
+    // Well inside the hold's 3 s watchdog, so only the pointerup can release it.
+    await expect(page.locator('.drawer-overlay'))
+      .toHaveCSS('pointer-events', 'none', { timeout: 1000 })
   })
 
   test('22g. Swipe close leaves a click-only next activation live', async ({ page }) => {
