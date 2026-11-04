@@ -84,16 +84,60 @@ export function isImmersiveActive(request, activeView, activeAppId) {
 export function immersiveLifecycleValue(previous, current, recordedIntent, requestedOnReturn = false) {
   if (!current?.appId) return null
   if (!current.active) return false
-  if (requestedOnReturn) return recordedIntent === true ? true : null
 
   const sameCanvas = previous?.appId != null
     && String(previous.appId) === String(current.appId)
-  const promotedWhileActive = sameCanvas
-    && previous.active === true
-    && previous.liveVersion !== current.liveVersion
+  if (!sameCanvas) return null
 
-  if (!promotedWhileActive) return null
+  if (previous.active !== true) {
+    return requestedOnReturn && recordedIntent === true ? true : null
+  }
+  if (previous.liveVersion === current.liveVersion) return null
   return recordedIntent === true
+}
+
+/**
+ * One canvas's immersive bookkeeping between frame messages and lifecycle
+ * transitions. AppCanvas reports what happened; this decides what reaches
+ * Shell, so the visit-bounded rules stay in one testable place.
+ *
+ * A live frame that posts while shown but not active leaves a pending
+ * request. It lives for exactly one showing: the next lifecycle transition
+ * consumes it, and the frame being hidden discards it. That keeps a post made
+ * during Shell's chat handoff (frame still painted after the pane went
+ * inactive) from replaying on a later return. An unfocused split pane is
+ * shown but inactive too; its request is honoured when the pane is focused,
+ * because the user could see the app when it asked and AppCanvas cannot tell
+ * that apart from a return. A later `false` post cancels it.
+ */
+export function createImmersiveLifecycle() {
+  let previous = null
+  let pendingVersion = null
+  return {
+    // A frame's moebius:immersive post. Returns whether to forward it to
+    // Shell now (only the live frame of the active canvas drives chrome).
+    frameRequested({ version, liveVersion, active, frameVisible }) {
+      if (version !== liveVersion) return false
+      if (active) return true
+      if (frameVisible) pendingVersion = version
+      return false
+    },
+    frameHidden() {
+      pendingVersion = null
+    },
+    // `current` is { appId, liveVersion, active }; returns immersiveLifecycleValue's result.
+    transition(current, recordedIntent) {
+      const value = immersiveLifecycleValue(
+        previous,
+        current,
+        recordedIntent,
+        pendingVersion != null && pendingVersion === current.liveVersion,
+      )
+      pendingVersion = null
+      previous = current
+      return value
+    },
+  }
 }
 
 // App ids are numeric from /api/apps but arrive as strings on some paths
