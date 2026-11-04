@@ -2140,20 +2140,27 @@ def _pending_activation_work(
       except Exception:
         head = None
       served_to_head = _activation_paths_between(repo, served, head)
-  served_paths = set(paths) | set(served_to_head or []) | set(additional_served_paths)
-  paths.extend(served_to_head or [])
-  paths.extend(additional_served_paths)
+  # Only the served-source diffs say whether the server still has to load a
+  # boot module. The marker cannot: boot keeps a local boot-module edit there
+  # as image work after the restart that loaded it.
+  served_paths = [*(served_to_head or []), *additional_served_paths]
+  paths.extend(served_paths)
   paths.extend(image_input_drift(repo) or [])
   owed = _image_work_owed(
     repo, [str(path) for path in paths if str(path)],
     release or _contained_official_source(repo),
   )
-  restart = sorted(
+  return sorted({*owed, *damaged}), _served_boot_restart(served_paths, owed)
+
+
+def _served_boot_restart(served_paths: list[str], image_owed: list[str]) -> list[str]:
+  """Changed boot modules whose official image input is already satisfied, so
+  only a server restart is owed to load their served source."""
+  return sorted({
     path for path in served_paths
     if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
-    and path not in owed
-  )
-  return sorted({*owed, *damaged}), restart
+    and path not in image_owed
+  })
 
 
 def _deployed_runtime_is_image_own(path: str) -> bool:
@@ -4751,11 +4758,7 @@ def _record_update_activation(
   changed_paths = _activation_paths_between(repo, served, head)
   release = target or _contained_official_source(repo)
   image_owed = _image_work_owed(repo, changed_paths, release)
-  served_restart = [
-    path for path in changed_paths
-    if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
-    and path not in image_owed
-  ]
+  served_restart = _served_boot_restart(changed_paths, image_owed)
   incoming_impact = platform_activation.classify_activation(
     image_owed, served_restart_paths=served_restart,
   )

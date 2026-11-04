@@ -5302,6 +5302,32 @@ def test_pre_rule_release_boot_retires_served_boot_debt(legacy_baked_boot):
   assert pu.platform_status(platform)["activation"]["required_actions"] == []
 
 
+@pytest.mark.parametrize("image_record", ["legacy", "boot_hashes"])
+def test_restart_retires_served_boot_debt_under_the_image_classifier(
+  legacy_baked_boot, monkeypatch, image_record,
+):
+  """The image keeps a local boot-module edit as image work it can never run,
+  but the restart that loaded the served source settled the served half."""
+  _, platform, _, info = legacy_baked_boot
+  path = "backend/app/config.py"
+  frozen = info["sha"]
+  if image_record == "boot_hashes":
+    info["image_inputs"].update(_image_boot_input_hashes(platform, frozen))
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(frozen + "\n")
+  head = _local_commit(platform, edits={path: "BOOT_VERSION = 2\n"})
+  pu._record_update_activation(platform, head, frozen)
+  monkeypatch.setattr(pu, "current_build_sha", lambda: frozen)
+
+  pu._complete_boot_activation(platform)
+  pu.SERVING_SHA_FILE.write_text(head + "\n")
+
+  assert pu._read_activation_marker()["image_paths"] == []
+  assert pu.platform_status(platform)["activation"]["required_actions"] == []
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  assert platform_restart.pending_restart_paths() == []
+
+
 @pytest.mark.parametrize("missing", ["sha", "commit", "baked_file", "baked_matches_blob", "blob"])
 def test_legacy_boot_proof_refuses_missing_or_disagreeing_image_evidence(legacy_baked_boot, missing):
   _, platform, baked_root, info = legacy_baked_boot
