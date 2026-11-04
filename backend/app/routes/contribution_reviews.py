@@ -14,8 +14,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import Text, cast, or_
+from sqlalchemy.orm import Session, load_only
 
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, providers, transcript_rows, settled
 from app import contribution_review_presets as presets
@@ -332,10 +332,11 @@ def _admission_action(body, facts) -> str:
   return action
 
 
-def _require_no_other_agent(db, owner_id, admitted):
+def _require_no_other_agent(db, owner_id, app_id, admitted):
   """One agent job per PR: the caller holds the owner's admission lock through the run's insert."""
   for target, facts, action in admitted:
-    pr_facts.require_allowed({**facts, "job": _pr_job(db, owner_id, target["repo"], target["number"])}, action)
+    job = _pr_job(db, owner_id, target["repo"], target["number"], app_id=app_id)
+    pr_facts.require_allowed({**facts, "job": job}, action)
 
 
 def _takeover_notices(body, admitted) -> dict:
@@ -350,7 +351,7 @@ async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, ta
   """Insert the run under the owner's admission lock, after its last one-job-per-PR check."""
   async with chat_queue.get_transition_lock(f"review-pr-admission:{principal.owner.id}"):
     db.rollback()
-    _require_no_other_agent(db, principal.owner.id, admitted)
+    _require_no_other_agent(db, principal.owner.id, app_id, admitted)
     # Consent in chat stays in that chat. An app selection without a source
     # conversation still receives its own durable review conversation.
     approval = _chat_approval(db, body, principal)
@@ -501,7 +502,8 @@ def list_reviews(app_id: int | None, db: Session = Depends(get_db),
     models.ContributionReviewRun.owner_id == principal.owner.id,
     _read_context_filter(app_id),
   ).order_by(models.ContributionReviewRun.created_at.desc()).limit(100).all()
-  return {"runs": [_list_run_view(db, row, app_id) for row in rows]}
+  return {"runs": [_list_run_view(db, row, app_id) for row in rows],
+          "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
 
 
 def _list_run_view(db, row, app_id):
@@ -746,7 +748,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       _require_ready_attempt_resolved(previous, target)
       await merge_actions.merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
         gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal),
-        job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id))
+        job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id, app_id=row.app_id))
       return {"run": _run_view(db, row)}
     if outcome.get("merge_attempted") or outcome.get("public_review"):
       reviews.save_effect_outcome(db, row, item_key, outcome)
@@ -908,8 +910,8 @@ def _run_job(db, row, repo, number) -> dict | None:
   return job
 
 
-def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None) -> dict | None:
-  """The agent job another review run holds on this PR, a live one before a stalled one.
+def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None, app_id=None) -> dict | None:
+  """The agent job another review run or a Respond chat holds on this PR, a live one before a stalled one.
 
   One agent job per PR: the machine refuses new jobs, merges and status
   changes while a live one holds the PR. A stalled job holds nothing.
@@ -917,7 +919,51 @@ def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None) -> dict | None:
   jobs = [_run_job(db, row, repo, number)
           for row in reviews.runs_naming_pull(db, owner_id, repo, number) if row.id != exclude_run_id]
   jobs = [job for job in jobs if job]
-  return next((job for job in jobs if job["state"] != "stalled"), jobs[0] if jobs else None)
+  live = next((job for job in jobs if job["state"] != "stalled"), None)
+  return live or _respond_job(db, app_id, repo, number) or (jobs[0] if jobs else None)
+
+
+# Contribute starts "Respond to feedback" as an ordinary app chat under this scope. No run row
+# tracks it, so the chat itself is the job: it holds its PR for as long as it can still move.
+_RESPOND_SCOPE = re.compile(r"contribute-address:(.+)#([0-9]+)")
+
+
+def _respond_pull(chat) -> tuple[str, int] | None:
+  """The (lowercased repo, number) a Respond chat answers feedback on, from its app chat scope."""
+  scope = coerce_agent_settings(chat.agent_settings_json).get("chat_scope")
+  found = _RESPOND_SCOPE.fullmatch(scope.strip()) if isinstance(scope, str) else None
+  return (found[1].lower(), int(found[2])) if found else None
+
+
+def _respond_chats(db, app_id, *, pull=None) -> list[dict]:
+  """The app's live Respond chats as {repo, number, chat_id, state}; `pull` narrows them to one PR.
+
+  Live means the chat still has a next move; `needs_answer` means that move is the
+  owner's (a card or secure input waiting), else `running`. Only the scope column is
+  read until a chat matches, because a handoff costs several queries.
+  """
+  chats = db.query(models.Chat).options(load_only(
+    models.Chat.id, models.Chat.agent_settings_json, models.Chat.pending_question_id)).filter(
+    models.Chat.deleted_at.is_(None), models.Chat.created_by_app_id == app_id,
+    cast(models.Chat.agent_settings_json, Text).like("%contribute-address:%")).all()
+  found = []
+  for chat in chats:
+    target = _respond_pull(chat)
+    if target is None or pull not in (None, target):
+      continue
+    kind = _chat_handoff(db, chat)["kind"]
+    if kind != "none":
+      found.append({"repo": target[0], "number": target[1], "chat_id": chat.id,
+                    "state": "needs_answer" if kind == "owner_input" else "running"})
+  return found
+
+
+def _respond_job(db, app_id, repo, number) -> dict | None:
+  """The job a live Respond chat holds on this PR. Only an app has Respond chats; core routes have none."""
+  if app_id is None:
+    return None
+  chat = next(iter(_respond_chats(db, app_id, pull=(repo.lower(), number))), None)
+  return {"kind": "respond", "state": chat["state"], "chat_id": chat["chat_id"]} if chat else None
 
 
 def _has_next_move(db, chat) -> bool:
@@ -930,6 +976,11 @@ def _has_next_move(db, chat) -> bool:
   manual by design) leaves the chat with no next move and the run "reviewing"
   for good. The same handoff projection the chat list shows says so honestly.
   """
+  return _chat_handoff(db, chat)["kind"] != "none"
+
+
+def _chat_handoff(db, chat) -> dict:
+  """The chat list's handoff projection for one chat: kind "none" when nothing will move it again."""
   from app import secure_inputs
   from app.chat import continuation_handoff_for_chat, is_chat_running
   from app.chat_handoffs import project_handoff
@@ -937,16 +988,15 @@ def _has_next_move(db, chat) -> bool:
   from app.delegations import serialize_background_helpers
   from app.goal_plans import presented_goal
   if chat is None:
-    return False
-  handoff = project_handoff(
-    owner_input=chat.id in secure_inputs.pending_chat_ids(),
+    return {"kind": "none", "reason": None}
+  return project_handoff(
+    owner_input=bool(chat.pending_question_id) or chat.id in secure_inputs.pending_chat_ids(),
     running=is_chat_running(chat.id),
     waits=[serialize_wait(wait, db=db) for wait in outstanding_waits_for_chat(db, chat.id)],
     helper_count=serialize_background_helpers(db, chat.id)["count"],
     park=continuation_handoff_for_chat(db, chat.id),
     goal=presented_goal(db, chat.id),
   )
-  return handoff["kind"] != "none"
 
 
 def _parent(db, row, principal):
@@ -1152,7 +1202,7 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
   return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce),
-                                             job=_pr_job(db, principal.owner.id, body.repo, body.number))
+                                             job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 class PullStatusChange(PullIdentity):
@@ -1183,7 +1233,7 @@ async def _owner_status_change(app_id, name, body, db, principal):
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
   return await pull_status.change_pull_status(_gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
-                                              job=_pr_job(db, principal.owner.id, body.repo, body.number))
+                                              job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 @router.post(APP_PREFIX + "/{app_id}/pulls/ready",
@@ -1645,7 +1695,8 @@ async def _push_repair_once(db, row, target, attempt, cwd) -> str | None:
   async with _github_connection_transaction():
     repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
     facts = await asyncio.to_thread(pr_facts.read_facts, _gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews and checks)
-      actor_id=row.github_actor_id, job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id))
+      actor_id=row.github_actor_id,
+      job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id, app_id=row.app_id))
     pr_facts.require_allowed(facts, "finish_it" if facts["role"] == "author" else "take_over")
     validation = await _validated_repair(db, row, owner, target, previous, cwd)
     if (validation["head_sha"], validation["diff_sha256"], validation["base_sha"]) != (
