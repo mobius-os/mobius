@@ -22,7 +22,8 @@ ITEM = {"repo": "example/project", "number": 7, "head_sha": SHA,
         "base_ref": "main", "base_sha": BASE}
 TARGET = {**ITEM, "repo_id": 1, "pr_id": "PR_7", "base_ref": "main",
           "base_sha": BASE, "title": "A change", "url": "https://github.com/example/project/pull/7"}
-REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True},
+# The connected account maintains the repository: it may merge, and take over someone else's PR.
+REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True, "maintain": True},
         "allow_squash_merge": True}
 PULL = {"node_id": "PR_7", "state": "open", "head": {"sha": SHA},
         "base": {"ref": "main", "sha": BASE}, "title": "A change", "html_url": TARGET["url"]}

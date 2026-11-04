@@ -9,9 +9,9 @@ from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from tests.test_contribution_review_runs import (ITEM, PULL, REPO, TARGET, VERDICTS, settle_fixture_review,
                                                  setup)  # noqa: F401  (fixture)
-from tests.test_contribution_review_workflows import MAINTAINER_REPO
 
 REASON = "The author is away for a month and asked a maintainer to finish it."
+WRITER_REPO = {**REPO, "permissions": {"push": True}}
 
 
 @pytest.fixture
@@ -92,9 +92,10 @@ def test_take_over_needs_a_maintainer_and_a_reason_that_is_frozen_into_the_grant
   db, fixture_run, principal, _ = owner
   settle_fixture_review(db, fixture_run)
   assert refusal(db, principal, mode="review_fix_merge") == (422, routes.TAKEOVER_REASON_NEEDED)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (WRITER_REPO, PULL))
   assert refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON) == (
     409, "Only maintainers can take over someone else’s PR.")
-  monkeypatch.setattr(domain, "current_pull", lambda *a: (MAINTAINER_REPO, PULL))
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, PULL))
   run = start(db, principal, mode="review_fix_merge", takeover_reason=f"  {REASON} ")["run"]
   assert run["options"]["takeover_reason"] == REASON
   assert run["items"][0]["role"] == "reviewer"

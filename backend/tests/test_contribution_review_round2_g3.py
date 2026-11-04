@@ -13,7 +13,7 @@ from app.chat_writer import create_chat
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from tests.test_contribution_review_runs import setup, ITEM, SHA, BASE, TARGET, PULL, report, settle_fixture_review
-from tests.test_contribution_review_workflows import configure_repair, publish_body, takeover, register_reviewer, MAINTAINER_REPO
+from tests.test_contribution_review_workflows import configure_repair, publish_body, takeover, register_reviewer, propose_and_push
 
 
 def test_publish_repair_rejects_rewritten_base_before_push(setup, monkeypatch):
@@ -26,7 +26,7 @@ def test_publish_repair_rejects_rewritten_base_before_push(setup, monkeypatch):
   monkeypatch.setattr(repairs, "validate_repair", lambda *a, **k: pytest.fail("validated against rewritten base"))
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **k: pytest.fail("public push"))
   with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    propose_and_push(db, row, principal, publish_body())
   assert error.value.status_code == 409
   assert not row.outcomes_json[reviews.key(ITEM)].get("repair_attempts")
 
@@ -210,7 +210,6 @@ def test_canonical_cli_finite_repair_preview_start_retry_and_limit(setup, monkey
   from scripts import github_review as cli
   db, _row, principal = setup
   settle_fixture_review(db, _row)
-  monkeypatch.setattr(reviews, "current_pull", lambda *a: (MAINTAINER_REPO, PULL))
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(cli, "inspect_pr", lambda *_args: TARGET)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *_args:

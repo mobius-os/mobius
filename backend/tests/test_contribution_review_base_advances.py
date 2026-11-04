@@ -33,7 +33,7 @@ from app.routes import contribution_reviews as routes
 from tests.test_contribution_review_runs import setup, ITEM, SHA, BASE, REPO, PULL, CHECKS, report  # noqa: F401
 
 
-from tests.test_contribution_review_workflows import takeover, publish_body, checkout_body
+from tests.test_contribution_review_workflows import takeover, publish_body, checkout_body, propose_and_push
 
 
 NEW_BASE = "e" * 40
@@ -102,8 +102,10 @@ def test_base_advance_under_unchanged_head_requires_fresh_independent_review(set
   previous = row.outcomes_json[domain.key(ITEM)]
   domain.save_outcome(db, row, domain.key(ITEM), {**previous, "independent_reviews": [
     *previous["independent_reviews"], receipt(base=NEW_BASE, receipt_id="fresh")]})
-  assert item(clear(setup, "fresh", base=NEW_BASE))["state"] == "merged"
-  assert merges == [NEW_BASE]
+  # The fresh review of the new combined result is all clear, and waits for the owner's own Merge.
+  settled = item(clear(setup, "fresh", base=NEW_BASE))
+  assert settled["state"] == "all_clear" and routes.READY_FOR_YOUR_MERGE in settled["summary"]
+  assert merges == []
 
 
 def test_repeated_advances_chain_from_the_receipted_base_and_stay_bounded(setup, monkeypatch):
@@ -237,7 +239,7 @@ def test_target_move_during_repair_validation_publishes_nothing(setup, monkeypat
     "files": ["owned.py"], "diff_sha256": "d" * 64, "merged_base_sha": NEW_BASE})
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("moved base"))
   with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    propose_and_push(db, row, principal, publish_body())
   assert error.value.status_code == 409
   assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
 
@@ -271,11 +273,10 @@ def test_a_base_advance_drops_every_verdict_recorded_for_the_old_base(setup, mon
   """A waiting item holds the old base's evidence; none of it may survive the move."""
   from app import delegations
   db, row, principal = clear_takeover(setup, monkeypatch)
-  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, **ROLLUP("PENDING"), "mergeStateStatus": "BLOCKED"})
   monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("stale verdict"))
-  waiting = item(clear(setup))
+  waiting = item(clear(setup))  # All clear, waiting for the owner's Merge.
   stale = ("reviewed_base_sha", "independent_receipt_id", "scope", "tests", "tests_passed")
-  assert waiting["state"] == "needs_you" and all(field in waiting for field in stale)
+  assert waiting["state"] == "all_clear" and all(field in waiting for field in stale)
   moving_base(monkeypatch, NEW_BASE)
   if via == "outcomes":
     advanced = item(clear(setup))

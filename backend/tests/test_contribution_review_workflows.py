@@ -16,14 +16,13 @@ from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from app import contribution_pr_facts as pr_facts
 from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, APPROVAL, report, settle_fixture_review
-# Taking over someone else's PR is for maintainers only (the PR machine's take_over guard).
-MAINTAINER_REPO = {**REPO, "permissions": {"push": True, "maintain": True}}
 
 NEW = "c" * 40
 
 
 CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
-                "review_fix_merge": True, "draft_takeover": True, "merge_now": True}
+                "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
+                "push_approval": True}
 
 def takeover(setup, monkeypatch):
   db, row, principal = setup
@@ -39,6 +38,10 @@ def takeover(setup, monkeypatch):
   chat.agent_settings_json = {"model": "gpt-5", "effort": "xhigh"}
   db.commit()
   monkeypatch.setattr(domain, "base_head", lambda *args: BASE)
+  # The owner's push decision resumes the run's conversation; no real turn starts in tests.
+  async def resumed(**_kwargs):
+    return True
+  monkeypatch.setattr(routes, "start_programmatic_chat_turn", resumed)
   return db, row, principal
 
 
@@ -49,6 +52,20 @@ def checkout_body(head=SHA):
 def publish_body(head=SHA, **changes):
   return routes.RepairPublish(**{**ITEM, "head_sha": head, "summary": "Fixed the scoped bug",
     "tests": "Focused tests passed", "tests_passed": True, **changes})
+
+
+def propose_and_push(db, row, principal, body=None):
+  """The agent proposes a repair and the owner's own tap pushes it: the only way a repair is pushed.
+
+  Returns the proposal call's answer when nothing was proposed (a refusal raises as before).
+  """
+  body = body or publish_body()
+  proposed = asyncio.run(routes.publish_repair(1, row.id, body, db, principal))
+  if "proposed" not in proposed:
+    return proposed
+  decision = routes.RepairDecision(repo=body.repo, number=body.number, head_sha=body.head_sha,
+                                   attempt_id=proposed["proposed"]["id"], decision="push")
+  return asyncio.run(routes.decide_repair(1, row.id, decision, db, Principal(owner=principal.owner, app_id=None)))
 
 
 def register_reviewer(db, row, child, target):
@@ -104,7 +121,6 @@ def test_cli_frozen_review_options_reproduce_the_server_preview(setup, monkeypat
 def test_uncapped_preview_admission_and_retry_freeze_the_same_hash(setup, monkeypatch, options):
   db, fixture_run, principal = setup
   settle_fixture_review(db, fixture_run)
-  monkeypatch.setattr(domain, "current_pull", lambda *a: (MAINTAINER_REPO, PULL))
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   monkeypatch.setattr(domain, "inspect_target", lambda *a: TARGET)
@@ -164,11 +180,11 @@ def test_both_repair_gates_allow_guarded_successors_beyond_former_caps(setup, mo
     return DispatchResult.confirmed({})
   monkeypatch.setattr(repairs, "push_repair", push)
   assert asyncio.run(routes.repair_checkout(1, row.id, checkout_body(head), db, principal))["checkout"] == checkout
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(head), db, principal))
+  result = propose_and_push(db, row, principal, publish_body(head))
   assert len(result["run"]["items"][0]["repair_attempts"]) == 26
   assert domain.effective_target(row, original)["head_sha"] == NEW
   assert row.targets_json == [original] and row.options_json["max_rounds"] == limit
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(head), db, principal))
+  propose_and_push(db, row, principal, publish_body(head))
   assert calls == [1]
   with pytest.raises(HTTPException) as error:
     report(setup, head_sha=NEW, tests_passed=True, reviewed_base_sha=BASE,
@@ -494,11 +510,11 @@ def test_guarded_push_receipt_is_durable_and_original_grant_immutable(setup, mon
     calls.append(1)
     return DispatchResult.confirmed({})
   monkeypatch.setattr(repairs, "push_repair", push)
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  result = propose_and_push(db, row, principal, publish_body())
   assert row.targets_json == [original]
   assert result["run"]["items"][0]["successor"]["head_sha"] == NEW
   assert domain.effective_target(row, original)["head_sha"] == NEW
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   assert calls == [1]
   with pytest.raises(HTTPException):
     report(setup, head_sha=NEW, reviewed_base_sha=BASE, tests_passed=True, independent_receipt_id="old-review")
@@ -518,11 +534,11 @@ def test_push_confirmed_while_pull_head_projection_lags(setup, monkeypatch):
   pushes = []
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw:
     pushes.append(1) or DispatchResult.confirmed({"head_sha": NEW}))
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  result = propose_and_push(db, row, principal, publish_body())
   item = result["run"]["items"][0]
   assert item["repair_attempts"][0]["state"] == "pushed"
   assert item["successor"]["head_sha"] == NEW
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   assert pushes == [1]
 
 
@@ -533,10 +549,10 @@ def test_lost_push_receipt_reconciles_without_second_public_request(setup, monke
     calls.append(1)
     return DispatchResult.unknown("Lost push response")
   monkeypatch.setattr(repairs, "push_repair", lose)
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  result = propose_and_push(db, row, principal, publish_body())
   assert result["run"]["items"][0]["repair_attempts"][0]["state"] == "push_unknown"
   assert row.targets_json[0]["head_sha"] == SHA
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  result = propose_and_push(db, row, principal, publish_body())
   assert result["run"]["items"][0]["repair_attempts"][0]["state"] == "pushed"
   assert calls == [1]
 
@@ -553,7 +569,7 @@ def test_repair_blocks_revoked_context_before_attempt(setup, monkeypatch, block)
   db.commit()
   monkeypatch.setattr(repairs, "push_repair", lambda *a: pytest.fail("revoked repair"))
   with pytest.raises(HTTPException):
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(tests_passed=block != "failed_tests"), db, principal))
+    propose_and_push(db, row, principal, publish_body(tests_passed=block != "failed_tests"))
   assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
 
 
@@ -579,7 +595,7 @@ def test_observation_reconciles_push_after_stop_without_agent_admission(setup, m
     calls.append(1)
     return DispatchResult.unknown("Lost push response")
   monkeypatch.setattr(repairs, "push_repair", lose)
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   db.get(models.ChatRun, principal.run_id).status = "stopped"
   db.commit()
   async def forbidden(**kwargs):
@@ -886,16 +902,17 @@ def test_stop_during_final_push_preflight_is_rechecked_before_public_io(setup, m
   db, row, principal = configure_repair(setup, monkeypatch)
   from app.database import SessionLocal
   def preflight(*args, before_push=None):
+    # The owner stops the review while their own push is in its final preflight.
     with SessionLocal() as other:
-      other.get(models.ChatRun, principal.run_id).status = "stopped"
-      other.commit()
+      domain.save_outcome(other, other.get(models.ContributionReviewRun, row.id), routes.REVIEW_STOP_KEY,
+                          {"state": "requested", "actor": "owner"})
     try:
       before_push()
     except NotDispatched as exc:
       return DispatchResult.not_dispatched(str(exc))
     pytest.fail("Public push must not happen after Stop")
   monkeypatch.setattr(repairs, "push_repair", preflight)
-  result = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  result = propose_and_push(db, row, principal, publish_body())
   assert result["run"]["items"][0]["repair_attempts"] == []
   assert "No branch update was applied" in result["run"]["items"][0]["summary"]
 
@@ -905,7 +922,7 @@ def test_cross_grant_uncertain_push_fence_cannot_be_replayed(setup, monkeypatch)
   def lose(*a, **kw):
     return DispatchResult.unknown("Lost push response")
   monkeypatch.setattr(repairs, "push_repair", lose)
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   second = models.ContributionReviewRun(id="second-repair", app_id=1, owner_id=row.owner_id,
     request_id="second-repair-request", mode=row.mode, github_actor_id=row.github_actor_id,
     app_nonce=row.app_nonce, options_json=dict(row.options_json), targets_json=list(row.targets_json),
@@ -914,14 +931,16 @@ def test_cross_grant_uncertain_push_fence_cannot_be_replayed(setup, monkeypatch)
   db.add(second)
   db.commit()
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("overlapping uncertain attempt"))
-  result = asyncio.run(routes.publish_repair(1, second.id, publish_body(), db, principal))
-  assert "earlier" in result["blocked"].lower()
+  # Nothing can even be proposed behind the earlier grant's unconfirmed push.
+  with pytest.raises(HTTPException) as error:
+    propose_and_push(db, second, principal, publish_body())
+  assert error.value.status_code == 409 and "earlier public attempt" in error.value.detail.lower()
 
 
-def test_confirmed_successor_with_fresh_independent_full_diff_can_merge(setup, monkeypatch):
+def test_confirmed_successor_with_fresh_independent_review_waits_for_the_owners_merge(setup, monkeypatch):
   db, row, principal = configure_repair(setup, monkeypatch)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: DispatchResult.confirmed({}))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   target = domain.effective_target(row, row.targets_json[0])
   assert target["head_sha"] == NEW and row.targets_json[0]["head_sha"] == SHA
   db.add(create_chat(id="successor-review-child", title="Full successor review"))
@@ -943,7 +962,9 @@ def test_confirmed_successor_with_fresh_independent_full_diff_can_merge(setup, m
   merged = []
   monkeypatch.setattr(domain, "perform_merge", lambda *a: merged.append(a[2]["head_sha"]) or {"merged": True, "sha": "landed"})
   result = report(setup, head_sha=NEW, tests_passed=True, reviewed_base_sha=BASE, independent_receipt_id=receipt)
-  assert result["run"]["state"] == "complete" and merged == [NEW]
+  # All clear at the successor, and ready for the owner's own Merge: a takeover never merges.
+  assert result["run"]["state"] == "complete" and merged == []
+  assert routes.READY_FOR_YOUR_MERGE in result["run"]["items"][0]["summary"]
   assert result["run"]["items"][0]["approved_head_sha"] == SHA
 
 
@@ -1186,7 +1207,8 @@ def test_review_stop_revokes_later_parent_public_actions(setup, monkeypatch):
   assert error.value.status_code == 409
 
 
-@pytest.mark.parametrize("pause_at", ["current_pull", "pull_checks"])
+# A takeover's all-clear reads the PR but no checks: it never merges (the owner's own Merge does).
+@pytest.mark.parametrize("pause_at", ["current_pull"])
 def test_stop_fences_unadmitted_merge_during_remote_preflight(setup, monkeypatch, pause_at):
   from threading import Event
   from app.database import SessionLocal
@@ -1408,7 +1430,7 @@ def test_prepared_repair_cannot_publish_behind_pending_merge(setup, monkeypatch,
     "head_sha": SHA, "merge_attempted": True})
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("PUBLIC_PUSH"))
   with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    propose_and_push(db, row, principal, publish_body())
   assert error.value.status_code == 409
   assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
 
