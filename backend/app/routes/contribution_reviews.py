@@ -288,6 +288,18 @@ def _chat_approval(db, body, principal):
 _ADMISSION_ACTIONS = {("review", "author"): "check_my_pr", ("review", "reviewer"): "review",
                       ("review_merge", "reviewer"): "review",
                       ("review_fix_merge", "author"): "finish_it", ("review_fix_merge", "reviewer"): "take_over"}
+# The one comment admitting a takeover of someone else's PR posts from the owner's
+# account, with their own reason; the app's confirm sheet shows these exact words.
+TAKEOVER_NOTICE_KEY = "_takeover_notice"
+TAKEOVER_NOTICE_UNCONFIRMED = {"code": "takeover_comment_unconfirmed", "message": (
+  "GitHub may have posted the takeover comment. Check the pull request: it is never sent twice, "
+  "and nothing was started.")}
+
+
+def takeover_comment(reason: str) -> str:
+  return f"Taking this PR over: {reason}"
+
+
 OWN_PR_REVIEW_MERGE = ("Review and merge is for someone else's PR. Check your own PR instead, and merge "
                        "it yourself once someone else approves it.")
 TAKEOVER_REASON_NEEDED = "Say why you are taking over someone else's PR. The reason goes with the takeover."
@@ -326,7 +338,15 @@ def _require_no_other_agent(db, owner_id, admitted):
     pr_facts.require_allowed({**facts, "job": _pr_job(db, owner_id, target["repo"], target["number"])}, action)
 
 
-async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets, admitted):
+def _takeover_notices(body, admitted) -> dict:
+  """The comment each taken-over PR receives, armed with the run so a lost answer is never resent."""
+  return {reviews.key(target): {"state": "posting", "body": takeover_comment(body.takeover_reason),
+                                "armed_at": reviews.utc_now_iso()}
+          for target, _facts, action in admitted if action == "take_over"}
+
+
+async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets,
+                     admitted) -> models.ContributionReviewRun:
   """Insert the run under the owner's admission lock, after its last one-job-per-PR check."""
   async with chat_queue.get_transition_lock(f"review-pr-admission:{principal.owner.id}"):
     db.rollback()
@@ -340,9 +360,10 @@ async def _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, ta
       targets = [{**target, "approval": approval} for target in targets]
     else:
       chat_id = _new_review_chat(db, snapshot["choice"], app_id)
+    notices = _takeover_notices(body, admitted)
     row = models.ContributionReviewRun(id=str(uuid.uuid4()), app_id=app_id,
       owner_id=principal.owner.id, request_id=body.request_id, mode=body.mode,
-      targets_json=targets, outcomes_json={}, chat_id=chat_id,
+      targets_json=targets, outcomes_json={TAKEOVER_NOTICE_KEY: notices} if notices else {}, chat_id=chat_id,
       github_actor_id=str(actor["id"]),
       app_nonce=app_nonce, options_json={**snapshot, "input_options": _options_input(body) or {},
         "confirmation_scope": body.confirmation_scope, "takeover_reason": body.takeover_reason,
@@ -361,6 +382,35 @@ def _new_review_chat(db, choice, app_id) -> str:
                                                       if key != "provider"})
   db.add(chat)
   return chat.id
+
+
+def _save_notice(db, row, item_key, notice) -> None:
+  reviews.save_effect_outcome(db, row, TAKEOVER_NOTICE_KEY, lambda current: {**current, item_key: notice})
+
+
+def _require_takeover_announced(row) -> None:
+  """A takeover starts only once GitHub confirmed its comment; a lost answer is never resent."""
+  for notice in ((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).values():
+    if notice.get("state") == "not_dispatched":
+      raise HTTPException(409, f"GitHub refused the takeover comment, so nothing was started. {notice.get('summary', '')}".strip())
+    if notice.get("state") != "posted":
+      raise HTTPException(502, TAKEOVER_NOTICE_UNCONFIRMED)
+
+
+async def _announce_takeover(db, row, cwd) -> None:
+  """Post each armed takeover comment once. Unless GitHub confirms it, the run is stopped
+  (it holds nothing) and the start is refused."""
+  for item_key, notice in list(((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).items()):
+    target = next(t for t in row.targets_json if reviews.key(t) == item_key)
+    async with _github_connection_transaction():
+      result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
+    fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
+              **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
+    _save_notice(db, row, item_key, {**notice, **fields})
+    if result.state != "confirmed":
+      reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": "platform",
+                                                       "reason": "The takeover comment was not confirmed."})
+      _require_takeover_announced(row)
 
 
 @router.post(APP_PREFIX + "/{app_id}/review-runs", dependencies=[Depends(reject_cross_site),
@@ -425,10 +475,12 @@ async def start_reviews(app_id: int | None, body: StartReviews,
           target["allowed_files"] = await asyncio.to_thread(reviews.repair_file_scope, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
           await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)  # unsettled: read-only (GitHub observation; no mutation)
       row = await _admit_run(db, body, principal, app_id, app_nonce, snapshot, actor, targets, admitted)
+      await _announce_takeover(db, row, cwd)
 
     # Any durable first turn owns recovery; clicking twice never starts a second
     # review or revives a stopped run. An admission failure retries the empty chat.
     if not db.query(models.ChatRun).filter_by(chat_id=row.chat_id).first():
+      _require_takeover_announced(row)
       chat = db.get(models.Chat, row.chat_id)
       frozen = row.options_json or {}
       if not _frozen_model_matches(frozen, chat):
@@ -757,6 +809,8 @@ def _read_context_filter(app_id):
 
 def _run_view(db, row, *, context_app_id=None):
   value = reviews.view(row)
+  if (row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY):
+    value["takeover_notice"] = row.outcomes_json[TAKEOVER_NOTICE_KEY]
   chat = db.get(models.Chat, row.chat_id)
   value["chat_created_by_app_id"] = chat.created_by_app_id if chat else None
   stop_context = context_app_id if context_app_id is not None else row.app_id
@@ -833,13 +887,34 @@ def _job_on_pull(view, repo, number) -> dict | None:
   return {"state": "running", "run_id": view["id"]}
 
 
+# How long an admitted run may wait for its first turn before it stops holding its PRs.
+# The run row is committed before that turn starts, so a younger run without one still
+# holds them: a second admission must never slip in between.
+FIRST_TURN_GRACE_SECONDS = 120
+
+
+def _never_started(db, row) -> bool:
+  """A run whose conversation never got a turn, well after admission: its start failed."""
+  from app.timeutil import now_naive_utc
+  if db.query(models.ChatRun.id).filter_by(chat_id=row.chat_id).first():
+    return False
+  return (now_naive_utc() - row.created_at).total_seconds() > FIRST_TURN_GRACE_SECONDS
+
+
+def _run_job(db, row, repo, number) -> dict | None:
+  job = _job_on_pull(_run_view(db, row), repo, number)
+  if job and job["state"] == "running" and _never_started(db, row):
+    return {**job, "state": "stalled"}
+  return job
+
+
 def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None) -> dict | None:
   """The agent job another review run holds on this PR, a live one before a stalled one.
 
   One agent job per PR: the machine refuses new jobs, merges and status
   changes while a live one holds the PR. A stalled job holds nothing.
   """
-  jobs = [_job_on_pull(_run_view(db, row), repo, number)
+  jobs = [_run_job(db, row, repo, number)
           for row in reviews.runs_naming_pull(db, owner_id, repo, number) if row.id != exclude_run_id]
   jobs = [job for job in jobs if job]
   return next((job for job in jobs if job["state"] != "stalled"), jobs[0] if jobs else None)

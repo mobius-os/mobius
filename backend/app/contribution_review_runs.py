@@ -986,8 +986,8 @@ def _takeover_opening(row) -> str:
     return ("Finish the owner's own named PRs for them: review privately and, only where "
             "necessary, repair them under the explicit scoped grant.")
   reason = (row.options_json or {}).get("takeover_reason")
-  said = (f"The owner's reason, which their confirm sheet announces on the PR (never post it yourself): {reason}\n"
-          if reason else "")
+  said = ("The owner's reason, which the platform already posted on the PR from the owner's account as "
+          f"\"Taking this PR over: <reason>\" (never post it yourself): {reason}\n" if reason else "")
   return ("Take over someone else's named PRs for the owner, a maintainer: review privately and, only where "
           f"necessary, repair them under the explicit scoped grant.\n{said}").rstrip()
 

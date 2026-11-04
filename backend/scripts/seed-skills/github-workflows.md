@@ -150,8 +150,10 @@ Use `preview --mode review_fix_merge` only when the owning chat explicitly
 authorizes repairing the named PR. The saved selection binds
 `named_pr_repairs_and_reviewed_successors` scope. On the owner's own PR it is
 "Finish it for me"; on someone else's it is "Take over", for maintainers
-(maintain or admin) only, with the owner's reason. The owner's confirm sheet
-announces a takeover on the PR; the agent never posts it.
+(maintain or admin) only, with the owner's reason. Starting a takeover posts
+one comment on the PR from the owner's account, `Taking this PR over:
+<reason>`: if GitHub refuses it nothing starts, and an unconfirmed one is
+never sent again. The agent never posts it.
 Read the run's returned brief. The parent alone calls `/repair-checkout` and
 `/repairs`; independent reviewers are admitted through `/reviewers`, inherit
 the parent's Goal, and report exact head/base evidence through

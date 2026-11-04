@@ -131,3 +131,22 @@ def test_a_run_that_settled_its_pr_or_waits_on_the_owner_holds_no_job(setup):
   assert routes._pr_job(db, row.owner_id, "example/project", 7) is None
   domain.save_outcome(db, row, item_key, {"state": "needs_you", "head_sha": SHA})
   assert routes._pr_job(db, row.owner_id, "example/project", 7) is None
+
+
+def test_a_run_whose_first_turn_never_started_stops_holding_the_pr(setup):
+  from datetime import timedelta
+  from app import models
+  from app.chat_writer import create_chat
+  db, row, _ = setup
+  domain.save_outcome(db, row, routes.REVIEW_STOP_KEY, {"state": "requested", "actor": "owner"})
+  db.add(create_chat(id="never-started", title="Review"))
+  late = models.ContributionReviewRun(id="late", app_id=1, owner_id=row.owner_id, request_id="late-request",
+    mode="review", targets_json=row.targets_json, outcomes_json={}, chat_id="never-started",
+    github_actor_id="42", app_nonce="nonce")
+  db.add(late)
+  db.commit()
+  # Just admitted, its first turn may still be starting: it holds the PR.
+  assert routes._pr_job(db, row.owner_id, "example/project", 7) == {"state": "running", "run_id": "late"}
+  late.created_at = late.created_at - timedelta(seconds=routes.FIRST_TURN_GRACE_SECONDS + 5)
+  db.commit()
+  assert routes._pr_job(db, row.owner_id, "example/project", 7)["state"] == "stalled"

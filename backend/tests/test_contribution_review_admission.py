@@ -123,3 +123,72 @@ def test_an_unreadable_pr_is_never_admitted(owner, monkeypatch):
   settle_fixture_review(db, fixture_run)
   monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "latestOpinionatedReviews": None})
   assert refusal(db, principal) == (409, "This PR could not be read. Try again.")
+
+
+def comments(monkeypatch, state="confirmed"):
+  from app import contribution_review_public as public
+  from app.contribution_review_effects import DispatchResult
+  posted = []
+  def post(_gh, _cwd, target, body):
+    posted.append((target["number"], body))
+    return {"confirmed": DispatchResult.confirmed({"id": 99, "url": "https://github.com/c/99"}),
+            "unknown": DispatchResult.unknown("lost answer"),
+            "not_dispatched": DispatchResult.not_dispatched("GitHub refused the request (HTTP 403).")}[state]
+  monkeypatch.setattr(public, "post_issue_comment", post)
+  return posted
+
+
+def test_taking_over_posts_the_owners_reason_once_as_a_comment(owner, monkeypatch):
+  db, fixture_run, principal, started = owner
+  settle_fixture_review(db, fixture_run)
+  posted = comments(monkeypatch)
+  run = start(db, principal, mode="review_fix_merge", takeover_reason=REASON)["run"]
+  assert posted == [(7, f"Taking this PR over: {REASON}")]
+  notice = run["takeover_notice"]["example/project#7"]
+  assert (notice["state"], notice["id"], notice["body"]) == ("posted", 99, f"Taking this PR over: {REASON}")
+  assert start(db, principal, mode="review_fix_merge", takeover_reason=REASON)["run"]["id"] == run["id"]
+  assert len(posted) == 1 and len(started) == 1
+
+
+@pytest.mark.parametrize("state, status", [("not_dispatched", 409), ("unknown", 502)])
+def test_a_takeover_github_did_not_confirm_starts_nothing_and_is_never_resent(owner, monkeypatch, state, status):
+  db, fixture_run, principal, started = owner
+  settle_fixture_review(db, fixture_run)
+  posted = comments(monkeypatch, state)
+  assert refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)[0] == status
+  assert started == [] and len(posted) == 1
+  row = db.query(models.ContributionReviewRun).filter_by(request_id="machine-admission").one()
+  assert row.outcomes_json[routes.TAKEOVER_NOTICE_KEY]["example/project#7"]["state"] == state
+  # The same request never posts again; the stopped run holds nothing, so a new request may.
+  status_again, detail = refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)
+  assert status_again == status and len(posted) == 1 and started == []
+  if state == "unknown":
+    assert detail == routes.TAKEOVER_NOTICE_UNCONFIRMED
+  comments(monkeypatch)
+  assert start(db, principal, mode="review_fix_merge", request_id="takeover-again", takeover_reason=REASON)["run"]
+
+
+def test_finishing_the_owners_own_pr_posts_nothing(owner, monkeypatch):
+  db, fixture_run, principal, _ = owner
+  settle_fixture_review(db, fixture_run)
+  posted = comments(monkeypatch)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42, "login": "me"}}))
+  run = start(db, principal, mode="review_fix_merge")["run"]
+  assert posted == [] and "takeover_notice" not in run
+
+
+def test_a_draft_take_over_is_admitted_under_the_single_repair_scope_and_never_marked_ready(owner, monkeypatch):
+  db, fixture_run, principal, _ = owner
+  settle_fixture_review(db, fixture_run)
+  comments(monkeypatch)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "draft": True}))
+  monkeypatch.setattr(domain, "inspect_target", lambda *a: {**TARGET, "is_draft": True, "head_repo": "example/project",
+                                                            "head_repo_id": 1, "head_ref": "topic"})
+  run = start(db, principal, mode="review_fix_merge", takeover_reason=REASON)["run"]
+  assert run["options"]["confirmation_scope"] == "named_pr_repairs_and_reviewed_successors"
+  assert run["items"][0]["is_draft"] is True
+  # Readiness stays the owner's own tap: no grant lets the run mark it ready.
+  paths = {route.path for route in routes.router.routes}
+  assert "/api/github/contributions/{app_id}/review-runs/{run_id}/ready" not in paths
+  assert "never merges, enqueues or marks a takeover ready" in " ".join(domain.takeover_brief(
+    db.get(models.ContributionReviewRun, run["id"])).split())

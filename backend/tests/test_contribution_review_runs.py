@@ -57,6 +57,8 @@ def setup(fresh_db, monkeypatch):
   monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
   monkeypatch.setattr(domain, "assert_current_base", lambda *args: None)
   monkeypatch.setattr(domain, "pull_checks", lambda *args: CHECKS)
+  # GitHub accepts the one comment that announces a takeover of someone else's PR.
+  monkeypatch.setattr(public, "post_issue_comment", lambda *args: DispatchResult.confirmed({"id": 1}))
   yield db, row, principal
   db.close()
 
