@@ -136,6 +136,7 @@ from app.github_contributions import (
   _reviewed_source_identity,
   _personal_publication_input,
   _personal_publication_input_sha256,
+  _UNSETTLED_PUSH_STAGES,
   _record_pending_equivalence,
   _record_pending_equivalence_locked,
   _merged_upstream_sha,
@@ -721,15 +722,7 @@ def _personal_resume_allowed(
     claim_input = receipt.get("claim_input")
     if not isinstance(claim_input, dict):
       raise HTTPException(status_code=409, detail="The recovery receipt is incomplete.")
-    preclaim_input = receipt.get("preclaim_input")
-    expected_candidates = [{**claim_input, **patch, "status": "prepared"}]
-    if isinstance(preclaim_input, dict):
-      expected_candidates.append(preclaim_input)
-    current_sha = _personal_publication_input_sha256(current)
-    if current_sha not in {
-      _personal_publication_input_sha256(candidate)
-      for candidate in expected_candidates
-    }:
+    if not _receipt_claims_prepared(receipt, current):
       raise HTTPException(
         status_code=409,
         detail="The contribution changed after its public attempt was recorded.",
@@ -755,22 +748,20 @@ def _personal_resume_allowed(
   return True
 
 
-# Phases a signed attempt reaches before any PR can exist. Neither of the
-# first two has a public effect; a push's outcome is the branch tip itself.
-_NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
-_PUSH_ATTEMPT_PHASES = frozenset({"push_pending", "push_ambiguous"})
+def _receipt_claims_prepared(receipt: dict, record: dict) -> bool:
+  """Whether prepared ``record`` is still the proposal ``receipt`` claimed.
 
-
-def _attempt_replays(receipt: dict, record: dict) -> bool:
-  """Whether ``record`` is still the exact proposal ``receipt`` was claimed for."""
+  A failed claim returns to prepared with the receipt's patch applied, or the
+  record was never rewritten from its pre-claim input. Either can replay.
+  """
   claim = receipt.get("claim_input")
   patch = receipt.get("record_patch")
   candidates = [receipt.get("preclaim_input")]
   if isinstance(claim, dict):
-    candidates += [claim, {
+    candidates.append({
       **claim, **(patch if isinstance(patch, dict) else {}),
-      "status": record.get("status"),
-    }]
+      "status": "prepared",
+    })
   current = _personal_publication_input_sha256(record)
   return any(
     isinstance(candidate, dict)
@@ -779,18 +770,39 @@ def _attempt_replays(receipt: dict, record: dict) -> bool:
   )
 
 
+# Signed phases that precede the attempt's PR create or update call. The
+# first two had no public effect. A push's public effect, on a new branch or
+# an open PR, is visible from the branch tip GitHub reports.
+_NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
+
+
+async def _retire_superseded_attempts(db: Session, approval: dict) -> None:
+  """Confirm one publication, then retire the attempts it supersedes.
+
+  ``approval`` holds the caller's ``_assert_confirmed_publication`` arguments.
+  That cheap check runs first, so a refused or stale confirmation leaves every
+  receipt in place and makes no GitHub read. The caller repeats it under the
+  lock that covers its claim.
+  """
+  async with fs_locks.app_storage_lock(approval["app_id"]):
+    _assert_confirmed_publication(db, **approval)
+  for record_id in approval["record_ids"]:
+    await _retire_superseded_attempt(approval["app_id"], record_id)
+
+
 async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
   """Drop a signed pre-PR attempt that GitHub proves a newer review supersedes.
 
   A receipt exists so the exact claimed action can be replayed and
   reconciled. Once the record is restaged or re-reviewed, that action can
   never replay, yet its receipt refused every later Send, so one interrupted
-  push left the record unsendable for good. The ambiguity is resolvable: a push's only effect is the branch tip. When
-  the tip is still the pre-push commit, or exactly the receipt's head, the
-  old attempt leaves nothing a new publication must reconcile, and that
-  publication still makes its own leased, authoritative GitHub reads.
-  Anything else (an unreadable tip, a moved branch, a phase after the push)
-  keeps the receipt.
+  push left the record unsendable for good. Whether that push landed is
+  visible from the branch tip. When the tip is still the pre-push commit, or
+  exactly the receipt's head, the old attempt leaves nothing a new
+  publication must reconcile, and that publication still makes its own
+  leased, authoritative GitHub reads (including the open PR's head for an
+  update). Anything else (an unreadable tip, a moved branch, a phase after
+  the push) keeps the receipt.
   """
   record_path, _ = _record_paths(app_id, record_id)
   async with fs_locks.app_storage_lock(app_id):
@@ -802,11 +814,12 @@ async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
   if (
     receipt is None
     or record.get("status") != "prepared"
-    or receipt.get("phase") not in _NO_EFFECT_ATTEMPT_PHASES | _PUSH_ATTEMPT_PHASES
-    or _attempt_replays(receipt, record)
+    or receipt.get("phase")
+    not in _NO_EFFECT_ATTEMPT_PHASES | _UNSETTLED_PUSH_STAGES
+    or _receipt_claims_prepared(receipt, record)
   ):
     return
-  if receipt["phase"] in _PUSH_ATTEMPT_PHASES:
+  if receipt["phase"] in _UNSETTLED_PUSH_STAGES:
     request = receipt.get("effective_request")
     if not isinstance(request, dict) or request.get("action") != "push":
       return
@@ -1116,8 +1129,15 @@ _REVIEW_STATUS_MESSAGES = {
   "source_provenance_mismatch": (
     "The installed source no longer proves that it contains this reviewed change."
   ),
+  "missing_commits": (
+    "The reviewed commits are no longer in the staged checkout."
+  ),
+  "github_reconnect": "Reconnect GitHub before sending this PR stack.",
   "review_unavailable": "This review could not be verified locally.",
 }
+# Codes a later check can clear without a new review; every other problem
+# needs a refresh.
+_UNAVAILABLE_REVIEW_CODES = frozenset({"review_unavailable", "github_reconnect"})
 
 _PUBLICATION_STATUS_MESSAGES = {
   "ready": "The target repository still has the reviewed default-branch head.",
@@ -1142,9 +1162,7 @@ def _review_status_problem(
   return {
     "id": record_id,
     "state": (
-      "unavailable"
-      if code in {"review_unavailable", "publication_unavailable"}
-      else "needs_refresh"
+      "unavailable" if code in _UNAVAILABLE_REVIEW_CODES else "needs_refresh"
     ),
     "code": code,
     "message": _REVIEW_STATUS_MESSAGES.get(
@@ -1328,12 +1346,7 @@ def _inspect_prepared_review(
   ):
     return _review_status_problem(record_id, code="invalid_plan")
   try:
-    try:
-      repo = _safe_repo_path(plan.get("repo_path"))
-    except ContributionSubmitError as exc:
-      return _review_status_problem(
-        record_id, code=exc.code or "invalid_checkout", detail=exc.message,
-      )
+    repo = _safe_repo_path(plan.get("repo_path"))
     branch = _validate_branch(plan.get("branch") or record.get("branch"))
     if not (repo / ".git").exists():
       return _review_status_problem(record_id, code="missing_checkout")
@@ -1352,7 +1365,7 @@ def _inspect_prepared_review(
     if base_oid is None or head_oid is None:
       raise ContributionSubmitError(
         "The reviewed commits are no longer available locally.",
-        code="review_unavailable",
+        code="missing_commits",
       )
     ancestry = app_git._run(
       repo, "merge-base", "--is-ancestor", base_oid, head_oid,
@@ -1410,7 +1423,10 @@ def _inspect_prepared_review(
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
     if stack and login and _GITHUB_LOGIN.match(login):
-      author_name, author_email = _connected_git_identity(github_state, login)
+      try:
+        author_name, author_email = _connected_git_identity(github_state, login)
+      except ContributionSubmitError:
+        return _review_status_problem(record_id, code="github_reconnect")
       attribution = app_git._run(
         repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", branch,
         read_only=True,
@@ -1843,6 +1859,21 @@ _STAGE_CLEARED_FIELDS = (
 )
 
 
+def _clear_superseded_push_stage(record: dict) -> None:
+  """Drop an unsettled push journal for a head this record no longer sends.
+
+  The journal can settle only its own head, so once restaging moves the
+  reviewed head it would lock the card for good. The signed attempt receipt,
+  not this app-writable journal, keeps guarding Send until GitHub resolves it.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  if (
+    record.get("last_submit_stage") in _UNSETTLED_PUSH_STAGES
+    and record.get("last_submit_push_sha") != plan.get("head_sha")
+  ):
+    record.pop("last_submit_stage")
+
+
 def _stage_error(exc: ContributionSubmitError) -> HTTPException:
   return HTTPException(
     status_code=exc.status_code,
@@ -2053,6 +2084,7 @@ def _stage_record(
     record["chat_ids"] = [*chat_ids, source_chat]
   for field in _STAGE_CLEARED_FIELDS:
     record.pop(field, None)
+  _clear_superseded_push_stage(record)
   _exact_reviewed_pr_text(record)
   _reviewed_pr_labels(plan)
   message = _git(repo_path, "log", "-1", "--format=%B", candidate.head_sha).stdout
@@ -2688,13 +2720,14 @@ async def submit_contribution(
   # connection. The nonce is rechecked inside the lock before the claim.
   submitter = body.submitter if body is not None else "contribute-button"
   db.close()
-  await _retire_superseded_attempt(app_id, record_id)
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=[record_id],
+    confirmed=confirmed, stack=False, phase_actions=frozenset({"pr"}),
+    submitter=submitter,
+  )
+  await _retire_superseded_attempts(db, approval)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=[record_id], confirmed=confirmed, stack=False,
-      phase_actions=frozenset({"pr"}), submitter=submitter,
-    )
+    _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit",
       "publication_stage": (
@@ -3146,13 +3179,14 @@ async def update_existing_contribution(
     body.submitter if body is not None else "contribute-update-button"
   )
   db.close()
-  await _retire_superseded_attempt(app_id, record_id)
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=[record_id],
+    confirmed=confirmed, stack=False, phase_actions=frozenset({"pr_update"}),
+    submitter=submitter,
+  )
+  await _retire_superseded_attempts(db, approval)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=[record_id], confirmed=confirmed, stack=False,
-      phase_actions=frozenset({"pr_update"}), submitter=submitter,
-    )
+    _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_existing"}
     existing_record_path, _ = _record_paths(app_id, record_id)
     allow_resume = _personal_resume_allowed(
@@ -3641,14 +3675,14 @@ async def update_contribution_stack(
   phase_actions = frozenset({"pr_update"})
   submitter = "contribute-stack-update-button"
   db.close()
-  for value in body.record_ids:
-    await _retire_superseded_attempt(app_id, value)
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=body.record_ids,
+    confirmed=confirmed, stack=True, phase_actions=phase_actions,
+    submitter=submitter,
+  )
+  await _retire_superseded_attempts(db, approval)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=body.record_ids, confirmed=confirmed, stack=True,
-      phase_actions=phase_actions, submitter=submitter,
-    )
+    _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_stack", "record_ids": body.record_ids}
     for cleanup_id in body.record_ids:
       cleanup_path, _ = _record_paths(app_id, cleanup_id)
@@ -3965,14 +3999,14 @@ async def submit_contribution_stack(
   phase_actions = frozenset({"pr"})
   submitter = "contribute-stack-button"
   db.close()
-  for value in body.record_ids:
-    await _retire_superseded_attempt(app_id, value)
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=body.record_ids,
+    confirmed=confirmed, stack=True, phase_actions=phase_actions,
+    submitter=submitter,
+  )
+  await _retire_superseded_attempts(db, approval)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=body.record_ids, confirmed=confirmed, stack=True,
-      phase_actions=phase_actions, submitter=submitter,
-    )
+    _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit_stack", "record_ids": body.record_ids,
       "publication_stage": body.publication_stage,

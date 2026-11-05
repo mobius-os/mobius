@@ -16225,7 +16225,7 @@ def test_review_status_unavailable_is_not_evidence_of_source_drift(
 @pytest.mark.parametrize("failure,code", [
   ("missing", "missing_checkout"), ("invalid", "invalid_checkout"),
   ("dirty", "working_changes"), ("missing_diff", "missing_diff"),
-  ("invalid_branch", "invalid_plan"),
+  ("invalid_branch", "invalid_plan"), ("missing_commits", "missing_commits"),
 ])
 def test_review_status_permanent_and_proven_drift_are_not_transient(
   client, owner_token, failure, code,
@@ -16242,9 +16242,30 @@ def test_review_status_permanent_and_proven_drift_are_not_transient(
     diff_path.unlink()
   elif failure == "invalid_branch":
     record["plan"]["branch"] = "not a valid branch"
+  elif failure == "missing_commits":
+    record["plan"]["head_sha"] = "f" * 40
   else:
     (repo / "index.jsx").write_text("owner changed this\n")
-  verdict = github_routes._inspect_prepared_review(record, diff_path, {})
+  verdict = asyncio.run(
+    github_routes._inspect_prepared_review_locked(record, diff_path, {}),
+  )
   assert verdict["state"] == "needs_refresh"
   assert verdict["code"] == code
   assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES[code]
+
+
+def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "reconnect-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "octocat", "user_id": "not-a-number"},
+  )
+  assert verdict == {
+    "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
+    "message": "Reconnect GitHub before sending this PR stack.",
+  }
