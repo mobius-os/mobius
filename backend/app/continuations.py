@@ -317,11 +317,11 @@ def continuation_protocol_source(
   )
   if allow_low_storage:
     # The owner let this one turn start below the disk safety floor, which
-    # every chat shares: say so, so the agent frees space before writing.
+    # every chat shares. Say so without licensing cleanup of other data.
     content += (
-      " The owner let this turn start below the shared disk safety floor."
-      " Check free space first; while it is still low, free space and avoid"
-      " large writes."
+      " The owner let this turn start below the shared disk safety floor;"
+      " avoid large writes. Delete only files this chat created; ask the"
+      " owner before deleting anything else."
     )
   if undelivered:
     content = "\n\n".join([

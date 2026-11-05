@@ -118,8 +118,19 @@ def test_owner_continue_route_persists_override_and_rejects_changed_retry(client
   assert len(scheduled) == 1
 
 
-@pytest.mark.parametrize("reason, allowed", [("manual", True), ("storage", False)])
-def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, monkeypatch, reason, allowed):
+def _low_storage(data_dir, *, allow_low_storage=False):
+  return require_agent_turn_admission(
+    data_dir, allow_low_storage=allow_low_storage, scratch_sweeper=_no_sweep,
+    status_reader=lambda _: {"facts": {"disk": {"free_bytes": 945 * 1024**2}},
+      "pressure": {"disk": {"state": "critical", "critical_below_bytes": 1024**3}}},
+  )
+
+
+async def _no_sweep():
+  return {}
+
+
+def _run_turn(db, chat, monkeypatch, reason, admission=_low_storage):
   row = models.ChatRun(
     id="admission-run", chat_id=chat.id, status="running", provider="claude",
     continuation_json={"reason": reason, "allow_low_storage": True},
@@ -128,16 +139,6 @@ def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, 
   db.commit()
   entered = []
 
-  async def admission(data_dir, *, allow_low_storage=False):
-    assert allow_low_storage is allowed
-    if not allowed:
-      return  # Ordinary admission behavior is covered separately.
-    await require_agent_turn_admission(
-      data_dir, allow_low_storage=allow_low_storage,
-      status_reader=lambda _: {"facts": {"disk": {"free_bytes": 945 * 1024**2}},
-        "pressure": {"disk": {"state": "critical", "critical_below_bytes": 1024**3}}},
-    )
-
   async def provider(*args, **kwargs):
     entered.append(kwargs["run_token"])
     return runtime.chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
@@ -145,7 +146,42 @@ def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, 
   monkeypatch.setattr(runtime, "require_agent_turn_admission", admission)
   monkeypatch.setattr(runtime, "_run_chat_impl", provider)
   asyncio.run(runtime.run_chat([], chat_id=chat.id, run_token=row.id))
-  assert entered == [row.id]
+  db.expire_all()
+  return entered, db.get(models.ChatRun, row.id)
+
+
+@pytest.mark.parametrize("reason, allowed", [("manual", True), ("storage", False)])
+def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, monkeypatch, reason, allowed):
+  entered, run = _run_turn(db, chat, monkeypatch, reason)
+  if allowed:
+    assert entered == [run.id]
+  else:
+    assert entered == [] and run.park_reason == "storage"
+
+
+def test_unreadable_permission_keeps_normal_storage_admission(db, chat, monkeypatch):
+  def unreadable():
+    raise RuntimeError("database unavailable")
+
+  monkeypatch.setattr("app.database.SessionLocal", unreadable)
+  assert runtime._run_allows_low_storage(chat.id, "admission-run") is False
+  monkeypatch.undo()
+  monkeypatch.setattr(runtime, "_run_allows_low_storage", lambda *_: False)
+  entered, run = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [] and run.park_reason == "storage"
+  assert run.status == "parked", "a read error is a storage wait, not a setup failure"
+
+
+def test_admitted_turn_never_reads_the_permission(db, chat, monkeypatch):
+  async def admitted(_data_dir, **_kwargs):
+    pass
+
+  def read(*_args):
+    pytest.fail("only a storage wait consults the saved permission")
+
+  monkeypatch.setattr(runtime, "_run_allows_low_storage", read)
+  entered, run = _run_turn(db, chat, monkeypatch, "manual", admitted)
+  assert entered == [run.id]
 
 
 def test_continue_anyway_tells_the_agent_storage_is_still_low():
@@ -157,4 +193,5 @@ def test_continue_anyway_tells_the_agent_storage_is_still_low():
   )
   assert "disk safety floor" not in plain["content"]
   assert "below the shared disk safety floor" in warned["content"]
-  assert "Check free space first" in warned["content"]
+  assert "Delete only files this chat created" in warned["content"]
+  assert "ask the owner before deleting anything else" in warned["content"]

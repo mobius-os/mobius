@@ -41,6 +41,25 @@ test('Continue anyway binds explicit storage permission to the same acknowledged
   assert.equal(requests[0][0], '', 'the action is not owner-authored prose')
 })
 
+test('a saved retry is not reused when the other recovery action is pressed', async () => {
+  const requests = []
+  const h = fixture(async (...args) => {
+    requests.push(args)
+    throw Object.assign(new Error('network'), { outboxRetained: true })
+  })
+  await h.result.current.resume()
+  h.rerender()
+  await h.result.current.resume({ allowLowStorage: true })
+  assert.match(h.result.current.state.error, /Continue anyway is saved/)
+  h.rerender()
+  await h.result.current.resume()
+  assert.equal(requests[0][2].allowLowStorage, undefined)
+  assert.equal(requests[1][2].allowLowStorage, true)
+  assert.notEqual(requests[1][2].cid, requests[0][2].cid)
+  assert.equal(requests[2][2].allowLowStorage, undefined)
+  assert.notEqual(requests[2][2].cid, requests[1][2].cid)
+})
+
 test('Resume stays pending without emitting a row until server acceptance; repeated taps coalesce', async () => {
   const response = deferred(), requests = []
   const h = fixture((...args) => { requests.push(args); return response.promise })

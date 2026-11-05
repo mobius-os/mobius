@@ -220,13 +220,10 @@ async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
 
 
 @pytest.mark.asyncio
-async def test_warned_storage_override_admits_cleanup_without_sweeping_its_scratch():
-  async def sweep():
-    pytest.fail("the cleanup turn may need its paused scratch")
-
+async def test_warned_storage_override_admits_the_turn_under_storage_pressure():
   await require_agent_turn_admission(
     "/data", allow_low_storage=True,
-    status_reader=lambda _path: _status("critical"), scratch_sweeper=sweep,
+    status_reader=lambda _path: _status("critical"), scratch_sweeper=_no_sweep,
   )
   with pytest.raises(AgentTurnDeferred) as waiting:
     await require_agent_turn_admission(
@@ -252,26 +249,3 @@ async def test_storage_override_does_not_override_critical_memory():
       status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
     )
   assert waiting.value.resource == "memory"
-
-
-
-@pytest.mark.asyncio
-async def test_continue_anyway_keeps_idle_scratch_even_when_memory_also_defers():
-  from app.agent_admission import agent_turn_deferral
-
-  swept = False
-
-  async def sweep():
-    nonlocal swept
-    swept = True
-    return {}
-
-  status = _status("critical")
-  status["pressure"]["memory"] = {"working_set_ratio": 0.99, "critical_at_ratio": 0.9}
-  deferral = await agent_turn_deferral(
-    "/data", status_reader=lambda _path: status, scratch_sweeper=sweep,
-    allow_low_storage=True,
-  )
-
-  assert deferral is not None
-  assert swept is False

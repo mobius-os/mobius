@@ -129,14 +129,13 @@ async def agent_turn_deferral(
   unusual self-hosted runtimes.
   """
   status = status_reader(data_dir)
-  # One warned owner continuation may cross the disk floor to perform cleanup.
+  # One warned owner continuation may start below the disk floor.
   # Memory admission still applies; this is not a global resource bypass.
   deferral = _deferral(status, allow_low_storage=allow_low_storage)
   if deferral is None:
     return None
-  if allow_low_storage or _storage_deferral(status) is None:
-    # Deleting paused chats' scratch frees no memory, and a warned
-    # Continue anyway turn may need the scratch it is about to clean up.
+  if _storage_deferral(status) is None:
+    # Deleting paused chats' scratch frees no memory.
     return deferral
   if scratch_sweeper is None:
     from app.agent_scratch import START_RACE_GRACE_SECONDS, sweep_idle_scratch

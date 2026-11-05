@@ -650,11 +650,17 @@ function MsgContentInner({
                 )}
               </div>
             )}
-            {manualResumeAvailable && (
+            {storageOverrideAvailable && (
+              <span className="chat__recovery-copy">
+                Continue this turn despite low storage—for example, to free space.
+                If the disk fills completely, saving may fail.
+              </span>
+            )}
+            {(manualResumeAvailable || storageOverrideAvailable) && (
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={() => onResume()}
+                onClick={() => onResume({ allowLowStorage: storageOverrideAvailable })}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -663,27 +669,14 @@ function MsgContentInner({
                     ? 'Möbius is reconnecting this paused turn.'
                   : undefined}
               >
-                {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
+                {resumeState?.pending
+                  ? storageOverrideAvailable ? 'Continuing…' : 'Resuming…'
+                  : resumeState?.unavailable ? 'Reconnecting…'
+                  : storageOverrideAvailable ? 'Continue anyway'
+                  : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
-            )}
-            {storageOverrideAvailable && (
-              <div className="chat__recovery-actions">
-                <span className="chat__recovery-copy">
-                  Continue this turn despite low storage—for example, to free space.
-                  If the disk fills completely, saving may fail.
-                </span>
-                <button
-                  type="button"
-                  className="chat__resume chat__recovery-action"
-                  onClick={() => onResume({ allowLowStorage: true })}
-                  disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
-                  aria-busy={resumeState?.pending || undefined}
-                >
-                  {resumeState?.pending ? 'Continuing…' : resumeState?.unavailable ? 'Reconnecting…' : 'Continue anyway'}
-                </button>
-              </div>
             )}
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">
