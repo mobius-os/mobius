@@ -307,8 +307,8 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     setPhase('resolving'); setError('')
     try {
       const body = await responseBody(await api.platform.conflictResolverChat({ resume: true }))
-      await refreshPlatform()
       if (body?.chat_id && onOpenChat) onOpenChat(body.chat_id)
+      void refreshPlatform({ preserveCurrentOnFailure: true })
     } catch (cause) { setError(cause.message || 'Could not resume this update.') }
     finally { pending.current = false; setPhase('idle') }
   }

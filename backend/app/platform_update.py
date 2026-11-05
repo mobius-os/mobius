@@ -1912,18 +1912,16 @@ def source_contains_image_release(
 
 def serves_image_release(
   repo: Path, served_sha: str | None, image_sha: str | None,
-  *, served_to_head: list[str] | None = None,
+  *, activation: PlatformActivationImpact | None = None,
 ) -> bool | None:
   """Whether the source this server serves contains the image's release.
 
-  The server serves its boot commit plus every committed change since that
-  activates live, so HEAD counts only when the served-to-HEAD diff owes no
-  activation. Image-provided files this image already runs as its release
-  has them are not owed, as in :func:`_pending_activation_paths`. Derived
-  only from the caller's served commit (and ``served_to_head``, that pair's
-  diff when the caller already has it), never re-read, and cheap enough for
-  ``/api/version``; platform status answers from here too. None for an
-  unstamped image.
+  Either the served commit contains it, or HEAD does and nothing since the
+  served commit is owed activation. That answer comes only from
+  :func:`_platform_activation_impact` over the caller's served-to-HEAD diff
+  (``activation`` when the caller has it), so an unknown served commit is
+  never live. ``/api/version`` skips the diff when the served commit already
+  contains the image. None for an unstamped image.
   """
   if not (isinstance(image_sha, str) and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
     return None
@@ -1934,11 +1932,11 @@ def serves_image_release(
   head = _rev(repo, "HEAD")
   if not source_contains_image_release(repo, head, image_sha):
     return False
-  if served_to_head is None:
-    served_to_head = _activation_paths_between(repo, served_sha, head)
-  return platform_activation.classify_activation(
-    _image_work_owed(repo, served_to_head, image_sha),
-  )["level"] == platform_activation.ActivationLevel.LIVE.value
+  if activation is None:
+    activation = _platform_activation_impact(
+      repo, served_to_head=_activation_paths_between(repo, served_sha, head),
+    )
+  return activation["level"] == platform_activation.ActivationLevel.LIVE.value
 
 
 def _activation_paths_between(
@@ -5585,17 +5583,14 @@ def platform_status(
   if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
     rolled_back = False
     rollback = None
-  served_to_head = (
-    _activation_paths_between(repo, served_sha, local) if served_sha else None
-  )
-  activation = _platform_activation_impact(repo, served_to_head=served_to_head)
+  activation = _platform_activation_impact(repo)
   activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
   image_build_applied = serves_image_release(
-    repo, served_sha, image_sha, served_to_head=served_to_head,
+    repo, served_sha, image_sha, activation=activation,
   )
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:

@@ -5,11 +5,9 @@ everything since it activated live; the historical upstream marker never
 counts. Only the clone's official refs name a release, never the image itself.
 """
 
-import hashlib
-
 import pytest
 
-from app import platform_update as pu
+from app import platform_activation, platform_update as pu
 from app.main import _served_platform_identity
 from .test_platform_update import (
   _advance_origin, _git, _local_commit, _served_sha, clone_env,
@@ -26,6 +24,12 @@ def _running(platform, monkeypatch, image, served):
     pu.SERVING_SHA_FILE.write_text(served + "\n")
   monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(pu.SERVING_SOURCE_FILE))
   monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(pu.SERVING_SHA_FILE))
+
+
+def _image_built_from(monkeypatch, origin, image):
+  """Record every image input as the image built from ``image`` has it."""
+  inputs = platform_activation.image_input_hashes(origin.parent / "origin-work")
+  monkeypatch.setattr(pu, "_build_info", lambda: {"sha": image, "image_inputs": inputs})
 
 
 def _origin_branch_commit(origin, branch, edits):
@@ -282,10 +286,13 @@ def test_image_provided_files_the_image_runs_do_not_hold_back_pairing(
   content = "image provided\n"
   image = _advance_origin(origin, edits={path: content})
   _running(platform, monkeypatch, image, old)
-  monkeypatch.setattr(pu, "_build_info", lambda: {
-    "sha": image,
-    "image_inputs": {path: hashlib.sha256(content.encode()).hexdigest()},
-  })
+  _image_built_from(monkeypatch, origin, image)
+  # The image deploys its own protected runtime copy.
+  deployed = platform.parent / "deployed-runtime"
+  if path.startswith("backend/runtime/"):
+    (deployed / path.removeprefix("backend/runtime/")).parent.mkdir(parents=True)
+    (deployed / path.removeprefix("backend/runtime/")).write_text(content)
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(deployed))
 
   assert pu.reconcile_clone(platform).status == "updated"
   status = pu.platform_status(platform)
@@ -324,3 +331,24 @@ def test_update_that_carries_the_image_release_says_so(clone_env, monkeypatch):
 
   assert status["available"] is True
   assert status["update_contains_image_release"] is True
+
+
+def test_boot_module_the_image_carries_still_owes_a_restart(
+  clone_env, monkeypatch,
+):
+  """The image has the release's boot module, but this server loaded the old
+  copy: the release is not served until a restart, on both endpoints."""
+  origin, platform = clone_env
+  old = _served_sha(platform)
+  path, content = "backend/app/config.py", "VALUE = 2\n"
+  image = _advance_origin(origin, edits={path: content})
+  _running(platform, monkeypatch, image, old)
+  _image_built_from(monkeypatch, origin, image)
+  _git(platform, "fetch", "origin")
+  _git(platform, "merge", "--ff-only", image)
+
+  status = pu.platform_status(platform)
+  identity = _served_platform_identity(str(platform.parent), image)
+
+  assert "server_restart" in status["activation"]["required_actions"]
+  assert status["image_build_applied"] is identity["image_build_applied"] is False
