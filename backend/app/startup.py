@@ -677,10 +677,11 @@ def _reconcile_app_cron(context: StartupContext) -> None:
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
   from app.chat_logging import get_chat_log_handler
 
-  handler = get_chat_log_handler()
+  # The `app.*` loggers below inherit the shared handler that
+  # `chat_logging.install_platform_warning_log` puts on `app`; attaching it to
+  # them as well would write each record twice. Only their level is set here.
   for name, level in (
     ("app.providers.models", logging.WARNING),
-    ("moebius.memory", logging.INFO),
     # Shared helper hosts: starts, exits with stderr, reseeds, and dispatches
     # that never start a helper are otherwise lost with the process output.
     ("app.helper_hosts", logging.INFO),
@@ -689,10 +690,13 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
     # the progress file keeps only the latest phase.
     ("app.platform_update", logging.INFO),
   ):
-    logger = logging.getLogger(name)
-    if handler not in logger.handlers:
-      logger.addHandler(handler)
-    logger.setLevel(level)
+    logging.getLogger(name).setLevel(level)
+  # Outside `app`, so it needs the handler itself.
+  memory = logging.getLogger("moebius.memory")
+  handler = get_chat_log_handler()
+  if handler not in memory.handlers:
+    memory.addHandler(handler)
+  memory.setLevel(logging.INFO)
 
 
 def _capture_platform_activation_snapshot(context: StartupContext) -> None:

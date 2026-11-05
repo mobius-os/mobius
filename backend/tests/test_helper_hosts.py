@@ -669,10 +669,12 @@ def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   assert turn.dispatch_error == "not_called"
   assert "529 Overloaded" in caplog.text and "completed without its tool call" in caplog.text
 
+  from app import chat_logging
+  chat_logging.install_platform_warning_log()
   startup._route_diagnostics_to_chat_log(None)
-  from app.chat_logging import get_chat_log_handler
+  assert chat_logging.get_chat_log_handler() in logging.getLogger("app").handlers
   for name in ("app.helper_hosts", "app.claude_helper_host"):
-    assert get_chat_log_handler() in logging.getLogger(name).handlers
+    assert logging.getLogger(name).isEnabledFor(logging.INFO)
 
 
 def test_host_helper_sessions_round_trip():

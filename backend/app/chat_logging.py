@@ -57,8 +57,9 @@ def install_platform_warning_log() -> None:
   handler, so Python's last-resort handler prints them to the container's
   stderr and nowhere else: an agent asked to check the logs cannot read them.
   Send them to the shared chat log as well. Any handler on the chain switches
-  the last-resort output off, so it is attached explicitly to keep the
-  container output exactly as it was.
+  the last-resort output off, so it is attached explicitly to keep warnings on
+  stderr. Child loggers inherit both handlers; do not attach the shared
+  handler to them again or each record is written twice.
   """
   platform_logger = logging.getLogger("app")
   handler = get_chat_log_handler()

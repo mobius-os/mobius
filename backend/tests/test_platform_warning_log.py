@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from app import chat_logging
+from app import chat_logging, startup
 
 
 class _Capture(logging.Handler):
@@ -53,3 +53,32 @@ def test_server_start_installs_the_platform_warning_log_before_startup_work():
   from app import main
   source = inspect.getsource(main.lifespan)
   assert source.index("install_platform_warning_log()") < source.index("run_startup_plan")
+
+
+@pytest.mark.parametrize("name", [
+  "app.providers.models",
+  "app.helper_hosts",
+  "app.claude_helper_host",
+  "app.platform_update",
+])
+def test_startup_diagnostics_reach_the_shared_log_exactly_once(platform_logger, monkeypatch, name):
+  """These loggers also sit under `app`, so wiring both would write each record twice."""
+  _, shared_log = platform_logger
+  child = logging.getLogger(name)
+  monkeypatch.setattr(child, "handlers", [])
+  monkeypatch.setattr(child, "level", child.level)
+  chat_logging.install_platform_warning_log()
+  startup._route_diagnostics_to_chat_log(None)
+  child.warning("once only")
+  assert shared_log.messages == ["once only"]
+
+
+def test_startup_gives_the_memory_logger_its_own_shared_handler(platform_logger, monkeypatch):
+  """`moebius.memory` sits outside `app`, so it is the one logger wired directly."""
+  _, shared_log = platform_logger
+  memory = logging.getLogger("moebius.memory")
+  monkeypatch.setattr(memory, "handlers", [])
+  monkeypatch.setattr(memory, "level", memory.level)
+  startup._route_diagnostics_to_chat_log(None)
+  memory.info("remembered")
+  assert shared_log.messages == ["remembered"]
