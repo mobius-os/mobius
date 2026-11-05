@@ -70,8 +70,10 @@ test('older reply actions reveal only on tap; only the latest reply keeps its ro
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /metaVisible=\{last \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
-    'the latest reply keeps its actions in view; owner rows never pin their timestamp')
+  assert.match(chatView, /metaVisible=\{\(!turnActive && last\) \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'only the idle latest reply pins its actions; a new turn hides the previous footer')
+  assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
+    'a new turn or assistant message clears an old tap reveal before paint')
 })
 
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {

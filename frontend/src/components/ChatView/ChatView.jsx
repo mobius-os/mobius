@@ -5084,6 +5084,14 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
+  // A new turn/reply retires the previous glance before paint, including a
+  // silent Resume whose new assistant row has not reached the transcript yet.
+  useLayoutEffect(() => {
+    if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
+    messageMetaTimerRef.current = null
+    setVisibleMessageMetaKey(null)
+  }, [chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId])
+
   const handleOpenChanges = useCallback((returnFocus = null) => {
     changesReturnFocusRef.current = returnFocus || document.activeElement
     setShowChanges(true)
@@ -6053,8 +6061,9 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      // The latest reply keeps its actions in view; earlier ones reveal on demand.
-      metaVisible={last || visibleMessageMetaKey === group.rows[0].key}
+      // Only an idle latest reply pins its actions. A live reply may not yet
+      // have a stored row; that must not leave the previous reply pinned too.
+      metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={showMessageMeta}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
       sealedSteerAssistant={active ? sealedSteerAssistant : sealedAssistantBeforeSteer(messages, group.start)}

@@ -4,6 +4,7 @@ import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { checkHiddenReplyContinuity } from './_replyContinuityFixture.mjs'
 import { mountReplyFooter } from './_replyFooterFixture.mjs'
 import { settledBox } from './_geometry.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 test.use({ serviceWorkers: 'block' })
@@ -46,9 +47,11 @@ test.describe('reply footer', () => {
   })
 
   for (const state of ['settled', 'running', 'pendingQuestion']) {
-    test(`a ${state} conversation has Copy but no footer Try again`, async ({ page }) => {
+    test(`a ${state} conversation keeps footer actions only where appropriate`, async ({ page }) => {
       const f = await mountReplyFooter(page, BASE, state === 'settled' ? {} : { [state]: true })
-      await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
+      const copy = f.replies.last().getByRole('button', { name: 'Copy message' })
+      if (state === 'running') await expect(copy).toBeHidden()
+      else await expect(copy).toBeVisible()
       await expect(f.replies.getByRole('button', { name: 'Try again', includeHidden: true })).toHaveCount(0)
     })
   }
@@ -63,6 +66,27 @@ test.describe('reply footer', () => {
     await expect(copy).toBeVisible()
     await expect(copy).toBeHidden({ timeout: 7000 })
     await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
+  })
+
+  test('starting a message clears a tapped older footer before the send completes', async ({ page }) => {
+    const f = await mountReplyFooter(page, BASE)
+    await f.composer.fill('A new question')
+    await waitForComposerSendable(f.surface)
+    const older = f.replies.first()
+    const copy = older.getByRole('button', { name: 'Copy message' })
+    let release
+    const responseGate = new Promise(resolve => { release = resolve })
+    await page.route(`**${f.path}/messages`, async route => {
+      await responseGate
+      await route.fulfill({ status: 400, json: { detail: 'Fixture rejection; no provider starts.' } })
+    })
+    try {
+      await older.locator('.chat__text--assistant').last().click()
+      await expect(copy).toBeVisible()
+      await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
+      await expect(copy).toBeHidden({ timeout: 1000 })
+      await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeHidden()
+    } finally { release() }
   })
 
   for (const width of [412, 1512]) {

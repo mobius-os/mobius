@@ -56,9 +56,11 @@ export async function mountReplyFooter(page, base, {
   const surface = page.locator('[data-chat-surface="painted"]')
   const replies = surface.locator('.chat__reply')
   await expect(replies).toHaveCount(2)
-  await expect(replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
+  const copy = replies.last().getByRole('button', { name: 'Copy message' })
+  if (running) await expect(copy).toBeHidden()
+  else await expect(copy).toBeVisible()
   if (running) await expect(surface.locator('.chat__stop')).toBeVisible()
   if (pendingQuestion) await expect(surface.locator('.qcard')).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
-  return { surface, replies, composer }
+  return { surface, replies, composer, path }
 }
