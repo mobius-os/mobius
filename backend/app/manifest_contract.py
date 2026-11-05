@@ -25,6 +25,7 @@ BOOLEAN_PERMISSIONS = (
   "connect_manage",
   "identity_manage",
   "railway_manage",
+  "helper_activity_read",
   "location_history_read",
 )
 # What an app's service may pay for from the owner's credits, as

@@ -23,7 +23,7 @@ import {
   cacheAppToken, readAppFrameStorage, readCachedAppToken,
   isSharedVirtualStorageKey,
 } from '../../lib/appFrameStorage.js'
-import { immersiveLifecycleValue } from '../../lib/immersive.js'
+import { createImmersiveLifecycle } from '../../lib/immersive.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
@@ -665,6 +665,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the promoted frame's recorded intent so an immersive game stays immersive
   // across a rebuild without a chrome flash.
   const frameImmersiveRef = useRef(new Map())
+  // Decides which recorded requests reach Shell live or on a lifecycle
+  // transition; see createImmersiveLifecycle for the one-visit rules.
+  const immersiveLifecycleRef = useRef(null)
+  if (!immersiveLifecycleRef.current) immersiveLifecycleRef.current = createImmersiveLifecycle()
   // A STABLE callback-ref per version. React only invokes a callback ref when
   // its identity changes, so caching one per version means a frame's ref never
   // churns across re-renders (a churning ref would delete+re-add the Map entry
@@ -1082,7 +1086,12 @@ const AppCanvas = forwardRef(function AppCanvas({
         // harmless presentation hint the frame may choose.
         const mode = msg.mode === 'bar' ? 'bar' : 'full'
         frameImmersiveRef.current.set(srcVersion, { value, mode })
-        if (srcVersion === liveVersionRef.current && activeRef.current) {
+        if (immersiveLifecycleRef.current.frameRequested({
+          version: srcVersion,
+          liveVersion: liveVersionRef.current,
+          active: activeRef.current,
+          frameVisible: frameVisibleRef.current,
+        })) {
           onImmersive?.(appId, value, mode)
         }
         return
@@ -1477,22 +1486,23 @@ const AppCanvas = forwardRef(function AppCanvas({
   // Real-time immersive messages are forwarded in onMessage above. Lifecycle
   // replay is intentionally narrower: leaving releases; returning to the same
   // cached frame does NOT resurrect its old request; only a newly promoted
-  // frame may replay the intent it posted while hidden. This makes the shell's
-  // Exit choice survive app switches while preserving seamless in-place app
-  // updates. The pure helper keeps that policy regression-testable.
-  const immersiveLifecycleRef = useRef(null)
+  // frame, or a request made during this showing, may replay. This makes the
+  // shell's Exit choice survive app switches while preserving seamless
+  // in-place app updates. The pure helper keeps that policy regression-testable.
   useEffect(() => {
     if (!appId) return
-    const current = { appId, liveVersion: swap.liveVersion, active }
     const intent = frameImmersiveRef.current.get(swap.liveVersion)
-    const value = immersiveLifecycleValue(
-      immersiveLifecycleRef.current,
-      current,
+    const value = immersiveLifecycleRef.current.transition(
+      { appId, liveVersion: swap.liveVersion, active },
       intent?.value,
     )
-    immersiveLifecycleRef.current = current
     if (value !== null) onImmersive?.(appId, value, intent?.mode)
   }, [appId, swap.liveVersion, active, onImmersive])
+
+  // A request made while shown lasts only for that showing.
+  useEffect(() => {
+    if (!frameVisible) immersiveLifecycleRef.current.frameHidden()
+  }, [frameVisible])
 
   // Unmount/eviction is a hard release even when no active-state render landed.
   useEffect(() => () => { onImmersive?.(appId, false) }, [appId, onImmersive])
@@ -2013,9 +2023,13 @@ const AppCanvas = forwardRef(function AppCanvas({
             // reaches only this frame and what it nests. An explicit
             // `fullscreen` entry overrides `allowFullScreen`, so it needs `*`
             // too. `clipboard-write` stays bare because apps copy through the
-            // host clipboard broker. Pointer lock is a sandbox flag in the
-            // frame's response CSP (backend `app_frame_csp`), not a feature.
-            allow="clipboard-write; fullscreen *; gamepad *"
+            // host clipboard broker. The motion sensors (accelerometer,
+            // gyroscope, magnetometer) let `devicemotion` and
+            // `deviceorientation` events reach the app; unlike camera and
+            // location they carry no shell-owned permission grant. Pointer
+            // lock is a sandbox flag in the frame's response CSP (backend
+            // `app_frame_csp`), not a feature.
+            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />

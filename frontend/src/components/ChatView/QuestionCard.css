@@ -389,7 +389,7 @@
 .qcard--grouped .qcard__submit-error + .qcard__submit {
   margin-top: 0;
 }
-.qcard__submit:hover:not(:disabled) {
+.qcard__submit:hover:not(:disabled):not(.qcard__submit--incomplete) {
   background: var(--accent-hover, var(--accent));
 }
 .qcard__submit:focus-visible {
@@ -399,6 +399,34 @@
 .qcard__submit:disabled {
   opacity: .4;
   cursor: default;
+}
+/* Waiting only for answers: stays tappable so a tap can lead to the first
+   unanswered question. Because it is operable, its label stays readable as a
+   quiet outlined button rather than a dimmed primary. */
+.qcard__submit--incomplete {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--muted);
+}
+.qcard__submit-hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+}
+.qcard__submit-hint + .qcard__submit {
+  margin-top: 8px;
+}
+.qcard--grouped .qcard__submit-hint {
+  margin: 0 16px 8px;
+}
+.qcard--grouped .qcard__submit-hint + .qcard__submit {
+  margin-top: 0;
+}
+.qcard__q--missing .qcard__hint {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 @media (max-width: 560px) {
@@ -424,7 +452,8 @@
     margin-inline: 14px;
   }
 
-  .qcard--grouped .qcard__submit-error {
+  .qcard--grouped .qcard__submit-error,
+  .qcard--grouped .qcard__submit-hint {
     margin-inline: 14px;
   }
 }

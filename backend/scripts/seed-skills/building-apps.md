@@ -1371,10 +1371,11 @@ useEffect(() => {
 
   Element fullscreen remains unavailable for this path on iOS. In a launch where `matchMedia('(display-mode: fullscreen)').matches`, skip the redundant request — but do not infer that iOS removed its own status bar.
 
-### Mouse-look and controllers
+### Mouse-look, controllers, and motion sensors
 
 App frames, including the shell, standalone, and public-link hosts, grant pointer
-lock and the Gamepad API directly, so a game uses the ordinary browser APIs:
+lock, the Gamepad API, and the device motion sensors directly, so an app uses the
+ordinary browser APIs:
 
 - **Pointer lock:** call `canvas.requestPointerLock()` from a click, then read
   `movementX`/`movementY`. Esc always releases it; show a "click to play"
@@ -1383,6 +1384,13 @@ lock and the Gamepad API directly, so a game uses the ordinary browser APIs:
 - **Gamepad:** poll `navigator.getGamepads()` each frame after a
   `gamepadconnected` event. Controllers only report once the page has focus
   and a button is pressed.
+- **Motion and tilt:** listen for `devicemotion` (acceleration, rotation rate)
+  and `deviceorientation` (alpha/beta/gamma angles). Where
+  `DeviceMotionEvent.requestPermission` exists (iOS), call it from a tap
+  before listening and handle `'denied'`; elsewhere events simply arrive.
+  These fire only while the app is visible, and a desktop browser usually
+  reports no motion at all, so keep a non-motion fallback. Background or
+  long-running motion recording is not available to apps this way.
 
 ### Splash / status-bar color
 
