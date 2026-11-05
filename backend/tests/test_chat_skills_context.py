@@ -377,6 +377,18 @@ def test_meaningful_next_steps_are_answerable_choices_not_prose_only_advice():
   assert "Once the agreed outcome is verified and no meaningful decision remains, finish declaratively" in core
 
 
+def test_question_recommendations_are_genuine_optional_and_first():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "Label an option `(Recommended)` only when you genuinely recommend it" in core
+  assert "can explain why; put that option first" in core
+  assert "When no option is genuinely preferable, offer neutral choices or a free-text question without a recommendation" in core
+  assert "Put a defensible `(Recommended)` option first" not in core
+
+
 def test_status_questions_offer_undecided_steps_without_granting_authority():
   repo = Path(__file__).resolve().parents[2]
   core = " ".join((repo / "skill" / "core.md").read_text(
@@ -487,6 +499,19 @@ def test_saved_secure_input_is_a_terminal_agent_action():
   assert (
     "On a confirmed receipt, end the turn with **no further text or tools**."
   ) in normalized
+
+
+def test_owner_input_card_request_is_not_parallelized_with_other_tools():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert (
+    "Never batch or parallelize a card request with any other tool call: "
+    "await every other call first, then request the card alone as the final "
+    "call of the turn."
+  ) in core
 
 
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
@@ -732,10 +757,17 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
   assert "sentence case" in normalized
   assert "Set it in your first turn" in normalized
   assert "A name the owner chose always wins" in normalized
+  assert "**Chat name** (`title`)" in normalized
+  assert "**Chat summary** (`chat_summary`)" in normalized
+  assert "**Full digest** (`digest_entry`)" in normalized
+  assert "two short, connected paragraphs" in normalized
+  assert "important earlier" in normalized and "recent phase" in normalized
+  assert "not just the last turn" in normalized
+  assert "without erasing its meaning or unresolved threads" in normalized
+  assert "not an execution diary" in normalized
+  assert "`## Summary` holds the chat summary and `## Digest` the full digest" in normalized
   assert "one concise checkpoint before ending a substantive turn" in normalized
   assert "Never postpone necessary recovery saves until compaction" in normalized
-  assert "**Summary** (`chat_summary`) — one short paragraph" in normalized
-  assert "**Digest** (`digest_entry`) — append only new" in normalized
   assert "Send `title` and `chat_summary` only when they need changing" in normalized
   assert "rather than saving after each tool or intermediate result" in normalized
   assert "Omitted fields stay unchanged" in normalized
@@ -745,14 +777,16 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
 
 def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
   """Möbius replaces each provider's default prompt, whose guidance tells the
-  model that visible text is the reply, what a denial means, and to report
-  faithfully. Without it, updates meant for the partner ended up in thinking."""
+  model that its reply text is what the user reads, what a denial means, and to
+  report faithfully. Without it, updates meant for the partner never reached
+  them, and turns ended without a closing message."""
   repo = Path(__file__).resolve().parents[2]
   core = " ".join(
     (repo / "skill" / "core.md").read_text(encoding="utf-8").split()
   ).lower()
   for required in (
-    "Thinking is folded away and is not a reply",
+    "**Your reply text is the conversation.**",
+    "**End every turn with a closing message:**",
     "A denied tool call means the partner or a Möbius guard declined it",
     "System reminders and hook output come from Möbius",
     "**Report outcomes faithfully.**",
@@ -764,7 +798,11 @@ def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
 
 def test_core_guidance_names_the_current_goal_completion_syntax():
   repo = Path(__file__).resolve().parents[2]
-  for path in ("skill/core.md", "backend/scripts/seed-skills/goal-planning.md"):
-    text = " ".join((repo / path).read_text(encoding="utf-8").split())
+  core = " ".join((repo / "skill/core.md").read_text().split())
+  planning = " ".join(
+    (repo / "backend/scripts/seed-skills/goal-planning.md").read_text().split()
+  )
+  for text in (core, planning):
     assert 'update_goal(complete: true, finished_claims: ["WORK_KEY"])' in text
+    assert "A refusal is an answer; do not retry it through the script" in text
     assert "complete --finished" not in text

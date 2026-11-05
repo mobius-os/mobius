@@ -27,17 +27,24 @@ def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
   assert 'maxLength' not in complete
 
 
-def test_checkpoint_chat_saves_a_short_summary_and_a_cumulative_digest_uncapped():
+def test_checkpoint_guidance_names_the_layers_and_leaves_them_uncapped():
   control = _control_module()
   definition = control._TOOL_DEFINITIONS["checkpoint_chat"]
   description = definition["description"]
   properties = definition["inputSchema"]["properties"]
 
-  assert "chat_summary replaces its short Summary" in description
-  assert "digest_entry appends one entry to its cumulative Digest" in description
+  assert "chat_summary replaces the Chat summary" in description
+  assert "digest_entry appends one entry to the Full digest" in description
+  assert "two short, connected paragraphs" in description
+  assert "important earlier outcomes" in description
+  assert "recent phase and open work" in description
+  assert "not an execution diary" in description
   assert set(properties) == {"title", "chat_summary", "digest_entry"}
+  # Length is guided by the instructions, not enforced by a cap.
   assert "maxLength" not in properties["chat_summary"]
   assert "maxLength" not in properties["digest_entry"]
+  assert properties["chat_summary"]["description"].startswith("Chat summary.")
+  assert properties["digest_entry"]["description"].startswith("Full digest entry.")
   # A save written for the old plain field names is refused, not misfiled.
   with pytest.raises(ValueError, match="chat_summary, digest_entry"):
     control._call_checkpoint_chat({"summary": "Facts written for the old meaning."})
@@ -1552,3 +1559,14 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert not result.get('isError'), result
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
+
+
+def test_saved_cards_ask_for_the_closing_message_before_the_card():
+  control = _control_module()
+  instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION
+  assert "before this call, write your closing message" in instruction
+  assert "where things stand" in instruction
+  for name in ("request_question", "request_restart", "request_approval"):
+    description = control._TOOL_DEFINITIONS[name]["description"]
+    assert instruction in description
+    assert "closeout before this call" not in description
