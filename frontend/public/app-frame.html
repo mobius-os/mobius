@@ -408,18 +408,12 @@
     var at = lead ? lead[0].length : 0;
     return text.slice(0, at) + pauseTag + text.slice(at);
   }
-  // The app reads back the srcdoc it set, so comparing or re-setting it
-  // neither reloads the child needlessly nor nests the script twice.
-  var appSrcdoc = new WeakMap();
-  function pausedSrcdoc(frame, html) {
-    var text = String(html);
-    var paused = withPause(text);
-    appSrcdoc.set(frame, { html: text, paused: paused });
-    return paused;
-  }
-  function readSrcdoc(frame, value) {
-    var set = appSrcdoc.get(frame);
-    return set && set.paused === value ? set.html : value;
+  // The app reads back the srcdoc it set (the injected tag removed), so
+  // comparing or re-setting it neither reloads the child nor nests the script.
+  function readSrcdoc(value) {
+    var text = value == null ? value : String(value);
+    var at = text ? text.indexOf(pauseTag) : -1;
+    return at < 0 ? value : text.slice(0, at) + text.slice(at + pauseTag.length);
   }
   function isSrcdoc(element, name) {
     return element instanceof HTMLIFrameElement && String(name).toLowerCase() === 'srcdoc';
@@ -428,18 +422,19 @@
   Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
     configurable: true,
     enumerable: srcdocProperty.enumerable,
-    get: function () { return readSrcdoc(this, srcdocProperty.get.call(this)); },
-    set: function (html) { srcdocProperty.set.call(this, pausedSrcdoc(this, html)); }
+    get: function () { return readSrcdoc(srcdocProperty.get.call(this)); },
+    set: function (html) { srcdocProperty.set.call(this, withPause(html)); }
   });
   // React and most authored code reach srcdoc through this path.
   var nativeSetAttribute = Element.prototype.setAttribute;
   var nativeGetAttribute = Element.prototype.getAttribute;
   Element.prototype.setAttribute = function (name, value) {
-    return nativeSetAttribute.call(this, name, isSrcdoc(this, name) ? pausedSrcdoc(this, value) : value);
+    if (!isSrcdoc(this, name)) return nativeSetAttribute.apply(this, arguments);
+    return nativeSetAttribute.call(this, name, withPause(value));
   };
   Element.prototype.getAttribute = function (name) {
     var value = nativeGetAttribute.apply(this, arguments);
-    return isSrcdoc(this, name) ? readSrcdoc(this, value) : value;
+    return isSrcdoc(this, name) ? readSrcdoc(value) : value;
   };
   function tellChild(frame) {
     var child = frame.contentWindow;

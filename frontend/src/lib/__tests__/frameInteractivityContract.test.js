@@ -707,7 +707,8 @@ test('an app reads back the srcdoc it set, so setting it again installs the paus
   assert.equal(viaProperty.srcdoc, html)
   assert.equal(viaProperty.getAttribute('srcdoc'), html)
   const written = viaProperty.attributes.srcdoc
-  viaProperty.srcdoc = viaProperty.srcdoc
+  const readBack = viaProperty.srcdoc
+  viaProperty.srcdoc = readBack
   assert.equal(viaProperty.attributes.srcdoc, written)
 
   const viaAttribute = new app.Iframe()
