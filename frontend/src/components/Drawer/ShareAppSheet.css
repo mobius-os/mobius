@@ -50,7 +50,7 @@
 
 .sas__eyebrow {
   margin: 0 0 3px;
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -145,7 +145,7 @@
   height: 24px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent, #a78bfa) 14%, transparent);
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
 }
 
 .sas__route-line {
@@ -178,7 +178,7 @@
 }
 
 .sas__btn--primary {
-  background: var(--accent, #a78bfa);
+  background: var(--accent-fill, var(--accent, #a78bfa));
   color: var(--accent-fg, #ffffff);
 }
 

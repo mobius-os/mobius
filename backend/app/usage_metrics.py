@@ -10,6 +10,9 @@ For Codex, the first update implies the pre-turn baseline
 (``first.total - first.last``). Subtracting that baseline from the final total
 produces the sum of every model call in this Möbius turn — the quantity needed
 to compare harness context efficiency.
+
+A Claude helper hosted inside a shared Claude Code process has no turn
+aggregate; see ``normalize_claude_helper_usage``.
 """
 
 from __future__ import annotations
@@ -27,23 +30,63 @@ CHAT_TOKEN_FIELDS = (
 )
 
 
+# How much of a run's usage the stored counters describe:
+# - final: the provider's complete aggregate for a run that completed;
+# - partial: a lower bound (a run that ended before the provider reported
+#   every call, or a sum of calls whose counters may be incomplete);
+# - unknown: usage recorded in a shape that is not this run's total;
+# - missing: no usage recorded (in flight, failed early, or before tracking).
+# Unknown and missing never read as a zero, and unknown never adds to totals.
+USAGE_QUALITIES = ("final", "partial", "unknown", "missing")
+_AGGREGATE_CALCULATIONS = ("result_aggregate", "thread_delta")
+_LOWER_BOUND_CALCULATIONS = ("last_call_fallback", "helper_call_sum")
+
+
+def run_usage_quality(usage: Any, status: str | None) -> str:
+  """Classify one durable run's ``usage_json``; see ``USAGE_QUALITIES``.
+
+  ``status`` is the run's status. Only a completed run's aggregate is final:
+  a stopped or failed run may have cut a model call short before its usage
+  arrived.
+  """
+  if usage is None:
+    return "missing"
+  calculation = usage.get("calculation") if isinstance(usage, dict) else None
+  if calculation in _AGGREGATE_CALCULATIONS:
+    return "final" if status == "completed" else "partial"
+  if calculation in _LOWER_BOUND_CALCULATIONS:
+    return "partial"
+  return "unknown"
+
+
 def summarize_chat_run_tokens(runs: Any) -> dict:
-  """Small provider-neutral token totals for one chat's durable runs."""
+  """Small provider-neutral token totals for one chat's durable runs.
+
+  ``totals`` are observed sums of final and partial runs: each field is None
+  when no such run reported it. ``coverage.runs_by_quality`` says whether
+  those sums are a complete aggregate (every run ``final``) or a lower bound.
+  """
   rows = list(runs or [])
+  qualities = [
+    run_usage_quality(getattr(run, "usage_json", None), getattr(run, "status", None))
+    for run in rows
+  ]
+  counted = [
+    run for run, quality in zip(rows, qualities) if quality in ("final", "partial")
+  ]
   totals = {}
   for field in CHAT_TOKEN_FIELDS:
     values = [
       int(getattr(run, field))
-      for run in rows
+      for run in counted
       if getattr(run, field, None) is not None
     ]
     totals[field] = sum(values) if values else None
   return {
     "coverage": {
       "runs": len(rows),
-      "runs_with_usage": sum(
-        getattr(run, "usage_json", None) is not None for run in rows
-      ),
+      "runs_with_usage": len(rows) - qualities.count("missing"),
+      "runs_by_quality": {q: qualities.count(q) for q in USAGE_QUALITIES},
     },
     "totals": totals,
   }
@@ -157,6 +200,35 @@ def normalize_claude_usage(
     "latest_model_input_tokens": latest_input_total,
     "provider_usage": _plain(usage),
     "provider_model_usage": _plain(model_usage),
+  }
+
+
+def normalize_claude_helper_usage(
+  call_usages: list[dict[str, Any]],
+  *,
+  duration_ms: int,
+) -> dict | None:
+  """Usage of one Claude helper turn hosted as a Claude Code background task.
+
+  A hosted helper has no turn aggregate (its task notification's total is the
+  last model call only), so this sums the per-call usage of the turn's own
+  model calls. Claude can relay a call before its final output count arrives,
+  so the sum is a lower bound (``helper_call_sum`` is never final).
+  """
+  if not call_usages:
+    return None
+  summed = {
+    field: sum(_count(usage.get(field)) for usage in call_usages)
+    for field in (
+      "input_tokens", "cache_creation_input_tokens",
+      "cache_read_input_tokens", "output_tokens",
+    )
+  }
+  return {
+    **normalize_claude_usage(summed, latest_model_usage=call_usages[-1]),
+    "scope": "helper_turn",
+    "calculation": "helper_call_sum",
+    "duration_ms": duration_ms,
   }
 
 

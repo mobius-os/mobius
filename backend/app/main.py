@@ -36,7 +36,10 @@ from sqlalchemy import inspect as inspect_database
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
-from app.chat_logging import get_logger as get_chat_logger
+from app.chat_logging import (
+  get_logger as get_chat_logger,
+  install_platform_warning_log,
+)
 from app.config import get_settings
 from app.database import (
   Base,
@@ -279,6 +282,7 @@ def _assert_provider_defaults(provider_names) -> None:
 @asynccontextmanager
 async def lifespan(app):
   _log = logging.getLogger(__name__)
+  install_platform_warning_log()
   record_memory_checkpoint("lifespan_start")
   # Before anything is spawned: no agent or tool may inherit server secrets.
   from app.config import withhold_server_secrets_from_children
@@ -1264,6 +1268,9 @@ def _served_platform_identity(
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "applied_upstream_sha": None,
          "image_build_applied": False, "baked_sha": None}
+  image_build_sha = str(image_build_sha or "").strip().lower()
+  if not re.fullmatch(r"[0-9a-f]{40}", image_build_sha):
+    out["image_build_applied"] = None  # unstamped, as platform status reports
   try:
     sentinel = Path(
       os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
@@ -1302,12 +1309,6 @@ def _served_platform_identity(
         value = upstream.stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", value):
           out["applied_upstream_sha"] = value
-          normalized_build = str(image_build_sha or "").strip().lower()
-          if re.fullmatch(r"[0-9a-f]{40}", normalized_build):
-            contains_build = _git(
-              "merge-base", "--is-ancestor", normalized_build, value,
-            )
-            out["image_build_applied"] = contains_build.returncode == 0
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:
@@ -1315,6 +1316,11 @@ def _served_platform_identity(
                  if ln.strip() and not ln.rstrip().endswith(".baked-sha")
                  and not ln.startswith("?? .")]
         out["platform_dirty"] = bool(dirty)
+      from app.platform_update import serves_image_release
+
+      out["image_build_applied"] = serves_image_release(
+        repo, out["served_sha"], image_build_sha,
+      )
     except Exception:
       pass
   return out

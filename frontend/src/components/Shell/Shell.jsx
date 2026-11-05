@@ -2,6 +2,7 @@ import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListR
 import { invalidateEventFedCachesAfterReconnect } from './eventFedCaches.js'
 import { ownerStore, sessionStore } from '../../lib/workspaceStorage.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
+import { openExistingChat, stageAppChatDraft } from '../../lib/appChatNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -235,6 +236,16 @@ const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
 // they need a short deadline rather than holding notifications behind a stalled request.
 const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
+// A list read that is merely slow (a busy server building every drawer row) would
+// miss the same short bound on every retry, and the abandoned reads keep the server
+// busy. Each retry doubles the bound, below the stream's 30s connect deadline.
+const SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS = 20_000
+function reconnectListTimeoutMs(failedAttempts = 0) {
+  return Math.min(
+    SYSTEM_RECONNECT_LIST_TIMEOUT_MS * 2 ** Math.max(0, failedAttempts),
+    SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS,
+  )
+}
 // Run/wait events arriving this close together share one scoped rows read.
 const CHAT_ROW_REFRESH_BATCH_MS = 250
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
@@ -335,7 +346,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     activeChatId,
     activeProjectId,
     activeArtifactRef,
-    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerOpen, drawerOpening, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, recordChatNavigation, navigateBackward, navigateForward,
     tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
@@ -516,6 +527,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
+  // Immersive hides the drawer panel (Shell.css), so a modal drawer cannot stay
+  // logically open underneath it: its dimming, tap-blocking scrim would cover
+  // the app with nothing visible to dismiss. This happens when an app claims
+  // immersive while the owner has the drawer open (e.g. during a game's load).
+  useLayoutEffect(() => {
+    if (immersiveActive && modalDrawerOpen) closeDrawerRef.current()
+  }, [immersiveActive, modalDrawerOpen])
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
   // branches are unit-tested in workspaceView.test.js, and so one commit flips
@@ -2723,16 +2741,32 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ))
     archiveRequestsRef.current.set(sid, request)
     let committed = false
+    let unreachable = false
     try {
       const response = await request
       committed = response.ok
-    } catch {}
+    } catch (error) {
+      // The client already resent once after a dropped connection; a
+      // TypeError here means the server could not be reached at all.
+      unreachable = error instanceof TypeError
+    }
     if (archiveActionsRef.current.get(sid)?.token !== token) return false
     archiveActionsRef.current.delete(sid)
     archiveRequestsRef.current.delete(sid)
     refreshChatRows(sid)
     if (!committed) {
-      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat.`, { variant: 'error' })
+      const reason = unreachable ? 'Möbius couldn’t be reached' : 'Möbius hit an error'
+      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat: ${reason}.`, {
+        variant: 'error',
+        // Shares the success notice's key: a retry's own notice (success with
+        // Undo, or a fresh failure) replaces this one. A retry is a new
+        // action, so it is undoable even when the failed attempt was an Undo.
+        noticeKey: `chat-archive:${sid}`,
+        action: {
+          label: 'Try again',
+          onAction: () => setChatArchived(sid, archived),
+        },
+      })
       return false
     }
     if (!undoable) return true
@@ -2813,6 +2847,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     notifyShell,
     setAppIntents,
     navToRef,
+    requestComposer,
   })
 
   // The one way the shell opens Settings for someone else (a mini-app, the
@@ -2946,7 +2981,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         return
       }
       if (request.type === 'moebius:open-chat') {
-        const draftText = request.draft || null
+        const open = draft => {
+          if (request.view === 'changes') requestChatChanges(request.chatId)
+          navToRef.current('chat', { chatId: request.chatId })
+          // Storage covers an unmounted target. The explicit request also updates
+          // an already-retained ChatView, whose controlled composer state would
+          // otherwise keep showing its old value until a full remount.
+          if (draft !== undefined) requestComposer(request.chatId, { draft })
+          refreshChats()
+        }
+        if (request.requireExisting) return openExistingChat(request, open)
         // Do not stage a dead chat and wait for ChatView's later 404 repair:
         // that briefly paints a destination which immediately disappears. The
         // direct resource probe is the shell's authoritative deletion signal.
@@ -2956,22 +3000,14 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         )
         if (targetState === 'deleted') {
           await newChatRef.current?.({
-            draft: draftText || undefined,
+            draft: request.draft || undefined,
             forceNew: true,
           })
           refreshChats()
           return
         }
-        if (draftText != null) {
-          stageComposerHandoff(request.chatId, draftText)
-        }
-        if (request.view === 'changes') requestChatChanges(request.chatId)
-        navToRef.current('chat', { chatId: request.chatId })
-        // Storage covers an unmounted target. The explicit request also updates
-        // an already-retained ChatView, whose controlled composer state would
-        // otherwise keep showing its old value until a full remount.
-        if (draftText != null) requestComposer(request.chatId, { draft: draftText })
-        refreshChats()
+        // A failed send awaiting resolution keeps the composer; drop the draft.
+        open(await stageAppChatDraft(request.chatId, request.draft).catch(() => undefined))
         return
       }
       if (request.type === 'moebius:open-app') {
@@ -3524,18 +3560,19 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(async ({ signal } = {}) => {
+  const reconcileSystemStateOnOpen = useCallback(async ({ signal, failedAttempts = 0 } = {}) => {
+    const listTimeoutMs = reconnectListTimeoutMs(failedAttempts)
     // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
       ...invalidateEventFedCachesAfterReconnect(queryClient),
-      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
+      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: listTimeoutMs, signal })),
     ])
     await reconcileDeletedChatIdentities()
     signal?.throwIfAborted()
-    const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
+    const refreshedChats = await fetchFreshChats({ timeoutMs: listTimeoutMs, signal })
     signal?.throwIfAborted()
     const reconciledLocalIds = reconcileLocalChatRuns(
       refreshedChats,
@@ -5090,6 +5127,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // mode scene (cross-origin app interaction is inert throughout).
                 interactive={appRuntimeVisible
                   && !modalDrawerOpen && !modeBeatActive}
+                // Reaching for the drawer holds whatever a leave would hold, so a
+                // heavy game cannot starve the drawer and its sound stops first.
+                covered={modalDrawerOpen || drawerOpening}
                 version={versionForApp(id)}
                 storageGeneration={app?.storage_generation}
                 appName={app?.name}

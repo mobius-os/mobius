@@ -599,6 +599,14 @@ def test_review_frozen_rename_scope_includes_both_paths():
   assert domain.repair_file_scope(gh, "/tmp", TARGET) == ["new.py", "old.py"]
 
 
+def test_independent_review_brief_bounds_parallel_tests_to_the_container_quota():
+  row = SimpleNamespace(id="run-1", app_id=None, options_json={})
+  brief = domain.independent_brief(row, {**TARGET, "base_sha": "b" * 40, "head_sha": "h" * 40})
+  assert "/sys/fs/cgroup/cpu.max" in brief and "memory.max" in brief
+  assert "never `pytest -n` above 2" in brief
+  assert "focused tests" in brief
+
+
 def test_independent_reviewer_admission_is_durable_same_model_and_never_restarts(setup, monkeypatch):
   from app import delegations
   db, row, principal = takeover(setup, monkeypatch)

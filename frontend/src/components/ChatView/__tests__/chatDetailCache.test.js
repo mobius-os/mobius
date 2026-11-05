@@ -288,6 +288,24 @@ test('an idle foreground runtime refetches only when it disproves the cache', ()
   }), false, 'a live run reconciles through its stream instead')
 })
 
+test('a lifecycle card that changed without a transcript write disproves the cache', () => {
+  const detail = {
+    updated_at: '2026-07-30T12:00:00Z', messages: [], total: 0, offset: 0,
+    lifecycle_projection_key: 'before-cancel',
+  }
+  const cached = chatDetailCacheValue(detail)
+  const runtime = { ...detail, running: false }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, runtime), false)
+  const cancelled = { ...runtime, lifecycle_projection_key: 'after-cancel' }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, cancelled), true,
+    'a cancelled Wait adds its card with the same updated_at')
+  assert.equal(shouldRefetchTranscriptForRuntime(
+    chatDetailCacheValue({ ...detail, lifecycle_projection_key: 'after-cancel' }), cancelled,
+  ), false)
+  assert.equal(shouldRefetchTranscriptForRuntime({ ...cached, lifecycleProjectionKey: null }, runtime), true,
+    'a cache saved before the key existed is read once to seed it')
+})
+
 test('pending question lookup requires the exact unanswered owner row', () => {
   const messages = [
     { role: 'user', content: 'choose' },

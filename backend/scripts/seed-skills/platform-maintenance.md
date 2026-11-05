@@ -41,12 +41,29 @@ Review the exact changed paths and use the smallest matching action:
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
 | `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, or `backend/runtime/` | Image-owned. Container replacement installs the official image for the release, which carries no local edit to these files: the edit stays in the checkout, inactive, and the update reports it without waiting on it. Batch and test the change, then prepare it as an upstream contribution; it takes effect with the release that contains it. |
+| `backend/app/platform_boot.py` and the modules it imports (`platform_update.py`, `platform_activation.py`, `app_git.py`, `config.py`, and the rest of its import closure) | The pre-import update transaction runs from the image's baked copy, so a fix to it is not active at boot until an image containing it is installed. A restart loads only the served copy the running server uses. Do not substitute repeated restarts or bypass the image-owned startup and rollback checks. |
 | `backend/runtime/identity_broker.py` | The one served privileged runtime file: one server restart activates a valid edit; an invalid one falls back to the baked platform for that boot. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | `backend/scripts/seed-skills/` | One server restart applies the served templates to installed skills; untouched copies advance and edited ones stay for review. No image rebuild once the container runs an image that hands this job to the server. To use an edit immediately, write identical bytes to `/data/shared/skills/<name>.md`. |
 | Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations do not activate a live install and do not require an immediate rebuild. They survive container replacement only through the release that contains them; see Dependencies below. |
+
+### Verify activation without confusing image and source versions
+
+`mapi /api/platform/status` names the remaining activation in
+`activation.required_actions`, `needs_restart`, and `unfinished_update`.
+Its `current_build_sha` is the immutable image revision, not the source the
+running server imported. `served_sha` identifies that served source; local
+reconciliation normally makes these revisions different. A server restart
+cannot change the image revision, so never request one just to make these
+values match. `image_build_applied` says whether the served source, including
+committed changes that need no restart, contains the image revision (`null`
+for an unstamped image); status and `mapi /api/version` report the same
+answer. `false` with no update offered after a check means the image was built
+outside the official releases; nothing needs doing. `/api/version` also reports
+`serving_source` and frontend freshness. Use those owning facts to verify a
+ready boot.
 
 ### Dependencies — live first, durable second
 
@@ -125,6 +142,10 @@ payload totals; its `runtime_memory.payload_sizing` field points to the detailed
 `memory` for processes, maps, runtime-owner payloads, GC diagnostics, and
 optional allocation tracing. Add `deep=true` only when a GC object-type walk is
 actually needed.
+
+`logs` tails the shared chat log (`/data/logs/chat.log`): chat-turn lines plus
+the platform's own warnings, such as slow database checkouts. The container's
+raw stdout is not stored anywhere an agent can read.
 
 When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and

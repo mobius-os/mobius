@@ -20,6 +20,16 @@ export const SWIPE_DX = 28
 // (decidePointerMove checks the swipe first), not merely a cancel.
 export const MOVE_CANCEL_PX = 10
 
+// One painted frame adds at most this much charge. A busy device paints rarely
+// and hands over the finger's release late as well, so a single long frame must
+// not complete a hold the owner never saw charging. At 20fps and above a hold
+// still takes exactly HOLD_MS.
+export const HOLD_FRAME_CHARGE_MS = 50
+
+export function chargeAfterFrame(chargedMs, frameMs) {
+  return chargedMs + Math.min(frameMs, HOLD_FRAME_CHARGE_MS)
+}
+
 // The hold has been held long enough to activate.
 export function holdComplete(elapsedMs) {
   return elapsedMs >= HOLD_MS

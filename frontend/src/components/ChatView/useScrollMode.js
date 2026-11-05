@@ -377,6 +377,10 @@ export default function useScrollMode({
   // to null and `maybeApplyMode()` would re-write scrollTop with the
   // same mode it already applied, visibly snapping the viewport.
   const lastAppliedModeRef = useRef(null)
+  // The scrollTop FOLLOW_BOTTOM itself last wrote, cleared by every mode
+  // transition. Send pinning reads it as the autoscroll tail while live output
+  // has committed but the next layout observation has not followed it yet.
+  const followTailTopRef = useRef(null)
   // The pinned message's offsetTop at the last PIN_USER_MSG apply. The RO
   // re-pins when this shifts (content ABOVE the message grew — an image
   // finished loading, an error/question card rendered), which the identity
@@ -490,6 +494,7 @@ export default function useScrollMode({
     if (!nextMode) return previousMode
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    followTailTopRef.current = null
     modeAdoptedAtReaderIntentVersionRef.current = readerIntentVersionRef.current
     const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
@@ -537,6 +542,9 @@ export default function useScrollMode({
     if (!allowed) return false
     const before = scrollEl.scrollTop
     applyMode(scrollEl, mode)
+    if (mode.kind === 'FOLLOW_BOTTOM' && mode === modeRef.current) {
+      followTailTopRef.current = scrollEl.scrollTop
+    }
     if (Math.abs(scrollEl.scrollTop - before) > 0.5) {
       recordTrace('writes', event, {
         from: mode,
@@ -678,6 +686,7 @@ export default function useScrollMode({
       scrollEl: scrollRef.current,
       mode: modeRef.current,
       isFirstUserMsg,
+      followTailTop: followTailTopRef.current,
     })
     const intent = {
       willPin: delayedSendWillPin({

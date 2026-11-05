@@ -395,11 +395,18 @@ test('grouped replies carry authoritative manual recovery to their existing acti
     const props = {
       replyGroup: assistantReplyGroups([msg]).get(0),
       activeMirrorMsg: msg, useDbActivePayload: true, onResume() {}, isLastMsg: true,
+      canOverrideStorage: true,
     }
     const manual = render(Active, { ...props, handoff: { kind: 'recovery' } })
     assert.match(manual, /class="chat__resume chat__recovery-action"/)
     const automatic = render(Active, { ...props, handoff: { kind: 'automatic' } })
-    assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    if (kind === 'storage') {
+      assert.match(automatic, />Continue anyway<\/button>/)
+      assert.match(manual, />Continue anyway<\/button>/)
+      assert.match(automatic, /If the disk fills completely, saving may fail\./)
+    } else {
+      assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    }
     assert.doesNotMatch(manual, /will continue automatically|Trying again shortly/)
   }
 })
