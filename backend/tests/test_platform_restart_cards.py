@@ -1195,6 +1195,35 @@ def test_uncommitted_restart_paths_lists_only_restart_loaded_working_edits(
   ]
 
 
+def test_uncommitted_restart_paths_name_dual_use_boot_module_edits(
+  tmp_path, monkeypatch,
+):
+  # Boot modules classify as image work, yet the restarted server still
+  # imports their served copy, so an unfinished edit there goes live too.
+  import subprocess
+
+  from app import platform_restart, platform_update
+
+  def git(*args):
+    subprocess.run(
+      ["git", "-C", str(tmp_path), *args], check=True, capture_output=True,
+    )
+
+  git("init", "-q")
+  git("config", "user.email", "t@example.com")
+  git("config", "user.name", "t")
+  (tmp_path / "backend/app").mkdir(parents=True)
+  (tmp_path / "backend/app/config.py").write_text("a = 1\n")
+  git("add", "-A")
+  git("commit", "-qm", "base")
+  (tmp_path / "backend/app/config.py").write_text("a = 2\n")
+  monkeypatch.setattr(platform_update, "PLATFORM_REPO", tmp_path)
+
+  assert platform_restart.uncommitted_restart_paths() == [
+    "backend/app/config.py",
+  ]
+
+
 def test_each_chat_saves_its_own_restart_decision_without_a_shared_claim(
   client, auth, db, monkeypatch,
 ):
