@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  DISMISS_POINTER_HOLD_MAX_MS,
   DRAWER_CLOSE_WATCHDOG_BUFFER_MS,
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -14,6 +15,7 @@ import {
   clearDrawerGestureStyles,
   drawerOpenBlockedByDrag,
   settleDrawerSwipe,
+  watchDismissPointerEnd,
 } from '../drawerLifecycle.js'
 
 test('drawer close restores only while the drawer still owns focus', () => {
@@ -205,6 +207,77 @@ test('the click guard fails open for keyboard and assistive activation', () => {
     sourceCapabilities: { firesTouchEvents: true },
   }), true)
   assert.equal(isGeneratedTouchClick({ detail: 1 }), true)
+})
+
+// Minimal DOM listener registry. Pointer ends are read in the capture phase so
+// a descendant's stopPropagation cannot hide them; `capture` selects the phase.
+function listenerTarget() {
+  const listeners = new Map()
+  const key = (type, options) => `${type}:${options === true || options?.capture === true}`
+  return {
+    addEventListener(type, listener, options) { listeners.set(key(type, options), listener) },
+    removeEventListener(type, listener, options) {
+      if (listeners.get(key(type, options)) === listener) listeners.delete(key(type, options))
+    },
+    fire(type, event = {}, capture = false) { listeners.get(key(type, capture))?.(event) },
+  }
+}
+
+function watchDismissPointer(pointerId = 7) {
+  const win = listenerTarget()
+  const doc = listenerTarget()
+  let releases = 0
+  const cleanup = watchDismissPointerEnd(pointerId, () => { releases += 1 }, { win, doc })
+  const pointer = (type, id) => win.fire(type, { pointerId: id }, true)
+  return { win, doc, pointer, cleanup, releases: () => releases }
+}
+
+for (const terminal of ['pointerup', 'pointercancel']) {
+  test(`the dismiss hold ends only on its own pointer's ${terminal}`, (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const hold = watchDismissPointer(7)
+    hold.pointer('pointermove', 7)
+    hold.pointer(terminal, 8)
+    assert.equal(hold.releases(), 0, 'another finger lifting must not release the scrim')
+    hold.pointer(terminal, 7)
+    assert.equal(hold.releases(), 1)
+    hold.cleanup()
+  })
+}
+
+test('the dismiss hold ends when the page loses focus or visibility', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const blurred = watchDismissPointer()
+  blurred.win.fire('blur')
+  assert.equal(blurred.releases(), 1)
+  blurred.cleanup()
+
+  const hidden = watchDismissPointer()
+  hidden.doc.fire('visibilitychange')
+  assert.equal(hidden.releases(), 1)
+  hidden.cleanup()
+})
+
+test('a lost pointer end releases the dismiss hold after the max hold', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const hold = watchDismissPointer()
+  t.mock.timers.tick(DISMISS_POINTER_HOLD_MAX_MS - 1)
+  assert.equal(hold.releases(), 0)
+  t.mock.timers.tick(1)
+  assert.equal(hold.releases(), 1)
+  hold.cleanup()
+})
+
+test('dismiss hold cleanup removes every release path', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const hold = watchDismissPointer(7)
+  hold.cleanup()
+  hold.pointer('pointerup', 7)
+  hold.pointer('pointercancel', 7)
+  hold.win.fire('blur')
+  hold.doc.fire('visibilitychange')
+  t.mock.timers.tick(DISMISS_POINTER_HOLD_MAX_MS)
+  assert.equal(hold.releases(), 0)
 })
 
 test('opening the drawer suspends an active touch composer without changing its draft', () => {
