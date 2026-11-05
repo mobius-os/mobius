@@ -5357,9 +5357,10 @@ export default function ChatView({
     : null
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above. The display-ready gate
-  // publishes a running frame only after the activation verdict settles, while
-  // catch-up continues to reconcile into the same active assistant row.
+  // the saved-coordinate coverage check above. A coordinate-validated cached
+  // frame, idle or mid-reply, presents immediately at the reader's position;
+  // the activation verdict and stream catch-up reconcile beneath it into the
+  // same active assistant row. Sending stays blocked until activation settles.
   const transcriptPaintable = (
     initialEntryPhase === 'cached'
     || initialEntryPhase === 'stream-catchup'
@@ -5374,6 +5375,10 @@ export default function ChatView({
     activationPhase,
     activationSettled,
     transcriptPaintable,
+    // Before activation, `stream-catchup` can only come from a cached running
+    // window; afterwards activation is settled and this input is moot.
+    cachedFrame: (initialEntryPhase === 'cached' || initialEntryPhase === 'stream-catchup')
+      && revealed,
   })
 
   // Transcript geometry reads force a synchronous layout of the whole

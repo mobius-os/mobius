@@ -82,3 +82,20 @@ test('a transcript or empty frame waits for runtime truth; only cold or cached-f
     { showEmpty: true, showLoadError: false, displayReady: true },
   )
 })
+
+test('a saved transcript presents at once, idle or mid-reply, while runtime truth reconciles beneath it', () => {
+  const cached = { messageCount: 5, transcriptPaintable: true, cachedFrame: true }
+  assert.equal(frame({ ...cached, activationPhase: 'pending' }).displayReady, true,
+    'reopening a chat must not wait on the network')
+  assert.equal(frame({ ...cached, turnActive: true, activationPhase: 'pending' }).displayReady, true,
+    'a chat whose cached window was mid-reply opens at once too')
+  assert.equal(frame({ ...cached, loading: true }).displayReady, false,
+    'a window still loading is not a saved frame')
+  assert.equal(frame({ cachedFrame: true }).displayReady, false,
+    'an empty cache never stands in for an unverified empty chat')
+  assert.equal(
+    frame({ messageCount: 5, transcriptPaintable: true, activationPhase: 'pending' }).displayReady,
+    false,
+    'an unvalidated reading coordinate still waits for runtime truth',
+  )
+})

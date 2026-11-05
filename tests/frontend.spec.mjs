@@ -1168,7 +1168,6 @@ test.describe('Scroll position', () => {
     const visibleRows = trajectory.filter(row => row.visible)
     expect(returnImageServed).toBe(true)
     expect(streamCount).toBeGreaterThan(0)
-    expect(trajectory.some(row => row.held)).toBe(true)
     expect(trajectory.every(row => row.painted)).toBe(true)
     expect(visibleRows.length).toBeGreaterThan(2)
     expect(visibleRows.every(row => row.anchor && row.y != null)).toBe(true)

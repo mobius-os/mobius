@@ -44,6 +44,10 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - The load error wins over a cached running marker, and it is stable as soon
  *   as it renders. While quiet retries run it stays up, saying so, rather than
  *   holding Shell or flashing per attempt.
+ * - A saved window the owner already read presents at once, idle or
+ *   mid-reply: reopening a chat should not wait on the network. It opens at
+ *   the reader's saved coordinate; runtime truth and any live reply reconcile
+ *   beneath it, and sending stays blocked until activation settles.
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -55,12 +59,14 @@ export function chatEntryFrame({
   activationPhase,
   activationSettled,
   transcriptPaintable,
+  cachedFrame = false,
 }) {
   const empty = messageCount === 0
   const showLoadError = empty && (activationRetrying || (loadError && !loading))
   const showEmpty = empty && !loadError && !activationRetrying && !turnActive && !loading
   const displayReady = showLoadError
     || activationPhase === 'cold'
+    || (cachedFrame && !loading && !empty)
     || (activationSettled && !loading && (transcriptPaintable || showEmpty))
     || (activationPhase === 'error' && !loading && transcriptPaintable)
   return { showEmpty, showLoadError, displayReady }
