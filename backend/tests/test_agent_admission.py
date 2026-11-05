@@ -252,3 +252,26 @@ async def test_storage_override_does_not_override_critical_memory():
       status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
     )
   assert waiting.value.resource == "memory"
+
+
+
+@pytest.mark.asyncio
+async def test_continue_anyway_keeps_idle_scratch_even_when_memory_also_defers():
+  from app.agent_admission import agent_turn_deferral
+
+  swept = False
+
+  async def sweep():
+    nonlocal swept
+    swept = True
+    return {}
+
+  status = _status("critical")
+  status["pressure"]["memory"] = {"working_set_ratio": 0.99, "critical_at_ratio": 0.9}
+  deferral = await agent_turn_deferral(
+    "/data", status_reader=lambda _path: status, scratch_sweeper=sweep,
+    allow_low_storage=True,
+  )
+
+  assert deferral is not None
+  assert swept is False

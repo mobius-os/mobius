@@ -134,8 +134,9 @@ async def agent_turn_deferral(
   deferral = _deferral(status, allow_low_storage=allow_low_storage)
   if deferral is None:
     return None
-  if _storage_deferral(status) is None:
-    # Deleting paused chats' scratch frees no memory.
+  if allow_low_storage or _storage_deferral(status) is None:
+    # Deleting paused chats' scratch frees no memory, and a warned
+    # Continue anyway turn may need the scratch it is about to clean up.
     return deferral
   if scratch_sweeper is None:
     from app.agent_scratch import START_RACE_GRACE_SECONDS, sweep_idle_scratch

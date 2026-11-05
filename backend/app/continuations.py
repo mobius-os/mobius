@@ -280,6 +280,7 @@ def continuation_protocol_source(
   *, reason: str, control_id: str, run_token: str,
   source_work_id: str | None = None, goal_id: str | None = None,
   undelivered: list[str] | None = None,
+  allow_low_storage: bool = False,
 ) -> dict:
   """Build provider-only input for a typed continuation control.
 
@@ -314,6 +315,13 @@ def continuation_protocol_source(
   content = prompts.get(
     reason, "Resume the interrupted owner work from its saved state."
   )
+  if allow_low_storage:
+    # The owner let this one turn start below the disk safety floor, which
+    # every chat shares: say so, so the agent frees space before writing.
+    content += (
+      " Storage is still critically low: the owner let this turn continue so"
+      " space can be freed. Free space first and avoid large writes."
+    )
   if undelivered:
     content = "\n\n".join([
       content,

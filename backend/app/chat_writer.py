@@ -3819,6 +3819,7 @@ class ChatWriterActor:
         run_token=cmd.run_token,
         goal_id=prior.goal_id if prior is not None else None,
         undelivered=undelivered_input(db, chat, prior),
+        allow_low_storage=cmd.allow_low_storage,
       )
       # Explicit null keeps an unrelated reply's recovery goal-less.
       provider_source["goal_id"] = prior.goal_id if prior is not None else None
