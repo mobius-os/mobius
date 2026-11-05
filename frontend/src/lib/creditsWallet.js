@@ -53,14 +53,31 @@ export function openStripeWindow() {
 /**
  * The checkout address to open, or null. The server already accepts only
  * Stripe's own page; this keeps the window, which starts on Möbius's origin,
- * from ever being sent to a script or non-https address if that changes.
+ * from ever being sent anywhere else if that changes: only an https page on
+ * Stripe Checkout's host, with no credentials or port.
  */
 export function checkoutPage(address) {
+  let page
   try {
-    return new URL(address).protocol === 'https:' ? address : null
+    page = new URL(address)
   } catch {
     return null
   }
+  const stripes = page.protocol === 'https:' && page.hostname === 'checkout.stripe.com'
+    && !page.username && !page.password && !page.port
+  return stripes ? page.href : null
+}
+
+/**
+ * The purchase terms to show and buy with, or null.
+ *
+ * Terms are one credits service's: its currency, amounts and waiver rule.
+ * Pairing again may point this Möbius at another service, so terms read under
+ * any pairing but the summary's current one are never shown or bought with.
+ */
+export function termsFor(terms, summary) {
+  const pairing = summary?.mode === 'customer' ? summary.pairing : null
+  return pairing && terms?.pairing === pairing ? terms : null
 }
 
 /**

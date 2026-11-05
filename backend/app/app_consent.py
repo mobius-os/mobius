@@ -33,7 +33,8 @@ BASELINE = (
 # cannot mark itself harmless because it never supplies this.
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
-  "connect_manage", "identity_manage", "railway_manage", "spend_credits",
+  "connect_manage", "identity_manage", "credits_manage", "railway_manage",
+  "spend_credits",
   "agent_start", "project_builders", "workspace.screen-control",
 })
 
@@ -77,6 +78,10 @@ _FLAGS = (
    "Can pair, unpair and manage computers that run work for you."),
   ("identity_manage", "identity_manage", "Manage your sign-in identity",
    "Can manage the mobius.you sign-in link and identity."),
+  ("credits_manage", "credits_manage", "Manage your credits and earnings",
+   "Can see your credits balance, earnings and history, connect this Möbius "
+   "to a credits service, buy credits, spend them on hosted models, set the "
+   "prices of your apps, and keep or withdraw your earnings."),
   ("railway_manage", "railway_manage", "Manage Railway deployments",
    "Can manage deployments on your Railway account."),
   ("location_history_read", "location_history_read", "See your location history",

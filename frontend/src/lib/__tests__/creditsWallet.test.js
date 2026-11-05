@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import WalletSection from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, checkoutPage, openStripeWindow, settleTopup } from '../creditsWallet.js'
+import { activityLabel, checkoutPage, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -82,10 +82,25 @@ test('a blocked Stripe window is reported, not written into', t => {
   assert.equal(openStripeWindow(), null)
 })
 
-test('only an https checkout address is ever opened', () => {
+test('only an https Stripe Checkout address is ever opened', () => {
   const stripe = 'https://checkout.stripe.com/c/pay/cs_test_a1#fid=x'
   assert.equal(checkoutPage(stripe), stripe)
-  for (const address of ['javascript:alert(1)', 'data:text/html,x', 'http://checkout.stripe.com/c', '', null, undefined]) {
+  for (const address of [
+    'javascript:alert(1)', 'data:text/html,x', 'http://checkout.stripe.com/c', '', null, undefined,
+    'https://checkout.stripe.com.evil.test/c', 'https://evil.test/checkout.stripe.com',
+    'https://connect.stripe.com/c', 'https://user@checkout.stripe.com/c',
+    'https://checkout.stripe.com:8443/c',
+  ]) {
     assert.equal(checkoutPage(address), null, String(address))
   }
+})
+
+test('purchase terms show only under the pairing they were read with', () => {
+  const terms = { ...TERMS, pairing: 'p-old' }
+  assert.equal(termsFor(terms, { mode: 'customer', pairing: 'p-old' }), terms)
+  // Paired again: the old service's currency, amounts and waiver are gone.
+  assert.equal(termsFor(terms, { mode: 'customer', pairing: 'p-new' }), null)
+  assert.equal(termsFor(terms, { mode: 'unpaired', pairing: null }), null)
+  assert.equal(termsFor({ ...TERMS }, { mode: 'customer', pairing: undefined }), null)
+  assert.equal(termsFor(null, { mode: 'customer', pairing: 'p-old' }), null)
 })

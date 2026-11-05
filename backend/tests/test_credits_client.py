@@ -38,12 +38,12 @@ def paired(service):
   return service
 
 
-def _app(db, slug, *, spend_credits=("ana/prompts",)):
+def _app(db, slug, *, spend_credits=("ana/prompts",), package_id=None, **grants):
   row = models.App(
     slug=slug, source_dir=f"/tmp/mobius-tests/{slug}", name=slug,
     description="", jsx_source="export default function App(){}",
-    compiled_path="/tmp/app.js",
-    capability_contract={"data": {"spend_credits": list(spend_credits)}},
+    compiled_path="/tmp/app.js", package_id=package_id,
+    capability_contract={"data": {"spend_credits": list(spend_credits), **grants}},
   )
   db.add(row)
   db.commit()
@@ -107,6 +107,21 @@ def test_an_address_without_a_credits_service_is_a_bad_gateway(client, auth, ser
     "/api/identity/credits/pair",
     json={"operator_url": "https://example.com", "key": "mbc_example_key"}, headers=auth)
   assert refused.status_code == 502 and refused.json()["detail"]["code"] == "not_found"
+
+
+def test_a_key_stored_unsealed_by_an_earlier_build_stays_paired_and_is_sealed(
+  service, tmp_path
+):
+  stored = tmp_path / "credits-client" / "credentials.json"
+  stored.parent.mkdir()
+  stored.write_text('{"operator_url": "https://www.mobius.you/credits", '
+                    '"key": "mbc_from_an_earlier_build"}')
+  assert credits_client.load_credentials()["key"] == "mbc_from_an_earlier_build"
+  assert "mbc_from_an_earlier_build" not in stored.read_text()
+  assert "sealed_key" in stored.read_text()
+  assert stored.stat().st_mode & 0o777 == 0o600
+  assert credits_client.load_credentials()["key"] == "mbc_from_an_earlier_build"
+  assert credits_client.summary()["mode"] == "customer"
 
 
 def test_a_key_sealed_under_another_installation_secret_reads_as_unpaired(
@@ -270,7 +285,11 @@ def test_only_an_app_service_with_spend_credits_can_charge(client, auth, db, pai
                      headers=_as(db, granted, "private"))
   assert paid.status_code == 200 and paid.json()["charge_id"] == "c1"
   # The service learns which local app paid, for the owner's history.
-  assert paired.calls[-1]["json"] == {**CHARGE, "buyer_app": "granted"}
+  assert paired.calls[-1]["json"] == {
+    **CHARGE, "buyer_app": "granted",
+    "idempotency_key": credits_client.app_scoped_key(
+      f"app:{granted.id}", CHARGE["idempotency_key"]),
+  }
 
 
 def test_an_app_pays_only_the_sellers_its_grant_lists(client, auth, db, paired):
@@ -353,5 +372,122 @@ def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
   service.answers["purchase-terms"] = (200, terms)
   read = client.get("/api/identity/credits/purchase-terms", headers=auth)
   assert read.status_code == 200, read.text
-  assert read.json() == terms
   assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/purchase-terms"
+  pairing = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert read.json() == {**terms, "pairing": pairing}
+
+
+# --- Credits management is its own grant ---------------------------------------
+
+# Every route that reads or moves the owner's money, with a body it accepts.
+OWNER_CREDIT_ROUTES = [
+  ("GET", "/api/identity/credits", None),
+  ("GET", "/api/identity/credits/transactions", None),
+  ("GET", "/api/identity/credits/purchase-terms", None),
+  ("GET", "/api/identity/credits/topups/t1", None),
+  ("GET", "/api/identity/credits/prices/ana", None),
+  ("POST", "/api/identity/credits/pair",
+   {"operator_url": "https://www.mobius.you/credits", "key": "mbc_other_key"}),
+  ("POST", "/api/identity/credits/topup", {"amount_cents": 500}),
+  ("POST", "/api/identity/credits/model-funding",
+   {"amount_micro": 1_000_000, "idempotency_key": "fund-0001"}),
+  ("PUT", "/api/identity/credits/prices/prompts/run", {"price_micro": 250_000}),
+  ("POST", "/api/identity/credits/connect", {}),
+  ("POST", "/api/identity/credits/convert", None),
+  ("POST", "/api/identity/credits/withdraw", None),
+  ("POST", "/api/identity/credits/disconnect", None),
+  ("POST", "/api/identity/credits/unpair", None),
+]
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_an_app_approved_only_to_manage_identity_cannot_reach_the_owners_credits(
+  client, auth, db, paired, service_scope
+):
+  """Consent to the sign-in link is not consent to see or move money."""
+  app = _app(db, "identity-only", spend_credits=(), identity_manage=True)
+  headers = _as(db, app, service_scope)
+  calls = len(paired.calls)
+  for method, path, body in OWNER_CREDIT_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_an_app_approved_to_manage_credits_reaches_them(
+  client, auth, db, paired, service_scope
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _as(db, app, service_scope)
+  paired.answers["balance"] = (200, {"balance": "2.25"})
+  read = client.get("/api/identity/credits", headers=headers)
+  assert read.status_code == 200 and read.json()["balance"] == {"balance": "2.25"}
+  for method, path, body in OWNER_CREDIT_ROUTES:
+    if path.endswith(("/pair", "/unpair", "/topup", "/connect")):
+      continue  # Their answers depend on the service's page; covered above.
+    answer = client.request(method, path, json=body, headers=headers)
+    assert answer.status_code == 200, (path, answer.text)
+
+
+# --- One app's idempotency key never replays another's ---------------------------
+
+
+def test_two_apps_using_the_same_key_are_two_charges_upstream(client, auth, db, paired):
+  store_app = _app(db, "store-payer", package_id="pkg-store-payer")
+  local_app = _app(db, "local-payer")
+  paired.answers["charges"] = (200, {"charge_id": "c1"})
+  sent = []
+  for app in (store_app, local_app, store_app):
+    answer = client.post("/api/identity/credits/charges", json=CHARGE,
+                         headers=_as(db, app, "private"))
+    assert answer.status_code == 200, answer.text
+    sent.append(paired.calls[-1]["json"]["idempotency_key"])
+  # Different apps: different upstream keys. The same app retrying: the same.
+  assert sent[0] != sent[1]
+  assert sent[0] == sent[2]
+  assert CHARGE["idempotency_key"] not in sent
+
+
+def test_a_scoped_key_stays_within_the_services_key_limits():
+  for key in ("k" * 8, "x" * 200, "ünïcode-key/with:separators"):
+    scoped = credits_client.app_scoped_key("package:" + "p" * 128, key)
+    assert 8 <= len(scoped) <= 200 and scoped.isascii()
+  assert credits_client.app_scoped_key("app:1", "run-0001") != \
+    credits_client.app_scoped_key("app:2", "run-0001")
+
+
+# --- Purchase terms belong to one pairing --------------------------------------
+
+
+def test_pairing_again_with_another_key_changes_the_pairing(client, auth, paired):
+  first = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert first and client.get("/api/identity/credits", headers=auth).json()["pairing"] == first
+  credits_client.pair("https://www.mobius.you/credits/", "mbc_another_key")
+  second = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert second and second != first
+  credits_client.pair("https://credits.example.test", "mbc_another_key")
+  assert client.get("/api/identity/credits", headers=auth).json()["pairing"] not in (
+    first, second)
+  assert "mbc_" not in second
+
+
+def test_a_purchase_on_terms_from_an_earlier_pairing_buys_nothing(client, auth, paired):
+  paired.answers["purchase-terms"] = (200, {"currency": "gbp", "amounts_cents": [500]})
+  shown = client.get("/api/identity/credits/purchase-terms", headers=auth).json()
+  credits_client.pair("https://credits.example.test", "mbc_new_service_key")
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 500, "pairing": shown["pairing"]})
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "pairing_changed"
+  assert len(paired.calls) == calls
+
+  paired.answers["topups"] = (200, {
+    "checkout_url": "https://checkout.stripe.com/c/pay/cs_1", "topup_id": "t1"})
+  current = client.get("/api/identity/credits/purchase-terms", headers=auth).json()
+  started = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 500, "pairing": current["pairing"]})
+  assert started.status_code == 200, started.text
+  assert paired.calls[-1]["url"] == "https://credits.example.test/api/billing/topups"

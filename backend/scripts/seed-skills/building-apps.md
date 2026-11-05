@@ -971,6 +971,12 @@ one `idempotency_key` per call so a retry never pays twice. Do the paid work
 only after a 200, and explain each refusal by its `detail.code`: `not_paired`
 (connect credits in Möbius · You), `insufficient_credits`, `price_changed`,
 `price_not_found`, `key_spend_cap`, or `key_refused` (connect credits again).
+The key is scoped to your app, so another app's identical key never replays
+your charge.
+
+Showing the owner's balance or history, buying credits, publishing prices or
+moving earnings is a separate critical grant, `"credits_manage": true`.
+`identity_manage` does not include it.
 
 ## Managed-app update events
 

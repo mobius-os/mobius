@@ -75,6 +75,7 @@ def _fernet() -> Fernet:
 
 
 def load_credentials() -> dict | None:
+  """The paired service, its key, and an id for this pairing; None if unpaired."""
   try:
     stored = json.loads(_credentials_path().read_text())
   except (OSError, ValueError):
@@ -82,14 +83,34 @@ def load_credentials() -> dict | None:
   if not isinstance(stored, dict):
     return None
   url, sealed = stored.get("operator_url"), stored.get("sealed_key")
-  if not isinstance(url, str) or not isinstance(sealed, str) or not url or not sealed:
+  if not isinstance(url, str) or not url:
+    return None
+  legacy = stored.get("key")
+  if sealed is None and isinstance(legacy, str) and legacy.startswith(KEY_PREFIX):
+    # Earlier builds stored the key unsealed. Seal it in place so an
+    # installation paired before the upgrade stays paired.
+    try:
+      _save_credentials(url, legacy)
+    except OSError:
+      pass  # Still usable this time; sealing is retried on the next read.
+    return _credentials(url, legacy)
+  if not isinstance(sealed, str) or not sealed:
     return None
   try:
     key = _fernet().decrypt(sealed.encode()).decode()
   except (InvalidToken, ValueError):
     # Sealed under another installation secret: connect again.
     return None
-  return {"operator_url": url, "key": key}
+  return _credentials(url, key)
+
+
+def _credentials(operator_url: str, key: str) -> dict:
+  """A paired service, with ``pairing``: an id that changes when the service
+  or its key does, so what was read under one pairing (the amounts it sells,
+  its currency) is never used with another. It is a digest, not the key."""
+  digest = hashlib.sha256(
+    json.dumps(["mobius-credits-pairing-v1", operator_url, key]).encode()).hexdigest()
+  return {"operator_url": operator_url, "key": key, "pairing": digest[:16]}
 
 
 def _save_credentials(operator_url: str, key: str) -> None:
@@ -185,11 +206,12 @@ def summary() -> dict:
   """Credits and earnings for this owner, or why they cannot be shown."""
   credentials = load_credentials()
   if credentials is None:
-    return {"mode": "unpaired", "service_host": None, "balance": None,
-            "earnings": None, "error": None}
+    return {"mode": "unpaired", "service_host": None, "pairing": None,
+            "balance": None, "earnings": None, "error": None}
   result = {
     "mode": "customer",
     "service_host": urlsplit(credentials["operator_url"]).hostname,
+    "pairing": credentials["pairing"],
     "balance": None, "earnings": None, "error": None,
   }
   # Both reads at once, so a slow service costs one timeout, not two.
@@ -254,9 +276,20 @@ def _stripe_page(value: object, host: str) -> str:
 
 
 def start_topup(amount_cents: int, waiver_accepted: bool,
-                return_url: str | None = None) -> dict:
-  """A Stripe Checkout page for buying credits, and the purchase's id."""
-  started = _call("POST", "topups", _paired(), {
+                return_url: str | None = None, pairing: str | None = None) -> dict:
+  """A Stripe Checkout page for buying credits, and the purchase's id.
+
+  ``pairing`` is the pairing the caller read the purchase terms under. When it
+  is given and this Möbius has since been paired again, nothing is bought:
+  the amount and waiver the owner saw were another service's terms.
+  """
+  credentials = _paired()
+  if pairing is not None and pairing != credentials["pairing"]:
+    raise CreditsUnavailable(
+      "This Möbius was connected to a different credits service after these "
+      "amounts were shown. Check them and try again.",
+      status=409, code="pairing_changed")
+  started = _call("POST", "topups", credentials, {
     "amount_cents": int(amount_cents),
     "waiver_accepted": bool(waiver_accepted),
     # Where Stripe sends the buyer back; the service appends the purchase id.
@@ -272,8 +305,10 @@ def read_topup(topup_id: str) -> dict:
 
 
 def purchase_terms() -> dict:
-  """The amounts the credits service sells, its currency, and the waiver rule."""
-  return _call("GET", "purchase-terms", _paired())
+  """The amounts the credits service sells, its currency, and the waiver rule,
+  with the ``pairing`` they were read under."""
+  credentials = _paired()
+  return {**_call("GET", "purchase-terms", credentials), "pairing": credentials["pairing"]}
 
 
 def transactions(limit: int = 50) -> dict:
@@ -302,17 +337,32 @@ def publish_price(app: str, action: str, price_micro: int,
 
 
 def charge(seller: str, app: str, action: str, idempotency_key: str,
-           max_price_micro: int, buyer_app: str) -> dict:
+           max_price_micro: int, *, payer: str, buyer_app: str) -> dict:
   """Pay for one call to ``seller``'s priced action from this owner's credits.
 
   ``max_price_micro`` is the price the caller showed; a higher current price
-  refuses with ``price_changed`` instead of charging more. ``buyer_app`` names
-  the local app that paid, so the owner's history can say which one spent.
+  refuses with ``price_changed`` instead of charging more. ``payer`` is the
+  paying app's stable identity, which scopes its idempotency key. ``buyer_app``
+  names that app in the owner's history, so it can say which one spent.
   """
   return _call("POST", "charges", _paired(), {
     "seller": seller, "app": app, "action": action,
-    "idempotency_key": idempotency_key, "max_price_micro": int(max_price_micro),
-    "buyer_app": buyer_app})
+    "idempotency_key": app_scoped_key(payer, idempotency_key),
+    "max_price_micro": int(max_price_micro), "buyer_app": buyer_app})
+
+
+def app_scoped_key(payer: str, idempotency_key: str) -> str:
+  """The idempotency key the credits service sees for one app's charge.
+
+  The service replays a charge by buyer account and key, and every app here
+  pays from the same account. So an app's own key is scoped to that app before
+  it leaves: two apps that pick the same key make two charges (or a conflict)
+  of their own, never a replay of each other's, while one app's retry still
+  replays its own. A digest keeps any key an app may send within the service's
+  8 to 200 characters.
+  """
+  digest = hashlib.sha256(json.dumps([payer, idempotency_key]).encode()).hexdigest()
+  return f"app-{digest}"
 
 
 # --- Earnings -----------------------------------------------------------------

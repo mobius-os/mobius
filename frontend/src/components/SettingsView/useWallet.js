@@ -4,22 +4,28 @@
  * The wallet lives on the credits service and changes without this screen:
  * every paid app run spends from it. So the figures are read again whenever
  * the owner comes back to the window, not only when Settings opens.
+ *
+ * The purchase terms (currency, amounts, waiver) belong to the service this
+ * Möbius is paired with. Pairing again can point it at another service, so
+ * terms carry the `pairing` they were read under and are only shown, and only
+ * bought with, while that is still the current pairing.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, jsonOrThrow } from '../../api/client.js'
-import { checkoutPage, openStripeWindow, settleTopup } from '../../lib/creditsWallet.js'
+import { checkoutPage, openStripeWindow, settleTopup, termsFor } from '../../lib/creditsWallet.js'
 
 const read = async path => jsonOrThrow(await apiFetch(path))
 
 export function useWallet({ active }) {
   const [summary, setSummary] = useState(null)
-  const [terms, setTerms] = useState(null)
+  const [readTerms, setReadTerms] = useState(null)
   const [activity, setActivity] = useState(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState(null)
   const [refusal, setRefusal] = useState(null)
   const generation = useRef(0)
+  const pairing = useRef(null)
 
   const load = useCallback(async () => {
     const mine = (generation.current += 1)
@@ -31,6 +37,12 @@ export function useWallet({ active }) {
       next = { mode: 'unknown' }
     }
     if (mine !== generation.current) return
+    const nextPairing = next?.mode === 'customer' ? next.pairing ?? null : null
+    if (nextPairing !== pairing.current) {
+      // Another service's history must not sit under this one's balance.
+      pairing.current = nextPairing
+      setActivity(null)
+    }
     setSummary(next)
     if (next?.mode !== 'customer') return
     try {
@@ -53,14 +65,23 @@ export function useWallet({ active }) {
     }
   }, [active, load])
 
-  const paired = summary?.mode === 'customer'
+  const terms = termsFor(readTerms, summary)
+  const currentPairing = summary?.mode === 'customer' ? summary.pairing ?? null : null
   useEffect(() => {
-    if (!active || !paired || terms) return
-    read('/identity/credits/purchase-terms').then(setTerms).catch(() => {
+    if (!active || !currentPairing || terms) return undefined
+    let current = true
+    read('/identity/credits/purchase-terms').then(body => {
+      if (!current) return
+      // Read under the pairing this screen shows: keep them. Under another
+      // (paired again meanwhile): read the summary again rather than show them.
+      if (body?.pairing === pairing.current) setReadTerms(body)
+      else void load()
+    }).catch(() => {
       // Without the service's amounts the buy control stays hidden rather
       // than offering amounts it may refuse.
     })
-  }, [active, paired, terms])
+    return () => { current = false }
+  }, [active, currentPairing, terms, load])
 
   const buy = useCallback(async ({ amountCents, waiverAccepted }) => {
     setRefusal(null)
@@ -79,7 +100,12 @@ export function useWallet({ active }) {
       const started = await jsonOrThrow(await apiFetch('/identity/credits/topup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount_cents: amountCents, waiver_accepted: Boolean(waiverAccepted) }),
+        body: JSON.stringify({
+          amount_cents: amountCents,
+          waiver_accepted: Boolean(waiverAccepted),
+          // The server refuses if this Möbius was paired again since.
+          pairing: terms?.pairing,
+        }),
       }))
       const page = checkoutPage(started?.checkout_url)
       if (!page) throw new Error('Stripe did not return a page to open.')
@@ -103,6 +129,7 @@ export function useWallet({ active }) {
     } catch (error) {
       popup.close()
       setRefusal(error?.message || 'That purchase could not be started.')
+      if (error?.detail?.code === 'pairing_changed') void load()
     } finally {
       setBusy(false)
     }

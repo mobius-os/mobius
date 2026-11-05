@@ -1348,11 +1348,46 @@ def get_owner_or_app_with_location_history_read(
   )
 
 
+def get_owner_or_app_with_credits_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with the reviewed credits-management grant.
+
+  The owner's credits are money at the paired credits service: the balance,
+  earnings and history are private financial information, and the routes behind
+  this gate buy, spend, publish prices and move earnings. That is its own
+  critical grant, never implied by ``identity_manage``, whose consent covers
+  only the sign-in link. Like that grant it lives in the accepted capability
+  contract, so an app version that stops declaring it loses access on the next
+  request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if _contract_data(app).get("credits_manage") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.credits_manage=true in its manifest "
+      "to see or manage your credits."
+    ),
+  )
+
+
+def _contract_data(app: models.App) -> dict:
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data")
+  return data if isinstance(data, dict) else {}
+
+
 def spend_credits_targets(app: models.App) -> list[str]:
   """The ``"<seller>/<app>"`` entries the owner allowed this app to pay for."""
-  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
-  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
-  targets = data.get("spend_credits")
+  targets = _contract_data(app).get("spend_credits")
   return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
 
 
@@ -1397,11 +1432,11 @@ def get_credits_price_reader(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app with ``identity_manage`` or a ``spend_credits`` grant.
+  """Owner JWT, or an app with ``credits_manage`` or a ``spend_credits`` grant.
 
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
-  spending or account authority and needs no identity-management grant.
+  spending or account authority and needs no credits-management grant.
   """
   owner = principal.owner
   if principal.app_id is None:
@@ -1409,9 +1444,7 @@ def get_credits_price_reader(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
-  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
-  if data.get("identity_manage") is True or spend_credits_targets(app):
+  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
     return owner
   raise HTTPException(
     status_code=403,

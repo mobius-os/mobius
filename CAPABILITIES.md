@@ -94,13 +94,25 @@ service a shared-browser guest invoked, and never a seller the grant does not
 list (`seller_not_allowed`). Each charge names the paying app (its package id,
 or its slug for an owner-built app) as `buyer_app`. The service reads the
 published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
-price it showed the owner. Retrying the same idempotency key charges once.
+price it showed the owner. Retrying the same idempotency key charges once;
+the key is scoped to the paying app before it reaches the service, so two apps
+that pick the same key never replay each other's charge.
 Refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
 `key_spend_cap`). A refused key answers 409 `key_refused` and an address that is
 not a credits service 502 `not_found`, so neither reads as the caller's own
 sign-in failing. Balance, history and purchase reads refuse a shared-browser
 guest.
+
+Everything else under `/api/identity/credits` is the owner's own money: the
+balance, earnings and history, pairing, buying, model funding, publishing
+prices, and keeping or withdrawing earnings. Besides the owner, only an app
+with `permissions.credits_manage: true` reaches it, a separate critical
+consent row. `identity_manage` covers the sign-in link only and never includes
+it. Reading a seller's published prices also admits a `spend_credits` app.
+The summary and purchase terms carry a `pairing` id that changes when the
+service or its key does; a top-up that names an earlier `pairing` is refused
+with 409 `pairing_changed`, so nothing is bought on another service's terms.
 
 ## Manifest contract
 

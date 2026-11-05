@@ -24,6 +24,7 @@ BOOLEAN_PERMISSIONS = (
   "connections_manage",
   "connect_manage",
   "identity_manage",
+  "credits_manage",
   "railway_manage",
   "helper_activity_read",
   "location_history_read",

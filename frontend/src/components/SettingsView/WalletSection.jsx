@@ -73,7 +73,9 @@ export default function WalletSection({
       {refusal && <p className="credits__refusal" role="alert">{refusal}</p>}
 
       {balance && terms?.amounts_cents?.length ? (
-        <WalletBuyForm terms={terms} busy={busy} onBuy={onBuy} />
+        // Keyed by pairing: a choice or waiver made for one service's terms
+        // never carries over to another's.
+        <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} />
       ) : null}
 
       {activity?.length ? (
