@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import chat_writer, transcript_rows
-from app.app_chat_scopes import SCOPE_MAX, chat_scope
+from app.app_chat_scopes import SCOPE_MAX, ScopedStartCancelled, chat_scope
 from app.chat_handoffs import project_handoff
 from app import (
   activity,
@@ -3826,17 +3826,17 @@ async def start_scoped_app_chat(
         ))
         db.commit()
 
-      response = await send_message(
-        schemas.SendMessage(
-          content=body.content,
-          cid=body.cid,
-          timezone=body.timezone,
-          viewport=body.viewport,
-        ),
-        chat_id,
-        principal,
-        db,
+      first_turn = schemas.SendMessage(
+        content=body.content,
+        cid=body.cid,
+        timezone=body.timezone,
+        viewport=body.viewport,
       )
+      # This request may time out and release the scope lock while the writer
+      # still holds its command, so the writer itself refuses the acceptance
+      # if a cancel committed first.
+      first_turn._scoped_start = (app_id, body.scope)
+      response = await send_message(first_turn, chat_id, principal, db)
       status_code = getattr(response, "status_code", 202)
       if status_code >= 400:
         failure = "first_turn_rejected"
@@ -3853,6 +3853,17 @@ async def start_scoped_app_chat(
   except HTTPException:
     failure = failure or "request_rejected"
     raise
+  except ScopedStartCancelled:
+    outcome = "cancelled"
+    failure = "scope_cancelled"
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": failure,
+        "chat_id": chat_id,
+        "message": _SCOPED_START_TERMINAL_MESSAGES["cancelled"],
+      },
+    )
   except Exception:
     failure = "start_error"
     log.exception(

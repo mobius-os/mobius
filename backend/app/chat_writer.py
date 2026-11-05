@@ -706,6 +706,9 @@ class StartTurn(_Command):
   owner_input: bool = False
   resume_goal_id: str | None = None
   resume_goal_revision: int | None = None
+  # (app_id, scope) when POST /api/app-chats/start sent this turn: see
+  # app_chat_scopes.admit_scoped_first_turn.
+  scoped_start: tuple[int, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -978,6 +981,8 @@ class AppendPending(_Command):
   front: bool = False
   require_answer_match: bool = False
   restore_archived: bool = False
+  # As on StartTurn: the /start identity this acceptance requires.
+  scoped_start: tuple[int, str] | None = None
 
 
 @dataclass
@@ -3844,7 +3849,7 @@ class ChatWriterActor:
       transcript_rows.append(db, chat, cmd.user_msg)
       claim_uploads(chat, cmd.user_msg.get("attachments"))
       # Same commit as the accepted message: see app_chat_scopes.
-      admit_scoped_first_turn(db, chat)
+      admit_scoped_first_turn(db, chat, cmd.scoped_start)
     # Allocate the current assistant's stable display id while history and the
     # queue are already in memory. Streaming snapshots can then update only the
     # small live value without rereading the historical JSON blob.
@@ -4826,7 +4831,7 @@ class ChatWriterActor:
     chat.pending_messages = pending
     claim_uploads(chat, new_msg.get("attachments"))
     # Same commit as the accepted message: see app_chat_scopes.
-    admit_scoped_first_turn(db, chat)
+    admit_scoped_first_turn(db, chat, cmd.scoped_start)
     if applied:
       # Both a recovered answer and an early continuation-card answer use the
       # queue. Retire the question, but leave a still-running turn's browser

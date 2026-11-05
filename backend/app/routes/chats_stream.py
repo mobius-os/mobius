@@ -45,6 +45,7 @@ from app.chat_writer import (
   ResolvePlatformRestartCard,
   RestartCardStateChanged,
 )
+from app.app_chat_scopes import ScopedStartCancelled
 from app.chat_steering import (
   has_live_steerable_turn,
   steer_into_active_turn,
@@ -379,6 +380,7 @@ async def _append_to_pending(
       owner_input=owner_input,
       front=front, require_answer_match=require_answer_match,
       restore_archived=restore_archived,
+      scoped_start=body._scoped_start,
     ),
   )
   return result["stored"]
@@ -410,7 +412,7 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
-  except (RestartCardStateChanged, RestartCardActionConflict):
+  except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartCancelled):
     raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
@@ -1800,6 +1802,7 @@ async def _send_message_locked(
         resume_run_id=body.resume_run_id,
         resume_goal_id=body.resume_goal_id,
         resume_goal_revision=body.resume_goal_revision,
+        scoped_start=body._scoped_start,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -1809,6 +1812,8 @@ async def _send_message_locked(
     # the send immediately, and run_chat sees the marker).
     try:
       result = await await_ack(ack)
+    except ScopedStartCancelled:
+      raise
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
     if isinstance(result, StartTurnRecoveryChanged):

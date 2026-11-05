@@ -693,3 +693,117 @@ def test_cancel_never_fences_a_turn_the_writer_admitted_after_classification(
   db.expire_all()
   binding = db.get(models.AppChatScopeStart, (app_id, "cycle:cancel-race"))
   assert binding.cancelled_at is None and binding.admitted_at is not None
+
+
+def _hold_the_scoped_writer_command(monkeypatch):
+  """Let /start's writer ack time out while its command stays undelivered.
+
+  This is the writer paused after dequeue: the request gives up (503) and
+  releases the scope lock, and the exact command it issued runs later.
+  """
+  from concurrent.futures import Future
+
+  from app import chat_writer
+  from app.routes import chats_stream
+
+  held = []
+  writer = chat_writer.get_writer()
+
+  class Paused:
+    def submit(self, cmd):
+      if getattr(cmd, "scoped_start", None) is not None:
+        held.append(cmd)
+        return Future()  # Never acknowledged inside the request.
+      return writer.submit(cmd)
+
+  monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.05)
+  monkeypatch.setattr(chats_stream, "get_writer", lambda: Paused())
+  return held
+
+
+@pytest.mark.parametrize("command", ["StartTurn", "AppendPending"])
+def test_cancel_after_a_writer_ack_timeout_fences_the_still_dispatched_first_turn(
+  client, owner_token, db, monkeypatch, command,
+):
+  from app.app_chat_scopes import ScopedStartCancelled
+  from app.chat_writer import get_writer
+
+  app_id, token = _make_app(client, owner_token, f"timeout-cancel-{command}")
+  if command == "AppendPending":
+    _queue_first_turns_through_the_real_send_path(monkeypatch)
+  held = _hold_the_scoped_writer_command(monkeypatch)
+
+  timed_out = _start(client, token, "cycle:timeout", cid="late-cid")
+  assert timed_out.status_code == 503, timed_out.text
+  chat_id = held[0].chat_id
+  assert [type(cmd).__name__ for cmd in held] == [command]
+  assert held[0].scoped_start == (app_id, "cycle:timeout")
+
+  cancelled = _cancel(client, token, "cycle:timeout")
+  assert cancelled.json() == {
+    "scope": "cycle:timeout", "outcome": "cancelled", "chat_id": chat_id,
+  }
+
+  # The writer now runs the exact command /start issued: it must commit nothing.
+  with pytest.raises(ScopedStartCancelled):
+    get_writer().submit(held[0]).result(timeout=5)
+  db.expire_all()
+  chat = db.get(models.Chat, chat_id)
+  assert transcript_rows.read_all(db, chat) == []
+  assert _pending_cids(db, chat_id) == []
+  assert db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id).count() == 0
+  binding = db.get(models.AppChatScopeStart, (app_id, "cycle:timeout"))
+  assert binding.cancelled_at is not None and binding.admitted_at is None
+
+  # An ordinary send to that chat carries no scoped identity and is unaffected.
+  from app.chat_writer import AppendPending
+  get_writer().submit(AppendPending(
+    chat_id=chat_id, owner_input=True,
+    user_msg={"role": "user", "content": "mine", "cid": "owner-cid", "ts": 1},
+  )).result(timeout=5)
+  assert _pending_cids(db, chat_id) == ["owner-cid"]
+  db.expire_all()
+  assert db.get(models.AppChatScopeStart, (app_id, "cycle:timeout")).admitted_at is None
+
+
+@pytest.mark.parametrize("command", ["StartTurn", "AppendPending"])
+def test_a_scoped_command_the_writer_runs_after_a_timeout_admits_once_before_cancel(
+  client, owner_token, db, monkeypatch, command,
+):
+  from app.chat_writer import get_writer
+
+  app_id, token = _make_app(client, owner_token, f"timeout-admit-{command}")
+  if command == "AppendPending":
+    _queue_first_turns_through_the_real_send_path(monkeypatch)
+  held = _hold_the_scoped_writer_command(monkeypatch)
+  assert _start(client, token, "cycle:late").status_code == 503
+  chat_id = held[0].chat_id
+
+  get_writer().submit(held[0]).result(timeout=5)
+  cancelled = _cancel(client, token, "cycle:late")
+  replay = _start(client, token, "cycle:late", cid="replay-cid")
+
+  assert cancelled.json() == {
+    "scope": "cycle:late", "outcome": "started", "chat_id": chat_id,
+  }
+  assert replay.json() == {"chat_id": chat_id, "outcome": "reused", "response": None}
+  assert len(held) == 1
+
+
+def test_start_maps_a_writer_side_cancellation_to_scope_cancelled(
+  client, owner_token, db, monkeypatch,
+):
+  from app.app_chat_scopes import ScopedStartCancelled
+  from app.routes import chats_stream
+
+  app_id, token = _make_app(client, owner_token, "writer-refusal-scope")
+
+  async def cancel_wins_inside_the_writer(body, chat_id, principal, request_db):
+    assert body._scoped_start == (app_id, "cycle:refused")
+    raise ScopedStartCancelled(chat_id)
+
+  monkeypatch.setattr(chats_stream, "send_message", cancel_wins_inside_the_writer)
+  refused = _start(client, token, "cycle:refused")
+
+  assert refused.status_code == 409, refused.text
+  assert refused.json()["detail"]["code"] == "scope_cancelled"
