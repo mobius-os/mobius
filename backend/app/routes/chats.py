@@ -157,6 +157,85 @@ def _latest_run_snapshot(
   return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
+def _lifecycle_projection_key(
+  db: Session, chat_id: str, *, include_foreign_context: bool,
+) -> str:
+  """Version the detail cards projected from lifecycle rows, not Chat.messages.
+
+  Settled Wait, terminal Goal and dependency cards, and "needed by" backlinks
+  on this chat's question cards change without a transcript write, so
+  ``updated_at`` alone cannot prove a retained detail page current. Their
+  anchors come from the transcript, which ``updated_at`` already versions.
+  Armed waits and open Goals are left out: runtime carries them itself, and a
+  routine check or plan revision must not invalidate the page. Keep this in
+  step with the read-side projections in ``_chat_detail_response``.
+  """
+  from app.goal_dependencies import outstanding_dependencies
+
+  wait, goal, dependency = models.ChatWait, models.ChatGoal, models.GoalDependency
+  waits = db.query(
+    wait.id, wait.status, wait.checks_count, wait.met_at, wait.cancelled_at,
+    wait.last_checked_at, wait.resume_delivered_at, wait.received_run_id,
+    wait.result_disposition, wait.result_disposed_at,
+  ).filter(
+    wait.chat_id == chat_id, wait.status.in_(("met", "expired", "failed", "cancelled")),
+  ).order_by(wait.id).all()
+  goals = db.query(goal.id, goal.status, goal.revision, goal.completed_at).filter(
+    goal.chat_id == chat_id, goal.status.in_(("completed", "cannot_complete", "cancelled")),
+  ).order_by(goal.id).all()
+  dependencies = db.query(
+    dependency.id, dependency.resolved_at, dependency.result_disposition,
+    dependency.result_disposed_at, dependency.received_run_id, dependency.withdrawn_at,
+    dependency.outcome_json, dependency.target_chat_id, dependency.target_claim_id,
+  ).filter(dependency.waiting_chat_id == chat_id).order_by(dependency.id).all()
+  # Goal cards also carry their helper tree, whose statuses follow child runs.
+  helpers = db.query(
+    models.Delegation.id, models.Delegation.cancelled_at,
+    models.Delegation.interrupted_at, models.Delegation.child_chat_id,
+  ).filter(
+    models.Delegation.goal_id.in_([row.id for row in goals]),
+  ).order_by(models.Delegation.id).all() if goals else []
+  helper_runs = db.query(func.max(models.ChatRunUpdate.id)).filter(
+    models.ChatRunUpdate.chat_id.in_({row.child_chat_id for row in helpers}),
+  ).scalar() if helpers else None
+  parts = [
+    # Wait and Goal cards also read this chat's run rows (receipts, goal links).
+    _latest_run_snapshot(db, chat_id)[2],
+    *([list(row) for row in rows] for rows in (waits, goals, dependencies, helpers)),
+    helper_runs,
+  ]
+  if include_foreign_context:
+    # Dependency cards name their source chat, and question cards name the
+    # chats whose live Goals need them.
+    claim_ids = {row.target_claim_id for row in dependencies if row.target_claim_id}
+    claims = db.query(
+      models.AgentWorkClaim.id, models.AgentWorkClaim.acquisition_id,
+      models.AgentWorkClaim.owner_chat_id, models.AgentWorkClaim.summary,
+    ).filter(
+      models.AgentWorkClaim.id.in_(claim_ids),
+    ).order_by(models.AgentWorkClaim.id).all() if claim_ids else []
+    source_ids = {row.target_chat_id for row in dependencies} | {
+      row.outcome_json.get("source_chat_id") for row in dependencies
+      if isinstance(row.outcome_json, dict)
+    } | {row.owner_chat_id for row in claims}
+    source_ids.discard(None)
+    sources = db.query(models.Chat.id, models.Chat.title, models.Chat.deleted_at).filter(
+      models.Chat.id.in_(source_ids),
+    ).order_by(models.Chat.id).all() if source_ids else []
+    backlinks = outstanding_dependencies(db).join(
+      goal, goal.id == dependency.waiting_goal_id,
+    ).join(models.Chat, models.Chat.id == dependency.waiting_chat_id).filter(
+      dependency.target_kind == "owner_card", dependency.target_chat_id == chat_id,
+      goal.status.in_(("open", "stopped")), goal.chat_id == models.Chat.id,
+      models.Chat.deleted_at.is_(None),
+    ).with_entities(
+      dependency.id, dependency.target_question_id, models.Chat.id, models.Chat.title,
+    ).order_by(dependency.id).all()
+    parts += [[list(row) for row in rows] for rows in (claims, sources, backlinks)]
+  encoded = json.dumps(parts, default=str, sort_keys=True, separators=(",", ":"))
+  return hashlib.sha256(encoded.encode()).hexdigest()[:24]
+
+
 def _active_assistant_message_id(
   chat: models.Chat,
 ) -> str | None:
@@ -694,6 +773,7 @@ def _chat_detail_response(
     db=db,
     live_message=live_message,
   )
+  # The lifecycle cards projected below are versioned by _lifecycle_projection_key.
   from app.goal_plans import terminal_goal_summaries_by_message_index
   summaries_by_index = terminal_goal_summaries_by_message_index(
     db, chat.id, coordinates, message_start=start, message_end=start + len(page),
@@ -845,6 +925,9 @@ def _chat_detail_response(
     # retain excerpts so the in-progress surface remains self-contained.
     "messages": page,
     "restart_observation_key": restart_observation_key(db, chat.id),
+    "lifecycle_projection_key": _lifecycle_projection_key(
+      db, chat.id, include_foreign_context=expose_session,
+    ),
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
@@ -1634,8 +1717,10 @@ async def patch_chat(
       chat.auto_resume_on_limit = body.auto_resume_on_limit
       # Existing chats keep their own stored policy. This only seeds the next
       # chat, matching other "last picked" defaults without making the setting
-      # global at runtime.
-      principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
+      # global at runtime. Only the owner's own input records that choice: an
+      # agent adjusting one chat must not rewrite the default for later chats.
+      if is_owner_input_principal(principal):
+        principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
@@ -1933,6 +2018,9 @@ def get_chat_runtime(
     "running": running,
     "compacting": compaction_kind(chat.id),
     "restart_observation_key": restart_observation_key(db, chat.id),
+    "lifecycle_projection_key": _lifecycle_projection_key(
+      db, chat.id, include_foreign_context=principal.scope != "chat_embed",
+    ),
     "run_id": run_id,
     "run_status": "running" if running and run_id else run_status,
     "runtime_revision": runtime_revision,

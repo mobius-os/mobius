@@ -33,6 +33,13 @@
   pointer-events: auto;
 }
 
+/* A drag that dismissed the drawer stays owned by the (now transparent) scrim
+   until that finger lifts, so its remaining movement cannot scroll the content
+   beneath. Drawer.jsx clears this on pointerup/pointercancel. */
+.drawer-overlay--dismissing {
+  pointer-events: auto;
+}
+
 .drawer-close-shield,
 .drawer {
   position: fixed;

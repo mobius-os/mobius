@@ -209,6 +209,9 @@ export default function useNavigation({
   // An explicit tap/swipe close can start the panel transition immediately
   // while drawerOpenRef remains true until Back consumes the drawer sentinel.
   const [drawerVisible, setDrawerVisible] = useState(false)
+  // Set from the opening tap until the drawer commits. An app under the opening
+  // drawer stops competing for the device at once, not two painted frames later.
+  const [drawerOpening, setDrawerOpening] = useState(false)
   // Android's embedded-surface hit-test map can lag the input that opens the
   // drawer. When opening over an app, wait through one painted frame before
   // exposing the scrim so that input/compositor ownership settles first. The
@@ -659,10 +662,12 @@ export default function useNavigation({
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
+      setDrawerOpening(true)
       drawerPrepareRafRef.current = requestAnimationFrame(() => {
         drawerPrepareRafRef.current = requestAnimationFrame(() => {
           drawerPrepareRafRef.current = 0
           drawerPreparingRef.current = false
+          setDrawerOpening(false)
           commitDrawerOpen()
         })
       })
@@ -678,6 +683,7 @@ export default function useNavigation({
       drawerPrepareRafRef.current = 0
     }
     drawerPreparingRef.current = false
+    setDrawerOpening(false)
     return true
   }
 
@@ -2336,6 +2342,7 @@ export default function useNavigation({
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
+    drawerOpening,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings

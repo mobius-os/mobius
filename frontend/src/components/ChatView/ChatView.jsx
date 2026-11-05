@@ -84,6 +84,7 @@ import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import CompactionProgress from './CompactionProgress.jsx'
 import useCompactCommands from './hooks/useCompactCommands.js'
+import { canStartRefusalFreshSession, refusalActionSentence } from './ErrorCard.jsx'
 import { chatCommandRejection, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import SideQuestionCard from './SideQuestionCard.jsx'
@@ -1680,7 +1681,7 @@ export default function ChatView({
         if (settled?.running === false) {
           retireSettledStreamRef.current?.()
         }
-        return runtime
+        return { ...runtime, transcriptCurrent: settled != null }
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
@@ -1694,8 +1695,8 @@ export default function ChatView({
         data,
         localAuthoritative,
       )) {
-        await fetchMessages({ force: true, authoritative: true })
-        return runtime
+        const refreshed = await fetchMessages({ force: true, authoritative: true })
+        return { ...runtime, transcriptCurrent: refreshed != null }
       }
       if (data.running) {
         setSending(true)
@@ -1764,7 +1765,10 @@ export default function ChatView({
           }
         })
       }
-      return runtime
+      // Reaching here idle and without a local owner means the retained
+      // page matched its transcript version and lifecycle cards (otherwise it
+      // was re-read above).
+      return { ...runtime, transcriptCurrent: !data.running && !localAuthoritative }
     } catch { /* background reconciliation is best-effort */ }
     return null
   }, [
@@ -2188,9 +2192,11 @@ export default function ChatView({
           fetchGenRef.current += 1
           invalidateSharedRuntimeRead(chatId)
           // Read fresh rather than joining a poll that predates the change.
-          await refreshRuntimeState()
+          const runtime = await refreshRuntimeState()
           // Idle lifecycle changes also add finished records to the transcript.
-          if (!sendingRef.current && !isStreamingRef.current) {
+          // Skip the detail page only when the runtime read proved the retained
+          // transcript current: every reconnect raises this signal per visible chat.
+          if (!runtime?.transcriptCurrent && !sendingRef.current && !isStreamingRef.current) {
             await fetchMessages({ force: true, authoritative: true })
           }
           continue
@@ -4411,6 +4417,21 @@ export default function ChatView({
     onRefresh: refreshResume,
     blocked: resumeBlocked,
   })
+  // A provider refusal is answered by changing the request, not by retrying
+  // it: the card reuses the composer's model picker and the /compact handoff.
+  // Stable references keep MsgContent's memo intact.
+  const runCompactCommandRef = useRef(null)
+  runCompactCommandRef.current = runCompactCommand
+  const handleRefusalModelChoice = useCallback(() => {
+    setModelSelectionRequest(request => request + 1)
+  }, [])
+  const handleRefusalFreshSession = useCallback(() => {
+    void runCompactCommandRef.current?.('', null)
+  }, [])
+  // The fresh session is the /compact handoff, which the server reserves for
+  // the owner's lifecycle control: a chat embed has no manual compaction and a
+  // shared-workspace guest is refused, so neither is offered the button.
+  const canStartFreshSession = canStartRefusalFreshSession({ embedded })
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
@@ -5846,6 +5867,12 @@ export default function ChatView({
     if (pendingResumeBlock.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual) {
       return 'Response paused for restart. Möbius will continue automatically.'
     }
+    if (pendingResumeBlock.pause?.kind === 'provider_refusal') {
+      return ['This model declined to continue.', refusalActionSentence({
+        switchModel: showPicker,
+        freshSession: canStartFreshSession,
+      })].filter(Boolean).join(' ')
+    }
     return 'Turn paused — Resume available.'
   })()
   // Chat surfaces retain all work, but Goal labels use only its exact owners.
@@ -6051,6 +6078,8 @@ export default function ChatView({
       onQuestionSubmitIntent={prepareQuestionSubmission}
       onQuestionSubmitCancel={cancelQuestionSubmission}
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
+      onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
+      onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6450,6 +6479,8 @@ export default function ChatView({
                             : 'Provider limit reached — continuation available'
                         : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
+                          : pendingResumeBlock?.pause?.kind === 'provider_refusal'
+                            ? 'Model declined — choose how to continue'
                             : 'Turn paused — tap to resume'}
                     </button>
                   )}
