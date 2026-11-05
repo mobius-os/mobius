@@ -165,6 +165,9 @@ _CLAUDE_WINDOW_LABELS = {
   "agent_sdk_monthly": "Agent SDK monthly",
 }
 _CLAUDE_WINDOW_ORDER = tuple(_CLAUDE_WINDOW_LABELS)
+# Typed meanings the chat's brain gauge selects by; every other window is
+# shown by label only.
+_CLAUDE_WINDOW_KINDS = {"five_hour": "five_hour", "seven_day": "weekly"}
 
 _PLAN_LABELS = {
   "free": "Free plan",
@@ -284,7 +287,7 @@ def normalize_claude_usage(
       continue
     normalized = _window(
       window_id,
-      "weekly" if window_id == "seven_day" else "other",
+      _CLAUDE_WINDOW_KINDS.get(window_id, "other"),
       _CLAUDE_WINDOW_LABELS.get(window_id, _humanize_window_id(window_id)),
       raw.get("utilization", raw.get("used_percentage")),
       raw.get("resets_at", raw.get("resetsAt")),
@@ -407,6 +410,8 @@ def _codex_window_kind(raw: dict[str, Any], window_id: str) -> str:
   duration = raw.get("window_duration_mins", raw.get("windowDurationMins"))
   if duration == 10_080 or (duration is None and window_id == "secondary"):
     return "weekly"
+  if duration == 300 or (duration is None and window_id == "primary"):
+    return "five_hour"
   return "other"
 
 

@@ -1419,6 +1419,7 @@ def test_complete_service_revocation_never_widens_from_transfer_limits_the_runti
   ("grant", "value"),
   [
     ("helper_activity_read", True),
+    ("location_history_read", True),
     ("identity_manage", True),
     ("railway_manage", True),
     ("job_secret_read", ["tg-1"]),

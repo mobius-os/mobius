@@ -48,6 +48,18 @@ test('a finished app update reaches a manager frame in the Store shape', () => {
   hook.unmount()
 })
 
+test('an app erased or recovered elsewhere reaches a manager frame too, so one open beside the Apps screen stays current', () => {
+  const { framesRef, posted } = fakeFrames()
+  const hook = renderShellAndFrame(framesRef, { data: { manage_apps: true } })
+  hook.result.current({ type: 'app_deleted', appId: '19' })
+  hook.result.current({ type: 'app_recovered', appId: 19 })
+  assert.deepEqual(posted.map(item => item.message.event), [
+    { type: 'app_deleted', appId: '19' },
+    { type: 'app_recovered', appId: '19' },
+  ])
+  hook.unmount()
+})
+
 test('frames without manage_apps never receive app lifecycle events', () => {
   for (const contract of [
     null, { data: {} }, { data: { manage_apps: false } },

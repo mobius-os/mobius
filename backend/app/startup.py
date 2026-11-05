@@ -613,6 +613,20 @@ async def _install_bootstrap_apps(context: StartupContext) -> None:
   context.bootstrap_retry = outcome if outcome.pending else None
 
 
+def _announce_setup_code(context: StartupContext) -> None:
+  """Print the one-time owner setup code while a self-hosted instance has none."""
+  from app import models, setup_code
+  from app.config import get_settings
+
+  if get_settings().mobius_sso_enabled:
+    return
+  with SessionLocal() as db:
+    if db.query(models.Owner).first() is not None:
+      setup_code.retire()
+      return
+  setup_code.current(announce=True)
+
+
 def _reconcile_app_cron(context: StartupContext) -> None:
   from app.routes.app_schedules import reconcile_app_cron_supervision
 
@@ -754,6 +768,7 @@ DATABASE_STARTUP_TASKS = (
     "reconcile unstarted delegations",
     _reconcile_unstarted_delegations,
   ),
+  StartupTask("announce owner setup code", _announce_setup_code),
   StartupTask(
     "reconcile app cron supervision",
     _reconcile_app_cron,

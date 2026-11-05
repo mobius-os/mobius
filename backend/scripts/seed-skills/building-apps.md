@@ -864,7 +864,10 @@ The proxy is GET-only, requires the bearer in the header (never a query
 parameter), and truncates bodies at 2,097,152 bytes. GET follows up to five
 redirect hops, validating each destination against SSRF rules rather than
 returning upstream 3xx responses as-is. Request small renditions,
-not full-resolution media. A cross-origin `<img src>` cannot attach the bearer,
+not full-resolution media: add `&w=<pixels>` (16–1600; about twice the
+displayed CSS width) and a PNG, JPEG, WebP or GIF wider than that comes back as
+a smaller WebP, while anything else is returned unchanged. A cross-origin
+`<img src>` cannot attach the bearer,
 so fetch through the proxy and convert the result to a `data:` URL before
 rendering it; the bundled CSP allows `data:` images but not blob object URLs.
 Use `Promise.allSettled` for multi-provider searches and always keep a static
@@ -900,9 +903,51 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Phone location tracking
+
+The Möbius phone app can record the device's location, including in the
+background. An app controls that recording with the `location.tracking`
+capability and reads what was recorded with the `location_history_read`
+server permission:
+
+```json
+"permissions": { "location_history_read": true },
+"capabilities": {
+  "location.tracking": { "version": 1, "reason": "Record your walks." }
+}
+```
+
+```js
+const caps = window.mobius.capabilities
+const state = await caps.invoke('location.tracking', { operation: 'get' })
+// state: { available, enabled, status, options: { interval, distance, background } }
+if (state.available) {
+  await caps.invoke('location.tracking', { operation: 'start' })
+  await caps.invoke('location.tracking', {
+    operation: 'set-options', options: { interval: 60000 }, // ms between fixes
+  })
+}
+const res = await fetch('/api/location/positions?limit=1000', {
+  headers: { Authorization: `Bearer ${token}` },
+})
+const { positions } = await res.json() // newest first, at most 5000
+```
+
+`available` is `true` only inside the phone app, where `enabled` and
+`options` describe that phone. Elsewhere `get` reports what the owner's phones
+last told the server (`enabled` when any phone is tracking, with that phone's
+`options`, and `status: null`), and `start`, `stop`, and `set-options` reject
+with code `unavailable`, so show the state read-only there. `status` is the phone's
+answer: `started`, `denied`, `disabled`, `unavailable`, or `stopped`; explain
+`denied` and `disabled` to the owner. If the phone cannot confirm that it
+stopped, `stop` rejects with code `stop_failed` and tracking stays on; say so
+rather than showing it off. Tracking keeps running after the owner
+leaves your app, until it is stopped, the phone app is closed, or the owner
+signs out; signing out also erases positions the phone had not uploaded yet.
+
 ## Managed-app update events
 
-Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
+Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update, uninstall or permanent erase, and recovery synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
 Events are not replayed, and standalone app pages do not receive them, so retain the ordinary initial load and refresh fallback.
 
 ## Host capabilities (microphone and future device/browser access)
@@ -1299,10 +1344,11 @@ useEffect(() => {
 
   Element fullscreen remains unavailable for this path on iOS. In a launch where `matchMedia('(display-mode: fullscreen)').matches`, skip the redundant request — but do not infer that iOS removed its own status bar.
 
-### Mouse-look and controllers
+### Mouse-look, controllers, and motion sensors
 
 App frames, including the shell, standalone, and public-link hosts, grant pointer
-lock and the Gamepad API directly, so a game uses the ordinary browser APIs:
+lock, the Gamepad API, and the device motion sensors directly, so an app uses the
+ordinary browser APIs:
 
 - **Pointer lock:** call `canvas.requestPointerLock()` from a click, then read
   `movementX`/`movementY`. Esc always releases it; show a "click to play"
@@ -1311,6 +1357,13 @@ lock and the Gamepad API directly, so a game uses the ordinary browser APIs:
 - **Gamepad:** poll `navigator.getGamepads()` each frame after a
   `gamepadconnected` event. Controllers only report once the page has focus
   and a button is pressed.
+- **Motion and tilt:** listen for `devicemotion` (acceleration, rotation rate)
+  and `deviceorientation` (alpha/beta/gamma angles). Where
+  `DeviceMotionEvent.requestPermission` exists (iOS), call it from a tap
+  before listening and handle `'denied'`; elsewhere events simply arrive.
+  These fire only while the app is visible, and a desktop browser usually
+  reports no motion at all, so keep a non-motion fallback. Background or
+  long-running motion recording is not available to apps this way.
 
 ### Splash / status-bar color
 

@@ -100,9 +100,20 @@ forward_signal() {
     || true
 }
 
+# Per-command scratch for npm and Node. An agent chat's $TMPDIR is durable
+# scratch on the small data volume; coverage data and the Node compile cache
+# (~220 MB per run) once filled it and broke the agent's own tool output.
+command_scratch=""
+
+remove_command_scratch() {
+  case "$command_scratch" in
+    /tmp/mobius-wt-npm.*) rm -rf -- "$command_scratch" ;;
+  esac
+}
+
 # Install cleanup before creating any path. SIGKILL cannot be trapped, but it
 # leaves only a tiny symlink which a later invocation can validate and use.
-trap release_borrowed_modules EXIT
+trap 'release_borrowed_modules; remove_command_scratch' EXIT
 trap 'forward_signal HUP 129' HUP
 trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
@@ -201,6 +212,15 @@ if [ -L "$FRONTEND/node_modules" ]; then
   proof_review_lock="$(sha256sum "$FRONTEND/package-lock.json" | awk '{print $1}')"
   proof_source_lock="$(sha256sum "$proof_source_frontend/package-lock.json" | awk '{print $1}')"
 fi
+
+command_scratch="$(mktemp -d /tmp/mobius-wt-npm.XXXXXX)" || {
+  echo "wt-npm: could not create command scratch under /tmp" >&2
+  exit 1
+}
+# The compact test log is small and must outlive the command, so it stays in
+# the caller's own TMPDIR while bulky scratch goes to the deleted directory.
+export MOBIUS_TEST_LOG_DIR="${MOBIUS_TEST_LOG_DIR:-${TMPDIR:-/tmp}/mobius-test-logs}"
+export TMPDIR="$command_scratch" NODE_COMPILE_CACHE="$command_scratch/node-compile-cache"
 
 cd "$FRONTEND" || exit 1
 # Descendants must not inherit the lock. A package script may intentionally

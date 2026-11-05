@@ -1103,6 +1103,60 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
+# The owner reads only a turn's text blocks; thinking is folded away. A turn
+# that ends with a short visible reply after long reasoning is the shape in
+# which the agent composed its answer in thinking and closed with a line such
+# as "Nothing has been changed." — the owner then sees no answer at all. The
+# shape is rare (under 1% of stored replies on one instance), so the check
+# below rarely costs an extra model call, and the agent itself judges whether
+# its reply is complete.
+_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
+_ANSWER_CHECK_THINKING_MIN_CHARS = 600
+_ANSWER_CHECK_REASON = (
+  "Möbius end-of-turn check. The owner sees only your visible reply; your "
+  "thinking is hidden from them. This turn's reasoning is long but its "
+  "visible reply is short, so your answer may exist only in your thinking. "
+  "Re-read the owner's latest message. If your visible reply does not "
+  "already answer it or report the result, write that answer now as visible "
+  "text, without mentioning this check. If it already does, end your turn "
+  "without writing anything more."
+)
+
+
+def _answer_may_be_only_in_thinking(
+  blocks: object, last_assistant_message: object = None,
+) -> bool:
+  """Whether this reply's reasoning dwarfs what the owner can actually read.
+
+  ``blocks`` is the sink's current assistant segment. The Stop hook can run
+  before the stream reader has dispatched the final text, so the CLI's own
+  ``last_assistant_message`` is counted when the blocks do not contain it yet.
+  """
+  if not isinstance(blocks, list):
+    return False
+  visible = "".join(
+    block["content"] for block in blocks
+    if isinstance(block, dict) and block.get("type") == "text"
+    and isinstance(block.get("content"), str)
+  )
+  visible_chars = len(visible.strip())
+  if isinstance(last_assistant_message, str):
+    tail = last_assistant_message.strip()
+    if tail and tail not in visible:
+      visible_chars += len(tail)
+  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
+    return False
+  longest_thinking = max(
+    (
+      len(block["content"].strip()) for block in blocks
+      if isinstance(block, dict) and block.get("type") == "thinking"
+      and isinstance(block.get("content"), str)
+    ),
+    default=0,
+  )
+  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
+
+
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1346,6 +1400,36 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
+  # Fires when the root agent is about to end its turn. At most once per turn,
+  # when the visible reply is short beside long reasoning, it returns the turn
+  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
+  # thinking gets written where the owner can read it. A Stop or a saved owner
+  # card owns the turn's end, so neither is ever reopened here.
+  answer_check_sent = False
+
+  async def visible_answer_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    nonlocal answer_check_sent
+    del tool_use_id, context
+    if (
+      answer_check_sent
+      or hook_input.get("stop_hook_active")
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return {"continue_": True}
+    if not _answer_may_be_only_in_thinking(
+      getattr(bc, "assistant_blocks", None),
+      hook_input.get("last_assistant_message"),
+    ):
+      return {"continue_": True}
+    answer_check_sent = True
+    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
+    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
     del hook_input, tool_use_id, context
@@ -1431,6 +1515,7 @@ async def run_claude_sdk_turn(
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
         ],
+        "Stop": [HookMatcher(matcher=None, hooks=[visible_answer_hook])],
       },
     }
     if run_policy is not None:

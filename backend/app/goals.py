@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from app import models
 
 log = logging.getLogger(__name__)
@@ -473,7 +473,8 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     if finished_claims:
       completed_keys = {row[0] for row in db.query(models.AgentWorkClaim.work_key).filter(
         models.AgentWorkClaim.owner_chat_id == goal.chat_id,
-        models.AgentWorkClaim.owner_goal_id == goal.id,
+        or_(models.AgentWorkClaim.owner_goal_id == goal.id,
+            models.AgentWorkClaim.owner_goal_id.is_(None)),
         models.AgentWorkClaim.completed_at.is_not(None),
       ).all()}
       if set(finished_claims) - completed_keys:
@@ -549,8 +550,8 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         + ", ".join(blockers),
         code="goal_completion_blocked", completion_blockers=blockers,
       )
-    from app.agent_work_claims import held_claims_hint, open_claim_keys
-    held = open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)
+    from app.agent_work_claims import completable_claim_keys, held_claims_hint
+    held = completable_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)
     unknown = set(finished_claims) - held
     if unknown:
       raise GoalPlanError(

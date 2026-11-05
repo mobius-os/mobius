@@ -760,3 +760,11 @@ def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
     "Long conversations are summarized automatically",
   ):
     assert required.lower() in core, f"constitution dropped: {required!r}"
+
+
+def test_core_guidance_names_the_current_goal_completion_syntax():
+  repo = Path(__file__).resolve().parents[2]
+  for path in ("skill/core.md", "backend/scripts/seed-skills/goal-planning.md"):
+    text = " ".join((repo / path).read_text(encoding="utf-8").split())
+    assert 'update_goal(complete: true, finished_claims: ["WORK_KEY"])' in text
+    assert "complete --finished" not in text

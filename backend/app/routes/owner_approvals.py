@@ -174,6 +174,7 @@ async def request_restart(
     CONDITION_VERSION,
     pending_restart_paths,
     restart_condition_id,
+    uncommitted_restart_paths,
   )
 
   source_boot_id = restart_ledger.current_boot_id()
@@ -193,21 +194,28 @@ async def request_restart(
     "paths": pending_restart_paths(),
   }
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
-  paths = requirement["paths"]
-  if paths:
-    path_summary = ", ".join(paths[:3])
+
+  def summarize(paths: list[str]) -> str:
+    summary = ", ".join(paths[:3])
     if len(paths) > 3:
-      path_summary += f", and {len(paths) - 3} more"
-    question = (
-      f"Restart to load the tested platform changes in {path_summary}? "
-      "This interrupts active turns and Möbius may be unavailable for "
-      "tens of seconds."
+      summary += f", and {len(paths) - 3} more"
+    return summary
+
+  paths = requirement["paths"]
+  question = (
+    f"Restart to load the tested platform changes in {summarize(paths)}?"
+    if paths else "Restart Möbius now?"
+  )
+  uncommitted = uncommitted_restart_paths()
+  if uncommitted:
+    question += (
+      f" It will also load uncommitted edits in {summarize(uncommitted)}, "
+      "which may be another chat's unfinished work."
     )
-  else:
-    question = (
-      "Restart Möbius now? This interrupts active turns and Möbius may be "
-      "unavailable for tens of seconds."
-    )
+  question += (
+    " This interrupts active turns and Möbius may be unavailable for "
+    "tens of seconds."
+  )
   payload = {
     "questions": [{
       "id": "restart",

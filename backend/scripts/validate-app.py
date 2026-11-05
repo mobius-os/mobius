@@ -97,6 +97,7 @@ def _compile(
     report_path = Path(tmp) / "report.json"
     command = rolldown_command(
       staged_root / entry, Path(tmp) / "app.js", report=report_path,
+      source_root=staged_root,
     )
     try:
       # In a running container this is the same lease shell Vite and mini-app

@@ -19,6 +19,10 @@ const settingsKey = ['settings']
 const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
+// Its own root, not under ['apps']: that prefix has stream-owned defaults that
+// stop a list refetching on mount, and it is persisted to disk. This list must
+// be fresh every time the Apps screen opens.
+const uninstalledAppsKey = ['uninstalled-apps']
 const chatAppArtifactsRootKey = ['chat-app-artifacts']
 const chatAppArtifactsKey = chatId => [
   ...chatAppArtifactsRootKey,
@@ -142,6 +146,21 @@ function useChatAppArtifactsQuery(chatId, { enabled = true } = {}) {
     queryFn: ({ signal }) => fetchChatAppArtifacts(chatId, { signal }),
     enabled: Boolean(enabled && chatId),
     staleTime: 0,
+  })
+}
+
+async function fetchUninstalledApps({ signal } = {}) {
+  const res = await api.apps.uninstalled({ signal })
+  const data = await jsonOrThrow(res, 'uninstalled apps fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useUninstalledAppsQuery() {
+  return useQuery({
+    queryKey: uninstalledAppsKey,
+    queryFn: fetchUninstalledApps,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 }
 
@@ -577,6 +596,12 @@ export const appQueries = {
     fetch: fetchAppConsent,
     useQuery: useAppConsentQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-consent', appId] }),
+  },
+  uninstalled: {
+    key: uninstalledAppsKey,
+    fetch: fetchUninstalledApps,
+    useQuery: useUninstalledAppsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: uninstalledAppsKey }),
   },
   list: {
     key: appsKey,
