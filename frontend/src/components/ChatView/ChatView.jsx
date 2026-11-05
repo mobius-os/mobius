@@ -481,8 +481,8 @@ export default function ChatView({
   const decisionRevealId = questionActivation.reveal?.id
   const decisionAnchorKey = decisionQuestionId ? `question:${decisionQuestionId}` : null
   const inputRef = useRef(null)
-  const handleInternalNav = useCallback((url) => {
-    onInternalNav?.(url)
+  const handleInternalNav = useCallback((url, composer) => {
+    onInternalNav?.(url, composer)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
   // A turn can only RUN while online (it spawns a server-side agent), but a
@@ -973,6 +973,11 @@ export default function ChatView({
     if (typeof composerRequest.draft === 'string'
         && inputValueRef.current !== composerRequest.draft) {
       handleComposerInputChange(composerRequest.draft)
+    }
+    if (composerRequest.submit !== true && typeof composerRequest.draft === 'string') {
+      // A retained composer owns the value now; leaving an unsent handoff
+      // behind would overwrite its later owner edits on remount.
+      consumeComposerHandoff(chatId, composerRequest.draft)
     }
 
     if (composerRequest.submit === true && typeof composerRequest.draft === 'string') {

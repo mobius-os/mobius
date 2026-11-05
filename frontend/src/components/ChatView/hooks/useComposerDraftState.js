@@ -31,7 +31,7 @@ function readInitialComposer(chatId, { acceptPending = true } = {}) {
       autoSend: !!input && handoff.autoSendDraft === input,
       source: pending ? 'pending' : (failedAttempt ? 'failed' : 'saved'),
       failedAttempt: pending ? null : failedAttempt,
-      attachments: pending ? [] : (failedAttempt?.attachments || saved.attachments),
+      attachments: failedAttempt && !pending ? failedAttempt.attachments : saved.attachments,
     }
   } catch {
     return {
@@ -120,8 +120,12 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     return draft
   }, [])
 
+  // Restore each initial draft once: showing the chat again must not write
+  // that older value over edits the owner made since.
+  const restoredInitialRef = useRef(null)
   useEffect(() => {
-    if (hidden) return
+    if (hidden || restoredInitialRef.current === initial) return
+    restoredInitialRef.current = initial
     if ((initial.source === 'pending' || initial.source === 'failed')
         && (initial.input || initial.attachments.length > 0)) {
       persistComposerDraft(chatId, initial.input, initial.attachments)

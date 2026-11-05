@@ -351,14 +351,23 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
  * The per-chat draft is the durable owner. A small chat-keyed intent record
  * tells the destination whether this exact value should submit automatically;
  * no other chat can claim it.
+ *
+ * An `additive` handoff (an app's draft) never replaces or submits the owner's
+ * work: it follows their unsent text, keeps their files, and repeating the
+ * same handoff adds nothing. The caller hydrates durable draft state first.
  */
 export function stageComposerHandoff(
   chatId,
   input,
-  { autoSend = false, storage } = {},
+  { autoSend = false, additive = false, storage } = {},
 ) {
   if (chatId == null || typeof input !== 'string' || input.length === 0) return false
-  const persisted = persistComposerDraft(chatId, input, [], storage)
+  const saved = additive ? readComposerDraft(chatId, storage) : null
+  if (saved?.input && saved.input !== input && !saved.input.endsWith(`\n\n${input}`)) {
+    input = `${saved.input}\n\n${input}`
+  } else if (saved?.input) input = saved.input
+  if (additive) autoSend = false
+  const persisted = persistComposerDraft(chatId, input, saved?.attachments || [], storage)
   const target = availableStorage(storage)
   if (!target) return persisted
 

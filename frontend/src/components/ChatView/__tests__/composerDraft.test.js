@@ -287,3 +287,20 @@ test('only one stored-handoff consumer may deliver the same queued Send', () => 
   assert.equal(consumeComposerHandoff('chat-a', 'One send', { autoSend: true, storage }), false)
   assert.equal(readComposerDraft('chat-a', storage).input, 'One send', 'claiming delivery does not delete the recoverable draft')
 })
+
+test('an additive handoff follows the owner draft, keeps its files and never autosends', () => {
+  const storage = storageStub()
+  const files = [{ name: 'notes.txt', size: 12, mime_type: 'text/plain', status: 'done' }]
+  persistComposerDraft('target', 'Owner text', files, storage)
+  persistComposerDraft('unrelated', 'Do not touch', files, storage)
+  for (let i = 0; i < 2; i += 1) {
+    assert.equal(stageComposerHandoff('target', 'App draft', { additive: true, autoSend: true, storage }), true)
+  }
+  assert.deepEqual(readComposerDraft('target', storage), {
+    input: 'Owner text\n\nApp draft', attachments: files,
+  }, 'repeating the same handoff adds nothing')
+  assert.deepEqual(readComposerHandoff('target', storage), {
+    draft: 'Owner text\n\nApp draft', autoSendDraft: null,
+  })
+  assert.deepEqual(readComposerDraft('unrelated', storage), { input: 'Do not touch', attachments: files })
+})

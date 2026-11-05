@@ -2,6 +2,7 @@ import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListR
 import { invalidateEventFedCachesAfterReconnect } from './eventFedCaches.js'
 import { ownerStore, sessionStore } from '../../lib/workspaceStorage.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
+import { openExistingChat, stageAppChatDraft } from '../../lib/appChatNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -2813,6 +2814,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     notifyShell,
     setAppIntents,
     navToRef,
+    requestComposer,
   })
 
   // The one way the shell opens Settings for someone else (a mini-app, the
@@ -2946,7 +2948,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         return
       }
       if (request.type === 'moebius:open-chat') {
-        const draftText = request.draft || null
+        const open = draft => {
+          if (request.view === 'changes') requestChatChanges(request.chatId)
+          navToRef.current('chat', { chatId: request.chatId })
+          // Storage covers an unmounted target. The explicit request also updates
+          // an already-retained ChatView, whose controlled composer state would
+          // otherwise keep showing its old value until a full remount.
+          if (draft !== undefined) requestComposer(request.chatId, { draft })
+          refreshChats()
+        }
+        if (request.requireExisting) return openExistingChat(request, open)
         // Do not stage a dead chat and wait for ChatView's later 404 repair:
         // that briefly paints a destination which immediately disappears. The
         // direct resource probe is the shell's authoritative deletion signal.
@@ -2956,22 +2967,14 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         )
         if (targetState === 'deleted') {
           await newChatRef.current?.({
-            draft: draftText || undefined,
+            draft: request.draft || undefined,
             forceNew: true,
           })
           refreshChats()
           return
         }
-        if (draftText != null) {
-          stageComposerHandoff(request.chatId, draftText)
-        }
-        if (request.view === 'changes') requestChatChanges(request.chatId)
-        navToRef.current('chat', { chatId: request.chatId })
-        // Storage covers an unmounted target. The explicit request also updates
-        // an already-retained ChatView, whose controlled composer state would
-        // otherwise keep showing its old value until a full remount.
-        if (draftText != null) requestComposer(request.chatId, { draft: draftText })
-        refreshChats()
+        // A failed send awaiting resolution keeps the composer; drop the draft.
+        open(await stageAppChatDraft(request.chatId, request.draft).catch(() => undefined))
         return
       }
       if (request.type === 'moebius:open-app') {

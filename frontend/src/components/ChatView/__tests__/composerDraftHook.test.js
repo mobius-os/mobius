@@ -356,3 +356,31 @@ test('resending an earlier message keeps the draft stored, then brings it back',
     box.unmount()
   })
 })
+
+test('an additive handoff keeps saved files and is restored only once', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    const chatId = 'additive-files'
+    const files = [{ name: 'notes.txt', size: 12, mime_type: 'text/plain', status: 'done' }]
+    persistComposerDraft(chatId, 'Owner text', files)
+    stageComposerHandoff(chatId, 'App draft', { additive: true })
+    let hidden = false
+    const hook = renderHook(() => useComposerDraftState({ chatId, hidden, inputRef: { current: null } }))
+    assert.equal(hook.result.current.input, 'Owner text\n\nApp draft')
+    assert.equal(hook.result.current.pendingFiles[0].name, 'notes.txt')
+    assert.equal(hook.result.current.pendingComposerSubmit, null)
+    hook.result.current.handleComposerInputChange('Newer owner text')
+    hidden = true
+    hook.rerender()
+    hidden = false
+    hook.rerender()
+    assert.equal(readComposerDraft(chatId).input, 'Newer owner text',
+      'showing the chat again must not restore the older handoff')
+    assert.equal(hook.result.current.pendingFiles[0].name, 'notes.txt')
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})

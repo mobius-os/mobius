@@ -1212,6 +1212,21 @@ visible app-owned chat, waits for the first message to be accepted, then
 returns its id for navigation. Catch errors and preserve the source UI so the
 owner can retry without losing work.
 
+`moebius:open-chat` with a `draft` adds that text after the owner's unsent
+draft in that chat, keeping their attachments; it never replaces or sends it.
+If the chat was deleted, the shell opens a new chat with the draft instead.
+To return the owner to one exact conversation with no fallback, post
+`moebius:open-existing-chat` with a `requestId` of the form
+`open-chat:<a>:<b>` and wait for the matching reply:
+
+```jsx
+const requestId = `open-chat:${Date.now()}:${Math.random().toString(36).slice(2)}`
+window.parent.postMessage({ type: 'moebius:open-existing-chat', requestId, chatId, draft }, '*')
+// -> { type: 'moebius:open-chat-result', requestId, ok, result: { outcome } }
+// outcome: 'opened' | 'target_missing' (deleted) | 'unavailable' (not reachable
+// now, or the chat holds a failed message the owner must resolve first)
+```
+
 The opaque app document cannot name the shell as a target origin, so raw
 app-to-shell messages use `'*'`. For reply protocols, require
 `event.source === window.parent` plus the exact request/correlation id. These

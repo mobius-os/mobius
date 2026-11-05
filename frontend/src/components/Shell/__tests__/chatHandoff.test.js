@@ -300,7 +300,7 @@ test('only the painted workspace world can expose its handoff layers', () => {
 
 test('app-supplied drafts update retained composers as well as remounted chats', () => {
   assert.match(shell,
-    /navToRef\.current\('chat', \{ chatId: request\.chatId \}\)[\s\S]*requestComposer\(request\.chatId, \{ draft: draftText \}\)/,
+    /navToRef\.current\('chat', \{ chatId: request\.chatId \}\)[\s\S]*if \(draft !== undefined\) requestComposer\(request\.chatId, \{ draft \}\)/,
     'the open-chat handoff must target the live composer after navigation')
   assert.match(chatView,
     /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
