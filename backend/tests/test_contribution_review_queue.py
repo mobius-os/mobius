@@ -33,7 +33,7 @@ def queue_timeline():
   # Actual GraphQL shapes: removal has no entry id and beforeCommit is NOT
   # the PR head. Neither reason nor this synthetic SHA supplies identity.
   return {"id": TARGET["pr_id"], "headRefOid": SHA, "state": "OPEN",
-    "merged": False, "mergeQueueEntry": None, "timelineItems": {
+    "merged": False, "mergeQueueEntry": None, "autoMergeRequest": None, "timelineItems": {
       "pageInfo": {"hasPreviousPage": False, "hasNextPage": False},
       "nodes": [
         {"__typename": "AddedToMergeQueueEvent", "id": "added-1", "createdAt": QUEUE_TIME},
@@ -149,7 +149,7 @@ def test_unconfirmed_attempt_ends_only_after_its_dispatch_window(monkeypatch, re
 
 
 @pytest.mark.parametrize("case", ["merged", "closed", "live_entry", "unknown_entry", "auto_merge",
-  "changed_head", "wrong_pr", "base_contains_head", "prior_proof_changed"])
+  "unknown_auto_merge", "changed_head", "wrong_pr", "base_contains_head", "prior_proof_changed"])
 def test_lost_attempt_proof_fails_closed(monkeypatch, case):
   node = queue_timeline()
   previous = lost_attempt()
@@ -159,6 +159,7 @@ def test_lost_attempt_proof_fails_closed(monkeypatch, case):
   elif case == "live_entry": node["mergeQueueEntry"] = {"id": "entry-2"}
   elif case == "unknown_entry": node.pop("mergeQueueEntry")
   elif case == "auto_merge": node["autoMergeRequest"] = {"enabledAt": QUEUE_TIME}
+  elif case == "unknown_auto_merge": node.pop("autoMergeRequest")
   elif case == "changed_head": node["headRefOid"] = "c" * 40
   elif case == "wrong_pr": node["id"] = "PR_other"
   elif case == "base_contains_head": compare = {"status": "identical"}

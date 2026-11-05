@@ -1380,7 +1380,8 @@ def confirmed_queue_removal(gh, cwd, target, previous, *, unavailable_marker=Non
     if (result.get("errors") or pr.get("id") != target["pr_id"]
         or pr.get("headRefOid") != target["head_sha"] or pr.get("state") != "OPEN"
         or pr.get("merged") is not False or "mergeQueueEntry" not in pr
-        or pr["mergeQueueEntry"] is not None or pr.get("autoMergeRequest") is not None):
+        or pr["mergeQueueEntry"] is not None
+        or "autoMergeRequest" not in pr or pr["autoMergeRequest"] is not None):
       return None
     if admitted:
       events = _ordered_queue_events(pr.get("timelineItems"))
@@ -1389,6 +1390,8 @@ def confirmed_queue_removal(gh, cwd, target, previous, *, unavailable_marker=Non
       enqueued_at = previous.get("queue_enqueued_at")
       if enqueued_at is None:
         # A legacy receipt has no admission timestamp: one complete cycle only.
+        # Its window has closed, so the window proof would also hold; this pair
+        # is kept only so already-saved legacy proofs stay identical.
         if len(events) != 2:
           return None
         pair = 0
