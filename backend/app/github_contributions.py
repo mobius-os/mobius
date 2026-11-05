@@ -3814,8 +3814,22 @@ def _submit_prepared_pr(
         else _assert_pending_equivalence_preflight(record)
       )
 
+    # Only a new standalone PR may open while it overlaps newer upstream: its
+    # exact reviewed diff is what GitHub shows, and resolving the overlap is
+    # the PR's next update. A stack layer or an existing PR's update must
+    # still merge cleanly before anything is pushed.
+    opens_standalone_pr = (
+      expected_existing_pr_number is None
+      and direct_base is None
+      and not isinstance(plan.get("stack"), dict)
+      and plan.get("action") == "pr"
+    )
     try:
-      merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      merge_patch = (
+        _git_ops.upstream_merge_for_new_pr(repo, upstream_repo, branch, expected_base)
+        if opens_standalone_pr else
+        _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      )
       record_patch = _git_ops._record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _git_ops._merge_error_patch(exc, record_patch) from exc

@@ -98,7 +98,6 @@ from app.github_contribution_git import (
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
-  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
@@ -1345,7 +1344,23 @@ def _inspect_prepared_review(
           code="review_unavailable",
         )
       if merge_preview.status == "conflict":
-        return _review_status_problem(record_id, code="upstream_conflict")
+        # Mirror Send: a new standalone PR whose sole upstream merge base is
+        # still the reviewed base opens with its exact diff; the overlap is
+        # its next update.
+        bases = app_git._run(
+          repo, "merge-base", "--all", upstream_sha, head_oid,
+          check=False, read_only=True,
+        ) if plan.get("action") == "pr" and not stack else None
+        if bases is not None and bases.returncode not in (0, 1):
+          raise ContributionSubmitError(
+            "The recorded upstream merge base could not be checked locally.",
+            code="review_unavailable",
+          )
+        if not (
+          bases is not None and bases.returncode == 0
+          and bases.stdout.split() == [base_oid.lower()]
+        ):
+          return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,

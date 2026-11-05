@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -93,6 +94,10 @@ def _git_env(repo: Path) -> dict:
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
   env["GIT_TERMINAL_PROMPT"] = "0"
+  # Like app_git: no askpass program from any config (including a repo's own
+  # core.askPass) may run with this environment's token.
+  env["GIT_ASKPASS"] = "/bin/false"
+  env["SSH_ASKPASS"] = "/bin/false"
   env["GH_PROMPT_DISABLED"] = "1"
   token = github_auth.get_token()
   if token:
@@ -736,9 +741,32 @@ def fetch_upstream_head(
     _git(repo, "update-ref", "-d", upstream_ref, check=False)
 
 
-def _assert_merges_with_upstream(
+@dataclass(frozen=True)
+class UpstreamMerge:
+  """The exact upstream tip a branch was checked against, and whether it merges."""
+
+  branch: str
+  sha: str
+  conflicts: bool
+
+  @property
+  def record_patch(self) -> dict:
+    return {
+      "last_submit_upstream_branch": self.branch,
+      "last_submit_upstream_sha": self.sha,
+    }
+
+
+def inspect_upstream_merge(
   repo: Path, upstream_repo: str, branch: str,
-) -> dict:
+) -> UpstreamMerge:
+  """Fetch today's upstream default tip and report whether ``branch`` merges.
+
+  A conflict is a fact about two exact commits, returned rather than raised.
+  Failing to learn that fact (transport, unresolved ref, auth, or a
+  ``merge-tree`` that could not run) still raises with its own code, so it is
+  never mislabelled as a conflict.
+  """
   upstream_branch = _upstream_default_branch(repo, upstream_repo)
   preflight_patch = {"last_submit_upstream_branch": upstream_branch}
   try:
@@ -764,53 +792,87 @@ def _assert_merges_with_upstream(
       code=exc.code,
       detail=exc.detail,
     ) from None
-  preflight_patch["last_submit_upstream_sha"] = upstream_sha
   merged = _git(
     repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
   )
-  if merged.returncode != 0:
+  # ``merge-tree --write-tree`` exits 0 when clean and 1 when conflicted.
+  # Histories with no common ancestor cannot merge at all (git refuses them
+  # fatally), which is a deterministic fact about the two commits, proven
+  # structurally rather than from localized stderr. Anything else (a fatal
+  # 128, a usage error, missing objects) is an unknown merge verdict, not a
+  # conflict, and never a licence to publish.
+  unrelated = merged.returncode not in (0, 1) and _git(
+    repo, "merge-base", upstream_sha, branch, check=False,
+  ).returncode == 1
+  merge = UpstreamMerge(
+    upstream_branch, upstream_sha, merged.returncode == 1 or unrelated,
+  )
+  if merged.returncode not in (0, 1) and not unrelated:
     raise ContributionSubmitError(
-      (
-        f"This PR no longer merges cleanly with upstream {upstream_branch}. "
-        "Leave feedback so your agent can refresh the branch before it is "
-        "pushed."
+      f"Contribute could not check whether this PR merges with upstream "
+      f"{upstream_branch}. Nothing was published. Leave feedback so your "
+      "agent can inspect it.",
+      record_patch=merge.record_patch,
+      code="upstream_merge_unavailable",
+      detail=readable_output(
+        merged.stderr or merged.stdout or
+        f"git merge-tree exited {merged.returncode} without diagnostic output."
       ),
-      record_patch=preflight_patch,
     )
-  return preflight_patch
+  return merge
 
-def _conflicts_with_recorded_upstream(record: dict, repo, branch: str) -> bool:
-  """Whether this branch still fails to merge the upstream it last saw.
 
-  A conflict is a fact about two commits, so DERIVE it from the branch as it
-  stands rather than trusting a verdict a past attempt left behind. A refreshed
-  branch stops reporting one the moment it genuinely merges, and nothing has to
-  remember to clear a flag — the failure mode of every stored classification.
+def _upstream_conflict_error(merge: UpstreamMerge) -> ContributionSubmitError:
+  return ContributionSubmitError(
+    (
+      f"This PR no longer merges cleanly with upstream {merge.branch}. "
+      "Leave feedback so your agent can refresh the branch before it is "
+      "pushed."
+    ),
+    record_patch=merge.record_patch,
+    code="upstream_conflict",
+  )
 
-  The upstream commit is already in this checkout's object store, fetched by the
-  submit that recorded its sha, so this stays local and never reaches the
-  network. It can only go stale in the safe direction: upstream moving on is
-  invisible here, and the authoritative check against live upstream still runs
-  at submit before anything is pushed.
 
-  ``merge-tree --write-tree`` writes the merged tree it computes, so this leaves
-  unreferenced objects behind for gc — the same objects the submit-time check
-  already writes. It touches no working tree, index, branch or ref, which is
-  what the read-only review endpoint calling it promises.
+def _assert_merges_with_upstream(
+  repo: Path, upstream_repo: str, branch: str,
+) -> dict:
+  """Refuse a branch that conflicts with today's upstream (stacks, updates)."""
+  merge = inspect_upstream_merge(repo, upstream_repo, branch)
+  if merge.conflicts:
+    raise _upstream_conflict_error(merge)
+  return merge.record_patch
+
+
+def upstream_merge_for_new_pr(
+  repo: Path, upstream_repo: str, branch: str, base_sha: str,
+) -> dict:
+  """Preflight a NEW standalone PR, where an upstream conflict is not a refusal.
+
+  The owner approved this exact reviewed change. GitHub shows a new PR as
+  ``merge-base..head``. Only when the sole merge base of today's upstream tip
+  and the head IS the reviewed base is that byte-for-byte the reviewed diff,
+  so the PR may open and resolving the overlap becomes its next update.
+  Ancestry alone is not enough: upstream may already contain some of the
+  head's own commits, which moves the merge base and shrinks the published
+  diff. Otherwise it still refuses. Stacks and existing-PR updates keep
+  ``_assert_merges_with_upstream``.
   """
-  upstream_sha = str(record.get("last_submit_upstream_sha") or "")
-  if not _GIT_SHA.match(upstream_sha):
-    return False
-  present = _git(
-    repo, "cat-file", "-e", f"{upstream_sha}^{{commit}}", check=False,
-  )
-  if present.returncode != 0:
-    return False
-  merged = _git(
-    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
-  )
-  return merged.returncode != 0
-
+  merge = inspect_upstream_merge(repo, upstream_repo, branch)
+  if not merge.conflicts:
+    return merge.record_patch
+  bases = _git(repo, "merge-base", "--all", merge.sha, branch, check=False)
+  if bases.returncode not in (0, 1):
+    raise ContributionSubmitError(
+      f"Could not compare this PR's reviewed base with upstream {merge.branch}. "
+      "Nothing was published.",
+      record_patch=merge.record_patch,
+      code="upstream_merge_unavailable",
+      detail=readable_output(bases.stderr or bases.stdout or ""),
+    )
+  if bases.returncode != 0 or (bases.stdout or "").split() != [str(base_sha).lower()]:
+    raise _upstream_conflict_error(merge)
+  return merge.record_patch
 
 
 def _canonical_reviewed_oid(value: object, label: str) -> str:
