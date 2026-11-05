@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { activationRetryDelay, chatEntryFrame } from '../chatRuntimeState.js'
+import {
+  activationRetryDelay,
+  chatEntryFrame,
+  liveControlsReady,
+  answerBeforeActivationError,
+} from '../chatRuntimeState.js'
 
 const READ_TIMEOUT_MS = 15000
 const timeout = Object.assign(new Error('Request timed out'), { name: 'TimeoutError' })
@@ -81,4 +86,38 @@ test('a transcript or empty frame waits for runtime truth; only cold or cached-f
     frame({ activationSettled: true }),
     { showEmpty: true, showLoadError: false, displayReady: true },
   )
+})
+
+test('a saved transcript presents at once, idle or mid-reply, while runtime truth reconciles beneath it', () => {
+  const cached = { messageCount: 5, transcriptPaintable: true, cachedFrame: true }
+  assert.equal(frame({ ...cached, activationPhase: 'pending' }).displayReady, true,
+    'reopening a chat must not wait on the network')
+  assert.equal(frame({ ...cached, turnActive: true, activationPhase: 'pending' }).displayReady, true,
+    'a chat whose cached window was mid-reply opens at once too')
+  assert.equal(frame({ ...cached, loading: true }).displayReady, false,
+    'a window still loading is not a saved frame')
+  assert.equal(frame({ cachedFrame: true }).displayReady, false,
+    'an empty cache never stands in for an unverified empty chat')
+  assert.equal(
+    frame({ messageCount: 5, transcriptPaintable: true, activationPhase: 'pending' }).displayReady,
+    false,
+    'an unvalidated reading coordinate still waits for runtime truth',
+  )
+})
+
+test('a saved frame offers no live-state control until runtime truth lands', () => {
+  for (const phase of ['pending', 'cold']) {
+    assert.deepEqual(liveControlsReady(phase, false), { act: false, stop: false },
+      `a ${phase} activation cannot Stop (and resend its queue), Try again, answer or Resume`)
+  }
+  assert.deepEqual(liveControlsReady('ready', true), { act: true, stop: true })
+  assert.deepEqual(liveControlsReady('error', false), { act: false, stop: true },
+    'a failed activation keeps Stop for a turn that may still be running')
+})
+
+test('an answer tapped before activation is refused on its own card, keeping the choice', () => {
+  const error = answerBeforeActivationError()
+  assert.equal(error.status, 409, 'the card shows a 409 detail rather than the generic retry copy')
+  assert.match(error.detail, /still loading/)
+  assert.equal(error.message, error.detail)
 })

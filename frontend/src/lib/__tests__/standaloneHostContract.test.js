@@ -24,7 +24,8 @@ test('standalone route selects the shared opaque AppCanvas host', () => {
 
 test('standalone navigation delegates chat ownership and shares crash recovery', () => {
   const standalone = read('src/components/StandaloneApp/StandaloneApp.jsx')
-  assert.match(standalone, /stageComposerHandoff\(request\.chatId, request\.draft\)/)
+  assert.match(standalone, /stageAppChatDraft\(request\.chatId, request\.draft\)/,
+    'an app draft for an existing chat is additive, never a replacement')
   assert.match(standalone, /stageComposerHandoff\(chat\.id, request\.draft\)/)
   assert.doesNotMatch(standalone, /autoSend/,
     'an app new-chat request stages an editable draft, never a submitted turn')

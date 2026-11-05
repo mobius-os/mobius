@@ -427,7 +427,8 @@ def dispatch_sdk_message(
   ``usage_state`` carries the latest root AssistantMessage usage to the
   terminal ResultMessage. Claude's result usage aggregates the whole agent
   turn; the assistant usage is the one-call value needed to measure current
-  context occupancy without counting every tool-loop refill.
+  context occupancy without counting every tool-loop refill. It also carries
+  whether the latest root call ended in a provider refusal.
 
   Extracted from the runner loop so unit tests can exercise the
   full dispatch matrix (named events, unknown fallthrough, usage
@@ -626,6 +627,11 @@ def dispatch_sdk_message(
       current_session_id = sdk_msg.session_id
     if native_work is not None:
       native_work.root_continuation_observed()
+    if usage_state is not None and sdk_msg.parent_tool_use_id is None:
+      # The provider's own refusal signal, not its wording. The CLI reports a
+      # refused root call as a synthetic error message with this stop reason;
+      # a later successful call (an internal retry or fallback) clears it.
+      usage_state["refused"] = sdk_msg.stop_reason == "refusal"
     if sdk_msg.error:
       # The CLI wraps a failed API call (a safety refusal, auth or billing
       # failure, an exhausted retry) in a synthetic assistant message: its
@@ -835,6 +841,10 @@ def dispatch_sdk_message(
       "error": (
         _result_error_message(sdk_msg)
         if sdk_msg.is_error else None
+      ),
+      "provider_refusal": bool(sdk_msg.is_error) and (
+        sdk_msg.stop_reason == "refusal"
+        or bool((usage_state or {}).get("refused"))
       ),
     }
 

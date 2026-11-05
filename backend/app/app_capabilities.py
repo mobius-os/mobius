@@ -598,6 +598,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "helper_activity_read": bool(perms.get("helper_activity_read", False)),
       "location_history_read": bool(perms.get("location_history_read", False)),
     },
     "background": (
@@ -720,6 +721,13 @@ def contract_from_app_state(
     )
   if tools is None:
     tools = agent_tools_from_contract(getattr(app, "capability_contract", None))
+  # Contract-only grants have no App column. An explicit mapping (manifest
+  # apply) is authoritative; otherwise keep what the stored contract accepted.
+  contract_grants = contract_permissions
+  if contract_grants is None:
+    stored = getattr(app, "capability_contract", None)
+    stored_data = stored.get("data") if isinstance(stored, dict) else None
+    contract_grants = stored_data if isinstance(stored_data, dict) else {}
   manifest = {
     "system_prompt": getattr(app, "system_prompt_file", None),
     "embeds_agent": bool(getattr(app, "embeds_agent", False)),
@@ -734,15 +742,16 @@ def contract_from_app_state(
       "github_connect": bool(getattr(app, "github_connect", False)),
       "connections_manage": bool(getattr(app, "connections_manage", False)),
       "connect_manage": bool(getattr(app, "connect_manage", False)),
-      # These contract-only grants must be declared on every local apply.
-      "identity_manage": bool(
-        (contract_permissions or {}).get("identity_manage", False)
-      ),
-      "railway_manage": bool(
-        (contract_permissions or {}).get("railway_manage", False)
+      # Manifest apply passes an explicit mapping: omission revokes. An
+      # unrelated row projection (no mapping, e.g. a PATCH of pinned or
+      # chat_log_access) retains every contract-only grant the owner accepted.
+      "identity_manage": bool(contract_grants.get("identity_manage", False)),
+      "railway_manage": bool(contract_grants.get("railway_manage", False)),
+      "helper_activity_read": bool(
+        contract_grants.get("helper_activity_read", False)
       ),
       "location_history_read": bool(
-        (contract_permissions or {}).get("location_history_read", False)
+        contract_grants.get("location_history_read", False)
       ),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
@@ -974,7 +983,8 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "data.location_history_read", "public.storage.read",
+  "data.railway_manage", "data.helper_activity_read",
+  "data.location_history_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {

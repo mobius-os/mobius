@@ -1062,7 +1062,7 @@ path means routing it through the same entries rather than inventing another rul
 | Event | Before | After | Scroll write |
 |---|---|---|---|
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
-| Later send submitted at the physical autoscroll tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
+| Later send submitted at the physical autoscroll tail (mode may be one frame stale; a follower still where `FOLLOW_BOTTOM` last wrote counts before layout follows newly committed output) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |

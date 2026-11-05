@@ -316,6 +316,21 @@ test('failed fresh-state reconciliation retries rather than accepting stale buff
   assert.equal(h.connections[1].reads, 1)
 })
 
+test('the open barrier learns how many attempts failed so a slow list read can widen its bound', async t => {
+  let count = 0
+  const h = await connectionHarness(t, { onOpen: () => { if (++count <= 2) throw new Error('list read timed out') } })
+  assert.equal(h.opens[0].failedAttempts, 0, 'a first connection keeps the short bound')
+  await h.tick(1000)
+  assert.equal(h.opens[1].failedAttempts, 1)
+  await h.tick(2000)
+  assert.equal(h.opens[2].failedAttempts, 2)
+  assert.equal(h.connections[2].reads, 1)
+  // A healthy read resets the count, so a later reconnect starts short again.
+  h.connections[2].end(); await h.flush()
+  await h.tick(1000)
+  assert.equal(h.opens[3].failedAttempts, 1, 'the clean EOF itself is one retired attempt')
+})
+
 test('an old read resolving after abort cannot deliver events or retire the replacement', async t => {
   const h = await connectionHarness(t, { ignoreAbort: true })
   h.visibility('hidden'); await h.tick(20_000); h.wakeBurst(); await h.flush()

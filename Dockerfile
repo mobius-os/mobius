@@ -56,8 +56,8 @@ RUN useradd -m -s /bin/bash mobius
 # turns at it. amd64 browsers come from the pinned layer that follows.
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CODEX_VERSION=0.162.0
-ARG CODEX_SDK_VERSION=0.162.0
+ARG CODEX_VERSION=0.163.0
+ARG CODEX_SDK_VERSION=0.163.0
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git iproute2 jq poppler-utils procps ripgrep sudo tini unzip util-linux xxd \
@@ -90,9 +90,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # discovery never selects it implicitly. Both live in /opt/agent-browser so
 # root and the mobius user share one copy via the symlinks below. A separate
 # layer after apt/npm, so a Chrome bump does not reinstall system packages.
-ARG CHROME_VERSION=156.0.8078.80
-ARG CHROME_SHA256=b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7
-ARG CHROME_HEADLESS_SHELL_SHA256=547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4
+ARG CHROME_VERSION=157.0.8103.38
+ARG CHROME_SHA256=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
+ARG CHROME_HEADLESS_SHELL_SHA256=deafffa74660b34853a4119c361fd427ac8c9fcb62db51ddb8a797cd83a4ba2d
 RUN set -eu; \
     browsers=/opt/agent-browser/browsers; \
     mkdir -p "$browsers"; \

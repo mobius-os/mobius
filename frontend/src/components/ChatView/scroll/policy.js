@@ -13,6 +13,8 @@ import {
 
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 const NESTED_SCROLL_EPSILON_PX = 0.5
+// Sub-pixel scrollTop rounding only; any real movement exceeds it.
+const AUTOSCROLL_POSITION_EPSILON_PX = 0.5
 const NESTED_SCROLL_SELECTOR = '[data-chat-scroll-region], .chat__scroll'
 export const FOLLOW_STICK_BAND_PX = 70
 export const HISTORY_PREFETCH_MIN_PX = 240
@@ -60,16 +62,29 @@ export function paginationViewportCompensationAllowed({
  *  autoscroll. Subtracting it made a message sitting mid-screen look like a
  *  bottom send and yanked the reader back to the top. Exact physical geometry
  *  remains synchronous even while ScrollMode settlement trails by a frame;
- *  ScrollMode is a DOM-less fallback only.
+ *  ScrollMode alone is a DOM-less fallback only.
+ *
+ *  Live output is the one exception to reading the raw gap. A reply commits
+ *  between frames and FOLLOW_BOTTOM reaches the new tail only at the next
+ *  layout observation, so for that interval the physical gap includes output
+ *  the follower has not been moved past yet (several lines when a backlog is
+ *  revealed quickly). `followTailTop` is the scrollTop FOLLOW_BOTTOM itself
+ *  last wrote; a viewport still exactly there is at the autoscroll tail. Any
+ *  reader movement or clamp changes scrollTop, so a stale FOLLOW_BOTTOM still
+ *  falls back to the physical geometry.
  */
 export function shouldPinSend({
   scrollEl,
   mode,
   isFirstUserMsg,
+  followTailTop = null,
 }) {
   if (isFirstUserMsg) return true
-  if (scrollEl) return isNearPhysicalBottom(scrollEl)
-  return mode?.kind === 'FOLLOW_BOTTOM'
+  if (!scrollEl) return mode?.kind === 'FOLLOW_BOTTOM'
+  return isNearPhysicalBottom(scrollEl)
+    || (mode?.kind === 'FOLLOW_BOTTOM'
+      && Number.isFinite(followTailTop)
+      && Math.abs(scrollEl.scrollTop - followTailTop) <= AUTOSCROLL_POSITION_EPSILON_PX)
 }
 
 

@@ -201,4 +201,11 @@ head, and repairs of other PRs sharing its branch, stay fenced. A receipt saved
 before admission times were recorded counts only once its one-hour dispatch
 window has closed.
 
-A lost-response enqueue later observed in the queue is marked `queue_receipt_unconfirmed`: the observed entry cannot prove it belongs to that lost request. Even if it has `enqueuedAt`, later removal does not authorize automatic successor repair for that receipt. Keep the uncertain grant fenced and resolve it in its owning conversation; do not retry the removed head.
+An attempt with no confirmed admission (a lost merge or enqueue response, or a
+`queue_receipt_unconfirmed` entry observed later) has no queue history to match.
+It ends the same way only after its one-hour dispatch window: an observation
+started then must show the PR open and unmerged at the attempted head, with no
+merge-queue entry, no auto-merge request, and a target base that does not
+contain the head. GitHub has then evaluated or dropped every request issued
+for the attempt, so it can no longer land. Until then it stays fenced; the same
+successor-only rules apply afterwards.
