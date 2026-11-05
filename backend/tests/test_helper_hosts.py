@@ -24,10 +24,14 @@ def test_turn_identity_never_lives_in_the_shared_host_environment():
     "MOBIUS_RUN_MARKER": "m1",
     "TMPDIR": "/data/agent-scratch/chat-1",
     "VIEWPORT_WIDTH": "1200",
+    # Derived from the viewport width, so it varies per turn like the width.
+    "AGENT_BROWSER_EXECUTABLE_PATH": "/scripts/chrome-desktop-pointer.sh",
+    "MOBIUS_SCREENSHOT_REAL_BROWSER": "/opt/chrome",
   })
   assert host == {"PATH": "/usr/bin", "CODEX_HOME": "/data/cli-auth/codex"}
   assert set(turn) == {
     "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_MARKER", "TMPDIR", "VIEWPORT_WIDTH",
+    "AGENT_BROWSER_EXECUTABLE_PATH", "MOBIUS_SCREENSHOT_REAL_BROWSER",
   }
 
 

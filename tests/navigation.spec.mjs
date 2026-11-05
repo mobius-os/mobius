@@ -730,6 +730,72 @@ test('held chat cover suppresses stale floating actions while the destination se
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
 
+  for (const dismissal of ['toggle', 'outside', 'back', 'swipe']) {
+    test(`drawer ${dismissal} dismissal restores a suspended empty composer`, async ({ page }) => {
+      await setup(page)
+      const composer = page.locator('[data-chat-surface="painted"] textarea.chat__input')
+      const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+      const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+      await composer.focus()
+      await expect(composer).toHaveValue('')
+      // A touch press preserves the field until the navigation boundary can
+      // remember it; a synthetic mouse click would blur before that boundary.
+      await toggle.tap()
+      await expect(navigation).toBeFocused()
+      await expect(composer).not.toBeFocused()
+      await expect(page.getByRole('textbox', { name: 'Preparing message input' })).not.toBeFocused()
+      if (dismissal === 'toggle') await toggle.tap()
+      if (dismissal === 'outside') {
+        await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+          pointerId: 81, pointerType: 'touch', isPrimary: true, button: 0,
+        })
+      }
+      if (dismissal === 'back') await goBack(page)
+      if (dismissal === 'swipe') {
+        await dispatchDrawerPointerGesture(page, {
+          pointerId: 82, points: [[230, 450], [170, 452], [90, 454]],
+        })
+      }
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      await expect(composer).toBeFocused()
+      await expect(composer).toHaveValue('')
+      expect((await getNavState(page)).activeChatId).toBe(NAV_CHATS[0].id)
+    })
+  }
+
+  test('drawer dismissal leaves a previously unfocused saved draft keyboard closed', async ({ page }) => {
+    await setup(page)
+    const composer = page.locator('[data-chat-surface="painted"] textarea.chat__input')
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await composer.fill('Keep this draft without opening its keyboard')
+    await composer.blur()
+    await toggle.tap()
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeFocused()
+    await toggle.tap()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    // Wait for the sentinel to settle, not just the immediate visual close.
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+    await expect(composer).not.toBeFocused()
+    await expect(composer).toHaveValue('Keep this draft without opening its keyboard')
+  })
+
+  test('choosing another destination never restores the suspended old composer', async ({ page }) => {
+    await setup(page)
+    const composer = page.locator('[data-chat-surface="painted"] textarea.chat__input')
+    await composer.fill('This stays in the original chat')
+    await page.getByRole('button', { name: 'Toggle navigation' }).tap()
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).tap()
+    await expect(page.locator('[data-chat-surface="painted"]')).toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
+    const destination = page.locator('[data-chat-surface="painted"] textarea.chat__input')
+    await expect(destination).not.toBeFocused()
+    await expect(destination).toHaveValue('')
+    await page.getByRole('button', { name: 'Toggle navigation' }).tap()
+    await navigateToSettings(page)
+    await expect(destination).not.toBeFocused()
+  })
+
   test('chat selection closes the drawer before the destination paints', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })

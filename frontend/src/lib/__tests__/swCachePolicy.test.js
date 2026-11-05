@@ -15,7 +15,9 @@ import {
   appCodeStoreAction,
   entriesToTrim,
   isAppCodeRoute,
-  isCacheableProxyRequest,
+  isPinnableProxyResponse,
+  PROXY_PINNED_CACHE,
+  proxyCacheLane,
   packagedAssetCacheLane,
   isCacheableAppAssetResponse,
   hasOpaqueEmbedSandbox,
@@ -400,12 +402,63 @@ test('proxied third-party assets are cached for subresources but never answer a 
   const svg = new URL(`${origin}/api/proxy?url=${encodeURIComponent('https://evil.example/x.svg')}`)
   const favicon = new URL(`${origin}/api/proxy/favicon?url=https%3A%2F%2Fevil.example%2F`)
   const json = new URL(`${origin}/api/proxy?url=${encodeURIComponent('https://api.example/data')}`)
-  assert.equal(isCacheableProxyRequest(svg, { mode: 'no-cors' }, origin), true)
-  assert.equal(isCacheableProxyRequest(favicon, { mode: 'cors' }, origin), true)
-  assert.equal(isCacheableProxyRequest(json, { mode: 'cors' }, origin), false)
-  assert.equal(isCacheableProxyRequest(svg, { mode: 'navigate' }, origin), false)
-  assert.equal(isCacheableProxyRequest(favicon, { mode: 'navigate' }, origin), false)
-  assert.equal(isCacheableProxyRequest(svg, { mode: 'no-cors' }, 'https://other.example'), false)
+  assert.equal(proxyCacheLane(svg, { mode: 'no-cors' }, origin), 'revalidate')
+  assert.equal(proxyCacheLane(favicon, { mode: 'cors' }, origin), 'revalidate')
+  assert.equal(proxyCacheLane(json, { mode: 'cors' }, origin), null)
+  assert.equal(proxyCacheLane(svg, { mode: 'navigate' }, origin), null)
+  assert.equal(proxyCacheLane(favicon, { mode: 'navigate' }, origin), null)
+  assert.equal(proxyCacheLane(svg, { mode: 'no-cors' }, 'https://other.example'), null)
+})
+
+test('commit-pinned proxied images are served cache-first; branch-relative ones still revalidate', () => {
+  const origin = 'https://mobius.example'
+  const commit = '0123456789abcdef0123456789abcdef01234567'
+  const proxied = (target, extra = '') =>
+    new URL(`${origin}/api/proxy?url=${encodeURIComponent(target)}${extra}`)
+  const lane = (target, extra, request = { mode: 'cors' }) =>
+    proxyCacheLane(proxied(target, extra), request, origin)
+  const raw = 'https://raw.githubusercontent.com/mobius-os/app-voice'
+
+  assert.equal(lane(`${raw}/${commit}/icon.png`), 'immutable')
+  // The requested width is part of the URL, so each size is its own entry.
+  assert.equal(lane(`${raw}/${commit}/media/banner.JPG`, '&w=1200'), 'immutable')
+  assert.equal(lane(`${raw}/main/icon.png`), 'revalidate')
+  assert.equal(lane(`${raw}/${commit.slice(1)}/icon.png`), 'revalidate')
+  // The server pins lowercase hex only; predicting more would make it network-only.
+  assert.equal(lane(`${raw}/${commit.toUpperCase()}/icon.png`), 'revalidate')
+  assert.equal(lane(`${raw}/${commit}/mobius.json`), null)
+  assert.equal(lane(`http://raw.githubusercontent.com/mobius-os/app-voice/${commit}/icon.png`), 'revalidate')
+  assert.equal(lane(`https://raw.githubusercontent.com.evil.example/a/b/${commit}/icon.png`), 'revalidate')
+  assert.equal(lane(`https://github.com/mobius-os/app-voice/${commit}/icon.png`), 'revalidate')
+  assert.equal(lane(`${raw}/${commit}/icon.png`, '', { mode: 'navigate' }), null)
+  assert.equal(
+    proxyCacheLane(proxied(`${raw}/${commit}/icon.png`), { mode: 'cors' }, 'https://other.example'),
+    null,
+  )
+})
+
+test('only complete responses the server marked immutable enter the pinned proxy cache', () => {
+  const response = (status, cacheControl) =>
+    new Response(status === 304 ? null : 'x', {
+      status,
+      headers: cacheControl ? { 'cache-control': cacheControl } : {},
+    })
+  assert.equal(isPinnableProxyResponse(response(200, 'private, max-age=31536000, immutable')), true)
+  assert.equal(isPinnableProxyResponse(response(200, 'private, max-age=299')), false)
+  assert.equal(isPinnableProxyResponse(response(200, 'no-store')), false)
+  assert.equal(isPinnableProxyResponse(response(200, 'private, x-not-immutable')), false)
+  assert.equal(isPinnableProxyResponse(response(200)), false)
+  assert.equal(isPinnableProxyResponse(response(404, 'private, max-age=31536000, immutable')), false)
+  assert.equal(isPinnableProxyResponse(undefined), false)
+})
+
+test('the pinned proxy cache survives activation, a renamed version does not, and logout clears it', () => {
+  assert.equal(isStaleRuntimeCache(PROXY_PINNED_CACHE), false)
+  // Bumping the version is how a changed downscaled rendition reaches clients.
+  assert.equal(isStaleRuntimeCache('mobius-proxy-pinned'), true)
+  assert.equal(isStaleRuntimeCache('mobius-proxy-pinned-v0'), true)
+  assert.equal(isStaleRuntimeCache('mobius-proxy'), false)
+  assert.deepEqual(cachesToDeleteOnLogout([PROXY_PINNED_CACHE]), [PROXY_PINNED_CACHE])
 })
 
 test('packaged-asset navigations are served from cache only for sandboxed /app-embeds documents', () => {

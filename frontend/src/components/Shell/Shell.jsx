@@ -14,12 +14,12 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
+import { refreshUninstalledForSystemEvent } from '../Drawer/uninstalledAppsEvents.js'
 import {
   copyChatSettings as copyNewChatSettings,
   withCopiedSettings,
   startChatFromCommand as startNewChatFromCommand,
 } from './newChatCommand.js'
-import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import NotificationCenter from '../NotificationBell/NotificationCenter.jsx'
 import {
   api, apiFetch, jsonOrThrow, probeDeletion, clearAppRuntimeData,
@@ -28,6 +28,7 @@ import {
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNativePush from '../../hooks/useNativePush.js'
 import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
+import useLatch from '../../hooks/useLatch.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
@@ -50,6 +51,7 @@ import {
 import useRestartPending from '../../hooks/useRestartPending.js'
 import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
+import { useLocationBoot } from '../../hooks/useLocationTracking.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
   authQueries,
@@ -64,14 +66,10 @@ import {
   projectQueries,
   settingsQueries,
 } from '../../hooks/queries.js'
-import ProjectCopyImport from '../Projects/ProjectCopyImport.jsx'
 import { consumeProjectCopyRequest, clearProjectCopyRequest } from '../../lib/projectCopies.js'
-import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
-import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
-import AppSourceWorkspace from '../Projects/AppSourceWorkspace.jsx'
-import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
-import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
+import { buildEventProjectId, isArtifactBuildEvent, projectEntryTarget, resultDisplayName } from '../../lib/projectArtifacts.js'
+import { projectChatTabLabel } from '../../lib/projectChats.js'
 import {
   appSourceProjectId,
   linkedProjectAppId,
@@ -169,6 +167,8 @@ import {
   composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
+import { shouldRestoreDrawerFocus, suspendDrawerComposer } from '../../lib/drawerLifecycle.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -193,7 +193,7 @@ import {
   shouldFocusComposerAfterPanePointer,
   supportsDesktopPaneComposerFocus,
 } from './paneChatFocus.js'
-import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
+import LazySurface, { SurfaceLoading, createLaunchCoverHold } from '../ErrorBoundary/LazySurface.jsx'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan,
   MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
@@ -242,6 +242,17 @@ const CHAT_ROW_REFRESH_BATCH_MS = 250
 // Shown once per account, so it stays out of the main bundle.
 const WalkthroughOverlay = lazy(() => import('../Walkthrough/WalkthroughOverlay.jsx'))
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
+// Surfaces a chat-only launch never paints stay off the startup path: an app
+// pane, the Projects launcher, and per-project workspaces. Each loads on first
+// render; the service worker's precache makes later first opens local. Each
+// render site wraps its surface in LazySurface, which keeps a failed download
+// local to that surface and holds the launch cover while a visible one loads.
+const AppCanvas = lazy(() => import('../AppCanvas/AppCanvas.jsx'))
+const ProjectsDirectory = lazy(() => import('../Projects/ProjectsDirectory.jsx'))
+const ProjectWorkspace = lazy(() => import('../Projects/ProjectWorkspace.jsx'))
+const AppSourceWorkspace = lazy(() => import('../Projects/AppSourceWorkspace.jsx'))
+const ArtifactWorkspace = lazy(() => import('../Projects/ArtifactWorkspace.jsx'))
+const ProjectCopyImport = lazy(() => import('../Projects/ProjectCopyImport.jsx'))
 
 // Capture the incoming fragment before navigation normalizes the URL; consume
 // the tab-scoped one-shot carry if identity sign-in redirected through /shell/.
@@ -311,6 +322,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // outgoing surface becomes inert. The callback is filled after the shared
   // composer handoff exists below.
   const beforeRestoreRouteRef = useRef(null)
+  const beforeDrawerOpenRef = useRef(null)
   const walkthroughHandoffRef = useRef(false)
   const onWalkthroughHandoffChange = useCallback((suspended) => {
     walkthroughHandoffRef.current = suspended
@@ -341,6 +353,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     replaceImplicitBootTab,
     dragActiveRef,
     beforeRestoreRouteRef,
+    beforeDrawerOpenRef,
     navigationStorage: workspaceStorage,
     routePath: sharedBrowserAccess ? sharedBrowserRoutePath() : '/shell/',
   })
@@ -858,11 +871,24 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // cannot reveal a chat while its scroll restoration is still deliberately
   // hidden.
   const initialVisualReadyRef = useRef(false)
-  const markInitialVisualReady = useCallback(() => {
+  const onInitialVisualReadyRef = useRef(onInitialVisualReady)
+  useLayoutEffect(() => {
+    onInitialVisualReadyRef.current = onInitialVisualReady
+  }, [onInitialVisualReady])
+  // A visible surface whose code is still downloading (LazySurface onPending)
+  // holds the cover, whichever view or pane shows it: lifting it earlier would
+  // expose an empty pane. A failed download also releases the hold, so the
+  // pane's own recovery panel shows instead of a cover that never lifts. The
+  // hold is created once so its callbacks keep one identity across renders.
+  const [launchCover] = useState(() => createLaunchCoverHold(() => {
     if (initialVisualReadyRef.current) return
     initialVisualReadyRef.current = true
-    onInitialVisualReady?.()
-  }, [onInitialVisualReady])
+    onInitialVisualReadyRef.current?.()
+  }))
+  const markInitialVisualReady = launchCover.request
+  const holdLaunchCover = useCallback(() => (
+    initialVisualReadyRef.current ? undefined : launchCover.hold()
+  ), [launchCover])
   const requestComposer = useCallback((chatId, {
     draft,
     focus = false,
@@ -889,21 +915,21 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     requestComposer(chatId, { focus: true })
   }
 
+  const reserveTouchComposer = useCallback((chatId, saved = readComposerDraft(chatId)) => {
+    const leased = beginTouchComposerFocusLease(composerFocusLeaseRef.current, {
+      initialValue: saved?.input,
+    })
+    if (!leased) return false
+    composerFocusLeaseDraftIdRef.current = String(chatId)
+    composerFocusLeaseDirtyRef.current = false
+    requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    return true
+  }, [requestComposer])
+
   function reserveTouchDraftComposer(chatId) {
     if (chatId == null) return false
     const saved = readComposerDraft(chatId)
-    if (composerDraftWantsKeyboard(saved)) {
-      const leased = beginTouchComposerFocusLease(composerFocusLeaseRef.current, {
-        initialValue: saved.input,
-      })
-      if (leased) {
-        composerFocusLeaseDraftIdRef.current = String(chatId)
-        composerFocusLeaseDirtyRef.current = false
-        requestComposer(chatId, { focus: true, restoreExistingDraft: true })
-        return true
-      }
-    }
-    return false
+    return composerDraftWantsKeyboard(saved) && reserveTouchComposer(chatId, saved)
   }
 
   function focusSelectedChatComposer(chatId) {
@@ -912,6 +938,40 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     focusDesktopChatPaneComposer(chatId)
     return true
   }
+
+  // Navigation captures before the workspace becomes inert, regardless of
+  // whether the drawer opens from the brand, an edge gesture, or Forward.
+  // Only a previously focused composer asks to reopen the touch keyboard.
+  const drawerComposerReturnRef = useRef(null)
+  beforeDrawerOpenRef.current = () => {
+    drawerComposerReturnRef.current = suspendDrawerComposer({
+      activeElement: document.activeElement,
+      touchPrimary: isTouchPrimary(),
+      leaseElement: composerFocusLeaseRef.current,
+      leaseChatId: composerFocusLeaseDraftIdRef.current,
+    })
+  }
+  const restoreDrawerComposer = useCallback(() => {
+    const chatId = drawerComposerReturnRef.current
+    if (chatId == null || activeViewRef.current !== 'chat'
+        || String(activeChatIdRef.current ?? '') !== chatId) return
+    const active = document.activeElement
+    if (active !== brandButtonRef.current && !shouldRestoreDrawerFocus({
+      drawer: document.getElementById('navigation-drawer'),
+      activeElement: active,
+      body: document.body,
+    })) return
+    // Reserve within the close gesture while the real composer is still inert.
+    // New Chat and destination selection keep their own existing focus policy.
+    if (!reserveTouchComposer(chatId)) {
+      requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    }
+  }, [activeViewRef, activeChatIdRef, requestComposer, reserveTouchComposer])
+  useLayoutEffect(() => {
+    if (modalDrawerOpen) return
+    restoreDrawerComposer()
+    drawerComposerReturnRef.current = null
+  }, [modalDrawerOpen, restoreDrawerComposer])
 
   // Browser traversal bypasses the drawer and tab selection handlers. Use the
   // same destination-composer handoff as direct chat selection at
@@ -923,6 +983,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // The guide owns focus when Back returns from an app it handed the owner
     // to. A chat restore still restores the chat; only its composer-focus request yields.
     if (walkthroughHandoffRef.current) return
+    // Dismissing navigation restores the prior keyboard state, not merely a
+    // saved draft. A draft whose keyboard was down must stay down.
+    if (drawerOpenRef.current && isTouchPrimary()) {
+      if (String(route.chatId) === drawerComposerReturnRef.current) restoreDrawerComposer()
+      return
+    }
     focusSelectedChatComposer(route.chatId)
   }
 
@@ -977,6 +1043,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // regardless of which view is open. Single-flight, so it composes with a
   // mounted chat's own reconnect reconcile without double-posting.
   useOutboxDrain()
+  // Re-arm native (mobile-app) location tracking after a reload in the same
+  // app session, and flush any positions queued while the page was gone.
+  useLocationBoot()
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale
@@ -1284,6 +1353,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === PROJECTS_KEY)
   const projectsPaned = workspaceChromeActive ? visibleTabRects.get(PROJECTS_KEY) : null
   const projectsFullBleed = !projectsPaned && fullBleedKey === PROJECTS_KEY
+  // The launcher is rendered (and so downloaded) only once it is first shown,
+  // then stays mounted like before.
+  const projectsDirectoryShown = useLatch(projectsVisibleAsTab || !!projectsPaned)
   // focusedActiveKey / fullBleedKey / visible ids are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -1493,6 +1565,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     return map
   }, [projects])
   const [projectRenameId, setProjectRenameId] = useState(null)
+  const [projectEntryFile, setProjectEntryFile] = useState(null)
   const [projectChatMeta, setProjectChatMeta] = useState({})
   const projectChatLookup = useMemo(() => {
     const next = { ...projectChatMeta }
@@ -1516,9 +1589,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') {
       const projectChat = projectChatLookup[tab.id]
+      const liveTitle = chatById.get(tab.id)?.title
       return projectChat
-        ? `${projectChat.projectName} · ${projectChat.title || 'Chat'}`
-        : chatById.get(tab.id)?.title || 'Chat'
+        ? projectChatTabLabel({ title: liveTitle || projectChat.title, projectName: projectChat.projectName })
+        : liveTitle || 'Chat'
     }
     if (tab.kind === 'project') {
       const project = projectById.get(tab.id)
@@ -1526,12 +1600,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       return sourceApp ? `${sourceApp.name} · Source` : project?.name || 'Project'
     }
     if (tab.kind === 'artifact') {
-      // An artifact tab is its own destination: it is named for the artifact,
-      // not prefixed with the project that built it.
+      // A result tab stands alone, so it is named for its project and result.
       const parsed = tabModel.parseArtifactTabId(tab.id)
       const sourceApp = parsed ? sourceAppByWorkspaceId.get(parsed.projectId) : null
       if (sourceApp) return `${sourceApp.name} · Source`
-      return projectArtifactByRef.get(tab.id)?.name || parsed?.artifactId || 'Artifact'
+      const artifact = projectArtifactByRef.get(tab.id)
+      if (!artifact) return parsed?.artifactId || 'Result'
+      return resultDisplayName(projectById.get(parsed.projectId), artifact)
     }
     return appById.get(tab.id)?.name || 'App'
   }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup, sourceAppByWorkspaceId])
@@ -1574,6 +1649,22 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         return paneModel.focusPane(next, projectPane.id)
       },
     })
+  }
+
+  // An ordinary entry (the list, Recents, a launcher, a new project) that opens
+  // a project's tab fresh shows its main result, or else its main file, rather
+  // than an empty pane. Re-entering an open tab, Back to project, chips, and
+  // restored tabs keep whatever the project already shows.
+  function enterProject(project) {
+    if (!project?.id) return
+    const projectId = String(project.id)
+    const alreadyOpen = openTabs.some(tab => tab.kind === 'project' && String(tab.id) === projectId)
+    openProject(project)
+    const row = projectById.get(projectId) || project
+    if (alreadyOpen || linkedProjectAppId(row) || sourceAppByWorkspaceId.has(projectId)) return
+    const target = projectEntryTarget(row)
+    if (target?.kind === 'result') openArtifact(row, target.artifactId)
+    else if (target?.kind === 'file') setProjectEntryFile({ projectId, path: target.path, key: Date.now() })
   }
 
   function openAppSource(app) {
@@ -1770,7 +1861,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ]
     queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
     setProjectRenameId(String(project.id))
-    openProject(project)
+    enterProject(project)
     return project
   }
 
@@ -1861,6 +1952,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
+  const enterProjectRef = useRef(enterProject)
+  enterProjectRef.current = enterProject
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -2844,7 +2937,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           client: api.projects,
           readJson: jsonOrThrow,
           browseProjects: () => navToRef.current('projects'),
-          openProject: project => openProjectRef.current(project),
+          openProject: project => enterProjectRef.current(project),
           publishProjects: rows => {
             projectsRef.current = rows
             queryClient.setQueryData(projectQueries.keys.all, rows)
@@ -3190,10 +3283,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       }
       void chatAppArtifactQueries.invalidateAll(queryClient)
       void invalidateShellListCache('apps')
+      void refreshUninstalledForSystemEvent(queryClient, ev)
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void chatAppArtifactQueries.invalidateAll(queryClient)
       void invalidateShellListCache('apps').then(refreshApps)
+      void refreshUninstalledForSystemEvent(queryClient, ev)
     } else if (
       ev.type === 'app_updated'
       || ev.type === 'app_created'
@@ -4604,7 +4699,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       closeHistoryDismiss={closeHistoryDismiss}
       unregisterHistoryDismiss={unregisterHistoryDismiss}
     >
-    {projectCopyUrl && <ProjectCopyImport key={projectCopyUrl} url={projectCopyUrl} onImported={acceptProjectCopy} onClose={closeProjectCopy} />}
+    {projectCopyUrl && (
+      <LazySurface key={projectCopyUrl} label="project-copy-import" onDismiss={closeProjectCopy}>
+        <ProjectCopyImport url={projectCopyUrl} onImported={acceptProjectCopy} onClose={closeProjectCopy} />
+      </LazySurface>
+    )}
     <div
       ref={shellRootRef}
       // Stable shell geometry only. Beat-local custom properties live on the header
@@ -4780,7 +4879,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeProjectChatProjectId={activeProjectChatProjectId}
         activeArtifactRef={activeArtifactRef}
         projectTemplates={projectTemplates}
-        onProject={openProject}
+        onProject={enterProject}
         onProjectRename={(project, name) => {
           if (typeof name === 'string') return renameProject(project, name)
           setProjectRenameId(String(project.id))
@@ -4973,57 +5072,57 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
             onPointerDownCapture={paned && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
-            <ErrorBoundary
+            <LazySurface
               key={`ab-${id}`}
-              variant="inline"
               label="app"
               recoveryKey={`app:${id}`}
+              onPending={surfaceVisible ? holdLaunchCover : undefined}
             >
-            <AppCanvas
-              appId={id}
-              // Focused-pane-only: gates safe-area insets + the immersive holder
-              // (global last-writer-wins).
-              active={tabKey === focusedActiveKey}
-              // Visible in ANY pane: gates app navigation and capabilities. A
-              // background split's app keeps running and can install sentinels;
-              // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
-              // Logical ownership controls app navigation and capabilities.
-              visible={appRuntimeVisible}
-              // The cover owns the frame's visual lifetime, independently of
-              // logical app ownership, so its already-painted pixels remain
-              // stable until the chat takes over.
-              frameVisible={appFrameVisible}
-              // Every visible pane remains painted beneath the modal scrim, but
-              // suspend its iframe interaction while the drawer is open OR during any
-              // mode scene (cross-origin app interaction is inert throughout).
-              interactive={appRuntimeVisible
-                && !modalDrawerOpen && !modeBeatActive}
-              version={versionForApp(id)}
-              storageGeneration={app?.storage_generation}
-              appName={app?.name}
-              themeColor={app?.theme_color}
-              appSlug={app?.slug}
-              offlineCapable={!!app?.offline_capable}
-              capabilityContract={app?.capability_contract || null}
-              subscribeManagedAppEvents={subscribeManagedAppEvents}
-              pendingIntent={appIntents[String(id)] || null}
-              immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
-                ? immersiveMode
-                : null}
-              onNavPush={appNavPush}
-              onNavPop={appNavPop}
-              onNavReset={appNavReset}
-              onAppFocus={focusAppPane}
-              onNavForwardResult={appNavForwardResult}
-              onImmersive={handleImmersive}
-              onIntentDelivered={handleAppIntentDelivered}
-              onAppError={handleAppError}
-              onHostRequest={handleAppHostRequest}
-              onMediaSession={handleMediaSession}
-              shellShortcuts={appFrameShortcutBindings(app, shellFrameShortcuts)}
-              onShellShortcut={runShellShortcut}
-            />
-            </ErrorBoundary>
+              <AppCanvas
+                appId={id}
+                // Focused-pane-only: gates safe-area insets + the immersive holder
+                // (global last-writer-wins).
+                active={tabKey === focusedActiveKey}
+                // Visible in ANY pane: gates app navigation and capabilities. A
+                // background split's app keeps running and can install sentinels;
+                // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
+                // Logical ownership controls app navigation and capabilities.
+                visible={appRuntimeVisible}
+                // The cover owns the frame's visual lifetime, independently of
+                // logical app ownership, so its already-painted pixels remain
+                // stable until the chat takes over.
+                frameVisible={appFrameVisible}
+                // Every visible pane remains painted beneath the modal scrim, but
+                // suspend its iframe interaction while the drawer is open OR during any
+                // mode scene (cross-origin app interaction is inert throughout).
+                interactive={appRuntimeVisible
+                  && !modalDrawerOpen && !modeBeatActive}
+                version={versionForApp(id)}
+                storageGeneration={app?.storage_generation}
+                appName={app?.name}
+                themeColor={app?.theme_color}
+                appSlug={app?.slug}
+                offlineCapable={!!app?.offline_capable}
+                capabilityContract={app?.capability_contract || null}
+                subscribeManagedAppEvents={subscribeManagedAppEvents}
+                pendingIntent={appIntents[String(id)] || null}
+                immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
+                  ? immersiveMode
+                  : null}
+                onNavPush={appNavPush}
+                onNavPop={appNavPop}
+                onNavReset={appNavReset}
+                onAppFocus={focusAppPane}
+                onNavForwardResult={appNavForwardResult}
+                onImmersive={handleImmersive}
+                onIntentDelivered={handleAppIntentDelivered}
+                onAppError={handleAppError}
+                onHostRequest={handleAppHostRequest}
+                onMediaSession={handleMediaSession}
+                shellShortcuts={appFrameShortcutBindings(app, shellFrameShortcuts)}
+                onShellShortcut={runShellShortcut}
+              />
+            </LazySurface>
           </div>
           )
         })}
@@ -5243,22 +5342,29 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId: projectsPaned.paneId })
                 : undefined}
             >
-              <ProjectsDirectory
-                projects={projects}
-                templates={projectTemplates}
-                status={projectsStatus}
-                onRetry={() => Promise.all([
-                  projectsQuery.refetch(),
-                  projectTemplatesQuery.refetch(),
-                ])}
-                onOpen={openProject}
-                onCreate={createProjectFromTemplate}
-                onImportGithub={importProjectFromGithub}
-                onImportSource={importProjectSource}
-                onRename={renameProject}
-                onColor={setProjectColor}
-                onDelete={deleteProject}
-              />
+              {projectsDirectoryShown && (
+                <LazySurface
+                  label="projects-directory"
+                  onPending={surfaceVisible ? holdLaunchCover : undefined}
+                >
+                  <ProjectsDirectory
+                    projects={projects}
+                    templates={projectTemplates}
+                    status={projectsStatus}
+                    onRetry={() => Promise.all([
+                      projectsQuery.refetch(),
+                      projectTemplatesQuery.refetch(),
+                    ])}
+                    onOpen={enterProject}
+                    onCreate={createProjectFromTemplate}
+                    onImportGithub={importProjectFromGithub}
+                    onImportSource={importProjectSource}
+                    onRename={renameProject}
+                    onColor={setProjectColor}
+                    onDelete={deleteProject}
+                  />
+                </LazySurface>
+              )}
             </div>
           )
         })()}
@@ -5300,25 +5406,34 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
                 : undefined}
             >
-              {sourceApp ? (
-                <AppSourceWorkspace
-                  app={sourceApp}
-                  requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
-                  onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
-                />
-              ) : (
-                <ProjectWorkspace
-                  project={project}
-                  linkedApp={appById.get(linkedProjectAppId(project))}
-                  onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
-                  onOpenChat={chat => openProjectChat(project, chat)}
-                  onCreateChat={options => createProjectChat(project, options)}
-                  onOpenArtifact={artifactId => openArtifact(project, artifactId)}
-                  startRenaming={String(projectRenameId) === String(project.id)}
-                  onRename={name => renameProject(project, name)}
-                  onRenameEnd={() => setProjectRenameId(null)}
-                />
-              )}
+              <LazySurface
+                label="project-workspace"
+                recoveryKey={key}
+                onPending={visible ? holdLaunchCover : undefined}
+              >
+                {sourceApp ? (
+                  <AppSourceWorkspace
+                    app={sourceApp}
+                    requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
+                    onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
+                  />
+                ) : (
+                  <ProjectWorkspace
+                    project={project}
+                    linkedApp={appById.get(linkedProjectAppId(project))}
+                    onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
+                    onOpenChat={chat => openProjectChat(project, chat)}
+                    liveChatById={chatById}
+                    onCreateChat={options => createProjectChat(project, options)}
+                    onOpenArtifact={artifactId => openArtifact(project, artifactId)}
+                    entryFile={projectEntryFile?.projectId === String(project.id) ? projectEntryFile : null}
+                    onEntryFileHandled={() => setProjectEntryFile(current => (current?.projectId === String(project.id) ? null : current))}
+                    startRenaming={String(projectRenameId) === String(project.id)}
+                    onRename={name => renameProject(project, name)}
+                    onRenameEnd={() => setProjectRenameId(null)}
+                  />
+                )}
+              </LazySurface>
             </div>
           )
         })}
@@ -5360,20 +5475,28 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
                 : undefined}
             >
-              {sourceApp ? (
-                <AppSourceWorkspace
-                  app={sourceApp}
-                  requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
-                  onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
-                />
-              ) : (
-                <ArtifactWorkspace
-                  projectId={parsed.projectId}
-                  project={projectById.get(parsed.projectId)}
-                  onOpenApp={appId => navTo('canvas', { appId })}
-                  artifactId={parsed.artifactId}
-                />
-              )}
+              <LazySurface
+                label="artifact-workspace"
+                recoveryKey={key}
+                onPending={visible ? holdLaunchCover : undefined}
+              >
+                {sourceApp ? (
+                  <AppSourceWorkspace
+                    app={sourceApp}
+                    requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
+                    onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
+                  />
+                ) : (
+                  <ArtifactWorkspace
+                    projectId={parsed.projectId}
+                    project={projectById.get(parsed.projectId)}
+                    onOpenApp={appId => navTo('canvas', { appId })}
+                    artifactId={parsed.artifactId}
+                    onOpenProject={() => navTo('project', { projectId: parsed.projectId })}
+                    allowOpenInNewTab={!sharedBrowserAccess}
+                  />
+                )}
+              </LazySurface>
             </div>
           )
         })}
@@ -5417,11 +5540,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
               : undefined}
           >
-            <Suspense fallback={(
-              <div className="shell__settings-loading" role="status" aria-label="Loading settings">
-                <span className="shell__settings-loading-dot" aria-hidden="true" />
-              </div>
-            )}>
+            <Suspense fallback={<SurfaceLoading label="Loading settings" />}>
               <SettingsView
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}

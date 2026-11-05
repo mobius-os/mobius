@@ -97,11 +97,18 @@ CONTROL_ENV_VARS = (
   "MOBIUS_AGENT_EFFORT",
   "MOBIUS_DELEGATION_ID",
   # The screenshot tool captures at the owner's viewport in this chat's
-  # browser session.
+  # browser session. agent-browser relaunches that session's browser on a
+  # blank page when a command's launch identity differs, so the capture must
+  # carry the turn's exact profile, flags, config and executable.
   "VIEWPORT_WIDTH",
   "VIEWPORT_HEIGHT",
   "VIEWPORT_PIXEL_RATIO",
   "AGENT_BROWSER_SESSION",
+  "AGENT_BROWSER_PROFILE",
+  "AGENT_BROWSER_ARGS",
+  "AGENT_BROWSER_CONFIG",
+  "AGENT_BROWSER_EXECUTABLE_PATH",
+  "MOBIUS_SCREENSHOT_REAL_BROWSER",
 )
 
 

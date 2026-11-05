@@ -41,7 +41,7 @@ export function appInstallShareText(app, installUrl) {
     `Install ${app?.name || 'this app'} in Möbius:`,
     installUrl,
     '',
-    'Open App Store → From URL, paste this link, then review and install.',
+    'In Möbius, ask your agent to install the app from this link, then review and approve it.',
   ].join('\n')
 }
 
@@ -49,7 +49,7 @@ export function appNativeSharePayload(app, installUrl) {
   const name = app?.name || 'Möbius app'
   return {
     title: name,
-    text: `Install ${name} in Möbius. Open App Store → From URL.`,
+    text: `Install ${name} in Möbius: ask your agent to install it from this link.`,
     url: installUrl,
   }
 }

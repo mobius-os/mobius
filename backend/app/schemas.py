@@ -22,6 +22,8 @@ class SetupRequest(BaseModel):
   # setup payloads before password hashing work. bcrypt receives a fixed-width
   # digest, so every character remains significant.
   password: str = Field(min_length=1, max_length=1024)
+  # One-time code from the server log / <data_dir>/setup-code (setup_code.py).
+  setup_code: str = Field(default="", max_length=64)
 
   @field_validator("username", mode="before")
   @classmethod
@@ -205,6 +207,36 @@ class AppUpdate(BaseModel):
     ):
       raise ValueError("Published manifest URL must be a public HTTPS URL.")
     return value
+
+
+class UninstalledAppOut(BaseModel):
+  """An app in its recovery window: uninstalled, not yet deleted for good."""
+
+  id: int
+  name: str
+  slug: str
+  version: str | None = None
+  deleted_at: datetime
+  expires_at: datetime
+  # Time left in the window, measured on the server. A countdown runs from this
+  # rather than from expires_at so a device clock that is off cannot end it early.
+  seconds_left: float
+  # A small copy of the app's icon, sent here because the public icon route
+  # hides uninstalled apps on purpose.
+  icon_data_url: str | None = None
+  background_color: str | None = None
+  theme_color: str | None = None
+  # Where the app came from, so the Store can tell which of its pages is this app.
+  manifest_url: str | None = None
+  package_id: str | None = None
+
+  @computed_field
+  @property
+  def source_manifest(self) -> AppSourceManifest | None:
+    if not self.manifest_url:
+      return None
+    url, manifest_id = requested_manifest_source(self.manifest_url)
+    return None if manifest_id is None else AppSourceManifest(id=manifest_id, url=url)
 
 
 class AppOut(BaseModel):

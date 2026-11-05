@@ -5,6 +5,7 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import { liveProjectChat, projectChatStatus } from '../../lib/projectChats.js'
 import ProjectThemeResource, { ProjectThemeSourceView } from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
@@ -23,8 +24,11 @@ export default function ProjectWorkspace({
   linkedApp,
   onOpenApp,
   onOpenChat,
+  liveChatById,
   onCreateChat,
   onOpenArtifact,
+  entryFile,
+  onEntryFileHandled,
   startRenaming = false,
   onRename,
   onRenameEnd,
@@ -223,13 +227,15 @@ export default function ProjectWorkspace({
           sourceDescription={isAppProject ? 'Open app to use the running version. Save edits here, then Build & update app when ready.' : undefined}
           onSourceChanged={isAppProject ? undefined : rebuildRegisteredArtifacts}
           requestedFile={requestedFile}
+          entryFile={entryFile}
+          onEntryFileHandled={onEntryFileHandled}
           onOpenGit={() => setGitOpen(true)}
           resources={<ProjectThemeResource onOpen={() => { themeHistory.open(); setThemeOpen(true) }} />}
           overview={(
             <div className="project-overview" aria-label="Project overview">
               <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
                 <header className="project-overview__heading">
-                  <h2 id={`project-artifacts-heading-${project.id}`}>Artifacts</h2>
+                  <h2 id={`project-artifacts-heading-${project.id}`}>Results</h2>
                 </header>
                 <ProjectArtifacts
                   projectId={project.id}
@@ -265,12 +271,16 @@ export default function ProjectWorkspace({
                   <p className="projects-empty">Describe what you want to make in a new chat. It can work with all the files in this project.</p>
                 ) : (
                   <div className="project-chats__list">
-                    {chats.map(chat => (
-                      <button key={chat.id} type="button" className="project-chats__row" onClick={() => onOpenChat?.(chat)}>
-                        <MessageSquare width={16} height={16} aria-hidden="true" />
-                        <span><strong>{chat.title || 'New chat'}</strong>{!chat.has_messages && <small>Empty</small>}{chat.archived_at && <small>Archived</small>}</span>
-                      </button>
-                    ))}
+                    {chats.map(row => {
+                      const chat = liveProjectChat(row, liveChatById?.get(String(row.id)))
+                      const status = projectChatStatus(chat)
+                      return (
+                        <button key={chat.id} type="button" className="project-chats__row" onClick={() => onOpenChat?.(chat)}>
+                          <MessageSquare width={16} height={16} aria-hidden="true" />
+                          <span><strong>{chat.title || 'New chat'}</strong>{status && <small className={chat.running ? 'project-chats__status--working' : undefined}>{status}</small>}</span>
+                        </button>
+                      )
+                    })}
                   </div>
                 )}
               </section>

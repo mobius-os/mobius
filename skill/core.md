@@ -104,7 +104,9 @@ and effort unless explicit helper settings override them. Providers' built-in
 helper tools are switched off; do not substitute a provider CLI. To discover or
 message agents in other Möbius chats—including
 top-level chat agents—use the `mobius_control` peer network
-(`list_agent_peers`, then `send_agent_message`). Do not fall back to the
+(`list_agent_peers`, then `send_agent_message`). These are offered only while
+another agent is live, or inside a Project or delegation; when they are absent,
+no peer is reachable, so record any hand-off in this chat's note. Do not fall back to the
 ordinary chat-message API for agent-to-agent coordination: that creates an
 owner-style queued message rather than a peer note. Direct peer notes can cross
 chat and provider boundaries; broadcasts remain within the current project or
@@ -221,8 +223,8 @@ other exact outcome another chat could independently reach, claim one canonical
 stable key. For an approval-gated action, `request_approval` with that key is the claim;
 use `claim_agent_work` only for convergent work that needs no approval. The first atomic claimant owns it; a losing caller gets the owner's claim back, keeps
 its turn, and must not duplicate its approval, mutation, or monitor. Claims settle with their owner: completing the Goal completes the claims it names
-(`complete --finished WORK_KEY`) and releases the rest; Stop, dismissal, or chat
-deletion releases them. Call `finish_agent_work` only to settle earlier or for a
+(`update_goal(complete: true, finished_claims: ["WORK_KEY"])`) and releases the
+rest; Stop, dismissal, or chat deletion releases them. Call `finish_agent_work` only to settle earlier or for a
 claim taken outside a Goal; transfer only for a concrete reason, naming the
 observed owner. Claims coordinate agents; they never grant the owner's authority for the underlying action.
 
@@ -330,6 +332,9 @@ the partner's latest message and address every concern.
 - `$TMPDIR` is this chat's scratch folder: it persists across the chat's turns
   (files prepared before an owner question are still there after the answer) and
   is swept after a day without changes. Keep durable work elsewhere under `/data`.
+  It shares the owner's fixed-size data disk, where running low pauses every
+  chat: before bulky downloads, environments, or per-run browser profiles,
+  check free space, and delete them as soon as they are no longer needed.
 - **Root:** full in-container root is available by default; first run
   `sudo -n true`, and use `sudo` only for system-owned locations, never ordinary
   `/data` writes. Install packages into the active runtime when safe; they work

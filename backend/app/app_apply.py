@@ -838,6 +838,7 @@ async def _apply_source_revision(
         source,
         out_path=staged,
         source_path=snapshot_dir / entry_relative,
+        source_root=snapshot_dir,
       )
 
       stable = await _git_operation(

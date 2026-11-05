@@ -1,3 +1,5 @@
+import { resultDisplayName } from '../../lib/projectArtifacts.js'
+
 // Normalize to a bare UTC wall-clock string so values from different sources
 // compare consistently: optimistic client stamps are ISO-with-`Z`, while the
 // server serializes naive-UTC without a suffix. Both denote UTC, so dropping a
@@ -175,6 +177,7 @@ export function buildDrawerSections(chats = [], apps = [], projects = []) {
           ...artifact,
           id: `${project.id}:${artifact.id}`,
           artifact_id: artifact.id,
+          display_name: resultDisplayName(project, artifact),
         },
       }))),
   ].sort(newestRecentFirst)

@@ -919,9 +919,20 @@ def test_community_proxy_binds_canonical_query_and_rejects_route_expansion(
   assert seen["capability"]["audience"] == "mobius-community-registry"
   assert seen["capability"]["scope"] == "community:read"
 
+  ranked = "/v1/community/apps?limit=12&offset=0&q=&sort=trending"
+  response = broker.proxy(
+    method="GET", path=ranked, body=b"", headers={}, allow_private_routes=True,
+  )
+  response.close()
+  assert seen["url"] == broker_module.COMMUNITY_BASE_URL + ranked
+
   for forbidden in (
     "/v1/community/apps?offset=0&limit=25",
     "/v1/community/apps?admin=true",
+    "/v1/community/apps?limit=25&sort=rating",
+    "/v1/community/apps?sort=trending&limit=25",
+    "/v1/community/apps?sort=installs&sort=trending",
+    "/v1/community/publications?limit=25&sort=trending",
     "/v1/community/apps?limit=25&review_status=unreviewed",
     "/v1/community/apps/app_12345678?limit=2",
     "/v1/community/private-audit",
@@ -1723,6 +1734,40 @@ def test_broker_keeps_reads_and_reviewed_deployment_writes(method, path):
   assert broker_module._managed_upstream_path(method, "/managed" + path) == path
 
 
+@pytest.mark.parametrize("sort", ["updated", "trending", "installs"])
+def test_broker_admits_every_listing_query_the_community_route_sends(sort):
+  """The App Store's listing reaches the registry only through the broker's
+  query allowlist, so drive the real route and broker client encoding into it."""
+  import asyncio
+
+  from app.community_broker import CommunityBrokerClient
+  from app.routes import community
+
+  sent = []
+
+  def registry(request):
+    sent.append(request.url.raw_path.decode("ascii"))
+    return httpx.Response(200, json={"items": [], "sort": sort})
+
+  client = CommunityBrokerClient(transport=httpx.MockTransport(registry))
+  original = community.community_broker
+  community.community_broker = client
+  try:
+    response = asyncio.run(community.list_community_apps(
+      q="latex", limit=25, offset=0, sort=sort, _=None,
+    ))
+  finally:
+    community.community_broker = original
+
+  assert response.status_code == 200
+  (target,) = sent
+  route_path, _, query = target.partition("?")
+  assert broker_module._community_scope("GET", route_path, query) == "community:read"
+  # The default listing stays the request every broker version accepts.
+  assert ("sort=" in query) == (sort != "updated")
+  assert broker_module.BROKER_ROUTE_EPOCH >= 10
+
+
 @pytest.mark.parametrize("region_options, workspace_ids", [
   (False, True), (True, False), (True, True),
 ])
@@ -1737,6 +1782,35 @@ def test_broker_forwards_every_railway_inventory_option_identity_sends(
   assert "?" in path
   assert broker_module._managed_upstream_path("GET", "/managed" + path) == path
   assert broker_module.BROKER_ROUTE_EPOCH >= 9
+
+
+def test_broker_forwards_only_the_display_cost_metrics_read_opt_in():
+  path = "/api/instance/v1/railway/instances/mob_example/metrics?cost=1"
+  assert broker_module._managed_upstream_path("GET", "/managed" + path) == path
+  assert broker_module.BROKER_ROUTE_EPOCH >= 11
+
+
+@pytest.mark.parametrize("suffix", [
+  "?", "?cost", "?cost=", "?cost=0", "?cost=true", "?cost=%31",
+  "?%63ost=1", "?cost=1&", "?cost=1&cost=1", "?cost=1&next=evil",
+  "?cost=1&region_options=1", "?cost=1#fragment", "/?cost=1",
+])
+def test_broker_rejects_noncanonical_or_extra_metrics_queries(suffix):
+  path = "/managed/api/instance/v1/railway/instances/mob_example/metrics" + suffix
+  assert broker_module._managed_upstream_path("GET", path) is None
+
+
+@pytest.mark.parametrize("method, path", [
+  ("POST", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("DELETE", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("GET", "/api/instance/v1/railway/instances/not_an_instance/metrics"),
+  ("GET", "/api/instance/v1/railway/instances/mob_example/recovery/status"),
+  ("GET", "/api/instance/v1/railway"),
+  ("GET", "/api/instance/v1/identity"),
+])
+def test_broker_cost_opt_in_cannot_escape_the_metrics_read(method, path):
+  assert broker_module._managed_upstream_path(method, "/managed" + path + "?cost=1") is None
 
 
 @pytest.mark.parametrize("method, path", [

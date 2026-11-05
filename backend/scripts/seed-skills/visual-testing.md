@@ -14,6 +14,16 @@ and visible evidence.
 For an already-open page (`--current-page`) or a specific output path, use the
 helper itself: `bash "$SCRIPTS_DIR/agent-screenshot.sh" [--current-page] <route> <out.png>`.
 
+This chat's own `agent-browser` commands and these captures share one browser
+session. The platform launches the turn's browser with the same settings the
+helper uses at the owner's viewport, so you can open a page, interact with it,
+and then capture it with `--current-page`. Do not change `AGENT_BROWSER_*`
+variables or `MOBIUS_SCREENSHOT_REAL_BROWSER` on commands for this chat's
+session: a command with different launch settings restarts that browser on a
+blank page, and the prepared state is lost. A separate named session, like the
+full-Chrome recipe below, is unaffected. A `--current-page` capture of a blank page fails
+immediately with that message.
+
 `preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it
 for those two common cases. `preview_app.sh` is readiness-gated and uses
 ephemeral content-only mode: it waits for the real post-render frame-mounted
@@ -32,6 +42,15 @@ bash "$SCRIPTS_DIR/agent-screenshot.sh" --current-page <route> <out.png>
 Do **not** fall back to raw `agent-browser screenshot` for a Möbius comparison;
 that bypasses the real display density, exact-font readiness, freshness, and
 atomic-output checks. Raw capture remains appropriate for non-Möbius pages.
+
+**Capture the "before" first.** Before you edit anything people can see,
+capture the state you are about to change, at the owner's viewport and at
+390 px wide, straight into this chat's media folder. A pull request for a
+visible change needs that before/after pair, and once the edit is live there is
+no cheap way back: the helper captures only the build being served. If the edit
+already landed without a before shot, do not rebuild an older tree, stand up a
+proxy, or upload images yourself. Say in the pull request body that the before
+screenshot is missing, and describe the earlier state in words.
 
 The helper always applies `$VIEWPORT_WIDTH`/`$VIEWPORT_HEIGHT`, including on
 `--current-page`, so a manual `agent-browser set viewport` is overwritten. To
