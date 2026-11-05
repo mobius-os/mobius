@@ -343,6 +343,8 @@ class PlatformStatus(TypedDict):
   # checkout once everything since boot activated live. Never the upstream
   # marker. None only for unstamped development images.
   image_build_applied: bool | None
+  # An available update carries the image's release, so applying it pairs them.
+  update_contains_image_release: bool
   # Exact release this response compared with the served source. For a
   # self-hosted check this is the freshly fetched origin/main; for a managed
   # deployment it is the verified image release selected by the controller.
@@ -1910,14 +1912,18 @@ def source_contains_image_release(
 
 def serves_image_release(
   repo: Path, served_sha: str | None, image_sha: str | None,
+  *, served_to_head: list[str] | None = None,
 ) -> bool | None:
   """Whether the source this server serves contains the image's release.
 
   The server serves its boot commit plus every committed change since that
-  activates live, so HEAD counts only when the served-to-HEAD diff needs no
-  restart. Derived only from the caller's served commit, never re-read, and
-  cheap enough for ``/api/version``; platform status answers from here too.
-  None for an unstamped image.
+  activates live, so HEAD counts only when the served-to-HEAD diff owes no
+  activation. Image-provided files this image already runs as its release
+  has them are not owed, as in :func:`_pending_activation_paths`. Derived
+  only from the caller's served commit (and ``served_to_head``, that pair's
+  diff when the caller already has it), never re-read, and cheap enough for
+  ``/api/version``; platform status answers from here too. None for an
+  unstamped image.
   """
   if not (isinstance(image_sha, str) and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
     return None
@@ -1926,11 +1932,13 @@ def serves_image_release(
   if not served_sha:
     return False
   head = _rev(repo, "HEAD")
-  return source_contains_image_release(repo, head, image_sha) and (
-    platform_activation.classify_activation(
-      _activation_paths_between(repo, served_sha, head),
-    )["level"] == platform_activation.ActivationLevel.LIVE.value
-  )
+  if not source_contains_image_release(repo, head, image_sha):
+    return False
+  if served_to_head is None:
+    served_to_head = _activation_paths_between(repo, served_sha, head)
+  return platform_activation.classify_activation(
+    _image_work_owed(repo, served_to_head, image_sha),
+  )["level"] == platform_activation.ActivationLevel.LIVE.value
 
 
 def _activation_paths_between(
@@ -5577,13 +5585,18 @@ def platform_status(
   if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
     rolled_back = False
     rollback = None
-  activation = _platform_activation_impact(repo)
+  served_to_head = (
+    _activation_paths_between(repo, served_sha, local) if served_sha else None
+  )
+  activation = _platform_activation_impact(repo, served_to_head=served_to_head)
   activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
-  image_build_applied = serves_image_release(repo, served_sha, image_sha)
+  image_build_applied = serves_image_release(
+    repo, served_sha, image_sha, served_to_head=served_to_head,
+  )
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")
@@ -5619,6 +5632,7 @@ def platform_status(
       current_build_sha=image_sha,
       served_sha=served_sha,
       image_build_applied=image_build_applied,
+      update_contains_image_release=False,
       checked_target_sha=checked_target_sha,
       installed_release_sha=upstream_sha,
       recorded_upstream_sha=upstream_sha,
@@ -5641,6 +5655,11 @@ def platform_status(
   # release exists; the preview/check path fetches and proves the source object
   # before it creates an actionable plan.
   available = bool(target_sha or target) and not target_contained
+  # Only an update that carries the image's own release brings them together.
+  update_contains_image_release = bool(
+    available and image_build_applied is False and target
+    and _rev(repo, image_sha) and _is_ancestor(repo, image_sha, target)
+  )
 
   if rolled_back:
     # A not-yet-landed target whose last apply failed (import probe or build).
@@ -5662,6 +5681,7 @@ def platform_status(
     current_build_sha=image_sha,
     served_sha=served_sha,
     image_build_applied=image_build_applied,
+    update_contains_image_release=update_contains_image_release,
     checked_target_sha=checked_target_sha,
     installed_release_sha=upstream_sha,
     recorded_upstream_sha=upstream_sha,

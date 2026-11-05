@@ -294,6 +294,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "current_build_sha": None,
       "served_sha": "3" * 40,
       "image_build_applied": None,
+      "update_contains_image_release": False,
       "checked_target_sha": target,
       "installed_release_sha": "1" * 40,
       "recorded_upstream_sha": "1" * 40,

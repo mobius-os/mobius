@@ -5,6 +5,8 @@ everything since it activated live; the historical upstream marker never
 counts. Only the clone's official refs name a release, never the image itself.
 """
 
+import hashlib
+
 import pytest
 
 from app import platform_update as pu
@@ -267,3 +269,58 @@ def test_live_source_update_confirms_the_image_release_without_restart(
   assert status["needs_restart"] is False
   assert status["image_build_applied"] is identity["image_build_applied"] is True
   assert status["state"] == "up_to_date"
+
+
+@pytest.mark.parametrize("path", ["Dockerfile", "backend/runtime/probe.py"])
+def test_image_provided_files_the_image_runs_do_not_hold_back_pairing(
+  clone_env, monkeypatch, path,
+):
+  """Applying an image-only release's source live pairs it: the image already
+  runs that release's image-provided files, so no restart is owed."""
+  origin, platform = clone_env
+  old = _served_sha(platform)
+  content = "image provided\n"
+  image = _advance_origin(origin, edits={path: content})
+  _running(platform, monkeypatch, image, old)
+  monkeypatch.setattr(pu, "_build_info", lambda: {
+    "sha": image,
+    "image_inputs": {path: hashlib.sha256(content.encode()).hexdigest()},
+  })
+
+  assert pu.reconcile_clone(platform).status == "updated"
+  status = pu.platform_status(platform)
+  identity = _served_platform_identity(str(platform.parent), image)
+
+  assert pu.SERVING_SHA_FILE.read_text().strip() == old  # no restart happened
+  assert status["image_build_applied"] is identity["image_build_applied"] is True
+  assert status["state"] != "source_unconfirmed"
+
+
+def test_unrelated_update_does_not_claim_to_bring_an_unofficial_image(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  image = _origin_branch_commit(origin, "feature", {"release.txt": "pr\n"})
+  _git(platform, "fetch", "origin", image)
+  newer = _advance_origin(origin, edits={"other.txt": "official\n"})
+  _git(platform, "fetch", "origin")
+  _running(platform, monkeypatch, image, _served_sha(platform))
+
+  status = pu.platform_status(platform)
+
+  assert status["checked_target_sha"] == newer
+  assert status["available"] is True
+  assert status["image_build_applied"] is False
+  assert status["update_contains_image_release"] is False
+
+
+def test_update_that_carries_the_image_release_says_so(clone_env, monkeypatch):
+  origin, platform = clone_env
+  image = _advance_origin(origin, edits={"release.txt": "image\n"})
+  _git(platform, "fetch", "origin")
+  _running(platform, monkeypatch, image, _served_sha(platform))
+
+  status = pu.platform_status(platform)
+
+  assert status["available"] is True
+  assert status["update_contains_image_release"] is True

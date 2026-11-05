@@ -15,7 +15,13 @@ import {
 test('image-only recovery does not announce a completed full update', () => {
   assert.equal(platformUpdateStatusLabel({
     state: 'available', available: true, image_build_applied: false,
+    update_contains_image_release: true,
   }), 'Code update required')
+  // An unrelated update does not bring an unofficial image's revision.
+  assert.equal(platformUpdateStatusLabel({
+    state: 'available', available: true, image_build_applied: false,
+    update_contains_image_release: false,
+  }), 'New update available')
   assert.equal(platformUpdateStatusLabel({
     state: 'source_unconfirmed', available: false, image_build_applied: false,
   }), 'Running code not confirmed')
@@ -375,8 +381,20 @@ test('Settings shows one coherent message for an unconfirmed image', async () =>
       },
       onOpenChat: () => {},
     }))
-    const live = render({ state: 'source_unconfirmed', available: false, image_build_applied: false })
+    const live = render({
+      state: 'source_unconfirmed', available: false, image_build_applied: false,
+      served_sha: 'a'.repeat(40),
+    })
     assert.match(live, /built outside the official releases .* nothing needs doing/)
+    const unknown = render({ state: 'source_unconfirmed', available: false, image_build_applied: false, served_sha: null })
+    assert.match(unknown, /running code could not be identified/)
+    assert.doesNotMatch(unknown, /official releases/)
+    const unrelated = render({
+      state: 'available', available: true, image_build_applied: false,
+      update_contains_image_release: false, served_sha: 'a'.repeat(40),
+    })
+    assert.match(unrelated, /built outside the official releases/)
+    assert.doesNotMatch(unrelated, /code update is still required/)
     const restart = render({
       state: 'activation_needed', available: false, image_build_applied: false,
       activation: { level: 'server_restart', required_actions: ['server_restart'] },

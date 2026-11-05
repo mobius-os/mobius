@@ -74,7 +74,7 @@ export function platformUpdateStatusLabel(platform) {
   if (activationLevel === 'container_recreate') return 'Update needs help'
   if (activationLevel === 'image_rebuild') return 'Ready to finish'
   if (activationLevel === 'host_maintenance') return 'Finish this update on your server'
-  if (available && platform?.image_build_applied === false) return 'Code update required'
+  if (available && platform?.update_contains_image_release) return 'Code update required'
   if (available) return 'New update available'
   if (state === 'source_unconfirmed' || platform?.image_build_applied === false) return 'Running code not confirmed'
   return 'Up to date'
