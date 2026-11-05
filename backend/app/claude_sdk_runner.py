@@ -1363,11 +1363,12 @@ async def run_claude_sdk_turn(
   # the turn. After it speaks, it considers only blocks that arrived since (plus
   # all visible text), so an unchanged retry or continuation passes and a
   # second swallowed answer is caught, before a card or at the end, up to
-  # answer_check.MAX_REMINDERS per turn. Before a card, long new reasoning with
-  # no new reply text since the reminder also counts as still unanswered. That cap, not the CLI's
-  # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
-  # fresh block list, which the identity check below treats as new. A Stop or
-  # a saved owner card owns the turn's end, so neither is reopened.
+  # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
+  # `stop_hook_active`, bounds how often a Stop is returned. Before a card,
+  # long new reasoning with no new reply text since the reminder also counts
+  # as still unanswered. A steer starts a fresh block list, which the identity
+  # check below treats as new. A Stop or a saved owner card owns the turn's
+  # end, so neither is reopened.
   answer_check_reminders = 0
   # (block list, blocks reviewed, visible reply) as of the last reminder.
   answer_check_reviewed: tuple[object, int, str | None] = (None, 0, None)
