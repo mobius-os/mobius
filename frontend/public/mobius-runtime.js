@@ -2574,11 +2574,7 @@ function makeChat({ appId, getToken, storage }) {
 		});
 		if (!res.ok) throw await scopedChatError("cancelStart", "cancel failed", res);
 		const data = await res.json().catch(() => null);
-		if (![
-			"cancelled",
-			"started",
-			"deleted"
-		].includes(data?.outcome)) throw new Error("window.mobius.chat.cancelStart: cancel failed (unknown outcome)");
+		if (!["cancelled", "started"].includes(data?.outcome)) throw new Error("window.mobius.chat.cancelStart: cancel failed (unknown outcome)");
 		return {
 			outcome: data.outcome,
 			chatId: data.chat_id ? String(data.chat_id) : null

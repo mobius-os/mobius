@@ -170,6 +170,28 @@ def test_unconfirmed_stop_issues_no_receipt_and_keeps_the_run(
   assert run.status == "running"
 
 
+def test_stop_during_a_restart_drain_keeps_the_queue_and_issues_no_receipt(
+  client, auth, db, chat, monkeypatch,
+):
+  """The drain keeps queued turns so they run after the restart; a receipt
+  would certify a revocation that has not happened."""
+  from app import chat as runtime
+  seed_run(db, chat, "drained-run", status="running")
+  chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid"}]
+  db.commit()
+  monkeypatch.setattr(runtime, "draining", True)
+
+  response = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert body["stopped"] is True
+  assert body["cleared_pending_cids"] == []
+  assert body["stop_receipt"] is None
+  db.expire_all()
+  assert [row["cid"] for row in db.get(models.Chat, chat.id).pending_messages] == ["queued-cid"]
+
+
 def test_global_stop_sweep_issues_no_per_chat_receipt(client, auth, db, chat):
   seed_run(db, chat, "swept-run", status="running")
 
@@ -222,13 +244,14 @@ def test_resume_contending_for_the_stop_gate_is_admitted_after_the_receipt(
       return await real_finish(chat_id, **kwargs)
 
     monkeypatch.setattr(runtime, "_finish_run", finish_while_the_owner_resumes)
-    outcome = await runtime.stop_chat_with_receipt(chat.id, actor="owner")
+    outcome = await runtime.stop_chat_for(chat.id, actor="owner")
     await contender
     return outcome
 
   outcome = asyncio.run(asyncio.wait_for(scenario(), timeout=10))
 
-  assert outcome.stopped is True and outcome.run_id == "stopped-run"
+  assert outcome.stopped is True
+  assert outcome.receipt == {"chat_id": chat.id, "run_id": "stopped-run"}
   assert resumed == ["resumed-run"]
   db.expire_all()
   assert db.get(models.ChatRun, "stopped-run").status == "stopped"

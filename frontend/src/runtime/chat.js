@@ -434,7 +434,7 @@ export function makeChat({ appId, getToken, storage }) {
   }
 
   // A scoped refusal keeps the backend's code and chat id. `scope_cancelled`
-  // and `scope_deleted` are terminal: no replay of that scope ever starts work.
+  // is terminal: no replay of that scope ever starts work.
   async function scopedChatError(method, summary, res) {
     const data = await res.json().catch(() => null)
     const detail = data && typeof data.detail === 'object' && data.detail ? data.detail : {}
@@ -446,7 +446,7 @@ export function makeChat({ appId, getToken, storage }) {
   }
 
   // Fence one scoped start before releasing whatever the app reserved for it.
-  // Resolves { outcome: 'cancelled' | 'started' | 'deleted', chatId }: a
+  // Resolves { outcome: 'cancelled' | 'started', chatId }: a
   // 'started' scope already admitted its turn (use chat.stop to stop it).
   async function cancelChatStart(opts = {}) {
     const scope = opts.scope == null ? '' : String(opts.scope).trim()
@@ -462,7 +462,7 @@ export function makeChat({ appId, getToken, storage }) {
       throw await scopedChatError('cancelStart', 'cancel failed', res)
     }
     const data = await res.json().catch(() => null)
-    if (!['cancelled', 'started', 'deleted'].includes(data?.outcome)) {
+    if (!['cancelled', 'started'].includes(data?.outcome)) {
       throw new Error('window.mobius.chat.cancelStart: cancel failed (unknown outcome)')
     }
     return { outcome: data.outcome, chatId: data.chat_id ? String(data.chat_id) : null }

@@ -356,7 +356,7 @@ test('chat.start keeps a terminal scoped refusal code instead of retrying work',
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url, init })
     return new Response(JSON.stringify({
-      detail: { code: 'scope_deleted', chat_id: 'deleted-chat', message: 'deleted' },
+      detail: { code: 'scope_cancelled', chat_id: 'cancelled-chat', message: 'cancelled' },
     }), { status: 409, headers: { 'Content-Type': 'application/json' } })
   }
   try {
@@ -365,8 +365,8 @@ test('chat.start keeps a terminal scoped refusal code instead of retrying work',
       chat.start({ draft: 'Prepare it.', scope: 'contribute-cycle:lost' }),
       (error) => {
         assert.match(error.message, /scoped start failed \(409\)/)
-        assert.equal(error.code, 'scope_deleted')
-        assert.equal(error.chatId, 'deleted-chat')
+        assert.equal(error.code, 'scope_cancelled')
+        assert.equal(error.chatId, 'cancelled-chat')
         assert.equal(error.status, 409)
         return true
       },

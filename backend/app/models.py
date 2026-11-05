@@ -1901,15 +1901,15 @@ class ChatAppArtifact(Base):
 
 
 class AppChatScopeStart(Base):
-  """The one first turn an app's scoped handoff may ever admit for a scope.
+  """The one first turn an app's scoped handoff may admit for a scope.
 
-  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity
-  for the app's lifetime: a lost response, a second pane, or a replay after the
-  owner deleted the chat or the app cancelled the job never admits a second
-  agent turn. The identity lives outside ``chats`` on purpose. ``chat_id`` has
-  no foreign key, so the binding outlives the chat's seven-day recovery window
-  and hard purge, and a cancellation can fence a scope before any chat exists.
-  Rows leave only with their app, because ``apps`` ids can be reused.
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
 
   Admission is recorded here too, not inferred from the chat alone: an owner
   Stop or queued-message removal can leave an admitted chat with no messages,

@@ -45,7 +45,7 @@ from app.chat_writer import (
   ResolvePlatformRestartCard,
   RestartCardStateChanged,
 )
-from app.app_chat_scopes import ScopedStartCancelled
+from app.app_chat_scopes import ScopedStartRefused
 from app.chat_steering import (
   has_live_steerable_turn,
   steer_into_active_turn,
@@ -412,7 +412,7 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
-  except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartCancelled):
+  except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartRefused):
     raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
@@ -1812,7 +1812,7 @@ async def _send_message_locked(
     # the send immediately, and run_chat sees the marker).
     try:
       result = await await_ack(ack)
-    except ScopedStartCancelled:
+    except ScopedStartRefused:
       raise
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc

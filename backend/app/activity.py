@@ -27,8 +27,8 @@ read both):
   {"ev":"chat_created",   "ts", "chat_id"}
   {"ev":"app_chat_handoff","ts", "app_id", "scope", "outcome",
                            "chat_id"?, "duration_ms"?, "failure"?}
-                           # outcome: started|reused|cancelled|deleted|failed,
-                           # or cancel_<cancelled|started|deleted> (no duration)
+                           # outcome: started|reused|cancelled|failed,
+                           # or cancel_<cancelled|started> (no duration)
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
   {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
   {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}

@@ -61,7 +61,7 @@ from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import chat_archive, models, schemas, transcript_rows
-from app.app_chat_scopes import admit_scoped_first_turn
+from app.app_chat_scopes import ScopedStartRefused, admit_scoped_first_turn
 from app.goals import admit_goal
 from app.chat_titles import apply_generated_title, first_message_title
 from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND, SIDE_QUESTION_MESSAGE_KIND
@@ -2034,20 +2034,23 @@ class ChatWriterActor:
           _safe_set_exception(self._inflight_ack, exc)
           self._inflight_ack = None
           self._recreate_session()  # raises to the outer handler on failure
-        except Exception:
+        except Exception as exc:
           # A non-DB command failure must not kill the actor: log, roll
           # back the poisoned transaction, fail this command's ack, keep
           # serving.  For a coalesced `_SnapshotReady`, `cmd.ack` is the
           # marker's None ack — the ack a caller awaits is the popped
           # snapshot's (`_inflight_ack`), so fail that too.
-          log.exception(
-            "chat writer command failed: %s", type(cmd).__name__
-          )
+          if isinstance(exc, ScopedStartRefused):
+            # An expected outcome the caller maps, not a writer failure.
+            log.info("chat writer refused a scoped start: %s", exc)
+          else:
+            log.exception(
+              "chat writer command failed: %s", type(cmd).__name__
+            )
           try:
             self._db.rollback()
           except Exception:
             log.exception("chat writer rollback failed")
-          exc = sys.exc_info()[1]
           _safe_set_exception(cmd.ack, exc)
           _safe_set_exception(self._inflight_ack, exc)
           self._inflight_ack = None

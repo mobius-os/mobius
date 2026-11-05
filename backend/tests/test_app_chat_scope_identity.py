@@ -1,8 +1,9 @@
-"""A scoped app start admits at most one first turn per app and scope, forever.
+"""A scoped app start admits at most one first turn per app and scope.
 
 Each case stands for a real recovery path: a lost response replayed after the
 owner deleted or recovered the chat, a cancellation that must outrun a delayed
-original request, the chat's hard purge, a restart, and two panes racing. The
+original request, a retry racing a timed-out request's still-queued command,
+the chat's hard purge, a restart, and two panes racing. The
 provider is never launched: first-turn admission is stubbed at
 ``chats_stream.send_message``, the boundary the route crosses.
 """
@@ -71,7 +72,7 @@ def _app_chats(db, app_id):
   return db.query(models.Chat).filter(models.Chat.created_by_app_id == app_id).all()
 
 
-def test_replay_after_owner_deletes_the_chat_is_terminal_not_recreated(
+def test_owner_deleting_the_chat_releases_the_scope_for_a_fresh_chat(
   client, owner_token, db, monkeypatch,
 ):
   app_id, token = _make_app(client, owner_token, "deleted-scope")
@@ -88,12 +89,14 @@ def test_replay_after_owner_deletes_the_chat_is_terminal_not_recreated(
   )
   assert deleted.status_code == 204, deleted.text
   replay = _start(client, token, "cycle:lost", cid="recovery")
+  again = _start(client, token, "cycle:lost", cid="again")
 
-  assert replay.status_code == 409, replay.text
-  assert replay.json()["detail"]["code"] == "scope_deleted"
-  assert replay.json()["detail"]["chat_id"] == chat_id
-  assert admitted == [chat_id]
-  assert [chat.id for chat in _app_chats(db, app_id)] == [chat_id]
+  assert replay.status_code == 200, replay.text
+  fresh = replay.json()["chat_id"]
+  assert fresh != chat_id and replay.json()["outcome"] == "started"
+  assert again.json() == {"chat_id": fresh, "outcome": "reused", "response": None}
+  assert admitted == [chat_id, fresh]
+  assert db.get(models.AppChatScopeStart, (app_id, "cycle:lost")).chat_id == fresh
 
 
 def test_owner_recovery_restores_the_same_scoped_chat_for_replay(
@@ -115,7 +118,7 @@ def test_owner_recovery_restores_the_same_scoped_chat_for_replay(
   assert len(_app_chats(db, app_id)) == 1
 
 
-def test_hard_purged_scoped_chat_stays_terminal_after_its_recovery_window(
+def test_hard_purged_scoped_chat_leaves_its_scope_free_for_a_fresh_chat(
   client, owner_token, db, monkeypatch,
 ):
   from app.chat_retention import purge_expired_chat_tombstones
@@ -132,14 +135,11 @@ def test_hard_purged_scoped_chat_stays_terminal_after_its_recovery_window(
 
   replay = _start(client, token, "cycle:purged", cid="after-purge")
 
-  assert replay.status_code == 409, replay.text
-  assert replay.json()["detail"] == {
-    "code": "scope_deleted",
-    "chat_id": chat_id,
-    "message": replay.json()["detail"]["message"],
-  }
-  assert admitted == [chat_id]
-  assert _app_chats(db, app_id) == []
+  assert replay.status_code == 200, replay.text
+  fresh = replay.json()["chat_id"]
+  assert fresh != chat_id and replay.json()["outcome"] == "started"
+  assert admitted == [chat_id, fresh]
+  assert [chat.id for chat in _app_chats(db, app_id)] == [fresh]
 
 
 def test_cancel_before_a_delayed_start_fences_the_scope_forever(
@@ -224,7 +224,7 @@ def test_cancel_fences_the_in_place_retry_of_an_unadmitted_chat(
   assert [chat.id for chat in _app_chats(db, app_id)] == [chat_id]
 
 
-def test_cancel_after_deletion_before_the_app_linked_reports_deleted(
+def test_cancel_after_deletion_before_the_app_linked_fences_the_released_scope(
   client, owner_token, db, monkeypatch,
 ):
   _, token = _make_app(client, owner_token, "deleted-before-link")
@@ -236,10 +236,14 @@ def test_cancel_after_deletion_before_the_app_linked_reports_deleted(
   ).status_code == 204
 
   cancelled = _cancel(client, token, "cycle:unlinked")
+  replay = _start(client, token, "cycle:unlinked", cid="replay")
 
+  # Deletion already stopped that chat's work, so nothing of the scope runs.
   assert cancelled.json() == {
-    "scope": "cycle:unlinked", "outcome": "deleted", "chat_id": chat_id,
+    "scope": "cycle:unlinked", "outcome": "cancelled", "chat_id": None,
   }
+  assert replay.status_code == 409, replay.text
+  assert replay.json()["detail"]["code"] == "scope_cancelled"
 
 
 def test_cancel_waits_for_an_in_flight_admission_and_reports_it(
@@ -667,7 +671,7 @@ def test_cancel_never_fences_a_turn_the_writer_admitted_after_classification(
 
   monkeypatch.setattr(chats_stream, "send_message", reject)
   chat_id = _start(client, token, "cycle:cancel-race").json()["detail"]["chat_id"]
-  real_state = chats._scoped_start_state
+  real_state = chats._resolve_scoped_start
   calls = []
 
   def owner_turn_lands_after_classification(session, app, scope):
@@ -682,7 +686,7 @@ def test_cancel_never_fences_a_turn_the_writer_admitted_after_classification(
     calls.append(result[0])
     return result
 
-  monkeypatch.setattr(chats, "_scoped_start_state", owner_turn_lands_after_classification)
+  monkeypatch.setattr(chats, "_resolve_scoped_start", owner_turn_lands_after_classification)
   cancelled = _cancel(client, token, "cycle:cancel-race")
 
   assert calls[0] == "pending"
@@ -695,11 +699,13 @@ def test_cancel_never_fences_a_turn_the_writer_admitted_after_classification(
   assert binding.cancelled_at is None and binding.admitted_at is not None
 
 
-def _hold_the_scoped_writer_command(monkeypatch):
+def _hold_the_scoped_writer_command(monkeypatch, *, run_held_before_next=False):
   """Let /start's writer ack time out while its command stays undelivered.
 
   This is the writer paused after dequeue: the request gives up (503) and
-  releases the scope lock, and the exact command it issued runs later.
+  releases the scope lock, and the exact command it issued runs later. With
+  ``run_held_before_next`` the writer resumes just as a later scoped command
+  arrives, so it runs the held command first, as its FIFO queue would.
   """
   from concurrent.futures import Future
 
@@ -712,6 +718,10 @@ def _hold_the_scoped_writer_command(monkeypatch):
   class Paused:
     def submit(self, cmd):
       if getattr(cmd, "scoped_start", None) is not None:
+        if held and run_held_before_next:
+          monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 30.0)
+          writer.submit(held[0]).result(timeout=5)
+          return writer.submit(cmd)
         held.append(cmd)
         return Future()  # Never acknowledged inside the request.
       return writer.submit(cmd)
@@ -723,9 +733,9 @@ def _hold_the_scoped_writer_command(monkeypatch):
 
 @pytest.mark.parametrize("command", ["StartTurn", "AppendPending"])
 def test_cancel_after_a_writer_ack_timeout_fences_the_still_dispatched_first_turn(
-  client, owner_token, db, monkeypatch, command,
+  client, owner_token, db, monkeypatch, command, caplog,
 ):
-  from app.app_chat_scopes import ScopedStartCancelled
+  from app.app_chat_scopes import ScopedStartRefused
   from app.chat_writer import get_writer
 
   app_id, token = _make_app(client, owner_token, f"timeout-cancel-{command}")
@@ -745,8 +755,11 @@ def test_cancel_after_a_writer_ack_timeout_fences_the_still_dispatched_first_tur
   }
 
   # The writer now runs the exact command /start issued: it must commit nothing.
-  with pytest.raises(ScopedStartCancelled):
+  with pytest.raises(ScopedStartRefused) as refused:
     get_writer().submit(held[0]).result(timeout=5)
+  assert refused.value.admitted is False
+  # An expected refusal, not a writer failure with a traceback.
+  assert not [r for r in caplog.records if "command failed" in r.getMessage()]
   db.expire_all()
   chat = db.get(models.Chat, chat_id)
   assert transcript_rows.read_all(db, chat) == []
@@ -793,17 +806,43 @@ def test_a_scoped_command_the_writer_runs_after_a_timeout_admits_once_before_can
 def test_start_maps_a_writer_side_cancellation_to_scope_cancelled(
   client, owner_token, db, monkeypatch,
 ):
-  from app.app_chat_scopes import ScopedStartCancelled
+  from app.app_chat_scopes import ScopedStartRefused
   from app.routes import chats_stream
 
   app_id, token = _make_app(client, owner_token, "writer-refusal-scope")
 
   async def cancel_wins_inside_the_writer(body, chat_id, principal, request_db):
     assert body._scoped_start == (app_id, "cycle:refused")
-    raise ScopedStartCancelled(chat_id)
+    raise ScopedStartRefused(chat_id, admitted=False)
 
   monkeypatch.setattr(chats_stream, "send_message", cancel_wins_inside_the_writer)
   refused = _start(client, token, "cycle:refused")
 
   assert refused.status_code == 409, refused.text
   assert refused.json()["detail"]["code"] == "scope_cancelled"
+
+
+@pytest.mark.parametrize("command", ["StartTurn", "AppendPending"])
+def test_a_retry_behind_a_timed_out_start_reuses_its_first_turn_instead_of_a_second(
+  client, owner_token, db, monkeypatch, command,
+):
+  """Regression: the writer must refuse a second /start command for a scope
+  whose first turn an earlier, timed-out request's command already admitted."""
+  app_id, token = _make_app(client, owner_token, f"timeout-retry-{command}")
+  if command == "AppendPending":
+    _queue_first_turns_through_the_real_send_path(monkeypatch)
+  held = _hold_the_scoped_writer_command(monkeypatch, run_held_before_next=True)
+  timed_out = _start(client, token, "cycle:retry", cid="late-cid")
+  assert timed_out.status_code == 503, timed_out.text
+  chat_id = held[0].chat_id
+
+  retry = _start(client, token, "cycle:retry", cid="retry-cid")
+
+  assert retry.status_code == 200, retry.text
+  assert retry.json() == {"chat_id": chat_id, "outcome": "reused", "response": None}
+  db.expire_all()
+  chat = db.get(models.Chat, chat_id)
+  accepted = [row.get("cid") for row in transcript_rows.read_all(db, chat)]
+  assert accepted + _pending_cids(db, chat_id) == ["late-cid"]
+  binding = db.get(models.AppChatScopeStart, (app_id, "cycle:retry"))
+  assert binding.admitted_at is not None and binding.cancelled_at is None

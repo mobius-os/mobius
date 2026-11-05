@@ -3152,7 +3152,7 @@ async def stop_browser_grant_runs(grant_id: str, db: Session = None) -> dict:
 async def stop_chat_for(
   chat_id: str, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
+) -> "ChatStopOutcome":
   """Kills the agent subprocess for a specific chat.
 
   Bumps the generation counter so the dying run_chat's finally
@@ -3164,7 +3164,8 @@ async def stop_chat_for(
   gets sent. Backend Stop is purely the interrupt; the frontend owns
   the "collapse + resend" UX. See CLAUDE.md "Stop-chat contract".
 
-  Returns `(stopped, cleared_pending_cids)` — `stopped` is whether every live
+  Returns a `ChatStopOutcome` that unpacks as `(stopped,
+  cleared_pending_cids)` — `stopped` is whether every live
   handle stopped within the bound, `cleared_pending_cids` is the stable `cid`
   this Stop actually removed from the queue (empty if the clear timed out, or
   if the turn-end drain had already promoted the queued message into a
@@ -3252,48 +3253,33 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
     )))
 
 
-@dataclass(frozen=True)
-class ChatStopOutcome:
-  """One per-chat Stop: the `(stopped, cleared_pending_cids)` contract plus
-  the exact run it addressed.
+class ChatStopOutcome(tuple):
+  """One per-chat Stop: the `(stopped, cleared_pending_cids)` pair internal
+  callers use, plus `receipt`, which the Stop route returns.
 
-  `run_id` comes from the writer's Stop boundary (`ChatStopPrepared`), never
-  from a read after the interrupt: once Stop releases the transition lock the
-  owner may resume, and that successor must not inherit this Stop's meaning.
-  It certifies revocation only when `stopped` is true.
+  `receipt` is `{chat_id, run_id}` only when Stop certifies that nothing of
+  this chat's lifecycle can still run without new owner input: every handle
+  stopped and the pending queue was cleared. A Stop that kept the queue (a
+  restart drain, a preserving caller, or a timed-out clear) leaves queued
+  turns that may still run, so it issues none. `run_id` comes from the
+  writer's Stop boundary (`ChatStopPrepared`), never from a read after the
+  interrupt: once Stop releases the transition lock the owner may resume, and
+  that successor must not inherit this Stop's meaning.
   """
 
-  stopped: bool
-  cleared_pending_cids: list[str]
-  run_id: str | None
+  def __new__(cls, stopped: bool, cleared_pending_cids: list[str], receipt: dict | None = None):
+    outcome = super().__new__(cls, (stopped, cleared_pending_cids))
+    outcome.receipt = receipt
+    return outcome
 
-
-async def stop_chat_with_receipt(
-  chat_id: str, db: Session = None, *,
-  actor: str | None = None, actor_id: str | None = None,
-) -> ChatStopOutcome:
-  """`stop_chat_for` for callers that must bind Stop to the run it revoked."""
-  async with chat_queue.get_transition_lock(chat_id):
-    return await _stop_chat_locked(chat_id, db=db, actor=actor, actor_id=actor_id)
+  stopped = property(lambda self: self[0])
+  cleared_pending_cids = property(lambda self: self[1])
 
 
 async def _stop_chat_for_locked(
   chat_id: str, db: Session = None, *,
   preserve_pending: bool = False,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
-  """Stop one chat whose transition lock the caller holds, as the tuple
-  `(stopped, cleared_pending_cids)` that internal callers already use."""
-  outcome = await _stop_chat_locked(
-    chat_id, db=db, actor=actor, actor_id=actor_id,
-    preserve_pending=preserve_pending,
-  )
-  return outcome.stopped, outcome.cleared_pending_cids
-
-
-async def _stop_chat_locked(
-  chat_id: str, db: Session = None, *,
-  actor: str | None = None, actor_id: str | None = None, preserve_pending: bool = False,
 ) -> ChatStopOutcome:
   """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
@@ -3322,6 +3308,7 @@ async def _stop_chat_locked(
   # self-heals on the next interaction).
   log = _get_logger()
   cleared_pending_cids: list[str] = []
+  queue_cleared = False
   # Restart-drain invariant (design §2.2): the pending queue must survive the
   # restart untouched. A Stop landing inside the drain window would durably
   # delete queued messages here and hand them to the frontend to re-send — but
@@ -3335,6 +3322,7 @@ async def _stop_chat_locked(
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
           cleared_pending_cids = await _clear_pending(chat_id)
+      queue_cleared = True
     except (Exception, asyncio.TimeoutError):
       log.warning(
         "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
@@ -3385,7 +3373,7 @@ async def _stop_chat_locked(
   if not all_stopped:
     # At least one runner is still alive — leave run-status + broadcast for it.
     registry.discard_starting(chat_id)
-    return ChatStopOutcome(False, cleared_pending_cids, prepared.run_id)
+    return ChatStopOutcome(False, cleared_pending_cids)
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's FinishRun). This is the
   # path that resolves the orphaned-run-after-restart case (a ChatRun left
@@ -3399,7 +3387,8 @@ async def _stop_chat_locked(
     await _finish_run(chat_id, terminal_status="stopped")
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  return ChatStopOutcome(True, cleared_pending_cids, prepared.run_id)
+  receipt = {"chat_id": chat_id, "run_id": prepared.run_id} if queue_cleared else None
+  return ChatStopOutcome(True, cleared_pending_cids, receipt)
 
 
 def _schedule_continuation(
