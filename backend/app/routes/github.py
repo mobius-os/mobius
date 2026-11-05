@@ -98,10 +98,11 @@ from app.github_contribution_git import (
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
-  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
+  opens_new_standalone_pr,
+  reviewed_base_is_sole_merge_base,
   _merge_error_patch,
   _record_patch_with,
   _normalize_head_attribution,
@@ -1028,6 +1029,15 @@ _REVIEW_STATUS_MESSAGES = {
     "This no longer merges cleanly with the branch it targets, so it has to "
     "be refreshed before it can be sent."
   ),
+  "upstream_base_moved": (
+    "The branch it targets no longer has this review's base as its only merge "
+    "base, so GitHub would not show the reviewed diff. It has to be refreshed "
+    "before it can be sent."
+  ),
+  "upstream_merge_unavailable": (
+    "Whether this still merges with the branch it targets could not be "
+    "checked locally."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -1337,7 +1347,15 @@ def _inspect_prepared_review(
     # unmergeable. A dirty or moved checkout is the more urgent thing to say,
     # so those are reported first.
     upstream_sha = str(record.get("last_submit_upstream_sha") or "")
-    if _GIT_SHA.match(upstream_sha):
+    if _GIT_SHA.match(upstream_sha) and opens_new_standalone_pr(plan):
+      # Mirror Send: a new standalone PR opens, even over an overlap, only
+      # while GitHub would show exactly its reviewed diff.
+      if not reviewed_base_is_sole_merge_base(
+        lambda *args: app_git._run(repo, *args, check=False, read_only=True),
+        upstream_sha, head_oid, base_oid,
+      ):
+        return _review_status_problem(record_id, code="upstream_base_moved")
+    elif _GIT_SHA.match(upstream_sha):
       merge_preview = app_git.preview_merge_refs(repo, upstream_sha, branch)
       if merge_preview is None:
         raise ContributionSubmitError(
@@ -1750,6 +1768,7 @@ _STAGEABLE_STATUSES = frozenset(("prepared", "open", "draft"))
 _SOURCE_SYNC_RESERVE = 1024
 _STAGE_CLEARED_FIELDS = (
   "last_submit_error", "last_submit_error_code", "last_submit_error_detail",
+  "last_submit_upstream_conflict",
 )
 
 
