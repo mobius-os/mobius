@@ -130,24 +130,30 @@ const SURFACE_KEYS = ['--bg', '--surface', '--surface-2']
 // in any owner layer, in any rule or condition -- beats a default, and a
 // variable the owner never declared still resolves. The owner's CSS is only
 // read to TAILOR the defaults: its winning plain-:root bases feed role
-// derivation and its winning --bg picks the mode; colours set elsewhere are
-// not seen, so derived roles are not certified for them.
+// derivation and its winning --bg picks the mode.
 //
-// Derivation limits, deliberately not lifted by parsing more CSS: a base
-// declared only in an `@layer`, an `html` rule, a component selector or an
-// `@media`/`@supports`/`[data-theme]` condition still wins the cascade, but
-// the roles (and the mode default) were derived from the plain-:root base or
-// the shipped one, and are not recomputed per condition. Such a palette can
-// therefore pair, say, a conditional accent with a role derived from another
-// accent. A theme that wants automatic text/fill roles puts its bases in a
-// plain top-level `:root`; one that sets bases elsewhere declares the
-// matching roles (--accent-text, --accent-fill, ...) beside them.
+// A base the theme also declares anywhere else (an `@layer`, an `html` or
+// component rule, an `@media`/`@supports`/`[data-theme]` condition, a nested
+// rule) is not resolved here, so its roles are `var(<base>)`: buttons and
+// links follow the owner's base, uncertified, as they did before roles. A
+// theme that wants certified text/fill roles puts its bases only in a plain
+// top-level `:root`, or declares the matching roles beside them. The block
+// holds only hex colours, `var()` of core variables and the shipped
+// constants, never owner text.
 //
 // Mirrors backend/app/theme.py `_ensure_core_vars` byte for byte; the shared
 // table themeCssCases.json pins both.
 
 const URL_OPEN_RE = /url\(\s*(?=[^\s"'])/iy
-const IMPORTANT_RE = /!\s*important$/i
+// CSS whitespace and an ASCII CSS <number>/<percentage>, exactly as in
+// backend/app/theme.py (`_CSS_WS`, `_CSS_NUMBER_RE`), so both sides read
+// malformed input (`rgb(12px, ...)`, a leading BOM) the same way.
+const CSS_WS = '[ \\t\\n\\r\\f]'
+const cssTrim = (text) => text.replace(new RegExp(`^${CSS_WS}+|${CSS_WS}+$`, 'g'), '')
+const CSS_NUMBER_RE = /^[+-]?(?:[0-9]+|[0-9]*\.[0-9]+)(?:[eE][+-]?[0-9]+)?%?$/
+const DECLARATION_RE = new RegExp(`^${CSS_WS}*(--[A-Za-z_][A-Za-z0-9_-]*)${CSS_WS}*:([\\s\\S]*)$`)
+const IMPORTANT_RE = new RegExp(`!${CSS_WS}*important$`, 'i')
+const ROOT_SELECTOR_RE = new RegExp(`^${CSS_WS}*:root${CSS_WS}*$`)
 
 // The comment-blanked text plus a same-length mask in which string and
 // unquoted url() contents and escaped characters are neutralised, so
@@ -221,23 +227,27 @@ function lexThemeCss(css) {
 }
 
 /**
- * The winning custom properties of the theme's unconditional top-level
- * `:root { }` rules (last wins; !important beats later normal ones), or null
- * when the CSS uses syntax this tokenizer cannot follow. Only used to tailor
- * the generated defaults, never to decide what is emitted. Mirrors
- * `scan_root_declarations` in backend/app/theme.py.
+ * `{ root, elsewhere }`: the winning custom properties of the theme's
+ * unconditional top-level `:root { }` rules (last wins; !important beats
+ * later normal ones) and the names of custom properties it declares anywhere
+ * else (another rule, condition, layer or nesting level), or null when the
+ * CSS uses syntax this tokenizer cannot follow. Only used to tailor the
+ * generated defaults, never to decide what is emitted. Mirrors
+ * `_scan_theme_css` in backend/app/theme.py.
  */
-export function scanRootDeclarations(css) {
+function scanThemeCss(css) {
   const { text, mask, ok } = lexThemeCss(String(css || '').replace(INJECTED_DEFAULTS_BLOCK_RE, ''))
   const root = {}
+  const elsewhere = new Set()
   const important = new Set()
-  const record = (decl) => {
-    const m = /^\s*(--[A-Za-z_][\w-]*)\s*:([\s\S]*)$/.exec(decl)
+  const record = (decl, inRoot) => {
+    const m = DECLARATION_RE.exec(decl)
     if (!m) return
     const name = m[1]
-    let value = m[2].trim()
+    if (!inRoot) { elsewhere.add(name); return }
+    let value = cssTrim(m[2])
     const isImportant = IMPORTANT_RE.test(value)
-    if (isImportant) value = value.replace(IMPORTANT_RE, '').trim()
+    if (isImportant) value = cssTrim(value.replace(IMPORTANT_RE, ''))
     if (important.has(name) && !isImportant) return
     if (isImportant) important.add(name)
     root[name] = value
@@ -248,27 +258,32 @@ export function scanRootDeclarations(css) {
   for (let i = 0; i < mask.length; i++) {
     const ch = mask[i]
     if (ch === '{') {
-      if (depth === 0) rootRule = text.slice(segment, i).trim().split(/\s+/).join(' ') === ':root'
+      if (depth === 0) rootRule = ROOT_SELECTOR_RE.test(text.slice(segment, i))
       depth++
       segment = i + 1
     } else if (ch === '}') {
       if (depth === 0) return null
-      if (depth === 1 && rootRule) record(text.slice(segment, i))
+      record(text.slice(segment, i), depth === 1 && rootRule)
       depth--
       if (depth === 0) rootRule = false
       segment = i + 1
     } else if (ch === ';') {
-      if (depth === 1 && rootRule) record(text.slice(segment, i))
+      record(text.slice(segment, i), depth === 1 && rootRule)
       segment = i + 1
     }
   }
-  return depth || !ok ? null : root
+  return depth || !ok ? null : { root, elsewhere }
+}
+
+/** The winning plain-:root custom properties (see `scanThemeCss`), or null. */
+export function scanRootDeclarations(css) {
+  return scanThemeCss(css)?.root ?? null
 }
 
 /** 'light' or 'dark' from a theme's winning plain-:root --bg; mirrors `_infer_theme_mode`. */
 export function inferThemeMode(css) {
   const bg = (scanRootDeclarations(css) || {})['--bg'] || ''
-  const hex = /^#([0-9a-f]{3,8})$/i.exec(bg.trim())?.[1]
+  const hex = /^#([0-9a-f]{3,8})$/i.exec(bg)?.[1]
   if (!hex || ![3, 4, 6, 8].includes(hex.length)) return 'dark'
   const rgb = hex.length <= 4
     ? [...hex.slice(0, 3)].map((c) => parseInt(c + c, 16))
@@ -279,10 +294,12 @@ export function inferThemeMode(css) {
 /** Every core variable's default for `css`; mirrors `theme_defaults_for_css`. */
 export function themeDefaultsForCss(css) {
   const mode = inferThemeMode(css)
+  const { root, elsewhere } = scanThemeCss(css)
+    || { root: {}, elsewhere: new Set(ROLE_SOURCES.map((source) => source.base)) }
   return {
     ...(mode === 'light' ? LIGHT_COLORS : DARK_COLORS),
     ...THEME_TYPOGRAPHY,
-    ...themeRoleVars(scanRootDeclarations(css) || {}, mode),
+    ...themeRoleVars(root, mode, elsewhere),
   }
 }
 
@@ -296,7 +313,7 @@ function preludeBounds(css) {
   let preludeEnd = 0
   let i = 0
   for (;;) {
-    while (i < mask.length && /\s/.test(mask[i])) i++
+    while (i < mask.length && ' \t\n\r\f'.includes(mask[i])) i++
     const m = /^@(charset|import|layer)\b/i.exec(text.slice(i, i + 8))
     if (!m) break
     let j = i
@@ -334,7 +351,7 @@ export function withThemeDefaults(css) {
  * before the theme stylesheet applies and read the cascade afterwards.
  */
 export function themeBg(effectiveCss) {
-  const bg = ((scanRootDeclarations(effectiveCss) || {})['--bg'] || '').trim()
+  const bg = (scanRootDeclarations(effectiveCss) || {})['--bg'] || ''
   if (/^#[0-9a-fA-F]{3,8}$/.test(bg)) return bg
   return String(effectiveCss || '').match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
 }
@@ -406,7 +423,7 @@ export function contrastingAccentFg(accent) {
 }
 
 function normalizedColor(value) {
-  const text = String(value ?? '').trim().toLowerCase().replace(/\s+/g, '')
+  const text = String(value ?? '').toLowerCase().replace(/[ \t\n\r\f]+/g, '')
   const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(text)
   return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}` : text
 }
@@ -420,31 +437,36 @@ export function isShippedThemeValue(key, value) {
 
 /**
  * Every role token, plus --accent-fg, for a theme whose plain-:root custom
- * properties are `declared`.
+ * properties are `declared`. `unfollowed` names the custom properties the
+ * theme also declares somewhere else, where their value is not known here.
  *
+ * - A base in `unfollowed` gets `var(<base>)` roles (the pre-role
+ *   behaviour), so buttons and links follow the theme's own base.
  * - A shipped base (of either mode) gets the shipped role when that meets
  *   its target on this theme's surfaces / label.
  * - Otherwise the role is the nearest black/white mix of the theme's base
  *   that meets 4.5:1. Guaranteed only for opaque hex/rgb() literals: a
- *   translucent or other colour syntax, or a target no mix can reach, keeps
- *   the theme's own base value -- passed through, not certified.
+ *   translucent or other colour syntax, or a target no mix can reach, gets
+ *   `var(<base>)` -- passed through, not certified.
  * - A label or fill the theme declared is the input for the fills and hover
  *   that pair with it.
+ *
+ * Every value is a hex colour or a `var()` of a core variable: the owner's
+ * text never enters the generated block.
  *
  * These are DEFAULTS in the leading generated block, so any role the owner
  * declares anywhere outranks them. Mirrors `theme_role_vars` in
  * backend/app/theme.py (cross-checked by themeRoleCases.json).
  */
-export function themeRoleVars(declared, mode) {
+export function themeRoleVars(declared, mode, unfollowed = new Set()) {
   const palette = mode === 'light' ? LIGHT_COLORS : DARK_COLORS
   const shippedRoles = mode === 'light' ? LIGHT_ROLES : DARK_ROLES
   const value = (key) => declared[key] ?? palette[key]
   const surfaces = SURFACE_KEYS.map((key) => parseCssRgb(value(key)) || parseCssRgb(palette[key]))
   const lightSurfaces = relativeLuminance(surfaces[0]) > 0.179
 
-  const fg = declared['--accent-fg'] ?? contrastingAccentFg(value('--accent')) ?? '#ffffff'
-  const out = { '--accent-fg': fg }
-  const fgRgb = parseCssRgb(fg)
+  const out = { '--accent-fg': contrastingAccentFg(value('--accent')) ?? '#ffffff' }
+  const fgRgb = parseCssRgb(declared['--accent-fg'] ?? out['--accent-fg'])
 
   const readsOnSurfaces = (rgb) => surfaces.every((s) => rgbContrast(rgb, s) >= MIN_TEXT_CONTRAST)
   const carriesFg = (rgb) => fgRgb !== null && rgbContrast(fgRgb, rgb) >= MIN_TEXT_CONTRAST
@@ -453,18 +475,20 @@ export function themeRoleVars(declared, mode) {
 
   for (const source of ROLE_SOURCES) {
     const base = value(source.base)
-    const baseRgb = parseCssRgb(base)
-    const shippedBase = isShippedThemeValue(source.base, base)
+    const unknown = unfollowed.has(source.base)
+    const baseRgb = unknown ? null : parseCssRgb(base)
+    const shippedBase = !unknown && isShippedThemeValue(source.base, base)
     const pick = (role, meets, preferred) => {
       if (shippedBase && meets(parseCssRgb(shippedRoles[role]))) return shippedRoles[role]
-      return (baseRgb && nearestPassingMix(baseRgb, preferred(baseRgb), meets)) || base
+      return (baseRgb && nearestPassingMix(baseRgb, preferred(baseRgb), meets)) || `var(${source.base})`
     }
     out[source.text] = pick(source.text, readsOnSurfaces, () => (lightSurfaces ? BLACK : WHITE))
     if (source.fill) out[source.fill] = pick(source.fill, carriesFg, awayFromFg)
     if (source.fillHover) {
-      const fill = declared[source.fill] ?? out[source.fill]
-      const fillRgb = parseCssRgb(fill)
-      out[source.fillHover] = fillRgb ? toHex(mixToward(fillRgb, awayFromFg(fillRgb), 0.1)) : fill
+      const fillRgb = parseCssRgb(declared[source.fill] ?? out[source.fill])
+      out[source.fillHover] = fillRgb
+        ? toHex(mixToward(fillRgb, awayFromFg(fillRgb), 0.1))
+        : 'var(--accent-hover)'
     }
   }
   return out
@@ -474,7 +498,7 @@ export function themeRoleVars(declared, mode) {
 // absent or 1. Translucent colours composite over an unknown backdrop, so
 // they are unsupported (null) rather than read as their opaque channels.
 function parseCssRgb(value) {
-  const text = String(value || '').trim().toLowerCase()
+  const text = cssTrim(String(value || '')).toLowerCase()
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(text)
   if (hex) {
     const d = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join('') : hex[1]
@@ -482,8 +506,9 @@ function parseCssRgb(value) {
   }
   const fn = /^rgba?\(([^)]*)\)$/.exec(text)
   if (fn) {
-    const parts = fn[1].replace(/\//g, ' ').split(/[,\s]+/).filter(Boolean)
+    const parts = fn[1].replace(/\//g, ' ').split(/[, \t\n\r\f]+/).filter(Boolean)
     if (parts.length !== 3 && parts.length !== 4) return null
+    if (!parts.every((p) => CSS_NUMBER_RE.test(p))) return null
     if (parts.length === 4) {
       const a = parts[3]
       const alpha = a.endsWith('%') ? parseFloat(a) / 100 : parseFloat(a)
@@ -555,8 +580,8 @@ function firstRootRule(css) {
       depth--
       if (depth === 0) segment = i + 1
     } else if (ch === '{') {
-      const selector = text.slice(segment, i).trim()
-      if (depth === 0 && selector.split(/\s+/).join(' ') === ':root') {
+      const selector = cssTrim(text.slice(segment, i))
+      if (depth === 0 && ROOT_SELECTOR_RE.test(selector)) {
         const close = matchingBrace(mask, i)
         if (close < 0) return null
         const start = segment + text.slice(segment, i).indexOf(selector)

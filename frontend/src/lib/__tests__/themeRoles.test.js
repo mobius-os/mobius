@@ -102,10 +102,21 @@ test('a light accent flips its foreground dark and keeps the fill readable', () 
   assert.ok(contrastRatio('#000000', roles['--green-fill']) >= 4.5)
 })
 
-test('an unparseable custom base keeps its own value instead of the shipped colour', () => {
-  const roles = themeRoleVars({ ...DARK_COLORS, '--accent': 'oklch(70% 0.2 150)' }, 'dark')
-  assert.equal(roles['--accent-text'], 'oklch(70% 0.2 150)')
-  assert.equal(roles['--accent-fill'], 'oklch(70% 0.2 150)')
+test('an unparseable custom base follows var(--base), never the shipped colour or its own text', () => {
+  for (const accent of ['oklch(70% 0.2 150)', 'rgb(12px, 0, 0)', '"}"']) {
+    const roles = themeRoleVars({ ...DARK_COLORS, '--accent': accent }, 'dark')
+    assert.equal(roles['--accent-text'], 'var(--accent)')
+    assert.equal(roles['--accent-fill'], 'var(--accent)')
+  }
+})
+
+test('a base the owner also sets outside a plain :root follows var(--base)', () => {
+  for (const css of [':root, html { --accent: #e11d48; }', 'body { --accent: #e11d48; }',
+    '[data-theme=dark] { --accent: #e11d48; }', '@media (min-width: 1px) { :root { --accent: #e11d48; } }']) {
+    const served = withThemeDefaults(css)
+    assert.ok(served.includes('  --accent-fill: var(--accent);\n'), css)
+    assert.ok(served.includes('  --accent-text: var(--accent);\n'), css)
+  }
 })
 
 test('cross-language role cases match the backend', () => {
@@ -171,10 +182,10 @@ test('a fill under a grey label moves toward whichever endpoint can pass', () =>
   }
 })
 
-test('an unreachable text target keeps the theme base instead of certifying a colour', () => {
+test('an unreachable text target follows the theme base instead of certifying a colour', () => {
   const surfaces = { '--bg': '#777777', '--surface': '#ffffff', '--surface-2': '#000000' }
   const roles = themeRoleVars({ ...DARK_COLORS, ...surfaces, '--danger': '#ff2d55' }, 'dark')
-  assert.equal(roles['--danger-text'], '#ff2d55')
+  assert.equal(roles['--danger-text'], 'var(--danger)')
 })
 
 test('translucent colours are unsupported rather than read as opaque', () => {

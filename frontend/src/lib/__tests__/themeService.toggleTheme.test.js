@@ -786,8 +786,9 @@ test('the toggle paints exactly what the server serves for what it persists', as
   ]
   for (const css of shapes) {
     const { result, persisted } = await toggleOnce(css, 'dark')
-    // withThemeDefaults is pinned byte-for-byte to backend _ensure_core_vars by themeCssCases.json.
-    assert.equal(result.newCss, withThemeDefaults(persisted))
+    // withThemeDefaults is pinned byte-for-byte to backend _ensure_core_vars by
+    // themeCssCases.json; the server strips theme.css before adding defaults.
+    assert.equal(result.newCss, withThemeDefaults(persisted.trim()))
     assert.equal(persisted.includes(INJECTED_DEFAULTS_MARKER), false)
   }
 })

@@ -440,8 +440,9 @@ export async function toggleTheme(queryClient, currentMode, api) {
   const colors = colorsForMode(meta.colors, currentCss, currentMode, newMode)
   const persistedCss = buildThemeCss(colors, meta, newMode)
   // What the shell paints, seeds and hands to app frames: exactly what
-  // `/api/theme` serves for the persisted css (backend `_ensure_core_vars`).
-  const newCss = withThemeDefaults(persistedCss)
+  // `/api/theme` serves for the persisted css (the server strips theme.css,
+  // then `_ensure_core_vars`), so a later refetch is a no-op, not a repaint.
+  const newCss = withThemeDefaults(persistedCss.trim())
 
   // Extract NEW bg from the built CSS, not from old meta.
   const newBg = themeBg(newCss) || meta.colors['--bg']

@@ -38,7 +38,7 @@
     "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: #0ea5e9;\n  --accent-fill-hover: #26aeeb;\n  --accent-hover: #7c5ce6;\n  --accent-text: #0ea5e9;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent: #0ea5e9 !important; }\n:root { --accent: #8b6cf7; }\n"
   },
   {
-    "name": "a base set only under @media keeps a default when the query is false",
+    "name": "a base set only under @media keeps a default; its roles follow var(--accent)",
     "css": ":root { --bg: #0d0d0d; }\n@media (prefers-contrast: more) { :root { --accent: #00ffff; --green: #00ff00; } }\n",
     "owner": {
       "--bg": "#0d0d0d"
@@ -47,7 +47,7 @@
       "--accent": "#00ffff",
       "--green": "#00ff00"
     },
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; }\n@media (prefers-contrast: more) { :root { --accent: #00ffff; --green: #00ff00; } }\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: var(--green);\n  --green-text: var(--green);\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; }\n@media (prefers-contrast: more) { :root { --accent: #00ffff; --green: #00ff00; } }\n"
   },
   {
     "name": "roles on other selectors stay scoped; the root keeps its defaults",
@@ -200,23 +200,23 @@
       "--accent-fg": "#000000"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #896ce9;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent-fg: #000000; }\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #896ce9;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent-fg: #000000; }\n"
   },
   {
-    "name": "a component-local accent leaves the root accent and its roles",
+    "name": "a component-local accent leaves the root accent; its roles follow var(--accent)",
     "css": ":root { --bg: #0d0d0d; --accent: #00ffff; }\n.chat { --accent: #ff00ff; }\n",
     "owner": {
       "--accent": "#00ffff"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: #00ffff;\n  --accent-fill-hover: #1affff;\n  --accent-hover: #7c5ce6;\n  --accent-text: #00ffff;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent: #00ffff; }\n.chat { --accent: #ff00ff; }\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent: #00ffff; }\n.chat { --accent: #ff00ff; }\n"
   },
   {
-    "name": "unsupported syntax (unterminated string) derives from shipped defaults",
+    "name": "unsupported syntax (unterminated string): every role follows its base",
     "css": ":root { --bg: #0d0d0d; --accent: #00ffff; --broken: \"never closed; }\n",
     "owner": null,
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent: #00ffff; --broken: \"never closed; }\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: var(--danger);\n  --danger-text: var(--danger);\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: var(--green);\n  --green-text: var(--green);\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: var(--warning);\n}\n}\n:root { --bg: #0d0d0d; --accent: #00ffff; --broken: \"never closed; }\n"
   },
   {
     "name": "a named owner layer beats the defaults layer",
@@ -226,7 +226,7 @@
       "--text": "#112233"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n@layer owner {\n  :root { --accent: #00ffff; --text: #112233; }\n}\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n@layer owner {\n  :root { --accent: #00ffff; --text: #112233; }\n}\n"
   },
   {
     "name": "an anonymous owner layer beats the defaults layer",
@@ -236,7 +236,7 @@
       "--accent": "#0ea5e9"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n@layer { :root { --bg: #f0eeeb; --accent: #0ea5e9; } }\n"
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n@layer { :root { --bg: #f0eeeb; --accent: #0ea5e9; } }\n"
   },
   {
     "name": "a layer-order statement keeps every owner layer above the defaults",
@@ -246,7 +246,7 @@
       "--text": "#222222"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@layer mobius-defaults;\n@layer base, brand;/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n\n@layer brand { :root { --accent: #00ffff; } }\n@layer base { :root { --accent: #ff00ff; --text: #222222; } }\n"
+    "expected": "@layer mobius-defaults;\n@layer base, brand;/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n\n@layer brand { :root { --accent: #00ffff; } }\n@layer base { :root { --accent: #ff00ff; --text: #222222; } }\n"
   },
   {
     "name": "an imported layer and its owner rules stay above the defaults",
@@ -282,7 +282,7 @@
       "--accent": "#00ffff"
     },
     "ownerWhenConditionsMatch": {},
-    "expected": "@charset \"utf-8\";@layer mobius-defaults;\n\n@layer brand;\n@import \"https://example.test/a;b.css\";\n@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n\n@layer brand { :root { --accent: #00ffff; } }\n"
+    "expected": "@charset \"utf-8\";@layer mobius-defaults;\n\n@layer brand;\n@import \"https://example.test/a;b.css\";\n@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n\n@layer brand { :root { --accent: #00ffff; } }\n"
   },
   {
     "name": "an escaped ) in an unquoted import URL keeps the import whole",
@@ -311,5 +311,71 @@
     },
     "ownerWhenConditionsMatch": {},
     "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: #00ffff;\n  --accent-fill-hover: #1affff;\n  --accent-hover: #7c5ce6;\n  --accent-text: #00ffff;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --img: url(a\\);b); --accent: #00ffff; }\n"
+  },
+  {
+    "name": "an html-rule accent: roles follow var(--accent), not the shipped purple",
+    "css": "html { --accent: #e11d48; }\n",
+    "owner": {
+      "--accent": "#e11d48"
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\nhtml { --accent: #e11d48; }\n"
+  },
+  {
+    "name": "a root accent also set in an html rule: roles follow var(--accent), whichever rule wins",
+    "css": ":root { --bg: #f0eeeb; --accent: #0ea5e9; }\nhtml { --accent: #e11d48; }\n",
+    "owner": {
+      "--bg": "#f0eeeb",
+      "--accent": "#0ea5e9"
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.08);\n  --accent-fg: #000000;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #f0eeeb;\n  --border: #d4d1cc;\n  --border-light: #e2dfdb;\n  --danger: #ef4444;\n  --danger-fill: #ef4444;\n  --danger-text: #b91c1c;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #059669;\n  --green-fill: #059669;\n  --green-text: #046c4e;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #6b6864;\n  --surface: #ffffff;\n  --surface-2: #e8e6e2;\n  --text: #1c1b1a;\n  --warning: #8f5a00;\n  --warning-text: #8f5a00;\n}\n}\n:root { --bg: #f0eeeb; --accent: #0ea5e9; }\nhtml { --accent: #e11d48; }\n"
+  },
+  {
+    "name": "a quoted brace as a base never enters the generated block",
+    "css": ":root { --bg: #0d0d0d; --accent: \"}\"; }\n",
+    "owner": {
+      "--bg": "#0d0d0d",
+      "--accent": "\"}\""
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accent: \"}\"; }\n"
+  },
+  {
+    "name": "a channel with a unit is not a colour",
+    "css": ":root { --bg: #f0eeeb; --accent: rgb(12px, 0, 0); }\n",
+    "owner": {
+      "--bg": "#f0eeeb",
+      "--accent": "rgb(12px, 0, 0)"
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.08);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #f0eeeb;\n  --border: #d4d1cc;\n  --border-light: #e2dfdb;\n  --danger: #ef4444;\n  --danger-fill: #dc2626;\n  --danger-text: #b91c1c;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #059669;\n  --green-fill: #047857;\n  --green-text: #046c4e;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #6b6864;\n  --surface: #ffffff;\n  --surface-2: #e8e6e2;\n  --text: #1c1b1a;\n  --warning: #8f5a00;\n  --warning-text: #8f5a00;\n}\n}\n:root { --bg: #f0eeeb; --accent: rgb(12px, 0, 0); }\n"
+  },
+  {
+    "name": "a channel with an underscore is not a colour",
+    "css": ":root { --bg: #f0eeeb; --danger: rgb(1_0, 0, 0); }\n",
+    "owner": {
+      "--bg": "#f0eeeb",
+      "--danger": "rgb(1_0, 0, 0)"
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.08);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #6548d4;\n  --bg: #f0eeeb;\n  --border: #d4d1cc;\n  --border-light: #e2dfdb;\n  --danger: #ef4444;\n  --danger-fill: var(--danger);\n  --danger-text: var(--danger);\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #059669;\n  --green-fill: #047857;\n  --green-text: #046c4e;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #6b6864;\n  --surface: #ffffff;\n  --surface-2: #e8e6e2;\n  --text: #1c1b1a;\n  --warning: #8f5a00;\n  --warning-text: #8f5a00;\n}\n}\n:root { --bg: #f0eeeb; --danger: rgb(1_0, 0, 0); }\n"
+  },
+  {
+    "name": "a leading BOM is part of the selector, not whitespace",
+    "css": "\ufeff:root { --bg: #f0eeeb; --accent: #00ffff; }\n",
+    "owner": {},
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: var(--accent);\n  --accent-fill-hover: var(--accent-hover);\n  --accent-hover: #7c5ce6;\n  --accent-text: var(--accent);\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n\ufeff:root { --bg: #f0eeeb; --accent: #00ffff; }\n"
+  },
+  {
+    "name": "a non-ASCII custom property name is not a core variable",
+    "css": ":root { --bg: #0d0d0d; --accént: #ffffff; --accent: #0ea5e9; }\n",
+    "owner": {
+      "--bg": "#0d0d0d",
+      "--accent": "#0ea5e9"
+    },
+    "ownerWhenConditionsMatch": {},
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #000000;\n  --accent-fill: #0ea5e9;\n  --accent-fill-hover: #26aeeb;\n  --accent-hover: #7c5ce6;\n  --accent-text: #0ea5e9;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #f87171;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #10b981;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root { --bg: #0d0d0d; --accént: #ffffff; --accent: #0ea5e9; }\n"
   }
 ]

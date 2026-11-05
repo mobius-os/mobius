@@ -292,11 +292,27 @@ def test_stale_generated_block_is_replaced_not_kept_active():
            f"/* {theme.INJECTED_DEFAULTS_MARKER} */\n:root {{ --accent-fg: #ffffff; }}\n.after {{ gap: 2px; }}\n")
   served = _ensure_core_vars(stale)
   assert served.count(theme.INJECTED_DEFAULTS_MARKER) == 1
-  assert "--accent-fg: #ffffff" not in served
+  assert ":root { --accent-fg: #ffffff; }" not in served
   assert ".keep { gap: 4px; }" in served and ".after { gap: 2px; }" in served
   resolved = _resolve_root(served)
   assert resolved["--accent-fg"] == "#000000"
   assert _contrast("#000000", resolved["--danger-fill"]) >= 4.5
+
+
+@pytest.mark.parametrize("css", [
+  ":root, html { --accent: #e11d48; }",
+  "html { --accent: #e11d48; }",
+  "body { --accent: #e11d48; }",
+  "[data-theme=dark] { --accent: #e11d48; }",
+  "@media (min-width: 1px) { :root { --accent: #e11d48; } }",
+  ":root { --accent: #e11d48; }\n:root { .x { --accent: #e11d48; } }",
+])
+def test_a_base_set_where_the_scanner_cannot_follow_keeps_var_roles(css):
+  """Roles derived from the shipped purple would pair purple buttons with
+  the owner's accent dots; `var(--accent)` follows the owner's colour."""
+  defaults = theme.theme_defaults_for_css(css)
+  assert defaults["--accent-text"] == defaults["--accent-fill"] == "var(--accent)"
+  assert defaults["--danger-fill"] == _shipped("dark")["--danger-fill"]
 
 
 def test_serving_is_idempotent():
@@ -437,8 +453,12 @@ def _composed_states():
   action = _rule("components/ChatView/markdown/AppBlock.css", ".md-app-block__action")
   primary = _rule("components/Drawer/UninstalledApps.css", ".uninstalled-popover__btn--primary")
   pressed = _rule("components/ChatView/markdown/AppBlock.css", '.md-app-block__action[aria-pressed="true"]')
+  badges = [
+    (f"app-block {tone} badge", _rule("components/ChatView/markdown/AppBlock.css", f".md-app-block__badge.is-{tone}"))
+    for tone in ("success", "attention", "danger", "accent")
+  ]
   # (label, text colour expr, background expr, backdrop expr)
-  return [
+  return [(label, _prop(rule, "color"), _prop(rule, "background"), "var(--bg)") for label, rule in badges] + [
     ("active drawer row", _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "color"),
      _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "background"), "var(--bg)"),
     ("question nudge at rest", _prop(nudge, "color"), _prop(nudge, "background"), "var(--bg)"),

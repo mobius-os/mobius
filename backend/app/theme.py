@@ -383,6 +383,14 @@ _LIGHT_DEFAULTS = {
 }
 
 
+# CSS whitespace, and a CSS <number> or <percentage> written in ASCII. Both
+# derivations (here and frontend/src/theme.js) read colours and structure with
+# exactly these, so input such as `rgb(12px, ...)`, `rgb(1_0, ...)` or a
+# leading BOM is read the same way on both sides (rejected, or not whitespace).
+_CSS_WS = " \t\n\r\f"
+_CSS_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+|[0-9]*\.[0-9]+)(?:[eE][+-]?[0-9]+)?%?")
+
+
 def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
   """(r, g, b) of an OPAQUE colour literal, else None.
 
@@ -392,7 +400,7 @@ def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
   up, like JavaScript's Math.round (Python's round() is bankers' rounding),
   so frontend/src/theme.js parses identically.
   """
-  text = value.strip().lower()
+  text = value.strip(_CSS_WS).lower()
   m = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", text)
   if m:
     digits = m.group(1)
@@ -404,19 +412,19 @@ def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
     # Accept both legacy comma-separated and modern space-separated syntax
     # (`rgb(255 255 255 / 50%)`); an unparseable form returns None and keeps
     # the previous fixed default rather than guessing.
-    parts = [p for p in re.split(r"[,\s]+", m.group(1).replace("/", " ")) if p]
-    if len(parts) not in (3, 4):
+    parts = [p for p in re.split(r"[, \t\n\r\f]+", m.group(1).replace("/", " ")) if p]
+    if len(parts) not in (3, 4) or not all(_CSS_NUMBER_RE.fullmatch(p) for p in parts):
       return None
+    if len(parts) == 4:
+      alpha = float(parts[3][:-1]) / 100 if parts[3].endswith("%") else float(parts[3])
+      if not alpha >= 1:
+        return None
     try:
-      if len(parts) == 4:
-        alpha = float(parts[3][:-1]) / 100 if parts[3].endswith("%") else float(parts[3])
-        if not alpha >= 1:
-          return None
       channels = [
         _round_half_up(float(p[:-1]) * 255 / 100) if p.endswith("%") else _round_half_up(float(p))
         for p in parts[:3]
       ]
-    except (ValueError, OverflowError):
+    except OverflowError:  # an infinite channel such as 1e999
       return None
     return tuple(max(0, min(255, c)) for c in channels)  # type: ignore[return-value]
   return None
@@ -536,7 +544,7 @@ def _nearest_passing_mix(rgb, preferred, meets) -> str | None:
 
 
 def _normalized_color(value: str) -> str:
-  text = re.sub(r"\s+", "", str(value).strip().lower())
+  text = re.sub(r"[ \t\n\r\f]+", "", str(value).lower())
   m = re.fullmatch(r"#([0-9a-f])([0-9a-f])([0-9a-f])", text)
   return "#" + "".join(c * 2 for c in m.groups()) if m else text
 
@@ -560,18 +568,28 @@ def _is_shipped_value(key: str, value: str) -> bool:
   )
 
 
-def theme_role_vars(declared: dict[str, str], mode: str) -> dict[str, str]:
+def theme_role_vars(
+  declared: dict[str, str], mode: str, unfollowed: "frozenset[str] | set[str]" = frozenset(),
+) -> dict[str, str]:
   """Every role token, plus --accent-fg, for a theme whose plain-:root
-  custom properties are `declared`.
+  custom properties are `declared`.  `unfollowed` names the custom
+  properties the theme also declares somewhere else (another selector, a
+  condition, a layer, nested), where its value cannot be known here.
 
+  - A base in `unfollowed` gets `var(<base>)` for its roles, the pre-role
+    behaviour: buttons and links follow whatever the theme's own base
+    resolves to rather than a colour derived from another value.
   - A shipped base (of either mode) gets the shipped role when that meets
     its target on this theme's surfaces / label.
   - Otherwise the role is the nearest black/white mix of the theme's base
     that meets 4.5:1.  Guaranteed only for opaque hex/rgb() literals: a
-    translucent or other colour syntax, or a target no mix can reach, keeps
-    the theme's own base value -- passed through, not certified.
+    translucent or other colour syntax, or a target no mix can reach, gets
+    `var(<base>)` -- passed through, not certified.
   - A label or fill the theme declared is used as the input for the fills
     and hover that pair with it.
+
+  Every value is a hex colour or a `var()` of a core variable: the owner's
+  text never enters the generated block.
 
   These are DEFAULTS: they sit in the leading generated block, so any role
   the owner declares anywhere outranks them by ordinary cascade.  Mirrors
@@ -585,11 +603,8 @@ def theme_role_vars(declared: dict[str, str], mode: str) -> dict[str, str]:
   surfaces = [_parse_css_rgb(value(k)) or _parse_css_rgb(palette[k]) for k in _SURFACE_KEYS]
   light_surfaces = _relative_luminance(surfaces[0]) > 0.179
 
-  fg = declared.get("--accent-fg")
-  if fg is None:
-    fg = _contrasting_accent_fg(value("--accent")) or "#ffffff"
-  out: dict[str, str] = {"--accent-fg": fg}
-  fg_rgb = _parse_css_rgb(fg)
+  out: dict[str, str] = {"--accent-fg": _contrasting_accent_fg(value("--accent")) or "#ffffff"}
+  fg_rgb = _parse_css_rgb(declared.get("--accent-fg", out["--accent-fg"]))
 
   def reads_on_surfaces(rgb) -> bool:
     return all(_rgb_contrast(rgb, s) >= _MIN_TEXT_CONTRAST for s in surfaces)
@@ -605,14 +620,15 @@ def theme_role_vars(declared: dict[str, str], mode: str) -> dict[str, str]:
 
   for source in _ROLE_SOURCES:
     base = value(source["base"])
-    base_rgb = _parse_css_rgb(base)
-    shipped_base = _is_shipped_value(source["base"], base)
+    unknown = source["base"] in unfollowed
+    base_rgb = None if unknown else _parse_css_rgb(base)
+    shipped_base = not unknown and _is_shipped_value(source["base"], base)
 
     def pick(role, meets, preferred):
       if shipped_base and meets(_parse_css_rgb(palette[role])):
         return palette[role]
       derived = _nearest_passing_mix(base_rgb, preferred(base_rgb), meets) if base_rgb else None
-      return derived or base
+      return derived or f"var({source['base']})"
 
     toward = _BLACK if light_surfaces else _WHITE
     out[source["text"]] = pick(source["text"], reads_on_surfaces, lambda _rgb: toward)
@@ -621,14 +637,15 @@ def theme_role_vars(declared: dict[str, str], mode: str) -> dict[str, str]:
       out[fill] = pick(fill, carries_fg, away_from_fg)
     hover = source.get("fill_hover")
     if hover:
-      fill_value = declared.get(fill, out[fill])
-      fill_rgb = _parse_css_rgb(fill_value)
-      out[hover] = _to_hex(_mix_toward(fill_rgb, away_from_fg(fill_rgb), 0.1)) if fill_rgb else fill_value
+      fill_rgb = _parse_css_rgb(declared.get(fill, out[fill]))
+      out[hover] = (_to_hex(_mix_toward(fill_rgb, away_from_fg(fill_rgb), 0.1)) if fill_rgb
+                    else "var(--accent-hover)")
   return out
 
 
-_DECLARATION_RE = re.compile(r"\s*(--[A-Za-z_][\w-]*)\s*:(.*)", re.S)
-_IMPORTANT_RE = re.compile(r"!\s*important$", re.I)
+_DECLARATION_RE = re.compile(r"[ \t\n\r\f]*(--[A-Za-z_][A-Za-z0-9_-]*)[ \t\n\r\f]*:(.*)", re.S)
+_IMPORTANT_RE = re.compile(r"![ \t\n\r\f]*important$", re.I)
+_ROOT_SELECTOR_RE = re.compile(r"[ \t\n\r\f]*:root[ \t\n\r\f]*")
 _URL_OPEN_RE = re.compile(r"url\(\s*(?=[^\s\"'])", re.I)
 
 
@@ -703,31 +720,34 @@ def _lex_theme_css(css: str) -> tuple[str, str, bool]:
   return "".join(text), "".join(mask), ok
 
 
-def scan_root_declarations(css: str) -> dict[str, str] | None:
-  """The winning custom properties of the theme's unconditional top-level
-  `:root { }` rules, in source order (the last declaration wins; an
-  !important one beats later normal ones), or None when the CSS uses
-  syntax this tokenizer cannot follow.
+def _scan_theme_css(css: str) -> tuple[dict[str, str], set[str]] | None:
+  """(the winning custom properties of the theme's unconditional top-level
+  `:root { }` rules, the names of custom properties it declares anywhere
+  else), or None when the CSS uses syntax this tokenizer cannot follow.
 
-  These values only feed role DERIVATION and mode inference.  They never
-  decide what is emitted: the generated defaults block always carries every
-  variable and sits before the owner's CSS, so the owner wins regardless.
+  In the plain roots the last declaration wins and an !important one beats
+  later normal ones.  "Anywhere else" is every other rule, condition, layer
+  or nesting level, whose value at the root this scanner does not resolve.
   A generated block is ignored; comments, strings, url() contents and
   escapes are lexed first, so a `}` or `;` inside them is never structure.
-  Mirrors `scanRootDeclarations` in frontend/src/theme.js.
+  Mirrors `scanThemeCss` in frontend/src/theme.js.
   """
   text, mask, supported = _lex_theme_css(_GENERATED_BLOCK_RE.sub("", css or ""))
   root: dict[str, str] = {}
+  elsewhere: set[str] = set()
   important: set[str] = set()
 
-  def record(decl: str) -> None:
+  def record(decl: str, in_root: bool) -> None:
     m = _DECLARATION_RE.fullmatch(decl)
     if not m:
       return
-    name, value = m.group(1), m.group(2).strip()
+    name, value = m.group(1), m.group(2).strip(_CSS_WS)
+    if not in_root:
+      elsewhere.add(name)
+      return
     is_important = bool(_IMPORTANT_RE.search(value))
     if is_important:
-      value = _IMPORTANT_RE.sub("", value).strip()
+      value = _IMPORTANT_RE.sub("", value).strip(_CSS_WS)
     if name in important and not is_important:
       return
     if is_important:
@@ -740,25 +760,32 @@ def scan_root_declarations(css: str) -> dict[str, str] | None:
   for i, ch in enumerate(mask):
     if ch == "{":
       if depth == 0:
-        root_rule = " ".join(text[segment:i].split()) == ":root"
+        root_rule = bool(_ROOT_SELECTOR_RE.fullmatch(text[segment:i]))
       depth += 1
       segment = i + 1
     elif ch == "}":
       if depth == 0:
         return None
-      if depth == 1 and root_rule:
-        record(text[segment:i])
+      record(text[segment:i], depth == 1 and root_rule)
       depth -= 1
       if depth == 0:
         root_rule = False
       segment = i + 1
     elif ch == ";":
-      if depth == 1 and root_rule:
-        record(text[segment:i])
+      record(text[segment:i], depth == 1 and root_rule)
       segment = i + 1
   if depth or not supported:
     return None
-  return root
+  return root, elsewhere
+
+
+def scan_root_declarations(css: str) -> dict[str, str] | None:
+  """The winning custom properties of the theme's plain top-level `:root`
+  rules (see `_scan_theme_css`), or None when the CSS cannot be followed.
+  These values only feed role derivation and mode inference; they never
+  decide what is emitted."""
+  scan = _scan_theme_css(css)
+  return scan[0] if scan else None
 
 
 def _infer_theme_mode(css: str) -> str:
@@ -771,7 +798,7 @@ def _infer_theme_mode(css: str) -> str:
   dark-vs-light direction.
   """
   bg = (scan_root_declarations(css) or {}).get("--bg", "")
-  m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", bg.strip())
+  m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", bg)
   if not m or len(m.group(1)) not in (3, 4, 6, 8):
     return "dark"
   raw = m.group(1)
@@ -783,10 +810,13 @@ def _infer_theme_mode(css: str) -> str:
 def theme_defaults_for_css(css: str) -> dict[str, str]:
   """Every core variable's default for `css`: the shipped palette of its
   inferred mode, with roles derived from its winning plain-:root bases (or
-  from the shipped bases when the scanner cannot follow the CSS)."""
+  from the shipped bases).  A base the theme also declares where the
+  scanner cannot resolve it -- or any base, when the scanner cannot follow
+  the CSS at all -- gets `var(<base>)` roles."""
   mode = _infer_theme_mode(css)
   defaults = _shipped_palette(mode)
-  defaults.update(theme_role_vars(scan_root_declarations(css) or {}, mode))
+  root, elsewhere = _scan_theme_css(css) or ({}, {source["base"] for source in _ROLE_SOURCES})
+  defaults.update(theme_role_vars(root, mode, elsewhere))
   return defaults
 
 
@@ -803,7 +833,7 @@ def _prelude_bounds(css: str) -> tuple[int, int]:
   text, mask, _ok = _lex_theme_css(css)
   charset_end = prelude_end = i = 0
   while True:
-    while i < len(mask) and mask[i].isspace():
+    while i < len(mask) and mask[i] in _CSS_WS:
       i += 1
     m = re.match(r"@(charset|import|layer)\b", text[i:i + 8], re.I)
     if not m:
@@ -836,9 +866,8 @@ def _ensure_core_vars(css: str) -> str:
   applies to the root element (unlayered or in any owner layer, in any
   rule or condition) takes precedence over the generated default, and a
   variable the owner never declared still resolves.  An owner !important
-  declaration also wins.  Not guaranteed: that the derived role colours
-  suit an owner base set outside a plain :root rule (they are derived from
-  the winning plain-:root bases, else the shipped ones), or that the served
+  declaration also wins.  A base the owner also sets outside a plain :root
+  gets `var(<base>)` roles, uncertified.  Not guaranteed: that the served
   `bg` metadata matches a background set outside a plain :root -- it is a
   pre-paint hint only; the appliers read the background from the cascade.
   Mirrors `withThemeDefaults` in frontend/src/theme.js byte for byte.
@@ -860,7 +889,7 @@ def _theme_bg(effective_css: str) -> str:
   not seen here; that is why the appliers only use this value for chrome
   painted before the theme stylesheet applies (theme-color, the first
   frame) and read the real background from the cascade afterwards."""
-  bg = (scan_root_declarations(effective_css) or {}).get("--bg", "").strip()
+  bg = (scan_root_declarations(effective_css) or {}).get("--bg", "")
   if re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
     return bg
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)

@@ -21,7 +21,7 @@
 .md-app-block__badge.is-success { background:color-mix(in srgb, var(--green) 18%, transparent); color:color-mix(in srgb, var(--green) 65%, var(--text)); }
 .md-app-block__badge.is-attention { background:color-mix(in srgb, var(--warning, var(--accent)) 20%, transparent); color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__badge.is-danger { background:color-mix(in srgb, var(--danger) 18%, transparent); color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
-.md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--accent-text, var(--accent)); }
+.md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:color-mix(in srgb, var(--accent) 65%, var(--text)); }
 .md-app-block__items { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); }
 .md-app-block__items > li { display:flex; align-items:center; gap:12px; padding:8px 16px; }
 .md-app-block__items > li + li { border-top:1px solid var(--border); }

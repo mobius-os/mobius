@@ -200,7 +200,7 @@
       "--accent-fill": "#4c1d95"
     },
     "expected": {
-      "--accent-fg": "#fefefe",
+      "--accent-fg": "#ffffff",
       "--accent-text": "#957cf8",
       "--accent-fill": "#7c5ce6",
       "--accent-fill-hover": "#441a86",
@@ -212,7 +212,7 @@
     }
   },
   {
-    "name": "unparseable accent keeps its own value",
+    "name": "unparseable accent: roles follow var(--accent)",
     "mode": "dark",
     "declared": {
       "--bg": "#0d0d0d",
@@ -231,9 +231,9 @@
     },
     "expected": {
       "--accent-fg": "#ffffff",
-      "--accent-text": "oklch(70% 0.2 150)",
-      "--accent-fill": "oklch(70% 0.2 150)",
-      "--accent-fill-hover": "oklch(70% 0.2 150)",
+      "--accent-text": "var(--accent)",
+      "--accent-fill": "var(--accent)",
+      "--accent-fill-hover": "var(--accent-hover)",
       "--danger-text": "#f87171",
       "--danger-fill": "#dc2626",
       "--green-text": "#10b981",
@@ -340,7 +340,7 @@
       "--accent-fg": "#888888"
     },
     "expected": {
-      "--accent-fg": "#888888",
+      "--accent-fg": "#000000",
       "--accent-text": "#676767",
       "--accent-fill": "#202020",
       "--accent-fill-hover": "#1d1d1d",
@@ -382,7 +382,7 @@
     }
   },
   {
-    "name": "translucent accent is unsupported and passed through",
+    "name": "translucent accent is unsupported: roles follow var(--accent)",
     "mode": "dark",
     "declared": {
       "--bg": "#0d0d0d",
@@ -401,9 +401,9 @@
     },
     "expected": {
       "--accent-fg": "#ffffff",
-      "--accent-text": "rgba(139, 108, 247, 0.5)",
-      "--accent-fill": "rgba(139, 108, 247, 0.5)",
-      "--accent-fill-hover": "rgba(139, 108, 247, 0.5)",
+      "--accent-text": "var(--accent)",
+      "--accent-fill": "var(--accent)",
+      "--accent-fill-hover": "var(--accent-hover)",
       "--danger-text": "#f87171",
       "--danger-fill": "#dc2626",
       "--green-text": "#10b981",
@@ -412,7 +412,7 @@
     }
   },
   {
-    "name": "surfaces no text colour can satisfy keep the base",
+    "name": "surfaces no text colour can satisfy: roles follow their base",
     "mode": "dark",
     "declared": {
       "--bg": "#777777",
@@ -431,11 +431,71 @@
     },
     "expected": {
       "--accent-fg": "#ffffff",
-      "--accent-text": "#8b6cf7",
+      "--accent-text": "var(--accent)",
       "--accent-fill": "#7c5ce6",
       "--accent-fill-hover": "#7053cf",
-      "--danger-text": "#ff2d55",
+      "--danger-text": "var(--danger)",
       "--danger-fill": "#e0284b",
+      "--green-text": "var(--green)",
+      "--green-fill": "#047857",
+      "--warning-text": "var(--warning)"
+    }
+  },
+  {
+    "name": "a channel with a unit is not a colour",
+    "mode": "dark",
+    "declared": {
+      "--bg": "#0d0d0d",
+      "--surface": "#171717",
+      "--surface-2": "#212121",
+      "--border": "#2a2a2a",
+      "--border-light": "#1f1f1f",
+      "--text": "#ececec",
+      "--muted": "#a8a8a8",
+      "--accent": "rgb(12px, 100, 200)",
+      "--accent-hover": "#7c5ce6",
+      "--accent-dim": "rgba(139, 108, 247, 0.14)",
+      "--danger": "#f87171",
+      "--green": "#10b981",
+      "--warning": "#d8922f"
+    },
+    "expected": {
+      "--accent-fg": "#ffffff",
+      "--accent-text": "var(--accent)",
+      "--accent-fill": "var(--accent)",
+      "--accent-fill-hover": "var(--accent-hover)",
+      "--danger-text": "#f87171",
+      "--danger-fill": "#dc2626",
+      "--green-text": "#10b981",
+      "--green-fill": "#047857",
+      "--warning-text": "#d8922f"
+    }
+  },
+  {
+    "name": "an infinite channel is not a colour",
+    "mode": "dark",
+    "declared": {
+      "--bg": "#0d0d0d",
+      "--surface": "#171717",
+      "--surface-2": "#212121",
+      "--border": "#2a2a2a",
+      "--border-light": "#1f1f1f",
+      "--text": "#ececec",
+      "--muted": "#a8a8a8",
+      "--accent": "rgb(1e999, 0, 0)",
+      "--accent-hover": "#7c5ce6",
+      "--accent-dim": "rgba(139, 108, 247, 0.14)",
+      "--danger": "#f87171",
+      "--green": "#10b981",
+      "--warning": "#d8922f"
+    },
+    "expected": {
+      "--accent-fg": "#ffffff",
+      "--accent-text": "var(--accent)",
+      "--accent-fill": "var(--accent)",
+      "--accent-fill-hover": "var(--accent-hover)",
+      "--danger-text": "#f87171",
+      "--danger-fill": "#dc2626",
       "--green-text": "#10b981",
       "--green-fill": "#047857",
       "--warning-text": "#d8922f"
