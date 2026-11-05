@@ -865,6 +865,8 @@ class SendMessage(BaseModel):
   # Exact physical run shown by Resume; stale recovery controls cannot start
   # a new continuation after automatic recovery has already advanced it.
   resume_run_id: str | None = None
+  # Explicit, warned Continue anyway control for one storage-waiting run.
+  allow_low_storage: bool = False
   # Goal Resume names the durable obligation, not an unrelated chat tail.
   resume_goal_id: str | None = Field(default=None, min_length=1, max_length=64)
   resume_goal_revision: int | None = Field(default=None, ge=0)
@@ -925,6 +927,10 @@ class SendMessage(BaseModel):
 
   @model_validator(mode="after")
   def validate_continuation(self):
+    if self.allow_low_storage and (
+      self.continuation != "manual" or not self.resume_run_id
+    ):
+      raise ValueError("Continue anyway requires the exact storage-waiting run")
     goal_target = self.resume_goal_id is not None or self.resume_goal_revision is not None
     if goal_target and (
       self.resume_goal_id is None or self.resume_goal_revision is None

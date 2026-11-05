@@ -17,7 +17,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
     return () => { if (scopeRef.current === scope) scopeRef.current = null }
   }, [chatId, runId, goalId, goalRevision, hasTarget])
 
-  const resume = useCallback(async () => {
+  const resume = useCallback(async ({ allowLowStorage = false } = {}) => {
     if (blocked?.() || attemptRef.current?.pending) return false
     if (!hasTarget && !attemptRef.current) {
       // A restart can briefly show a durable pause before its replacement run
@@ -28,7 +28,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       return false
     }
     const scope = scopeRef.current
-    const attempt = attemptRef.current || { cid: crypto.randomUUID(), runId, goalId, goalRevision }
+    const attempt = attemptRef.current || { cid: crypto.randomUUID(), runId, goalId, goalRevision, allowLowStorage }
     attempt.pending = true
     attemptRef.current = attempt
     setState({ pending: true, error: '', unavailable: false })
@@ -36,6 +36,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       const result = await send('', undefined, {
         cid: attempt.cid,
         continuation: 'manual',
+        ...(attempt.allowLowStorage ? { allowLowStorage: true } : {}),
         ...(attempt.goalId != null
           ? { resumeGoalId: attempt.goalId, resumeGoalRevision: attempt.goalRevision }
           : { resumeRunId: attempt.runId || undefined }),

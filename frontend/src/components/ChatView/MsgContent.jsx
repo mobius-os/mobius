@@ -604,13 +604,15 @@ function MsgContentInner({
         const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
-        // A resource wait owns its automatic retry. Offering Resume while the
-        // same measured pressure remains only launches a turn admission will
-        // re-park. Once the scheduler reports manual recovery, expose the
-        // existing recovery action instead of leaving the owner at a dead end.
+        // Resource waits retain automatic retry. A warned storage-only action
+        // can admit one cleanup turn even while that measured pressure remains.
+        const storageOverrideAvailable = recoveryOwner && block.pause?.kind === 'storage'
+          && ['automatic', 'recovery'].includes(handoff?.kind)
+          && !['restart_required', 'restoring_edits'].includes(continuationWait)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
+          && !storageOverrideAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
         return (
           <ErrorCard
@@ -650,7 +652,7 @@ function MsgContentInner({
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={onResume}
+                onClick={() => onResume()}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -663,6 +665,23 @@ function MsgContentInner({
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
+            )}
+            {storageOverrideAvailable && (
+              <div className="chat__recovery-actions">
+                <span className="chat__recovery-copy">
+                  Continue this turn despite low storage—for example, to free space.
+                  If the disk fills completely, saving may fail.
+                </span>
+                <button
+                  type="button"
+                  className="chat__resume chat__recovery-action"
+                  onClick={() => onResume({ allowLowStorage: true })}
+                  disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
+                  aria-busy={resumeState?.pending || undefined}
+                >
+                  {resumeState?.pending ? 'Continuing…' : resumeState?.unavailable ? 'Reconnecting…' : 'Continue anyway'}
+                </button>
+              </div>
             )}
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">

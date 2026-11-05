@@ -4871,6 +4871,16 @@ async def _complete_turn(
   return disposition
 
 
+def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
+  """Whether this exact run is the owner's warned low-storage Continue anyway."""
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    control = db.query(models.ChatRun.continuation_json).filter(
+      models.ChatRun.id == run_token, models.ChatRun.chat_id == chat_id,
+    ).scalar() or {}
+  return control.get("reason") == "manual" and control.get("allow_low_storage") is True
+
+
 async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -4917,8 +4927,15 @@ async def run_chat(
   runtime_settled = False
   setup_failure_settled = False
   try:
+    # Admission uses the committed control, not transient request flags. The
+    # permission belongs only to this physical run, never its later retries,
+    # helpers, queued follow-ups or other chats.
+    allow_low_storage = bool(chat_id and run_token) and await asyncio.to_thread(
+      _run_allows_low_storage, chat_id, run_token,
+    )
     await require_agent_turn_admission(
       get_settings().data_dir,
+      allow_low_storage=allow_low_storage,
     )
     # A prior turn may still be releasing this chat's browser resources.
     async with _browser_lifecycle_lock(chat_id):

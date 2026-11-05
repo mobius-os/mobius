@@ -686,6 +686,7 @@ class StartTurn(_Command):
   browser_grant_id: str | None = None
   # The rendered recovery control names its exact interrupted physical run.
   resume_run_id: str | None = None
+  allow_low_storage: bool = False
   restore_archived: bool = False
   owner_input: bool = False
   resume_goal_id: str | None = None
@@ -3697,6 +3698,7 @@ class ChatWriterActor:
         if not manual_resume_matches(
           control, control_id=incoming_cid, run_id=cmd.resume_run_id,
           goal_id=cmd.resume_goal_id, goal_revision=cmd.resume_goal_revision,
+          allow_low_storage=cmd.allow_low_storage,
         ):
           db.rollback()
           return StartTurnRecoveryChanged()
@@ -3778,6 +3780,13 @@ class ChatWriterActor:
       if prior is None:
         db.rollback()
         return StartTurnRecoveryChanged()
+    if cmd.allow_low_storage and (
+      not cmd.owner_input or not resuming or prior is None
+      or cmd.resume_run_id != prior.id or prior.park_reason != "storage"
+      or prior.status not in {"parked", "resume_pending", "interrupted"}
+    ):
+      db.rollback()
+      return StartTurnRecoveryChanged()
     grant_id = cmd.browser_grant_id
     if resuming and prior is not None:
       if grant_id is not None and grant_id != prior.browser_grant_id:
@@ -3893,6 +3902,7 @@ class ChatWriterActor:
           goal_id=goal_id,
           supersedes_run_token=prior.id if prior is not None else None,
           goal_revision=cmd.resume_goal_revision,
+          allow_low_storage=cmd.allow_low_storage,
         )
         if resuming else None
       ),

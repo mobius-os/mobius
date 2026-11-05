@@ -23,6 +23,24 @@ function fixture(send, changes = {}) {
   return { ...hook, props, accepted, refreshes }
 }
 
+test('Continue anyway binds explicit storage permission to the same acknowledged retry', async () => {
+  const requests = []
+  let failed = true
+  const h = fixture(async (...args) => {
+    requests.push(args)
+    if (failed) throw Object.assign(new Error('network'), { outboxRetained: true })
+    return { status: 'started' }
+  })
+  await h.result.current.resume({ allowLowStorage: true })
+  h.rerender()
+  failed = false
+  await h.result.current.resume({ allowLowStorage: true })
+  assert.deepEqual(requests[1], requests[0])
+  assert.equal(requests[0][2].allowLowStorage, true)
+  assert.equal(requests[0][2].resumeRunId, 'interrupted-a')
+  assert.equal(requests[0][0], '', 'the action is not owner-authored prose')
+})
+
 test('Resume stays pending without emitting a row until server acceptance; repeated taps coalesce', async () => {
   const response = deferred(), requests = []
   const h = fixture((...args) => { requests.push(args); return response.promise })

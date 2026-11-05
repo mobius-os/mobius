@@ -1473,6 +1473,7 @@ async def _send_message_locked(
       if not manual_resume_matches(
         control, control_id=body.cid, run_id=body.resume_run_id,
         goal_id=body.resume_goal_id, goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       ):
         raise HTTPException(409, detail={
           "code": "recovery_changed",
@@ -1800,6 +1801,7 @@ async def _send_message_locked(
         resume_run_id=body.resume_run_id,
         resume_goal_id=body.resume_goal_id,
         resume_goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
