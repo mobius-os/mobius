@@ -340,7 +340,8 @@ def test_custom_accent_roles_follow_the_theme_not_the_brand_purple():
 
 def test_theme_bg_is_the_owner_winning_root_value():
   assert theme._theme_bg(_ensure_core_vars(":root { --bg: #102030; }\n:root { --bg: #f0eeeb; }\n")) == "#f0eeeb"
-  assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == "#0d0d0d"
+  # A --bg outside a plain :root only picks the mode; the hint is that mode's default.
+  assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == _shipped("light")["--bg"]
 
 
 def test_cross_language_role_cases():

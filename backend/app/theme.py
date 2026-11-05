@@ -570,11 +570,14 @@ def _is_shipped_value(key: str, value: str) -> bool:
 
 def theme_role_vars(
   declared: dict[str, str], mode: str, unfollowed: "frozenset[str] | set[str]" = frozenset(),
+  unfollowed_accent: str | None = None,
 ) -> dict[str, str]:
   """Every role token, plus --accent-fg, for a theme whose plain-:root
   custom properties are `declared`.  `unfollowed` names the custom
   properties the theme also declares somewhere else (another selector, a
-  condition, a layer, nested), where its value cannot be known here.
+  condition, a layer, nested), where its value cannot be known here;
+  `unfollowed_accent` is the owner's accent found there, which picks the
+  --accent-fg label for the `var(--accent)` fill.
 
   - A base in `unfollowed` gets `var(<base>)` for its roles, the pre-role
     behaviour: buttons and links follow whatever the theme's own base
@@ -603,7 +606,8 @@ def theme_role_vars(
   surfaces = [_parse_css_rgb(value(k)) or _parse_css_rgb(palette[k]) for k in _SURFACE_KEYS]
   light_surfaces = _relative_luminance(surfaces[0]) > 0.179
 
-  out: dict[str, str] = {"--accent-fg": _contrasting_accent_fg(value("--accent")) or "#ffffff"}
+  label_on = unfollowed_accent if "--accent" in unfollowed and unfollowed_accent else value("--accent")
+  out: dict[str, str] = {"--accent-fg": _contrasting_accent_fg(label_on) or "#ffffff"}
   fg_rgb = _parse_css_rgb(declared.get("--accent-fg", out["--accent-fg"]))
 
   def reads_on_surfaces(rgb) -> bool:
@@ -788,16 +792,30 @@ def scan_root_declarations(css: str) -> dict[str, str] | None:
   return scan[0] if scan else None
 
 
+def _first_hex_anywhere(css: str, name: str) -> str | None:
+  """The first hex value declared for custom property `name` anywhere in
+  `css` -- any rule, condition, layer or nesting -- outside comments,
+  strings and url(), or None.  The fallback for a value the plain-:root
+  scan cannot resolve; it reads even CSS the scanner cannot follow.
+  Mirrors `firstHexAnywhere` in frontend/src/theme.js."""
+  _text, mask, _ok = _lex_theme_css(_GENERATED_BLOCK_RE.sub("", css or ""))
+  m = re.search(r"(?<![A-Za-z0-9_-])" + re.escape(name)
+                + r"[ \t\n\r\f]*:[ \t\n\r\f]*(#[0-9a-fA-F]{3,8})(?![0-9A-Za-z_-])", mask)
+  return m.group(1) if m else None
+
+
 def _infer_theme_mode(css: str) -> str:
   """'light' or 'dark' from the theme's winning plain-:root --bg
-  (`scan_root_declarations`), mirroring `inferThemeMode` in
-  frontend/src/theme.js.  Anything else -- no such --bg, a non-hex value,
-  or CSS the scanner cannot follow -- is 'dark', the historical default
-  (DEFAULT_THEME is dark).  #RGB/#RGBA double their nibbles and
-  #RRGGBB/#RRGGBBAA use their leading six digits: alpha never changes the
-  dark-vs-light direction.
+  (`scan_root_declarations`), else the first hex --bg declared anywhere
+  (an `html` rule, a condition, a layer), mirroring `inferThemeMode` in
+  frontend/src/theme.js.  With no hex --bg at all it is 'dark', the
+  historical default (DEFAULT_THEME is dark).  #RGB/#RGBA double their
+  nibbles and #RRGGBB/#RRGGBBAA use their leading six digits: alpha never
+  changes the dark-vs-light direction.
   """
   bg = (scan_root_declarations(css) or {}).get("--bg", "")
+  if not re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
+    bg = _first_hex_anywhere(css, "--bg") or ""
   m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", bg)
   if not m or len(m.group(1)) not in (3, 4, 6, 8):
     return "dark"
@@ -812,11 +830,14 @@ def theme_defaults_for_css(css: str) -> dict[str, str]:
   inferred mode, with roles derived from its winning plain-:root bases (or
   from the shipped bases).  A base the theme also declares where the
   scanner cannot resolve it -- or any base, when the scanner cannot follow
-  the CSS at all -- gets `var(<base>)` roles."""
+  the CSS at all -- gets `var(<base>)` roles.  Its --accent-fg default
+  then follows the first hex --accent declared anywhere, so the label
+  stays legible on the `var(--accent)` fill."""
   mode = _infer_theme_mode(css)
   defaults = _shipped_palette(mode)
   root, elsewhere = _scan_theme_css(css) or ({}, {source["base"] for source in _ROLE_SOURCES})
-  defaults.update(theme_role_vars(root, mode, elsewhere))
+  accent = _first_hex_anywhere(css, "--accent") if "--accent" in elsewhere else None
+  defaults.update(theme_role_vars(root, mode, elsewhere, accent))
   return defaults
 
 

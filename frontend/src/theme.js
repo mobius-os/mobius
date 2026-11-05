@@ -280,9 +280,22 @@ export function scanRootDeclarations(css) {
   return scanThemeCss(css)?.root ?? null
 }
 
-/** 'light' or 'dark' from a theme's winning plain-:root --bg; mirrors `_infer_theme_mode`. */
+// The first hex value declared for `name` anywhere in `css` (any rule,
+// condition, layer or nesting) outside comments, strings and url(), or null.
+// Reads even CSS the scanner cannot follow. Mirrors `_first_hex_anywhere`.
+function firstHexAnywhere(css, name) {
+  const { mask } = lexThemeCss(String(css || '').replace(INJECTED_DEFAULTS_BLOCK_RE, ''))
+  const re = new RegExp(`(?<![A-Za-z0-9_-])${escapeRe(name)}${CSS_WS}*:${CSS_WS}*(#[0-9a-fA-F]{3,8})(?![0-9A-Za-z_-])`)
+  return re.exec(mask)?.[1] ?? null
+}
+
+/**
+ * 'light' or 'dark' from a theme's winning plain-:root --bg, else the first
+ * hex --bg declared anywhere; mirrors `_infer_theme_mode`.
+ */
 export function inferThemeMode(css) {
-  const bg = (scanRootDeclarations(css) || {})['--bg'] || ''
+  let bg = (scanRootDeclarations(css) || {})['--bg'] || ''
+  if (!/^#[0-9a-fA-F]{3,8}$/.test(bg)) bg = firstHexAnywhere(css, '--bg') || ''
   const hex = /^#([0-9a-f]{3,8})$/i.exec(bg)?.[1]
   if (!hex || ![3, 4, 6, 8].includes(hex.length)) return 'dark'
   const rgb = hex.length <= 4
@@ -296,10 +309,11 @@ export function themeDefaultsForCss(css) {
   const mode = inferThemeMode(css)
   const { root, elsewhere } = scanThemeCss(css)
     || { root: {}, elsewhere: new Set(ROLE_SOURCES.map((source) => source.base)) }
+  const accent = elsewhere.has('--accent') ? firstHexAnywhere(css, '--accent') : null
   return {
     ...(mode === 'light' ? LIGHT_COLORS : DARK_COLORS),
     ...THEME_TYPOGRAPHY,
-    ...themeRoleVars(root, mode, elsewhere),
+    ...themeRoleVars(root, mode, elsewhere, accent),
   }
 }
 
@@ -438,7 +452,9 @@ export function isShippedThemeValue(key, value) {
 /**
  * Every role token, plus --accent-fg, for a theme whose plain-:root custom
  * properties are `declared`. `unfollowed` names the custom properties the
- * theme also declares somewhere else, where their value is not known here.
+ * theme also declares somewhere else, where their value is not known here;
+ * `unfollowedAccent` is the owner's accent found there, which picks the
+ * --accent-fg label for the `var(--accent)` fill.
  *
  * - A base in `unfollowed` gets `var(<base>)` roles (the pre-role
  *   behaviour), so buttons and links follow the theme's own base.
@@ -458,14 +474,15 @@ export function isShippedThemeValue(key, value) {
  * declares anywhere outranks them. Mirrors `theme_role_vars` in
  * backend/app/theme.py (cross-checked by themeRoleCases.json).
  */
-export function themeRoleVars(declared, mode, unfollowed = new Set()) {
+export function themeRoleVars(declared, mode, unfollowed = new Set(), unfollowedAccent = null) {
   const palette = mode === 'light' ? LIGHT_COLORS : DARK_COLORS
   const shippedRoles = mode === 'light' ? LIGHT_ROLES : DARK_ROLES
   const value = (key) => declared[key] ?? palette[key]
   const surfaces = SURFACE_KEYS.map((key) => parseCssRgb(value(key)) || parseCssRgb(palette[key]))
   const lightSurfaces = relativeLuminance(surfaces[0]) > 0.179
 
-  const out = { '--accent-fg': contrastingAccentFg(value('--accent')) ?? '#ffffff' }
+  const labelOn = unfollowed.has('--accent') && unfollowedAccent ? unfollowedAccent : value('--accent')
+  const out = { '--accent-fg': contrastingAccentFg(labelOn) ?? '#ffffff' }
   const fgRgb = parseCssRgb(declared['--accent-fg'] ?? out['--accent-fg'])
 
   const readsOnSurfaces = (rgb) => surfaces.every((s) => rgbContrast(rgb, s) >= MIN_TEXT_CONTRAST)
