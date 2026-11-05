@@ -1180,13 +1180,32 @@ send({ event: 'close' })                            // playback ended
 // { type: 'moebius:media-control', sessionId, action: 'play' | 'pause' | 'stop' }.
 ```
 
-The page still reads as hidden while such playback continues. Documents the
-app embeds in its own child iframes are separate pages: forward the visibility
-to them yourself. For the same reason, `<audio>`/`<video>` inside an open
-shadow root isn't reached — the frame's scan doesn't cross shadow boundaries
-and `play` events don't escape them — so pause shadow-DOM media yourself from
-`onVisibilityChange` as well. Plain (light-DOM) elements and `new Audio()` are
-handled for you.
+The page still reads as hidden while such playback continues.
+
+Hidden documents get no animation frames: `requestAnimationFrame` callbacks wait
+for the app's return, as they do on a really hidden page. The same hold covers
+sound and frame loops from the moment the owner opens the mobile drawer over the
+app, so a heavy game cannot starve the drawer and its sound stops before they
+pick a destination. The app stays painted beneath the drawer and does not read
+as hidden, and closing the drawer picks it back up.
+
+A document set as an iframe's `srcdoc` gets all of this with no code. A
+document loaded from a URL, such as a packaged `/app-embeds/` game, cannot be
+reached, but the frame forwards it the verdict, so it only has to listen:
+
+```js
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return
+  const { type, visible, covered, backgroundPlayback } = event.data || {}
+  if (type !== 'moebius:frame-visibility') return
+  setGamePaused((!visible || covered) && !backgroundPlayback)
+})
+```
+
+`<audio>`/`<video>` inside an open shadow root isn't reached either — the
+frame's scan doesn't cross shadow boundaries and `play` events don't escape
+them — so pause shadow-DOM media yourself from `onVisibilityChange` as well.
+Plain (light-DOM) elements and `new Audio()` are handled for you.
 
 ---
 

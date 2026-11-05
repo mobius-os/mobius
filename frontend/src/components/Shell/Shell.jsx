@@ -335,7 +335,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     activeChatId,
     activeProjectId,
     activeArtifactRef,
-    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerOpen, drawerOpening, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, recordChatNavigation, navigateBackward, navigateForward,
     tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
@@ -5090,6 +5090,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // mode scene (cross-origin app interaction is inert throughout).
                 interactive={appRuntimeVisible
                   && !modalDrawerOpen && !modeBeatActive}
+                // Reaching for the drawer holds whatever a leave would hold, so a
+                // heavy game cannot starve the drawer and its sound stops first.
+                covered={modalDrawerOpen || drawerOpening}
                 version={versionForApp(id)}
                 storageGeneration={app?.storage_generation}
                 appName={app?.name}
