@@ -260,9 +260,9 @@
 .ctx__compact {
   min-height: 40px;
   padding: 0 16px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-fill, var(--accent));
   border-radius: 10px;
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #fff);
   font: inherit;
   font-weight: 600;
