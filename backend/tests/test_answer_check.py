@@ -42,6 +42,19 @@ def test_answer_check_flags_an_answer_written_only_in_thinking_at_the_end_of_a_t
   ))
 
 
+def test_answer_check_length_rule_speaks_only_before_any_reminder():
+  # After a reminder, a short reply beside long reasoning is the agent judging
+  # it has nothing to add, as the reminder allows; a new closing draft still counts.
+  assert answer_check.reason(
+    _ANSWER_ONLY_IN_THINKING, chat_id="c", media_dir="/m", before_card=False,
+    reminded=True,
+  ) is None
+  assert _asks_for_the_answer(answer_check.reason(
+    _closing_draft_before_card(), chat_id="c", media_dir="/m", before_card=False,
+    reminded=True,
+  ))
+
+
 def test_answer_check_lets_a_short_lead_in_to_a_card_through():
   # The card carries the content, so a short lead-in after long reasoning is
   # the normal shape of a card turn, not a hidden answer.
@@ -267,7 +280,7 @@ def test_answer_check_names_only_the_host_of_a_link_with_credentials():
   # the reason, which is stored with the declined card.
   output = "remote: https://x-access-token:ghs_SECRET123@github.com/o/r.git\n"
   reason = _reason(
-    _link_only_in_tool_output("Open the link to the repository.", output),
+    _link_only_in_tool_output("Open the repository from the link below.", output),
     before_card=True,
   )
   assert reason is not None
@@ -293,6 +306,27 @@ def test_answer_check_leaves_shown_and_unmentioned_links_alone():
      "output": "GET http://127.0.0.1:8000/api/apps/ 200\nhttp://localhost:5173/"},
     {"type": "text", "content": "The broken link in your app is fixed."},
   ]) is None
+
+
+@pytest.mark.parametrize("text", [
+  "Pay on the test checkout page linked above.",
+  "Use the link below to finish the purchase.",
+  "Open the following link to pay.",
+])
+def test_answer_check_flags_each_way_of_pointing_at_an_unshown_link(text):
+  reason = _reason(_link_only_in_tool_output(text), before_card=True)
+  assert reason is not None and "checkout.stripe.com" in reason
+
+
+@pytest.mark.parametrize("text", [
+  # Talking about a link, or a component named Link, is not pointing at one.
+  "I added a link to the footer.",
+  "Check the Link component.",
+  # A relative markdown link is shown, even though it has no web address.
+  "Open [the link](/shell/?app=3) below.",
+], ids=["a-link", "link-component", "relative-markdown-link"])
+def test_answer_check_leaves_ordinary_link_wording_alone(text):
+  assert _reason(_link_only_in_tool_output(text), before_card=True) is None
 
 
 def test_answer_check_leaves_link_words_and_xml_namespaces_alone():

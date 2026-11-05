@@ -272,6 +272,9 @@ _ANSWER_CHECK_CARD_TOOLS = frozenset(
   f"mcp__{CONTROL_SERVER_NAME}__{name}"
   for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
 )
+# The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
+# of exact tool names, so only these calls pay the PreToolUse round trip.
+_ANSWER_CHECK_CARD_MATCHER = "|".join(sorted(_ANSWER_CHECK_CARD_TOOLS))
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -1358,10 +1361,12 @@ async def run_claude_sdk_turn(
   # ends its turn. Before a card it declines that one tool call, so the agent
   # can write what is missing and call the card again; at the end it returns
   # the turn. After it speaks, it considers only blocks that arrived since (plus
-  # all visible text), so an unchanged retry passes and a second swallowed
-  # answer is caught, up to answer_check.MAX_REMINDERS per turn. A steer
-  # starts a fresh block list, which the identity check below treats as new.
-  # A Stop or a saved owner card owns the turn's end, so neither is reopened.
+  # all visible text), so an unchanged retry or continuation passes and a
+  # second swallowed answer is caught, before a card or at the end, up to
+  # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
+  # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
+  # fresh block list, which the identity check below treats as new. A Stop or
+  # a saved owner card owns the turn's end, so neither is reopened.
   answer_check_reminders = 0
   answer_check_reviewed: tuple[object, int] = (None, 0)
   answer_check_media_dir = os.path.normpath(
@@ -1387,6 +1392,7 @@ async def run_claude_sdk_turn(
       chat_id=chat_id,
       media_dir=answer_check_media_dir,
       before_card=before_card,
+      reminded=answer_check_reminders > 0,
       last_assistant_message=last_assistant_message,
     )
     if reason is None:
@@ -1407,8 +1413,6 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
-    if hook_input.get("stop_hook_active"):
-      return {"continue_": True}
     reason = _answer_check_since_last_reminder(
       before_card=False,
       last_assistant_message=hook_input.get("last_assistant_message"),
@@ -1423,11 +1427,9 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
-    # A delegated child's card goes to its parent agent, not the owner.
-    if (
-      hook_input.get("tool_name") not in _ANSWER_CHECK_CARD_TOOLS
-      or hook_input.get("agent_id")
-    ):
+    # Registered for _ANSWER_CHECK_CARD_MATCHER only. A delegated child's card
+    # goes to its parent agent, not the owner.
+    if hook_input.get("agent_id"):
       return {"continue_": True}
     reason = _answer_check_since_last_reminder(before_card=True)
     if reason is None:
@@ -1547,7 +1549,10 @@ async def run_claude_sdk_turn(
       "hooks": {
         "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
         "PreToolUse": [
-          HookMatcher(matcher=None, hooks=[visible_answer_before_card_hook]),
+          HookMatcher(
+            matcher=_ANSWER_CHECK_CARD_MATCHER,
+            hooks=[visible_answer_before_card_hook],
+          ),
         ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),

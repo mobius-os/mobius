@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import tempfile
 import time
 from collections import deque
@@ -3707,8 +3708,11 @@ async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monk
   class _Client(_FakeClient):
     async def receive_response(self):
       decisions.append(await _fire_stop_hook(self.options))
-      # The agent's own continuation writes the answer, and a second Stop from
-      # any cause never loops back into the check.
+      # The agent's continuation ends with long reasoning and nothing more to
+      # say, as the reminder allows: that Stop, and any later one, passes.
+      bus.assistant_blocks.append({
+        "type": "thinking", "content": "The reply already covers it. " * 40,
+      })
       decisions.append(await _fire_stop_hook(self.options, stop_hook_active=True))
       decisions.append(await _fire_stop_hook(self.options))
       yield _success_result()
@@ -3721,6 +3725,40 @@ async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monk
   assert decisions[0]["reason"].startswith("Möbius end-of-turn check.")
   assert "brief explanation of the conclusion" in decisions[0]["reason"]
   assert decisions[1:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_at_the_end_catches_an_answer_swallowed_again_after_its_reminder(monkeypatch):
+  from app.answer_check import MAX_REMINDERS
+
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = list(_ANSWER_ONLY_IN_THINKING)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_stop_hook(self.options))
+      # Each continuation does more work and again writes its answer only as
+      # thinking; the CLI marks those Stops as continuing from this hook.
+      for _ in range(MAX_REMINDERS):
+        bus.assistant_blocks.append({"type": "tool", "tool": "Bash", "status": "done"})
+        bus.assistant_blocks.append(_answer_as_second_thinking_part(
+          f"Step {len(bus.assistant_blocks)}: the preview build memory limit is "
+          "still too low, so the deploy cannot be retried yet.",
+        ))
+        decisions.append(await _fire_stop_hook(self.options, stop_hook_active=True))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-stop-rearm-chat", bc=bus)
+
+  assert result["error"] is None
+  # Each new swallowed answer is caught until the per-turn cap ends the turn.
+  assert [d.get("decision") for d in decisions] == [
+    *["block"] * MAX_REMINDERS, None,
+  ]
+  assert decisions[-1] == {"continue_": True}
+  assert all("preview build memory limit" not in d.get("reason", "") for d in decisions)
 
 
 @pytest.mark.asyncio
@@ -3764,8 +3802,7 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
 
   class _Client(_FakeClient):
     async def receive_response(self):
-      # Ordinary tools and a delegated child's card pass untouched.
-      decisions.append(await _fire_pre_card_hook(self.options, tool_name="Bash"))
+      # A delegated child's card passes untouched.
       decisions.append(await _fire_pre_card_hook(self.options, agent_id="child-1"))
       decisions.append(await _fire_pre_card_hook(self.options))
       # The agent's retried card, and the turn's end, are not stopped again.
@@ -3777,8 +3814,8 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
   result = await _run_turn(chat_id, bc=bus)
 
   assert result["error"] is None
-  assert decisions[:2] == [{"continue_": True}, {"continue_": True}]
-  denied = decisions[2]["hookSpecificOutput"]
+  assert decisions[0] == {"continue_": True}
+  denied = decisions[1]["hookSpecificOutput"]
   assert denied["hookEventName"] == "PreToolUse"
   assert denied["permissionDecision"] == "deny"
   reason = denied["permissionDecisionReason"]
@@ -3787,7 +3824,26 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
   else:
     assert "brief explanation of the conclusion" in reason
     assert _DRAFT not in reason
-  assert decisions[3:] == [{"continue_": True}, {"continue_": True}]
+  assert decisions[2:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_before_a_card_is_registered_only_for_owner_card_tools(monkeypatch):
+  clients = _install_fake_client(monkeypatch)
+  await _run_turn("answer-check-matcher-chat", bc=_ChatBus())
+
+  (matcher,) = clients[0].options.hooks["PreToolUse"]
+  assert [hook.__name__ for hook in matcher.hooks] == ["visible_answer_before_card_hook"]
+  # The CLI reads a matcher of only letters, digits, `_` and `|` as a list of
+  # exact tool names, so no other tool call pays a hook round trip
+  # (proved against the bundled CLI in test_claude_subagent_hook_stop_e2e).
+  assert re.fullmatch(r"[a-zA-Z0-9_|]+", matcher.matcher)
+  assert set(matcher.matcher.split("|")) == {
+    "mcp__mobius_control__request_approval",
+    "mcp__mobius_control__request_question",
+    "mcp__mobius_control__request_restart",
+    "mcp__mobius_control__request_secret",
+  }
 
 
 @pytest.mark.asyncio

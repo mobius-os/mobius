@@ -51,11 +51,15 @@ _DRAFT_MIN_CHARS = 40
 _SHARED_WORDS = 5
 _IMAGE_PATH = re.compile(r"\.(?:gif|jpe?g|png|webp)$", re.IGNORECASE)
 _URL = re.compile(r"https?://[^\s\"'<>()\[\]\\`]+")
-# A reply that points at a link ("the link", "linked above") rather than one
-# that merely uses the word ("the nav link colour").
+# A markdown link target shows a link, relative ones such as `/shell/?app=3`
+# included.
+_MARKDOWN_LINK = re.compile(r"\]\(\s*[^)\s]")
+# A reply that points at where a link is ("the link below", "linked above")
+# rather than one that talks about links ("I added a link to the footer",
+# "the Link component").
 _POINTS_TO_A_LINK = re.compile(
-  r"\b(?:(?:the|this|that|a|your|following)\s+(?:links?|urls?)\b"
-  r"|links?\s+(?:above|below)\b|linked\s+(?:above|below|here)\b)",
+  r"\b(?:(?:links?|urls?)\s+(?:above|below)\b|linked\s+(?:above|below|here)\b"
+  r"|following\s+(?:links?|urls?)\b)",
   re.IGNORECASE,
 )
 # An XML namespace (`xmlns="http://www.w3.org/2000/svg"`) is an identifier,
@@ -124,6 +128,7 @@ def reason(
   chat_id: str,
   media_dir: str,
   before_card: bool,
+  reminded: bool = False,
   last_assistant_message: object = None,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
@@ -131,7 +136,10 @@ def reason(
   ``last_assistant_message`` is the CLI's own final text, which the Stop hook
   can see before the stream reader has dispatched it. Before a card, the card
   itself carries the content, so a short lead-in after long reasoning is
-  normal; only a closing draft counts there.
+  normal; only a closing draft counts there. Once a reminder has spoken this
+  turn (``reminded``), the length rule stays quiet: it has no new evidence, and
+  a reply that ends with more reasoning and nothing more to say, as the
+  reminder allows, must not be returned again for it.
   """
   if not isinstance(blocks, list):
     return None
@@ -145,7 +153,10 @@ def reason(
     (not undispatched and _has_unsaid_draft(
       _closing_thinking(blocks), visible, _closing_draft_candidates,
     ))
-    or (not before_card and _answer_may_be_only_in_thinking(blocks, visible))
+    or (
+      not before_card and not reminded
+      and _answer_may_be_only_in_thinking(blocks, visible)
+    )
   ):
     parts.append(_MISSING_ANSWER.format(seen=_seen(visible)))
   images = _unshown_viewed_images(blocks, media_dir, visible)
@@ -359,13 +370,16 @@ def _unshown_viewed_images(blocks: list, media_dir: str, visible: str) -> list[s
 def _tool_output_link_hosts_the_reply_points_to(blocks: list, visible: str) -> list[str]:
   """Hosts of links seen only in tool output when the reply points to a link.
 
-  Fires only when the visible reply points at a link yet contains no web
-  address at all: tool output routinely holds addresses nobody needs, so their
-  mere presence says nothing; a reply that points to one and shows none does.
-  Only the host is named, never userinfo such as a token in
+  Fires only when the visible reply points at a link yet shows none at all (no
+  web address, no markdown link): tool output routinely holds addresses nobody
+  needs, so their mere presence says nothing; a reply that points to one and
+  shows none does. Only the host is named, never userinfo such as a token in
   ``https://user:token@host``.
   """
-  if not _POINTS_TO_A_LINK.search(visible) or _URL.search(visible):
+  if (
+    not _POINTS_TO_A_LINK.search(visible)
+    or _URL.search(visible) or _MARKDOWN_LINK.search(visible)
+  ):
     return []
   hosts: list[str] = []
   for block in blocks:
