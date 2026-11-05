@@ -490,40 +490,40 @@ def test_resumed_helper_task_counters_are_kept_but_never_claimed_for_the_turn():
   assert usage["provider_task_usage"]["notification"]["total_tokens"] == 5_000
 
 
-def _helper(final=None, progress=None, attributable=True):
-  return normalize_claude_helper_task_usage(
-    final=final, progress=progress, attributable=attributable, turn_duration_ms=5,
-  )
-
-
 def test_usage_quality_labels_new_and_older_shapes_honestly():
   from app.usage_metrics import run_usage_quality
 
   claude = normalize_claude_usage({"input_tokens": 1, "output_tokens": 1})
   assert run_usage_quality(claude) == "final"
-  assert run_usage_quality({"calculation": "thread_delta"}) == "final"
+  assert run_usage_quality({"calculation": "thread_delta"}, "completed") == "final"
+  # Older Codex rows stored thread_delta for stopped and failed runs too.
+  assert run_usage_quality({"calculation": "thread_delta"}, "stopped") == "partial"
+  assert run_usage_quality({"calculation": "thread_delta"}, "failed") == "partial"
   # Codex's counter-reset fallback is the latest call only: a lower bound.
   assert run_usage_quality({"calculation": "last_call_fallback"}) == "partial"
-  assert run_usage_quality(_helper(final={"total_tokens": 9})) == "final"
-  assert run_usage_quality(_helper(progress={"total_tokens": 0})) == "partial"
-  assert run_usage_quality(_helper(progress={"tool_uses": 2})) == "unknown"
+  assert run_usage_quality(_helper_usage(final={"total_tokens": 9})) == "final"
+  assert run_usage_quality(_helper_usage(progress={"total_tokens": 0})) == "partial"
+  assert run_usage_quality(_helper_usage(progress={"tool_uses": 2})) == "unknown"
   assert run_usage_quality(
-    _helper(final={"total_tokens": 9}, attributable=False),
+    _helper_usage(final={"total_tokens": 9}, attributable=False),
   ) == "unknown"
   # The pre-label hosted-helper shape and other unrecognized shapes are never final.
   assert run_usage_quality({"total_tokens": 9, "duration_ms": 1}) == "unknown"
   assert run_usage_quality({}) == "unknown"
-  assert run_usage_quality({"coverage": "made-up", "calculation": "thread_delta"}) == "unknown"
+  assert run_usage_quality(
+    {"coverage": "made-up", "calculation": "thread_delta"}, "completed",
+  ) == "unknown"
   assert run_usage_quality("legacy") == "unknown"
   # Shapes written before the four labels keep an honest classification.
   assert run_usage_quality({"coverage": "unattributed", "total_tokens": None}) == "unknown"
   assert run_usage_quality(None) == "missing"
 
 
-def _run(usage, **counts):
+def _run(usage, status="completed", **counts):
   from app.usage_metrics import CHAT_TOKEN_FIELDS
   return SimpleNamespace(
-    **{field: counts.get(field) for field in CHAT_TOKEN_FIELDS}, usage_json=usage,
+    **{field: counts.get(field) for field in CHAT_TOKEN_FIELDS},
+    usage_json=usage, status=status,
   )
 
 
@@ -532,9 +532,9 @@ def test_summary_separates_observed_sums_from_run_quality():
 
   final = _run({"calculation": "thread_delta"}, input_tokens=100,
                cache_read_input_tokens=80, output_tokens=10, total_tokens=110)
-  partial_zero = _run(_helper(progress={"total_tokens": 0}), total_tokens=0)
-  final_zero = _run(_helper(final={"total_tokens": 0}), total_tokens=0)
-  unattributed = _run(_helper(final={"total_tokens": 500}, attributable=False))
+  partial_zero = _run(_helper_usage(progress={"total_tokens": 0}), total_tokens=0)
+  final_zero = _run(_helper_usage(final={"total_tokens": 0}), total_tokens=0)
+  unattributed = _run(_helper_usage(final={"total_tokens": 500}, attributable=False))
   missing = _run(None)
 
   only_final = summarize_chat_run_tokens([final, final_zero])

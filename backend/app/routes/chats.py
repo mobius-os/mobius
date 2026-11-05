@@ -2546,7 +2546,7 @@ def get_chat_usage(
         **{field: getattr(run, field) for field in CHAT_TOKEN_FIELDS},
         "model_context_window": run.model_context_window,
         "usage": run.usage_json,
-        "usage_quality": run_usage_quality(run.usage_json),
+        "usage_quality": run_usage_quality(run.usage_json, run.status),
       }
       for run in runs
     ],

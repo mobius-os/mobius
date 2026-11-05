@@ -45,8 +45,12 @@ _FINAL_CALCULATIONS = ("result_aggregate", "thread_delta")
 _PARTIAL_CALCULATIONS = ("last_call_fallback",)
 
 
-def run_usage_quality(usage: Any) -> str:
-  """Classify one durable run's ``usage_json``; see ``USAGE_QUALITIES``."""
+def run_usage_quality(usage: Any, status: str | None = None) -> str:
+  """Classify one durable run's ``usage_json``; see ``USAGE_QUALITIES``.
+
+  ``status`` is the run's status. Older Codex rows recorded ``thread_delta``
+  for every run, so that calculation is final only for a completed run.
+  """
   if usage is None:
     return "missing"
   if not isinstance(usage, dict):
@@ -55,6 +59,8 @@ def run_usage_quality(usage: Any) -> str:
   if coverage in ("final", "partial"):
     return coverage
   calculation = usage.get("calculation")
+  if coverage is None and calculation == "thread_delta" and status != "completed":
+    return "partial"
   if coverage is None and calculation in _FINAL_CALCULATIONS:
     return "final"
   if coverage is None and calculation in _PARTIAL_CALCULATIONS:
@@ -79,7 +85,10 @@ def summarize_chat_run_tokens(runs: Any) -> dict:
       if getattr(run, field, None) is not None
     ]
     totals[field] = sum(values) if values else None
-  qualities = [run_usage_quality(getattr(run, "usage_json", None)) for run in rows]
+  qualities = [
+    run_usage_quality(getattr(run, "usage_json", None), getattr(run, "status", None))
+    for run in rows
+  ]
   return {
     "coverage": {
       "runs": len(rows),
