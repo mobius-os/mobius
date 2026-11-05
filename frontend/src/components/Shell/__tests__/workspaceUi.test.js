@@ -1517,9 +1517,9 @@ test('complete and scoped reads both preserve pending archive intent', () => {
 })
 
 function deferred() {
-  let resolve
-  const promise = new Promise(r => { resolve = r })
-  return { promise, resolve }
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
 }
 
 function harness() {
@@ -1606,6 +1606,35 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('unreachable archive says so and offers Try again, which a success then replaces', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].reject(new TypeError('Load failed'))
+  assert.equal(await first, false)
+  assert.equal(h.row.archived_at, null, 'failure settles from the server row')
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius couldn’t be reached\./)
+  assert.equal(h.notices[0].options.variant, 'error')
+  assert.equal(h.notices[0].options.action.label, 'Try again')
+  const retry = h.notices[0].options.action.onAction()
+  await tick()
+  assert.deepEqual(h.calls, ['archive', 'archive'])
+  h.requests[1].resolve({ ok: true })
+  assert.equal(await retry, true)
+  assert.equal(h.row.archived_at, 'server-archive')
+  assert.equal(h.notices[1].options.noticeKey, h.notices[0].options.noticeKey,
+    'the success notice replaces the error notice')
+})
+
+test('a server error reads differently from an unreachable server', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].resolve({ ok: false })
+  await first
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius hit an error\./)
 })
 
 test('Undo reverses a committed archive without creating another Undo', async () => {
