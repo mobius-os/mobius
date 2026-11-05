@@ -155,6 +155,6 @@ def test_continue_anyway_tells_the_agent_storage_is_still_low():
   warned = continuation_protocol_source(
     reason="manual", control_id="c", run_token="r", allow_low_storage=True,
   )
-  assert "critically low" not in plain["content"]
-  assert "Storage is still critically low" in warned["content"]
-  assert "Free space first and avoid large writes" in warned["content"]
+  assert "disk safety floor" not in plain["content"]
+  assert "below the shared disk safety floor" in warned["content"]
+  assert "Check free space first" in warned["content"]

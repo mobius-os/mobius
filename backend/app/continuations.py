@@ -319,8 +319,9 @@ def continuation_protocol_source(
     # The owner let this one turn start below the disk safety floor, which
     # every chat shares: say so, so the agent frees space before writing.
     content += (
-      " Storage is still critically low: the owner let this turn continue so"
-      " space can be freed. Free space first and avoid large writes."
+      " The owner let this turn start below the shared disk safety floor."
+      " Check free space first; while it is still low, free space and avoid"
+      " large writes."
     )
   if undelivered:
     content = "\n\n".join([
