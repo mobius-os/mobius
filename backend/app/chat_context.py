@@ -602,10 +602,12 @@ def _with_tool_activity(row):
   ):
     return row
   parts: list[str] = []
+  has_text = False
   for block in blocks:
     if not isinstance(block, dict):
       continue
     if block.get("type") == "text" and isinstance(block.get("content"), str):
+      has_text = has_text or bool(block["content"].strip())
       parts.append(block["content"].strip())
     elif block.get("type") == "tool":
       name = block.get("tool") or block.get("name") or "tool"
@@ -614,6 +616,10 @@ def _with_tool_activity(row):
         detail = json.dumps(detail, ensure_ascii=False)
       detail = " ".join(detail.split())[:_TOOL_NOTE_CHARS]
       parts.append(f"[used {name}{': ' + detail if detail else ''}]")
+  if not has_text and isinstance(row.get("content"), str):
+    # Rows whose blocks hold only tool calls keep their answer in ``content``;
+    # it follows the tools it came after.
+    parts.append(row["content"].strip())
   text = "\n\n".join(part for part in parts if part)
   return {**row, "content": text} if text else row
 

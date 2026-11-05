@@ -214,7 +214,8 @@ def branch_chat(
   """Create and commit the branch of ``source`` through one reply.
 
   Upload files are linked into the branch's folder before the commit and the
-  folder is removed if the commit fails, so a failed branch leaves nothing.
+  folder is removed if copying or the commit fails, so a failed branch leaves
+  nothing.
   """
   rows = branch_rows(source, transcript_rows.read_all(db, source), through_key)
   # Top-level chats run in the data directory (chat.py), which is also where
@@ -243,18 +244,17 @@ def branch_chat(
   names = _attachment_names(rows)
   source_uploads = Path(data_dir) / "chats" / source.id / "uploads"
   branch_uploads = Path(data_dir) / "chats" / branch.id / "uploads"
-  uploads = []
-  for entry in source.uploads or []:
-    name = entry.get("name") if isinstance(entry, dict) else None
-    if name not in names or not (source_uploads / name).is_file():
-      continue
-    branch_uploads.mkdir(parents=True, exist_ok=True)
-    _link_or_copy(source_uploads / name, branch_uploads / name)
-    uploads.append(copy.deepcopy(entry))
-  branch.uploads = uploads
-
   tool_ids = _tool_use_ids(rows, set())
   try:
+    uploads = []
+    for entry in source.uploads or []:
+      name = entry.get("name") if isinstance(entry, dict) else None
+      if name not in names or not (source_uploads / name).is_file():
+        continue
+      branch_uploads.mkdir(parents=True, exist_ok=True)
+      _link_or_copy(source_uploads / name, branch_uploads / name)
+      uploads.append(copy.deepcopy(entry))
+    branch.uploads = uploads
     db.add(branch)
     ordered_ids = sorted(tool_ids)
     # Chunked to stay far below SQLite's bound-parameter limit on long chats.

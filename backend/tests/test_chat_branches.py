@@ -6,7 +6,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from app import chat as chat_mod, models, schemas, transcript_rows
+import pytest
+
+from app import chat as chat_mod, chat_branches, models, schemas, transcript_rows
 from app.broadcast import create_broadcast
 from app.chat_branches import claude_fork_point, codex_fork_point
 from app.chat_writer import StartTurn, alloc_run_token, get_writer
@@ -269,3 +271,41 @@ def test_text_history_notes_the_tools_a_reply_used():
     {"type": "text", "content": "Sunny."},
   ]}
   assert _with_tool_activity(row)["content"] == 'Checking.\n\n[used WebSearch: {"query": "rome weather"}]\n\nSunny.'
+
+
+def test_text_history_keeps_the_answer_of_a_reply_with_only_tool_blocks():
+  from app.chat_context import _with_tool_activity
+
+  row = {"role": "assistant", "content": "Done", "blocks": [
+    {"type": "tool", "tool": "Read", "input": "notes.txt"},
+  ]}
+  assert _with_tool_activity(row)["content"] == "[used Read: notes.txt]\n\nDone"
+
+
+def test_failed_upload_copy_leaves_no_branch_folder(client, auth, db, monkeypatch):
+  data_dir = Path(get_settings().data_dir)
+  messages = [
+    {"role": "user", "content": "Read these", "cid": "u1", "ts": 1,
+     "attachments": [{"name": "one.txt"}, {"name": "two.txt"}]},
+    {"id": "a1", "role": "assistant", "content": "Done", "ts": 2},
+  ]
+  source_id = _chat(client, auth, db, messages, uploads=[
+    {"name": "one.txt", "claimed": True}, {"name": "two.txt", "claimed": True},
+  ])
+  uploads = data_dir / "chats" / source_id / "uploads"
+  uploads.mkdir(parents=True, exist_ok=True)
+  (uploads / "one.txt").write_text("one")
+  (uploads / "two.txt").write_text("two")
+  real_copy = chat_branches._link_or_copy
+
+  def _fail_second(source, target):
+    if source.name == "two.txt":
+      raise OSError("disk full")
+    real_copy(source, target)
+
+  monkeypatch.setattr(chat_branches, "_link_or_copy", _fail_second)
+  before = set((data_dir / "chats").iterdir())
+  with pytest.raises(OSError):
+    client.post(f"/api/chats/{source_id}/branch", json={"through": "a1"}, headers=auth)
+  assert set((data_dir / "chats").iterdir()) == before
+  assert db.query(models.Chat).count() == 1
