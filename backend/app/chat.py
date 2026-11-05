@@ -2846,22 +2846,14 @@ async def _clear_pending(chat_id: str) -> list[str]:
   Awaits the ack so a clear-then-bail caller sees the queue emptied
   before it returns. Best-effort on a failed ack: logged + swallowed (a
   stranded queue is reconciled on the next interaction), so a clear
-  failure never blocks Stop or a terminal-error bail.
+  failure never blocks a terminal-error bail. Callers that must know
+  whether the queue really emptied use `_clear_pending_strict`.
 
   Returns the stable `cid`s it actually cleared (empty on a no-op, a missing
-  chat_id, or a failed/swallowed ack). Stop uses this to resend ONLY the
-  queued messages it truly removed — a message the turn-end drain already
-  promoted into a continuation is gone from the queue, so it isn't in this
-  list and won't be double-sent.
+  chat_id, or a failed/swallowed ack).
   """
-  if not chat_id:
-    return []
   try:
-    ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
-    result = await _await_ack(ack)
-    if isinstance(result, dict):
-      return [c for c in result.get("cleared_cids", []) if c is not None]
-    return []
+    return await _clear_pending_strict(chat_id)
   except Exception:
     _get_logger().warning(
       "ClearPending did not persist chat_id=%s", chat_id, exc_info=True,
@@ -2869,25 +2861,29 @@ async def _clear_pending(chat_id: str) -> list[str]:
     return []
 
 
-async def _clear_pending_strict(chat_id: str) -> None:
-  """Strict terminal variant of `_clear_pending`: surfaces a failed ack.
+async def _clear_pending_strict(chat_id: str) -> list[str]:
+  """Strict variant of `_clear_pending`: surfaces a failed ack.
 
-  The best-effort `_clear_pending` above swallows a failed ack because a
-  stranded queue is self-correcting on the next interaction — fine for
-  Stop and a cancel-then-bail. But a TERMINAL cleanup path (no-owner /
-  auth-error / unsupported-provider) records its outcome as a
-  `TerminalDisposition`: if the queue clear didn't durably land, the path
-  must be able to OBSERVE that and leave the durable run marker set so
-  reconciliation recovers the incomplete turn — exactly what swallowing
-  would hide. So this re-raises on a failed ack (or a lock/ack timeout the
-  bounded caller imposes) rather than logging-and-continuing.
+  A TERMINAL cleanup path (no-owner / auth-error / unsupported-provider)
+  records its outcome as a `TerminalDisposition`: if the queue clear didn't
+  durably land, the path must be able to OBSERVE that and leave the durable
+  run marker set so reconciliation recovers the incomplete turn. Stop needs
+  the same certainty before it issues a receipt, since a receipt promises no
+  queued turn can still run. So this re-raises on a failed ack rather than
+  logging-and-continuing.
 
-  No-op (no raise) when there's no chat_id — nothing to clear.
+  Returns the stable `cid`s it cleared. Stop uses them to resend ONLY the
+  queued messages it truly removed — a message the turn-end drain already
+  promoted into a continuation is gone from the queue, so it isn't in this
+  list and won't be double-sent. No-op (no raise) when there's no chat_id.
   """
   if not chat_id:
-    return
+    return []
   ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
-  await _await_ack(ack)
+  result = await _await_ack(ack)
+  if isinstance(result, dict):
+    return [c for c in result.get("cleared_cids", []) if c is not None]
+  return []
 
 
 def _finalize_broadcast_if_running(chat_id: str) -> None:
@@ -3305,7 +3301,7 @@ async def _stop_chat_for_locked(
   # TERMINAL_LOCK_TIMEOUT_SECS so a wedged lock holder can't hang Stop; on a
   # timeout the queue is left for reconciliation (the clear is best-effort
   # here by design — Stop's job is the interrupt, and a stranded queue
-  # self-heals on the next interaction).
+  # self-heals on the next interaction — but then Stop issues no receipt).
   log = _get_logger()
   cleared_pending_cids: list[str] = []
   queue_cleared = False
@@ -3321,11 +3317,13 @@ async def _stop_chat_for_locked(
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          cleared_pending_cids = await _clear_pending(chat_id)
+          # Strict: a swallowed failure would let Stop receipt a chat whose
+          # queued turns can still run.
+          cleared_pending_cids = await _clear_pending_strict(chat_id)
       queue_cleared = True
     except (Exception, asyncio.TimeoutError):
       log.warning(
-        "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
+        "stop_chat_for: queue clear failed or timed out chat_id=%s — leaving "
         "queue for reconciliation", chat_id, exc_info=True,
       )
   questions.cancel(chat_id)

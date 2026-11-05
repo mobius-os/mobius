@@ -246,6 +246,52 @@ def test_cancel_after_deletion_before_the_app_linked_fences_the_released_scope(
   assert replay.json()["detail"]["code"] == "scope_cancelled"
 
 
+def test_cancel_racing_the_owners_deletion_fences_the_released_scope(
+  client, owner_token, db, monkeypatch,
+):
+  from app.database import SessionLocal
+  from app.routes import chats as chats_route
+  from app.routes import chats_stream
+
+  app_id, token = _make_app(client, owner_token, "deleted-during-cancel")
+
+  async def reject(body, chat_id, principal, request_db):
+    return JSONResponse({"detail": "busy"}, status_code=409)
+
+  monkeypatch.setattr(chats_stream, "send_message", reject)
+  chat_id = _start(client, token, "cycle:raced").json()["detail"]["chat_id"]
+  real_fence = chats_route._fence_scoped_start
+  calls = []
+
+  def admitted_then_deleted_before_the_reread(request_db, app_id, scope):
+    calls.append(scope)
+    if len(calls) == 1:
+      # The writer admits a turn after classification, so the fence fails;
+      # the owner then deletes the chat before cancel re-reads the scope.
+      with SessionLocal() as other:
+        other.get(models.AppChatScopeStart, (app_id, scope)).admitted_at = now_naive_utc()
+        other.commit()
+      fenced = real_fence(request_db, app_id, scope)
+      with SessionLocal() as other:
+        other.get(models.Chat, chat_id).deleted_at = now_naive_utc()
+        other.commit()
+      return fenced
+    return real_fence(request_db, app_id, scope)
+
+  monkeypatch.setattr(
+    chats_route, "_fence_scoped_start", admitted_then_deleted_before_the_reread,
+  )
+  cancelled = _cancel(client, token, "cycle:raced")
+
+  assert cancelled.status_code == 200, cancelled.text
+  assert cancelled.json() == {
+    "scope": "cycle:raced", "outcome": "cancelled", "chat_id": None,
+  }
+  assert len(calls) == 2
+  assert db.get(models.AppChatScopeStart, (app_id, "cycle:raced")).cancelled_at
+  assert _start(client, token, "cycle:raced", cid="replay").status_code == 409
+
+
 def test_cancel_waits_for_an_in_flight_admission_and_reports_it(
   client, owner_token, db, monkeypatch,
 ):

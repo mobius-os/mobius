@@ -256,3 +256,29 @@ def test_resume_contending_for_the_stop_gate_is_admitted_after_the_receipt(
   db.expire_all()
   assert db.get(models.ChatRun, "stopped-run").status == "stopped"
   assert db.get(models.ChatRun, "resumed-run").status == "running"
+
+
+def test_failed_queue_clear_issues_no_receipt_and_keeps_the_queue(
+  client, auth, db, chat, monkeypatch,
+):
+  """A receipt promises no queued turn can still run; a clear the writer
+  failed to persist leaves them queued, so Stop must not issue one."""
+  from app.chat_writer import ChatWriterActor
+  seed_run(db, chat, "stopped-run", status="running")
+  chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid"}]
+  db.commit()
+
+  def clear_fails(self, db, cmd):
+    raise RuntimeError("database is locked")
+
+  monkeypatch.setattr(ChatWriterActor, "_clear_pending", clear_fails)
+
+  response = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert body["stopped"] is True
+  assert body["cleared_pending_cids"] == []
+  assert body["stop_receipt"] is None
+  db.expire_all()
+  assert [row["cid"] for row in db.get(models.Chat, chat.id).pending_messages] == ["queued-cid"]

@@ -4038,8 +4038,10 @@ async def cancel_scoped_app_chat_start(
   async with _scoped_start_lock(app_id, body.scope):
     db.rollback()
     state = _resolve_scoped_start(db, app_id, body.scope)[0]
-    if state in ("absent", "pending"):
-      # A failed fence means the chat writer admitted a turn after that read.
+    while state in ("absent", "pending"):
+      # A failed fence means the scope changed after that read: the chat
+      # writer admitted a turn, or the owner deleted the chat and released
+      # the scope. Re-read it; a released scope is fenced on the next pass.
       state = (
         "cancelled" if _fence_scoped_start(db, app_id, body.scope)
         else _resolve_scoped_start(db, app_id, body.scope)[0]
