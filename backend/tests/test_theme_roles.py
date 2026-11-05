@@ -220,6 +220,7 @@ def test_cross_language_stylesheet_cases():
   assert len(cases) >= 20
   for case in cases:
     assert _ensure_core_vars(case["css"]) == case["expected"], case["name"]
+    assert theme._theme_bg(case["expected"]) == case["bg"], case["name"]
 
 
 def test_owner_declarations_always_win_and_every_core_var_resolves():
@@ -340,8 +341,9 @@ def test_custom_accent_roles_follow_the_theme_not_the_brand_purple():
 
 def test_theme_bg_is_the_owner_winning_root_value():
   assert theme._theme_bg(_ensure_core_vars(":root { --bg: #102030; }\n:root { --bg: #f0eeeb; }\n")) == "#f0eeeb"
-  # A --bg outside a plain :root only picks the mode; the hint is that mode's default.
-  assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == _shipped("light")["--bg"]
+  # With no plain-:root --bg, the first hex --bg declared anywhere, as for the mode.
+  assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == "#ffffff"
+  assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#0d0d0d"
 
 
 def test_cross_language_role_cases():

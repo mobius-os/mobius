@@ -360,13 +360,17 @@ export function withThemeDefaults(css) {
 
 /**
  * A pre-paint HINT for an effective theme's background: the owner's winning
- * plain-:root hex --bg, else the generated default. A background set in any
- * other rule is not seen here, so appliers use this only for chrome painted
+ * plain-:root hex --bg, else the first hex --bg declared anywhere (the rule
+ * `inferThemeMode` uses), else the generated default. It may not be what a
+ * condition or layer resolves, so appliers use this only for chrome painted
  * before the theme stylesheet applies and read the cascade afterwards.
+ * Mirrors `_theme_bg` in backend/app/theme.py.
  */
 export function themeBg(effectiveCss) {
   const bg = (scanRootDeclarations(effectiveCss) || {})['--bg'] || ''
   if (/^#[0-9a-fA-F]{3,8}$/.test(bg)) return bg
+  const anywhere = firstHexAnywhere(effectiveCss, '--bg')
+  if (anywhere) return anywhere
   return String(effectiveCss || '').match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
 }
 

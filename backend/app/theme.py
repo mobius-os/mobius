@@ -144,7 +144,7 @@ def extract_imports(css: str) -> tuple[list[str], str]:
 
 def get_bg_color(data_dir: str) -> str:
   """Extracts the --bg color for use in the manifest."""
-  return _theme_bg(get_theme_css(data_dir))
+  return load_effective_theme(data_dir).bg
 
 
 def get_theme_mode(data_dir: str) -> str:
@@ -905,13 +905,18 @@ def _ensure_core_vars(css: str) -> str:
 
 def _theme_bg(effective_css: str) -> str:
   """A pre-paint HINT for the theme's background: the owner's winning
-  plain-:root --bg when it is a hex colour, else the generated default.  A
-  background set in another rule (an `html` rule, a condition, a layer) is
-  not seen here; that is why the appliers only use this value for chrome
+  plain-:root --bg when it is a hex colour, else the first hex --bg the
+  owner declared anywhere (the same rule as `_infer_theme_mode`), else the
+  generated default.  It may not be the background a condition or layer
+  resolves to; that is why the appliers only use this value for chrome
   painted before the theme stylesheet applies (theme-color, the first
-  frame) and read the real background from the cascade afterwards."""
+  frame) and read the real background from the cascade afterwards.
+  Mirrors `themeBg` in frontend/src/theme.js."""
   bg = (scan_root_declarations(effective_css) or {}).get("--bg", "")
   if re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
+    return bg
+  bg = _first_hex_anywhere(effective_css, "--bg")
+  if bg:
     return bg
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)
   return m.group(1) if m else "#0d0d0d"

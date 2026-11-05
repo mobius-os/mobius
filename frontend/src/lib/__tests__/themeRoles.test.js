@@ -26,6 +26,7 @@ import {
   inferThemeMode,
   parseThemeMeta,
   scanRootDeclarations,
+  themeBg,
   themeRoleVars,
   withThemeDefaults,
 } from '../../theme.js'
@@ -131,8 +132,9 @@ test('whole-stylesheet cases: the shell paints byte-for-byte what the server ser
   // resolves the same bytes through a cascade oracle to prove owner
   // declarations win and every core variable resolves.
   assert.ok(cssCases.length >= 20)
-  for (const { name, css, expected } of cssCases) {
+  for (const { name, css, expected, bg } of cssCases) {
     assert.equal(withThemeDefaults(css), expected, name)
+    assert.equal(themeBg(expected), bg, `${name}: background hint`)
   }
 })
 
