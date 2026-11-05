@@ -8,8 +8,10 @@ therefore serve bounded diagnostics without executing partial maintenance.
 
 from __future__ import annotations
 
+import importlib.metadata
 import inspect
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,6 +177,36 @@ def _validate_provider_defaults(context: StartupContext) -> None:
   from app.providers import PROVIDER_NAMES
 
   context.assert_provider_defaults(PROVIDER_NAMES)
+
+
+_DOCKERFILE = Path(__file__).resolve().parents[2] / "Dockerfile"
+
+
+def _check_codex_sdk_pin(_context: StartupContext) -> None:
+  """Name an image whose Codex SDK differs from the served source's pin.
+
+  Served source can move ahead of the image (an update that needs a rebuild).
+  This logs the mismatch at boot in addition to, not instead of, whatever the
+  first Codex turn then raises. It reads package metadata only: importing the
+  SDK here would load it on every boot (#1623 keeps it lazy). The import
+  contract itself is checked by test_codex_sdk_contract and the image build.
+  """
+  try:
+    dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+  except FileNotFoundError:
+    return  # The baked fallback platform carries no Dockerfile.
+  match = re.search(r"(?m)^ARG CODEX_SDK_VERSION=(\S+)$", dockerfile)
+  if not match:
+    raise RuntimeError("Dockerfile does not pin CODEX_SDK_VERSION")
+  try:
+    installed = importlib.metadata.version("openai-codex")
+  except importlib.metadata.PackageNotFoundError:
+    installed = "not installed"
+  if installed != match.group(1):
+    raise RuntimeError(
+      f"openai-codex is {installed} but the Dockerfile pins {match.group(1)}; "
+      "Codex chats may fail until the image is rebuilt"
+    )
 
 
 def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
@@ -676,6 +708,7 @@ def _capture_platform_activation_snapshot(context: StartupContext) -> None:
 PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
+  StartupTask("check Codex SDK pin", _check_codex_sdk_pin),
   StartupTask(
     "remove legacy global auto-resume setting",
     _remove_legacy_auto_resume_setting,

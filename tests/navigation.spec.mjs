@@ -791,9 +791,17 @@ test.describe('Touch navigation', () => {
     const destination = page.locator('[data-chat-surface="painted"] textarea.chat__input')
     await expect(destination).not.toBeFocused()
     await expect(destination).toHaveValue('')
+    // Suspend the destination's open keyboard, then leave chat entirely.
+    await destination.focus()
     await page.getByRole('button', { name: 'Toggle navigation' }).tap()
-    await navigateToSettings(page)
+    await expect(navigation).toBeFocused()
     await expect(destination).not.toBeFocused()
+    await navigateToSettings(page)
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+    // Settings unpaints the chat, so no `painted` surface remains to query.
+    // Neither a retained chat composer nor the keyboard handoff may take focus.
+    await expect(page.locator('textarea.chat__input:focus')).toHaveCount(0)
+    await expect(page.getByRole('textbox', { name: 'Preparing message input' })).not.toBeFocused()
   })
 
   test('chat selection closes the drawer before the destination paints', async ({ page }) => {
@@ -2813,6 +2821,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
     expect((await getNavState(page)).drawerOpen).toBe(false)
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: 'touch',
+    })
 
     // WebKit can retarget the compatibility click after the pointerdown has
     // removed the scrim. That click still belongs to the drawer dismissal.
@@ -2827,6 +2841,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     await openDrawer(page)
     await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 5,
+      pointerType: 'touch',
+    })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
       button: 0,
       isPrimary: true,
       pointerId: 5,
@@ -2996,6 +3016,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerId: 7,
       pointerType: 'touch',
     })
+    // The scrim holds the touch that dismissed it until that touch lifts (22i).
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 7,
+      pointerType: 'touch',
+    })
 
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
@@ -3038,7 +3065,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
         observer.disconnect()
         resolve({
           blocking: overlay.classList.contains('drawer-overlay--blocking'),
-          pointerEvents: getComputedStyle(overlay).pointerEvents,
+          dismissing: overlay.classList.contains('drawer-overlay--dismissing'),
           transitionProperty: getComputedStyle(drawer).transitionProperty,
         })
       })
@@ -3053,11 +3080,21 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
 
+    // Only the touch that dismissed the drawer still holds the scrim.
     expect(await committedClose).toEqual({
       blocking: false,
-      pointerEvents: 'none',
+      dismissing: true,
       transitionProperty: 'none',
     })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 8,
+      pointerType: 'touch',
+    })
+    // Well inside the hold's 3 s watchdog, so only the pointerup can release it.
+    await expect(page.locator('.drawer-overlay'))
+      .toHaveCSS('pointer-events', 'none', { timeout: 1000 })
   })
 
   test('22g. Swipe close leaves a click-only next activation live', async ({ page }) => {
@@ -3134,6 +3171,111 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(settledWidth.client).toBeCloseTo(startWidth.client + 48, 0)
     expect(settledWidth.stored * paintScale).toBeCloseTo(settledWidth.client, 0)
     await page.mouse.up()
+  })
+
+  for (const terminal of ['pointerup', 'pointercancel']) {
+    test(`22i. The scrim keeps the touch that dismissed it until its ${terminal}`, async ({ page }) => {
+      await setup(page)
+      await page.evaluate(() => {
+        // Inside the shell's stacking context, so it sits beneath the scrim
+        // like workspace content and clear of the closing panel's shield.
+        const probe = document.createElement('button')
+        probe.id = 'drawer-underlay-probe'
+        probe.setAttribute('aria-label', 'Underlying action')
+        probe.style.cssText = 'position:fixed;right:8px;top:280px;width:40px;height:40px;z-index:50'
+        probe.addEventListener('click', () => {
+          probe.dataset.clicks = String(Number(probe.dataset.clicks || 0) + 1)
+        })
+        document.querySelector('.shell').appendChild(probe)
+      })
+      await openDrawer(page)
+      const overlay = page.locator('.drawer-overlay')
+      const touch = (type, pointerId) => overlay.dispatchEvent(type, {
+        button: 0,
+        isPrimary: true,
+        pointerId,
+        pointerType: 'touch',
+      })
+      const overlayOwnsProbe = () => page.evaluate(() => {
+        const rect = document.getElementById('drawer-underlay-probe').getBoundingClientRect()
+        return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+          === document.querySelector('.drawer-overlay')
+      })
+
+      await touch('pointerdown', 51)
+      await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+        .toHaveAttribute('aria-expanded', 'false')
+      // The rest of the dismissing drag stays on the scrim instead of scrolling
+      // the content beneath it.
+      await expect(overlay).toHaveClass(/drawer-overlay--dismissing/)
+      expect(await overlay.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('auto')
+      expect(await overlayOwnsProbe()).toBe(true)
+
+      // Another finger ending does not release the dismissing touch.
+      await touch(terminal, 52)
+      expect(await overlay.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('auto')
+
+      await touch(terminal, 51)
+      // Well inside the hold's 3 s watchdog, so only the terminal event releases it.
+      await expect(overlay).toHaveCSS('pointer-events', 'none', { timeout: 1000 })
+      expect(await overlayOwnsProbe()).toBe(false)
+      await page.getByRole('button', { name: 'Underlying action' }).click({ timeout: 1000 })
+      await expect(page.locator('#drawer-underlay-probe')).toHaveAttribute('data-clicks', '1')
+    })
+  }
+
+  test('22j. An immersive takeover closes the modal drawer and its history entry', async ({ page }) => {
+    const appId = 990203
+    await setup(page)
+    await page.route(/\/api\/apps\/(\?.*)?$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          id: appId, name: 'Immersive App', description: '', compiled_path: '',
+          chat_id: null, source_dir: null, pinned_at: null,
+          cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+          updated_at: '2026-07-12T12:00:00Z',
+        }]),
+      })
+    })
+    await page.route(new RegExp(`/api/apps/${appId}/frame`), route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
+    }))
+    await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ token: 'mock-app-token' }),
+    }))
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    const frame = await appFrameFor(page, appId)
+    const historyEntry = () => page.evaluate(() => ({
+      kind: history.state?.kind ?? null,
+      entryId: history.state?.entryId ?? null,
+      index: history.state?.index ?? null,
+    }))
+    const routeEntry = await historyEntry()
+
+    // The owner opens the drawer while the app is still loading; the app then
+    // claims immersive, which hides the drawer panel.
+    await openDrawer(page)
+    expect(await historyEntry()).not.toEqual(routeEntry)
+    await frame.evaluate(id => window.parent.postMessage(
+      { type: 'moebius:immersive', value: true, appId: id }, '*',
+    ), appId)
+    await expect(page.locator('.shell')).toHaveClass(/shell--immersive/)
+
+    await expect.poll(async () => (await getNavState(page)).drawerOpen).toBe(false)
+    await expect(page.locator('.drawer-overlay')).not.toHaveClass(/drawer-overlay--visible/)
+    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
+    await expect.poll(historyEntry).toEqual(routeEntry)
+
+    // The next tap reaches the shell's exit control instead of an invisible scrim.
+    await page.getByRole('button', { name: 'Exit full screen' }).click({ timeout: 1000 })
+    await expect(page.locator('.shell')).not.toHaveClass(/shell--barhidden/)
   })
 
   test('23. Brand toggle close does not navigate, even from a deep view', async ({ page }) => {
