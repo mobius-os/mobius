@@ -720,7 +720,7 @@ test('manual recovery remains available while only storage waits offer a warned 
   for (const kind of ['memory', 'storage', 'model_capacity']) {
     const props = {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind } }] },
-      isLastMsg: true, onResume() {}, resumeState: {},
+      isLastMsg: true, onResume() {}, resumeState: {}, canOverrideStorage: true,
     }
     const manual = renderToStaticMarkup(createElement(MsgContent, { ...props, handoff: { kind: 'recovery' } }))
     assert.match(manual, /class="chat__resume chat__recovery-action"/)
@@ -761,17 +761,38 @@ for (const [name, overrides] of [
     const html = renderToStaticMarkup(createElement(MsgContent, {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
       isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' },
-      ...overrides,
+      canOverrideStorage: true, ...overrides,
     }))
     assert.doesNotMatch(html, /Continue anyway/)
   })
 }
+
+test('only the installation owner is offered Continue anyway; guests and embeds keep Resume', () => {
+  // ChatView derives the prop from the same owner rule as a fresh session.
+  assert.match(chatView, /canOverrideStorage=\{canStartFreshSession\}/)
+  const props = {
+    msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
+    isLastMsg: true, onResume() {}, resumeState: {}, handoff: { kind: 'recovery' },
+  }
+  for (const viewer of [{ embedded: true }, { ownerWorkspace: false }]) {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      ...props, canOverrideStorage: canStartRefusalFreshSession(viewer),
+    }))
+    assert.doesNotMatch(html, /Continue anyway|If the disk fills completely/)
+    assert.match(html, /class="chat__resume chat__recovery-action"[^>]*>(Resume|Try now)<\/button>/)
+  }
+  const owner = renderToStaticMarkup(createElement(MsgContent, {
+    ...props, canOverrideStorage: canStartRefusalFreshSession({ embedded: false, ownerWorkspace: true }),
+  }))
+  assert.match(owner, />Continue anyway<\/button>/)
+})
 
 for (const state of [{ pending: true }, { unavailable: true }]) {
   test(`storage override respects ${Object.keys(state)[0]} acknowledgement state`, () => {
     const html = renderToStaticMarkup(createElement(MsgContent, {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
       isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' }, resumeState: state,
+      canOverrideStorage: true,
     }))
     assert.match(html, /disabled=""/)
     assert.match(html, state.pending ? /Continuing…/ : /Reconnecting…/)

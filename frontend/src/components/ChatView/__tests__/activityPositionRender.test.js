@@ -395,6 +395,7 @@ test('grouped replies carry authoritative manual recovery to their existing acti
     const props = {
       replyGroup: assistantReplyGroups([msg]).get(0),
       activeMirrorMsg: msg, useDbActivePayload: true, onResume() {}, isLastMsg: true,
+      canOverrideStorage: true,
     }
     const manual = render(Active, { ...props, handoff: { kind: 'recovery' } })
     assert.match(manual, /class="chat__resume chat__recovery-action"/)

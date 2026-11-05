@@ -230,6 +230,9 @@ function MsgContentInner({
   // model picker, or compact into a fresh provider session. Stable references.
   onRefusalModelChoice,
   onRefusalFreshSession,
+  // Only the installation owner may bypass the storage floor; the server
+  // refuses Continue anyway from anyone else, who keeps the plain Resume.
+  canOverrideStorage = false,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -612,7 +615,8 @@ function MsgContentInner({
         // can admit one cleanup turn even while that measured pressure remains.
         // Not while an update restores edits or awaits a restart: the server
         // reports those for a storage wait as the handoff's reason.
-        const storageOverrideAvailable = recoveryOwner && block.pause?.kind === 'storage'
+        const storageOverrideAvailable = recoveryOwner && canOverrideStorage
+          && block.pause?.kind === 'storage'
           && ['automatic', 'recovery'].includes(handoff?.kind)
           && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
@@ -882,6 +886,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onResume === next.onResume
     && prev.onRefusalModelChoice === next.onRefusalModelChoice
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
+    && prev.canOverrideStorage === next.canOverrideStorage
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff
