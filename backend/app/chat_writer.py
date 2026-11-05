@@ -3780,9 +3780,10 @@ class ChatWriterActor:
       if prior is None:
         db.rollback()
         return StartTurnRecoveryChanged()
+    # The resume_run_id check above already pinned prior to that exact run.
     if cmd.allow_low_storage and (
-      not cmd.owner_input or not resuming or prior is None
-      or cmd.resume_run_id != prior.id or prior.park_reason != "storage"
+      not cmd.owner_input or cmd.resume_run_id is None
+      or prior.park_reason != "storage"
       or prior.status not in {"parked", "resume_pending", "interrupted"}
     ):
       db.rollback()
@@ -3819,7 +3820,6 @@ class ChatWriterActor:
         run_token=cmd.run_token,
         goal_id=prior.goal_id if prior is not None else None,
         undelivered=undelivered_input(db, chat, prior),
-        allow_low_storage=cmd.allow_low_storage,
       )
       # Explicit null keeps an unrelated reply's recovery goal-less.
       provider_source["goal_id"] = prior.goal_id if prior is not None else None

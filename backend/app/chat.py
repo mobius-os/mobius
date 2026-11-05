@@ -4963,6 +4963,12 @@ async def run_chat(
       await require_agent_turn_admission(
         get_settings().data_dir, allow_low_storage=True,
       )
+      # Only a turn the override actually admitted is told storage is low.
+      from app.continuations import LOW_STORAGE_NOTICE
+      if messages:
+        messages = [*messages[:-1], messages[-1].model_copy(update={
+          "content": f"{messages[-1].content}\n\n{LOW_STORAGE_NOTICE}",
+        })]
     # A prior turn may still be releasing this chat's browser resources.
     async with _browser_lifecycle_lock(chat_id):
       pass

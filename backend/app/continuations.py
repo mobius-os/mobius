@@ -276,11 +276,20 @@ def undelivered_input(db, chat, superseded_run) -> list[str]:
   return carried
 
 
+# Added by the runtime only when admission actually used Continue anyway, so a
+# turn admitted after space recovered is not told the disk is low. The floor is
+# shared by every chat: say so without licensing cleanup of other data.
+LOW_STORAGE_NOTICE = (
+  "The owner let this turn start below the shared disk safety floor;"
+  " avoid large writes. Delete only files this chat created; ask the"
+  " owner before deleting anything else."
+)
+
+
 def continuation_protocol_source(
   *, reason: str, control_id: str, run_token: str,
   source_work_id: str | None = None, goal_id: str | None = None,
   undelivered: list[str] | None = None,
-  allow_low_storage: bool = False,
 ) -> dict:
   """Build provider-only input for a typed continuation control.
 
@@ -315,14 +324,6 @@ def continuation_protocol_source(
   content = prompts.get(
     reason, "Resume the interrupted owner work from its saved state."
   )
-  if allow_low_storage:
-    # The owner let this one turn start below the disk safety floor, which
-    # every chat shares. Say so without licensing cleanup of other data.
-    content += (
-      " The owner let this turn start below the shared disk safety floor;"
-      " avoid large writes. Delete only files this chat created; ask the"
-      " owner before deleting anything else."
-    )
   if undelivered:
     content = "\n\n".join([
       content,

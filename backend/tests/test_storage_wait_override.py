@@ -10,7 +10,7 @@ from app.agent_admission import require_agent_turn_admission
 from app.chat_writer import (
   StartTurn, StartTurnRecoveryChanged, get_writer,
 )
-from app.continuations import manual_resume_matches
+from app.continuations import LOW_STORAGE_NOTICE, manual_resume_matches
 from app.timeutil import now_naive_utc
 
 
@@ -139,20 +139,23 @@ def _run_turn(db, chat, monkeypatch, reason, admission=_low_storage):
   db.commit()
   entered = []
 
-  async def provider(*args, **kwargs):
+  async def provider(messages, *args, **kwargs):
     entered.append(kwargs["run_token"])
+    prompts.extend(m.content for m in messages)
     return runtime.chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
 
+  prompts = []
   monkeypatch.setattr(runtime, "require_agent_turn_admission", admission)
   monkeypatch.setattr(runtime, "_run_chat_impl", provider)
-  asyncio.run(runtime.run_chat([], chat_id=chat.id, run_token=row.id))
+  source = schemas.ChatMessage(role="user", content="Resume the interrupted work.")
+  asyncio.run(runtime.run_chat([source], chat_id=chat.id, run_token=row.id))
   db.expire_all()
-  return entered, db.get(models.ChatRun, row.id)
+  return entered, db.get(models.ChatRun, row.id), prompts
 
 
 @pytest.mark.parametrize("reason, allowed", [("manual", True), ("storage", False)])
 def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, monkeypatch, reason, allowed):
-  entered, run = _run_turn(db, chat, monkeypatch, reason)
+  entered, run, _ = _run_turn(db, chat, monkeypatch, reason)
   if allowed:
     assert entered == [run.id]
   else:
@@ -167,7 +170,7 @@ def test_unreadable_permission_keeps_normal_storage_admission(db, chat, monkeypa
   assert runtime._run_allows_low_storage(chat.id, "admission-run") is False
   monkeypatch.undo()
   monkeypatch.setattr(runtime, "_run_allows_low_storage", lambda *_: False)
-  entered, run = _run_turn(db, chat, monkeypatch, "manual")
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
   assert entered == [] and run.park_reason == "storage"
   assert run.status == "parked", "a read error is a storage wait, not a setup failure"
 
@@ -180,18 +183,16 @@ def test_admitted_turn_never_reads_the_permission(db, chat, monkeypatch):
     pytest.fail("only a storage wait consults the saved permission")
 
   monkeypatch.setattr(runtime, "_run_allows_low_storage", read)
-  entered, run = _run_turn(db, chat, monkeypatch, "manual", admitted)
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", admitted)
   assert entered == [run.id]
-
-
-def test_continue_anyway_tells_the_agent_storage_is_still_low():
-  from app.continuations import continuation_protocol_source
-
-  plain = continuation_protocol_source(reason="manual", control_id="c", run_token="r")
-  warned = continuation_protocol_source(
-    reason="manual", control_id="c", run_token="r", allow_low_storage=True,
+  assert prompts == ["Resume the interrupted work."], (
+    "a saved override that admission did not need adds no low-storage notice"
   )
-  assert "disk safety floor" not in plain["content"]
-  assert "below the shared disk safety floor" in warned["content"]
-  assert "Delete only files this chat created" in warned["content"]
-  assert "ask the owner before deleting anything else" in warned["content"]
+
+
+def test_continue_anyway_tells_the_agent_storage_is_still_low(db, chat, monkeypatch):
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [run.id]
+  assert prompts[-1].startswith("Resume the interrupted work.")
+  assert prompts[-1].endswith(LOW_STORAGE_NOTICE)
+  assert "ask the owner before deleting anything else" in LOW_STORAGE_NOTICE
