@@ -1468,8 +1468,8 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
   return _rev(repo, UPSTREAM_BRANCH) or None
 
 
-def _tracked_release(repo: Path) -> str | None:
-  """The newest release the clone's refs know: ``origin/main`` unless it lags.
+def _latest_known_release(repo: Path) -> str | None:
+  """The newest release this clone knows: ``origin/main`` unless it lags.
 
   A reviewed Apply can install an exact target fetched outside the tracking
   ref, leaving ``origin/main`` behind the installed ``upstream`` marker until
@@ -1479,29 +1479,10 @@ def _tracked_release(repo: Path) -> str | None:
   """
   remote = _rev(repo, DEFAULT_TARGET_REF) or None
   installed = recorded_upstream_sha(repo)
+  if remote and installed and _is_ancestor(repo, remote, installed):
+    return installed
   # A missing tracking ref stays unavailable, never "up to date".
-  if not remote:
-    return None
-  return installed if installed and _is_ancestor(repo, remote, installed) else remote
-
-
-def _latest_known_release(repo: Path) -> str | None:
-  """The newest known release, including the running image's official source.
-
-  Only the frozen build record counts, and only when the image's official
-  lineage (fetched from the canonical origin at build) contains it: a
-  configurable build SHA, a fork, or a local-overlay image proves nothing
-  about upstream. Such an image may be newer than the clone's refs before its
-  object is fetched; preview must obtain that object before admitting a plan,
-  while GET status stays fetch-free.
-  """
-  release = _tracked_release(repo)
-  image = frozen_image_sha()
-  if release and image and image in image_lineage() and (
-    not _rev(repo, image) or _is_ancestor(repo, release, image)
-  ):
-    return image
-  return release
+  return remote
 
 
 def _update_source_tip(repo: Path) -> str:
@@ -1550,9 +1531,6 @@ def _contained_official_source(repo: Path) -> str | None:
   if not head:
     return None
   known = _latest_known_release(repo)
-  if known and not _rev(repo, known):
-    # A not-yet-fetched image release says nothing about what HEAD contains.
-    known = _tracked_release(repo)
   base = _git(
     "merge-base", head, known, repo=repo, check=False,
   ).stdout.strip() if known else ""
@@ -1928,6 +1906,27 @@ def source_contains_image_release(
     ).returncode == 0
   except (OSError, subprocess.SubprocessError):
     return False
+
+
+def serves_image_release(
+  repo: Path,
+  served_sha: str | None,
+  image_sha: str | None,
+  *,
+  activation: PlatformActivationImpact | None = None,
+) -> bool:
+  """Whether the source this server serves contains the image's release.
+
+  The server serves its boot commit plus every change since that activates
+  live; once nothing is owed activation, the checkout is what it serves.
+  Platform status and ``/api/version`` both answer from here.
+  """
+  if not (served_sha and image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
+    return False
+  activation = activation or _platform_activation_impact(repo)
+  live = activation["level"] == platform_activation.ActivationLevel.LIVE.value
+  source = _rev(repo, "HEAD") if live else served_sha
+  return source_contains_image_release(repo, source, image_sha)
 
 
 def _activation_paths_between(
@@ -5581,15 +5580,10 @@ def platform_status(
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
-  # The server serves its boot commit plus every change since that activates
-  # live; once nothing is owed, the checkout is what it serves.
   image_build_applied = None
   if image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha):
-    serves_head = bool(served_sha) and (
-      activation["level"] == platform_activation.ActivationLevel.LIVE.value
-    )
-    image_build_applied = source_contains_image_release(
-      repo, local if serves_head else served_sha, image_sha,
+    image_build_applied = serves_image_release(
+      repo, served_sha, image_sha, activation=activation,
     )
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
@@ -5647,7 +5641,7 @@ def platform_status(
   # store. Its immutable SHA is still authoritative evidence that a different
   # release exists; the preview/check path fetches and proves the source object
   # before it creates an actionable plan.
-  available = bool(checked_target_sha) and not target_contained
+  available = bool(target_sha or target) and not target_contained
 
   if rolled_back:
     # A not-yet-landed target whose last apply failed (import probe or build).
@@ -5909,9 +5903,9 @@ def platform_update_preview(
   image_digest: str | None = None,
 ) -> PlatformUpdatePreview:
   """Read-only preview of the incoming platform update, for the Settings review
-  step before Apply. Previews remain fetch-free unless a managed target or the
-  installed image's source floor is missing from the local object store. Then
-  this function may refresh the canonical remote ref to verify that source tree;
+  step before Apply. Generic previews remain fetch-free. When a managed
+  deployment supplies an exact GHCR target, this function may refresh the
+  canonical remote ref solely to obtain and verify that immutable source tree;
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
@@ -5951,20 +5945,22 @@ def _platform_update_preview_unlocked(
   target_sha: str | None = None,
   image_digest: str | None = None,
 ) -> PlatformUpdatePreview:
-  """Review the effective incoming tree while keeping Git release history."""
+  """Build one preview while the reconcile lock holds its source snapshot."""
   local_sha = _update_source_tip(repo)
-  target = target_sha or _latest_known_release(repo)
-  if not target:
-    raise PlatformUpdateError("platform_target_unavailable")
   if target_sha:
     if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
       raise PlatformUpdateError("image_release_invalid")
-  if _rev(repo, target) != target:
-    if not _fetch(repo, refspec=OWNER_UPDATE_FETCH_REFSPEC):
+    if _rev(repo, target_sha) != target_sha:
+      if not _fetch(repo, refspec=OWNER_UPDATE_FETCH_REFSPEC):
+        raise PlatformUpdateError("image_release_source_unavailable")
+    if _rev(repo, target_sha) != target_sha:
       raise PlatformUpdateError("image_release_source_unavailable")
-  if _rev(repo, target) != target:
-    raise PlatformUpdateError("image_release_source_unavailable")
   local = local_sha
+  target = (
+    _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
+  ) or None
+  if not target:
+    raise PlatformUpdateError("platform_target_unavailable")
   available = not _is_ancestor(repo, target, local)
   if not available:
     preview = empty_platform_update_preview(

@@ -1300,11 +1300,6 @@ def _served_platform_identity(
         value = upstream.stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", value):
           out["applied_upstream_sha"] = value
-      from app.platform_update import source_contains_image_release
-
-      out["image_build_applied"] = source_contains_image_release(
-        repo, out["served_sha"], str(image_build_sha or "").strip().lower(),
-      )
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:
@@ -1312,6 +1307,11 @@ def _served_platform_identity(
                  if ln.strip() and not ln.rstrip().endswith(".baked-sha")
                  and not ln.startswith("?? .")]
         out["platform_dirty"] = bool(dirty)
+      from app.platform_update import serves_image_release
+
+      out["image_build_applied"] = serves_image_release(
+        repo, out["served_sha"], str(image_build_sha or "").strip().lower(),
+      )
     except Exception:
       pass
   return out
