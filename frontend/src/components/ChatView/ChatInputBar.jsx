@@ -704,6 +704,17 @@ export default function ChatInputBar({
     requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
   }
 
+  // A restored draft starts with its caret at the end, where typing left it,
+  // so keyboard focus continues the draft. Once per chat rather than on every
+  // focus: later native focus keeps the owner's own selection.
+  const caretPlacedForChatRef = useRef(null)
+  useLayoutEffect(() => {
+    const el = inputRef?.current
+    if (!el || !input || caretPlacedForChatRef.current === chatId) return
+    caretPlacedForChatRef.current = chatId
+    if (el.ownerDocument?.activeElement !== el) placeCaretAtTextEnd(el)
+  }, [chatId, input, inputRef])
+
   const canSubmit = !submissionBlocked && !questionBlocked
 
   function handleKeyDown(e) {
