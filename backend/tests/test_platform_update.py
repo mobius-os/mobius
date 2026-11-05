@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 import select
 import signal
 import subprocess
@@ -207,6 +208,7 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", tmp_path / ".restart")
   monkeypatch.setattr(pu, "SERVING_SOURCE_FILE", tmp_path / ".serving-source")
   monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / ".serving-sha")
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-0")  # _boot_started_server starts the next
   monkeypatch.setattr(pu, "CONFLICT_FLAG", tmp_path / ".conflict")
   monkeypatch.setattr(pu, "ROLLED_BACK_FLAG", tmp_path / ".rolled-back")
   monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
@@ -646,7 +648,9 @@ def test_long_local_history_merges_once_and_never_replays_commits(
 
 
 def _boot_started_server(platform: Path, source: str = "platform") -> None:
-  """What the boot script records once it has chosen what uvicorn serves."""
+  """What the boot script records once it has chosen what uvicorn serves,
+  in a boot of its own."""
+  os.environ["MOBIUS_BOOT_ID"] = f"boot-{uuid.uuid4().hex}"
   pu.SERVING_SOURCE_FILE.write_text(source + "\n")
   pu.SERVING_SHA_FILE.write_text(_served_sha(platform) + "\n")
 
@@ -934,8 +938,80 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   assert "LINE_A = 'RESOLVED AND LATE'" in (
     platform / "backend/app/main.py"
   ).read_text()
-  assert not pu.late_edits_pending()
   assert pu._is_ancestor(platform, target, _served_sha(platform))
+  _assert_restored_late_edits_finish_once_loaded(platform)
+
+
+@pytest.mark.parametrize("killed_before_record", [False, True])
+def test_a_resolved_late_edit_that_fails_to_start_is_set_aside_on_revert(
+  clone_env, monkeypatch, killed_before_record,
+):
+  """The resolver's answer is work the reverted-to tree lacks: a boot that
+  cannot start it returns to the late edit and keeps the answer at a set-aside
+  ref the receipt names, not only in the reflog. That holds when the process
+  died after the merge cleared the conflict flag, before it recorded the
+  merge-back: the next boot must not take the answer for its own tree."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE'"),
+  }, msg="late conflicting edit")
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert _finish_prepared(platform) == "conflict"
+  replay = Path(pu._read_conflict_flag()["overlay"]["worktree"])
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+  if killed_before_record:
+    def killed(*args, **kwargs):
+      raise KeyboardInterrupt("killed")
+    with monkeypatch.context() as patch:
+      patch.setattr(pu, "_record_update_activation", killed)
+      with pytest.raises(KeyboardInterrupt):
+        pu.continue_platform_overlay_update(platform)
+    assert not pu.CONFLICT_FLAG.exists()
+    assert pu.read_prepared_update()["replayed"] is None
+  else:
+    assert pu.continue_platform_overlay_update(platform) == "updated"
+  resolved = _served_sha(platform)
+  late = pu.read_prepared_update()["late"]
+
+  # The restart that loads the answer fails its startup check.
+  assert pu.settle_prepared_update_for_this_image(platform) == "replayed"
+  assert pu.revert_failed_update(platform)
+
+  assert _served_sha(platform) == late
+  assert "LINE_A = 'LATE'" in (platform / "backend/app/main.py").read_text()
+  refs = _reported_private_recovery_refs(platform)
+  assert refs and all(ref.startswith(pu._SET_ASIDE_PREFIX + "/") for ref in refs)
+  assert any(
+    _git(platform, "rev-parse", ref).stdout.strip() == resolved for ref in refs
+  ), "the resolver's answer must be named by a set-aside ref"
+  assert pu.read_prepared_update()["state"] == "prepared"
+
+
+def _assert_restored_late_edits_finish_once_loaded(platform: Path) -> None:
+  """Late edits merged back after the server imported the update are not
+  loaded yet: the swap stays (resumes held, a restart owed, the boot can still
+  go back) until a restarted server serves them."""
+  record = pu.read_prepared_update()
+  assert record["state"] == "swapped"
+  assert record["replayed"] == _served_sha(platform)
+  assert pu.late_edits_pending()
+  assert pu.unfinished_update(platform) == {
+    "target_sha": record["target"], "stage": "finish", "action": "restart",
+    "cancellable": False,
+  }
+  assert not pu.confirm_platform_swap_loaded(platform)
+
+  assert pu.settle_prepared_update_for_this_image(platform) == "replayed"
+  _boot_started_server(platform)
+  assert pu.complete_platform_swap(platform) == "replayed"
+  assert not pu.late_edits_pending()
+  assert pu.confirm_platform_swap_loaded(platform)
+  assert pu.read_prepared_update() is None
+  assert pu.unfinished_update(platform) is None
 
 
 def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
@@ -974,7 +1050,6 @@ def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
   _git(replay, "add", "backend/app/main.py")
 
   assert pu.continue_platform_overlay_update(platform) == "updated"
-  assert not pu.late_edits_pending()
   assert "LINE_A = 'RESOLVED, LATE AND DIRTY'" in (
     platform / "backend/app/main.py"
   ).read_text()
@@ -988,6 +1063,28 @@ def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
   assert "late conflicting commit" in _git(
     platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF,
   ).stdout
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+
+
+def test_startup_merge_back_of_only_uncommitted_edits_waits_for_a_restart(
+  clone_env,
+):
+  """A server that imported the update before its late edits came back has
+  not loaded them, even when they all return uncommitted and the checkout's
+  commit is still the one it serves."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY'\n")
+  assert pu.swap_in_prepared_update(cutover=True, repo=platform)
+  _boot_started_server(platform)  # started on the update without the edits
+
+  assert pu.complete_platform_swap(platform) == "replayed"
+
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
 
 
 def _swapped_with_late_commit(platform: Path, origin: Path) -> tuple[str, str]:
@@ -1308,7 +1405,12 @@ def test_a_late_uncommitted_edit_that_conflicts_parks_after_boot(clone_env):
   assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
     " M backend/app/main.py",
   ]
-  assert not pu.late_edits_pending()
+  # The edits came back uncommitted, so the checkout's commit is still the one
+  # this server imported; only a later boot has loaded them.
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert "LINE_A = 'RESOLVED WITH DIRTY'" in (
+    platform / "backend/app/main.py"
+  ).read_text()
 
 
 def test_an_answer_that_fails_the_startup_check_is_never_prepared(
@@ -9718,6 +9820,52 @@ async def test_resume_opens_a_new_resolver_when_the_bound_chat_has_no_model(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_resumes_of_a_model_less_resolver_open_one_replacement(
+  clone_env, db, monkeypatch,
+):
+  """Both Resume taps see the same unusable resolver; the second, after
+  waiting for the first, returns its replacement instead of starting
+  another agent on the same parked worktree."""
+  from app.chat_start import ProgrammaticChatModelRequired
+  from app.chat_writer import create_chat
+
+  _origin, platform = clone_env
+  _parked_update(platform, chat_id="resolver-no-model")
+  db.add(create_chat(id="resolver-no-model", title="Resolve platform update conflict",
+                     messages=[], pending_messages=[], provider="claude"))
+  db.commit()
+  spawned = []
+
+  async def refuse(**kwargs):
+    await asyncio.sleep(0)  # both taps observe the old binding first
+    raise ProgrammaticChatModelRequired("no explicitly selected model")
+
+  async def fake_spawn(session, paths, target_sha, overlay=None):
+    await asyncio.sleep(0)  # let the other tap reach the creation lock
+    chat_id = f"replacement-{len(spawned) + 1}"
+    spawned.append(chat_id)
+    session.add(create_chat(id=chat_id, title="Resolve platform update conflict",
+                            messages=[], pending_messages=[], provider="claude"))
+    session.commit()
+    return {"chat_id": chat_id, "created": True, "started": True}
+
+  monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", refuse)
+  monkeypatch.setattr(pu, "spawn_platform_conflict_chat", fake_spawn)
+  # A contended asyncio.Lock binds to this test's event loop.
+  monkeypatch.setattr(pu, "_resolver_creation_lock", asyncio.Lock())
+
+  first, second = await asyncio.gather(
+    pu.resume_platform_conflict_resolver(db, platform),
+    pu.resume_platform_conflict_resolver(db, platform),
+  )
+
+  assert spawned == ["replacement-1"]
+  assert first == {"chat_id": "replacement-1", "created": True, "started": True}
+  assert second == {"chat_id": "replacement-1", "created": False, "started": False}
+  assert pu._read_conflict_flag()["chat_id"] == "replacement-1"
+
+
+@pytest.mark.asyncio
 async def test_resume_recreates_a_missing_resolver_and_rebinds_the_update(
   clone_env, db, monkeypatch,
 ):
@@ -9736,3 +9884,43 @@ async def test_resume_recreates_a_missing_resolver_and_rebinds_the_update(
   assert result["chat_id"] == "new-resolver" and result["created"] is True
   assert calls == [(["backend/app/main.py"], _served_sha(platform), "net")]
   assert pu._read_conflict_flag()["chat_id"] == "new-resolver"
+
+
+@pytest.mark.asyncio
+async def test_the_resolver_is_the_chat_its_update_binds_not_one_with_its_title(
+  clone_env, db, owner_token, monkeypatch,
+):
+  """An earlier update's resolver that is still running shares the title but
+  not this update; concurrent clicks open exactly one resolver."""
+  from app import models
+  from app.chat_writer import create_chat
+
+  _origin, platform = clone_env
+  worktree, _index, _then = _parked_update(platform)
+  db.add(create_chat(id="earlier-resolver", title="Resolve platform update conflict",
+                     messages=[], pending_messages=[], provider="claude"))
+  db.add(models.ChatRun(id="earlier-run", root_run_id="earlier-run",
+                        chat_id="earlier-resolver", status="running", provider="claude"))
+  db.commit()
+  started = []
+
+  async def fake_start(**kwargs):
+    await asyncio.sleep(0)  # let the other click in while this one opens
+    started.append(kwargs)
+    return True
+
+  monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", fake_start)
+  monkeypatch.setattr("app.push.notify_owner", lambda *args, **kwargs: None)
+  # A contended asyncio.Lock binds to this test's event loop.
+  monkeypatch.setattr(pu, "_resolver_creation_lock", asyncio.Lock())
+
+  first, second = await asyncio.gather(
+    pu.create_platform_conflict_resolver_chat(db, platform),
+    pu.create_platform_conflict_resolver_chat(db, platform),
+  )
+
+  assert first["created"] is True and first["chat_id"] != "earlier-resolver"
+  assert second == {"chat_id": first["chat_id"], "created": False, "started": False}
+  assert [call["chat_id"] for call in started] == [first["chat_id"]]
+  assert str(worktree) in started[0]["content"]
+  assert pu._read_conflict_flag()["chat_id"] == first["chat_id"]

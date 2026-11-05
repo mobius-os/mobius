@@ -83,7 +83,8 @@ except ImportError:  # only a transitive dependency; pip vendors the same librar
   from pip._vendor.packaging.version import InvalidVersion, Version
 
 from app import (
-  app_git, local_change_tests, platform_activation, removed_references, runtime_provenance,
+  app_git, local_change_tests, platform_activation, removed_references,
+  runtime_provenance,
 )
 from app.platform_activation import PlatformActivationImpact
 from app.restart_util import run_candidate_startup_check
@@ -3442,10 +3443,14 @@ class PreparedUpdate(TypedDict):
   local_tests: dict | None  # best-effort evidence, not complete local coverage
   late: str | None  # live state saved at the swap, in-progress edits on top
   late_committed: str | None  # its committed part
-  # The late edits merged back before the server imported anything; the
-  # record stays swapped until it is confirmed, so a merged tree that cannot
-  # start is still returned to ``late`` by the boot transaction.
+  # The late edits merged back into the live checkout; the record stays
+  # swapped until a server serves them, so a merged tree that cannot start is
+  # still returned to ``late`` by the boot transaction.
   replayed: str | None
+  # The boot already serving when ``replayed`` merged back (None when it
+  # merged before the server imported). That boot never loaded it, even when
+  # the commit is the one it serves (the edits came back uncommitted).
+  replayed_boot: str | None
   # The container replacement whose success confirms an image-requiring
   # update: ``{"controller": "railway" | "host", "id": ...}``. Only that exact
   # operation retires the record (``reconcile_bound_operation``). None means
@@ -3457,8 +3462,10 @@ class PreparedUpdate(TypedDict):
   # Bookkeeping the swap replaced, restored exactly if the swap is reverted:
   # ``{"upstream": sha | None, "activation": marker text | None}``.
   restore: dict | None
-  # The complete working tree (in-progress edits included) the merge-back
-  # left, so a revert sets aside only work made after it.
+  # The tree the boot itself established, so a revert sets aside only work
+  # made after it: what the boot's merge-back left (in-progress edits
+  # included), or the update alone when a resolver merged the late edits
+  # back later; that answer is resolver work, not boot state.
   booted_tree: str | None
 
 
@@ -3482,6 +3489,7 @@ def read_prepared_update() -> PreparedUpdate | None:
     late=record.get("late") or None,
     late_committed=record.get("late_committed") or None,
     replayed=record.get("replayed") or None,
+    replayed_boot=record.get("replayed_boot"),
     operation=_valid_operation(record.get("operation")),
     protocol=record.get("protocol") if isinstance(record.get("protocol"), int) else 0,
     restore=record.get("restore") if isinstance(record.get("restore"), dict) else None,
@@ -3613,7 +3621,7 @@ def _prepare(
     state="prepared", snapshot=snapshot, prepared=prepared, target=target,
     image_digest=image_digest, requires_image=requires_image, late=None,
     local_tests=local_report,
-    late_committed=None, replayed=None, operation=None,
+    late_committed=None, replayed=None, replayed_boot=None, operation=None,
     protocol=BOOT_PROTOCOL, restore=None, booted_tree=None,
   )
   _write_prepared_update(record)
@@ -3724,8 +3732,8 @@ def _swap_in(repo: Path, record: PreparedUpdate) -> PreparedUpdate:
   late = carried.pre
   swapped = PreparedUpdate(**{
     **record, "state": "swapped", "late": late,
-    "late_committed": carried.served, "replayed": None, "restore": restore,
-    "booted_tree": None,
+    "late_committed": carried.served, "replayed": None, "replayed_boot": None,
+    "restore": restore, "booted_tree": None,
   })
   try:
     _git("update-ref", _LATE_REF, late, repo=repo)
@@ -3867,13 +3875,23 @@ def late_edits_pending() -> bool:
   )
 
 
+def _current_boot_id() -> str:
+  """This server process's boot identity (``restart_ledger.current_boot_id``).
+
+  Read directly: this module runs in the baked boot step, whose closure must
+  not grow to include the restart ledger.
+  """
+  return os.environ.get("MOBIUS_BOOT_ID", "")
+
+
 def _serves_replayed(record: PreparedUpdate, repo: Path = PLATFORM_REPO) -> bool:
-  """Whether this server imported the merged-back late edits (or newer)."""
+  """Whether this server imported the merged-back late edits (or newer):
+  it serves them and started after they merged back."""
   served = _served_platform_sha()
   return bool(record["replayed"] and served and (
     served == record["replayed"]
     or _is_ancestor(repo, record["replayed"], served)
-  ))
+  ) and record["replayed_boot"] != _current_boot_id())
 
 
 def _swap_position(repo: Path, record: PreparedUpdate, head: str) -> str:
@@ -3901,9 +3919,12 @@ def _replay_parked(record: PreparedUpdate) -> bool:
   )
 
 
-def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
+def _replay_late_edits(
+  repo: Path, record: PreparedUpdate, *, serving_boot: str | None = None,
+) -> str:
   """Merge late edits onto the booted update, or park them; the caller holds
-  the reconcile lock and has checked the checkout is exactly the update."""
+  the reconcile lock and has checked the checkout is exactly the update.
+  ``serving_boot`` is the boot that already imported the update, if any."""
   local = _local_branch(repo)
   head = record["prepared"]
   # Late edits are local work and the booted update is the incoming
@@ -3933,7 +3954,7 @@ def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
     _restore_working_edits(repo, local)
   replayed = _rev(repo, local)
   _write_prepared_update(PreparedUpdate(**{
-    **record, "replayed": replayed,
+    **record, "replayed": replayed, "replayed_boot": serving_boot,
     "booted_tree": _working_tree_oid(repo, replayed),
   }))
   return "replayed"
@@ -4619,7 +4640,8 @@ def _settle_reverted(
       RESTART_NEEDED_FLAG.unlink(missing_ok=True)
   prepared = PreparedUpdate(**{
     **record, "state": "prepared", "late": None, "late_committed": None,
-    "replayed": None, "operation": None, "restore": None, "booted_tree": None,
+    "replayed": None, "replayed_boot": None, "operation": None, "restore": None,
+    "booted_tree": None,
   })
   if set_aside:
     reason += f" Work made on the new version is kept at {set_aside}."
@@ -4684,7 +4706,9 @@ def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
       # so it cannot have loaded them: merge now and record the restart that
       # loads them. The record stays, so the next boot can still return a
       # tree that cannot start to the saved previous state.
-      outcome = _replay_late_edits(repo, record)
+      outcome = _replay_late_edits(
+        repo, record, serving_boot=_current_boot_id(),
+      )
       if outcome == "replayed":
         _record_update_activation(
           repo, _rev(repo, local), recorded_upstream_sha(repo),
@@ -4965,6 +4989,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
         _working_overlay_commit(repo, committed, late.merged_tree_oid),
         late_working,
       )
+    record = read_prepared_update() if parked.get("replay") else None
+    if record is not None and not record["booted_tree"]:
+      # The boot established only the update; the answer is resolver work,
+      # which a revert sets aside (``_set_aside_unsaved_update_work``).
+      # Recorded before the merge clears the conflict flag, after which a boot
+      # would take the merged tree for its own (``_settle_swap``).
+      _write_prepared_update(PreparedUpdate(**{
+        **record, "booted_tree": _commit_tree_oid(repo, record["prepared"]),
+      }))
     _reattach_detached_head(repo, local)
     carried = _carry_working_edits(repo, local)
     if parked.get("replay") and resolved_working is not None:
@@ -5001,16 +5034,16 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _record_update_activation(repo, head, target)
       return result.status
     # The server booted before these edits returned, so it still owes the
-    # restart that loads them.
+    # restart that loads them. The swap stays until a later boot serves them
+    # (``confirm_platform_swap_loaded``) or its bound replacement confirms it,
+    # so that boot can still return a merged tree that cannot start.
     _record_update_activation(repo, head, recorded_upstream_sha(repo))
     record = read_prepared_update()
-    if record is not None and record["operation"] is not None:
-      # Its replacement still confirms it; the restart loads this.
+    if record is not None:
       _write_prepared_update(PreparedUpdate(**{
-        **record, "replayed": head, "booted_tree": _working_tree_oid(repo, head),
+        **record, "replayed": head,
+        "replayed_boot": _current_boot_id(),
       }))
-    elif record is not None:
-      _retire_swap(repo, record)
     return result.status
 
 
@@ -6372,42 +6405,49 @@ def _apply_platform_update_sync(
       raise
 
 
+# A second click (or startup) waits for the first, then finds the chat it bound.
+_resolver_creation_lock = asyncio.Lock()
+
+
 async def create_platform_conflict_resolver_chat(
-  db: Session, repo: Path = PLATFORM_REPO, *, replace_bound: bool = False,
+  db: Session, repo: Path = PLATFORM_REPO, *, replace_chat_id: str | None = None,
 ) -> PlatformConflictResolverChatOut:
   """Create or return the owner-clicked resolver chat for a platform conflict.
 
-  ``replace_bound`` opens a new one even when the bound chat still exists
-  (resuming a chat that cannot take a system turn) and rebinds the update.
+  The conflict flag's ``chat_id`` is the resolver's identity.
+  ``replace_chat_id`` names a bound chat the caller found unusable (it cannot
+  take a system turn): a new resolver replaces it and is bound to the update,
+  unless a concurrent caller already replaced it, whose chat is returned.
   """
-  flag = _read_conflict_flag() or {}
-  if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
-    raise PlatformUpdateError("No unresolved platform update conflict.")
+  async with _resolver_creation_lock:
+    flag = _read_conflict_flag() or {}
+    if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
+      raise PlatformUpdateError("No unresolved platform update conflict.")
 
-  existing = None if replace_bound else _bound_resolver_chat(db, flag)
-  if existing is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=existing.id, created=False, started=False,
+    existing = _bound_resolver_chat(db, flag)
+    if existing is not None and existing.id != replace_chat_id:
+      return PlatformConflictResolverChatOut(
+        chat_id=existing.id, created=False, started=False,
+      )
+
+    conflict_paths = flag.get("paths") or _unmerged_paths(repo)
+    target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+    parked = flag.get("overlay")
+    if not target_sha:
+      raise PlatformUpdateError("Platform conflict target is unavailable.")
+    result = await spawn_platform_conflict_chat(
+      db, conflict_paths, target_sha, parked,
     )
+    if result is None:
+      raise PlatformUpdateError("Could not open resolver chat.")
 
-  conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
-  parked = flag.get("overlay")
-  if not target_sha:
-    raise PlatformUpdateError("Platform conflict target is unavailable.")
-  result = await spawn_platform_conflict_chat(
-    db, conflict_paths, target_sha, parked,
-  )
-  if result is None:
-    raise PlatformUpdateError("Could not open resolver chat.")
-
-  _write_conflict_flag(
-    target_sha,
-    conflict_paths,
-    result["chat_id"],
-    overlay=parked,
-  )
-  return result
+    _write_conflict_flag(
+      target_sha,
+      conflict_paths,
+      result["chat_id"],
+      overlay=parked,
+    )
+    return result
 
 
 async def resume_platform_conflict_resolver(
@@ -6435,7 +6475,7 @@ async def resume_platform_conflict_resolver(
       content=_platform_conflict_resolver_resume_message(flag),
     )
   except ProgrammaticChatModelRequired:
-    return await create_platform_conflict_resolver_chat(db, repo, replace_bound=True)
+    return await create_platform_conflict_resolver_chat(db, repo, replace_chat_id=chat.id)
   return PlatformConflictResolverChatOut(chat_id=chat.id, created=False, started=started)
 
 
@@ -6519,7 +6559,7 @@ def _platform_conflict_resolver_message(
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
-      "Paused chats resume once these edits are back.\n\n"
+      "Paused chats resume once a restart loads these edits.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
       "both the update and the intent of those edits.\n\n"
       + review + "Stage the resolved files, then run "
@@ -6527,8 +6567,8 @@ def _platform_conflict_resolver_message(
       "import continue_platform_overlay_update as c; print(c())\"`. It "
       "merges your answer into the live checkout with the normal build and "
       "import checks. If it prints `conflict`, newer live edits overlap your "
-      "answer; resolve the fresh markers and run it again. Backend edits "
-      "load at the next restart."
+      "answer; resolve the fresh markers and run it again. When it prints "
+      "`updated`, request a restart so the server loads the merged edits."
     )
   if overlay and overlay.get("mode") == "net":
     opening = (
@@ -6607,7 +6647,8 @@ async def spawn_platform_conflict_chat(
 ) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
-  update-conflict resolver chat. Dedupes on a running resolver."""
+  update-conflict resolver chat. Reuse is the caller's: the conflict flag
+  binds the update's chat (``create_platform_conflict_resolver_chat``)."""
   import uuid
 
   from app import models, providers
@@ -6615,27 +6656,8 @@ async def spawn_platform_conflict_chat(
   from app.chat_writer import create_chat
   from app.config import get_settings
   from app.push import notify_owner
-  from app.run_state import running_chat_ids
 
   title = "Resolve platform update conflict"
-  candidate_ids = [
-    row.id for row in (
-      db.query(models.Chat.id)
-      .filter(models.Chat.title == title)
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
-  ]
-  running_ids = running_chat_ids(db, candidate_ids)
-  running_id = next(
-    (chat_id for chat_id in candidate_ids if chat_id in running_ids),
-    None,
-  )
-  if running_id is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=running_id, created=False, started=False,
-    )
-
   owner = db.query(models.Owner).first()
   if owner is None:
     return None
