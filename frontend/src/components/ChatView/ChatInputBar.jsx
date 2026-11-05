@@ -931,7 +931,9 @@ export default function ChatInputBar({
               aria-describedby={historyKeyHint ? historyKeyHintId : undefined}
               name="message"
               autoComplete="off"
-              spellCheck={false}
+              // A touch keyboard corrects words itself; the browser's own
+              // spelling popup only competes with it. Desktop keeps underlines.
+              spellCheck={!touchPrimary}
               rows={1}
               // Combobox semantics apply only while the menu is open. Left on
               // permanently they would announce this plain prose textarea as a

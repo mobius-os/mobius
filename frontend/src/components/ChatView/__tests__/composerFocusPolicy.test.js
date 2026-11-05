@@ -79,7 +79,7 @@ test('explicit caret placement still lands at the end for restored text controls
   assert.equal(placeCaretAtTextEnd({ value: 'unsupported' }), false)
 })
 
-test('the composer opts out of browser spelling popups without disabling keyboard autocorrection', () => {
+test('a pointer-primary composer keeps browser spelling underlines', () => {
   const client = new QueryClient()
   try {
     const html = renderToStaticMarkup(React.createElement(
@@ -91,8 +91,8 @@ test('the composer opts out of browser spelling popups without disabling keyboar
     ))
     const textarea = html.match(/<textarea\b[^>]*>/)?.[0]
     assert.ok(textarea)
-    assert.match(textarea, /spellCheck="false"/i)
-    assert.doesNotMatch(textarea, /autoCorrect="off"/i)
+    // Node has no touch-primary pointer; the touch case is the browser spec.
+    assert.match(textarea, /spellCheck="true"/i)
   } finally {
     client.clear()
   }

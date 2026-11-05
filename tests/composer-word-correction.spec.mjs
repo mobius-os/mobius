@@ -4,7 +4,8 @@ import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
-test.use({ serviceWorkers: 'block', hasTouch: true })
+// isMobile makes Chromium report a coarse, non-hovering primary pointer.
+test.use({ serviceWorkers: 'block', hasTouch: true, isMobile: true })
 attachCleanup()
 
 test('returning to a selected word permits correction without moving to the draft end', async ({ page }) => {
