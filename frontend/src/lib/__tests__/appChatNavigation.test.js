@@ -2,9 +2,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import 'fake-indexeddb/auto'
+import { createStore, set as setIdbValue } from 'idb-keyval'
 import { saveFailedSendAttempt } from '../../components/ChatView/sendAttemptRecovery.js'
 import { openExistingChat, stageAppChatDraft } from '../appChatNavigation.js'
-import { persistComposerDraft, readComposerDraft, readComposerHandoff } from '../../components/ChatView/composerDraft.js'
+import {
+  _clearComposerDraftMemoryForTests, persistComposerDraft, readComposerDraft, readComposerHandoff,
+} from '../../components/ChatView/composerDraft.js'
 
 function storageStub() {
   const values = new Map()
@@ -57,5 +60,22 @@ test('a failed send awaiting resolution keeps the composer from app drafts', asy
     assert.deepEqual(outcome, { outcome: 'unavailable' })
     assert.equal(readComposerDraft('ambiguous').input, 'Owner text')
     assert.equal(await stageAppChatDraft('ambiguous', ''), undefined, 'no draft stages nothing')
+  })
+})
+
+test('a cold start keeps a newer session draft over an older durable one', async () => {
+  const envelope = (updatedAt, input, attachments = []) => JSON.stringify({
+    type: 'mobius-composer-draft', version: 2, updated_at: updatedAt, input, attachments,
+  })
+  const file = { name: 'newer.txt', size: 3, mime_type: 'text/plain' }
+  await withBrowser(async () => new Response('{}'), async () => {
+    await setIdbValue('cold', envelope(1, 'Older text'), createStore('mobius-owner-drafts', 'drafts-v1'))
+    // The durable write of the newer draft failed; only session storage has it.
+    sessionStorage.setItem('draft:cold', envelope(2, 'Newer text', [file]))
+    _clearComposerDraftMemoryForTests()
+    assert.equal(await stageAppChatDraft('cold', 'App draft'), 'Newer text\n\nApp draft')
+    assert.deepEqual(readComposerDraft('cold'), {
+      input: 'Newer text\n\nApp draft', attachments: [{ ...file, status: 'done' }],
+    })
   })
 })
