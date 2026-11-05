@@ -8,8 +8,11 @@
 `android.jar` from platform 36 and the five build tools the build uses. Android
 files are read straight out of Google's archives with HTTP range requests, and
 the JDK archive is streamed and checksum-verified, so the full kits are never
-stored (peak disk about 260 MB). It also creates a per-instance test signing key
-under the projects directory when none exists.
+stored (peak disk about 300 MB). Each part is built in a staging folder and moved
+into place only when complete, so an interrupted run is repaired by rerunning it.
+It also creates a per-instance test signing key under the projects directory when
+none exists, and never replaces an existing one. x86-64 hosts only: Google
+publishes no Linux ARM64 build tools.
 
 `build` turns PROJECT (AndroidManifest.xml, res/, src/, optional libs/*.jar) into
 PROJECT/build/<name>.apk: aapt2 compile and link, javac, d8, zipalign, apksigner.
@@ -22,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import secrets
 import shutil
 import subprocess
@@ -33,6 +37,9 @@ from pathlib import Path
 
 DEFAULT_PREFIX = Path("/opt/apk")
 DEFAULT_SIGNING = Path("/data/native-apps/.signing")
+TEST_KEY_DIR = "test"
+# Google publishes the Linux build tools (aapt2, zipalign) for x86-64 only.
+SUPPORTED_MACHINES = frozenset({"x86_64", "amd64"})
 
 ANDROID_REPOSITORY = "https://dl.google.com/android/repository/"
 PLATFORM_ZIP = ANDROID_REPOSITORY + "platform-36_r02.zip"
@@ -121,13 +128,31 @@ def _extract_remote(url: str, members: dict[str, Path]) -> None:
   print(f"  {name}: fetched {reader.fetched / 1e6:.0f} of {reader.size / 1e6:.0f} MB")
 
 
+def _publish(staging: Path, target: Path) -> None:
+  """Move a completely built folder into place, replacing an incomplete one."""
+  shutil.rmtree(target, ignore_errors=True)
+  staging.rename(target)
+
+
+def _android_complete(prefix: Path) -> bool:
+  required = [prefix / PLATFORM_DIR / "android.jar"]
+  required += [prefix / BUILD_TOOLS_DIR / rel for rel in BUILD_TOOL_FILES]
+  return all(path.exists() for path in required)
+
+
 def _install_android(prefix: Path) -> None:
-  print("Android platform 36: android.jar")
-  _extract_remote(PLATFORM_ZIP, {"android.jar": prefix / PLATFORM_DIR / "android.jar"})
-  print("Android build tools 36.0.0")
-  _extract_remote(
-    BUILD_TOOLS_ZIP, {rel: prefix / BUILD_TOOLS_DIR / rel for rel in BUILD_TOOL_FILES},
-  )
+  staging = prefix / ".sdk-staging"
+  shutil.rmtree(staging, ignore_errors=True)
+  try:
+    print("Android platform 36: android.jar")
+    _extract_remote(PLATFORM_ZIP, {"android.jar": staging / "platforms/android-36/android.jar"})
+    print("Android build tools 36.0.0")
+    _extract_remote(
+      BUILD_TOOLS_ZIP, {rel: staging / "build-tools/36.0.0" / rel for rel in BUILD_TOOL_FILES},
+    )
+    _publish(staging, prefix / "sdk")
+  finally:
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 class _HashingReader(io.RawIOBase):
@@ -153,12 +178,18 @@ def _jdk_member_needed(rel: str) -> bool:
   )
 
 
+def _java_complete(prefix: Path) -> bool:
+  return all((prefix / "jre" / "bin" / tool).exists() for tool in ("java", "javac", "keytool"))
+
+
 def _install_java(prefix: Path) -> None:
   request = urllib.request.Request(ADOPTIUM_JDK, headers=HEADERS)
   package = json.load(urllib.request.urlopen(request))[0]["binary"]["package"]
   print(f"Java: streaming {package['name']} ({package['size'] / 1e6:.0f} MB)")
   scratch = prefix / ".jdk-download"
+  runtime = prefix / ".jre-staging"
   shutil.rmtree(scratch, ignore_errors=True)
+  shutil.rmtree(runtime, ignore_errors=True)
   try:
     source = _HashingReader(
       urllib.request.urlopen(urllib.request.Request(package["link"], headers=HEADERS)),
@@ -173,8 +204,6 @@ def _install_java(prefix: Path) -> None:
       pass
     if source.digest.hexdigest() != package["checksum"]:
       raise SystemExit("JDK checksum mismatch; nothing installed")
-    runtime = prefix / "jre"
-    shutil.rmtree(runtime, ignore_errors=True)
     subprocess.run(
       [
         str(scratch / "bin" / "jlink"), "--add-modules", ",".join(JLINK_MODULES),
@@ -183,34 +212,63 @@ def _install_java(prefix: Path) -> None:
       ],
       check=True,
     )
+    _publish(runtime, prefix / "jre")
   finally:
     shutil.rmtree(scratch, ignore_errors=True)
+    shutil.rmtree(runtime, ignore_errors=True)
 
 
 def _ensure_test_key(prefix: Path, signing: Path) -> None:
-  keystore = signing / "test.jks"
-  if keystore.exists():
+  """Create the test key and its settings as one folder, or keep the existing one."""
+  key_dir = signing / TEST_KEY_DIR
+  if key_dir.exists():
+    if not ((key_dir / "test.jks").exists() and (key_dir / "signing.env").exists()):
+      raise SystemExit(
+        f"{key_dir} exists but lacks test.jks or signing.env; it may hold a signing "
+        "identity, so it is left untouched. Restore it, or move it aside and rerun setup.",
+      )
     return
   signing.mkdir(parents=True, exist_ok=True)
   signing.chmod(0o700)
-  password = secrets.token_urlsafe(18)
-  subprocess.run(
-    [
-      str(prefix / "jre" / "bin" / "keytool"), "-genkeypair", "-keystore", str(keystore),
-      "-storetype", "PKCS12", "-alias", "test", "-keyalg", "RSA", "-keysize", "2048",
-      "-validity", "10000", "-dname", "CN=Mobius test key",
-      "-storepass:env", "ANDROID_KS_PASS", "-keypass:env", "ANDROID_KS_PASS",
-    ],
-    check=True, env={**os.environ, "ANDROID_KS_PASS": password}, stdout=subprocess.DEVNULL,
-  )
-  env_file = signing / "test.env"
-  env_file.write_text(f"KS={keystore}\nKS_ALIAS=test\nKS_PASS={password}\n", encoding="utf-8")
-  env_file.chmod(0o600)
-  keystore.chmod(0o600)
-  print(f"Created a test signing key in {signing}")
+  staging = signing / f".{TEST_KEY_DIR}-staging"
+  shutil.rmtree(staging, ignore_errors=True)
+  staging.mkdir(mode=0o700)
+  try:
+    password = secrets.token_urlsafe(18)
+    subprocess.run(
+      [
+        str(prefix / "jre" / "bin" / "keytool"), "-genkeypair",
+        "-keystore", str(staging / "test.jks"), "-storetype", "PKCS12", "-alias", "test",
+        "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+        "-dname", "CN=Mobius test key",
+        "-storepass:env", "ANDROID_KS_PASS", "-keypass:env", "ANDROID_KS_PASS",
+      ],
+      check=True, env={**os.environ, "ANDROID_KS_PASS": password},
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    (staging / "test.jks").chmod(0o600)
+    settings = staging / "signing.env"
+    settings.write_text(
+      f"KS={key_dir / 'test.jks'}\nKS_ALIAS=test\nKS_PASS={password}\n", encoding="utf-8",
+    )
+    settings.chmod(0o600)
+    staging.rename(key_dir)
+  finally:
+    shutil.rmtree(staging, ignore_errors=True)
+  print(f"Created a test signing key in {key_dir}")
+
+
+def _require_supported_host() -> None:
+  machine = platform.machine().lower()
+  if machine not in SUPPORTED_MACHINES:
+    raise SystemExit(
+      f"this host is {machine}; the Android build tools are published for Linux x86-64 "
+      "only, so this toolchain cannot run here. Nothing was downloaded.",
+    )
 
 
 def setup(prefix: Path, signing: Path) -> None:
+  _require_supported_host()
   try:
     prefix.mkdir(parents=True, exist_ok=True)
   except PermissionError:
@@ -219,9 +277,9 @@ def setup(prefix: Path, signing: Path) -> None:
       f"$(id -u):$(id -g) {prefix}` or pass --prefix",
     ) from None
   # Java first: its temporary unpack is the disk peak, so the SDK is not there yet.
-  if not (prefix / "jre" / "bin" / "javac").exists():
+  if not _java_complete(prefix):
     _install_java(prefix)
-  if not (prefix / BUILD_TOOLS_DIR / "d8").exists():
+  if not _android_complete(prefix):
     _install_android(prefix)
   _ensure_test_key(prefix, signing)
   size = sum(p.stat().st_size for p in prefix.rglob("*") if p.is_file() and not p.is_symlink())
@@ -241,7 +299,7 @@ def build(project: Path, prefix: Path, signing_env: Path, code: str, name: str) 
   java_bin = prefix / "jre" / "bin"
   tools = prefix / BUILD_TOOLS_DIR
   android_jar = prefix / PLATFORM_DIR / "android.jar"
-  if not (java_bin / "javac").exists() or not android_jar.exists():
+  if not (_java_complete(prefix) and _android_complete(prefix)):
     raise SystemExit(f"no toolchain in {prefix}; run `setup` first")
   if not signing_env.exists():
     raise SystemExit(f"no signing settings at {signing_env}; run `setup` first")
@@ -306,7 +364,7 @@ def main() -> None:
   build_parser.add_argument("--version-code", default="1")
   build_parser.add_argument("--version-name", default="0.1.0")
   build_parser.add_argument(
-    "--signing-env", type=Path, default=DEFAULT_SIGNING / "test.env",
+    "--signing-env", type=Path, default=DEFAULT_SIGNING / TEST_KEY_DIR / "signing.env",
     help="KS, KS_ALIAS, KS_PASS[, KEY_PASS] file",
   )
   args = parser.parse_args()

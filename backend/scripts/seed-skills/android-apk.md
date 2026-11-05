@@ -27,6 +27,9 @@ to a heavier one:
 - **APIs newer than Android platform 36.**
 - **Play Store uploads** (an `.aab` needs bundletool). These APKs are for
   sideloading.
+- **ARM64 hosts.** Google publishes the Linux build tools for x86-64 only, so
+  `setup` refuses other machines before downloading anything. Tell the owner
+  their Möbius host can't build APKs this way.
 - **Automated UI tests** (no emulator here): verify on a real device.
 
 A plain Java library shipped as a single `.jar` without resources does work:
@@ -56,11 +59,13 @@ What it does, so you can explain it:
   checksum-verified), keeps only what `jlink` needs in a temporary folder,
   builds a ~58 MB runtime with `java`, `javac` and `keytool`, then deletes the
   temporary folder.
-- Peak disk about 300 MB, final about 111 MB. Parts already present are
-  skipped, so rerunning is cheap.
-- Creates a per-instance **test signing key** in `/data/native-apps/.signing/`
-  (`test.jks` plus `test.env` with a random password, both owner-only) when
-  none exists.
+- Peak disk about 300 MB, final about 111 MB. Each part is assembled in a
+  staging folder and moved into place only when complete, so after an
+  interrupted run just run `setup` again; complete parts are skipped.
+- Creates a per-instance **test signing key** in
+  `/data/native-apps/.signing/test/` (`test.jks` plus `signing.env` with a
+  random password, both owner-only) when none exists. An existing key is never
+  replaced; if that folder is incomplete, `setup` stops and says so.
 
 `/opt` is lost when the container is replaced; `setup` restores it in about a
 minute. The signing key and project sources live on the data disk so they
