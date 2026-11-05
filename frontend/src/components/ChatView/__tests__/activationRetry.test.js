@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { activationRetryDelay, chatEntryFrame } from '../chatRuntimeState.js'
+import { activationRetryDelay, chatEntryFrame, createActivationGate } from '../chatRuntimeState.js'
 
 const READ_TIMEOUT_MS = 15000
 const timeout = Object.assign(new Error('Request timed out'), { name: 'TimeoutError' })
@@ -98,4 +98,20 @@ test('a saved transcript presents at once, idle or mid-reply, while runtime trut
     false,
     'an unvalidated reading coordinate still waits for runtime truth',
   )
+})
+
+test('a row control tapped on a saved frame waits for the activation verdict', async () => {
+  const gate = createActivationGate()
+  assert.equal(await gate.wait(true), true, 'a settled chat acts at once')
+  let answered = null
+  const held = gate.wait(false).then(ready => { answered = ready })
+  await Promise.resolve()
+  assert.equal(answered, null, 'the tap is held, not dropped, while activation is pending')
+  gate.settle(true)
+  await held
+  assert.equal(answered, true, 'it proceeds once activation is ready')
+
+  const failed = gate.wait(false)
+  gate.settle(false)
+  assert.equal(await failed, false, 'a failed activation or a chat change cancels it')
 })

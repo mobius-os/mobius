@@ -46,7 +46,7 @@ import {
   olderHistoryRetryDelayMs,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
-import { activationRetryDelay, chatEntryFrame } from './chatRuntimeState.js'
+import { activationRetryDelay, chatEntryFrame, createActivationGate } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -550,9 +550,12 @@ export default function ChatView({
         : initialCacheEntryState,
   )
   // Cached rows are safe restoration geometry, but their persisted liveness can
-  // be stale. Do not publish a chat-to-chat handoff until this activation's
-  // runtime/detail verdict has arrived: otherwise an apparently idle cache can
-  // be promoted before the server reports that its turn is still running.
+  // be stale. A coordinate-validated saved frame still presents at once (see
+  // chatEntryFrame); this activation's runtime/detail verdict reconciles
+  // beneath it. The accepted trade-off: a chat saved idle may flip to running
+  // as that verdict lands, and a chat deleted elsewhere shows briefly before
+  // its 404 redirects. Nothing acts on the saved liveness: Send, question
+  // answers, durable Restart offers and Stop all wait for the verdict.
   // One identity-bound phase owns activation. A retained ChatView can receive
   // another chat before its previous effect runs, so the phase is never read
   // across identities. Provisional chats are locally authoritative from birth;
@@ -583,6 +586,11 @@ export default function ChatView({
   // A failed activation keeps Send usable as its in-place recovery: the tap
   // retries activation and the draft stays. Nothing sends before it settles.
   const activationFailed = activationPhase === 'error'
+  const [activationGate] = useState(createActivationGate)
+  useEffect(() => {
+    if (activationSettled || activationFailed) activationGate.settle(activationSettled)
+  }, [activationGate, activationSettled, activationFailed])
+  useEffect(() => () => activationGate.settle(false), [activationGate, activationIdentity])
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -3947,7 +3955,9 @@ export default function ChatView({
     questionId,
     questionSubmissionContext = null,
   ) => {
-    if (!activationSettledRef.current) return false
+    // A saved frame shows its open question (or Restart offer) before
+    // activation settles; hold the tap until then rather than dropping it.
+    if (!await activationGate.wait(activationSettledRef.current)) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
@@ -4164,6 +4174,7 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
     }
   }, [
+    activationGate,
     streamSend,
     cancelQuestionSubmission,
     commitMessages,
@@ -4566,6 +4577,8 @@ export default function ChatView({
     if (handlingStopRef.current) return
     handlingStopRef.current = true
     try {
+      // Stop can show from a saved running frame; it acts on runtime truth.
+      if (!await activationGate.wait(activationSettledRef.current)) return
       // An in-flight steer POST must settle before Stop snapshots: its
       // outcome determines whether those rows still belong to the queue or
       // have already moved into the transcript. Bounded so a hung POST can't

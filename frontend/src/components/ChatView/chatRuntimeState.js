@@ -47,7 +47,7 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - A saved window the owner already read presents at once, idle or
  *   mid-reply: reopening a chat should not wait on the network. It opens at
  *   the reader's saved coordinate; runtime truth and any live reply reconcile
- *   beneath it, and sending stays blocked until activation settles.
+ *   beneath it. Sending, answers and Stop wait for activation to settle.
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -70,6 +70,25 @@ export function chatEntryFrame({
     || (activationSettled && !loading && (transcriptPaintable || showEmpty))
     || (activationPhase === 'error' && !loading && transcriptPaintable)
   return { showEmpty, showLoadError, displayReady }
+}
+
+/** Holds a row control tapped on a saved frame (a question answer, a durable
+ * Restart offer, Stop) until that chat's activation verdict, the way a
+ * composer submit waits for it: `wait` resolves true once activation is
+ * ready, and false when it fails or the view leaves the chat, so the control
+ * reports its own cancellation instead of acting on unconfirmed runtime. */
+export function createActivationGate() {
+  let waiting = []
+  return {
+    wait(settled) {
+      return settled ? Promise.resolve(true) : new Promise(resolve => waiting.push(resolve))
+    },
+    settle(ready) {
+      const resolved = waiting
+      waiting = []
+      for (const resolve of resolved) resolve(ready)
+    },
+  }
 }
 
 /** Display-only history of a pause that a later continuation resolved. It

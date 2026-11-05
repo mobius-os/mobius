@@ -43,6 +43,12 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,[\s\S]*cachedFrame: \(initialEntryPhase === 'cached' \|\| initialEntryPhase === 'stream-catchup'\)\s*&& revealed,/,
     'a coordinate-validated cache, idle or mid-reply, presents before runtime confirmation (chatEntryFrame); an unvalidated frame waits, and Send stays blocked either way',
   )
+  assert.match(chatView,
+    /const doSendSilent = useCallback\(async \([\s\S]*?\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(!await activationGate\.wait\(activationSettledRef\.current\)\) return false/,
+    'an answer or Restart offer tapped on that early frame waits for activation instead of being dropped')
+  assert.match(chatView,
+    /async function handleStop\(\) \{[\s\S]*?try \{\s*(?:\/\/[^\n]*\n\s*)*if \(!await activationGate\.wait\(activationSettledRef\.current\)\) return\n/,
+    'Stop shown from a saved running frame acts only on runtime truth')
   assert.match(
     chatView,
     /const \[activationState, setActivationState\] = useState\(\(\) => \(\{[\s\S]*phase: provisionalNewChat \? 'ready' : 'pending',[\s\S]*const activationPhase = activationState.chatId === activationIdentity[\s\S]*const activationSettled = provisionalNewChat \|\| activationPhase === 'ready'/,

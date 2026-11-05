@@ -994,6 +994,9 @@ test.describe('Scroll position', () => {
     let releaseCatchUp
     const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve })
     let returnImageServed = false
+    let returnDetailServed = false
+    let releaseReturnDetail
+    const returnDetailGate = new Promise(resolve => { releaseReturnDetail = resolve })
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
       'base64',
@@ -1016,7 +1019,10 @@ test.describe('Scroll position', () => {
 
     await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
       if (route.request().method() !== 'GET') return route.continue()
-      if (returning) await new Promise(resolve => setTimeout(resolve, 220))
+      if (returning) {
+        await returnDetailGate
+        returnDetailServed = true
+      }
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -1152,7 +1158,11 @@ test.describe('Scroll position', () => {
       return !!el && getComputedStyle(el).visibility !== 'hidden' && !!target
     }, chatId, { timeout: 5000 })
     await expect(page.locator('.shell__chat-view--held')).toHaveCount(0)
+    // The saved reading position paints before the chat detail answers.
+    expect(returnDetailServed).toBe(false)
     expect(catchUpServed).toBe(false)
+    releaseReturnDetail()
+    await expect.poll(() => returnDetailServed, { timeout: 3000 }).toBe(true)
     releaseCatchUp()
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
