@@ -8845,6 +8845,12 @@ def test_retired_copies_leave_only_the_residual_conflict_for_the_resolver(clone_
   assert parked["served"] == served
   assert _git(platform, "rev-parse", f"{parked['left']}^").stdout.strip() == served
   assert parked["units"] == {"backend/app/main.py": "c-" + served[:8] + "-local-line-a"}
+  # The resolver reviews against the candidate's local side, not the served
+  # commit that still carries the set-aside draft.
+  message = pu._platform_conflict_resolver_message(target, res.conflict_paths, parked)
+  assert f"`git diff --cached {parked['left']} --`" in message
+  assert f"`git diff {parked['base']} {parked['left']} --`" in message
+  assert served not in message
   worktree = Path(parked["worktree"])
   assert (worktree / "backend/app/foo.py").read_text() == _FOO_MERGED
   (worktree / "backend/app/main.py").write_text(

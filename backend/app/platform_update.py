@@ -4751,7 +4751,7 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
     if not target or not source or not (worktree / ".git").exists():
       raise PlatformUpdateError("The parked net merge is incomplete.")
-    answer = _resolved_tree(parked, worktree, source)
+    answer = _resolved_tree(parked, worktree)
     if parked.get("stage") == "working":
       committed = str(parked.get("right") or "")
       resolved_working = (
@@ -4850,12 +4850,17 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     return result.status
 
 
-def _resolved_tree(parked: dict, worktree: Path, source: str) -> str:
+def _parked_left(parked: dict) -> str:
+  """The local side the parked candidate merges from: the saved working
+  snapshot, else the served commit minus set-aside merged copies (``left``)."""
+  if parked.get("stage") == "working":
+    return str(parked.get("pre") or "")
+  return str(parked.get("left") or parked.get("served") or "")
+
+
+def _resolved_tree(parked: dict, worktree: Path) -> str:
   """The resolver's staged answer, only while its parked merge is intact."""
-  left = str(
-    parked.get("pre") if parked.get("stage") == "working"
-    else parked.get("left") or source
-  )
+  left = _parked_left(parked)
   right = str(parked.get("right") or "")
   merging = app_git.merge_in_progress(worktree)
   active_merge = (
@@ -6303,7 +6308,7 @@ def _platform_conflict_resolver_message(
   # two-sided review text rather than an error.
   source = right = base = None
   if overlay and overlay.get("mode") == "net":
-    source = overlay.get("pre") if overlay.get("stage") == "working" else overlay.get("served")
+    source = _parked_left(overlay)
     right, base = overlay.get("right"), overlay.get("base")
   if source and right and base:
     review = (
