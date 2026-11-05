@@ -255,7 +255,9 @@ test('the frame keeps an early visibility verdict for the app runtime', () => {
 // hidden ancestor never changes the frame's native Page Visibility. These
 // tests pin that the app frame itself turns the shell's verdict into silence.
 
-function bootFrame() {
+// A nested srcdoc document reads location.origin as "null" but runs in its
+// parent's origin (window.origin), or an opaque one ("null") when sandboxed.
+function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}) {
   const source = frame.match(/<script data-mobius-background-pause>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(source, 'app-frame.html has the background pause script')
 
@@ -310,7 +312,8 @@ function bootFrame() {
   const parent = {}
   const window = {
     parent,
-    location: { origin: SHELL_ORIGIN },
+    origin,
+    location: { origin: locationOrigin },
     AudioContext: FakeAudioContext,
     webkitAudioContext: FakeAudioContext,
     HTMLMediaElement: FakeMediaElement,
@@ -344,6 +347,11 @@ function bootFrame() {
     setNativeVisibility(value) { nativeVisibility = value },
     shell(data, origin = SHELL_ORIGIN, eventSource = parent) {
       messageListener({ source: eventSource, origin, data: { type: 'moebius:frame-visibility', ...data } })
+    },
+    // Load this document into a child iframe of `host`, as the browser would.
+    nestIn(host, iframe) {
+      iframe.contentWindow.postMessage = (data) => messageListener({ source: parent, origin: SHELL_ORIGIN, data })
+      host.childFrames.push(iframe)
     },
     // The browser begins playback on its own (autoplay, or a clip that was
     // still loading): it starts playing, then dispatches a capture-phase play
@@ -574,6 +582,20 @@ test('a hidden app keeps its animation frames for its return, as a really hidden
   assert.deepEqual(ran, ['before', 'held'])
 })
 
+test('a held frame stays cancellable while held and after return, until it runs', () => {
+  const app = bootFrame()
+  const ran = []
+  app.shell({ visible: false })
+  const whileHeld = app.window.requestAnimationFrame(() => ran.push('while held'))
+  const afterReturn = app.window.requestAnimationFrame(() => ran.push('after return'))
+  app.window.requestAnimationFrame(() => ran.push('kept'))
+  app.window.cancelAnimationFrame(whileHeld)
+  app.shell({ visible: true })
+  app.window.cancelAnimationFrame(afterReturn)
+  assert.equal(app.paint(), 1)
+  assert.deepEqual(ran, ['kept'])
+})
+
 test('platform painting keeps running while the app is held', () => {
   const app = bootFrame()
   app.shell({ visible: false })
@@ -676,6 +698,32 @@ test('each verdict reaches child frames, and a child that loads later hears the 
   const late = new app.Iframe()
   app.childLoaded(late)
   assert.deepEqual({ visible: late.posted[0].visible, covered: late.posted[0].covered }, { visible: true, covered: true })
+})
+
+test('a nested srcdoc document pauses on the verdict its parent forwards', async () => {
+  const app = bootFrame()
+  const game = bootFrame({ locationOrigin: 'null' })
+  game.nestIn(app, new app.Iframe())
+  const music = new game.window.AudioContext()
+  app.shell({ visible: true, covered: true })
+  await settle()
+  assert.equal(music.state, 'suspended')
+  app.shell({ visible: true, covered: false })
+  await settle()
+  assert.equal(music.state, 'running')
+})
+
+test('a sandboxed nested document trusts only the frame that embeds it', async () => {
+  const app = bootFrame()
+  const game = bootFrame({ locationOrigin: 'null', origin: 'null' })
+  game.nestIn(app, new app.Iframe())
+  const music = new game.window.AudioContext()
+  game.shell({ visible: false }, SHELL_ORIGIN, {})
+  await settle()
+  assert.equal(music.state, 'running')
+  app.shell({ visible: false })
+  await settle()
+  assert.equal(music.state, 'suspended')
 })
 
 test('a child frame that loads before any verdict is not told anything', () => {

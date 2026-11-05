@@ -382,8 +382,12 @@
     heldFrames.set(lastHeldFrame, callback);
     return lastHeldFrame;
   };
+  // A held id stays cancellable after release(), until its callback runs.
+  var resumedFrames = new Map();
   window.cancelAnimationFrame = function (id) {
-    if (!heldFrames.delete(id)) nativeCancelFrame.call(window, id);
+    heldFrames.delete(id);
+    nativeCancelFrame.call(window, resumedFrames.has(id) ? resumedFrames.get(id) : id);
+    resumedFrames.delete(id);
   };
 
   // Nested documents. The tag is assembled so this inline script never contains
@@ -465,11 +469,16 @@
   function release() {
     var contexts = Array.from(heldContexts);
     var media = Array.from(heldMedia);
-    var frames = Array.from(heldFrames.values());
+    var frames = Array.from(heldFrames);
     heldContexts.clear();
     heldMedia.clear();
     heldFrames.clear();
-    frames.forEach(function (callback) { nativeFrame.call(window, callback); });
+    frames.forEach(function (entry) {
+      resumedFrames.set(entry[0], nativeFrame.call(window, function (time) {
+        resumedFrames.delete(entry[0]);
+        entry[1](time);
+      }));
+    });
     contexts.forEach(function (context) {
       if (context.state !== 'closed') contextApi(context).resume.call(context).catch(ignore);
     });
@@ -483,8 +492,12 @@
     });
   }
 
+  // A nested srcdoc document's location.origin reads "null"; window.origin is
+  // the origin it really runs in, its parent's. A sandboxed document's origin
+  // is opaque, so it has nothing to compare and trusts only its embedder.
   window.addEventListener('message', function (event) {
-    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    if (event.source !== window.parent) return;
+    if (window.origin !== 'null' && event.origin !== window.origin) return;
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
