@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { openInternalLink } from '../internalLink.js'
+import { openExistingChat } from '../../../lib/appChatNavigation.js'
 import { appBlockHref, transcriptHostRequest } from './appBlock.js'
 import './AppBlock.css'
 
@@ -15,11 +16,12 @@ export function installedApp(apps, slug) {
   return (apps || []).find(app => app.slug === slug && !app.deleted_at) || null
 }
 
-/** Navigation the embedded view may request, through the shell's navigator. */
+/** Navigation the embedded view may request, through the shell's navigator.
+ *  `composer` carries an unsent draft already staged for the opened chat. */
 export function useTranscriptNavigation(onInternalNav) {
-  return useCallback(target => {
+  return useCallback((target, composer) => {
     const url = new URL(sharedBrowserShellHref(target), window.location.href)
-    if (onInternalNav) onInternalNav(url)
+    if (onInternalNav) onInternalNav(url, composer)
     else window.location.assign(url.href)
   }, [onInternalNav])
 }
@@ -106,7 +108,15 @@ export function StaticAppBlock({ block, app, appsLoading, onInternalNav, section
   const open = viewIntent !== null
   useEffect(() => { onOpenChange?.(open) }, [onOpenChange, open])
   const navigate = useTranscriptNavigation(onInternalNav)
-  const onHostRequest = useCallback((_, request) => transcriptHostRequest(request, { navigate }), [navigate])
+  const onHostRequest = useCallback((_, request) => {
+    // Only the strict request may leave a draft from a transcript; it reports
+    // its outcome to the app instead of falling back.
+    if (request?.type === 'moebius:open-chat' && request.requireExisting) {
+      const target = `/shell/?${new URLSearchParams({ chat: request.chatId })}`
+      return openExistingChat(request, draft => navigate(target, draft === undefined ? undefined : { draft }))
+    }
+    return transcriptHostRequest(request, { navigate })
+  }, [navigate])
   const actionable = block.inline && app
   // `expand: false`: no inline view at all; an action is a link into the app.
   const openable = actionable && block.expand

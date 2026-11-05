@@ -291,6 +291,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //   - {type: 'moebius:new-chat', draft?}                     frame → host
 //     (always an editable draft; see appHostRequest)
 //   - {type: 'moebius:open-chat', chatId, draft?}            frame → host
+//   - {type: 'moebius:open-existing-chat', requestId, chatId, draft?}
+//     → {type: 'moebius:open-chat-result', requestId, ok, result: {outcome}}
+//     (that exact chat or an outcome, never a new-chat fallback)
 //   - {type: 'moebius:open-app', appId, intent?}             frame → host
 //   - {type: 'moebius:open-settings', section?}              frame → host
 // App crashes are separately attributed here and sent to `onAppError`.
@@ -1249,9 +1252,11 @@ const AppCanvas = forwardRef(function AppCanvas({
         }
         const responseType = hostRequest.type === 'moebius:chat-control'
           ? 'moebius:chat-control-result'
+          : hostRequest.type === 'moebius:open-chat' ? 'moebius:open-chat-result'
           : 'moebius:projects-result'
         const fallbackError = hostRequest.type === 'moebius:chat-control'
           ? 'Chat control failed.'
+          : hostRequest.type === 'moebius:open-chat' ? 'Opening the conversation failed.'
           : 'Projects request failed.'
         // A hidden transcript or session document runs without an owner
         // gesture on screen. Ordinary shell apps keep their background reads.

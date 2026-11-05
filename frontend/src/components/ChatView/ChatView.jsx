@@ -487,8 +487,8 @@ export default function ChatView({
   const decisionRevealId = questionActivation.reveal?.id
   const decisionAnchorKey = decisionQuestionId ? `question:${decisionQuestionId}` : null
   const inputRef = useRef(null)
-  const handleInternalNav = useCallback((url) => {
-    onInternalNav?.(url)
+  const handleInternalNav = useCallback((url, composer) => {
+    onInternalNav?.(url, composer)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
   // A turn can only RUN while online (it spawns a server-side agent), but a
