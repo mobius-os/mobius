@@ -88,6 +88,26 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
 )
 
 
+# entrypoint.sh executes app.platform_boot from /app/platform-baked before it
+# may trust the served checkout. Include package initialization and the boot
+# transaction's import closure, not all backend modules. These modules also
+# have served uses, so their changed imports still need the backend probe.
+IMAGE_PLATFORM_BOOT_MODULES = (
+  "backend/app/__init__.py",
+  "backend/app/memory_observability.py",
+  "backend/app/platform_boot.py",
+  "backend/app/platform_update.py",
+  "backend/app/local_change_tests.py",
+  "backend/app/removed_references.py",
+  "backend/app/platform_activation.py",
+  "backend/app/app_git.py",
+  "backend/app/runtime_provenance.py",
+  "backend/app/managed_paths.py",
+  "backend/app/config.py",
+  "backend/app/restart_util.py",
+)
+
+
 # Ordered first-match rules.  Narrow baked/deployment inputs precede the broad
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
@@ -196,6 +216,13 @@ _RULES = (
     ),
   ),
   _Rule(
+    "baked_platform_boot",
+    ActivationLevel.IMAGE_REBUILD,
+    "The image-owned startup transaction changed; restarting the server "
+    "does not reload its baked copy.",
+    exact=IMAGE_PLATFORM_BOOT_MODULES,
+  ),
+  _Rule(
     "platform_skill_templates",
     ActivationLevel.SERVER_RESTART,
     "Platform skill templates changed; the server applies them to installed "
@@ -293,7 +320,8 @@ def backend_import_probe_required(paths: Iterable[str]) -> bool:
     rule = _rule_for_path(normalized)
     if (
       rule
-      and rule.level is ActivationLevel.SERVER_RESTART
+      and (rule.level is ActivationLevel.SERVER_RESTART
+           or normalized in IMAGE_PLATFORM_BOOT_MODULES)
       and normalized != "skill/core.md"
     ):
       return True
@@ -357,8 +385,12 @@ def guidance_for(level: ActivationLevel, deployment: DeploymentKind) -> str:
 
 def classify_activation(
   paths: Iterable[str], *, deployment: DeploymentKind | None = None,
+  served_restart_paths: Iterable[str] = (),
 ) -> PlatformActivationImpact:
-  """Classify the actions that apply to this installation."""
+  """Classify independent actions. ``served_restart_paths`` names dual-use
+  boot modules whose official image input has already been proved satisfied;
+  it is supplied only by the updater's marker/served-diff provenance seam.
+  """
   active_deployment = deployment or deployment_kind()
   grouped: dict[str, tuple[_Rule | None, list[str]]] = {}
   for raw_path in paths:
@@ -370,6 +402,11 @@ def classify_activation(
     if key not in grouped:
       grouped[key] = (rule, [])
     grouped[key][1].append(path)
+
+  served_boot = sorted({
+    _normalize_path(path) for path in served_restart_paths
+    if _normalize_path(path) in IMAGE_PLATFORM_BOOT_MODULES
+  })
 
   reasons: list[ActivationReason] = []
   action_levels: set[ActivationLevel] = set()
@@ -387,6 +424,14 @@ def classify_activation(
         else "These files are rebuilt, read on demand, or do not affect the running installation."
       ),
       paths=sorted(set(grouped_paths)),
+    ))
+
+  if served_boot:
+    action_levels.add(ActivationLevel.SERVER_RESTART)
+    reasons.append(ActivationReason(
+      code="served_boot_module",
+      summary="The image runs the official boot module; restart the server to load its served source.",
+      paths=served_boot,
     ))
 
   required_level = max(
