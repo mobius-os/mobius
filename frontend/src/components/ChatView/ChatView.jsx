@@ -1596,7 +1596,7 @@ export default function ChatView({
     pendingQueue.pendingMessagesRef,
     reconcileFailedSendAttempt,
   ])
-  // A send that never took the draft (a reply's Try again) has no
+  // A send that never took the composer draft has no
   // failed-attempt record to reconcile. Once the transcript shows its cid
   // landed, its "couldn't confirm" banner is stale.
   const settleDetachedSendConfirmation = useCallback(async (cid, banner) => {
@@ -3210,7 +3210,7 @@ export default function ChatView({
     // a stale callback or failed-file-only draft must not close the keyboard,
     // claim scroll ownership, or freeze queue geometry when nothing will send.
     const usesComposerFiles = !Array.isArray(opts.attachments)
-    // A send the owner triggers from elsewhere (a reply's Try again) carries
+    // A send the owner triggers outside the composer carries
     // its own text and cid: the composer's draft is not its payload, so the
     // send neither clears it, nor restores the sent text into it on failure,
     // nor reads or writes the failed-attempt record that belongs to that draft.
@@ -6011,21 +6011,6 @@ export default function ChatView({
   // A DB refresh may commit the steer before its cut reaches this socket.
   // Keep the identity-owned active row in its transcript slot through that
   // handoff; moving it to the tail would paint the owner message above it.
-  // Replies are memoized; hand them one stable Try again that sends through
-  // the latest doSend without touching the owner's draft. A failed attempt
-  // leaves its reply the latest, and tapping again there reuses its cid: if
-  // the unconfirmed send did land, the server answers it as a duplicate
-  // instead of starting a second turn.
-  const doSendRef = useRef(doSend)
-  doSendRef.current = doSend
-  const failedTryAgainRef = useRef(null)
-  const handleTryAgain = useCallback(async (replyKey) => {
-    const failed = failedTryAgainRef.current
-    const cid = failed?.replyKey === replyKey ? failed.cid : mintSendCid()
-    const sent = await doSendRef.current('Try again', { attachments: [], fromComposer: false, cid })
-    failedTryAgainRef.current = sent ? null : { replyKey, cid }
-    return sent
-  }, [])
   const renderAssistantReply = group => {
     if (!group) return null
     const activeIndex = showActiveAssistantSurface
@@ -6071,9 +6056,6 @@ export default function ChatView({
       // The latest reply keeps its actions in view; earlier ones reveal on demand.
       metaVisible={last || visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={showMessageMeta}
-      // A queued message is already the next turn; Try again would only queue behind it.
-      onTryAgain={last && !turnActive && !hasPendingQuestion
-        && pendingQueue.pendingMessages.length === 0 ? handleTryAgain : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
       sealedSteerAssistant={active ? sealedSteerAssistant : sealedAssistantBeforeSteer(messages, group.start)}
     />

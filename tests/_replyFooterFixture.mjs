@@ -1,4 +1,4 @@
-/* The real ChatView owns retry eligibility and sending; only its API is faked. */
+/* Exercise the real ChatView reply actions and layout with a fixed transcript. */
 import { expect } from '@playwright/test'
 import { createTaggedChat } from './_chatTracker.mjs'
 import { mockDeliveryReady, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
@@ -12,7 +12,7 @@ export async function mountReplyFooter(page, base, {
   const path = `/api/chats/${chat.id}`
   const assistant = (id, content, ts) => ({ role: 'assistant', id, ts,
     blocks: [{ type: 'text', content }] })
-  let messages = [
+  const messages = [
     { role: 'user', content: 'First question', cid: 'footer-first', ts: 1 },
     assistant('footer-earlier', 'Earlier completed answer.', 2),
     { role: 'user', content: 'Second question', cid: 'footer-second', ts: 3 },
@@ -22,8 +22,7 @@ export async function mountReplyFooter(page, base, {
     questions: [{ question: 'Which next step?', options: [{ label: 'Continue' }] }] })
   const runtime = () => runtimeSnapshot({ running,
     pending_question_id: pendingQuestion ? 'footer-question' : null,
-    // A new run without prose must suppress retry on the still-settled latest
-    // reply, not merely let AssistantReply hide a streaming reply's actions.
+    // Keep the previous reply settled while a new run has not written prose.
     active_assistant_message_id: running ? 'footer-new-run' : null,
     run_id: running ? 'footer-new-run' : null, runtime_revision: 10000000 })
   const detail = () => ({ ...chat, provider: 'claude', ...testChatAgentSettings(), ...runtime(),
@@ -51,8 +50,7 @@ export async function mountReplyFooter(page, base, {
     name: 'draft-note.txt', filename: 'draft-note.txt', size: 16,
     mime_type: 'text/plain', url: `${path}/uploads/draft-note.txt`,
   }] }))
-  // Retry POSTs never reach the backend. Tests opt into the exact response
-  // below only when exercising the real callback, without starting a provider.
+  // Footer interactions must never start a provider turn.
   await page.route(`**${path}/messages`, route => route.abort())
   await page.goto(`${base}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
   const surface = page.locator('[data-chat-surface="painted"]')
@@ -62,11 +60,5 @@ export async function mountReplyFooter(page, base, {
   if (running) await expect(surface.locator('.chat__stop')).toBeVisible()
   if (pendingQuestion) await expect(surface.locator('.qcard')).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
-  return { surface, replies, composer, path,
-    accept(body) {
-      const message = { role: 'user', content: body.content, cid: body.cid, ts: 5 }
-      messages = [...messages, message, assistant('footer-retried', 'Retried answer.', 6)]
-      return { status: 'started', message }
-    },
-  }
+  return { surface, replies, composer }
 }

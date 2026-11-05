@@ -1,6 +1,6 @@
 /* A reply has one action row, on its own line at its end, holding a Copy of
  * its answer. It appears only once the reply has settled. The latest reply
- * keeps it in view; earlier replies reveal it by tap (or hover with a mouse).
+ * keeps it in view; earlier replies reveal it only by tap/click.
  * #1290 attached copy to every assistant row and #1342 reverted that; a reply
  * now owns exactly one row instead. */
 import { after, test } from 'node:test'
@@ -69,9 +69,9 @@ test('an earlier reply hides its action row until revealed', () => {
   assert.match(renderReply([turn], { metaVisible: true }), /chat__msg-meta--visible/)
 })
 
-test('a hidden action row is not also hidden from assistive technology', () => {
-  // Hover reveals the row through CSS alone; an aria-hidden ancestor would
-  // leave its now-focusable buttons without accessible semantics.
+test('a revealed action row retains its accessible semantics', () => {
+  // CSS owns visibility; an aria-hidden ancestor would leave revealed buttons
+  // focusable but without accessible semantics.
   const row = renderReply([turn]).match(/<div class="chat__msg-meta[^>]*>/)[0]
   assert.doesNotMatch(row, /aria-hidden/)
 })
@@ -79,10 +79,10 @@ test('a hidden action row is not also hidden from assistive technology', () => {
 test('a streaming reply already reserves its action row, empty until it settles', () => {
   // Settling must fill the line, not add one: a followed transcript would
   // grow and jump at the end of every turn (streaming-cursor.spec).
-  const html = renderReply([turn], { isStreaming: true, metaVisible: true, onTryAgain: () => {} })
+  const html = renderReply([turn], { isStreaming: true, metaVisible: true })
   assert.equal(metaRows(html).length, 1)
   assert.match(html, /<div class="chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"><\/div>/,
-    'no time, Copy or Try again while the reply is still being written')
+    'no time or Copy while the reply is still being written')
 })
 
 test('a reply with no prose offers no Copy but keeps its time', () => {
@@ -128,17 +128,19 @@ test('the answer reads across a reply’s rows and skips hidden or system rows',
   ]), 'Part one.\n\nPart two.')
 })
 
-test('the reply row shows the reply’s date and time after its actions', () => {
+test('the reply row shows the reply’s date and time before Copy', () => {
   const html = renderReply([turn])
   assert.match(html, /<time class="chat__ts">21st Oct 2026, /)
 })
 
-test('Try again appears only where the conversation offers it', () => {
-  assert.doesNotMatch(renderReply([turn]), /aria-label="Try again"/,
-    'an earlier reply, or one while a turn runs, has no Try again')
-  const latest = renderReply([turn], { metaVisible: true, onTryAgain: () => {} })
-  assert.match(latest, /aria-label="Try again"/)
-  assert.ok(latest.indexOf('aria-label="Copy message"') < latest.indexOf('aria-label="Try again"'))
+test('settled reply footers offer Copy without Try again', () => {
+  for (const metaVisible of [false, true]) {
+    const html = renderReply([turn], { metaVisible })
+    assert.match(html, /aria-label="Copy message"/)
+    assert.doesNotMatch(html, /aria-label="Try again"/)
+    const timeIndex = html.indexOf('<time class="chat__ts">')
+    assert.ok(timeIndex >= 0 && timeIndex < html.indexOf('aria-label="Copy message"'))
+  }
 })
 
 test('a progress note followed by real work is not the answer; the card it ends on is', () => {
@@ -267,8 +269,8 @@ test('Copy numbers answer blocks as they render, past deliverables and a card’
   }
 })
 
-// Caller eligibility, the real retry click/draft path, and footer flow geometry
-// run in tests/hidden-reply-continuity.spec.mjs against the painted ChatView.
+// Copy, tap-only reveal, and inset inline footer geometry run in
+// tests/hidden-reply-continuity.spec.mjs against the painted ChatView.
 
 const failedReply = (...blocks) => ({ role: 'assistant', id: 'run', ts: turn.ts, blocks })
 
@@ -282,7 +284,7 @@ test('a reply ending on a failure card leaves recovery to that card', () => {
   )
   assert.deepEqual(summary([parked]), { answer: '', failed: true },
     'the provider’s echo of the limit is the error, not an answer')
-  const row = actionRow(renderReply([parked], { onTryAgain: () => {}, onResume: () => {} }))
+  const row = actionRow(renderReply([parked], { onResume: () => {} }))
   assert.doesNotMatch(row, /aria-label="(Copy message|Try again)"/)
 })
 
@@ -299,21 +301,19 @@ test('a stopped reply copies only the answer it was still writing, never Try aga
     { type: 'error', message: 'The agent stopped before finishing this turn.', resumable: true },
   )
   assert.deepEqual(summary([partial]), { answer: 'The board is up to', failed: true })
-  const html = renderReply([partial], { metaVisible: true, onTryAgain: () => {}, onResume: () => {} })
+  const html = renderReply([partial], { metaVisible: true, onResume: () => {} })
   assert.match(html, /aria-label="Copy message"/)
   assert.doesNotMatch(html, /aria-label="Try again"/)
 })
 
-test('an error card that cannot recover leaves Try again to the latest reply', () => {
-  // Only a resumable tail card owns recovery (ownsRecoveryAction); a plain
-  // provider error shows neither Try now nor Resume.
-  const latest = { metaVisible: true, onTryAgain: () => {}, onResume: () => {} }
+test('a non-resumable error keeps only the time and any partial answer Copy', () => {
+  const latest = { metaVisible: true, onResume: () => {} }
   const providerError = failedReply(
     { type: 'tool', name: 'Bash' },
     { type: 'error', message: 'The provider returned an error.' },
   )
   const bare = actionRow(renderReply([providerError], latest))
-  assert.match(bare, /aria-label="Try again"/)
+  assert.doesNotMatch(bare, /aria-label="Try again"/)
   assert.doesNotMatch(bare, /aria-label="Copy message"/,
     'no answer, so the row has nothing to copy (the error card copies its own message)')
   assert.match(bare, /<time class="chat__ts">/)
@@ -323,18 +323,17 @@ test('an error card that cannot recover leaves Try again to the latest reply', (
   )
   const html = actionRow(renderReply([partial], latest))
   assert.match(html, /aria-label="Copy message"/)
-  assert.match(html, /aria-label="Try again"/)
+  assert.doesNotMatch(html, /aria-label="Try again"/)
 })
 
-test('a resumable error card owns recovery only where it can act', () => {
+test('removing footer retry leaves the error card’s Resume intact', () => {
   const stopped = failedReply(
     { type: 'tool', name: 'Bash' },
     { type: 'error', message: 'The agent stopped before finishing this turn.', resumable: true },
   )
-  assert.doesNotMatch(actionRow(renderReply([stopped], { onTryAgain: () => {}, onResume: () => {} })),
-    /aria-label="Try again"/, 'its Resume is the way on')
-  assert.match(renderReply([stopped], { onTryAgain: () => {} }), /aria-label="Try again"/,
-    'without a Resume path the card offers nothing, so Try again does')
+  const html = renderReply([stopped], { onResume: () => {} })
+  assert.match(html, /class="chat__resume chat__recovery-action">Resume<\/button>/)
+  assert.doesNotMatch(actionRow(html), /aria-label="Try again"/)
 })
 
 test('an error card above a later row does not end the reply', () => {

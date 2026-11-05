@@ -1,12 +1,10 @@
 /* One reply owns live/saved source rows, continuous prose, its final References,
-   and the one action row at its end: its time, Copy of its answer, and Try
-   again where offered. */
+   and the one action row at its end: its time and Copy of its answer. */
 import { Fragment, memo, useMemo, useContext } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import { renderedReplyClipboard, replyOutcome } from './messageCopy.js'
-import { ownsRecoveryAction } from './recoveryCard.js'
 import { carryDurableBlockState, streamItemsToAssistantPayload } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
 import { mergeProjectedActivity } from './peerTimeline.js'
@@ -30,7 +28,6 @@ function AssistantReply({
   isLastMsg = true,
   metaVisible = false,
   onRevealMeta,
-  onTryAgain,
   pendingQuestionRef,
   resumeCardRef,
   ...messageProps
@@ -81,18 +78,6 @@ function AssistantReply({
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
   const metaKey = presentationRows[0].key
-  // An error card that owns recovery already offers Try now or Resume. Any
-  // other failure (a plain provider error) leaves Try again as the way on.
-  const cardOwnsRecovery = ownsRecoveryAction({
-    block: outcome?.endingError,
-    // endingError is by definition the last row's last rendered entry.
-    entryIndex: 0,
-    lastEntryIndex: 0,
-    isLastMessage: isLastMsg,
-    canResume: !!messageProps.onResume,
-  })
-  const tryAgain = outcome && onTryAgain && !cardOwnsRecovery
-    ? () => onTryAgain(metaKey) : undefined
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     onClick={outcome && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
@@ -158,7 +143,6 @@ function AssistantReply({
       copy={answerText ? button => renderedReplyClipboard(
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}
-      onTryAgain={tryAgain}
       side="start"
       visible={metaVisible}
     />

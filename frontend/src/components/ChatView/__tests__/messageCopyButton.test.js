@@ -62,10 +62,10 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('a mouse hover reveals a reply’s row; only the latest reply keeps its row in view', () => {
+test('older reply actions reveal only on tap; only the latest reply keeps its row in view', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  const hover = css.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply:hover > \.chat__msg-meta \{[^}]*visibility: visible;/)
-  assert.ok(hover, 'hover reveal is limited to fine pointers so touch keeps tap-to-reveal')
+  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
+    'hovering an earlier reply must not reveal another Copy above the current reply')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
