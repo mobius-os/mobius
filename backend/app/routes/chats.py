@@ -2506,7 +2506,7 @@ def get_chat_usage(
   counters, so callers can distinguish zero usage from missing coverage.
   ``coverage.runs_by_quality`` and each run's ``usage_quality`` (one of
   ``usage_metrics.USAGE_QUALITIES``) say whether the totals are a complete
-  aggregate or only the sum of what was reported; both fields are additive.
+  aggregate or a lower bound; both fields are additive.
   This owner-only diagnostic is deliberately independent of the transcript:
   benchmark tooling can read it without parsing user-visible messages.
   """

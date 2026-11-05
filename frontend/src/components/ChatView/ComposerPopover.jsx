@@ -538,7 +538,7 @@ export default function ComposerPopover({
                   <span className="composer-popover__row-sub">
                     {usageQuery.isLoading
                       ? 'Checking this chat’s usage…'
-                      : (usageSummary || 'Usage not reported')}
+                      : (usageSummary || 'No usage yet')}
                   </span>
                 </span>
               </button>

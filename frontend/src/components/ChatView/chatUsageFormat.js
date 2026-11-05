@@ -59,18 +59,9 @@ export function formatUsageMenuText(totals, coverage) {
   if (output) parts.push(`${output} out`)
   if (cache) parts.push(`${cache} cache`)
   if (cost !== null) parts.push(cost)
-  if (!parts.length) {
-    const total = formatTokenCount(totals.total_tokens)
-    if (total !== null) parts.push(`${total} tokens`)
-  }
-  if (!parts.length) {
-    return coverage?.runs_by_quality?.unknown > 0 ? 'Usage unknown' : null
-  }
-  // A server without quality labels makes no completeness claim either way.
-  const byQuality = coverage?.runs_by_quality
-  const incomplete = !!byQuality && coverage.runs > 0
-    && (byQuality.final ?? 0) < coverage.runs
-  return `${incomplete ? 'Reported: ' : ''}${parts.join(' · ')}`
+  const incomplete = incompleteRuns(coverage) > 0
+  if (!parts.length) return incomplete ? 'Usage unknown' : null
+  return `${incomplete ? 'At least ' : ''}${parts.join(' · ')}`
 }
 
 export function modelDisplayName(modelId, registry, provider) {
@@ -122,13 +113,18 @@ export function usageQualityLabel(quality) {
   return USAGE_QUALITY_LABELS[quality] || null
 }
 
-/** Why chat totals are reported sums rather than a complete aggregate. */
-export function incompleteUsageNote(coverage) {
-  const byQuality = coverage?.runs_by_quality
-  if (!byQuality || typeof byQuality !== 'object') return null
-  const count = Object.keys(USAGE_QUALITY_LABELS)
+// Turns whose usage is a lower bound or not counted. In-flight and untracked
+// turns (missing) have their own note and never mark the totals incomplete.
+function incompleteRuns(coverage) {
+  const byQuality = coverage?.runs_by_quality || {}
+  return Object.keys(USAGE_QUALITY_LABELS)
     .reduce((sum, quality) => sum + (Number(byQuality[quality]) || 0), 0)
+}
+
+/** Why chat totals are a lower bound rather than a complete aggregate. */
+export function incompleteUsageNote(coverage) {
+  const count = incompleteRuns(coverage)
   if (count <= 0) return null
   const turns = count === 1 ? '1 turn has' : `${count} turns have`
-  return `${turns} partial or unknown usage. Totals add only what was reported.`
+  return `${turns} partial or unknown usage, so totals are a lower bound.`
 }

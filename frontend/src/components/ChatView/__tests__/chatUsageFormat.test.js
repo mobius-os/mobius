@@ -34,27 +34,25 @@ test('Brain usage summary remains useful when cost is unavailable', () => {
   assert.equal(formatUsageMenuText({}), null)
 })
 
-test('compact usage distinguishes observed values from complete coverage', () => {
+test('compact usage marks totals that are only a lower bound', () => {
   const totals = { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 5 }
   assert.match(formatUsageMenuText(totals, {
     runs: 2, runs_by_quality: { final: 1, partial: 1 },
-  }), /Reported/)
-  assert.match(formatUsageMenuText(totals, {
-    runs: 2, runs_by_quality: { final: 1, missing: 1 },
-  }), /Reported/)
-  assert.doesNotMatch(formatUsageMenuText(totals, {
-    runs: 1, runs_by_quality: { final: 1 },
-  }), /Reported/)
+  }), /^At least /)
+  // A running or untracked turn is not a lower-bound claim.
+  for (const coverage of [
+    { runs: 2, runs_by_quality: { final: 1, missing: 1 } },
+    { runs: 1, runs_by_quality: { final: 1 } },
+    { runs: 2, runs_with_usage: 2 },
+  ]) {
+    assert.doesNotMatch(formatUsageMenuText(totals, coverage), /At least/)
+  }
   assert.equal(formatUsageMenuText({}, {
     runs: 1, runs_by_quality: { unknown: 1 },
   }), 'Usage unknown')
-  assert.equal(formatUsageMenuText({ total_tokens: 0 }, {
-    runs: 1, runs_by_quality: { partial: 1 },
-  }), 'Reported: 0 tokens')
-  // A server that predates quality labels makes no completeness claim.
-  assert.doesNotMatch(formatUsageMenuText(totals, {
-    runs: 2, runs_with_usage: 2,
-  }), /Reported/)
+  assert.equal(formatUsageMenuText({}, {
+    runs: 1, runs_by_quality: { missing: 1 },
+  }), null)
 })
 
 test('usage helpers distinguish non-cached input from cumulative input', () => {
@@ -113,7 +111,7 @@ test('usage coverage labels never present partial numbers as complete', async ()
   assert.equal(incompleteUsageNote({ runs_by_quality: { final: 3, missing: 2 } }), null)
   assert.equal(
     incompleteUsageNote({ runs_by_quality: { final: 1, partial: 1, unknown: 1 } }),
-    '2 turns have partial or unknown usage. Totals add only what was reported.',
+    '2 turns have partial or unknown usage, so totals are a lower bound.',
   )
   assert.match(incompleteUsageNote({ runs_by_quality: { unknown: 1 } }), /^1 turn has/)
 })

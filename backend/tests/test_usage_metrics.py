@@ -3,9 +3,11 @@
 from types import SimpleNamespace
 
 from app.usage_metrics import (
-  normalize_claude_helper_task_usage,
+  normalize_claude_helper_usage,
   normalize_claude_usage,
   normalize_codex_usage,
+  run_usage_quality,
+  summarize_chat_run_tokens,
 )
 
 
@@ -108,15 +110,10 @@ def test_codex_thread_delta_sums_every_model_call_in_the_turn():
   assert usage["reasoning_output_tokens"] == 100
   assert usage["total_tokens"] == 1_100
   assert usage["model_context_window"] == 200_000
-  assert usage["coverage"] == "final"
-
+  assert run_usage_quality(usage, "completed") == "final"
   # A turn that ended before Codex completed it may have cut a call short
   # whose usage never arrived: the same delta is only a lower bound.
-  from app.usage_metrics import run_usage_quality
-  stopped = normalize_codex_usage(first, final, completed=False)
-  assert stopped["calculation"] == "thread_delta"
-  assert stopped["total_tokens"] == 1_100
-  assert run_usage_quality(stopped) == "partial"
+  assert run_usage_quality(usage, "stopped") == "partial"
 
 
 def test_codex_counter_reset_uses_labelled_latest_call_fallback():
@@ -159,7 +156,7 @@ def test_codex_counter_reset_uses_labelled_latest_call_fallback():
   assert usage is not None
   assert usage["calculation"] == "last_call_fallback"
   assert usage["input_tokens"] == 80
-  assert usage["coverage"] == "partial"
+  assert run_usage_quality(usage, "completed") == "partial"
   assert usage["total_tokens"] == 100
 
 
@@ -423,100 +420,55 @@ def test_codex_cost_usd_flows_from_normalized_usage():
 # ------------------------------------------------------- hosted Claude helpers
 
 
-def _helper_usage(final=None, progress=None, attributable=True):
-  return normalize_claude_helper_task_usage(
-    final=final, progress=progress, attributable=attributable,
-    turn_duration_ms=4_000,
+def _call(input_tokens, output_tokens, cache_read=0, cache_write=0):
+  return {
+    "input_tokens": input_tokens, "output_tokens": output_tokens,
+    "cache_read_input_tokens": cache_read,
+    "cache_creation_input_tokens": cache_write,
+  }
+
+
+def test_helper_usage_sums_every_model_call_of_the_turn():
+  """A hosted helper's task total is only its last call; the turn's own
+  per-call usage is summed instead, keeping Claude's input/cache split."""
+  usage = normalize_claude_helper_usage(
+    [_call(10, 5, cache_read=1_000, cache_write=200), _call(20, 7, cache_read=1_200)],
+    duration_ms=4_000,
   )
-
-
-def test_helper_task_notification_counters_are_the_final_task_aggregate():
-  usage = _helper_usage(
-    final={"total_tokens": 1_200, "tool_uses": 0, "duration_ms": 900},
-    progress={"total_tokens": 800, "tool_uses": 3, "duration_ms": 500},
-  )
-  assert usage["scope"] == "helper_task"
-  assert (usage["coverage"], usage["calculation"]) == ("final", "task_notification")
-  # The notification wins per counter; a reported zero is a measurement.
-  assert (usage["total_tokens"], usage["tool_uses"], usage["duration_ms"]) == (
-    1_200, 0, 900,
-  )
-  # Claude reports no split for a task: those fields stay unknown, not zero.
-  for field in (
-    "input_tokens", "output_tokens", "cache_read_input_tokens",
-    "cache_creation_input_tokens", "reasoning_output_tokens",
-  ):
-    assert usage[field] is None, field
-
-
-def test_helper_progress_snapshot_alone_is_labelled_partial():
-  usage = _helper_usage(progress={"total_tokens": 0, "tool_uses": 2, "duration_ms": 10})
-  assert (usage["coverage"], usage["calculation"], usage["total_tokens"]) == (
-    "partial", "task_progress", 0,
-  )
-  assert usage["counter_sources"]["total_tokens"] == "task_progress"
-
-
-def test_helper_without_any_reported_counter_has_no_usage():
-  assert _helper_usage() is None
-  assert _helper_usage(final={}, progress={"total_tokens": None}) is None
-
-
-def test_malformed_helper_counters_stay_unknown_instead_of_false_zero():
-  usage = _helper_usage(
-    final={"total_tokens": "lots", "tool_uses": True, "duration_ms": -5},
-    progress={"total_tokens": 300},
-  )
-  # The final total is unusable, so the progress lower bound stands, labelled.
-  assert (usage["total_tokens"], usage["coverage"]) == (300, "partial")
-  assert usage["tool_uses"] is None
-  assert usage["duration_ms"] == 4_000  # this turn's measured wall clock
-
-  unknown = _helper_usage(final={"total_tokens": "lots", "tool_uses": 4})
-  assert (unknown["total_tokens"], unknown["coverage"], unknown["calculation"]) == (
-    None, "unknown", None,
-  )
-  assert unknown["tool_uses"] == 4
-
-
-def test_resumed_helper_task_counters_are_kept_but_never_claimed_for_the_turn():
-  usage = _helper_usage(
-    final={"total_tokens": 5_000, "tool_uses": 9, "duration_ms": 70_000},
-    attributable=False,
-  )
-  assert (usage["coverage"], usage["calculation"]) == ("unknown", None)
-  assert usage["total_tokens"] is None and usage["tool_uses"] is None
+  assert (usage["scope"], usage["calculation"]) == ("helper_turn", "helper_call_sum")
+  assert usage["uncached_input_tokens"] == 30
+  assert usage["cache_read_input_tokens"] == 2_200
+  assert usage["cache_creation_input_tokens"] == 200
+  assert usage["input_tokens"] == 2_430
+  assert usage["output_tokens"] == 12
+  assert usage["total_tokens"] == 2_442
+  # Context occupancy is the latest call's input, never the sum.
+  assert usage["latest_model_input_tokens"] == 1_220
   assert usage["duration_ms"] == 4_000
-  assert usage["provider_task_usage"]["notification"]["total_tokens"] == 5_000
+  # Output counts can be relayed before a call finishes: never final.
+  assert run_usage_quality(usage, "completed") == "partial"
+
+
+def test_helper_without_model_calls_has_no_usage():
+  assert normalize_claude_helper_usage([], duration_ms=1) is None
 
 
 def test_usage_quality_labels_new_and_older_shapes_honestly():
-  from app.usage_metrics import run_usage_quality
-
   claude = normalize_claude_usage({"input_tokens": 1, "output_tokens": 1})
-  assert run_usage_quality(claude) == "final"
+  assert run_usage_quality(claude, "completed") == "final"
+  # A stopped or failed turn may have cut its last call short, whatever the
+  # provider: its aggregate is only a lower bound.
+  for status in ("stopped", "failed", "interrupted"):
+    assert run_usage_quality(claude, status) == "partial"
+    assert run_usage_quality({"calculation": "thread_delta"}, status) == "partial"
   assert run_usage_quality({"calculation": "thread_delta"}, "completed") == "final"
-  # Older Codex rows stored thread_delta for stopped and failed runs too.
-  assert run_usage_quality({"calculation": "thread_delta"}, "stopped") == "partial"
-  assert run_usage_quality({"calculation": "thread_delta"}, "failed") == "partial"
   # Codex's counter-reset fallback is the latest call only: a lower bound.
-  assert run_usage_quality({"calculation": "last_call_fallback"}) == "partial"
-  assert run_usage_quality(_helper_usage(final={"total_tokens": 9})) == "final"
-  assert run_usage_quality(_helper_usage(progress={"total_tokens": 0})) == "partial"
-  assert run_usage_quality(_helper_usage(progress={"tool_uses": 2})) == "unknown"
-  assert run_usage_quality(
-    _helper_usage(final={"total_tokens": 9}, attributable=False),
-  ) == "unknown"
-  # The pre-label hosted-helper shape and other unrecognized shapes are never final.
-  assert run_usage_quality({"total_tokens": 9, "duration_ms": 1}) == "unknown"
-  assert run_usage_quality({}) == "unknown"
-  assert run_usage_quality(
-    {"coverage": "made-up", "calculation": "thread_delta"}, "completed",
-  ) == "unknown"
-  assert run_usage_quality("legacy") == "unknown"
-  # Shapes written before the four labels keep an honest classification.
-  assert run_usage_quality({"coverage": "unattributed", "total_tokens": None}) == "unknown"
-  assert run_usage_quality(None) == "missing"
+  assert run_usage_quality({"calculation": "last_call_fallback"}, "completed") == "partial"
+  # The older hosted-helper shape (a task total) and unrecognized shapes.
+  assert run_usage_quality({"total_tokens": 9, "duration_ms": 1}, "completed") == "unknown"
+  assert run_usage_quality({}, "completed") == "unknown"
+  assert run_usage_quality("legacy", "completed") == "unknown"
+  assert run_usage_quality(None, "running") == "missing"
 
 
 def _run(usage, status="completed", **counts):
@@ -527,39 +479,28 @@ def _run(usage, status="completed", **counts):
   )
 
 
-def test_summary_separates_observed_sums_from_run_quality():
-  from app.usage_metrics import summarize_chat_run_tokens
-
+def test_summary_adds_final_and_partial_runs_but_never_unknown_ones():
   final = _run({"calculation": "thread_delta"}, input_tokens=100,
                cache_read_input_tokens=80, output_tokens=10, total_tokens=110)
-  partial_zero = _run(_helper_usage(progress={"total_tokens": 0}), total_tokens=0)
-  final_zero = _run(_helper_usage(final={"total_tokens": 0}), total_tokens=0)
-  unattributed = _run(_helper_usage(final={"total_tokens": 500}, attributable=False))
-  missing = _run(None)
+  partial = _run({"calculation": "thread_delta"}, "stopped", total_tokens=7)
+  old_helper = _run({"total_tokens": 500, "duration_ms": 1}, total_tokens=500)
+  missing = _run(None, "running")
 
-  only_final = summarize_chat_run_tokens([final, final_zero])
-  assert only_final["totals"]["total_tokens"] == 110
+  only_final = summarize_chat_run_tokens([final])
   # Cached input is inside input_tokens; it is never added a second time.
   assert only_final["totals"]["input_tokens"] == 100
-  assert only_final["coverage"]["runs_by_quality"]["final"] == 2
+  assert only_final["coverage"]["runs_by_quality"]["final"] == 1
 
-  mixed = summarize_chat_run_tokens(
-    [final, partial_zero, final_zero, unattributed, missing],
-  )
-  assert mixed["coverage"]["runs"] == 5
-  assert mixed["coverage"]["runs_with_usage"] == 4
+  mixed = summarize_chat_run_tokens([final, partial, old_helper, missing])
+  assert mixed["coverage"]["runs"] == 4
+  assert mixed["coverage"]["runs_with_usage"] == 3
   assert mixed["coverage"]["runs_by_quality"] == {
-    "final": 2, "partial": 1, "unknown": 1, "missing": 1,
+    "final": 1, "partial": 1, "unknown": 1, "missing": 1,
   }
-  # The unattributed 500 is evidence, never part of the observed sum.
-  assert mixed["totals"]["total_tokens"] == 110
+  # The old helper's task total is not this run's usage: never summed.
+  assert mixed["totals"]["total_tokens"] == 117
 
-  # A partial zero and a final zero are distinguishable in coverage.
-  assert summarize_chat_run_tokens([partial_zero])["coverage"]["runs_by_quality"]["partial"] == 1
-  assert summarize_chat_run_tokens([final_zero])["coverage"]["runs_by_quality"]["final"] == 1
-  # Unattributed evidence alone: usage present on every run, still no total.
-  alone = summarize_chat_run_tokens([unattributed])
-  assert alone["coverage"]["runs_with_usage"] == alone["coverage"]["runs"] == 1
+  alone = summarize_chat_run_tokens([old_helper])
   assert alone["coverage"]["runs_by_quality"]["unknown"] == 1
   assert alone["totals"]["total_tokens"] is None
   empty = summarize_chat_run_tokens([])

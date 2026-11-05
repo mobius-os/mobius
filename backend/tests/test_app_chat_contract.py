@@ -399,14 +399,10 @@ def test_app_chat_list_can_filter_by_scope(client, owner_token, db):
     usage_json={"provider": "codex"},
   ))
   # A partial zero and an unmeasured run must not change the observed sums.
-  from app.usage_metrics import normalize_claude_helper_task_usage
   db.add(models.ChatRun(
     id="session-a-partial-run", chat_id=session_a_2, status="stopped",
     provider="claude", total_tokens=0,
-    usage_json=normalize_claude_helper_task_usage(
-      final=None, progress={"total_tokens": 0}, attributable=True,
-      turn_duration_ms=1,
-    ),
+    usage_json={"provider": "claude", "calculation": "helper_call_sum"},
   ))
   db.add(models.ChatRun(
     id="session-a-missing-run", chat_id=session_a_2, status="failed",
