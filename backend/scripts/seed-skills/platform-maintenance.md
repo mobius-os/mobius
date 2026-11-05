@@ -127,6 +127,10 @@ payload totals; its `runtime_memory.payload_sizing` field points to the detailed
 optional allocation tracing. Add `deep=true` only when a GC object-type walk is
 actually needed.
 
+`logs` tails the shared chat log (`/data/logs/chat.log`): chat-turn lines plus
+the platform's own warnings, such as slow database checkouts. The container's
+raw stdout is not stored anywhere an agent can read.
+
 When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and
 stacks. It occupies one worker for the window, and one profile runs at a time.
