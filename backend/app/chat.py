@@ -3252,11 +3252,49 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
     )))
 
 
+@dataclass(frozen=True)
+class ChatStopOutcome:
+  """One per-chat Stop: the `(stopped, cleared_pending_cids)` contract plus
+  the exact run it addressed.
+
+  `run_id` comes from the writer's Stop boundary (`ChatStopPrepared`), never
+  from a read after the interrupt: once Stop releases the transition lock the
+  owner may resume, and that successor must not inherit this Stop's meaning.
+  It certifies revocation only when `stopped` is true.
+  """
+
+  stopped: bool
+  cleared_pending_cids: list[str]
+  run_id: str | None
+
+
+async def stop_chat_with_receipt(
+  chat_id: str, db: Session = None, *,
+  actor: str | None = None, actor_id: str | None = None,
+) -> ChatStopOutcome:
+  """`stop_chat_for` for callers that must bind Stop to the run it revoked."""
+  async with chat_queue.get_transition_lock(chat_id):
+    return await _stop_chat_locked(chat_id, db=db, actor=actor, actor_id=actor_id)
+
+
 async def _stop_chat_for_locked(
   chat_id: str, db: Session = None, *,
   preserve_pending: bool = False,
   actor: str | None = None, actor_id: str | None = None,
 ) -> tuple[bool, list[str]]:
+  """Stop one chat whose transition lock the caller holds, as the tuple
+  `(stopped, cleared_pending_cids)` that internal callers already use."""
+  outcome = await _stop_chat_locked(
+    chat_id, db=db, actor=actor, actor_id=actor_id,
+    preserve_pending=preserve_pending,
+  )
+  return outcome.stopped, outcome.cleared_pending_cids
+
+
+async def _stop_chat_locked(
+  chat_id: str, db: Session = None, *,
+  actor: str | None = None, actor_id: str | None = None, preserve_pending: bool = False,
+) -> ChatStopOutcome:
   """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
   # Stop owns the lifecycle fence for linked activation waits too. Unlike a
@@ -3270,7 +3308,7 @@ async def _stop_chat_for_locked(
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "stopped"
   from app.chat_writer import PrepareChatStop
-  await _await_ack(get_writer().submit(PrepareChatStop(
+  prepared = await _await_ack(get_writer().submit(PrepareChatStop(
     chat_id=chat_id, actor=actor, actor_id=actor_id,
   )))
   # The queue-lock window guards the clear's COMPOUND decision against a
@@ -3347,7 +3385,7 @@ async def _stop_chat_for_locked(
   if not all_stopped:
     # At least one runner is still alive — leave run-status + broadcast for it.
     registry.discard_starting(chat_id)
-    return all_stopped, cleared_pending_cids
+    return ChatStopOutcome(False, cleared_pending_cids, prepared.run_id)
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's FinishRun). This is the
   # path that resolves the orphaned-run-after-restart case (a ChatRun left
@@ -3361,7 +3399,7 @@ async def _stop_chat_for_locked(
     await _finish_run(chat_id, terminal_status="stopped")
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  return all_stopped, cleared_pending_cids
+  return ChatStopOutcome(True, cleared_pending_cids, prepared.run_id)
 
 
 def _schedule_continuation(

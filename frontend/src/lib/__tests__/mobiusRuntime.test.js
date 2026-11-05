@@ -241,6 +241,13 @@ test('app chat metadata body exposes owner visibility only on create', () => {
   assert.deepEqual(appChatMetadataBody({ ownerVisible: true }), {})
 })
 
+test('app chat metadata preserves an explicit effort without inventing a default', () => {
+  assert.deepEqual(appChatMetadataBody({ effort: 'high' }), { effort: 'high' })
+  assert.deepEqual(appChatMetadataBody({ effort: 'low' }, { includeProvider: false }), { effort: 'low' })
+  assert.deepEqual(appChatMetadataBody({ effort: null }), { effort: null })
+  assert.equal(Object.hasOwn(appChatMetadataBody({ model: 'chosen-model' }), 'effort'), false)
+})
+
 test('chat.start creates one owner-visible app chat and submits its first turn', async () => {
   const previousFetch = globalThis.fetch
   const calls = []
@@ -312,6 +319,9 @@ test('chat.start admits a scoped first turn atomically and exposes reuse', async
     const result = await chat.start({
       title: 'Fix and review contribution',
       draft: 'Review the exact prepared head.',
+      provider: 'claude',
+      model: 'chosen-model',
+      effort: 'high',
       scope: 'contribute-review:exact-head',
       scopeLabel: 'Fix and review contribution',
     })
@@ -326,12 +336,67 @@ test('chat.start admits a scoped first turn atomically and exposes reuse', async
     assert.equal(calls[0].url, '/api/app-chats/start')
     const body = JSON.parse(calls[0].init.body)
     assert.equal(body.title, 'Fix and review contribution')
+    assert.equal(body.provider, 'claude')
+    assert.equal(body.model, 'chosen-model')
+    assert.equal(body.effort, 'high')
     assert.equal(body.scope, 'contribute-review:exact-head')
     assert.equal(body.scope_label, 'Fix and review contribution')
     assert.equal(body.owner_visible, true)
     assert.equal(body.content, 'Review the exact prepared head.')
     assert.equal(typeof body.cid, 'string')
     assert.equal(typeof body.timezone, 'string')
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('chat.start keeps a terminal scoped refusal code instead of retrying work', async () => {
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init })
+    return new Response(JSON.stringify({
+      detail: { code: 'scope_deleted', chat_id: 'deleted-chat', message: 'deleted' },
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } })
+  }
+  try {
+    const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
+    await assert.rejects(
+      chat.start({ draft: 'Prepare it.', scope: 'contribute-cycle:lost' }),
+      (error) => {
+        assert.match(error.message, /scoped start failed \(409\)/)
+        assert.equal(error.code, 'scope_deleted')
+        assert.equal(error.chatId, 'deleted-chat')
+        assert.equal(error.status, 409)
+        return true
+      },
+    )
+    assert.deepEqual(calls.map(call => call.url), ['/api/app-chats/start'])
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('chat.cancelStart fences one exact scope and returns its definitive outcome', async () => {
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init })
+    return new Response(JSON.stringify({
+      scope: 'contribute-cycle:pending', outcome: 'started', chat_id: 'admitted-chat',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  try {
+    const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
+    const result = await chat.cancelStart({ scope: ' contribute-cycle:pending ' })
+
+    assert.deepEqual(result, { outcome: 'started', chatId: 'admitted-chat' })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, '/api/app-chats/start/cancel')
+    assert.equal(calls[0].init.method, 'POST')
+    assert.deepEqual(JSON.parse(calls[0].init.body), { scope: 'contribute-cycle:pending' })
+    await assert.rejects(chat.cancelStart({ scope: '  ' }), /opts\.scope must not be empty/)
+    assert.equal(calls.length, 1)
   } finally {
     globalThis.fetch = previousFetch
   }

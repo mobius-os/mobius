@@ -2342,6 +2342,7 @@ function appChatMetadataBody(opts = {}, { includeProvider = true, includeOwnerVi
 	const body = {};
 	if (hasOwn(opts, "systemPrompt")) body.system_prompt = opts.systemPrompt == null ? "" : String(opts.systemPrompt);
 	if (hasOwn(opts, "model")) body.model = opts.model == null ? "" : String(opts.model);
+	if (hasOwn(opts, "effort")) body.effort = opts.effort;
 	if (includeProvider && hasOwn(opts, "provider")) {
 		const provider = opts.provider == null ? "" : String(opts.provider).trim();
 		if (provider) body.provider = provider;
@@ -2554,6 +2555,35 @@ function makeChat({ appId, getToken, storage }) {
 			await appChatFetch(`/api/app-chats/${encodeURIComponent(chatId)}/embed-sessions/${encodeURIComponent(instanceId)}`, { method: "DELETE" });
 		} catch (e) {}
 	}
+	async function scopedChatError(method, summary, res) {
+		const data = await res.json().catch(() => null);
+		const detail = data && typeof data.detail === "object" && data.detail ? data.detail : {};
+		const error = /* @__PURE__ */ new Error(`window.mobius.chat.${method}: ${summary} (${res.status})`);
+		error.status = res.status;
+		if (typeof detail.code === "string") error.code = detail.code;
+		if (detail.chat_id) error.chatId = String(detail.chat_id);
+		return error;
+	}
+	async function cancelChatStart(opts = {}) {
+		const scope = opts.scope == null ? "" : String(opts.scope).trim();
+		if (!scope) throw new Error("window.mobius.chat.cancelStart: opts.scope must not be empty");
+		const res = await appChatFetch("/api/app-chats/start/cancel", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scope })
+		});
+		if (!res.ok) throw await scopedChatError("cancelStart", "cancel failed", res);
+		const data = await res.json().catch(() => null);
+		if (![
+			"cancelled",
+			"started",
+			"deleted"
+		].includes(data?.outcome)) throw new Error("window.mobius.chat.cancelStart: cancel failed (unknown outcome)");
+		return {
+			outcome: data.outcome,
+			chatId: data.chat_id ? String(data.chat_id) : null
+		};
+	}
 	async function startChat(opts = {}) {
 		const content = String(opts.content ?? opts.draft ?? "").trim();
 		if (!content) throw new Error("window.mobius.chat.start: opts.draft must not be empty");
@@ -2586,7 +2616,7 @@ function makeChat({ appId, getToken, storage }) {
 					...body
 				})
 			});
-			if (!res.ok) throw new Error(`window.mobius.chat.start: scoped start failed (${res.status})`);
+			if (!res.ok) throw await scopedChatError("start", "scoped start failed", res);
 			const data = await res.json().catch(() => null);
 			if (!data?.chat_id) throw new Error("window.mobius.chat.start: scoped start failed (missing chat id)");
 			const outcome = data.outcome === "reused" ? "reused" : "started";
@@ -3017,6 +3047,7 @@ function makeChat({ appId, getToken, storage }) {
 		};
 	};
 	chat.start = startChat;
+	chat.cancelStart = cancelChatStart;
 	chat.list = listChats;
 	chat.status = (chatId) => requestChatControl("status", chatId);
 	chat.stop = (chatId) => requestChatControl("stop", chatId);

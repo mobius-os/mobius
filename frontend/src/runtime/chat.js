@@ -146,6 +146,7 @@ export function appChatMetadataBody(
   if (hasOwn(opts, 'model')) {
     body.model = opts.model == null ? '' : String(opts.model)
   }
+  if (hasOwn(opts, 'effort')) body.effort = opts.effort
   if (includeProvider && hasOwn(opts, 'provider')) {
     const provider = opts.provider == null ? '' : String(opts.provider).trim()
     if (provider) body.provider = provider
@@ -432,6 +433,41 @@ export function makeChat({ appId, getToken, storage }) {
     } catch (e) {}
   }
 
+  // A scoped refusal keeps the backend's code and chat id. `scope_cancelled`
+  // and `scope_deleted` are terminal: no replay of that scope ever starts work.
+  async function scopedChatError(method, summary, res) {
+    const data = await res.json().catch(() => null)
+    const detail = data && typeof data.detail === 'object' && data.detail ? data.detail : {}
+    const error = new Error(`window.mobius.chat.${method}: ${summary} (${res.status})`)
+    error.status = res.status
+    if (typeof detail.code === 'string') error.code = detail.code
+    if (detail.chat_id) error.chatId = String(detail.chat_id)
+    return error
+  }
+
+  // Fence one scoped start before releasing whatever the app reserved for it.
+  // Resolves { outcome: 'cancelled' | 'started' | 'deleted', chatId }: a
+  // 'started' scope already admitted its turn (use chat.stop to stop it).
+  async function cancelChatStart(opts = {}) {
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    if (!scope) {
+      throw new Error('window.mobius.chat.cancelStart: opts.scope must not be empty')
+    }
+    const res = await appChatFetch('/api/app-chats/start/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    })
+    if (!res.ok) {
+      throw await scopedChatError('cancelStart', 'cancel failed', res)
+    }
+    const data = await res.json().catch(() => null)
+    if (!['cancelled', 'started', 'deleted'].includes(data?.outcome)) {
+      throw new Error('window.mobius.chat.cancelStart: cancel failed (unknown outcome)')
+    }
+    return { outcome: data.outcome, chatId: data.chat_id ? String(data.chat_id) : null }
+  }
+
   // Start a first-class owner-visible chat and submit its first turn without
   // depending on shell navigation, retained ChatView state, or browser draft
   // storage. Navigation is deliberately left to the caller: after this
@@ -480,7 +516,7 @@ export function makeChat({ appId, getToken, storage }) {
         }),
       })
       if (!res.ok) {
-        throw new Error(`window.mobius.chat.start: scoped start failed (${res.status})`)
+        throw await scopedChatError('start', 'scoped start failed', res)
       }
       const data = await res.json().catch(() => null)
       if (!data?.chat_id) {
@@ -1032,6 +1068,7 @@ export function makeChat({ appId, getToken, storage }) {
     }
   }
   chat.start = startChat
+  chat.cancelStart = cancelChatStart
   chat.list = listChats
   chat.status = chatId => requestChatControl('status', chatId)
   chat.stop = chatId => requestChatControl('stop', chatId)

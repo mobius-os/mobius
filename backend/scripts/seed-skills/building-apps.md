@@ -1212,6 +1212,27 @@ visible app-owned chat, waits for the first message to be accepted, then
 returns its id for navigation. Catch errors and preserve the source UI so the
 owner can retry without losing work.
 
+Pass `scope: '<one exact job id>'` when a retry, reload, or second pane must
+never start the same job twice. Möbius admits at most one first turn per app
+and scope for as long as the app stays installed: repeating the identical call
+after a lost response returns `{ chatId, outcome: 'reused' }`, even if the owner
+has since stopped that turn or removed it from the queue. Before releasing
+anything the app reserved for an unconfirmed start, call
+`await window.mobius.chat.cancelStart({ scope })`.
+It resolves `{ outcome: 'cancelled' }` when no turn was or will ever be
+admitted, or `'started'` / `'deleted'` with the existing `chatId`. After a
+cancellation, or after the owner deletes that chat, `chat.start` for the scope
+rejects with `error.code` `'scope_cancelled'` or `'scope_deleted'`; treat both
+as final. A new attempt needs a new scope.
+
+To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
+When it resolves `stopped: true` it carries `stop_receipt: { chat_id, run_id }`,
+the run that Stop revoked, or the chat's latest idle run (`run_id: null` if it
+never ran). Bind the cancellation to that `run_id`, never to a later
+`chat.status(chatId)`: the owner may resume in between. A status with another
+`run_id`, or with `running: true`, is newer work and is not cancelled. Without a
+receipt (`stopped: false`) nothing was certified; keep any reservation.
+
 The opaque app document cannot name the shell as a target origin, so raw
 app-to-shell messages use `'*'`. For reply protocols, require
 `event.source === window.parent` plus the exact request/correlation id. These

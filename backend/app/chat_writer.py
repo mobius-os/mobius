@@ -61,6 +61,7 @@ from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import chat_archive, models, schemas, transcript_rows
+from app.app_chat_scopes import admit_scoped_first_turn
 from app.goals import admit_goal
 from app.chat_titles import apply_generated_title, first_message_title
 from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND, SIDE_QUESTION_MESSAGE_KIND
@@ -369,6 +370,21 @@ class PrepareChatStop(_Command):
   actor: str | None = None
   actor_id: str | None = None
   source_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass(frozen=True)
+class ChatStopPrepared:
+  """What one Stop fenced, read in the same writer transaction.
+
+  ``run_id`` is the chat's latest durable run at this boundary: the run Stop
+  revokes while it is nonterminal, otherwise the idle lifecycle Stop found.
+  Stop's caller holds the per-chat transition lock, so no send or resume can
+  admit a successor between this read and the interrupt. A later run id is
+  therefore a successor this Stop never addressed.
+  """
+
+  cancelled_activations: int
+  run_id: str | None
 
 
 class RestartCardStateChanged(Exception):
@@ -3827,6 +3843,8 @@ class ChatWriterActor:
     if not resuming:
       transcript_rows.append(db, chat, cmd.user_msg)
       claim_uploads(chat, cmd.user_msg.get("attachments"))
+      # Same commit as the accepted message: see app_chat_scopes.
+      admit_scoped_first_turn(db, chat)
     # Allocate the current assistant's stable display id while history and the
     # queue are already in memory. Streaming snapshots can then update only the
     # small live value without rereading the historical JSON blob.
@@ -4807,6 +4825,8 @@ class ChatWriterActor:
       pending.append(new_msg)
     chat.pending_messages = pending
     claim_uploads(chat, new_msg.get("attachments"))
+    # Same commit as the accepted message: see app_chat_scopes.
+    admit_scoped_first_turn(db, chat)
     if applied:
       # Both a recovered answer and an early continuation-card answer use the
       # queue. Retire the question, but leave a still-running turn's browser
@@ -5855,9 +5875,10 @@ class ChatWriterActor:
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      return 0
+      return ChatStopPrepared(cancelled_activations=0, run_id=None)
+    latest = latest_run(db, chat.id)
     if cmd.actor is not None:
-      current = latest_run(db, chat.id)
+      current = latest
       # While another turn runs, Stop belongs to that turn, not a retained
       # Goal behind it. When idle it addresses the Goal actually presented.
       if current is not None and current.status in models.NONTERMINAL_RUN_STATUSES:
@@ -5874,7 +5895,9 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PrepareChatStop did not persist")
     _publish_goal_runtime_changed(db, cmd.chat_id)
-    return count
+    return ChatStopPrepared(
+      cancelled_activations=count, run_id=latest.id if latest else None,
+    )
 
   @staticmethod
   def _close_nonterminal_runs(db, chat_id, status, except_token=None, end_reason=None):

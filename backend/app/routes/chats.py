@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import chat_writer, transcript_rows
+from app.app_chat_scopes import SCOPE_MAX, chat_scope
 from app.chat_handoffs import project_handoff
 from app import (
   activity,
@@ -3263,7 +3264,7 @@ _REPORT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A project_id is used directly as a storage path component, so it must be a
 # safe slug — alphanumerics, dash, underscore only; no separators or traversal.
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_CHAT_SCOPE_MAX = 160
+_CHAT_SCOPE_MAX = SCOPE_MAX
 _CHAT_SCOPE_LABEL_MAX = 120
 
 
@@ -3458,11 +3459,6 @@ def _has_real_assistant_turn(chat: models.Chat) -> bool:
   )
 
 
-def _app_chat_scope(chat: models.Chat) -> str | None:
-  value = _coerce_agent_settings(chat.agent_settings_json).get("chat_scope")
-  return value.strip() if isinstance(value, str) and value.strip() else None
-
-
 def _app_chat_scope_label(chat: models.Chat) -> str | None:
   value = _coerce_agent_settings(chat.agent_settings_json).get("chat_scope_label")
   return value.strip() if isinstance(value, str) and value.strip() else None
@@ -3499,7 +3495,7 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
     # An agent turn is live now; an app shows this rather than guessing.
     "running": is_chat_running(chat.id),
     "provider": chat.provider or "claude",
-    "scope": _app_chat_scope(chat),
+    "scope": chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
     "model": _coerce_agent_settings(chat.agent_settings_json).get("model"),
     "effort": _coerce_agent_settings(chat.agent_settings_json).get("effort"),
@@ -3545,7 +3541,7 @@ def list_app_chats(
     models.Chat.created_by_app_id == principal.app_id,
   ).all()
   if clean_scope is not None:
-    chats = [c for c in chats if _app_chat_scope(c) == clean_scope]
+    chats = [c for c in chats if chat_scope(c) == clean_scope]
   chats.sort(key=_app_chat_sort_ts, reverse=True)
   usage_by_chat: dict[str, dict] = {}
   if chats:
@@ -3612,6 +3608,20 @@ def create_app_chat(
       status_code=403,
       detail="Use POST /api/chats for owner-created chats.",
     )
+  chat = _add_app_chat(body, principal.app_id, db)
+  db.commit()
+  db.refresh(chat)
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "created_by_app_id": chat.created_by_app_id,
+  }
+
+
+def _add_app_chat(
+  body: AppChatCreate, app_id: int, db: Session,
+) -> models.Chat:
+  """Add one app-attributed chat to the session; the caller commits it."""
   import uuid
 
   owner = db.query(models.Owner).first()
@@ -3667,7 +3677,7 @@ def create_app_chat(
     messages=[],
     provider=provider,
     agent_settings_json=agent_settings,
-    created_by_app_id=principal.app_id,
+    created_by_app_id=app_id,
   )
   _merge_app_chat_settings(
     chat,
@@ -3682,13 +3692,68 @@ def create_app_chat(
     owner_visible=body.owner_visible,
   )
   db.add(chat)
-  db.commit()
-  db.refresh(chat)
-  return {
-    "id": chat.id,
-    "title": chat.title,
-    "created_by_app_id": chat.created_by_app_id,
-  }
+  return chat
+
+
+def _scoped_start_lock(app_id: int, scope: str):
+  """The one lock that orders an app scope's admission and cancellation."""
+  from app import chat_queue
+  return chat_queue.get_transition_lock(f"app-scope:{app_id}:{scope}")
+
+
+def _scoped_start_state(
+  db: Session, app_id: int, scope: str,
+) -> tuple[str, models.AppChatScopeStart | None, models.Chat | None]:
+  """Classify one app scope's durable first-start identity.
+
+  Returns ``(state, binding, chat)``. ``absent`` means the scope never admitted
+  a chat; ``cancelled`` means the app fenced it; ``deleted`` means its chat is
+  in the owner's recovery window or already purged; ``pending`` means its live
+  chat has no admitted first turn yet; ``started`` means it has one. The caller
+  holds ``_scoped_start_lock``.
+
+  ``started`` rests on the binding's durable ``admitted_at``, which the chat
+  writer commits together with the turn it accepts for the bound chat
+  (``app_chat_scopes``), so it survives the owner's Stop or queue removal. A
+  live chat already carrying the scope without a binding (created by an
+  earlier release or grouped through ``POST /api/app-chats``) is bound on
+  first sight as the newest such chat, as the previous lookup chose. Its chat
+  contents are the only evidence of a turn admitted before it was bound, so
+  when they show one it is recorded at once.
+  """
+  binding = db.get(models.AppChatScopeStart, (app_id, scope))
+  if binding is None:
+    candidates = db.query(models.Chat).filter(
+      models.Chat.deleted_at.is_(None),
+      models.Chat.created_by_app_id == app_id,
+    ).all()
+    matches = [chat for chat in candidates if chat_scope(chat) == scope]
+    if not matches:
+      return "absent", None, None
+    chat = max(matches, key=_app_chat_sort_ts)
+    binding = models.AppChatScopeStart(app_id=app_id, scope=scope, chat_id=chat.id)
+    db.add(binding)
+    db.commit()
+  if binding.cancelled_at is not None:
+    return "cancelled", binding, None
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == binding.chat_id,
+    models.Chat.created_by_app_id == app_id,
+  ).first()
+  if chat is None or chat.deleted_at is not None:
+    return "deleted", binding, None
+  if binding.admitted_at is None:
+    if not _app_chat_started(chat, db):
+      return "pending", binding, chat
+    binding.admitted_at = now_naive_utc()
+    db.commit()
+  return "started", binding, chat
+
+
+_SCOPED_START_TERMINAL_MESSAGES = {
+  "cancelled": "This scoped job was cancelled, so its first turn is never admitted.",
+  "deleted": "This scoped job's conversation was deleted, so it is not started again.",
+}
 
 
 @app_chat_router.post(
@@ -3701,10 +3766,13 @@ async def start_scoped_app_chat(
 ):
   """Atomically create-or-reuse one app-owned scoped first turn.
 
-  Scope is the idempotency identity. The lock covers lookup, allocation, and
-  first-send admission so two panes cannot both observe an absent conversation.
-  A previously-created empty row is retried in place; any row that already owns
-  a durable/live turn is returned without submitting the prompt again.
+  Scope is the idempotency identity for the app's lifetime, recorded in
+  ``AppChatScopeStart``. The lock covers lookup, allocation, and first-send
+  admission so two panes cannot both observe an absent conversation. A bound
+  empty chat is retried in place; a chat that already owns a durable/live turn
+  is returned without submitting the prompt again. A scope the app cancelled,
+  or whose chat the owner deleted, answers 409 ``scope_cancelled`` or
+  ``scope_deleted`` and is never resumed or recreated by a replay.
   """
   if principal.app_id is None:
     raise HTTPException(
@@ -3714,7 +3782,6 @@ async def start_scoped_app_chat(
   if not body.scope:
     raise HTTPException(status_code=422, detail="scope is required")
 
-  from app import chat_queue
   from app.routes.chats_stream import send_message
 
   app_id = principal.app_id
@@ -3723,35 +3790,41 @@ async def start_scoped_app_chat(
   failure: str | None = None
   started_at = time.monotonic()
   try:
-    async with chat_queue.get_transition_lock(
-      f"app-scope:{app_id}:{body.scope}",
-    ):
+    async with _scoped_start_lock(app_id, body.scope):
       # A concurrent request may have committed while this request waited.
       db.rollback()
-      candidates = db.query(models.Chat).filter(
-        models.Chat.deleted_at.is_(None),
-        models.Chat.created_by_app_id == app_id,
-      ).all()
-      matches = [chat for chat in candidates if _app_chat_scope(chat) == body.scope]
-      matches.sort(key=_app_chat_sort_ts, reverse=True)
-      chat = matches[0] if matches else None
-
-      if chat is not None and _app_chat_started(chat, db):
-        chat_id = chat.id
+      state, binding, chat = _scoped_start_state(db, app_id, body.scope)
+      if binding is not None:
+        chat_id = binding.chat_id
+      if state in _SCOPED_START_TERMINAL_MESSAGES:
+        outcome = state
+        failure = f"scope_{state}"
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": failure,
+            "chat_id": chat_id,
+            "message": _SCOPED_START_TERMINAL_MESSAGES[state],
+          },
+        )
+      if state == "started":
         outcome = "reused"
-        return {"chat_id": chat.id, "outcome": outcome, "response": None}
-
-      if chat is None:
-        created = create_app_chat(
+        return {"chat_id": chat_id, "outcome": outcome, "response": None}
+      if state == "absent":
+        # The chat and its scope binding commit together, so no admitted chat
+        # can exist without the identity that keeps it the scope's only one.
+        chat = _add_app_chat(
           AppChatCreate(**body.model_dump(exclude={
             "content", "cid", "timezone", "viewport",
           })),
-          principal,
+          app_id,
           db,
         )
-        chat_id = str(created["id"])
-      else:
         chat_id = chat.id
+        db.add(models.AppChatScopeStart(
+          app_id=app_id, scope=body.scope, chat_id=chat_id,
+        ))
+        db.commit()
 
       response = await send_message(
         schemas.SendMessage(
@@ -3806,6 +3879,85 @@ async def start_scoped_app_chat(
     if failure:
       fields["failure"] = failure
     activity.log_event("app_chat_handoff", **fields)
+
+
+def _fence_scoped_start(db: Session, app_id: int, scope: str) -> bool:
+  """Cancel a scope only while no first turn is admitted; the caller holds
+  ``_scoped_start_lock``.
+
+  Only start and cancel create bindings, both under that lock. The chat
+  writer stamps admission without it, so fencing an existing binding is a
+  compare-and-set rather than a write of what was read: a turn accepted
+  between classification and this commit keeps the scope started.
+  """
+  if db.get(models.AppChatScopeStart, (app_id, scope)) is None:
+    db.add(models.AppChatScopeStart(
+      app_id=app_id, scope=scope, cancelled_at=now_naive_utc(),
+    ))
+    db.commit()
+    return True
+  fenced = db.query(models.AppChatScopeStart).filter(
+    models.AppChatScopeStart.app_id == app_id,
+    models.AppChatScopeStart.scope == scope,
+    models.AppChatScopeStart.admitted_at.is_(None),
+    models.AppChatScopeStart.cancelled_at.is_(None),
+  ).update({"cancelled_at": now_naive_utc()}, synchronize_session=False)
+  db.commit()
+  db.expire_all()
+  return fenced == 1
+
+
+class AppChatStartCancel(BaseModel):
+  scope: str = Field(max_length=_CHAT_SCOPE_MAX)
+
+  @field_validator("scope")
+  @classmethod
+  def _validate_scope(cls, value: str) -> str:
+    cleaned = _clean_app_chat_text(value, _CHAT_SCOPE_MAX, "scope")
+    if cleaned is None:
+      raise ValueError("scope is required")
+    return cleaned
+
+
+@app_chat_router.post(
+  "/start/cancel", dependencies=[Depends(reject_cross_site)],
+)
+async def cancel_scoped_app_chat_start(
+  body: AppChatStartCancel,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Fence one exact scope so no later start can admit its first turn.
+
+  This is the app's durable answer to an owner Cancel issued before the app
+  knows whether its start reached Möbius. It shares admission's lock, so its
+  outcome is definitive and a delayed or replayed start can never overtake it:
+  ``cancelled`` means no scoped first turn was or will be admitted;
+  ``started`` returns the chat whose turn already was, because cancellation
+  never stops work (that remains the owner's Stop); ``deleted`` means the owner
+  already deleted that chat. Repeating the call is safe and never un-fences.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Scoped app handoffs may only be cancelled by an app token.",
+    )
+  app_id = principal.app_id
+  async with _scoped_start_lock(app_id, body.scope):
+    db.rollback()
+    state = _scoped_start_state(db, app_id, body.scope)[0]
+    if state in ("absent", "pending"):
+      # A failed fence means the chat writer admitted a turn after that read.
+      state = (
+        "cancelled" if _fence_scoped_start(db, app_id, body.scope)
+        else _scoped_start_state(db, app_id, body.scope)[0]
+      )
+    chat_id = db.get(models.AppChatScopeStart, (app_id, body.scope)).chat_id
+  fields = {"app_id": app_id, "scope": body.scope, "outcome": f"cancel_{state}"}
+  if chat_id:
+    fields["chat_id"] = chat_id
+  activity.log_event("app_chat_handoff", **fields)
+  return {"scope": body.scope, "outcome": state, "chat_id": chat_id}
 
 
 @app_chat_router.patch(
