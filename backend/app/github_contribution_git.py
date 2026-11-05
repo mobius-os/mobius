@@ -94,10 +94,6 @@ def _git_env(repo: Path) -> dict:
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
   env["GIT_TERMINAL_PROMPT"] = "0"
-  # Like app_git: no askpass program from any config (including a repo's own
-  # core.askPass) may run with this environment's token.
-  env["GIT_ASKPASS"] = "/bin/false"
-  env["SSH_ASKPASS"] = "/bin/false"
   env["GH_PROMPT_DISABLED"] = "1"
   token = github_auth.get_token()
   if token:
@@ -896,10 +892,11 @@ def upstream_merge_for_new_pr(
 
   The PR may open even while it conflicts with newer upstream, because the
   owner approved this exact change and resolving the overlap is its next
-  update. The returned patch then carries ``last_submit_upstream_conflict``
-  so Contribute and agents see that the open PR needs upstream merged in
-  (GitHub runs no PR workflows while it conflicts). Clean or not, a reviewed
-  base that is no longer the sole merge base refuses. Stacks and existing-PR
+  update. The returned patch then carries ``last_submit_upstream_conflict``,
+  which Send records only once the PR is open, so Contribute and agents see
+  that it needs upstream merged in (GitHub runs no PR workflows while it
+  conflicts). Clean or not, a reviewed base that is no longer the sole merge
+  base refuses. Stacks and existing-PR
   updates keep ``_assert_merges_with_upstream``.
   """
   merge = inspect_upstream_merge(repo, upstream_repo, branch)
@@ -912,11 +909,12 @@ def upstream_merge_for_new_pr(
   if not exact:
     raise _upstream_conflict_error(merge) if merge.conflicts else (
       ContributionSubmitError(
-        f"Upstream {merge.branch} already contains part of this PR, so GitHub "
-        "would not show the reviewed diff. Leave feedback so your agent can "
+        f"This PR's reviewed base is no longer its only merge base with "
+        f"upstream {merge.branch}, so GitHub would not show the reviewed "
+        "diff. Nothing was published. Leave feedback so your agent can "
         "refresh the branch before it is pushed.",
         record_patch=merge.record_patch,
-        code="upstream_conflict",
+        code="upstream_base_moved",
       )
     )
   if not merge.conflicts:

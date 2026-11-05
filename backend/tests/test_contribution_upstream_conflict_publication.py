@@ -240,13 +240,42 @@ def test_a_clean_merge_after_upstream_took_part_of_the_topic_still_refuses(histo
   assert not git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/partly-landed").conflicts
   with pytest.raises(ContributionSubmitError) as error:
     git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/partly-landed", shas["base"], HEAD)
-  assert error.value.code == "upstream_conflict"
-  assert "already contains part of this PR" in error.value.message
+  assert error.value.code == "upstream_base_moved"
+  assert "no longer its only merge base" in error.value.message
   assert error.value.record_patch == {
     "last_submit_upstream_branch": "main", "last_submit_upstream_sha": upstream["sha"]}
   # A stack layer or an existing-PR update keeps its clean-merge-only gate.
   assert git_ops._assert_merges_with_upstream(repo, "owner/repo", "fix/partly-landed") == {
     "last_submit_upstream_branch": "main", "last_submit_upstream_sha": upstream["sha"]}
+
+
+def test_a_clean_merge_over_a_rewritten_reviewed_base_is_not_called_an_overlap(histories):
+  """Upstream dropped the reviewed base without taking any of this PR.
+
+  The branch merges cleanly, but GitHub would show the dropped base commit
+  too, so Send refuses and says why without claiming upstream holds the PR.
+  """
+  repo, upstream, shas = histories
+  run(repo, "checkout", "-q", "-b", "reviewed-base", shas["base"])
+  (repo / "dropped.txt").write_text("later rewritten away\n")
+  run(repo, "add", "dropped.txt")
+  run(repo, "commit", "-qm", "reviewed base")
+  reviewed_base = run(repo, "rev-parse", "HEAD")
+  run(repo, "checkout", "-q", "-b", "fix/on-dropped-base")
+  (repo / "index.jsx").write_text("export default 2\n")
+  run(repo, "commit", "-qam", "reviewed fix")
+  run(repo, "checkout", "-q", "-b", "upstream-rewritten", shas["base"])
+  (repo / "other.txt").write_text("rewritten history\n")
+  run(repo, "add", "other.txt")
+  run(repo, "commit", "-qm", "rewritten upstream")
+  upstream["sha"] = run(repo, "rev-parse", "HEAD")
+  run(repo, "checkout", "-q", "fix/on-dropped-base")
+  assert not git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/on-dropped-base").conflicts
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/on-dropped-base", reviewed_base, HEAD)
+  assert error.value.code == "upstream_base_moved"
+  assert "already contains" not in error.value.message
+  assert "no longer its only merge base with upstream main" in error.value.message
 
 
 def test_reviewed_base_as_one_of_several_merge_bases_is_not_the_reviewed_diff(histories):
@@ -299,7 +328,7 @@ def standalone_record(record_id, repo):
   }
 
 
-def send_fakes(monkeypatch, *, base_on_upstream=True, merge_conflict=True):
+def send_fakes(monkeypatch, *, base_on_upstream=True, merge_conflict=True, fork_fails=False):
   git_calls, gh_calls = [], []
   fork_ready = {"value": False}
   def fake_git(repo_path, *args, check=True):
@@ -332,6 +361,8 @@ def send_fakes(monkeypatch, *, base_on_upstream=True, merge_conflict=True):
   def fake_gh(repo_path, *args, check=True):
     gh_calls.append(args)
     if args[:2] == ("repo", "fork"):
+      if fork_fails:
+        return _cp(stderr="HTTP 403: fork refused", returncode=1)
       fork_ready["value"] = True
       return _cp("")
     if args[:2] == ("repo", "view"):
@@ -443,11 +474,52 @@ def test_send_refuses_a_clean_merge_whose_reviewed_base_is_no_longer_the_merge_b
                          headers={"Authorization": f"Bearer {app_token}"})
   assert response.status_code == 409
   detail = response.json()["detail"]
-  assert detail["code"] == "upstream_conflict"
+  assert detail["code"] == "upstream_base_moved"
   assert detail["record"]["status"] == "prepared"
   assert "last_submit_upstream_conflict" not in detail["record"]
   assert not any(call[:1] == ("push",) for call in git_calls)
   assert not any(call[:2] == ("pr", "create") for call in gh_calls)
+
+
+def test_a_send_that_fails_after_a_conflicting_merge_records_no_conflict(client, owner_token, monkeypatch):
+  """The conflict is a fact about an open PR, so a Send that stops before
+  opening one (here at the fork) leaves nothing that says it conflicts."""
+  _write_token(login="octocat")
+  _allow_synthetic_source_provenance(monkeypatch)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo = Path(get_settings().data_dir) / "contrib" / "rec-fork-fails" / "repo"
+  (repo / ".git").mkdir(parents=True)
+  _write_contribution(app_id, "rec-fork-fails", standalone_record("rec-fork-fails", repo), DIFF)
+  git_calls, gh_calls = send_fakes(monkeypatch, fork_fails=True)
+  response = client.post(f"/api/github/contributions/{app_id}/rec-fork-fails/submit",
+                         headers={"Authorization": f"Bearer {app_token}"})
+  assert response.status_code >= 400, response.text
+  assert ("merge-base", "--all", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  assert not any(call[:2] == ("pr", "create") for call in gh_calls)
+  record = stored(app_id, "rec-fork-fails")
+  assert record["status"] == "prepared"
+  assert record["last_submit_upstream_sha"] == _UPSTREAM_SHA
+  assert "last_submit_upstream_conflict" not in record
+
+
+def test_a_clean_send_clears_an_earlier_conflict(client, owner_token, monkeypatch):
+  _write_token(login="octocat")
+  _allow_synthetic_source_provenance(monkeypatch)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo = Path(get_settings().data_dir) / "contrib" / "rec-clean-again" / "repo"
+  (repo / ".git").mkdir(parents=True)
+  record = standalone_record("rec-clean-again", repo)
+  record["last_submit_upstream_conflict"] = {
+    "upstream_branch": "main", "upstream_sha": "e" * 40,
+    "head_sha": HEAD, "next_pr_action": "merge_upstream_into_pr"}
+  _write_contribution(app_id, "rec-clean-again", record, DIFF)
+  send_fakes(monkeypatch, merge_conflict=False)
+  response = client.post(f"/api/github/contributions/{app_id}/rec-clean-again/submit",
+                         headers={"Authorization": f"Bearer {app_token}"})
+  assert response.status_code == 200, response.text
+  assert response.json()["record"]["status"] in {"open", "draft"}
+  assert "last_submit_upstream_conflict" not in response.json()["record"]
+  assert "last_submit_upstream_conflict" not in stored(app_id, "rec-clean-again")
 
 
 def direct_submit(monkeypatch, tmp_path, *, plan=None, **kwargs):
@@ -534,7 +606,8 @@ def test_review_status_blocks_a_clean_standalone_pr_upstream_already_took(client
   head = subprocess.check_output(["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True).strip()
   _record_upstream(app_id, "already-landed", head)
   verdict = review_status(client, app_id, app_token)
-  assert verdict["state"] == "needs_refresh" and verdict["code"] == "upstream_conflict", verdict
+  assert verdict["state"] == "needs_refresh" and verdict["code"] == "upstream_base_moved", verdict
+  assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES["upstream_base_moved"]
 
 
 def test_review_status_blocks_an_overlap_whose_reviewed_base_left_upstream(client, owner_token):
@@ -552,7 +625,7 @@ def test_review_status_blocks_an_overlap_whose_reviewed_base_left_upstream(clien
   # An unrelated rewritten history cannot even be merged locally; either way
   # Send never becomes available for a diff GitHub would show differently.
   assert verdict["state"] != "ready", verdict
-  assert verdict["code"] in {"upstream_conflict", "review_unavailable"}
+  assert verdict["code"] in {"upstream_conflict", "upstream_base_moved", "review_unavailable"}
 
 
 def test_an_existing_pr_update_keeps_the_gate_even_if_its_action_witness_regressed(monkeypatch, tmp_path):
@@ -568,7 +641,7 @@ def test_an_existing_pr_update_keeps_the_gate_even_if_its_action_witness_regress
 
 
 @pytest.mark.parametrize(("answer", "code"), [
-  ("moved", "upstream_conflict"), ("several", "upstream_conflict"),
+  ("moved", "upstream_base_moved"), ("several", "upstream_base_moved"),
   ("unreadable", "upstream_merge_unavailable"),
 ])
 def test_review_status_requires_the_reviewed_base_as_the_sole_merge_base(client, owner_token, monkeypatch, answer, code):
@@ -595,3 +668,7 @@ def test_review_status_requires_the_reviewed_base_as_the_sole_merge_base(client,
   monkeypatch.setattr(app_git, "_run", run_git)
   verdict = review_status(client, app_id, app_token)
   assert verdict["state"] != "ready" and verdict["code"] == code
+  # The read-only card has its own sentence; Send's "Nothing was published"
+  # would describe an action the card never took.
+  assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES[code]
+  assert "published" not in verdict["message"]

@@ -1029,6 +1029,15 @@ _REVIEW_STATUS_MESSAGES = {
     "This no longer merges cleanly with the branch it targets, so it has to "
     "be refreshed before it can be sent."
   ),
+  "upstream_base_moved": (
+    "The branch it targets no longer has this review's base as its only merge "
+    "base, so GitHub would not show the reviewed diff. It has to be refreshed "
+    "before it can be sent."
+  ),
+  "upstream_merge_unavailable": (
+    "Whether this still merges with the branch it targets could not be "
+    "checked locally."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -1345,7 +1354,7 @@ def _inspect_prepared_review(
         lambda *args: app_git._run(repo, *args, check=False, read_only=True),
         upstream_sha, head_oid, base_oid,
       ):
-        return _review_status_problem(record_id, code="upstream_conflict")
+        return _review_status_problem(record_id, code="upstream_base_moved")
     elif _GIT_SHA.match(upstream_sha):
       merge_preview = app_git.preview_merge_refs(repo, upstream_sha, branch)
       if merge_preview is None:

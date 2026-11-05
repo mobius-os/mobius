@@ -2106,6 +2106,9 @@ def _mark_submit_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # Only the Send that opened this PR over an overlap may say it conflicts.
+  if not (record_patch or {}).get("last_submit_upstream_conflict"):
+    next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2146,6 +2149,8 @@ def _mark_existing_pr_update_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # An update publishes only after it merges cleanly with upstream.
+  next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -3826,6 +3831,9 @@ def _submit_prepared_pr(
         ) else
         _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
       )
+      # A conflict is true of the PR only once it opens, so a failed later step
+      # never leaves it on the still-prepared record.
+      upstream_conflict = merge_patch.pop("last_submit_upstream_conflict", None)
       record_patch = _git_ops._record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _git_ops._merge_error_patch(exc, record_patch) from exc
@@ -4399,10 +4407,10 @@ def _submit_prepared_pr(
               _reviewed_pr_labels(plan),
             )
             completed_patch = _git_ops._record_patch_with(
-              _git_ops._record_patch_with(
-                pushed_patch,
-                {"publication_stage": confirmed_existing[1]},
-              ),
+              _git_ops._record_patch_with(pushed_patch, {
+                "publication_stage": confirmed_existing[1],
+                "last_submit_upstream_conflict": upstream_conflict,
+              }),
               label_patch,
             )
             if attempt_event is not None:
@@ -4474,9 +4482,10 @@ def _submit_prepared_pr(
       _reviewed_pr_labels(plan),
     )
     completed_patch = _git_ops._record_patch_with(
-      _git_ops._record_patch_with(
-        pushed_patch, {"publication_stage": confirmed_stage},
-      ),
+      _git_ops._record_patch_with(pushed_patch, {
+        "publication_stage": confirmed_stage,
+        "last_submit_upstream_conflict": upstream_conflict,
+      }),
       label_patch,
     )
     if attempt_event is not None:
