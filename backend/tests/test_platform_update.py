@@ -933,8 +933,31 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   assert "LINE_A = 'RESOLVED AND LATE'" in (
     platform / "backend/app/main.py"
   ).read_text()
-  assert not pu.late_edits_pending()
   assert pu._is_ancestor(platform, target, _served_sha(platform))
+  _assert_restored_late_edits_finish_once_loaded(platform)
+
+
+def _assert_restored_late_edits_finish_once_loaded(platform: Path) -> None:
+  """Late edits merged back after the server imported the update are not
+  loaded yet: the swap stays (resumes held, a restart owed, the boot can still
+  go back) until a restarted server serves them."""
+  record = pu.read_prepared_update()
+  assert record["state"] == "swapped"
+  assert record["replayed"] == _served_sha(platform)
+  assert pu.late_edits_pending()
+  assert pu.unfinished_update(platform) == {
+    "target_sha": record["target"], "stage": "finish", "action": "restart",
+    "cancellable": False,
+  }
+  assert not pu.confirm_platform_swap_loaded(platform)
+
+  assert pu.settle_prepared_update_for_this_image(platform) == "replayed"
+  _boot_started_server(platform)
+  assert pu.complete_platform_swap(platform) == "replayed"
+  assert not pu.late_edits_pending()
+  assert pu.confirm_platform_swap_loaded(platform)
+  assert pu.read_prepared_update() is None
+  assert pu.unfinished_update(platform) is None
 
 
 def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
@@ -973,7 +996,6 @@ def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
   _git(replay, "add", "backend/app/main.py")
 
   assert pu.continue_platform_overlay_update(platform) == "updated"
-  assert not pu.late_edits_pending()
   assert "LINE_A = 'RESOLVED, LATE AND DIRTY'" in (
     platform / "backend/app/main.py"
   ).read_text()
@@ -987,6 +1009,8 @@ def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
   assert "late conflicting commit" in _git(
     platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF,
   ).stdout
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
 
 
 def _swapped_with_late_commit(platform: Path, origin: Path) -> tuple[str, str]:
@@ -9477,3 +9501,41 @@ async def test_resume_recreates_a_missing_resolver_and_rebinds_the_update(
   assert result["chat_id"] == "new-resolver" and result["created"] is True
   assert calls == [(["backend/app/main.py"], _served_sha(platform), "net")]
   assert pu._read_conflict_flag()["chat_id"] == "new-resolver"
+
+
+@pytest.mark.asyncio
+async def test_the_resolver_is_the_chat_its_update_binds_not_one_with_its_title(
+  clone_env, db, owner_token, monkeypatch,
+):
+  """An earlier update's resolver that is still running shares the title but
+  not this update; concurrent clicks open exactly one resolver."""
+  from app import models
+  from app.chat_writer import create_chat
+
+  _origin, platform = clone_env
+  worktree, _index, _then = _parked_update(platform)
+  db.add(create_chat(id="earlier-resolver", title="Resolve platform update conflict",
+                     messages=[], pending_messages=[], provider="claude"))
+  db.add(models.ChatRun(id="earlier-run", root_run_id="earlier-run",
+                        chat_id="earlier-resolver", status="running", provider="claude"))
+  db.commit()
+  started = []
+
+  async def fake_start(**kwargs):
+    await asyncio.sleep(0)  # let the other click in while this one opens
+    started.append(kwargs)
+    return True
+
+  monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", fake_start)
+  monkeypatch.setattr("app.push.notify_owner", lambda *args, **kwargs: None)
+
+  first, second = await asyncio.gather(
+    pu.create_platform_conflict_resolver_chat(db, platform),
+    pu.create_platform_conflict_resolver_chat(db, platform),
+  )
+
+  assert first["created"] is True and first["chat_id"] != "earlier-resolver"
+  assert second == {"chat_id": first["chat_id"], "created": False, "started": False}
+  assert [call["chat_id"] for call in started] == [first["chat_id"]]
+  assert str(worktree) in started[0]["content"]
+  assert pu._read_conflict_flag()["chat_id"] == first["chat_id"]

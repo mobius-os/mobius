@@ -4878,16 +4878,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _record_update_activation(repo, head, target)
       return result.status
     # The server booted before these edits returned, so it still owes the
-    # restart that loads them.
+    # restart that loads them. The swap stays until a server serves them
+    # (``confirm_platform_swap_loaded``) or its bound replacement confirms it,
+    # so that boot can still return a merged tree that cannot start.
     _record_update_activation(repo, head, recorded_upstream_sha(repo))
     record = read_prepared_update()
-    if record is not None and record["operation"] is not None:
-      # Its replacement still confirms it; the restart loads this.
+    if record is not None:
       _write_prepared_update(PreparedUpdate(**{
         **record, "replayed": head, "booted_tree": _working_tree_oid(repo, head),
       }))
-    elif record is not None:
-      _retire_swap(repo, record)
     return result.status
 
 
@@ -6218,42 +6217,48 @@ def _apply_platform_update_sync(
       raise
 
 
+# A second click (or startup) waits for the first, then finds the chat it bound.
+_resolver_creation_lock = asyncio.Lock()
+
+
 async def create_platform_conflict_resolver_chat(
   db: Session, repo: Path = PLATFORM_REPO, *, replace_bound: bool = False,
 ) -> PlatformConflictResolverChatOut:
   """Create or return the owner-clicked resolver chat for a platform conflict.
 
-  ``replace_bound`` opens a new one even when the bound chat still exists
-  (resuming a chat that cannot take a system turn) and rebinds the update.
+  The conflict flag's ``chat_id`` is the resolver's identity. ``replace_bound``
+  opens a new one even when the bound chat still exists (resuming a chat that
+  cannot take a system turn) and rebinds the update.
   """
-  flag = _read_conflict_flag() or {}
-  if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
-    raise PlatformUpdateError("No unresolved platform update conflict.")
+  async with _resolver_creation_lock:
+    flag = _read_conflict_flag() or {}
+    if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
+      raise PlatformUpdateError("No unresolved platform update conflict.")
 
-  existing = None if replace_bound else _bound_resolver_chat(db, flag)
-  if existing is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=existing.id, created=False, started=False,
+    existing = None if replace_bound else _bound_resolver_chat(db, flag)
+    if existing is not None:
+      return PlatformConflictResolverChatOut(
+        chat_id=existing.id, created=False, started=False,
+      )
+
+    conflict_paths = flag.get("paths") or _unmerged_paths(repo)
+    target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+    parked = flag.get("overlay")
+    if not target_sha:
+      raise PlatformUpdateError("Platform conflict target is unavailable.")
+    result = await spawn_platform_conflict_chat(
+      db, conflict_paths, target_sha, parked,
     )
+    if result is None:
+      raise PlatformUpdateError("Could not open resolver chat.")
 
-  conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
-  parked = flag.get("overlay")
-  if not target_sha:
-    raise PlatformUpdateError("Platform conflict target is unavailable.")
-  result = await spawn_platform_conflict_chat(
-    db, conflict_paths, target_sha, parked,
-  )
-  if result is None:
-    raise PlatformUpdateError("Could not open resolver chat.")
-
-  _write_conflict_flag(
-    target_sha,
-    conflict_paths,
-    result["chat_id"],
-    overlay=parked,
-  )
-  return result
+    _write_conflict_flag(
+      target_sha,
+      conflict_paths,
+      result["chat_id"],
+      overlay=parked,
+    )
+    return result
 
 
 async def resume_platform_conflict_resolver(
@@ -6422,7 +6427,8 @@ async def spawn_platform_conflict_chat(
 ) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
-  update-conflict resolver chat. Dedupes on a running resolver."""
+  update-conflict resolver chat. Reuse is the caller's: the conflict flag
+  binds the update's chat (``create_platform_conflict_resolver_chat``)."""
   import uuid
 
   from app import models, providers
@@ -6430,27 +6436,8 @@ async def spawn_platform_conflict_chat(
   from app.chat_writer import create_chat
   from app.config import get_settings
   from app.push import notify_owner
-  from app.run_state import running_chat_ids
 
   title = "Resolve platform update conflict"
-  candidate_ids = [
-    row.id for row in (
-      db.query(models.Chat.id)
-      .filter(models.Chat.title == title)
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
-  ]
-  running_ids = running_chat_ids(db, candidate_ids)
-  running_id = next(
-    (chat_id for chat_id in candidate_ids if chat_id in running_ids),
-    None,
-  )
-  if running_id is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=running_id, created=False, started=False,
-    )
-
   owner = db.query(models.Owner).first()
   if owner is None:
     return None
