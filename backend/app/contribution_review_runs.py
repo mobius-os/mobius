@@ -923,7 +923,7 @@ For an old uncertain public attempt, open its named owning chat/run and POST
 that old run's /observe endpoint for read-only reconciliation against GitHub.
 If the exact
 effect cannot be proved or disproved, ask the owner for supervised recovery;
-elapsed time, a closed PR, or an unchanged projection never releases the receipt.
+elapsed time alone, a closed PR, or an unchanged projection never releases the receipt.
 Autopilot is unsupported: perform only the requested immediate step and hand off,
 rather than starting unattended follow-up turns. This never broadens mutation consent.
 When an exact repair push is confirmed, finish its saved receipt work_key via
@@ -1335,23 +1335,29 @@ _QUEUE_PROOF_UNAVAILABLE = object()
 
 
 def confirmed_queue_removal(gh, cwd, target, previous, *, unavailable_marker=None):
-  """Prove the saved admission ended, never infer it from missing entry/checks.
+  """Prove the saved attempt can no longer land, never infer it from missing entry/checks.
 
-  Queue removal events have no entry id, and beforeCommit is a synthetic
-  merge-group commit, NOT the PR head. Match the saved unique admission by timestamp;
-  legacy receipts require a unique pair in the complete queue-event history.
-  A bounded incomplete history deliberately blocks rather than guessing.
+  A confirmed admission is matched to its removal event: removal events have
+  no entry id, and beforeCommit is a synthetic merge-group commit, NOT the PR
+  head. Match the saved unique admission by timestamp; legacy receipts require
+  a unique pair in the complete queue-event history. A bounded incomplete
+  history deliberately blocks rather than guessing.
+
+  An attempt without a confirmed admission (a lost merge or queue response)
+  is proved only by a read started after ``dispatch_window_closed``: GitHub
+  has then evaluated or dropped every request issued for it, and one that
+  took effect left the PR merged, queued or set to auto-merge, which this
+  read would show.
   """
-  if (not previous.get("queue_entry_id") or previous.get("queue_receipt_unconfirmed")
-      or previous.get("head_sha") != target["head_sha"]):
+  if previous.get("head_sha") != target["head_sha"]:
     return None
-  if previous.get("queue_enqueued_at") is None and not dispatch_window_closed(
-      previous.get("merge_armed_at"), time.time()):
-    # A legacy receipt has no provenance: the uncertain request it may stand
-    # for could still admit the head until its dispatch window has closed.
+  admitted = previous.get("queue_entry_id") and not previous.get("queue_receipt_unconfirmed")
+  if ((not admitted or previous.get("queue_enqueued_at") is None)
+      and not dispatch_window_closed(previous.get("merge_armed_at"), time.time())):
+    # Until then an uncertain request could still merge or admit the head.
     return None
   query = """query($id:ID!){node(id:$id){... on PullRequest {
-    id headRefOid state merged mergeQueueEntry{id}
+    id headRefOid state merged mergeQueueEntry{id} autoMergeRequest{enabledAt}
     timelineItems(last:100,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){
       pageInfo{hasPreviousPage hasNextPage} nodes{
         __typename
@@ -1374,31 +1380,35 @@ def confirmed_queue_removal(gh, cwd, target, previous, *, unavailable_marker=Non
     if (result.get("errors") or pr.get("id") != target["pr_id"]
         or pr.get("headRefOid") != target["head_sha"] or pr.get("state") != "OPEN"
         or pr.get("merged") is not False or "mergeQueueEntry" not in pr
-        or pr["mergeQueueEntry"] is not None):
+        or pr["mergeQueueEntry"] is not None or pr.get("autoMergeRequest") is not None):
       return None
-    events = _ordered_queue_events(pr.get("timelineItems"))
-    if events is None:
-      return None
-    enqueued_at = previous.get("queue_enqueued_at")
-    if enqueued_at is None:
-      # A legacy receipt has no admission timestamp: one complete cycle only.
-      if len(events) != 2:
+    if admitted:
+      events = _ordered_queue_events(pr.get("timelineItems"))
+      if events is None:
         return None
-      pair = 0
+      enqueued_at = previous.get("queue_enqueued_at")
+      if enqueued_at is None:
+        # A legacy receipt has no admission timestamp: one complete cycle only.
+        if len(events) != 2:
+          return None
+        pair = 0
+      else:
+        admission = _queue_time(enqueued_at)
+        if admission is None:
+          return None
+        matching = [i for i in range(0, len(events), 2)
+          if _queue_time(events[i]["createdAt"]) == admission]
+        if len(matching) != 1:
+          return None
+        pair = matching[0]
+      added, removed = events[pair:pair + 2]
+      proof = {"queue_entry_id": previous["queue_entry_id"],
+        "head_sha": target["head_sha"], "added_event_id": added["id"],
+        "enqueued_at": added["createdAt"], "removed_event_id": removed["id"],
+        "removed_at": removed["createdAt"]}
     else:
-      admission = _queue_time(enqueued_at)
-      if admission is None:
-        return None
-      matching = [i for i in range(0, len(events), 2)
-        if _queue_time(events[i]["createdAt"]) == admission]
-      if len(matching) != 1:
-        return None
-      pair = matching[0]
-    added, removed = events[pair:pair + 2]
-    proof = {"queue_entry_id": previous["queue_entry_id"],
-      "head_sha": target["head_sha"], "added_event_id": added["id"],
-      "enqueued_at": added["createdAt"], "removed_event_id": removed["id"],
-      "removed_at": removed["createdAt"]}
+      proof = {"head_sha": target["head_sha"], "merge_armed_at": previous.get("merge_armed_at"),
+        "dispatch_window_closed": True}
     if previous.get("queue_removal") not in (None, proof):
       return None
     # A queue merge also emits a removal event, and state/merged above can lag
@@ -1446,7 +1456,8 @@ def reconcile_merge(gh, cwd, target, previous, pull):
       history.append({**snapshot, "merge_attempted": True, "queue_removal": proof})
     return {"merge_attempts": history,
       "merge_attempted": True, "state": "needs_you", "queue_removal": proof,
-      "summary": "The saved queue admission was removed. Only a new repaired successor with fresh independent review may proceed; this head cannot be retried."}
+      "summary": ("GitHub shows the earlier merge/queue attempt can no longer land. Only a new repaired "
+                  "successor with fresh independent review may proceed; this head cannot be retried.")}
   return {"state": "merge_unknown",
     "summary": "The exact earlier merge/queue attempt remains unclear. It was not repeated."}
 
@@ -1460,6 +1471,6 @@ def require_repairable_merge(gh, cwd, target, previous):
     raise HTTPException(403, "Your repository write permission is no longer available.")
   proof = confirmed_queue_removal(gh, cwd, target, previous)
   if pull.get("state") != "open" or pull.get("merged") or not proof:
-    raise HTTPException(409, "The saved merge attempt has no confirmed queue removal. No repair may start.")
+    raise HTTPException(409, "GitHub has not proved the saved merge attempt can no longer land. No repair may start.")
   if previous.get("queue_removal") != proof:
-    raise HTTPException(409, "Observe the confirmed queue removal before preparing a repaired successor.")
+    raise HTTPException(409, "Observe the proved end of the merge attempt before preparing a repaired successor.")
