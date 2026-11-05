@@ -21,7 +21,7 @@ from pathlib import Path
 from app.chat_notes import extract_chat_summary
 
 # How many recent per-chat notes to inject at session start. Each contributes
-# the agent's whole short Summary, with no size cap or budget; the most
+# the agent's whole Chat summary, with no size cap or budget; the most
 # recently active ones open a fresh session with recent conversational context.
 RECENT_CHAT_NOTES = 10
 

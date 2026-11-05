@@ -1069,6 +1069,9 @@ def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
   ):
     description = control._TOOL_DEFINITIONS[name]["description"].lower()
     assert description.count(instruction) == 1
+    assert "closeout before this call" not in description
+  assert "before this call, write your closing message" in instruction
+  assert "where things stand" in instruction
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
@@ -1560,13 +1563,3 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
 
-
-def test_saved_cards_ask_for_the_closing_message_before_the_card():
-  control = _control_module()
-  instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION
-  assert "before this call, write your closing message" in instruction
-  assert "where things stand" in instruction
-  for name in ("request_question", "request_restart", "request_approval"):
-    description = control._TOOL_DEFINITIONS[name]["description"]
-    assert instruction in description
-    assert "closeout before this call" not in description

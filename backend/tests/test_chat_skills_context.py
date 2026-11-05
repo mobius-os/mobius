@@ -786,6 +786,7 @@ def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
   ).lower()
   for required in (
     "**Your reply text is the conversation.**",
+    "Thinking is folded away and is not a reply",
     "**End every turn with a closing message:**",
     "A denied tool call means the partner or a Möbius guard declined it",
     "System reminders and hook output come from Möbius",
