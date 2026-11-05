@@ -94,6 +94,7 @@ from app.github_contribution_git import (
   _gh,
   _validate_repo_slug,
   _validate_branch,
+  _authoritative_upstream_branch_sha,
   _git_env,
   _run_cmd,
   _assert_clean_worktree,
@@ -754,6 +755,79 @@ def _personal_resume_allowed(
   return True
 
 
+# Phases a signed attempt reaches before any PR can exist. Neither of the
+# first two has a public effect; a push's outcome is the branch tip itself.
+_NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
+_PUSH_ATTEMPT_PHASES = frozenset({"push_pending", "push_ambiguous"})
+
+
+def _attempt_replays(receipt: dict, record: dict) -> bool:
+  """Whether ``record`` is still the exact proposal ``receipt`` was claimed for."""
+  claim = receipt.get("claim_input")
+  patch = receipt.get("record_patch")
+  candidates = [receipt.get("preclaim_input")]
+  if isinstance(claim, dict):
+    candidates += [claim, {
+      **claim, **(patch if isinstance(patch, dict) else {}),
+      "status": record.get("status"),
+    }]
+  current = _personal_publication_input_sha256(record)
+  return any(
+    isinstance(candidate, dict)
+    and _personal_publication_input_sha256(candidate) == current
+    for candidate in candidates
+  )
+
+
+async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
+  """Drop a signed pre-PR attempt that GitHub proves a newer review supersedes.
+
+  A receipt exists so the exact claimed action can be replayed and
+  reconciled. Once the record is restaged or re-reviewed, that action can
+  never replay, yet its receipt refused every later Send, so one interrupted
+  push left the record unsendable for good. The ambiguity is resolvable: a push's only effect is the branch tip. When
+  the tip is still the pre-push commit, or exactly the receipt's head, the
+  old attempt leaves nothing a new publication must reconcile, and that
+  publication still makes its own leased, authoritative GitHub reads.
+  Anything else (an unreadable tip, a moved branch, a phase after the push)
+  keeps the receipt.
+  """
+  record_path, _ = _record_paths(app_id, record_id)
+  async with fs_locks.app_storage_lock(app_id):
+    receipt = _read_personal_attempt(
+      record_path, app_id=app_id, record_id=record_id,
+    )
+    # The owning route reports a missing or unreadable record itself.
+    record = _read_record(record_path) if receipt is not None else None
+  if (
+    receipt is None
+    or record.get("status") != "prepared"
+    or receipt.get("phase") not in _NO_EFFECT_ATTEMPT_PHASES | _PUSH_ATTEMPT_PHASES
+    or _attempt_replays(receipt, record)
+  ):
+    return
+  if receipt["phase"] in _PUSH_ATTEMPT_PHASES:
+    request = receipt.get("effective_request")
+    if not isinstance(request, dict) or request.get("action") != "push":
+      return
+    try:
+      actual = await asyncio.to_thread(  # unsettled: read-only (branch tip)
+        _authoritative_upstream_branch_sha,
+        Path(get_settings().data_dir),
+        _validate_repo_slug(request.get("head_repository")),
+        _validate_branch(request.get("branch")),
+      )
+    except (ContributionSubmitError, OSError, subprocess.SubprocessError):
+      return
+    if actual not in {request.get("expected_remote_sha"), request.get("head_sha")}:
+      return
+  async with fs_locks.app_storage_lock(app_id):
+    if _read_record(record_path) == record and _read_personal_attempt(
+      record_path, app_id=app_id, record_id=record_id,
+    ) == receipt:
+      _remove_personal_attempt(app_id, record_id)
+
+
 def _assert_active_stack_attempts_current(
   attempt_owners: dict[str, _PersonalAttemptOwner],
 ) -> None:
@@ -1067,7 +1141,11 @@ def _review_status_problem(
 ) -> dict:
   return {
     "id": record_id,
-    "state": "needs_refresh",
+    "state": (
+      "unavailable"
+      if code in {"review_unavailable", "publication_unavailable"}
+      else "needs_refresh"
+    ),
     "code": code,
     "message": _REVIEW_STATUS_MESSAGES.get(
       code,
@@ -1250,7 +1328,12 @@ def _inspect_prepared_review(
   ):
     return _review_status_problem(record_id, code="invalid_plan")
   try:
-    repo = _safe_repo_path(plan.get("repo_path"))
+    try:
+      repo = _safe_repo_path(plan.get("repo_path"))
+    except ContributionSubmitError as exc:
+      return _review_status_problem(
+        record_id, code=exc.code or "invalid_checkout", detail=exc.message,
+      )
     branch = _validate_branch(plan.get("branch") or record.get("branch"))
     if not (repo / ".git").exists():
       return _review_status_problem(record_id, code="missing_checkout")
@@ -1275,7 +1358,9 @@ def _inspect_prepared_review(
       repo, "merge-base", "--is-ancestor", base_oid, head_oid,
       check=False, read_only=True,
     )
-    if ancestry.returncode != 0:
+    if ancestry.returncode not in (0, 1):
+      return _review_status_problem(record_id, code="review_unavailable")
+    if ancestry.returncode == 1:
       raise ContributionSubmitError(
         "The reviewed branch is no longer based on its recorded parent.",
         code="invalid_ancestry",
@@ -1290,7 +1375,7 @@ def _inspect_prepared_review(
     expected_diff = str(plan.get("diff_sha256") or "")
     try:
       stored_diff = diff_path.read_bytes()
-    except OSError as exc:
+    except FileNotFoundError as exc:
       raise ContributionSubmitError(
         "The reviewed diff is missing.", code="missing_diff",
       ) from exc
@@ -1301,7 +1386,9 @@ def _inspect_prepared_review(
     branch_diff = app_git._canonical_diff(
       repo, base_oid, head_oid, read_only=True,
     )
-    if branch_diff is None or hashlib.sha256(branch_diff).hexdigest() != expected_diff:
+    if branch_diff is None:
+      return _review_status_problem(record_id, code="review_unavailable")
+    if hashlib.sha256(branch_diff).hexdigest() != expected_diff:
       raise ContributionSubmitError(
         "The reviewed diff does not match the branch.", code="diff_mismatch",
       )
@@ -1347,9 +1434,11 @@ def _inspect_prepared_review(
       if merge_preview.status == "conflict":
         return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
+    # Domain validation is actionable even when older validators lack a code.
+    # Only an explicit unavailable verdict (or the I/O catch below) is transient.
     return _review_status_problem(
       record_id,
-      code=exc.code or "review_unavailable",
+      code=exc.code or "invalid_plan",
       detail=exc.message,
     )
   except (
@@ -1569,6 +1658,7 @@ async def contribution_review_status(
     "records": results,
     "ready": sum(item["state"] == "ready" for item in results),
     "needs_refresh": sum(item["state"] == "needs_refresh" for item in results),
+    "unavailable": sum(item["state"] == "unavailable" for item in results),
     "publication": {
       "ready": sum(
         item["publication"]["state"] == "ready" for item in results
@@ -2598,6 +2688,7 @@ async def submit_contribution(
   # connection. The nonce is rechecked inside the lock before the claim.
   submitter = body.submitter if body is not None else "contribute-button"
   db.close()
+  await _retire_superseded_attempt(app_id, record_id)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(
       db, app_id=app_id, expected_nonce=expected_nonce,
@@ -2918,7 +3009,7 @@ async def mark_contribution_ready(
           "This draft already has auto-merge enabled. Ready could merge it immediately, so nothing was changed.",
           code="ready_auto_merge_enabled",
         )
-      await asyncio.to_thread(
+      await settled.run_settled(
         _mark_personal_pr_ready,
         target,
         node_id=str(live["node_id"]),
@@ -3055,6 +3146,7 @@ async def update_existing_contribution(
     body.submitter if body is not None else "contribute-update-button"
   )
   db.close()
+  await _retire_superseded_attempt(app_id, record_id)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(
       db, app_id=app_id, expected_nonce=expected_nonce,
@@ -3549,6 +3641,8 @@ async def update_contribution_stack(
   phase_actions = frozenset({"pr_update"})
   submitter = "contribute-stack-update-button"
   db.close()
+  for value in body.record_ids:
+    await _retire_superseded_attempt(app_id, value)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(
       db, app_id=app_id, expected_nonce=expected_nonce,
@@ -3871,6 +3965,8 @@ async def submit_contribution_stack(
   phase_actions = frozenset({"pr"})
   submitter = "contribute-stack-button"
   db.close()
+  for value in body.record_ids:
+    await _retire_superseded_attempt(app_id, value)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(
       db, app_id=app_id, expected_nonce=expected_nonce,
