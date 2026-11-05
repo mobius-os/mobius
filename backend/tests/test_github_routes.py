@@ -16253,3 +16253,106 @@ def test_single_claim_rechecks_the_confirmed_proposal_before_writing(
   assert raised.value.detail["not_attempted"] is True
   assert armed == []
   assert _record_bytes(app_id, [record_id]) == before
+
+
+@pytest.mark.parametrize("failure", ["read", "diff", "ancestry"])
+def test_review_status_unavailable_is_not_evidence_of_source_drift(
+  client, owner_token, monkeypatch, failure,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, f"unavailable-source-{failure}")
+  if failure == "diff":
+    monkeypatch.setattr(app_git, "_canonical_diff", lambda *a, **kw: None)
+  else:
+    original = app_git._run
+    def fail_read(repo, *args, **kwargs):
+      if failure == "read" and args[0] == "status":
+        raise OSError("temporary read failure")
+      if failure == "ancestry" and args[:2] == ("merge-base", "--is-ancestor"):
+        return subprocess.CompletedProcess(args, 128, "", "read failed")
+      return original(repo, *args, **kwargs)
+    monkeypatch.setattr(app_git, "_run", fail_read)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200
+  data = response.json()
+  assert data["needs_refresh"] == data["ready"] == 0
+  assert data["unavailable"] == 1
+  assert data["records"][0] == {
+    "id": f"unavailable-source-{failure}", "state": "unavailable",
+    "code": "review_unavailable",
+    "message": "This review could not be verified locally.",
+    "publication": {
+      "state": "unavailable", "code": "publication_unavailable",
+      "message": "GitHub freshness could not be checked right now.",
+    },
+  }
+
+
+@pytest.mark.parametrize("failure,code", [
+  ("missing", "missing_checkout"), ("invalid", "invalid_checkout"),
+  ("dirty", "working_changes"), ("missing_diff", "missing_diff"),
+  ("invalid_branch", "invalid_plan"), ("missing_commits", "missing_commits"),
+])
+def test_review_status_permanent_and_proven_drift_are_not_transient(
+  client, owner_token, failure, code,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  repo, record, _diff = _prepared_real_review(app_id, f"specific-source-{failure}")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  if failure == "missing":
+    shutil.rmtree(repo / ".git")
+  elif failure == "invalid":
+    record["plan"]["repo_path"] = "/outside-durable-roots"
+  elif failure == "missing_diff":
+    diff_path.unlink()
+  elif failure == "invalid_branch":
+    record["plan"]["branch"] = "not a valid branch"
+  elif failure == "missing_commits":
+    record["plan"]["head_sha"] = "f" * 40
+  else:
+    (repo / "index.jsx").write_text("owner changed this\n")
+  verdict = asyncio.run(
+    github_routes._inspect_prepared_review_locked(record, diff_path, {}),
+  )
+  assert verdict["state"] == "needs_refresh"
+  assert verdict["code"] == code
+  assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES[code]
+
+
+def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "reconnect-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "octocat", "user_id": "not-a-number"},
+  )
+  assert verdict == {
+    "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
+    "message": "Reconnect GitHub before sending this PR stack.",
+  }
+
+
+def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  # The staged commits are octocat's; the connected account is now hubot.
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "hubot", "user_id": 7},
+  )
+  assert verdict == {
+    "id": "identity-source", "state": "needs_refresh",
+    "code": "commit_identity_mismatch",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
+  }
