@@ -640,8 +640,9 @@ for (const [name, overrides] of [
     { type: 'error', resumable: false, pause: { kind: 'memory' } },
   ] } }],
   ['working', { handoff: { kind: 'working' } }],
-  ['waiting for restart', { continuationWait: 'restart_required' }],
-  ['restoring work', { continuationWait: 'restoring_edits' }],
+  // The server's real shape for a storage wait during an update.
+  ['waiting for restart', { handoff: { kind: 'recovery', reason: 'restart_required' } }],
+  ['restoring work', { handoff: { kind: 'automatic', reason: 'restoring_edits' } }],
 ]) {
   test(`${name} storage pause cannot offer Continue anyway`, () => {
     const html = renderToStaticMarkup(createElement(MsgContent, {

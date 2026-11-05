@@ -606,9 +606,11 @@ function MsgContentInner({
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
         // Resource waits retain automatic retry. A warned storage-only action
         // can admit one cleanup turn even while that measured pressure remains.
+        // Not while an update restores edits or awaits a restart: the server
+        // reports those for a storage wait as the handoff's reason.
         const storageOverrideAvailable = recoveryOwner && block.pause?.kind === 'storage'
           && ['automatic', 'recovery'].includes(handoff?.kind)
-          && !['restart_required', 'restoring_edits'].includes(continuationWait)
+          && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
