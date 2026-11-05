@@ -4953,7 +4953,8 @@ async def _autopilot_escalate_and_notify(
       title=_HUMAN_REQUIRED_TITLE,
       body=f"{title} — {attention['message']}",
       source_type="app", source_id=str(app_id),
-      target=f"/shell/?app={app_id}",
+      # Open the escalated contribution itself, not the app's front page.
+      target=f"/shell/?app={app_id}&intent=review:{record_id}",
     )
   except Exception:
     log.warning("human_required notify failed %s/%s", app_id, record_id,
