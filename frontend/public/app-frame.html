@@ -863,6 +863,13 @@
     // An attacker embedding this frame on their own page can read
     // the ready event but cannot inject a token — their reply has
     // the wrong origin.
+    //
+    // Tests execute this script's real top-level declarations, parsed with
+    // acorn rather than copied: backend/tests/frame_entrypoint_probe.mjs and
+    // frontend/src/lib/__tests__/tokenExpiredProtocol.test.js. They bind names
+    // such as initialized, currentToken, importBrokeredModule and
+    // COMPILED_RUNTIME_ABI directly, so renaming one, or giving a function they
+    // run a new top-level dependency, fails them until their harness follows.
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;

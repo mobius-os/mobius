@@ -211,7 +211,9 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
     "MOBIUS_DELEGATION_ID",
     # Non-secret capture context for the screenshot tool.
     "VIEWPORT_WIDTH", "VIEWPORT_HEIGHT", "VIEWPORT_PIXEL_RATIO",
-    "AGENT_BROWSER_SESSION",
+    "AGENT_BROWSER_SESSION", "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_ARGS",
+    "AGENT_BROWSER_CONFIG", "AGENT_BROWSER_EXECUTABLE_PATH",
+    "MOBIUS_SCREENSHOT_REAL_BROWSER",
   }
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {

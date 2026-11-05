@@ -198,7 +198,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: clamp(14px, 2.5vw, 24px) clamp(14px, 4vw, 40px) max(28px, env(safe-area-inset-bottom));
+  padding: clamp(14px, 2.5vw, 24px) clamp(14px, 3vw, 30px) max(28px, env(safe-area-inset-bottom));
   scrollbar-width: var(--shell-scrollbar-width, none);
 }
 
@@ -226,7 +226,7 @@
 }
 .projects-empty p { margin: 0; }
 
-.projects-collection { width: min(760px, 100%); margin: 0 auto; }
+.projects-collection { width: 100%; }
 .projects-collection__main {
   min-width: 0;
   border: 0;
@@ -558,6 +558,7 @@
 .project-chats__row > span { min-width: 0; display: grid; gap: 1px; }
 .project-chats__row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
 .project-chats__row small { color: var(--muted); font-size: 10px; }
+.project-chats__row small.project-chats__status--working { color: var(--accent); }
 .project-chats__row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .project-finder__conflict {
@@ -1155,6 +1156,8 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .artifact-pill--idle { color: var(--muted); background: var(--surface); }
 .artifact-pill--building { color: var(--accent); background: var(--accent-dim); }
 .artifact-pill--ok { color: #157a4a; background: color-mix(in srgb, #157a4a 16%, transparent); }
+.artifact-pill--ready { color: #fff; background: #157a4a; }
+.artifact-pill--stale { color: #8a5a00; background: color-mix(in srgb, #c98a00 18%, transparent); }
 .artifact-pill--error { color: var(--danger, #c43d3d); background: color-mix(in srgb, var(--danger, #c43d3d) 16%, transparent); }
 
 /* ── Artifact workspace (its own tab) ───────────────────────────────────────── */

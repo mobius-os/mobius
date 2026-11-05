@@ -39,6 +39,7 @@ from typing import Any
 
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
+from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
 from app.usage_metrics import HELPER_TASK_COUNTERS, normalize_claude_helper_task_usage, reported_counter
 
 log = logging.getLogger(__name__)
@@ -287,6 +288,15 @@ class HelperTurn:
     self.done.set()
 
 
+# One Claude process hosts all of a parent's helpers, so one memory kill ends
+# them together; say so, or agents guess at an unrelated cause and retry the
+# same parallel load.
+HOST_OUT_OF_MEMORY = (
+  "The helper host was stopped because Möbius ran out of memory, ending every "
+  "helper it was running. Run fewer memory-heavy helpers at once before retrying."
+)
+
+
 class ClaudeHelperHost(Host):
   """One Claude Code process hosting one parent's helpers."""
 
@@ -302,6 +312,9 @@ class ClaudeHelperHost(Host):
     self._turn_by_tool_use: dict[str, HelperTurn] = {}
     self._agent_of_tool_use: dict[str, str] = {}
     self._turn_by_agent: dict[str, HelperTurn] = {}
+    # OOM evidence: the container's kill counter at start and the exit code.
+    self._oom_kills_at_start: int | None = None
+    self._exit_code: int | None = None
     # A first tool can precede its task-start event. Identity has no deadline:
     # only accepted/rejected task start or host shutdown settles it.
     self._agent_identity: dict[str, asyncio.Future] = {}
@@ -370,6 +383,7 @@ class ClaudeHelperHost(Host):
       resume = None
     self._client = client
     self.session_id = resume
+    self._oom_kills_at_start = cgroup_oom_kill_count()
     self.process_group_id = _claude_process_group_id(client)
     lower_process_group_priority(
       self.process_group_id, logger=log, label="Claude helper host",
@@ -663,7 +677,8 @@ class ClaudeHelperHost(Host):
           log.debug("helper event routing failed", exc_info=True)
     except asyncio.CancelledError:
       raise
-    except Exception:
+    except Exception as exc:
+      self._exit_code = getattr(exc, "exit_code", None)
       log.warning("Claude helper host stream ended key=%s", self.key.digest, exc_info=True)
     finally:
       if not self._closed:
@@ -678,10 +693,15 @@ class ClaudeHelperHost(Host):
     self._cancel_pending_identity()
     for dispatch in self._host_tasks:
       dispatch.cancel()
+    summary = (
+      HOST_OUT_OF_MEMORY
+      if process_was_oom_killed(self._exit_code, oom_kills_before=self._oom_kills_at_start)
+      else "The helper host stopped unexpectedly."
+    )
     for turn in list(self._turn_by_dispatch.values()):
       if not turn.done.is_set():
         turn.host_lost = True
-      turn.finish("failed", "The helper host stopped unexpectedly.")
+      turn.finish("failed", summary)
 
   def _turn_for_parent(self, tool_use_id: str) -> HelperTurn | None:
     agent = self._agent_of_tool_use.get(tool_use_id)

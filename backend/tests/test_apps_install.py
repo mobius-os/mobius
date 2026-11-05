@@ -10600,7 +10600,7 @@ async def test_ancillary_bundle_comparison_uses_same_root_and_upstream_deletions
   tree = {"index.jsx": JSX.encode(), "README.md": b"owner", "bundle.js": b"source"}
   entries = []
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     entries.append(source_path)
     assert (source_path.parent / "bundle.js").read_bytes() == b"source"
     assert (source_path.parent / "README.md").exists() is (len(entries) == 1)
@@ -10938,7 +10938,7 @@ async def test_ancillary_source_check_and_tree_writes_leave_event_loop(monkeypat
       writes.append(threading.get_ident())
     return write_bytes(path, data)
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     assert threading.get_ident() == event_loop_thread
     entries.append(source_path)
     expected = b"owner" if len(entries) == 1 else b"upstream"

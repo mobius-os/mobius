@@ -93,19 +93,6 @@ test('the guide is a modal: Tab stays inside, and Escape dismisses it like the c
   await expect.poll(completionCount).toBe(1)
 })
 
-test('Escape in the access review cancels only the review, not the guide', async ({ page }) => {
-  await stubCatalog(page)
-  await page.route(/\/api\/apps\/preview$/, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ manifest: { id: 'memory' }, capability_contract: {}, capability_digest: 'd1' }) }))
-  const { guide, completionCount } = await openGuide(page)
-  await goToScreen(guide, 'Make it yours')
-  await guide.getByRole('button', { name: 'Install Memory' }).click()
-  await expect(page.getByRole('alertdialog', { name: 'Memory asks for access' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('alertdialog')).toHaveCount(0)
-  await expect(guide).toBeVisible()
-  expect(completionCount()).toBe(0)
-})
-
 test('mobile guide fills the screen and keeps Continue reachable', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 700 })
   const { guide } = await openGuide(page)
@@ -127,64 +114,26 @@ test('short landscape keeps guide actions and dismissal reachable', async ({ pag
   await expect.poll(completionCount).toBe(1)
 })
 
-test('installing an app asks for access first and installs exactly what was reviewed', async ({ page }) => {
+test('installing an app installs it directly, with no check or confirmation first', async ({ page }) => {
   await stubCatalog(page)
   const requests = []
-  await page.route(/\/api\/apps\/(preview|install)$/, route => {
+  let release
+  const held = new Promise(resolve => { release = resolve })
+  await page.route(/\/api\/apps\/(preview|install)$/, async route => {
     const request = route.request()
     requests.push({ path: new URL(request.url()).pathname.split('/').pop(), body: request.postDataJSON() })
-    if (request.url().endsWith('/preview')) {
-      // The server words the review: access_rows is exactly what it sends for this contract.
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-        manifest: { id: 'memory' },
-        capability_contract: { data: { shared_memory: 'write' } },
-        capability_digest: 'digest-1',
-        access_rows: [{ id: 'shared_memory', title: 'Use shared memory', text: 'Can read and change the shared memory area.', level: 'write', rank: 2, critical: false, scope: null }],
-      }) })
-    }
+    await held
     return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ warnings: [] }) })
   })
   const { guide } = await openGuide(page)
   await goToScreen(guide, 'Make it yours')
-  const install = guide.getByRole('button', { name: 'Install Memory' })
-  await install.click()
-
-  const access = page.getByRole('alertdialog', { name: 'Memory asks for access' })
-  await expect(access).toBeVisible()
-  await expect(access.getByText('Use shared memory (write)', { exact: true })).toBeVisible()
-  await expect(access.getByText('Can read and change the shared memory area.', { exact: true })).toBeVisible()
-  await expect(access.getByRole('button', { name: 'Confirm and install' })).toBeFocused()
-  // Nothing is installed while the access is being read.
-  expect(requests.map(request => request.path)).toEqual(['preview'])
-  // The other app cannot be started while this review is open.
-  await expect(guide.getByRole('button', { name: 'Install Reflection' })).toHaveAttribute('aria-disabled', 'true')
-
-  await access.getByRole('button', { name: 'Cancel' }).click()
-  await expect(access).toHaveCount(0)
-  await expect(install).toBeFocused()
-  expect(requests.map(request => request.path)).toEqual(['preview'])
-
-  await install.click()
-  await page.getByRole('button', { name: 'Confirm and install' }).click()
-  await expect.poll(() => requests.filter(request => request.path === 'install').length).toBe(1)
-  expect(requests.at(-1).body.reviewed_capability_digest).toBe('digest-1')
-})
-
-test('an access check that returns after the owner moved on does not open a review', async ({ page }) => {
-  await stubCatalog(page)
-  let release
-  const held = new Promise(resolve => { release = resolve })
-  await page.route(/\/api\/apps\/preview$/, async route => {
-    await held
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ manifest: { id: 'memory' }, capability_contract: {}, capability_digest: 'late' }) })
-  })
-  const { guide } = await openGuide(page)
-  await goToScreen(guide, 'Make it yours')
   await guide.getByRole('button', { name: 'Install Memory' }).click()
-  await guide.getByRole('button', { name: 'Continue' }).click()
-  release()
-  await expect(guide.getByRole('heading', { name: /Build useful/ })).toBeVisible()
+  await expect.poll(() => requests.length).toBe(1)
+  // One install request, no preview and no reviewed digest; what an app may do is asked at first open.
+  expect(requests[0].path).toBe('install')
+  expect(Object.keys(requests[0].body)).toEqual(['manifest_url'])
   await expect(page.getByRole('alertdialog')).toHaveCount(0)
+  release()
 })
 
 async function stubIdentity(page, identity) {

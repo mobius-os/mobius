@@ -118,9 +118,9 @@ def test_new_app_compile_does_not_hold_sqlite_write_lock(
   concurrent_chat_id = "chat-created-during-app-compile"
 
   async def compile_while_chat_is_created(
-    _source, *, out_path, source_path=None,
+    _source, *, out_path, source_path=None, source_root=None,
   ):
-    del source_path
+    del source_path, source_root
     concurrent = SessionLocal()
     try:
       # A regression should fail promptly instead of waiting out the live

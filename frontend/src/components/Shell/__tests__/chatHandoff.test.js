@@ -390,13 +390,13 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.equal(selectedChatHandoffs.length, 2,
     'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
   assert.match(shell,
-    /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
+    /const reserveTouchComposer = useCallback[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\?\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)[\s\S]*composerDraftWantsKeyboard\(saved\) && reserveTouchComposer\(chatId, saved\)/,
     'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
   assert.match(shell,
     /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*focusSelectedChatComposer\(route\.chatId\)/,
     'Back and Forward must use the same destination-composer focus handoff')
   assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
-  assert.match(shell, /beforeRestoreRouteRef,\s*navigationStorage:[\s\S]*?routePath:[\s\S]*?\}\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*beforeDrawerOpenRef,\s*navigationStorage:[\s\S]*?routePath:[\s\S]*?\}\)/)
   assert.match(
     navigationSource,
     /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
@@ -405,7 +405,7 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(
     navigationSource,
     /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
-    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+    'both explicit and Back-driven drawer closes must consult the prior keyboard state',
   )
 })
 

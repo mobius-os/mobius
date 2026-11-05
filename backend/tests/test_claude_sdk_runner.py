@@ -3679,3 +3679,98 @@ async def test_cancel_during_turn_teardown_still_disconnects_and_unregisters(mon
     await asyncio.wait_for(task, timeout=2)
   assert clients[0].disconnected
   assert runners.get_handle("teardown-cancel-chat", RunnerKind.CLAUDE_SDK) is None
+
+
+# The owner reads only text blocks. This is the stored shape of a reply whose
+# answer lived only in its thinking: a closing line after a checkpoint.
+_ANSWER_ONLY_IN_THINKING = [
+  {"type": "thinking", "content": "Checking the deploy log for the failure."},
+  {"type": "text", "content": "I'll check the deploy log before answering."},
+  {"type": "tool", "tool": "Bash", "status": "done"},
+  {"type": "thinking", "content": "Confirmed: the deploy failed because the "
+   "build ran out of memory while bundling the frontend. " * 10},
+  {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"},
+  {"type": "text", "content": "Nothing has been changed."},
+]
+
+
+def test_answer_check_flags_an_answer_written_only_in_thinking():
+  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
+
+  assert _answer_may_be_only_in_thinking(_ANSWER_ONLY_IN_THINKING)
+  # The CLI's final message may not have reached the sink yet; a short one
+  # does not hide the problem.
+  assert _answer_may_be_only_in_thinking(
+    _ANSWER_ONLY_IN_THINKING[:-1], "Nothing has been changed.",
+  )
+
+
+def test_answer_check_leaves_ordinary_replies_alone():
+  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
+
+  answered = [*_ANSWER_ONLY_IN_THINKING, {
+    "type": "text",
+    "content": "The deploy failed: the build ran out of memory. " * 10,
+  }]
+  assert not _answer_may_be_only_in_thinking(answered)
+  # An answer the stream reader has not dispatched yet still counts.
+  assert not _answer_may_be_only_in_thinking(
+    _ANSWER_ONLY_IN_THINKING, answered[-1]["content"],
+  )
+  # A short answer after brief reasoning is a normal short reply.
+  assert not _answer_may_be_only_in_thinking([
+    {"type": "thinking", "content": "Simple greeting."},
+    {"type": "text", "content": "Hi!"},
+  ])
+  for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
+    assert not _answer_may_be_only_in_thinking(malformed)
+
+
+async def _fire_stop_hook(options, **overrides) -> dict:
+  hook_input = {"hook_event_name": "Stop", "stop_hook_active": False}
+  hook_input.update(overrides)
+  return await options.hooks["Stop"][0].hooks[0](hook_input, None, {})
+
+
+@pytest.mark.asyncio
+async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = list(_ANSWER_ONLY_IN_THINKING)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_stop_hook(self.options))
+      # The agent's own continuation writes the answer, and a second Stop from
+      # any cause never loops back into the check.
+      decisions.append(await _fire_stop_hook(self.options, stop_hook_active=True))
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-chat", bc=bus)
+
+  assert result["error"] is None
+  assert decisions[0] == {
+    "decision": "block", "reason": claude_sdk_runner._ANSWER_CHECK_REASON,
+  }
+  assert "only in your thinking" in decisions[0]["reason"]
+  assert decisions[1:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch):
+  decisions: list[dict] = []
+  bus = _CardBus()
+  bus.assistant_blocks = list(_ANSWER_ONLY_IN_THINKING)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      await _fire_card_end_hook(self.options)
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _tool_boundary_interrupt_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-card-chat", bc=bus)
+
+  assert decisions == [{"continue_": True}]

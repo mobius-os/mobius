@@ -71,11 +71,11 @@ test('share payloads carry install instructions and one public URL', () => {
   assert.equal(
     appInstallShareText(app, url),
     'Install Published later in Möbius:\n' + url +
-      '\n\nOpen App Store → From URL, paste this link, then review and install.',
+      '\n\nIn Möbius, ask your agent to install the app from this link, then review and approve it.',
   )
   assert.deepEqual(appNativeSharePayload(app, url), {
     title: 'Published later',
-    text: 'Install Published later in Möbius. Open App Store → From URL.',
+    text: 'Install Published later in Möbius: ask your agent to install it from this link.',
     url,
   })
 })

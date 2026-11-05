@@ -5293,6 +5293,49 @@ MAX_VIEWPORT_PIXEL_RATIO = 4.0
 AVAILABLE_SKILLS_CONTEXT_LIMIT = 64
 DEFAULT_AGENT_BROWSER_CONFIG = "/app/agent-browser-config.json"
 DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS = "600000"
+# Same threshold and wrapper as agent-screenshot.sh's desktop pointer switch.
+DESKTOP_POINTER_MIN_WIDTH = 1024
+DESKTOP_POINTER_WRAPPER = (
+  Path(__file__).resolve().parents[1] / "scripts" / "chrome-desktop-pointer.sh"
+)
+
+
+def _configured_browser_executable(config_path: str) -> str:
+  try:
+    with open(config_path, encoding="utf-8") as handle:
+      return str(json.load(handle).get("executablePath") or "")
+  except (OSError, ValueError, AttributeError):
+    return ""
+
+
+def desktop_pointer_browser_env(env: Mapping[str, str]) -> dict[str, str]:
+  """Launch this chat's browser the way its desktop-width captures do.
+
+  agent-browser relaunches a session's browser on a blank page whenever a
+  command arrives with a different executable or launch flags. At desktop
+  widths agent-screenshot.sh launches through the hover/pointer wrapper, so a
+  turn whose own commands used the plain executable lost every prepared page
+  to the next capture and vice versa. Exporting the identical identity for
+  the whole turn keeps one browser; the helper still switches it for an
+  explicit non-desktop viewport override.
+  """
+  try:
+    width = int(env.get("VIEWPORT_WIDTH") or 0)
+  except ValueError:
+    return {}
+  if width < DESKTOP_POINTER_MIN_WIDTH or not os.access(DESKTOP_POINTER_WRAPPER, os.X_OK):
+    return {}
+  real_browser = str(env.get("AGENT_BROWSER_EXECUTABLE_PATH") or "")
+  if not real_browser or Path(real_browser) == DESKTOP_POINTER_WRAPPER:
+    real_browser = _configured_browser_executable(
+      str(env.get("AGENT_BROWSER_CONFIG") or DEFAULT_AGENT_BROWSER_CONFIG),
+    )
+  if not real_browser or not os.access(real_browser, os.X_OK):
+    return {}
+  return {
+    "AGENT_BROWSER_EXECUTABLE_PATH": str(DESKTOP_POINTER_WRAPPER),
+    "MOBIUS_SCREENSHOT_REAL_BROWSER": real_browser,
+  }
 
 
 def agent_browser_runtime_env(
@@ -5952,6 +5995,21 @@ async def _run_chat_impl_with_db(
       )
       side_question_cids = tuple(body["cid"] for body in owed_side_rows)
 
+  if chat_row is not None:
+    from app.questions import typed_reply_context
+    try:
+      run_row = db.get(models.ChatRun, run_token) if run_token else None
+      typed_reply = typed_reply_context(
+        db, chat_row, raw_user_message,
+        answered_by_owner=run_row is not None and run_row.owner_input_at is not None,
+      )
+    except Exception:
+      # Advisory framing: the answer still reaches the agent verbatim.
+      log.exception("typed card reply context unreadable chat_id=%s", chat_id)
+      typed_reply = ""
+    if typed_reply:
+      user_message = f"{typed_reply}\n\n{user_message}"
+
   goal_brief_refresh = None
   if chat_id:
     from app.goals import compaction_brief_refresh, turn_goal_brief
@@ -6085,6 +6143,7 @@ async def _run_chat_impl_with_db(
     os.environ.get("AGENT_BROWSER_ARGS"),
   )
   base_env.update(agent_browser_runtime_env())
+  base_env.update(desktop_pointer_browser_env(base_env))
 
   # Resolve effective agent settings (model, effort, ...) for this turn.
   # Per-chat overrides from `Chat.agent_settings_json` win over the
