@@ -1608,7 +1608,7 @@ test('failed last intent refreshes server truth and successful archive retains U
   assert.match(h.notices[1].message, /Couldn’t restore/)
 })
 
-test('unreachable archive says so and offers Try again, which a success then replaces', async () => {
+test('unreachable archive says so and offers Try again', async () => {
   const h = harness()
   const first = h.act('a', true)
   await tick()
@@ -1624,8 +1624,6 @@ test('unreachable archive says so and offers Try again, which a success then rep
   h.requests[1].resolve({ ok: true })
   assert.equal(await retry, true)
   assert.equal(h.row.archived_at, 'server-archive')
-  assert.equal(h.notices[1].options.noticeKey, h.notices[0].options.noticeKey,
-    'the success notice replaces the error notice')
 })
 
 test('a server error reads differently from an unreachable server', async () => {

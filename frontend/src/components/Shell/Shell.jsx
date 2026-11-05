@@ -2757,11 +2757,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       const reason = unreachable ? 'Möbius couldn’t be reached' : 'Möbius hit an error'
       notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat: ${reason}.`, {
         variant: 'error',
-        // Shares the success notice's key, so a successful retry replaces it.
+        // Shares the success notice's key: a retry's own notice (success with
+        // Undo, or a fresh failure) replaces this one. A retry is a new
+        // action, so it is undoable even when the failed attempt was an Undo.
         noticeKey: `chat-archive:${sid}`,
         action: {
           label: 'Try again',
-          onAction: () => setChatArchived(sid, archived, { undoable }),
+          onAction: () => setChatArchived(sid, archived),
         },
       })
       return false
