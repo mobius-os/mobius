@@ -6352,7 +6352,7 @@ def _platform_conflict_resolver_message(
       f"in the isolated candidate at `{overlay.get('worktree')}`.\n\n"
       + (review + "Then run " if review else (
         "Preserve the intended local behavior and the incoming upstream "
-        "behavior. A file's tests belong with the side whose code you keep. "
+        "behavior, including both sides' tests. "
         "Stage the resolved files, run the tests covering them from the "
         "candidate (`scripts/wt-pytest.sh <tests>`), then run "
       )) + "`cd /data/platform/backend && "

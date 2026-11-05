@@ -2911,8 +2911,10 @@ def test_resolver_omits_two_sided_review_for_a_flag_without_snapshots(
 
   assert "continue_platform_overlay_update" in content
   assert "git diff --cached" not in content
-  # Without the fixed snapshots the original single-candidate guidance stays.
-  assert "tests belong with the side" in content
+  # Without the fixed snapshots the single-candidate guidance stays, but it
+  # still keeps both sides' tests rather than those of a winning side.
+  assert "including both sides' tests" in content
+  assert "tests belong with the side" not in content
   assert "Stage the resolved files" in content
 
 
