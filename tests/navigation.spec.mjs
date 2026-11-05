@@ -791,9 +791,17 @@ test.describe('Touch navigation', () => {
     const destination = page.locator('[data-chat-surface="painted"] textarea.chat__input')
     await expect(destination).not.toBeFocused()
     await expect(destination).toHaveValue('')
+    // Suspend the destination's open keyboard, then leave chat entirely.
+    await destination.focus()
     await page.getByRole('button', { name: 'Toggle navigation' }).tap()
-    await navigateToSettings(page)
+    await expect(navigation).toBeFocused()
     await expect(destination).not.toBeFocused()
+    await navigateToSettings(page)
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+    // Settings unpaints the chat, so no `painted` surface remains to query.
+    // Neither a retained chat composer nor the keyboard handoff may take focus.
+    await expect(page.locator('textarea.chat__input:focus')).toHaveCount(0)
+    await expect(page.getByRole('textbox', { name: 'Preparing message input' })).not.toBeFocused()
   })
 
   test('chat selection closes the drawer before the destination paints', async ({ page }) => {
