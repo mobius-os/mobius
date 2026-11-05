@@ -3328,9 +3328,9 @@ class PreparedUpdate(TypedDict):
   local_tests: dict | None  # best-effort evidence, not complete local coverage
   late: str | None  # live state saved at the swap, in-progress edits on top
   late_committed: str | None  # its committed part
-  # The late edits merged back before the server imported anything; the
-  # record stays swapped until it is confirmed, so a merged tree that cannot
-  # start is still returned to ``late`` by the boot transaction.
+  # The late edits merged back into the live checkout; the record stays
+  # swapped until a server serves them, so a merged tree that cannot start is
+  # still returned to ``late`` by the boot transaction.
   replayed: str | None
   # The container replacement whose success confirms an image-requiring
   # update: ``{"controller": "railway" | "host", "id": ...}``. Only that exact
@@ -6225,21 +6225,22 @@ _resolver_creation_lock = asyncio.Lock()
 
 
 async def create_platform_conflict_resolver_chat(
-  db: Session, repo: Path = PLATFORM_REPO, *, replace_bound: bool = False,
+  db: Session, repo: Path = PLATFORM_REPO, *, replace_chat_id: str | None = None,
 ) -> PlatformConflictResolverChatOut:
   """Create or return the owner-clicked resolver chat for a platform conflict.
 
-  The conflict flag's ``chat_id`` is the resolver's identity. ``replace_bound``
-  opens a new one even when the bound chat still exists (resuming a chat that
-  cannot take a system turn) and rebinds the update.
+  The conflict flag's ``chat_id`` is the resolver's identity.
+  ``replace_chat_id`` names a bound chat the caller found unusable (it cannot
+  take a system turn): a new resolver replaces it and is bound to the update,
+  unless a concurrent caller already replaced it, whose chat is returned.
   """
   async with _resolver_creation_lock:
     flag = _read_conflict_flag() or {}
     if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
       raise PlatformUpdateError("No unresolved platform update conflict.")
 
-    existing = None if replace_bound else _bound_resolver_chat(db, flag)
-    if existing is not None:
+    existing = _bound_resolver_chat(db, flag)
+    if existing is not None and existing.id != replace_chat_id:
       return PlatformConflictResolverChatOut(
         chat_id=existing.id, created=False, started=False,
       )
@@ -6289,7 +6290,7 @@ async def resume_platform_conflict_resolver(
       content=_platform_conflict_resolver_resume_message(flag),
     )
   except ProgrammaticChatModelRequired:
-    return await create_platform_conflict_resolver_chat(db, repo, replace_bound=True)
+    return await create_platform_conflict_resolver_chat(db, repo, replace_chat_id=chat.id)
   return PlatformConflictResolverChatOut(chat_id=chat.id, created=False, started=started)
 
 
@@ -6345,15 +6346,15 @@ def _platform_conflict_resolver_message(
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
-      "Paused chats resume once these edits are back.\n\n"
+      "Paused chats resume once a restart loads these edits.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
       "both the update and the intent of those edits, stage them, then run "
       "`cd /data/platform/backend && python3 -c \"from app.platform_update "
       "import continue_platform_overlay_update as c; print(c())\"`. It "
       "merges your answer into the live checkout with the normal build and "
       "import checks. If it prints `conflict`, newer live edits overlap your "
-      "answer; resolve the fresh markers and run it again. Backend edits "
-      "load at the next restart."
+      "answer; resolve the fresh markers and run it again. When it prints "
+      "`updated`, request a restart so the server loads the merged edits."
     )
   if overlay and overlay.get("mode") == "net":
     opening = (

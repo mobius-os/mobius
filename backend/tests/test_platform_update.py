@@ -9517,6 +9517,52 @@ async def test_resume_opens_a_new_resolver_when_the_bound_chat_has_no_model(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_resumes_of_a_model_less_resolver_open_one_replacement(
+  clone_env, db, monkeypatch,
+):
+  """Both Resume taps see the same unusable resolver; the second, after
+  waiting for the first, returns its replacement instead of starting
+  another agent on the same parked worktree."""
+  from app.chat_start import ProgrammaticChatModelRequired
+  from app.chat_writer import create_chat
+
+  _origin, platform = clone_env
+  _parked_update(platform, chat_id="resolver-no-model")
+  db.add(create_chat(id="resolver-no-model", title="Resolve platform update conflict",
+                     messages=[], pending_messages=[], provider="claude"))
+  db.commit()
+  spawned = []
+
+  async def refuse(**kwargs):
+    await asyncio.sleep(0)  # both taps observe the old binding first
+    raise ProgrammaticChatModelRequired("no explicitly selected model")
+
+  async def fake_spawn(session, paths, target_sha, overlay=None):
+    await asyncio.sleep(0)  # let the other tap reach the creation lock
+    chat_id = f"replacement-{len(spawned) + 1}"
+    spawned.append(chat_id)
+    session.add(create_chat(id=chat_id, title="Resolve platform update conflict",
+                            messages=[], pending_messages=[], provider="claude"))
+    session.commit()
+    return {"chat_id": chat_id, "created": True, "started": True}
+
+  monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", refuse)
+  monkeypatch.setattr(pu, "spawn_platform_conflict_chat", fake_spawn)
+  # A contended asyncio.Lock binds to this test's event loop.
+  monkeypatch.setattr(pu, "_resolver_creation_lock", asyncio.Lock())
+
+  first, second = await asyncio.gather(
+    pu.resume_platform_conflict_resolver(db, platform),
+    pu.resume_platform_conflict_resolver(db, platform),
+  )
+
+  assert spawned == ["replacement-1"]
+  assert first == {"chat_id": "replacement-1", "created": True, "started": True}
+  assert second == {"chat_id": "replacement-1", "created": False, "started": False}
+  assert pu._read_conflict_flag()["chat_id"] == "replacement-1"
+
+
+@pytest.mark.asyncio
 async def test_resume_recreates_a_missing_resolver_and_rebinds_the_update(
   clone_env, db, monkeypatch,
 ):
@@ -9562,6 +9608,8 @@ async def test_the_resolver_is_the_chat_its_update_binds_not_one_with_its_title(
 
   monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", fake_start)
   monkeypatch.setattr("app.push.notify_owner", lambda *args, **kwargs: None)
+  # A contended asyncio.Lock binds to this test's event loop.
+  monkeypatch.setattr(pu, "_resolver_creation_lock", asyncio.Lock())
 
   first, second = await asyncio.gather(
     pu.create_platform_conflict_resolver_chat(db, platform),
