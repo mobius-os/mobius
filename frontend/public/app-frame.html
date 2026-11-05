@@ -474,9 +474,13 @@
     heldMedia.clear();
     heldFrames.clear();
     frames.forEach(function (entry) {
-      resumedFrames.set(entry[0], nativeFrame.call(window, function (time) {
-        resumedFrames.delete(entry[0]);
-        entry[1](time);
+      var id = entry[0];
+      var callback = entry[1];
+      resumedFrames.set(id, nativeFrame.call(window, function (time) {
+        resumedFrames.delete(id);
+        // A plain call, as the browser makes it, so the callback sees the same
+        // receiver whether or not it was held.
+        callback(time);
       }));
     });
     contexts.forEach(function (context) {

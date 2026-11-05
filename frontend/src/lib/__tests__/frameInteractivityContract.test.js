@@ -596,6 +596,21 @@ test('a held frame stays cancellable while held and after return, until it runs'
   assert.deepEqual(ran, ['kept'])
 })
 
+test('a held frame runs with the same receiver as one the browser runs directly', () => {
+  const app = bootFrame()
+  const receivers = []
+  // Sloppy-mode callbacks, as most app loops are written, so `this` is observable.
+  const record = runInNewContext('(function (sink) { return function () { sink.push(this) } })')(receivers)
+  app.window.requestAnimationFrame(record)
+  app.paint()
+  app.shell({ visible: false })
+  app.window.requestAnimationFrame(record)
+  app.shell({ visible: true })
+  app.paint()
+  assert.equal(receivers.length, 2)
+  assert.equal(receivers[1], receivers[0], 'releasing a held frame does not change what `this` is')
+})
+
 test('platform painting keeps running while the app is held', () => {
   const app = bootFrame()
   app.shell({ visible: false })
