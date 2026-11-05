@@ -1883,6 +1883,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0096_app_accepted_consent",
     "0097_core_contribution_review_runs",
     "0098_run_end_reason",
+    "0099_chat_branch_origin",
   ]
   assert second == first
 

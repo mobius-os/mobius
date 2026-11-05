@@ -497,7 +497,8 @@
    see chatUiPolish.test), but a single tap reveals a quiet ghost button
    beside the timestamp when one is present. */
 .chat__msg-copy,
-.chat__msg-retry {
+.chat__msg-retry,
+.chat__msg-branch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -517,17 +518,21 @@
 .chat__msg-copy:active,
 .chat__msg-retry:active { transform: scale(0.94); }
 .chat__msg-retry:disabled { cursor: default; opacity: 0.4; transform: none; }
+.chat__msg-branch:active { transform: scale(0.94); }
+.chat__msg-branch--busy { opacity: 0.4; cursor: progress; }
 .chat__msg-copy--copied { color: var(--accent); opacity: 1; }
 .chat__msg-copy--failed { color: var(--danger); opacity: 1; }
 .chat__msg-copy:focus-visible,
-.chat__msg-retry:focus-visible {
+.chat__msg-retry:focus-visible,
+.chat__msg-branch:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
   opacity: 1;
 }
 @media (hover: hover) and (pointer: fine) {
   .chat__msg-copy:hover,
-  .chat__msg-retry:hover:not(:disabled) {
+  .chat__msg-retry:hover:not(:disabled),
+  .chat__msg-branch:hover {
     background: var(--surface-2); /* CONTRACT: secondary opaque fill */
     color: var(--text);
   }
@@ -5083,3 +5088,50 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 .chat__dependency-stop { display: flex; flex-direction: column; gap: 4px; }
 button.chat__dependency-link { cursor: pointer; background: none; border: 0; text-align: left; }
 button.chat__dependency-link:disabled { cursor: default; opacity: .55; }
+
+/* ── Branch origin ─────────────────────────────────────
+   Where a branch's copied history ends: a quiet full-width rule with a
+   centred "Branched from <chat>" label; the title opens the source. */
+.chat__branch-origin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 6px;
+  list-style: none;
+}
+.chat__branch-origin::before,
+.chat__branch-origin::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border); /* CONTRACT: 1px line on opaque fill */
+}
+.chat__branch-origin-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 75%;
+  font-size: 12px;
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  white-space: nowrap;
+}
+.chat__branch-origin-link,
+.chat__branch-origin-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat__branch-origin-link {
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.chat__branch-origin-link:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: 2px;
+}

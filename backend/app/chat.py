@@ -69,6 +69,8 @@ from app.chat_context import (
   _RESUME_CONTEXT_CHAR_BUDGET,
   _build_app_context,
   _build_app_report_block,
+  _branch_fork,
+  _build_branch_history,
   _build_resumed_context,
   _build_time_context,
   _chat_has_goal_intent,
@@ -5938,7 +5940,20 @@ async def _run_chat_impl_with_db(
     if activity_delivery.text:
       user_message = f"{activity_delivery.text}\n\n{user_message}"
 
+  branch_fork = None
+  branch_history = None
   if starts_fresh and run_policy is None:
+    # Prepended newest-first so the request reads oldest-first: the brief,
+    # then any turns after it, then this turn. A retired session is reseeded
+    # from its whole transcript below; only a chat that never had a session
+    # (a branch) can start with turns no session has seen.
+    if not session_id:
+      branch_history = _build_branch_history(chat_row)
+      branch_fork = _branch_fork(chat_row, provider_id, settings.data_dir)
+      # An exact provider fork already holds those turns; the text is then
+      # only the runner's fallback if the fork itself cannot be made.
+      if branch_history and branch_fork is None:
+        user_message = f"{branch_history}\n\n{user_message}"
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
       block = (
@@ -6471,7 +6486,8 @@ async def _run_chat_impl_with_db(
         db=db,
         agent_settings=runner_agent_settings,
         system_prompt=system_prompt,
-        resumed_context=resumed_context_fallback,
+        resumed_context=resumed_context_fallback or (branch_history if branch_fork else None),
+        fork_from=branch_fork,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
         retire_native_goal=historical_goal_mode,
         run_policy=run_policy,
@@ -6680,6 +6696,7 @@ async def _run_chat_impl_with_db(
           connector_plan=connector_turn_plan,
           coordination_enabled=coordination_tools_enabled,
           goal_brief_refresh=goal_brief_refresh,
+          fork_from=branch_fork,
         )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

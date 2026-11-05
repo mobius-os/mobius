@@ -221,6 +221,9 @@ export function chatDetailCacheValue(data = {}) {
       // {id, name, root_path} when the chat belongs to a live project — the
       // composer's @-mention of project files activates on this.
       project: data.project || null,
+      // {chat_id, title, through_count, available} for a branch: where its
+      // copied history ends and which chat it came from (BranchOrigin).
+      branch_origin: data.branch_origin || null,
     },
   }
 }

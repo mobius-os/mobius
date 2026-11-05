@@ -1,7 +1,10 @@
 /* MessageMetaRow keeps a message's time and actions in one revealable row:
    beside an owner message's bubble, or on its own line at a reply's start
-   edge (`side="start"`), where the latest reply can also offer Try again.
-   `copy(button)` returns the clipboard payload (see MessageCopyButton). */
+   edge (`side="start"`), where the latest reply can also offer Try again
+   and a settled reply offers Branch.
+   `copy(button)` returns the clipboard payload (see MessageCopyButton);
+   `branch()` opens a new chat continuing through this reply. */
+import MessageBranchButton from './MessageBranchButton.jsx'
 import MessageCopyButton from './MessageCopyButton.jsx'
 import MessageRetryButton from './MessageRetryButton.jsx'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
@@ -11,6 +14,7 @@ export default function MessageMetaRow({
   timestamp,
   copy,
   onTryAgain,
+  branch,
   side = 'end',
   visible,
 }) {
@@ -31,6 +35,7 @@ export default function MessageMetaRow({
       )}
       {copy && <MessageCopyButton read={copy} />}
       {onTryAgain && <MessageRetryButton onTryAgain={onTryAgain} />}
+      {branch && <MessageBranchButton branch={branch} />}
     </div>
   )
 }

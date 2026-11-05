@@ -550,8 +550,101 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   """
   if chat_row is None:
     return None
+  return _seeded_history_block(transcript_rows.history(chat_row), keep_task=keep_task)
+
+
+def _build_branch_history(chat_row) -> str | None:
+  """Earlier turns a chat's first provider session has never seen.
+
+  A chat's first session normally starts from an empty transcript, and a
+  provider switch or ``/compact`` ends the history with a compaction row
+  whose brief reaches the fresh session separately (``_latest_compaction_brief``).
+  A branch (``POST /api/chats/{id}/branch``) is the chat that starts with
+  turns after its latest compaction row, so they are reseeded here. The
+  current turn's trailing owner messages are left out: the provider receives
+  them as this turn's request. Returns None when no earlier turn exists,
+  which keeps every other fresh start unchanged.
+  """
+  if chat_row is None:
+    return None
+  history = list(transcript_rows.history(chat_row))
+  start = 0
+  for index in range(len(history) - 1, -1, -1):
+    row = history[index]
+    if isinstance(row, dict) and row.get("kind") == "compaction":
+      start = index + 1
+      break
+  end = len(history)
+  while end > start and isinstance(history[end - 1], dict) and history[end - 1].get("role") == "user":
+    end -= 1
+  earlier = history[start:end]
+  if not any(isinstance(row, dict) and row.get("role") == "assistant" for row in earlier):
+    return None
+  return _seeded_history_block(
+    [_with_tool_activity(row) for row in earlier], budget=_BRANCH_HISTORY_CHAR_BUDGET,
+  )
+
+
+# A branch's text history stands in for a whole conversation the owner chose to
+# continue (only when an exact provider fork is unavailable), so it keeps far
+# more than a lost session's recent-turn reseed: about 30k tokens.
+_BRANCH_HISTORY_CHAR_BUDGET = 120_000
+_TOOL_NOTE_CHARS = 160
+
+
+def _with_tool_activity(row):
+  """A reply's text with one short note per tool call, in reply order."""
+  if not isinstance(row, dict) or row.get("role") != "assistant":
+    return row
+  blocks = row.get("blocks")
+  if not isinstance(blocks, list) or not any(
+    isinstance(b, dict) and b.get("type") == "tool" for b in blocks
+  ):
+    return row
+  parts: list[str] = []
+  for block in blocks:
+    if not isinstance(block, dict):
+      continue
+    if block.get("type") == "text" and isinstance(block.get("content"), str):
+      parts.append(block["content"].strip())
+    elif block.get("type") == "tool":
+      name = block.get("tool") or block.get("name") or "tool"
+      detail = block.get("summary") or block.get("input") or ""
+      if not isinstance(detail, str):
+        detail = json.dumps(detail, ensure_ascii=False)
+      detail = " ".join(detail.split())[:_TOOL_NOTE_CHARS]
+      parts.append(f"[used {name}{': ' + detail if detail else ''}]")
+  text = "\n\n".join(part for part in parts if part)
+  return {**row, "content": text} if text else row
+
+
+def _branch_fork(chat_row, provider_id: str, data_dir: str) -> dict | None:
+  """The exact provider fork a branch's first turn starts from, if still possible.
+
+  ``Chat.branch_origin["fork"]`` (chat_branches.reply_fork) names the source
+  session and the point the chosen reply ended. Only the same provider can
+  fork it, and a Claude transcript must still exist; Codex reports a missing
+  rollout when forking, and its runner then falls back to the text history.
+  """
+  origin = getattr(chat_row, "branch_origin", None)
+  fork = origin.get("fork") if isinstance(origin, dict) else None
+  if not isinstance(fork, dict) or fork.get("provider") != provider_id:
+    return None
+  if not isinstance(fork.get("session_id"), str) or not isinstance(fork.get("at"), str):
+    return None
+  if provider_id == "claude":
+    from app.claude_sdk_runner import _resumable
+    if not _resumable(fork["session_id"], str(data_dir), str(Path(data_dir) / "cli-auth" / "claude")):
+      return None
+  return {"session_id": fork["session_id"], "at": fork["at"]}
+
+
+def _seeded_history_block(
+  messages, *, keep_task: bool = False, budget: int = _RESUME_CONTEXT_CHAR_BUDGET,
+) -> str | None:
+  """Format earlier turns as one bounded ``<resumed_context>`` block."""
   entries: list[tuple[dict, str]] = []
-  for msg in transcript_rows.history(chat_row):
+  for msg in messages:
     if not isinstance(msg, dict):
       continue
     role = msg.get("role")
@@ -576,7 +669,7 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
     and not_owner_speech_label(entries[0][0]) is None
   ):
     task = entries.pop(0)[1]
-  budget = _RESUME_CONTEXT_CHAR_BUDGET - len(task or "")
+  budget -= len(task or "")
   lines: list[str] = []
   used = 0
   # Walk newest-first, accumulating until the budget is hit, then
@@ -596,10 +689,10 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   body = "\n\n".join(lines)
   return (
     "The <resumed_context> block below is the earlier history of THIS "
-    "same chat. The underlying provider session could not be resumed, so "
-    "this is a fresh session seeded with your own prior conversation. "
-    "Treat it as conversation history you are continuing, not as a new "
-    "user request, and do not echo it back.\n\n"
+    "same chat. This is a fresh provider session that has not seen it, so "
+    "it is seeded with that prior conversation. Treat it as conversation "
+    "history you are continuing, not as a new user request, and do not "
+    "echo it back.\n\n"
     f"<resumed_context>\n{body}\n</resumed_context>"
   )
 

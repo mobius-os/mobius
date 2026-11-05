@@ -131,6 +131,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     has_assistant_turns: true,
     auto_resume_on_limit: true,
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
+    branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
   }
 
   const cached = chatDetailCacheValue(source)
@@ -156,6 +157,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     has_assistant_turns: true,
     auto_resume_on_limit: true,
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
+    branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
   })
 })
 

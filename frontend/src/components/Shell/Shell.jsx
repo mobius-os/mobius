@@ -1080,6 +1080,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     options => startChatFromCommandRef.current?.(options) ?? Promise.resolve(false),
     [],
   )
+  const branchChatRef = useRef(null)
+  const handleBranchChat = useCallback(
+    (chatId, through) => branchChatRef.current?.(chatId, through) ?? Promise.resolve(false),
+    [],
+  )
   // Latest-materialize ref so the deferred-New-Chat watcher (stable deps) runs this
   // render's live closure without depending on the function's identity (round 4 item 3).
   const materializeNewChatHomeRef = useRef(null)
@@ -1764,21 +1769,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     })
   }
 
-  async function createProjectChat(project, {
-    title = 'New chat', prompt = null, autoSend = false, settings = null,
-  } = {}) {
-    if (!project?.id) return null
-    const response = await api.projects.createChat(project.id, {
-      title,
-      recovery_request_id: crypto.randomUUID(),
-    })
-    const created = await jsonOrThrow(response, 'Project chat creation failed:')
-    // The copy lands before the chat opens, so an auto-sent first message
-    // already runs on the copied model, and every cache below holds the chat
-    // as the copy saved it rather than the pre-copy creation record.
-    const copy = await copyChatSettings(created.id, settings)
-    const chat = withCopiedSettings(created, copy.saved)
-    const sendsPrompt = !!prompt && autoSend && copy.ok
+  // One created project chat joins the project's caches before it opens.
+  function publishProjectChat(project, chat) {
     knownExistingOffListChatIdsRef.current.add(String(chat.id))
     queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
       chat,
@@ -1799,6 +1791,24 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           : row)
         : current
     ))
+  }
+
+  async function createProjectChat(project, {
+    title = 'New chat', prompt = null, autoSend = false, settings = null,
+  } = {}) {
+    if (!project?.id) return null
+    const response = await api.projects.createChat(project.id, {
+      title,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const created = await jsonOrThrow(response, 'Project chat creation failed:')
+    // The copy lands before the chat opens, so an auto-sent first message
+    // already runs on the copied model, and every cache below holds the chat
+    // as the copy saved it rather than the pre-copy creation record.
+    const copy = await copyChatSettings(created.id, settings)
+    const chat = withCopiedSettings(created, copy.saved)
+    const sendsPrompt = !!prompt && autoSend && copy.ok
+    publishProjectChat(project, chat)
     // A staged auto-send is read by the chat as it opens, so stage it first.
     if (sendsPrompt) stageComposerHandoff(chat.id, prompt, { autoSend: true })
     openProjectChat(project, chat)
@@ -1838,6 +1848,33 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   function startChatFromCommand(options) {
     return startNewChatFromCommand(newChatCommandDeps(), options)
+  }
+
+  // A reply's Branch action: the server copies the conversation through that
+  // reply into a new chat (same project and model), which then opens with
+  // history, so Back returns to the source. Resolves false when it failed.
+  async function branchChat(sourceChatId, through) {
+    try {
+      const chat = await jsonOrThrow(
+        await api.chats.branch(sourceChatId, through), 'Branching failed:',
+      )
+      const project = chat.project?.id != null
+        ? projectsRef.current.find(row => String(row.id) === String(chat.project.id))
+        : null
+      if (project) {
+        publishProjectChat(project, chat)
+        openProjectChat(project, chat)
+      } else {
+        publishCreatedChat(chat)
+        navTo('chat', { chatId: chat.id })
+      }
+      focusSelectedChatComposer(chat.id)
+      return true
+    } catch (error) {
+      recordClientError({ where: 'branch-chat', error })
+      notifyShell("Couldn't branch this chat — please try again.", { variant: 'error' })
+      return false
+    }
   }
 
   async function createProjectFromTemplate(template) {
@@ -4353,6 +4390,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
   startChatFromCommandRef.current = startChatFromCommand
+  branchChatRef.current = branchChat
   // Keep the latest-materialize ref current so the watcher effect (stable deps) always
   // runs this render's live closure without depending on the function's identity.
   materializeNewChatHomeRef.current = materializeNewChatHome
@@ -5224,6 +5262,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onNewChatSubmit={queueDraftFirstNewChat}
                 onNewChatRetry={retryDraftFirstNewChat}
                 onNewChatCommand={handleNewChatCommand}
+                onBranchChat={handleBranchChat}
                 artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.

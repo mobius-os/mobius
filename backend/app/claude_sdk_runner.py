@@ -1172,12 +1172,16 @@ async def run_claude_sdk_turn(
   connector_plan=None,
   coordination_enabled: bool = True,
   goal_brief_refresh=None,
+  fork_from: dict | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
   Args:
     user_message: Fully prepared user prompt for this turn.
     session_id: Existing Claude session to resume, or None on first turn.
+    fork_from: On a branch's first turn (no ``session_id``), the source
+      ``{"session_id", "at"}``: the turn starts in a new session forked from
+      that one at entry ``at`` (chat_branches.claude_fork_point).
     base_env: Environment passed through to the Claude subprocess.
     cwd: Working directory for the SDK run.
     chat_id: Möbius chat identifier used for registries.
@@ -1537,6 +1541,10 @@ async def run_claude_sdk_turn(
       options_kwargs["thinking"] = thinking_config
     if _effort:
       options_kwargs["effort"] = _effort
+    if session_id is None and fork_from is not None:
+      options_kwargs["resume"] = fork_from["session_id"]
+      options_kwargs["fork_session"] = True
+      options_kwargs["resume_session_at"] = fork_from["at"]
     # Arm ultracode via its documented `ultracode` settings flag; on every other
     # turn set the documented `disableWorkflows` flag so a stray "ultracode" token
     # in injected memory/context can't arm the Workflow fleet on a turn the owner

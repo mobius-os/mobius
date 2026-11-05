@@ -352,3 +352,19 @@ test('an error the reply recovered from does not count as failing', () => {
     { type: 'text', content: 'Done.' },
   )]), { answer: 'Done.', failed: false })
 })
+
+test('a settled reply offers Branch right after Copy', () => {
+  const branched = []
+  const html = renderReply([turn], { onBranch: through => branched.push(through) })
+  const row = actionRow(html)
+  assert.match(row, /aria-label="Branch in new chat"/)
+  assert.ok(row.indexOf('aria-label="Copy message"') < row.indexOf('aria-label="Branch in new chat"'),
+    'Branch sits to the right of Copy')
+  assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'))
+})
+
+test('no Branch while the reply is still being written or without a branch action', () => {
+  assert.doesNotMatch(renderReply([turn], { isStreaming: true, metaVisible: true, onBranch: () => {} }),
+    /Branch in new chat/)
+  assert.doesNotMatch(renderReply([turn]), /Branch in new chat/)
+})

@@ -1208,6 +1208,40 @@ async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
   return response.goal
 
 
+async def _fork_codex_thread(codex, source_thread_id: str, last_turn_id: str, thread_options: dict):
+  """Fork ``source_thread_id`` through ``last_turn_id`` with this turn's options.
+
+  The SDK's ``thread_fork`` cannot name a last turn yet, so this builds the
+  same request with ``last_turn_id`` set. Personality is the thread's own,
+  inherited from the source.
+  """
+  from openai_codex import AsyncThread
+  from openai_codex.api import (
+    ThreadForkParams,
+    _approval_mode_override_settings,
+    _sandbox_mode,
+  )
+
+  await codex._ensure_initialized()
+  approval_policy, approvals_reviewer = _approval_mode_override_settings(
+    thread_options.get("approval_mode"),
+  )
+  params = ThreadForkParams(
+    thread_id=source_thread_id,
+    last_turn_id=last_turn_id,
+    approval_policy=approval_policy,
+    approvals_reviewer=approvals_reviewer,
+    base_instructions=thread_options.get("base_instructions"),
+    config=thread_options.get("config"),
+    cwd=thread_options.get("cwd"),
+    developer_instructions=thread_options.get("developer_instructions"),
+    model=thread_options.get("model"),
+    sandbox=_sandbox_mode(thread_options.get("sandbox")),
+  )
+  forked = await codex._client.thread_fork(source_thread_id, params)
+  return AsyncThread(codex, forked.thread.id)
+
+
 def _sdk_imports() -> dict[str, Any]:
   """Imports the SDK lazily so this module stays importable without it.
 
@@ -1697,6 +1731,7 @@ async def _run_codex_sdk_turn(
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
   resumed_context: str | None = None,
+  fork_from: dict | None = None,
   should_abort: Callable[[], bool] | None = None,
   retire_native_goal: bool = False,
   run_policy=None,
@@ -2137,6 +2172,20 @@ async def _run_codex_sdk_turn(
             "Codex session %s has no rollout for chat %s; starting a fresh "
             "thread", session_id, chat_id,
           )
+      if session_id is None and fork_from is not None:
+        # A branch's first turn: continue from an exact copy of the source
+        # thread through the chosen reply's turn (chat_branches.codex_fork_point).
+        try:
+          thread = await _fork_codex_thread(
+            codex, fork_from["session_id"], fork_from["at"], thread_options,
+          )
+        except sdk["InvalidRequestError"] as exc:
+          log.warning(
+            "Codex branch fork of %s failed for chat %s (%s); starting fresh "
+            "with the copied history", fork_from["session_id"], chat_id, exc,
+          )
+          if resumed_context:
+            user_message = f"{resumed_context}\n\n{user_message}"
       if thread is None:
         thread = await codex.thread_start(**thread_options)
       record_memory_checkpoint_once(
@@ -2834,6 +2883,7 @@ async def run_codex_sdk_turn(
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
   resumed_context: str | None = None,
+  fork_from: dict | None = None,
   should_abort: Callable[[], bool] | None = None,
   retire_native_goal: bool = False,
   run_policy=None,
@@ -2871,6 +2921,7 @@ async def run_codex_sdk_turn(
       agent_settings=agent_settings,
       system_prompt=system_prompt,
       resumed_context=resumed_context,
+      fork_from=fork_from,
       should_abort=should_abort,
       retire_native_goal=retire_native_goal,
       run_policy=run_policy,

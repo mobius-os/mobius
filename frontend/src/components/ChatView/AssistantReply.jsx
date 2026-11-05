@@ -31,6 +31,7 @@ function AssistantReply({
   metaVisible = false,
   onRevealMeta,
   onTryAgain,
+  onBranch,
   pendingQuestionRef,
   resumeCardRef,
   ...messageProps
@@ -159,6 +160,8 @@ function AssistantReply({
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}
       onTryAgain={tryAgain}
+      // Branching continues from the whole settled reply: its last row.
+      branch={outcome && onBranch ? () => onBranch(rows[rows.length - 1].key) : undefined}
       side="start"
       visible={metaVisible}
     />
