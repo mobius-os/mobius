@@ -1480,9 +1480,13 @@ export const api = {
     // (pdfjs for latex, and the shell fetching + inlining a website into a
     // sandboxed srcDoc). The owner token is NEVER placed in a URL a sandboxed
     // artifact could read from window.location.
+    // `no-cache` revalidates every read: a rebuild rewrites the same output
+    // path, and the response carries no Cache-Control, so the browser's
+    // heuristic cache otherwise keeps showing the previous build after reload.
+    // An unchanged file still costs only a 304.
     artifactOutput: (projectId, artifactId, path, { signal } = {}) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
-      { signal },
+      { signal, cache: 'no-cache' },
     ),
   },
   sharedApps: {

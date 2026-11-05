@@ -113,7 +113,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           : { label: phase === 'checking' ? 'Checking…' : 'Check for updates', act: check }
   const status = recoveryRequired || activeRebuild ? rebuildStatusLine(rebuild)
     : settling ? 'Confirming the new container…'
-    : update.reconnecting ? (update.observingKind === 'apply' ? 'Checking the update…' : 'Restarting Möbius…')
+    : update.reconnecting ? 'Restarting Möbius…'
       : !platform ? 'Checking update status…' : platformUpdateStatusLabel(platform)
 
   return (

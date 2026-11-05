@@ -85,6 +85,35 @@ test('shouldPinSend trusts actual scroll position over stale FOLLOW_BOTTOM mode'
   }), false)
 })
 
+test('shouldPinSend keeps a live follower at the autoscroll tail before layout follows new output', () => {
+  // FOLLOW_BOTTOM last wrote scrollTop 1500. A fast reveal then committed
+  // three more lines; the next layout observation has not followed them yet,
+  // so the raw physical gap is 75px although the reader never moved.
+  assert.equal(shouldPinSend({
+    scrollEl: makeScrollEl({ scrollHeight: 2075, scrollTop: 1500, clientHeight: 500 }),
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
+  }), true)
+})
+
+test('shouldPinSend does not treat a moved reader as the autoscroll tail', () => {
+  const scrollEl = makeScrollEl({ scrollHeight: 2075, scrollTop: 1380, clientHeight: 500 })
+  assert.equal(shouldPinSend({
+    scrollEl,
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
+  }), false)
+  // A remembered follow position never turns another mode into autoscroll.
+  assert.equal(shouldPinSend({
+    scrollEl: makeScrollEl({ scrollHeight: 2075, scrollTop: 1500, clientHeight: 500 }),
+    mode: { kind: 'ANCHOR_AT', key: 'reader-row', offset: 0 },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
+  }), false)
+})
+
 test('shouldPinSend uses FOLLOW_BOTTOM only when no scroll element is available', () => {
   assert.equal(shouldPinSend({
     scrollEl: null,

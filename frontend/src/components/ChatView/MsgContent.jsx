@@ -226,6 +226,10 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  // A provider refusal changes the request instead of retrying it: open the
+  // model picker, or compact into a fresh provider session. Stable references.
+  onRefusalModelChoice,
+  onRefusalFreshSession,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -601,7 +605,7 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
+        const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
         // Resource waits retain automatic retry. A warned storage-only action
@@ -625,6 +629,10 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
+            refusalActions={recoveryOwner && providerRefusal ? {
+              switchModel: !!onRefusalModelChoice,
+              freshSession: !!onRefusalFreshSession,
+            } : null}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -647,6 +655,30 @@ function MsgContentInner({
                   <span className="chat__recovery-action-error" role="alert">
                     {autoResumeError}
                   </span>
+                )}
+              </div>
+            )}
+            {recoveryOwner && providerRefusal && (onRefusalModelChoice || onRefusalFreshSession) && (
+              <div className="chat__recovery-actions">
+                {onRefusalModelChoice && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalModelChoice}
+                    disabled={submissionBlocked}
+                  >
+                    Switch model
+                  </button>
+                )}
+                {onRefusalFreshSession && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalFreshSession}
+                    disabled={submissionBlocked}
+                  >
+                    Start fresh session
+                  </button>
                 )}
               </div>
             )}
@@ -848,6 +880,8 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.onRefusalModelChoice === next.onRefusalModelChoice
+    && prev.onRefusalFreshSession === next.onRefusalFreshSession
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff
