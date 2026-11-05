@@ -7031,18 +7031,31 @@ def _repair_claude_session_costs(eng) -> None:
     if not all(isinstance(current.get(raw), int) and not isinstance(current[raw], bool)
                and current[raw] >= 0 for _, raw in fields):
       return None
+    per_call = any(isinstance(model, dict) and all(
+      model.get(key) == current[raw] for key, raw in fields
+    ) for model in models.values())
+    evidence_keys = ("costUSD",) + tuple(key for key, _ in fields)
     for name, model in models.items():
       before = previous.get(name)
       if isinstance(model, dict) and isinstance(before, dict) and all(
         isinstance(model.get(key), int) and isinstance(before.get(key), int)
         and model[key] - before[key] == current[raw] for key, raw in fields
       ):
-        return "previous"
-    if any(isinstance(model, dict) and all(
-      model.get(key) == current[raw] for key, raw in fields
-    ) for model in models.values()):
-      return "zero"
-    return None
+        # A primary-model delta cannot justify subtracting other models' spend.
+        # Require the rest of the breakdown to be unchanged; when both per-call
+        # and cumulative interpretations fit, preserve the original record.
+        if per_call:
+          return None
+        model_cost, before_cost = amount(model.get("costUSD")), amount(before.get("costUSD"))
+        if models.keys() == previous.keys() and all(
+          isinstance(other, dict) and isinstance(previous[other_name], dict)
+          and all(other.get(key) == previous[other_name].get(key)
+                  for key in evidence_keys)
+          for other_name, other in models.items() if other_name != name
+        ) and model_cost is not None and before_cost is not None and model_cost >= before_cost:
+          return "previous"
+        return None
+    return "zero" if per_call else None
 
   if "chat_runs" not in sa_inspect(eng).get_table_names():
     return

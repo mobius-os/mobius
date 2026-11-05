@@ -170,9 +170,12 @@ def test_historical_migration_proves_deltas_and_is_idempotent(tmp_path):
     "costUSD": 0, "inputTokens": 3, "outputTokens": 1,
     "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
   }
+  first["provider_model_usage"]["haiku"] = copy.deepcopy(second["provider_model_usage"]["haiku"])
+  third = _usage(15, 22, 4)
+  third["provider_model_usage"]["haiku"] = copy.deepcopy(second["provider_model_usage"]["haiku"])
   records = [
     ("cumulative", 10, first), ("cumulative", 13, second),
-    ("cumulative", 15, _usage(15, 22, 4)),
+    ("cumulative", 15, third),
     ("per-call", 2, _usage(2, 10, 10)),
     ("per-call", 3, _usage(3, 20, 20)),
     # Unexplained counters must not be repaired by dollar monotonicity alone.
@@ -211,3 +214,45 @@ def test_historical_repair_does_not_change_pre_telemetry_tables(tmp_path):
   _repair_claude_session_costs(eng)
   with eng.connect() as conn:
     assert list(conn.execute(text("SELECT * FROM chat_runs"))) == [("old-run", "old-chat")]
+
+
+@pytest.mark.parametrize("auxiliary", ["missing", "reset", "unchanged"])
+def test_historical_repair_preserves_ambiguous_multi_model_per_call(tmp_path, auxiliary):
+  first = _usage(0, 0, 0)
+  first["provider_model_usage"]["haiku"] = _usage(10, 10, 10)["provider_model_usage"]["opus"]
+  second = _usage(13, 13, 13)
+  if auxiliary != "missing":
+    second["provider_model_usage"]["haiku"] = _usage(
+      10 if auxiliary == "unchanged" else 0,
+      10 if auxiliary == "unchanged" else 0, 0,
+    )["provider_model_usage"]["opus"]
+  cost = sum(model["costUSD"] for model in second["provider_model_usage"].values())
+  eng = _migration_database(tmp_path, [("session", 10, first), ("session", cost, second)])
+  _repair_claude_session_costs(eng)
+  with eng.connect() as conn:
+    row = conn.execute(text("SELECT cost_usd, usage_json FROM chat_runs WHERE id = '1'")).one()
+  assert row.cost_usd == cost
+  assert json.loads(row.usage_json) == second
+
+
+@pytest.mark.parametrize("auxiliary", ["unchanged", "missing", "reset", "advanced"])
+def test_historical_repair_requires_consistent_other_model_evidence(tmp_path, auxiliary):
+  first = _usage(2, 10, 10)
+  first["provider_model_usage"]["haiku"] = _usage(8, 8, 8)["provider_model_usage"]["opus"]
+  second = _usage(5, 13, 3)
+  if auxiliary != "missing":
+    second["provider_model_usage"]["haiku"] = _usage(
+      {"unchanged": 8, "reset": 0, "advanced": 9}[auxiliary],
+      {"unchanged": 8, "reset": 0, "advanced": 9}[auxiliary], 0,
+    )["provider_model_usage"]["opus"]
+  cost = sum(model["costUSD"] for model in second["provider_model_usage"].values())
+  eng = _migration_database(tmp_path, [("session", 10, first), ("session", cost, second)])
+  _repair_claude_session_costs(eng)
+  with eng.connect() as conn:
+    rows = conn.execute(text("SELECT cost_usd, usage_json FROM chat_runs ORDER BY started_at")).all()
+  assert rows[1].cost_usd == (3 if auxiliary == "unchanged" else cost)
+  if auxiliary != "unchanged":
+    assert json.loads(rows[1].usage_json) == second
+  _repair_claude_session_costs(eng)
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT cost_usd, usage_json FROM chat_runs ORDER BY started_at")).all() == rows
