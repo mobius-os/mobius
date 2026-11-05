@@ -56,8 +56,11 @@ function PaneChatView({
   archived = false,
   setChatArchived,
 }) {
+  // A runtime-inactive pane (hidden in the other world, or a handoff cover)
+  // renders its cached artifacts and reads when it becomes active, so the
+  // same chat is not fetched once per mounted copy.
   const appArtifactsQuery = chatAppArtifactQueries.detail.useQuery(chatId, {
-    enabled: !newChatSession || newChatSession.materialized,
+    enabled: runtimeActive && (!newChatSession || newChatSession.materialized),
   })
   const builtApps = useMemo(
     () => projectChatAppArtifacts(appArtifactsQuery.data),
