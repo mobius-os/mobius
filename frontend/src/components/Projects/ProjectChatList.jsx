@@ -51,6 +51,11 @@ function ProjectChatRow({ chat, onOpen, onOpenMenu }) {
 export function ProjectChatRename({ chat, onSubmit, onCancel }) {
   const inputRef = useRef(null)
   const settledRef = useRef(false)
+  const menuFocusPendingRef = useRef(true)
+
+  function finishMenuFocusHandoff() {
+    menuFocusPendingRef.current = false
+  }
 
   // Rename replaces the menu that opened it; focusing a frame later lets that
   // teardown settle so the editor keeps focus.
@@ -59,7 +64,11 @@ export function ProjectChatRename({ chat, onSubmit, onCancel }) {
       inputRef.current?.focus()
       inputRef.current?.select()
     })
-    return () => cancelAnimationFrame(frame)
+    document.addEventListener('pointerdown', finishMenuFocusHandoff, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('pointerdown', finishMenuFocusHandoff, true)
+    }
   }, [])
 
   function settle(next) {
@@ -79,7 +88,9 @@ export function ProjectChatRename({ chat, onSubmit, onCancel }) {
         defaultValue={chat.title || ''}
         maxLength={drawerNameMaxLength('chat')}
         aria-label="Rename chat"
+        onChange={finishMenuFocusHandoff}
         onKeyDown={event => {
+          finishMenuFocusHandoff()
           if (event.nativeEvent?.isComposing) return
           if (event.key === 'Enter') {
             event.preventDefault()
@@ -94,13 +105,13 @@ export function ProjectChatRename({ chat, onSubmit, onCancel }) {
           requestAnimationFrame(() => {
             const active = document.activeElement
             if (active === input) return
-            // Closing the menu releases its Back-stack entry, and that popstate
-            // drops focus to <body> a frame later. That is the app moving
-            // focus, not the owner leaving the field, so reclaim it.
+            // Menu teardown may drop focus to <body>. Recover once, only
+            // before the owner interacts; later click-away blurs must settle.
             const focusDropped = !active
               || active === document.body
               || active === document.documentElement
-            if (focusDropped && input?.isConnected && !settledRef.current) {
+            if (menuFocusPendingRef.current && focusDropped && input?.isConnected && !settledRef.current) {
+              finishMenuFocusHandoff()
               input.focus()
               return
             }
