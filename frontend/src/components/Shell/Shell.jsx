@@ -2740,16 +2740,32 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ))
     archiveRequestsRef.current.set(sid, request)
     let committed = false
+    let unreachable = false
     try {
       const response = await request
       committed = response.ok
-    } catch {}
+    } catch (error) {
+      // The client already resent once after a dropped connection; a
+      // TypeError here means the server could not be reached at all.
+      unreachable = error instanceof TypeError
+    }
     if (archiveActionsRef.current.get(sid)?.token !== token) return false
     archiveActionsRef.current.delete(sid)
     archiveRequestsRef.current.delete(sid)
     refreshChatRows(sid)
     if (!committed) {
-      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat.`, { variant: 'error' })
+      const reason = unreachable ? 'Möbius couldn’t be reached' : 'Möbius hit an error'
+      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat: ${reason}.`, {
+        variant: 'error',
+        // Shares the success notice's key: a retry's own notice (success with
+        // Undo, or a fresh failure) replaces this one. A retry is a new
+        // action, so it is undoable even when the failed attempt was an Undo.
+        noticeKey: `chat-archive:${sid}`,
+        action: {
+          label: 'Try again',
+          onAction: () => setChatArchived(sid, archived),
+        },
+      })
       return false
     }
     if (!undoable) return true
