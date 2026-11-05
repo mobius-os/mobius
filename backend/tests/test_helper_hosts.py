@@ -604,6 +604,43 @@ def test_a_usage_limit_inside_a_host_parks_like_the_private_runner(
   ) is ProviderErrorKind.USAGE_LIMIT
 
 
+def test_a_refusal_inside_a_host_reaches_the_result_as_a_refusal(
+  tmp_path, monkeypatch,
+):
+  """A refused helper must get the refusal card, not the generic error: the
+  helper's own refusal stop reason reaches its turn's result."""
+  from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+  report = "API Error: flagged."
+  host = claude_host.ClaudeHelperHost(
+    _key(), options_factory=None, session_file=tmp_path / "host.json",
+  )
+  routed = _turn(tmp_path)
+  host._turn_by_tool_use["toolu_spawn"] = routed
+
+  class _Stream:
+    async def receive_messages(self):
+      yield AssistantMessage(
+        content=[TextBlock(text=report)], model="<synthetic>",
+        parent_tool_use_id="toolu_spawn", error="invalid_request",
+        stop_reason="refusal",
+      )
+
+  host._client = _Stream()
+  asyncio.run(host._read())
+  assert routed.refused is True
+
+  def refusal_ends_the_turn(turn, _verb):
+    turn.api_error, turn.refused = routed.api_error, routed.refused
+    turn.finish("failed")
+
+  turn, _client, _saved = _host_turns(tmp_path, monkeypatch, refusal_ends_the_turn)
+  result = turn("task")
+
+  assert result["error"] == report
+  assert result["provider_refusal"] is True
+
+
 def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   tmp_path, monkeypatch, caplog,
 ):
@@ -632,10 +669,12 @@ def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   assert turn.dispatch_error == "not_called"
   assert "529 Overloaded" in caplog.text and "completed without its tool call" in caplog.text
 
+  from app import chat_logging
+  chat_logging.install_platform_warning_log()
   startup._route_diagnostics_to_chat_log(None)
-  from app.chat_logging import get_chat_log_handler
+  assert chat_logging.get_chat_log_handler() in logging.getLogger("app").handlers
   for name in ("app.helper_hosts", "app.claude_helper_host"):
-    assert get_chat_log_handler() in logging.getLogger(name).handlers
+    assert logging.getLogger(name).isEnabledFor(logging.INFO)
 
 
 def test_host_helper_sessions_round_trip():

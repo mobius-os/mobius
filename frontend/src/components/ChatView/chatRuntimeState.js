@@ -44,6 +44,11 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - The load error wins over a cached running marker, and it is stable as soon
  *   as it renders. While quiet retries run it stays up, saying so, rather than
  *   holding Shell or flashing per attempt.
+ * - A saved window the owner already read presents at once, idle or
+ *   mid-reply: reopening a chat should not wait on the network. It opens at
+ *   the reader's saved coordinate; runtime truth and any live reply reconcile
+ *   beneath it. Controls that act on live state wait for it (see
+ *   liveControlsReady).
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -55,15 +60,38 @@ export function chatEntryFrame({
   activationPhase,
   activationSettled,
   transcriptPaintable,
+  cachedFrame = false,
 }) {
   const empty = messageCount === 0
   const showLoadError = empty && (activationRetrying || (loadError && !loading))
   const showEmpty = empty && !loadError && !activationRetrying && !turnActive && !loading
   const displayReady = showLoadError
     || activationPhase === 'cold'
+    || (cachedFrame && !loading && !empty)
     || (activationSettled && !loading && (transcriptPaintable || showEmpty))
     || (activationPhase === 'error' && !loading && transcriptPaintable)
   return { showEmpty, showLoadError, displayReady }
+}
+
+/** Which controls a chat frame may offer, by activation phase. A saved frame
+ * presents before runtime truth, so its liveness, queue and open cards are
+ * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
+ * activation to settle. Stop (`stop`), whose queue resend is a send, waits
+ * too, and stays available on a failed activation, where the frame may show a
+ * turn that is still running and Stop is the only way to end it. */
+export function liveControlsReady(activationPhase, activationSettled) {
+  return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
+}
+
+const ANSWER_BEFORE_ACTIVATION = 'This chat is still loading. Your choice is still here — submit it again in a moment.'
+
+/** The refusal an answer tapped before activation settles reports on its own
+ * card. Shaped as a 409 so the card shows this detail and keeps the choice. */
+export function answerBeforeActivationError() {
+  return Object.assign(new Error(ANSWER_BEFORE_ACTIVATION), {
+    status: 409,
+    detail: ANSWER_BEFORE_ACTIVATION,
+  })
 }
 
 /** Display-only history of a pause that a later continuation resolved. It

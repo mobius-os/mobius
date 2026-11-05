@@ -90,3 +90,16 @@ test('an app new-chat request never asks the host to submit its text', () => {
     type: 'moebius:new-chat', draft: 'run this', autoSend: true,
   }), { type: 'moebius:new-chat', draft: 'run this' })
 })
+
+test('open-existing-chat needs a correlated request and drops every other field', () => {
+  const base = { type: 'moebius:open-existing-chat', chatId: 'source', draft: 'App draft' }
+  for (const requestId of [undefined, 1, 'bad', 'open-chat:a:b\n', 'projects:a:b']) {
+    assert.equal(appHostRequest({ ...base, requestId }), null)
+  }
+  assert.deepEqual(appHostRequest({ ...base, requestId: 'open-chat:a:b', autoSend: true, action: 'resume' }), {
+    type: 'moebius:open-chat', chatId: 'source', requireExisting: true, requestId: 'open-chat:a:b', draft: 'App draft',
+  })
+  assert.deepEqual(appHostRequest({ type: 'moebius:open-chat', chatId: 'source', requireExisting: true, requestId: 'open-chat:a:b' }), {
+    type: 'moebius:open-chat', chatId: 'source', draft: '',
+  }, 'only the distinct wire type is strict')
+})

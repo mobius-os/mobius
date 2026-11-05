@@ -1,7 +1,8 @@
 """The durable start identity of app-scoped chats (``AppChatScopeStart``).
 
 An app scope has two meanings. For ``POST /api/app-chats/start`` it is one
-exact job: at most one first turn per app and scope, ever. For embedded chat
+exact job: at most one first turn per app and scope while its chat exists
+(the owner deleting that chat releases the scope). For embedded chat
 pickers it groups several chats. Only start and cancel create or fence this
 record; grouping neither reads nor claims it.
 

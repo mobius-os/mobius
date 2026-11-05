@@ -862,7 +862,9 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
-  assert runtime.json() == {
+  body = runtime.json()
+  assert isinstance(body.pop("lifecycle_projection_key"), str)
+  assert body == {
     "running": True,
     "compacting": None,
     "restart_observation_key": "[[],null]",

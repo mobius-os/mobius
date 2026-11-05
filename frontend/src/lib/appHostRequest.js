@@ -1,6 +1,7 @@
 const REQUEST_TYPES = new Set([
   'moebius:new-chat',
   'moebius:open-chat',
+  'moebius:open-existing-chat',
   'moebius:open-app',
   'moebius:open-settings',
   'moebius:projects',
@@ -18,6 +19,7 @@ const REQUEST_TYPES = new Set([
  * an app's own chats never receive), and no browser signal proves the owner
  * approved app-chosen text. Apps that need one-click work use
  * `mobius.chat.start`, which creates an app-attributed chat instead.
+ * An open-chat draft is likewise only added after the owner's unsent text.
  */
 export function appHostRequest(message) {
   if (!message || !REQUEST_TYPES.has(message.type)) return null
@@ -27,11 +29,17 @@ export function appHostRequest(message) {
       draft: typeof message.draft === 'string' ? message.draft : '',
     }
   }
-  if (message.type === 'moebius:open-chat') {
+  if (message.type === 'moebius:open-chat' || message.type === 'moebius:open-existing-chat') {
     if (typeof message.chatId !== 'string' || !message.chatId) return null
+    // A distinct wire type, so an older host ignores it instead of falling
+    // back to a new chat. Hosts see one open-chat request with a strict flag.
+    const strict = message.type === 'moebius:open-existing-chat'
+    if (strict && (typeof message.requestId !== 'string'
+        || !/^open-chat:[a-z0-9]+:[a-z0-9]+$/i.test(message.requestId))) return null
     return {
-      type: message.type,
+      type: 'moebius:open-chat',
       chatId: message.chatId,
+      ...(strict ? { requireExisting: true, requestId: message.requestId } : {}),
       ...(message.view === 'changes' ? { view: 'changes' } : {}),
       draft: typeof message.draft === 'string' ? message.draft : '',
     }
