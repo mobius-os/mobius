@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { activationRetryDelay, chatEntryFrame, createActivationGate } from '../chatRuntimeState.js'
+import {
+  activationRetryDelay,
+  chatEntryFrame,
+  createActivationGate,
+  heldAnswerStillOpen,
+} from '../chatRuntimeState.js'
 
 const READ_TIMEOUT_MS = 15000
 const timeout = Object.assign(new Error('Request timed out'), { name: 'TimeoutError' })
@@ -100,18 +105,83 @@ test('a saved transcript presents at once, idle or mid-reply, while runtime trut
   )
 })
 
-test('a row control tapped on a saved frame waits for the activation verdict', async () => {
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+test('a row control tapped on a saved frame is held, then runs once activation is ready', async () => {
   const gate = createActivationGate()
-  assert.equal(await gate.wait(true), true, 'a settled chat acts at once')
+  assert.equal(await gate.wait('ready'), true, 'a settled chat acts at once')
   let answered = null
-  const held = gate.wait(false).then(ready => { answered = ready })
-  await Promise.resolve()
+  const held = gate.wait('pending').then(ready => { answered = ready })
+  await tick()
   assert.equal(answered, null, 'the tap is held, not dropped, while activation is pending')
   gate.settle(true)
   await held
   assert.equal(answered, true, 'it proceeds once activation is ready')
+})
 
-  const failed = gate.wait(false)
+test('a held tap is cancelled when activation fails or the view leaves the chat', async () => {
+  const gate = createActivationGate()
+  const failed = gate.wait('pending')
+  const cold = gate.wait('cold')
   gate.settle(false)
-  assert.equal(await failed, false, 'a failed activation or a chat change cancels it')
+  assert.equal(await failed, false)
+  assert.equal(await cold, false, 'a cold activation still holds and cancels the same way')
+  const later = gate.wait('pending')
+  gate.settle(true)
+  assert.equal(await later, true, 'a settled gate leaves no stale waiter behind for the next tap')
+})
+
+test('a tap made after activation already failed resolves false at once instead of hanging', async () => {
+  const gate = createActivationGate()
+  let outcome = null
+  gate.wait('error').then(ready => { outcome = ready })
+  await tick()
+  assert.equal(outcome, false, 'Stop or an answer tapped on a failed chat does not wait for a later recovery')
+  gate.settle(true)
+  await tick()
+  assert.equal(outcome, false, 'a later recovery does not fire the stale tap')
+})
+
+test('a held control re-reads live state once activation lands and drops a moot tap', async () => {
+  const gate = createActivationGate()
+  let running = true
+  const heldStop = gate.wait('pending', () => running)
+  running = false
+  gate.settle(true)
+  assert.equal(await heldStop, false, 'a Stop held for a chat that turned out idle does nothing')
+
+  const checked = []
+  const immediate = gate.wait('ready', () => { checked.push('read'); return false })
+  assert.equal(await immediate, true, 'a tap on a ready chat acts on what it saw; no re-check')
+  assert.deepEqual(checked, [])
+})
+
+test('a held answer proceeds only while its card is still the open question', () => {
+  const question = { type: 'question', question_id: 'q1' }
+  const messages = [{ role: 'assistant', blocks: [question] }]
+  assert.equal(heldAnswerStillOpen('q1', { answerableQuestionId: 'q1', messages }), true)
+  assert.equal(heldAnswerStillOpen('q1', { answerableQuestionId: null, messages }), false,
+    'runtime truth shows the question already closed, so the held answer is dropped')
+  assert.equal(heldAnswerStillOpen('q1', { answerableQuestionId: 'q2', messages }), false,
+    'a newer question replaced it')
+  assert.equal(heldAnswerStillOpen(null, { answerableQuestionId: 'q1', messages }), false)
+
+  const restart = (status, extra = {}) => ({
+    type: 'question',
+    question_id: 'r1',
+    platform_action: { type: 'restart', version: 2, status },
+    ...extra,
+  })
+  const offer = status => [{ role: 'assistant', blocks: [restart(status)] }]
+  assert.equal(heldAnswerStillOpen('r1', { answerableQuestionId: null, messages: offer('awaiting_owner') }), true,
+    'a durable Restart offer still awaiting the owner stays answerable without being the live question')
+  assert.equal(heldAnswerStillOpen('r1', { answerableQuestionId: null, messages: offer('restarting') }), false)
+  assert.equal(heldAnswerStillOpen('r1', {
+    answerableQuestionId: null,
+    messages: [{ role: 'assistant', blocks: [restart('awaiting_owner', { answers: { a: 'b' } })] }],
+  }), false, 'an offer answered elsewhere is closed')
+  assert.equal(heldAnswerStillOpen('r1', {
+    answerableQuestionId: null,
+    streamItems: [restart('awaiting_owner')],
+  }), true, 'the live stream counts as well as the saved transcript')
 })

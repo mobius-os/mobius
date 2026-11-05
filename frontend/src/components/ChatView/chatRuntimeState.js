@@ -6,6 +6,7 @@
 import { groupActivityRuns } from './activityGrouping.js'
 import { stripAugmentation } from './msgText.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
+import { isDurableRestartOffer } from './restartCard.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -47,7 +48,7 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - A saved window the owner already read presents at once, idle or
  *   mid-reply: reopening a chat should not wait on the network. It opens at
  *   the reader's saved coordinate; runtime truth and any live reply reconcile
- *   beneath it. Sending, answers and Stop wait for activation to settle.
+ *   beneath it. Sending, answers, Resume and Stop wait for activation.
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -72,16 +73,22 @@ export function chatEntryFrame({
   return { showEmpty, showLoadError, displayReady }
 }
 
-/** Holds a row control tapped on a saved frame (a question answer, a durable
- * Restart offer, Stop) until that chat's activation verdict, the way a
- * composer submit waits for it: `wait` resolves true once activation is
- * ready, and false when it fails or the view leaves the chat, so the control
- * reports its own cancellation instead of acting on unconfirmed runtime. */
+/** Owns "is this chat ready to act" for a row control tapped on a saved frame
+ * (a question answer, a durable Restart offer, Stop), the way a composer
+ * submit waits for activation. `wait(phase, stillApplies)` resolves at once
+ * for a chat already ready (true) or already failed (false: the tap reports
+ * its own cancellation instead of hanging until some later recovery). A tap
+ * made while activation is pending is held: it resolves false if activation
+ * fails or the view leaves the chat, and once runtime truth arrives it
+ * proceeds only if `stillApplies()` (read then, against live state) says the
+ * control still has something to act on; a now-moot tap is dropped quietly. */
 export function createActivationGate() {
   let waiting = []
   return {
-    wait(settled) {
-      return settled ? Promise.resolve(true) : new Promise(resolve => waiting.push(resolve))
+    wait(phase, stillApplies = () => true) {
+      if (phase === 'ready') return Promise.resolve(true)
+      if (phase === 'error') return Promise.resolve(false)
+      return new Promise(resolve => waiting.push(ready => resolve(ready && !!stillApplies())))
     },
     settle(ready) {
       const resolved = waiting
@@ -89,6 +96,18 @@ export function createActivationGate() {
       for (const resolve of resolved) resolve(ready)
     },
   }
+}
+
+/** Whether an answer held behind activation still targets an open card once
+ * runtime truth has arrived: the chat's live answerable question, or a
+ * durable Restart offer still awaiting the owner. Anything else was answered
+ * or closed meanwhile, so the held tap is moot. */
+export function heldAnswerStillOpen(questionId, { answerableQuestionId, messages = [], streamItems = [] }) {
+  if (!questionId) return false
+  if (questionId === answerableQuestionId) return true
+  const blocks = [...streamItems, ...messages.flatMap(message => message?.blocks || [])]
+  const block = blocks.find(item => item?.type === 'question' && item.question_id === questionId)
+  return !!block && !block.answers && isDurableRestartOffer(block.platform_action)
 }
 
 /** Display-only history of a pause that a later continuation resolved. It

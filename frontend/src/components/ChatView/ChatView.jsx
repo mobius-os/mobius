@@ -46,7 +46,12 @@ import {
   olderHistoryRetryDelayMs,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
-import { activationRetryDelay, chatEntryFrame, createActivationGate } from './chatRuntimeState.js'
+import {
+  activationRetryDelay,
+  chatEntryFrame,
+  createActivationGate,
+  heldAnswerStillOpen,
+} from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -555,7 +560,8 @@ export default function ChatView({
   // beneath it. The accepted trade-off: a chat saved idle may flip to running
   // as that verdict lands, and a chat deleted elsewhere shows briefly before
   // its 404 redirects. Nothing acts on the saved liveness: Send, question
-  // answers, durable Restart offers and Stop all wait for the verdict.
+  // answers, durable Restart offers and Stop wait for the verdict (through
+  // activationGate), and transcript and Goal Resume stay blocked until it.
   // One identity-bound phase owns activation. A retained ChatView can receive
   // another chat before its previous effect runs, so the phase is never read
   // across identities. Provisional chats are locally authoritative from birth;
@@ -591,6 +597,14 @@ export default function ChatView({
     if (activationSettled || activationFailed) activationGate.settle(activationSettled)
   }, [activationGate, activationSettled, activationFailed])
   useEffect(() => () => activationGate.settle(false), [activationGate, activationIdentity])
+  // A row control tapped on the saved frame waits here; `stillApplies` re-reads
+  // live state once runtime truth lands (see createActivationGate).
+  const awaitActivation = useCallback((stillApplies) => activationGate.wait(
+    activationSettledRef.current ? 'ready' : activationPhaseRef.current,
+    stillApplies,
+  ), [activationGate])
+  // Live mirror of answerableQuestionId (assigned where it is derived below).
+  const answerableQuestionIdRef = useRef(null)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -3956,8 +3970,14 @@ export default function ChatView({
     questionSubmissionContext = null,
   ) => {
     // A saved frame shows its open question (or Restart offer) before
-    // activation settles; hold the tap until then rather than dropping it.
-    if (!await activationGate.wait(activationSettledRef.current)) return false
+    // activation settles; hold the tap until then rather than dropping it, and
+    // drop it quietly if runtime truth shows that card already closed.
+    const stillOpen = () => heldAnswerStillOpen(questionId, {
+      answerableQuestionId: answerableQuestionIdRef.current,
+      messages: messagesRef.current,
+      streamItems: latestItemsRef.current,
+    })
+    if (!await awaitActivation(stillOpen)) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
@@ -4174,7 +4194,8 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
     }
   }, [
-    activationGate,
+    awaitActivation,
+    messagesRef,
     streamSend,
     cancelQuestionSubmission,
     commitMessages,
@@ -4402,8 +4423,11 @@ export default function ChatView({
   const refreshResume = useCallback(() => {
     void fetchMessages({ force: true, authoritative: true })
   }, [fetchMessages])
+  // The saved frame's recovery run, Goal revision and liveness are not
+  // runtime truth: Resume (transcript and Goal rail) waits for activation.
   const resumeBlocked = useCallback(() => (
-    isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
+    !activationSettledRef.current
+    || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
@@ -4577,8 +4601,12 @@ export default function ChatView({
     if (handlingStopRef.current) return
     handlingStopRef.current = true
     try {
-      // Stop can show from a saved running frame; it acts on runtime truth.
-      if (!await activationGate.wait(activationSettledRef.current)) return
+      // Stop can show from a saved running frame; it acts on runtime truth,
+      // and only if the chat is still running once that truth lands.
+      const stillRunning = () => (
+        sendingRef.current || isStreamingRef.current || serverRunningRef.current
+      )
+      if (!await awaitActivation(stillRunning)) return
       // An in-flight steer POST must settle before Stop snapshots: its
       // outcome determines whether those rows still belong to the queue or
       // have already moved into the transcript. Bounded so a hung POST can't
@@ -5568,6 +5596,7 @@ export default function ChatView({
   const answerableQuestionId = liveQuestionId
     || pendingStreamQuestion?.question_id
     || null
+  answerableQuestionIdRef.current = answerableQuestionId
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a

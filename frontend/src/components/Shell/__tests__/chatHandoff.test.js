@@ -44,11 +44,17 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'a coordinate-validated cache, idle or mid-reply, presents before runtime confirmation (chatEntryFrame); an unvalidated frame waits, and Send stays blocked either way',
   )
   assert.match(chatView,
-    /const doSendSilent = useCallback\(async \([\s\S]*?\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(!await activationGate\.wait\(activationSettledRef\.current\)\) return false/,
-    'an answer or Restart offer tapped on that early frame waits for activation instead of being dropped')
+    /const awaitActivation = useCallback\(\(stillApplies\) => activationGate\.wait\(\s*activationSettledRef\.current \? 'ready' : activationPhaseRef\.current,\s*stillApplies,/,
+    'row controls wait on the current activation phase, so a tap after failure resolves at once')
   assert.match(chatView,
-    /async function handleStop\(\) \{[\s\S]*?try \{\s*(?:\/\/[^\n]*\n\s*)*if \(!await activationGate\.wait\(activationSettledRef\.current\)\) return\n/,
-    'Stop shown from a saved running frame acts only on runtime truth')
+    /const doSendSilent = useCallback\(async \([\s\S]*?\) => \{\s*(?:\/\/[^\n]*\n\s*)*const stillOpen = \(\) => heldAnswerStillOpen\(questionId, \{\s*answerableQuestionId: answerableQuestionIdRef\.current,[\s\S]*?\}\)\s*if \(!await awaitActivation\(stillOpen\)\) return false/,
+    'an answer or Restart offer tapped on that early frame waits for activation, then only answers a still-open card')
+  assert.match(chatView,
+    /async function handleStop\(\) \{[\s\S]*?try \{\s*(?:\/\/[^\n]*\n\s*)*const stillRunning = \(\) => \(\s*sendingRef\.current \|\| isStreamingRef\.current \|\| serverRunningRef\.current\s*\)\s*if \(!await awaitActivation\(stillRunning\)\) return\n/,
+    'Stop shown from a saved running frame acts only on runtime truth, and only if the chat still runs')
+  assert.match(chatView,
+    /const resumeBlocked = useCallback\(\(\) => \(\s*!activationSettledRef\.current\s*\|\|/,
+    'transcript and Goal Resume never act on the saved recovery run or Goal revision')
   assert.match(
     chatView,
     /const \[activationState, setActivationState\] = useState\(\(\) => \(\{[\s\S]*phase: provisionalNewChat \? 'ready' : 'pending',[\s\S]*const activationPhase = activationState.chatId === activationIdentity[\s\S]*const activationSettled = provisionalNewChat \|\| activationPhase === 'ready'/,
