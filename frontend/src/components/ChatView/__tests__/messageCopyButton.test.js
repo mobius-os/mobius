@@ -64,7 +64,7 @@ test('owner rows copy their own text; a reply copies only from its one end row',
 
 test('a mouse hover reveals a reply’s row; only the latest reply keeps its row in view', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  const hover = css.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply:hover > \.chat__msg-meta \{[^}]*visibility: visible;/)
+  const hover = css.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply:hover > \.chat__msg-meta \{[^}]*visibility: inherit;/)
   assert.ok(hover, 'hover reveal is limited to fine pointers so touch keeps tap-to-reveal')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
@@ -84,7 +84,16 @@ test('copy follows the timestamp inside one tap-revealed metadata row', () => {
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.match(css, /\.chat__msg-meta \{[\s\S]*visibility: hidden;/)
-  assert.match(css, /\.chat__msg-meta--visible \{[\s\S]*visibility: visible;/)
+  assert.match(css, /\.chat__msg-meta--visible \{[^}]*visibility: inherit;/)
+  // Inactive chats stay mounted under a `visibility: hidden` shell view; a
+  // `visible` reveal would paint their rows over whatever view is active.
+  const metaReveals = css.match(/\.chat__msg-meta[^{]*\{[^}]*\}/g)
+    .filter(rule => /opacity: 1;/.test(rule))
+  assert.ok(metaReveals.length >= 2)
+  for (const rule of metaReveals) {
+    assert.doesNotMatch(rule, /visibility: visible;/,
+      'a revealed row inherits its chat’s visibility so hidden chats stay hidden')
+  }
   const metaRule = css.match(/\.chat__msg-meta \{([^}]*)\}/)[1]
   const boxHeight = metaRule.match(/(?:^|\s)height: (\d+)px;/)?.[1]
   assert.ok(boxHeight, 'the row must use the message gap instead of centering controls in zero height')
