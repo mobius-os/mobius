@@ -559,9 +559,12 @@ export default function ChatView({
   // chatEntryFrame); this activation's runtime/detail verdict reconciles
   // beneath it. The accepted trade-off: a chat saved idle may flip to running
   // as that verdict lands, and a chat deleted elsewhere shows briefly before
-  // its 404 redirects. Nothing acts on the saved liveness: Send, question
-  // answers, durable Restart offers and Stop wait for the verdict (through
-  // activationGate), and transcript and Goal Resume stay blocked until it.
+  // its 404 redirects. Nothing that depends on the live question, offer or
+  // run acts on the saved liveness: question answers and durable Restart
+  // offers wait for the verdict (through activationGate), Send waits for it
+  // too, and transcript and Goal Resume stay blocked until activation
+  // settles. Stop acts immediately: it is idempotent and the server decides
+  // whether anything is running.
   // One identity-bound phase owns activation. A retained ChatView can receive
   // another chat before its previous effect runs, so the phase is never read
   // across identities. Provisional chats are locally authoritative from birth;
@@ -597,7 +600,7 @@ export default function ChatView({
     if (activationSettled || activationFailed) activationGate.settle(activationSettled)
   }, [activationGate, activationSettled, activationFailed])
   useEffect(() => () => activationGate.settle(false), [activationGate, activationIdentity])
-  // A row control tapped on the saved frame waits here; `stillApplies` re-reads
+  // An answer tapped on the saved frame waits here; `stillApplies` re-reads
   // live state once runtime truth lands (see createActivationGate).
   const awaitActivation = useCallback((stillApplies) => activationGate.wait(
     activationSettledRef.current ? 'ready' : activationPhaseRef.current,
@@ -4601,12 +4604,6 @@ export default function ChatView({
     if (handlingStopRef.current) return
     handlingStopRef.current = true
     try {
-      // Stop can show from a saved running frame; it acts on runtime truth,
-      // and only if the chat is still running once that truth lands.
-      const stillRunning = () => (
-        sendingRef.current || isStreamingRef.current || serverRunningRef.current
-      )
-      if (!await awaitActivation(stillRunning)) return
       // An in-flight steer POST must settle before Stop snapshots: its
       // outcome determines whether those rows still belong to the queue or
       // have already moved into the transcript. Bounded so a hung POST can't

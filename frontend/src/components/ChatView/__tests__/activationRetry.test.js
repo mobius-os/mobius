@@ -136,7 +136,7 @@ test('a tap made after activation already failed resolves false at once instead 
   let outcome = null
   gate.wait('error').then(ready => { outcome = ready })
   await tick()
-  assert.equal(outcome, false, 'Stop or an answer tapped on a failed chat does not wait for a later recovery')
+  assert.equal(outcome, false, 'an answer tapped on a failed chat does not wait for a later recovery')
   gate.settle(true)
   await tick()
   assert.equal(outcome, false, 'a later recovery does not fire the stale tap')
@@ -144,11 +144,11 @@ test('a tap made after activation already failed resolves false at once instead 
 
 test('a held control re-reads live state once activation lands and drops a moot tap', async () => {
   const gate = createActivationGate()
-  let running = true
-  const heldStop = gate.wait('pending', () => running)
-  running = false
+  let open = true
+  const heldAnswer = gate.wait('pending', () => open)
+  open = false
   gate.settle(true)
-  assert.equal(await heldStop, false, 'a Stop held for a chat that turned out idle does nothing')
+  assert.equal(await heldAnswer, false, 'an answer held for a question that closed meanwhile does nothing')
 
   const checked = []
   const immediate = gate.wait('ready', () => { checked.push('read'); return false })

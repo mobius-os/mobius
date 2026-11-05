@@ -49,9 +49,9 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
   assert.match(chatView,
     /const doSendSilent = useCallback\(async \([\s\S]*?\) => \{\s*(?:\/\/[^\n]*\n\s*)*const stillOpen = \(\) => heldAnswerStillOpen\(questionId, \{\s*answerableQuestionId: answerableQuestionIdRef\.current,[\s\S]*?\}\)\s*if \(!await awaitActivation\(stillOpen\)\) return false/,
     'an answer or Restart offer tapped on that early frame waits for activation, then only answers a still-open card')
-  assert.match(chatView,
-    /async function handleStop\(\) \{[\s\S]*?try \{\s*(?:\/\/[^\n]*\n\s*)*const stillRunning = \(\) => \(\s*sendingRef\.current \|\| isStreamingRef\.current \|\| serverRunningRef\.current\s*\)\s*if \(!await awaitActivation\(stillRunning\)\) return\n/,
-    'Stop shown from a saved running frame acts only on runtime truth, and only if the chat still runs')
+  assert.doesNotMatch(chatView,
+    /async function handleStop\(\) \{(?:(?!\n  \}\n)[\s\S])*?(?:awaitActivation|activationGate)/,
+    'Stop acts immediately from a saved frame: it is idempotent and the server decides whether anything runs')
   assert.match(chatView,
     /const resumeBlocked = useCallback\(\(\) => \(\s*!activationSettledRef\.current\s*\|\|/,
     'transcript and Goal Resume never act on the saved recovery run or Goal revision')

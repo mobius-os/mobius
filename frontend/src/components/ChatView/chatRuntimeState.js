@@ -48,7 +48,8 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - A saved window the owner already read presents at once, idle or
  *   mid-reply: reopening a chat should not wait on the network. It opens at
  *   the reader's saved coordinate; runtime truth and any live reply reconcile
- *   beneath it. Sending, answers, Resume and Stop wait for activation.
+ *   beneath it. Sending and answers wait for activation and Resume stays
+ *   blocked until it settles; Stop acts at once.
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -73,8 +74,8 @@ export function chatEntryFrame({
   return { showEmpty, showLoadError, displayReady }
 }
 
-/** Owns "is this chat ready to act" for a row control tapped on a saved frame
- * (a question answer, a durable Restart offer, Stop), the way a composer
+/** Owns "is this chat ready to act" for an answer tapped on a saved frame
+ * (a question answer or a durable Restart offer), the way a composer
  * submit waits for activation. `wait(phase, stillApplies)` resolves at once
  * for a chat already ready (true) or already failed (false: the tap reports
  * its own cancellation instead of hanging until some later recovery). A tap
