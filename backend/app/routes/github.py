@@ -18,6 +18,7 @@ it cannot use either path as a general GitHub write proxy.
 """
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -771,23 +772,70 @@ def _receipt_claims_prepared(receipt: dict, record: dict) -> bool:
 
 
 # Signed phases that precede the attempt's PR create or update call. The
-# first two had no public effect. A push's public effect, on a new branch or
-# an open PR, is visible from the branch tip GitHub reports.
+# first two precede any branch push or PR write; their public effects (a
+# fork, uploaded screenshots) leave no branch or PR to reconcile. A push's
+# public effect, on a new branch or an open PR, is visible from the branch tip
+# GitHub reports.
 _NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
 
 
-async def _retire_superseded_attempts(db: Session, approval: dict) -> None:
-  """Confirm one publication, then retire the attempts it supersedes.
+class _ClaimDryRun(Exception):
+  """Stops a claim at its first write, after every check that can refuse it."""
 
-  ``approval`` holds the caller's ``_assert_confirmed_publication`` arguments.
-  That cheap check runs first, so a refused or stale confirmation leaves every
-  receipt in place and makes no GitHub read. The caller repeats it under the
-  lock that covers its claim.
+
+def _stop_before_claim_write(*_args) -> None:
+  raise _ClaimDryRun
+
+
+async def _retire_superseded_attempts(
+  db: Session, approval: dict, claim: Callable[..., object],
+) -> None:
+  """Retire the attempts one publication supersedes once nothing refuses it.
+
+  ``approval`` holds the caller's ``_assert_confirmed_publication`` arguments
+  and ``claim`` its claim call. When a record has a superseded attempt, both
+  run first under the app lock, the claim stopped before its first write, so
+  a Send that any check refuses leaves every receipt in place and makes no
+  GitHub read. The caller repeats both under the lock that covers its claim.
   """
-  async with fs_locks.app_storage_lock(approval["app_id"]):
+  app_id = approval["app_id"]
+  async with fs_locks.app_storage_lock(app_id):
+    superseded = [
+      record_id for record_id in approval["record_ids"]
+      if _superseded_attempt(app_id, record_id) is not None
+    ]
+    if not superseded:
+      return
     _assert_confirmed_publication(db, **approval)
-  for record_id in approval["record_ids"]:
-    await _retire_superseded_attempt(approval["app_id"], record_id)
+    try:
+      claim(before_claim_write=_stop_before_claim_write)
+    except _ClaimDryRun:
+      pass
+    db.close()
+  for record_id in superseded:
+    await _retire_superseded_attempt(app_id, record_id)
+
+
+def _superseded_attempt(
+  app_id: int, record_id: str,
+) -> tuple[Path, dict, dict] | None:
+  """Under the app lock, a signed attempt a newer prepared review may retire."""
+  record_path, _ = _record_paths(app_id, record_id)
+  receipt = _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  )
+  if receipt is None:
+    return None
+  # The owning route reports a missing or unreadable record itself.
+  record = _read_record(record_path)
+  if (
+    record.get("status") != "prepared"
+    or receipt.get("phase")
+    not in _NO_EFFECT_ATTEMPT_PHASES | _UNSETTLED_PUSH_STAGES
+    or _receipt_claims_prepared(receipt, record)
+  ):
+    return None
+  return record_path, record, receipt
 
 
 async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
@@ -804,21 +852,11 @@ async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
   update). Anything else (an unreadable tip, a moved branch, a phase after
   the push) keeps the receipt.
   """
-  record_path, _ = _record_paths(app_id, record_id)
   async with fs_locks.app_storage_lock(app_id):
-    receipt = _read_personal_attempt(
-      record_path, app_id=app_id, record_id=record_id,
-    )
-    # The owning route reports a missing or unreadable record itself.
-    record = _read_record(record_path) if receipt is not None else None
-  if (
-    receipt is None
-    or record.get("status") != "prepared"
-    or receipt.get("phase")
-    not in _NO_EFFECT_ATTEMPT_PHASES | _UNSETTLED_PUSH_STAGES
-    or _receipt_claims_prepared(receipt, record)
-  ):
+    superseded = _superseded_attempt(app_id, record_id)
+  if superseded is None:
     return
+  record_path, record, receipt = superseded
   if receipt["phase"] in _UNSETTLED_PUSH_STAGES:
     request = receipt.get("effective_request")
     if not isinstance(request, dict) or request.get("action") != "push":
@@ -1133,6 +1171,10 @@ _REVIEW_STATUS_MESSAGES = {
     "The reviewed commits are no longer in the staged checkout."
   ),
   "github_reconnect": "Reconnect GitHub before sending this PR stack.",
+  "commit_identity_mismatch": (
+    "The staged commits were made with a different identity than the "
+    "connected GitHub account, so the stack has to be restaged."
+  ),
   "review_unavailable": "This review could not be verified locally.",
 }
 # Codes a later check can clear without a new review; every other problem
@@ -1433,7 +1475,8 @@ def _inspect_prepared_review(
       ).stdout.rstrip("\n").split("\x00")
       if attribution != [author_name, author_email, author_name, author_email]:
         raise ContributionSubmitError(
-          "This PR stack was prepared with a different commit identity."
+          "This PR stack was prepared with a different commit identity.",
+          code="commit_identity_mismatch",
         )
     # Last, because it is the only verdict here that is not about the staged
     # checkout: the source can match its review exactly and still be
@@ -2725,7 +2768,11 @@ async def submit_contribution(
     confirmed=confirmed, stack=False, phase_actions=frozenset({"pr"}),
     submitter=submitter,
   )
-  await _retire_superseded_attempts(db, approval)
+  claim = functools.partial(
+    _claim_record, app_id=app_id, record_id=record_id, db=db,
+    expected_nonce=expected_nonce, submitter=submitter, confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(db, **approval)
     action_input = {
@@ -2744,15 +2791,8 @@ async def submit_contribution(
       app_id=app_id, action_input=action_input,
     )
 
-    claimed, record_path, diff_path = _claim_record(
-      app_id=app_id,
-      record_id=record_id,
-      db=db,
-      expected_nonce=expected_nonce,
-      submitter=submitter,
-      allow_personal_resume=allow_resume,
-      before_claim_write=own_claim,
-      confirmed=confirmed,
+    claimed, record_path, diff_path = claim(
+      allow_personal_resume=allow_resume, before_claim_write=own_claim,
     )
     attempt_owner = attempt_owners[record_id]
     publication_record = attempt_owner.recovery_record(claimed)
@@ -3184,7 +3224,12 @@ async def update_existing_contribution(
     confirmed=confirmed, stack=False, phase_actions=frozenset({"pr_update"}),
     submitter=submitter,
   )
-  await _retire_superseded_attempts(db, approval)
+  claim = functools.partial(
+    _claim_record, app_id=app_id, record_id=record_id, db=db,
+    expected_nonce=expected_nonce, submitter=submitter,
+    expected_action="pr_update", confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_existing"}
@@ -3197,16 +3242,8 @@ async def update_existing_contribution(
       app_id=app_id, action_input=action_input,
     )
 
-    claimed, record_path, diff_path = _claim_record(
-      app_id=app_id,
-      record_id=record_id,
-      db=db,
-      expected_nonce=expected_nonce,
-      submitter=submitter,
-      expected_action="pr_update",
-      allow_personal_resume=allow_resume,
-      before_claim_write=own_claim,
-      confirmed=confirmed,
+    claimed, record_path, diff_path = claim(
+      allow_personal_resume=allow_resume, before_claim_write=own_claim,
     )
     attempt_owner = attempt_owners[record_id]
     publication_record = attempt_owner.recovery_record(claimed)
@@ -3680,7 +3717,23 @@ async def update_contribution_stack(
     confirmed=confirmed, stack=True, phase_actions=phase_actions,
     submitter=submitter,
   )
-  await _retire_superseded_attempts(db, approval)
+  claim = functools.partial(
+    _claim_stack_records,
+    app_id=app_id,
+    record_ids=body.record_ids,
+    db=db,
+    expected_nonce=expected_nonce,
+    # Public parents may retain their original `pr` provenance. They are
+    # validated but never claimed; every private layer must still be an
+    # explicitly reviewed `pr_update`.
+    allowed_actions=_PREPARED_PR_ACTIONS,
+    prepared_actions=phase_actions,
+    deferred_prepared_actions=frozenset({"pr"}),
+    submitter=submitter,
+    already_detail="Every PR in this stack already has the reviewed update.",
+    confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_stack", "record_ids": body.record_ids}
@@ -3697,22 +3750,7 @@ async def update_contribution_stack(
       app_id=app_id, action_input=action_input,
     )
 
-    rows = _claim_stack_records(
-      app_id=app_id,
-      record_ids=body.record_ids,
-      db=db,
-      expected_nonce=expected_nonce,
-      # Public parents may retain their original `pr` provenance. They are
-      # validated but never claimed; every private layer must still be an
-      # explicitly reviewed `pr_update`.
-      allowed_actions=_PREPARED_PR_ACTIONS,
-      prepared_actions=phase_actions,
-      deferred_prepared_actions=frozenset({"pr"}),
-      submitter=submitter,
-      already_detail="Every PR in this stack already has the reviewed update.",
-      before_claim_write=own_stack_claim,
-      confirmed=confirmed,
-    )
+    rows = claim(before_claim_write=own_stack_claim)
     for row in rows:
       if row["record"].get("status") == "submitting":
         row["record"] = attempt_owners[
@@ -4004,7 +4042,12 @@ async def submit_contribution_stack(
     confirmed=confirmed, stack=True, phase_actions=phase_actions,
     submitter=submitter,
   )
-  await _retire_superseded_attempts(db, approval)
+  claim = functools.partial(
+    _claim_stack_records, app_id=app_id, record_ids=body.record_ids, db=db,
+    expected_nonce=expected_nonce, allowed_actions=_PREPARED_PR_ACTIONS,
+    prepared_actions=phase_actions, submitter=submitter, confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
     _assert_confirmed_publication(db, **approval)
     action_input = {
@@ -4024,17 +4067,7 @@ async def submit_contribution_stack(
       app_id=app_id, action_input=action_input,
     )
 
-    rows = _claim_stack_records(
-      app_id=app_id,
-      record_ids=body.record_ids,
-      db=db,
-      expected_nonce=expected_nonce,
-      allowed_actions=_PREPARED_PR_ACTIONS,
-      prepared_actions=phase_actions,
-      submitter=submitter,
-      before_claim_write=own_stack_claim,
-      confirmed=confirmed,
-    )
+    rows = claim(before_claim_write=own_stack_claim)
     for row in rows:
       if row["record"].get("status") == "submitting":
         row["record"] = attempt_owners[

@@ -16269,3 +16269,20 @@ def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
     "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
     "message": "Reconnect GitHub before sending this PR stack.",
   }
+
+
+def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  # The staged commits are octocat's; the connected account is now hubot.
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "hubot", "user_id": 7},
+  )
+  assert verdict == {
+    "id": "identity-source", "state": "needs_refresh",
+    "code": "commit_identity_mismatch",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
+  }

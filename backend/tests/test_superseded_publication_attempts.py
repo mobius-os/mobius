@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app import contribution_runtime
+from app import contribution_runtime, github_contributions
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
 from app.routes import github as github_routes
@@ -25,12 +25,15 @@ OLD_TIP = "c" * 40
 ACTION = {"action": "submit", "publication_stage": "draft", "autopilot": False}
 
 
-def write_record(record_id, head=NEW_HEAD, status="prepared", app_id=APP_ID, **extra):
+def write_record(record_id, head=NEW_HEAD, status="prepared", app_id=APP_ID,
+                 action="pr", plan=None, **extra):
   record = {**extra,
     "id": record_id, "type": "pr", "status": status, "repo": "mobius-os/app-demo",
     "branch": "fix/demo", "title": "Polish demo",
-    "plan": {"action": "pr", "repo": "mobius-os/app-demo", "branch": "fix/demo",
-             "head_sha": head, "title": "Polish demo", "body_draft": "Polishes."},
+    "plan": {"action": action, "repo": "mobius-os/app-demo", "branch": "fix/demo",
+             "base_sha": OLD_TIP, "head_sha": head, "title": "Polish demo",
+             "body_draft": "Polishes.", **(plan or {})},
+    "quality_review": {"state": "all_clear", "reviewed_head_sha": head},
   }
   path = Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
   path.mkdir(parents=True, exist_ok=True)
@@ -166,11 +169,46 @@ def app_token(client, owner_token):
 
 
 ROUTES = {
-  "submit": ("{app_id}/one/submit", False),
-  "update": ("{app_id}/one/update-existing", False),
-  "submit-stack": ("{app_id}/submit-stack", True),
-  "update-stack": ("{app_id}/update-stack", True),
+  "submit": ("{app_id}/one/submit", False, "pr"),
+  "update": ("{app_id}/one/update-existing", False, "pr_update"),
+  "submit-stack": ("{app_id}/submit-stack", True, "pr"),
+  "update-stack": ("{app_id}/update-stack", True, "pr_update"),
 }
+CHILD_HEAD = "f" * 40
+
+
+def write_sendable(app_id, route):
+  """Records the route can claim, the first with a superseded push receipt."""
+  _path, stack, action = ROUTES[route]
+  if not stack:
+    records = [write_record("one", app_id=app_id, action=action)]
+  else:
+    layer = {"id": "s1", "total": 2, "base_branch": "main"}
+    records = [
+      write_record("one", app_id=app_id, action=action, plan={
+        "branch": "stack/s1/one", "stack": {**layer, "position": 1},
+      }),
+      write_record("two", head=CHILD_HEAD, app_id=app_id, action=action, plan={
+        "branch": "stack/s1/two", "base_sha": NEW_HEAD,
+        "stack": {**layer, "position": 2, "base_branch": "stack/s1/one",
+                  "parent_record_id": "one"},
+      }),
+    ]
+  return records, sign("one", records[0], "push_ambiguous", app_id=app_id)
+
+
+def send(client, token, app_id, route, record_ids=("one", "two"), confirmed=None):
+  path, stack, _action = ROUTES[route]
+  if stack:
+    body = {"record_ids": list(record_ids)}
+    if confirmed is not None:
+      body["expected_records"] = confirmed
+  else:
+    body = {} if confirmed is None else {"expected_record": confirmed[0]}
+  return client.post(
+    f"/api/github/contributions/{path.format(app_id=app_id)}",
+    headers={"Authorization": f"Bearer {token}"}, json=body,
+  )
 
 
 @pytest.mark.parametrize("route", ROUTES)
@@ -180,9 +218,7 @@ def test_publish_routes_confirm_before_they_retire_an_attempt(
 ):
   monkeypatch.setattr(github_routes._limiter, "enabled", False)
   app_id, token = app_token(client, owner_token)
-  path, stack = ROUTES[route]
-  records = [write_record(value, app_id=app_id) for value in ("one", "two")]
-  receipt = sign("one", records[0], "push_ambiguous", app_id=app_id)
+  records, receipt = write_sendable(app_id, route)
   reads = remote_tip(monkeypatch, None)
   confirmed = [
     {**record, "title": "Changed after confirming"} if stale else record
@@ -196,14 +232,7 @@ def test_publish_routes_confirm_before_they_retire_an_attempt(
     if len(checks) == 2:  # the claim's own recheck: stop before any claim
       raise HTTPException(status_code=418)
   monkeypatch.setattr(github_routes, "_assert_confirmed_publication", check)
-  body = (
-    {"record_ids": ["one", "two"], "expected_records": confirmed}
-    if stack else {"expected_record": confirmed[0]}
-  )
-  response = client.post(
-    f"/api/github/contributions/{path.format(app_id=app_id)}",
-    headers={"Authorization": f"Bearer {token}"}, json=body,
-  )
+  response = send(client, token, app_id, route, confirmed=confirmed)
   if stale:
     # A refused confirmation wrote nothing: the receipt stays and GitHub is
     # never read, so its not-attempted answer is still truthful.
@@ -214,6 +243,39 @@ def test_publish_routes_confirm_before_they_retire_an_attempt(
     assert response.status_code == 418, response.text
     assert checks == [True, False]
     assert reads == [("octocat/app-demo", "fix/demo")] and not receipt.exists()
+
+
+REFUSALS = [
+  (route, refusal)
+  for route, (_path, stack, _action) in ROUTES.items()
+  for refusal in ("nonce", "review", *(("size",) if stack else ()))
+]
+
+
+@pytest.mark.parametrize(("route", "refusal"), REFUSALS)
+def test_a_refused_send_without_a_confirmation_retires_nothing(
+  client, owner_token, monkeypatch, route, refusal,
+):
+  # Legacy callers omit the confirmed records, so the claim's own checks are
+  # the only ones left, and they too run before any receipt is retired.
+  monkeypatch.setattr(github_routes._limiter, "enabled", False)
+  app_id, token = app_token(client, owner_token)
+  records, receipt = write_sendable(app_id, route)
+  reads = remote_tip(monkeypatch, None)
+  record_ids = ("one", "two")
+  status = {"nonce": 404, "review": 409, "size": 400}[refusal]
+  if refusal == "nonce":
+    def rotated(*_args):
+      raise HTTPException(status_code=404, detail="App not found.")
+    monkeypatch.setattr(github_contributions, "_recheck_submit_app", rotated)
+  elif refusal == "review":
+    record_path, _ = github_routes._record_paths(app_id, "one")
+    record_path.write_text(json.dumps({**records[0], "quality_review": None}))
+  else:
+    record_ids = ("one",)
+  response = send(client, token, app_id, route, record_ids=record_ids)
+  assert response.status_code == status, response.text
+  assert reads == [] and receipt.exists()
 
 
 @pytest.mark.parametrize(("stage", "pushed", "kept"), [
