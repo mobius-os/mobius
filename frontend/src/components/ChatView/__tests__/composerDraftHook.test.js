@@ -15,6 +15,7 @@ import {
 } from '../sendAttemptRecovery.js'
 import useComposerDraftState from '../hooks/useComposerDraftState.js'
 import useComposerHistory from '../hooks/useComposerHistory.js'
+import { stageAppChatDraft } from '../../../lib/appChatNavigation.js'
 
 function storageStub() {
   const values = new Map()
@@ -357,14 +358,14 @@ test('resending an earlier message keeps the draft stored, then brings it back',
   })
 })
 
-test('an additive handoff keeps saved files and is restored only once', () => {
+test('an app draft keeps saved files and later owner edits survive hide and show', async () => {
   const previousStorage = globalThis.sessionStorage
   globalThis.sessionStorage = storageStub()
   try {
-    const chatId = 'additive-files'
+    const chatId = 'app-draft-files'
     const files = [{ name: 'notes.txt', size: 12, mime_type: 'text/plain', status: 'done' }]
     persistComposerDraft(chatId, 'Owner text', files)
-    stageComposerHandoff(chatId, 'App draft', { additive: true })
+    assert.equal(await stageAppChatDraft(chatId, 'App draft'), 'Owner text\n\nApp draft')
     let hidden = false
     const hook = renderHook(() => useComposerDraftState({ chatId, hidden, inputRef: { current: null } }))
     assert.equal(hook.result.current.input, 'Owner text\n\nApp draft')
@@ -376,7 +377,7 @@ test('an additive handoff keeps saved files and is restored only once', () => {
     hidden = false
     hook.rerender()
     assert.equal(readComposerDraft(chatId).input, 'Newer owner text',
-      'showing the chat again must not restore the older handoff')
+      'showing the chat again must not restore the app draft')
     assert.equal(hook.result.current.pendingFiles[0].name, 'notes.txt')
     hook.unmount()
   } finally {

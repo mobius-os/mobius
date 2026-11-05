@@ -1214,10 +1214,13 @@ owner can retry without losing work.
 
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.
-If the chat was deleted, the shell opens a new chat with the draft instead.
-To return the owner to one exact conversation with no fallback, post
+It reports nothing back, and what happens when the chat no longer exists
+depends on the host. When the app needs to know the chat exists, or to return
+the owner to one exact conversation with no fallback, post
 `moebius:open-existing-chat` with a `requestId` of the form
-`open-chat:<a>:<b>` and wait for the matching reply:
+`open-chat:<a>:<b>` and wait for the matching reply. Older hosts ignore this
+request, so stop waiting after a few seconds without a reply and keep the
+source UI usable:
 
 ```jsx
 const requestId = `open-chat:${Date.now()}:${Math.random().toString(36).slice(2)}`

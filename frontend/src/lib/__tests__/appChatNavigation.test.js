@@ -7,6 +7,7 @@ import { saveFailedSendAttempt } from '../../components/ChatView/sendAttemptReco
 import { openExistingChat, stageAppChatDraft } from '../appChatNavigation.js'
 import {
   _clearComposerDraftMemoryForTests, persistComposerDraft, readComposerDraft, readComposerHandoff,
+  stageComposerHandoff,
 } from '../../components/ChatView/composerDraft.js'
 
 function storageStub() {
@@ -77,5 +78,22 @@ test('a cold start keeps a newer session draft over an older durable one', async
     assert.deepEqual(readComposerDraft('cold'), {
       input: 'Newer text\n\nApp draft', attachments: [{ ...file, status: 'done' }],
     })
+  })
+})
+
+test('an app draft is additive and idempotent and leaves the handoff slot alone', async () => {
+  const files = [{ name: 'notes.txt', size: 12, mime_type: 'text/plain', status: 'done' }]
+  await withBrowser(async () => new Response('{}'), async () => {
+    stageComposerHandoff('other', 'Queued send', { autoSend: true })
+    persistComposerDraft('target', 'Owner text', files)
+    for (let i = 0; i < 2; i += 1) {
+      assert.equal(await stageAppChatDraft('target', 'App draft'), 'Owner text\n\nApp draft')
+    }
+    assert.deepEqual(readComposerDraft('target'), { input: 'Owner text\n\nApp draft', attachments: files },
+      'repeating the same draft adds nothing')
+    assert.deepEqual(readComposerHandoff('target'), { draft: null, autoSendDraft: null })
+    assert.equal(readComposerHandoff('other').autoSendDraft, 'Queued send',
+      "another chat's pending send keeps its slot")
+    assert.equal(await stageAppChatDraft('empty', 'Only draft'), 'Only draft')
   })
 })

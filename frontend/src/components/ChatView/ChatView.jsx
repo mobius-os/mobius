@@ -974,11 +974,6 @@ export default function ChatView({
         && inputValueRef.current !== composerRequest.draft) {
       handleComposerInputChange(composerRequest.draft)
     }
-    if (composerRequest.submit !== true && typeof composerRequest.draft === 'string') {
-      // A retained composer owns the value now; leaving an unsent handoff
-      // behind would overwrite its later owner edits on remount.
-      consumeComposerHandoff(chatId, composerRequest.draft)
-    }
 
     if (composerRequest.submit === true && typeof composerRequest.draft === 'string') {
       setPendingComposerSubmit({
