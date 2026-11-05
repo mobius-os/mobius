@@ -1900,6 +1900,46 @@ class ChatAppArtifact(Base):
   seen_at = Column(DateTime, nullable=True, default=None)
 
 
+class AppChatScopeStart(Base):
+  """The one first turn an app's scoped handoff may admit for a scope.
+
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
+
+  Admission is recorded here too, not inferred from the chat alone: an owner
+  Stop or queued-message removal can leave an admitted chat with no messages,
+  queue, or run, and a replay must still find it started.
+  """
+
+  __tablename__ = "app_chat_scope_starts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  scope = Column(String(160), primary_key=True)
+  # The chat this scope admitted; NULL only when cancelled before admission.
+  chat_id = Column(String(64), nullable=True)
+  # Set once by the app's cancellation; a cancelled scope never admits a turn.
+  cancelled_at = Column(DateTime, nullable=True)
+  # Set once, in the chat writer commit that accepted the chat's first turn
+  # (see app_chat_scopes); never cleared.
+  admitted_at = Column(DateTime, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (
+    CheckConstraint(
+      "chat_id IS NOT NULL OR cancelled_at IS NOT NULL",
+      name="ck_app_chat_scope_starts_outcome",
+    ),
+    CheckConstraint(
+      "admitted_at IS NULL OR (chat_id IS NOT NULL AND cancelled_at IS NULL)",
+      name="ck_app_chat_scope_starts_admitted",
+    ),
+  )
+
+
 class PushSubscription(Base):
   """Browser push subscription for Web Push delivery."""
 

@@ -7,7 +7,7 @@ from typing import Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
-  BaseModel, ConfigDict, Field, computed_field, field_validator,
+  BaseModel, ConfigDict, Field, PrivateAttr, computed_field, field_validator,
   model_validator,
 )
 
@@ -924,6 +924,10 @@ class SendMessage(BaseModel):
   # process has gone away, but persistence/rendering attribute that prompt as
   # a continuation marker rather than a user bubble.
   continuation: Literal["manual"] | None = None
+  # (app_id, scope) when POST /api/app-chats/start sends this first turn. A
+  # private attribute, so request JSON can never set it; the send carries it
+  # onto the writer command that accepts the message (app_chat_scopes).
+  _scoped_start: tuple[int, str] | None = PrivateAttr(default=None)
 
   @model_validator(mode="after")
   def validate_continuation(self):

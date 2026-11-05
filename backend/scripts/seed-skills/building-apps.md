@@ -1239,6 +1239,32 @@ visible app-owned chat, waits for the first message to be accepted, then
 returns its id for navigation. Catch errors and preserve the source UI so the
 owner can retry without losing work.
 
+Pass `scope: '<one exact job id>'` when a retry, reload, or second pane must
+never start the same job twice. Möbius admits at most one first turn per app
+and scope while that scope's chat exists: repeating the call after a lost
+response returns `{ chatId, outcome: 'reused' }`, even if the owner has since
+stopped that turn or removed it from the queue. If the owner deletes the chat,
+the scope is released and the next `chat.start` creates a fresh chat. Before
+releasing anything the app reserved for an unconfirmed start, call
+`await window.mobius.chat.cancelStart({ scope })`. It resolves
+`{ outcome: 'cancelled' }` when no turn of that scope will be admitted any
+more, or `'started'` with the existing `chatId`. After a cancellation,
+`chat.start` for the scope rejects with `error.code` `'scope_cancelled'`;
+treat it as final. A new attempt needs a new scope.
+
+To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
+When Stop ended the chat's run and cleared its queue, the result carries
+`stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
+idle run (`run_id: null` if it never ran). It certifies only that run. Later
+work in the chat, such as an owner resume, a Wait firing, or a helper result,
+runs under a different `run_id`. Bind the cancellation to the receipt's
+`run_id`, never to a later `chat.status(chatId)`: a status with another
+`run_id`, or with `running: true`, is newer work and is not cancelled. Without
+a receipt (`stop_receipt: null`) nothing was certified, even with
+`stopped: true`: during a Möbius restart, for example, Stop keeps queued turns
+so they survive it, and they run afterwards. Keep any reservation and call
+Stop again later.
+
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.
 It reports nothing back, and what happens when the chat no longer exists

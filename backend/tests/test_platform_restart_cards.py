@@ -220,7 +220,7 @@ def test_free_text_cannot_claim_restart_but_post_stop_button_still_does():
       chat_id="restart-guard", question_id=qid,
       answers={"restart": "Restart now"},
     ))
-  assert _submit(PrepareChatStop(chat_id="restart-guard")) == 1
+  assert _submit(PrepareChatStop(chat_id="restart-guard")).cancelled_activations == 1
   with SessionLocal() as db:
     chat = db.get(models.Chat, "restart-guard")
     wait = db.get(models.ChatWait, wait_id)
@@ -1258,7 +1258,7 @@ def test_any_restart_card_wakes_all_registered_chats_once_without_bypassing_inpu
       "role": "user", "content": "B", "cid": f"b-{chat_id}", "ts": 3,
     }))
   stopped_id, _, stopped_wait, _, _ = participants["stopped"]
-  assert _submit(PrepareChatStop(chat_id=stopped_id)) == 1
+  assert _submit(PrepareChatStop(chat_id=stopped_id)).cancelled_activations == 1
   input_id, input_qid, input_wait, _, _ = participants["unrelated-input"]
   newer_qid = "unrelated-owner-decision"
   with SessionLocal() as read:
