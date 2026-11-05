@@ -446,7 +446,7 @@ def _composed_states():
     ("question submit", _prop(submit, "color"), _prop(submit, "background"), "var(--surface)"),
     ("question submit hover", _prop(submit, "color"),
      _prop(_rule("components/ChatView/QuestionCard.css",
-                 ".qcard__submit:hover:not(:disabled)"), "background"),
+                 ".qcard__submit:hover:not(:disabled):not(.qcard__submit--incomplete)"), "background"),
      "var(--surface)"),
   ]
 

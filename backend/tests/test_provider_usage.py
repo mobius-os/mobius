@@ -43,7 +43,7 @@ def test_normalize_claude_usage_keeps_current_and_model_windows():
     "5-hour", "Weekly", "Opus weekly",
   ]
   assert [window["kind"] for window in snapshot["windows"]] == [
-    "other", "weekly", "other",
+    "five_hour", "weekly", "other",
   ]
   assert snapshot["windows"][0]["used_percent"] == 34.2
   assert snapshot["windows"][0]["resets_at"] == "2026-07-30T17:00:00+00:00"
@@ -95,7 +95,7 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
     "5-hour", "7-day",
   ]
   assert [window["kind"] for window in snapshot["windows"]] == [
-    "other", "weekly",
+    "five_hour", "weekly",
   ]
   assert snapshot["windows"][1]["used_percent"] == 54
   assert snapshot["credit_balance"] == "18.50 credits"

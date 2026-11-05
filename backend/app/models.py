@@ -2401,3 +2401,76 @@ class ChatTranscriptDamage(Base):
   raw = Column(LargeBinary, nullable=False)
   error = Column(Text, nullable=False)
   recorded_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationPosition(Base):
+  """One device location fix uploaded by the native mobile app's web view.
+
+  The native app hands positions to the top-frame page through
+  ``window.MobiusNative``; the page is the only route to the server, so it
+  queues fixes and POSTs them to ``/api/location/batch``. Positions arrive in
+  batches, out of order, and a rare batch can be delivered twice — so storage
+  is idempotent on ``(owner_id, device_id, device_timestamp_ms)``. The device
+  fix time is the identity key, not arrival order.
+
+  ``device_id`` is optional; it defaults to the empty string rather than NULL
+  so the uniqueness key stays well-defined (SQLite treats NULLs as distinct,
+  which would defeat deduplication for the common single-device case). All
+  fields the device could not determine are stored as NULL, except latitude
+  and longitude, which a stored fix always has.
+
+  This is a new table, so ``create_all`` adds it to existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "location_positions"
+  __table_args__ = (
+    UniqueConstraint(
+      "owner_id", "device_id", "device_timestamp_ms",
+      name="uq_location_owner_device_ts",
+    ),
+    Index("ix_location_owner_ts", "owner_id", "device_timestamp_ms"),
+  )
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  # Opaque client-chosen device identifier; "" when the page did not supply one.
+  device_id = Column(String(128), nullable=False, default="", server_default="")
+  # Milliseconds since the epoch, from the device's location fix. The dedup key.
+  device_timestamp_ms = Column(Integer, nullable=False)
+  latitude = Column(Float, nullable=False)
+  longitude = Column(Float, nullable=False)
+  accuracy = Column(Float, nullable=True)
+  altitude = Column(Float, nullable=True)
+  speed = Column(Float, nullable=True)
+  heading = Column(Float, nullable=True)
+  # When this server received and stored the fix; distinct from the fix time so
+  # delayed offline uploads cannot be mistaken for when the device was there.
+  received_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationTrackingDevice(Base):
+  """Whether one phone is tracking, and its options, as that phone reported.
+
+  Each phone writes only its own row when tracking starts, stops, or changes
+  pace, so other surfaces (a viewer on a laptop) can show the current state:
+  tracking is on when any phone's row says so. A row never starts or stops a
+  phone; each phone resumes only its own tracking after a reload in the same
+  app session. ``reported_at`` is the phone's own clock when it decided the
+  change, so a slower, older report cannot overwrite a newer one.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "location_tracking_devices"
+
+  owner_id = Column(Integer, ForeignKey("owner.id"), primary_key=True)
+  # The same opaque phone id the phone stamps on its uploaded fixes.
+  device_id = Column(String(128), primary_key=True)
+  enabled = Column(Boolean, nullable=False, default=False, server_default=false())
+  # The phone's last startLocation options: {background, interval, distance}.
+  # JSON so option shape can grow without a migration.
+  options_json = Column(JSON, nullable=False, default=dict)
+  # Milliseconds since the epoch on the phone when it made this change.
+  reported_at_ms = Column(Integer, nullable=False)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)

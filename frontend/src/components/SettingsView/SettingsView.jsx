@@ -10,6 +10,7 @@ import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
 import { forgetNativePush } from '../../lib/nativePush.js'
+import { stopLocationForSignOut } from '../../lib/nativeLocation.js'
 import { handOffExplicitSignOut } from '../../lib/nativeSession.js'
 import { stopShellInstallPassPreparation } from '../../lib/shellInstallPass.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
@@ -28,7 +29,8 @@ import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import GithubConnection from './GithubConnection.jsx'
-import SharedFoldersSection from './SharedFoldersSection.jsx'
+import SharedFoldersSummary from './SharedFoldersSummary.jsx'
+import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusProviderAccess from './MobiusProviderAccess.jsx'
 import { formatPlanStatus } from './providerUsage.js'
@@ -39,6 +41,8 @@ import '../ui/ModelSheet.css'
 import './SettingsView.css'
 
 const MobiusLogo = PROVIDER_INFO.mobius?.Logo
+// The one detail page that is not a provider; every other detailPage value is a provider id.
+const SHARED_FOLDERS_PAGE = 'shared-folders'
 
 const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
@@ -310,7 +314,8 @@ export default function SettingsView({
   // null shows the overview; a provider id shows that provider's detail page.
   // Usage is on demand: only an open provider page fetches its usage.
   const [detailPage, setDetailPage] = useState(null)
-  const selectedProvider = detailPage
+  const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
+  const selectedProvider = sharedFoldersOpen ? null : detailPage
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -876,6 +881,7 @@ export default function SettingsView({
         stopInstallHandoffPreparation: stopShellInstallPassPreparation,
         revokeInstallHandoffs: () => api.auth.shellInstallPass.revoke(),
         forgetPushDevice: forgetNativePush,
+        stopLocationTracking: stopLocationForSignOut,
         dropCredential: clearToken,
         clearOwnerCache: clearQueryCache,
       })
@@ -954,7 +960,7 @@ export default function SettingsView({
       <div className="settings__content">
         <header className="settings__header">
           {detailPage && <button type="button" className="settings__back" aria-label="Back to Settings" onClick={() => setDetailPage(null)}><ArrowLeft width={18} height={18} aria-hidden="true" /></button>}
-          <h1 className="settings__title">{selectedProvider ? (modelProviderInfo[selectedProvider]?.label || selectedProvider) : 'Settings'}</h1>
+          <h1 className="settings__title">{sharedFoldersOpen ? 'Shared folders' : selectedProvider ? (modelProviderInfo[selectedProvider]?.label || selectedProvider) : 'Settings'}</h1>
           {!detailPage && <button
             type="button"
             className="settings__appearance-toggle"
@@ -996,7 +1002,9 @@ export default function SettingsView({
           </div>
         </section>}
 
-        <section
+        {sharedFoldersOpen && <SharedFoldersPage />}
+
+        {!sharedFoldersOpen && <section
           className={`settings__section settings__section--ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
           id="settings-ai-providers"
           ref={(node) => setSetupFocusRef('ai-providers', node)}
@@ -1148,10 +1156,10 @@ export default function SettingsView({
               onlyProvider={manageModelsProvider === 'all' ? null : manageModelsProvider}
             />
           )}
-        </section>
+        </section>}
 
         {!detailPage && <>
-        <SharedFoldersSection />
+        <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

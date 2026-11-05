@@ -539,6 +539,7 @@ export default function ChatSettingsPanel({
   const allowanceUsageLabel = providerUsage?.allowanceSummary
     || providerUsage?.allowanceLabel
     || 'Usage'
+  const weeklyUsageLabel = providerUsage?.weeklyAllowanceSummary || null
   const extraUsageLabel = providerUsage?.extraUsageSummary || null
   const contextUsageLabel = (
     typeof providerUsage?.contextTokensUsed === 'number'
@@ -558,6 +559,12 @@ export default function ChatSettingsPanel({
             <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
             <span>{allowanceUsageLabel}</span>
           </span>
+          {weeklyUsageLabel && (
+            <span className="csp__usage-key-item">
+              <span className="csp__usage-key-line csp__usage-key-line--provider-reference" aria-hidden="true" />
+              <span>{weeklyUsageLabel}</span>
+            </span>
+          )}
           {extraUsageLabel && (
             <span className="csp__usage-key-item">
               <span className="csp__usage-key-line csp__usage-key-line--extra" aria-hidden="true" />

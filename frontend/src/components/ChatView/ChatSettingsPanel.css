@@ -52,6 +52,12 @@
 }
 
 .csp__usage-key-line--provider { background: var(--accent); }
+/* Outlined: listed in the key but not drawn in the brain. */
+.csp__usage-key-line--provider-reference {
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  opacity: 0.6;
+}
 .csp__usage-key-line--context { background: #d97757; }
 .csp__usage-key-line--extra { background: #2b9e83; }
 

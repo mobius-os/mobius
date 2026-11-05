@@ -155,18 +155,32 @@ def _assert_clean_worktree(repo: Path) -> None:
     )
 
 
+_GITHUB_WEB_COMMITTER = "noreply@github.com"
+
+
 def _assert_coauthor_trailer(
   repo: Path, branch: str, record: dict | None = None,
 ) -> None:
   if not coauthor_trailer_required(record):
     return
   body = _git(repo, "log", "-1", "--format=%B", branch).stdout
-  if _COAUTHOR_TRAILER not in body:
-    raise ContributionSubmitError(
-      "This staged commit is missing the Möbius Agent co-author trailer. "
-      "Leave feedback so your agent can prepare it again.",
-      code="missing_coauthor",
+  if _COAUTHOR_TRAILER in body:
+    return
+  committer = _git(repo, "log", "-1", "--format=%ce", branch).stdout.strip()
+  if committer == _GITHUB_WEB_COMMITTER:
+    # GitHub's own commits (Update branch, web edits) cannot carry the
+    # trailer, which otherwise reads as a defect in the agent's commit.
+    message = (
+      "The newest commit on this pull request was added on GitHub (for "
+      "example by Update branch) and doesn't carry the Möbius co-author "
+      "line. Nothing was changed. Ask your agent to prepare it again."
     )
+  else:
+    message = (
+      "This staged commit is missing the Möbius Agent co-author trailer. "
+      "Leave feedback so your agent can prepare it again."
+    )
+  raise ContributionSubmitError(message, code="missing_coauthor")
 
 
 def _connected_git_identity(state: dict, login: str) -> tuple[str, str]:

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  createImmersiveLifecycle,
   immersiveLifecycleValue,
   immersiveReducer,
   isImmersiveActive,
@@ -90,6 +91,20 @@ test('returning to a cached app never resurrects its old immersive request', () 
   ), null)
 })
 
+test('a request made on this return, before the pane activated, is honoured', () => {
+  // The shell shows the frame before it marks the pane active; an app that
+  // asks as soon as it reappears must not lose that fresh request.
+  const previous = { appId: 7, liveVersion: 'a', active: false }
+  const current = { appId: 7, liveVersion: 'a', active: true }
+  assert.equal(immersiveLifecycleValue(previous, current, true, true), true)
+  assert.equal(immersiveLifecycleValue(previous, current, false, true), null)
+  // Leaving still releases even if a request was recorded.
+  assert.equal(immersiveLifecycleValue(current, previous, true, true), false)
+  // A different canvas or a first mount is never a return.
+  assert.equal(immersiveLifecycleValue(null, current, true, true), null)
+  assert.equal(immersiveLifecycleValue({ ...previous, appId: 3 }, current, true, true), null)
+})
+
 test('a live frame promotion replays only the promoted frame intent', () => {
   const previous = { appId: 7, liveVersion: 'a', active: true }
   const current = { appId: 7, liveVersion: 'b', active: true }
@@ -103,4 +118,71 @@ test('initial mount is driven by the frame message, not a stale replay', () => {
     { appId: 7, liveVersion: 'a', active: true },
     true,
   ), null)
+})
+
+// createImmersiveLifecycle is what AppCanvas calls from its message handler
+// (frameRequested), its lifecycle effect (transition) and its frame-visibility
+// effect (frameHidden). These sequences mirror those calls.
+const at = (liveVersion, active) => ({ appId: 7, liveVersion, active })
+const post = (lifecycle, { version = 'a', liveVersion = 'a', active, frameVisible }) =>
+  lifecycle.frameRequested({ version, liveVersion, active, frameVisible })
+
+test('only the live frame of the active canvas is forwarded in real time', () => {
+  const lifecycle = createImmersiveLifecycle()
+  assert.equal(post(lifecycle, { active: true, frameVisible: true }), true)
+  assert.equal(post(lifecycle, { version: 'b', active: true, frameVisible: true }), false)
+  assert.equal(post(lifecycle, { active: false, frameVisible: true }), false)
+  assert.equal(post(lifecycle, { active: false, frameVisible: false }), false)
+})
+
+test('a request made while returning is honoured once, on activation', () => {
+  const lifecycle = createImmersiveLifecycle()
+  assert.equal(lifecycle.transition(at('a', true), undefined), null)
+  assert.equal(lifecycle.transition(at('a', false), undefined), false)
+  // Shown again, not yet active: the app asks as it reappears.
+  post(lifecycle, { active: false, frameVisible: true })
+  assert.equal(lifecycle.transition(at('a', true), true), true)
+  // The next visit makes no fresh request, so nothing is resurrected.
+  assert.equal(lifecycle.transition(at('a', false), true), false)
+  assert.equal(lifecycle.transition(at('a', true), true), null)
+})
+
+test('a request posted during the chat handoff never replays on a later return', () => {
+  // Shell keeps the leaving frame painted (frameVisible) after the pane went
+  // inactive. A post in that window must die with that showing.
+  const lifecycle = createImmersiveLifecycle()
+  lifecycle.transition(at('a', true), undefined)
+  assert.equal(lifecycle.transition(at('a', false), true), false)
+  post(lifecycle, { active: false, frameVisible: true })
+  lifecycle.frameHidden()
+  assert.equal(lifecycle.transition(at('a', true), true), null)
+})
+
+test('an unfocused split pane request is honoured on focus unless withdrawn', () => {
+  const lifecycle = createImmersiveLifecycle()
+  assert.equal(lifecycle.transition(at('a', false), undefined), false)
+  post(lifecycle, { active: false, frameVisible: true })
+  assert.equal(lifecycle.transition(at('a', true), true), true)
+
+  // Focus moves away and back; the app asks, then withdraws, while unfocused.
+  lifecycle.transition(at('a', false), true)
+  post(lifecycle, { active: false, frameVisible: true })
+  post(lifecycle, { active: false, frameVisible: true })
+  assert.equal(lifecycle.transition(at('a', true), false), null)
+})
+
+test('a hidden incoming frame post is not taken as a return request', () => {
+  const lifecycle = createImmersiveLifecycle()
+  lifecycle.transition(at('a', false), undefined)
+  post(lifecycle, { version: 'b', liveVersion: 'a', active: false, frameVisible: true })
+  assert.equal(lifecycle.transition(at('b', true), true), null)
+})
+
+test('a request from a frame that was since replaced is discarded', () => {
+  const lifecycle = createImmersiveLifecycle()
+  lifecycle.transition(at('a', false), undefined)
+  post(lifecycle, { active: false, frameVisible: true })
+  // Promotion while still inactive is itself a transition and consumes it.
+  assert.equal(lifecycle.transition(at('b', false), undefined), false)
+  assert.equal(lifecycle.transition(at('b', true), true), null)
 })

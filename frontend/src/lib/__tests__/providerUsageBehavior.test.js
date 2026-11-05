@@ -7,6 +7,7 @@ import {
   claudeResetCredits,
   providerAllowance,
   providerAllowanceSummary,
+  providerWeeklyAllowance,
 } from '../../components/SettingsView/providerUsage.js'
 import { providerExtraUsage } from '../../components/SettingsView/providerUsage.js'
 
@@ -26,11 +27,45 @@ test('plan providers follow typed weekly meaning, not display labels or other li
     expiresAt: null,
   })
   assert.deepEqual(providerAllowance('claude', { state: 'ready', windows: [] }), {
-    kind: 'weekly',
-    label: 'Weekly usage',
+    kind: 'five_hour',
+    label: '5-hour usage',
     usedPercent: null,
     expiresAt: null,
   })
+})
+
+test('the brain gauges the 5-hour window and lists weekly beside it', () => {
+  const snapshot = {
+    state: 'ready',
+    windows: [
+      { kind: 'five_hour', label: '5-hour', used_percent: 25 },
+      { kind: 'weekly', label: 'Weekly', used_percent: 10 },
+      { kind: 'other', label: 'Opus weekly', used_percent: 90 },
+    ],
+  }
+  const gauge = providerAllowance('claude', snapshot)
+  assert.deepEqual(gauge, {
+    kind: 'five_hour',
+    label: '5-hour usage',
+    usedPercent: 25,
+    expiresAt: null,
+  })
+  assert.equal(providerAllowanceSummary('claude', gauge), '25% 5-hour usage')
+  const weekly = providerWeeklyAllowance('claude', snapshot)
+  assert.equal(providerAllowanceSummary('claude', weekly), '10% weekly usage')
+})
+
+test('weekly is gauged only when no 5-hour window is reported', () => {
+  const snapshot = {
+    state: 'ready',
+    windows: [{ kind: 'weekly', label: '7-day', used_percent: 40 }],
+  }
+  assert.equal(providerAllowance('codex', snapshot).label, '7-day usage')
+  assert.equal(providerWeeklyAllowance('codex', snapshot), null)
+  assert.equal(providerWeeklyAllowance('mobius', {
+    state: 'ready',
+    windows: [{ kind: 'weekly', used_percent: 40 }],
+  }), null)
 })
 
 test('Codex names its 10,080-minute allowance as a 7-day window', () => {

@@ -151,6 +151,7 @@ export const coldRestoredCanvasAppId =
  *   replaceImplicitBootTab
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
+ *   beforeDrawerOpenRef   captures focus before the modal makes content inert.
  *   beforeRestoreRouteRef optional synchronous Back/Forward destination hook,
  *                       run after validation but before workspace mutation.
  *
@@ -169,6 +170,7 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
   beforeRestoreRouteRef,
+  beforeDrawerOpenRef,
   navigationStorage = localStore(),
   routePath = '/shell/',
 }) {
@@ -538,7 +540,10 @@ export default function useNavigation({
       content.chatId,
       content.appId,
       content.paneId,
-      content.projectId ? { projectId: content.projectId } : null,
+      content.projectId ? {
+        projectId: content.projectId,
+        ...(content.artifactRef ? { artifactRef: content.artifactRef } : {}),
+      } : null,
     )
   }, [workspaceStateRef, overlayShowingForWs])
 
@@ -714,6 +719,7 @@ export default function useNavigation({
           closeTraversal.recovered = true
         }
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
         return
       }
@@ -745,6 +751,7 @@ export default function useNavigation({
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
     drawerOpenRef.current = true
+    beforeDrawerOpenRef?.current?.()
     setDrawerVisible(true)
   }
 
@@ -1400,9 +1407,9 @@ export default function useNavigation({
         }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      // A marked provider return, not an ordinary Settings link, may replace
-      // the stale destination claimed by a prior shell reload.
+      // A provider return or explicit result launch replaces a stale claimed reload.
       const claimedReloadDestination = shellReload?.destinationClaimed && !deepLink?.providerReturn
+        && deepLink?.view !== 'artifact'
         ? {
             view: shellReload.activeView,
             appId: shellReload.activeAppId ?? null,
@@ -1467,6 +1474,12 @@ export default function useNavigation({
         bootDeepLink(
           { view: 'projects', chatId: null, appId: null, paneId: bootPaneId },
           tabModel.projectsTab(),
+        )
+      } else if (deepLink?.view === 'artifact' && deepLink.projectId && deepLink.artifactId) {
+        const artifactRef = tabModel.artifactTabId(deepLink.projectId, deepLink.artifactId)
+        bootDeepLink(
+          { view: 'artifact', projectId: deepLink.projectId, artifactRef, chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.artifactTab(deepLink.projectId, deepLink.artifactId),
         )
       } else if (deepLink?.view === 'project' && deepLink.projectId) {
         bootDeepLink(
@@ -1648,6 +1661,7 @@ export default function useNavigation({
       if (destination?.kind === 'drawer') {
         drawerPushedRef.current = true
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
       } else {
         drawerPushedRef.current = false
@@ -2017,7 +2031,9 @@ export default function useNavigation({
           const consumeRecoveredClose = () => {
             settleRecoveredDrawerClose(destination, recoveredSource)
           }
-          if (e.canIntercept) e.intercept({ handler: consumeRecoveredClose })
+          if (e.canIntercept) {
+            e.intercept({ handler: consumeRecoveredClose, focusReset: 'manual' })
+          }
           else setTimeout(consumeRecoveredClose, 0)
           return
         }
@@ -2064,7 +2080,11 @@ export default function useNavigation({
           // slide); otherwise let the traversal commit and consume right
           // after — the drawer branch of handleBack keys on our own refs,
           // not on the destination.
-          if (e.canIntercept) e.intercept({ handler: consume })
+          // A tap, toggle, or swipe close has already handed focus back (to
+          // the restored composer or Drawer's previous target) before this
+          // traversal starts. The Navigation API's default focus reset would
+          // then move focus to <body> and drop a restored touch keyboard.
+          if (e.canIntercept) e.intercept({ handler: consume, focusReset: 'manual' })
           else setTimeout(consume, 0)
           return
         }

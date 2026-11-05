@@ -859,6 +859,11 @@ async def read_railway(
 ):
   include_region_options = request.query_params.get("region_options") == "1"
   include_workspace_ids = request.query_params.get("workspace_ids") == "1"
+  # Settings validates the account origin; never use request or upstream URLs.
+  navigation = (
+    {"dashboard_url": _account_origin() + "/dashboard"}
+    if request.query_params.get("dashboard") == "1" else {}
+  )
   if get_settings().mobius_sso_enabled:
     try:
       payload = await _managed_railway_remote(
@@ -867,9 +872,12 @@ async def read_railway(
       )
     except HTTPException as exc:
       if exc.status_code == 502:
-        return {"railway_access": "unavailable", "connection": None, "instances": []}
+        return {
+          "railway_access": "unavailable", "connection": None, "instances": [],
+          **navigation,
+        }
       raise
-    return {"railway_access": "available", **payload}
+    return {"railway_access": "available", **payload, **navigation}
   access, payload = await _linked_railway_remote(
     db, owner.id, include_region_options=include_region_options,
     include_workspace_ids=include_workspace_ids,
@@ -878,6 +886,7 @@ async def read_railway(
     "railway_access": access,
     "connection": payload.get("connection") if payload else None,
     "instances": payload.get("instances", []) if payload else [],
+    **navigation,
   }
 
 
@@ -1037,11 +1046,14 @@ def _railway_workspace_plans_contract(payload: object) -> dict:
   return {"workspaces": workspaces}
 
 
-def _railway_metrics_contract(payload: object) -> dict:
+def _railway_metrics_contract(payload: object, *, include_cost: bool = False) -> dict:
   invalid = HTTPException(502, "The Möbius account service returned invalid Railway metrics.")
-  if not isinstance(payload, dict) or set(payload) != {
-    "runtime", "cpu", "memory", "volume", "network"
-  }:
+  keys = {"runtime", "cpu", "memory", "volume", "network"}
+  if (
+    not isinstance(payload, dict)
+    or not keys.issubset(payload)
+    or not set(payload).issubset(keys | ({"cost"} if include_cost else set()))
+  ):
     raise invalid
 
   def _strings(source: object, keys: set[str], limit: int) -> None:
@@ -1061,7 +1073,18 @@ def _railway_metrics_contract(payload: object) -> dict:
   _strings(payload["memory"], {"label", "limit_label", "percent"}, 40)
   _strings(payload["volume"], {"used_label", "allocated_label", "percent"}, 40)
   _strings(payload["network"], {"rx_label", "tx_label", "percent"}, 40)
-  return payload
+  projected = {key: value for key, value in payload.items() if key != "cost"}
+  # Older account services omit cost. Absence is not a zero-dollar estimate.
+  if include_cost and "cost" in payload:
+    cost = payload["cost"]
+    limits = {"heading": 200, "note": 360, "percent": 40}
+    if not isinstance(cost, dict) or any(
+      not isinstance(cost.get(key), str) or len(cost[key]) > limit
+      for key, limit in limits.items()
+    ):
+      raise invalid
+    projected["cost"] = {key: cost[key] for key in limits}
+  return projected
 
 
 def _railway_deletion_contract(payload: object) -> dict:
@@ -1241,13 +1264,17 @@ async def disconnect_railway(
 @router.get("/railway/deployments/{instance_id}/metrics")
 async def read_railway_metrics(
   instance_id: str,
+  request: Request,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
   db: Session = Depends(get_db),
 ):
+  include_cost = request.query_params.get("cost") == "1"
+  suffix = f"/instances/{_railway_instance_id(instance_id)}/metrics"
+  if include_cost:
+    suffix += "?cost=1"
   return _railway_metrics_contract(
-    await _railway_proxy(
-      db, owner.id, "GET", f"/instances/{_railway_instance_id(instance_id)}/metrics"
-    )
+    await _railway_proxy(db, owner.id, "GET", suffix),
+    include_cost=include_cost,
   )
 
 

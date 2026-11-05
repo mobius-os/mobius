@@ -217,6 +217,12 @@ CSS_IMPORT_ERROR = (
 )
 
 
+OUTSIDE_IMPORT_ERROR = (
+  "Mini-app source can import only files inside its own app folder and the "
+  "supported runtime libraries."
+)
+
+
 def rolldown_runner_path() -> Path:
   return Path(__file__).with_name("rolldown_compile.mjs")
 
@@ -226,8 +232,14 @@ def rolldown_command(
   output: str | Path,
   *,
   report: str | Path,
+  source_root: str | Path,
 ) -> list[str]:
-  """Return the canonical production/preflight Rolldown adapter argv."""
+  """Return the canonical production/preflight Rolldown adapter argv.
+
+  ``source_root`` is the app's own source tree. The adapter refuses to read
+  any module outside it and the platform runtime packages, so a package or
+  project cannot inline files the server can read into its bundle.
+  """
   aliases = [
     ("mobius-runtime", str(mobius_runtime_path())),
     *((specifier, str(path)) for specifier, path in runtime_library_aliases()),
@@ -236,11 +248,14 @@ def rolldown_command(
     "entry": str(entry),
     "output": str(output),
     "report": str(report),
+    "sourceRoot": str(source_root),
     "nodeModules": str(runtime_node_path()),
+    "mobiusRuntime": str(mobius_runtime_path()),
     "runtimeInject": str(runtime_inject_path()),
     "banner": COMPILED_RUNTIME_BANNER,
     "aliases": aliases,
     "cssImportError": CSS_IMPORT_ERROR,
+    "outsideImportError": OUTSIDE_IMPORT_ERROR,
   }
   return [
     "node",
