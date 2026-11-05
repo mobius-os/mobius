@@ -31,7 +31,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 function stubServer() {
   // `holdTerms` delays a terms answer: one the service already wrote (a slow
   // network), or with `readAfterHold`, one the service writes only then.
-  const server = { pairing: 'p-old', terms: GBP, holdTerms: null, readAfterHold: false, calls: [] }
+  const server = { pairing: 'p-old', terms: GBP, holdTerms: null, readAfterHold: false, termsDown: false, calls: [] }
   server.pairWith = (pairing, terms) => { server.pairing = pairing; server.terms = terms }
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^.*\/api/, '')
@@ -42,6 +42,7 @@ function stubServer() {
     }
     if (path.startsWith('/identity/credits/transactions')) return json({ transactions: [] })
     if (path === '/identity/credits/purchase-terms') {
+      if (server.termsDown) return json({ detail: 'unavailable' }, 503)
       const answer = () => ({ ...server.terms, pairing: server.pairing })
       const early = answer()
       if (server.holdTerms) await server.holdTerms
@@ -127,4 +128,20 @@ test('a_purchase_names_its_pairing_and_a_refusal_after_pairing_again_reloads', a
   await tick()
   assert.equal(result.current.summary.pairing, 'p-new')
   assert.equal(result.current.terms.currency, 'usd')
+})
+
+test('terms_that_failed_to_load_are_read_again_when_the_wallet_refreshes', async () => {
+  const server = stubServer()
+  server.termsDown = true
+  const { result } = renderHook(useWallet, { active: true })
+  await tick()
+  assert.equal(result.current.summary.pairing, 'p-old')
+  assert.equal(result.current.terms, null) // No amounts: the buy control stays hidden.
+
+  // Connectivity returns; the owner comes back to the window, same pairing.
+  server.termsDown = false
+  window.dispatchEvent(new Event('focus'))
+  await tick()
+  assert.equal(result.current.terms?.currency, 'gbp')
+  assert.equal(result.current.terms?.pairing, 'p-old')
 })

@@ -78,10 +78,12 @@ export function useWallet({ active }) {
       else void load()
     }).catch(() => {
       // Without the service's amounts the buy control stays hidden rather
-      // than offering amounts it may refuse.
+      // than offering amounts it may refuse, until the next refresh below.
     })
     return () => { current = false }
-  }, [active, currentPairing, terms, load])
+    // `summary`, not only `currentPairing`: each refresh (focus, return to the
+    // window) brings a new summary, so terms that failed to load are read again.
+  }, [active, summary, currentPairing, terms, load])
 
   const buy = useCallback(async ({ amountCents, waiverAccepted }) => {
     setRefusal(null)
