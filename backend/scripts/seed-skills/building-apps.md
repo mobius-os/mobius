@@ -1189,9 +1189,14 @@ app, so a heavy game cannot starve the drawer and its sound stops before they
 pick a destination. The app stays painted beneath the drawer and does not read
 as hidden, and closing the drawer picks it back up.
 
-A document set as an iframe's `srcdoc` gets all of this with no code. A
-document loaded from a URL, such as a packaged `/app-embeds/` game, cannot be
-reached, but the frame forwards it the verdict, so it only has to listen:
+Inside the shell's main app pane, a document you nest by setting an iframe's
+`srcdoc` (through the property or `setAttribute`) gets all of this with no code.
+Nothing else is reached: iframes inserted through `innerHTML`, documents
+written with `document.write`, workers, documents loaded from a URL (such as a
+packaged `/app-embeds/` game), and app views shown outside the main pane. Each
+child frame of a reached document is still forwarded the verdict as a
+`moebius:frame-visibility` message, so a nested document the frame cannot reach
+only has to listen:
 
 ```js
 window.addEventListener('message', (event) => {

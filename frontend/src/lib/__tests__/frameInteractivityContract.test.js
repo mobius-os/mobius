@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { runInNewContext } from 'node:vm'
+import { createContext, runInContext, runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -255,9 +255,10 @@ test('the frame keeps an early visibility verdict for the app runtime', () => {
 // hidden ancestor never changes the frame's native Page Visibility. These
 // tests pin that the app frame itself turns the shell's verdict into silence.
 
-// A nested srcdoc document reads location.origin as "null" but runs in its
-// parent's origin (window.origin), or an opaque one ("null") when sandboxed.
-function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}) {
+// The app frame runs in an opaque-origin sandbox: window.origin reads "null"
+// while location.origin is its URL's. A nested srcdoc document reads
+// location.origin as "null" too.
+function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = 'null' } = {}) {
   const source = frame.match(/<script data-mobius-background-pause>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(source, 'app-frame.html has the background pause script')
 
@@ -299,6 +300,7 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}
   class FakeElement {
     constructor() { this.attributes = {} }
     setAttribute(name, value) { this.attributes[name] = value }
+    getAttribute(name) { return name in this.attributes ? this.attributes[name] : null }
   }
   class FakeIframe extends FakeElement {
     constructor() { super(); this.posted = []; this.contentWindow = { postMessage: (data) => this.posted.push(data) } }
@@ -306,7 +308,8 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}
     set srcdoc(html) { this.attributes.srcdoc = html }
   }
 
-  let messageListener = null
+  const messageListeners = []
+  const messageListener = (event) => messageListeners.forEach((listener) => listener(event))
   const nativeFrames = new Map()
   let lastNativeFrame = 0
   const parent = {}
@@ -319,12 +322,13 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}
     HTMLMediaElement: FakeMediaElement,
     requestAnimationFrame(callback) { nativeFrames.set(++lastNativeFrame, callback); return lastNativeFrame },
     cancelAnimationFrame(id) { nativeFrames.delete(id) },
-    addEventListener(type, callback) { if (type === 'message') messageListener = callback },
+    addEventListener(type, callback) { if (type === 'message') messageListeners.push(callback) },
   }
-  runInNewContext(source, {
+  const context = createContext({
     window, document, Document: FakeDocument, HTMLMediaElement: FakeMediaElement, Event,
     Element: FakeElement, HTMLIFrameElement: FakeIframe,
   })
+  runInContext(source, context)
 
   return {
     window,
@@ -336,6 +340,13 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = SHELL_ORIGIN } = {}
     Iframe: FakeIframe,
     Element: FakeElement,
     source,
+    // The same script reaching this document a second time.
+    reinstall() { runInContext(source, context) },
+    // Run code inside the frame, stopped if it blocks for longer than timeout.
+    run(code, globals, timeout) {
+      Object.assign(context, globals)
+      return runInContext(code, context, { timeout })
+    },
     // One browser frame: every callback the browser was given runs once.
     paint() {
       const due = [...nativeFrames.values()]
@@ -677,6 +688,44 @@ test('a nested document keeps its rendering mode behind leading comments', () =>
   const iframe = new app.Iframe()
   iframe.srcdoc = '  <!-- built for play -->\n<!DOCTYPE html><p>game</p>'
   assert.match(iframe.attributes.srcdoc, /^ {2}<!-- built for play -->\n<!DOCTYPE html><script data-mobius-background-pause>/)
+})
+
+test('a nested document behind many comments and no doctype is wrapped at once', () => {
+  const app = bootFrame()
+  const iframe = new app.Iframe()
+  const html = '<!-- part -->\n'.repeat(40) + '<p>game</p>'
+  app.run('iframe.srcdoc = html', { iframe, html }, 1000)
+  assert.match(iframe.attributes.srcdoc, /^<script data-mobius-background-pause>/)
+  assert.ok(iframe.attributes.srcdoc.endsWith('</script>' + html))
+})
+
+test('an app reads back the srcdoc it set, so setting it again installs the pause once', () => {
+  const app = bootFrame()
+  const html = '<!doctype html><p>game</p>'
+  const viaProperty = new app.Iframe()
+  viaProperty.srcdoc = html
+  assert.equal(viaProperty.srcdoc, html)
+  assert.equal(viaProperty.getAttribute('srcdoc'), html)
+  const written = viaProperty.attributes.srcdoc
+  viaProperty.srcdoc = viaProperty.srcdoc
+  assert.equal(viaProperty.attributes.srcdoc, written)
+
+  const viaAttribute = new app.Iframe()
+  viaAttribute.setAttribute('srcdoc', html)
+  assert.equal(viaAttribute.srcdoc, html)
+  assert.equal(viaAttribute.getAttribute('srcdoc'), html)
+  viaAttribute.setAttribute('srcdoc', viaAttribute.getAttribute('srcdoc'))
+  assert.equal(viaAttribute.attributes.srcdoc, written)
+})
+
+test('the pause installs once in a document however often it arrives', () => {
+  const app = bootFrame()
+  app.reinstall()
+  const game = new app.Iframe()
+  app.childFrames.push(game)
+  app.shell({ visible: false })
+  assert.equal(game.posted.length, 1)
+  assert.deepEqual(app.visibilityEvents, ['visibilitychange'])
 })
 
 test('other attributes and other elements pass through untouched', () => {

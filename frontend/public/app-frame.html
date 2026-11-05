@@ -257,6 +257,9 @@
            forwarded to every child frame. A child loaded from a URL has no
            script of ours; it can listen for the forwarded message. -->
       <script data-mobius-background-pause>(function () {
+  // A document reached twice (an app copying a page that already carries this
+  // script) keeps the first install.
+  if (window.__mobiusNativeFrame) return;
   var shellHidden = false;
   var holding = false;
   var verdict = null;
@@ -395,7 +398,9 @@
   // escaped script text and miss the real end of this element.
   var pauseTag = '<scr' + 'ipt data-mobius-background-pause>'
     + document.currentScript.textContent + '</scr' + 'ipt>';
-  var documentLead = new RegExp('^(?:\\s|<!' + '--[\\s\\S]*?--' + '>)*<!doctype[^>]*>', 'i');
+  // A comment body never crosses its own end, so a run of comments with no
+  // doctype after it fails in linear time instead of backtracking.
+  var documentLead = new RegExp('^(?:\\s|<!' + '--(?:(?!--' + '>)[\\s\\S])*--' + '>)*<!doctype[^>]*>', 'i');
   // After the doctype, so the nested page keeps its rendering mode.
   function withPause(html) {
     var text = String(html);
@@ -403,18 +408,38 @@
     var at = lead ? lead[0].length : 0;
     return text.slice(0, at) + pauseTag + text.slice(at);
   }
+  // The app reads back the srcdoc it set, so comparing or re-setting it
+  // neither reloads the child needlessly nor nests the script twice.
+  var appSrcdoc = new WeakMap();
+  function pausedSrcdoc(frame, html) {
+    var text = String(html);
+    var paused = withPause(text);
+    appSrcdoc.set(frame, { html: text, paused: paused });
+    return paused;
+  }
+  function readSrcdoc(frame, value) {
+    var set = appSrcdoc.get(frame);
+    return set && set.paused === value ? set.html : value;
+  }
+  function isSrcdoc(element, name) {
+    return element instanceof HTMLIFrameElement && String(name).toLowerCase() === 'srcdoc';
+  }
   var srcdocProperty = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc');
   Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
     configurable: true,
     enumerable: srcdocProperty.enumerable,
-    get: srcdocProperty.get,
-    set: function (html) { srcdocProperty.set.call(this, withPause(html)); }
+    get: function () { return readSrcdoc(this, srcdocProperty.get.call(this)); },
+    set: function (html) { srcdocProperty.set.call(this, pausedSrcdoc(this, html)); }
   });
   // React and most authored code reach srcdoc through this path.
   var nativeSetAttribute = Element.prototype.setAttribute;
+  var nativeGetAttribute = Element.prototype.getAttribute;
   Element.prototype.setAttribute = function (name, value) {
-    var isSrcdoc = this instanceof HTMLIFrameElement && String(name).toLowerCase() === 'srcdoc';
-    return nativeSetAttribute.call(this, name, isSrcdoc ? withPause(value) : value);
+    return nativeSetAttribute.call(this, name, isSrcdoc(this, name) ? pausedSrcdoc(this, value) : value);
+  };
+  Element.prototype.getAttribute = function (name) {
+    var value = nativeGetAttribute.apply(this, arguments);
+    return isSrcdoc(this, name) ? readSrcdoc(this, value) : value;
   };
   function tellChild(frame) {
     var child = frame.contentWindow;
@@ -496,12 +521,13 @@
     });
   }
 
-  // A nested srcdoc document's location.origin reads "null"; window.origin is
-  // the origin it really runs in, its parent's. A sandboxed document's origin
-  // is opaque, so it has nothing to compare and trusts only its embedder.
+  // The app frame's sandbox makes its window.origin opaque, but its URL names
+  // the shell's origin, which must have sent the verdict. A nested srcdoc
+  // document's URL has no origin ("null"), so it trusts only its embedder.
   window.addEventListener('message', function (event) {
     if (event.source !== window.parent) return;
-    if (window.origin !== 'null' && event.origin !== window.origin) return;
+    var expected = window.location.origin;
+    if (expected !== 'null' && event.origin !== expected) return;
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
