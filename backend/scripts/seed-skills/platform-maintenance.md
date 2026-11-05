@@ -57,8 +57,10 @@ running server imported. `served_sha` identifies that served source; local
 reconciliation normally makes these revisions different. A server restart
 cannot change the image revision, so never request one just to make these
 values match. `image_build_applied` says whether the served source, including
-changes that activated without a restart, contains the image revision; status
-and `mapi /api/version` report the same answer. `/api/version` also reports
+committed changes that need no restart, contains the image revision (`null`
+for an unstamped image); status and `mapi /api/version` report the same
+answer. `false` with no update offered after a check means the image was built
+outside the official releases; nothing needs doing. `/api/version` also reports
 `serving_source` and frontend freshness. Use those owning facts to verify a
 ready boot.
 

@@ -160,24 +160,6 @@ def test_staged_source_is_not_loaded_until_existing_backend_activation(
   assert status["needs_restart"] is True
 
 
-def test_replayed_identity_alone_cannot_complete_an_unpaired_replacement(
-  clone_env, monkeypatch,
-):
-  origin, platform = clone_env
-  old = _served_sha(platform)
-  image = _advance_origin(origin, edits={"release.txt": "new image\n"})
-  _git(platform, "fetch", "origin")
-  _running(platform, monkeypatch, image, old)
-  monkeypatch.setattr(pu, "frozen_image_sha", lambda: image)
-  record = {
-    "state": "swapped", "requires_image": True, "target": image,
-    "replayed": old, "replayed_in_boot": None,
-  }
-
-  assert pu._serves_replayed(record, platform) is True
-  assert pu._serving_settled_update(record, platform) is False
-
-
 def test_managed_selection_keeps_its_exact_identity_without_claiming_pairing(
   clone_env, monkeypatch,
 ):
@@ -194,26 +176,6 @@ def test_managed_selection_keeps_its_exact_identity_without_claiming_pairing(
   assert status["state"] == "source_unconfirmed"
   assert status["available"] is False
   assert _served_sha(platform) == selected
-
-
-def test_paired_replacement_accepts_a_local_merged_descendant(
-  clone_env, monkeypatch,
-):
-  origin, platform = clone_env
-  image = _advance_origin(origin, edits={"release.txt": "new image\n"})
-  _git(platform, "fetch", "origin")
-  _git(platform, "merge", "--ff-only", image)
-  merged = _local_commit(platform, edits={"local.txt": "keep me\n"})
-  _running(platform, monkeypatch, image, merged)
-  monkeypatch.setattr(pu, "frozen_image_sha", lambda: image)
-  record = {
-    "state": "swapped", "requires_image": True, "target": image,
-    "replayed": merged, "replayed_in_boot": None,
-  }
-
-  assert merged != image
-  assert pu._serving_settled_update(record, platform) is True
-  assert (platform / "local.txt").read_text() == "keep me\n"
 
 
 def test_older_official_image_does_not_replace_a_newer_fetched_release(

@@ -1262,6 +1262,9 @@ def _served_platform_identity(
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "applied_upstream_sha": None,
          "image_build_applied": False, "baked_sha": None}
+  image_build_sha = str(image_build_sha or "").strip().lower()
+  if not re.fullmatch(r"[0-9a-f]{40}", image_build_sha):
+    out["image_build_applied"] = None  # unstamped, as platform status reports
   try:
     sentinel = Path(
       os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
@@ -1310,7 +1313,7 @@ def _served_platform_identity(
       from app.platform_update import serves_image_release
 
       out["image_build_applied"] = serves_image_release(
-        repo, out["served_sha"], str(image_build_sha or "").strip().lower(),
+        repo, out["served_sha"], image_build_sha,
       )
     except Exception:
       pass

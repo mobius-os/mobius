@@ -360,3 +360,30 @@ test('a mixed gap with an uncommitted local edit still says to revert that edit'
   })
   assert.match(warning.message, /Some come from a local change; if the new container still lacks them, revert the uncommitted edit\./)
 })
+
+test('Settings shows one coherent message for an unconfirmed image', async () => {
+  const { createElement } = await import('react')
+  const { renderToStaticMarkup } = await import('react-dom/server')
+  const { createSsrRenderServer } = await import('./ssrRenderServer.mjs')
+  const vite = await createSsrRenderServer()
+  try {
+    const { PlatformUpdatesView } = await vite.ssrLoadModule('/src/components/SettingsView/PlatformUpdates.jsx')
+    const render = (platform) => renderToStaticMarkup(createElement(PlatformUpdatesView, {
+      update: {
+        platform, cachedPlatform: null, rebuild: null, version: null, phase: 'idle',
+        busy: false, reconnecting: false, error: '', errorCode: '', checkResult: '',
+      },
+      onOpenChat: () => {},
+    }))
+    const live = render({ state: 'source_unconfirmed', available: false, image_build_applied: false })
+    assert.match(live, /built outside the official releases .* nothing needs doing/)
+    const restart = render({
+      state: 'activation_needed', available: false, image_build_applied: false,
+      activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    })
+    assert.match(restart, /Your changes are ready/)
+    assert.doesNotMatch(restart, /own revision|code update is still required/)
+  } finally {
+    await vite.close()
+  }
+})

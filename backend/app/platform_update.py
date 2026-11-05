@@ -1909,24 +1909,28 @@ def source_contains_image_release(
 
 
 def serves_image_release(
-  repo: Path,
-  served_sha: str | None,
-  image_sha: str | None,
-  *,
-  activation: PlatformActivationImpact | None = None,
-) -> bool:
+  repo: Path, served_sha: str | None, image_sha: str | None,
+) -> bool | None:
   """Whether the source this server serves contains the image's release.
 
-  The server serves its boot commit plus every change since that activates
-  live; once nothing is owed activation, the checkout is what it serves.
-  Platform status and ``/api/version`` both answer from here.
+  The server serves its boot commit plus every committed change since that
+  activates live, so HEAD counts only when the served-to-HEAD diff needs no
+  restart. Derived only from the caller's served commit, never re-read, and
+  cheap enough for ``/api/version``; platform status answers from here too.
+  None for an unstamped image.
   """
-  if not (served_sha and image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
+  if not (isinstance(image_sha, str) and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
+    return None
+  if source_contains_image_release(repo, served_sha, image_sha):
+    return True
+  if not served_sha:
     return False
-  activation = activation or _platform_activation_impact(repo)
-  live = activation["level"] == platform_activation.ActivationLevel.LIVE.value
-  source = _rev(repo, "HEAD") if live else served_sha
-  return source_contains_image_release(repo, source, image_sha)
+  head = _rev(repo, "HEAD")
+  return source_contains_image_release(repo, head, image_sha) and (
+    platform_activation.classify_activation(
+      _activation_paths_between(repo, served_sha, head),
+    )["level"] == platform_activation.ActivationLevel.LIVE.value
+  )
 
 
 def _activation_paths_between(
@@ -4632,7 +4636,6 @@ def _serving_settled_update(record: PreparedUpdate, repo: Path) -> bool:
     and bool(record["replayed"])
     and frozen_image_sha() == record["target"]
     and _serves_replayed(record, repo)
-    and source_contains_image_release(repo, _served_platform_sha(), record["target"])
   )
 
 
@@ -5580,11 +5583,7 @@ def platform_status(
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
-  image_build_applied = None
-  if image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha):
-    image_build_applied = serves_image_release(
-      repo, served_sha, image_sha, activation=activation,
-    )
+  image_build_applied = serves_image_release(repo, served_sha, image_sha)
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")

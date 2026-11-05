@@ -171,10 +171,10 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
         </button>
       </div>
       {confirmRestart && <p className="platform-updates__description" role="status">Restarting briefly pauses active chats. This page will reconnect automatically. Confirm within 4 seconds, or let this prompt expire.</p>}
-      {!busy && !conflict && !settling && !unfinished && !recoveryRequired && platform?.image_build_applied === false && (
+      {!busy && !conflict && !settling && !unfinished && !recoveryRequired && level === 'live' && platform?.image_build_applied === false && (
         <p className="platform-updates__description">{available
           ? 'The container is updated, but the code update is still required. Review the update to bring them together while keeping your local changes.'
-          : 'The running code has not yet been confirmed against this container. A container replacement alone does not finish a code update.'}</p>
+          : 'The running code does not include this container\'s own revision. Check for updates: if none is offered, the container was built outside the official releases (such as a fork or test build) and nothing needs doing.'}</p>
       )}
       {settling && !busy && !activeRebuild && !recoveryRequired && (
         <div className="platform-updates__description">
