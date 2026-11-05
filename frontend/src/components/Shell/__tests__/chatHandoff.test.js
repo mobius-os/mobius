@@ -40,8 +40,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation (chatEntryFrame); only the composer may reveal early',
+    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,[\s\S]*cachedFrame: \(initialEntryPhase === 'cached' \|\| initialEntryPhase === 'stream-catchup'\)\s*&& revealed,/,
+    'a coordinate-validated cache, idle or mid-reply, presents before runtime confirmation (chatEntryFrame); an unvalidated frame waits, and Send stays blocked either way',
   )
   assert.match(
     chatView,
@@ -428,6 +428,8 @@ test('every outgoing chat-entry surface becomes neutral until the atomic swap', 
   )
   const openingCover = ruleBody('.shell__chat-view--held::after')
   assert.match(openingCover, /content:\s*"Opening chat\\2026"/)
+  assert.match(openingCover, /color:\s*transparent;[\s\S]*animation:\s*shell-opening-label 0s linear 400ms forwards/,
+    'a quick swap stays a quiet neutral surface; the label appears only when opening is slow')
   assert.match(openingCover, /background:\s*var\(--bg\)/,
     'the selected chat waits behind one opaque neutral surface')
   assert.match(
