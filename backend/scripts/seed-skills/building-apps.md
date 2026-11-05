@@ -1301,6 +1301,20 @@ failed report then repairs itself on a later request instead of leaving a
 stale count, and an installation that already has unread items reports them
 the first time it runs.
 
+### Refresh the moment something arrives
+
+Polling still leaves a gap after new data lands. When Möbius sees new activity
+for the app (an app-attributed notification, or a change to its sidebar unread
+badge), the open app hears it at the same instant as the sidebar:
+
+```jsx
+useEffect(() => window.mobius.onActivity?.(() => refresh()), [])
+```
+
+The nudge carries no content, so treat it as "check now" and keep polling as
+the fallback for nudges missed during a reconnect or on an older Möbius
+(`window.mobius.runtimeFeatures?.appActivity`).
+
 ### Shell shortcuts
 
 Shell shortcuts (Cmd/Ctrl+K search, Cmd/Ctrl+N new chat, Cmd/Ctrl+, back, and

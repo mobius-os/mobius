@@ -61,6 +61,7 @@ import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
 import { GlobeOffRealTimeSearch } from '@openai/apps-sdk-ui/components/Icon'
+import { subscribeAppActivity } from '../../lib/appActivitySignal.js'
 import './AppCanvas.css'
 
 function appFrameRequestUrl(appId, version, frameRev) {
@@ -199,6 +200,10 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      unless backgroundPlayback says the document owns an open media session
 //      (deliberate playback the drawer still controls). covered holds the same
 //      work while the modal drawer is over a frame that stays painted.
+//
+//   3d. {type: 'moebius:app-activity'}                     parent → frame
+//      The shell saw new activity for this app (lib/appActivitySignal.js).
+//      Carries no content; the runtime's onActivity listeners refresh.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -1609,6 +1614,18 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online])
+
+  // ── New-activity nudge ───────────────────────────────────────────
+  // The shell hears an app's new activity (an app-attributed notification or
+  // an unread-badge change) on its live event stream and publishes it here, so
+  // the open app can refresh at the same instant as its sidebar pill
+  // (window.mobius.onActivity). Every loaded frame gets it: a buffered frame
+  // about to be promoted should not miss the change either.
+  useEffect(() => subscribeAppActivity(appId, () => {
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) postToFrame(v, { type: 'moebius:app-activity' })
+    }
+  }), [appId])
 
   // ── Immersive safe-area passthrough (.pm/128 follow-up) ──────────
   // Forward the device safe-area insets so an immersive (full-bleed) app can
