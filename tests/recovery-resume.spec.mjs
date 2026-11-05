@@ -37,6 +37,14 @@ const partial = { id: 'assistant-a', role: 'assistant', ts: 1788800000200, conte
   { type: 'error', message: 'Interrupted work is ready to resume.', resumable: true },
 ] }
 
+// The owner-visible proof that Resume was acknowledged. Its title also names
+// when the work continued ("Resumed manually · 16:53"), so match the marker
+// title rather than an exact text node; an exact match would make every
+// "not yet resumed" count below pass vacuously.
+const manualResumeMarker = surface => surface.locator('.chat__marker-title', {
+  hasText: /^Resumed manually(?: · .+)?$/,
+})
+
 function deferred() {
   let resolve
   const promise = new Promise(r => { resolve = r })
@@ -278,7 +286,7 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toHaveCount(0)
+  await expect(manualResumeMarker(state.surface)).toHaveCount(0)
   const pending = await sampleGeometry(page)
 
   expect(Math.abs(pending.top - before.top)).toBeLessThanOrEqual(1)
@@ -287,7 +295,7 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   expect(state.attempts[0]).toMatchObject({ continuation: 'manual', resume_run_id: 'interrupted-a' })
   expect(state.attempts[0].attachments || []).toHaveLength(0)
   state.accepted.resolve()
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toBeVisible()
+  await expect(manualResumeMarker(state.surface)).toBeVisible()
   await expect(state.composer).toHaveValue(draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
@@ -309,7 +317,7 @@ test('a rejected Resume leaves recovery retryable without changing owner intent'
   await expect(state.composer).toHaveValue(draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toHaveCount(0)
+  await expect(manualResumeMarker(state.surface)).toHaveCount(0)
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
   await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect.poll(() => state.attempts.length).toBe(2)
@@ -317,7 +325,7 @@ test('a rejected Resume leaves recovery retryable without changing owner intent'
   expect(state.attempts[1]).toMatchObject({ continuation: 'manual', resume_run_id: 'interrupted-a' })
   expect(state.attempts[1].attachments || []).toHaveLength(0)
   state.accepted.resolve()
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toBeVisible()
+  await expect(manualResumeMarker(state.surface)).toBeVisible()
   await expect(state.composer).toHaveValue(draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
@@ -329,7 +337,7 @@ test('a delayed no-stream reconciliation keeps the partial answer painted until 
   await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
   await state.requested.promise
   state.accepted.resolve()
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toBeVisible()
+  await expect(manualResumeMarker(state.surface)).toBeVisible()
   const liveText = answer.replaceAll('Paragraph', 'Recovered paragraph')
   await page.waitForFunction(() => !!window.__recoveryStream)
   await page.evaluate(content => {
@@ -387,7 +395,7 @@ test('a lost Resume acknowledgement retries the same control without exposing co
   state.accepted.resolve()
   await expect.poll(() => state.attempts.length).toBeGreaterThanOrEqual(2)
   expect(state.attempts.every(attempt => JSON.stringify(attempt) === JSON.stringify(state.attempts[0]))).toBe(true)
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toHaveCount(1)
+  await expect(manualResumeMarker(state.surface)).toHaveCount(1)
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
   await expect(state.composer).toHaveValue(draft)
   await expect(state.attachment).toBeVisible()
@@ -400,7 +408,7 @@ test('failed transcript replacement retains the answer and a successful Retry re
   await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
   await state.requested.promise
   state.accepted.resolve()
-  await expect(state.surface.getByText('Resumed manually', { exact: true })).toBeVisible()
+  await expect(manualResumeMarker(state.surface)).toBeVisible()
   const liveText = answer.replaceAll('Paragraph', 'Recovered paragraph')
   await page.waitForFunction(() => !!window.__recoveryStream)
   await page.evaluate(content => {

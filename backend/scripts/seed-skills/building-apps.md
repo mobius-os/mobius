@@ -1180,13 +1180,40 @@ send({ event: 'close' })                            // playback ended
 // { type: 'moebius:media-control', sessionId, action: 'play' | 'pause' | 'stop' }.
 ```
 
-The page still reads as hidden while such playback continues. Documents the
-app embeds in its own child iframes are separate pages: forward the visibility
-to them yourself. For the same reason, `<audio>`/`<video>` inside an open
-shadow root isn't reached — the frame's scan doesn't cross shadow boundaries
-and `play` events don't escape them — so pause shadow-DOM media yourself from
-`onVisibilityChange` as well. Plain (light-DOM) elements and `new Audio()` are
-handled for you.
+The page still reads as hidden while such playback continues.
+
+Hidden documents get no animation frames: `requestAnimationFrame` callbacks wait
+for the app's return, as they do on a really hidden page. The same hold covers
+sound and frame loops from the moment the owner opens the mobile drawer over the
+app, so a heavy game cannot starve the drawer and its sound stops before they
+pick a destination. The app stays painted beneath the drawer and does not read
+as hidden, and closing the drawer picks it back up. Because a covered app gets
+no `visibilitychange`, a loop that advances by elapsed time should cap its step,
+so the first frame after the drawer closes does not jump the game forward.
+
+A document you nest by setting an iframe's `srcdoc` (through the property or
+`setAttribute`) gets all of this with no code. The drawer hold applies to the
+shell's main app pane; app views shown elsewhere are held only while hidden.
+Nothing else is reached: iframes inserted through `innerHTML`, documents
+written with `document.write`, workers, and documents loaded from a URL (such
+as a packaged `/app-embeds/` game). Each
+child frame of a reached document is still forwarded the verdict as a
+`moebius:frame-visibility` message, so a nested document the frame cannot reach
+only has to listen:
+
+```js
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return
+  const { type, visible, covered, backgroundPlayback } = event.data || {}
+  if (type !== 'moebius:frame-visibility') return
+  setGamePaused((!visible || covered) && !backgroundPlayback)
+})
+```
+
+`<audio>`/`<video>` inside an open shadow root isn't reached either — the
+frame's scan doesn't cross shadow boundaries and `play` events don't escape
+them — so pause shadow-DOM media yourself from `onVisibilityChange` as well.
+Plain (light-DOM) elements and `new Audio()` are handled for you.
 
 ---
 

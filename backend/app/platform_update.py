@@ -173,6 +173,10 @@ DEPENDENCY_RECEIPT_PATH = Path("/tmp/mobius-dependency-inputs.json")
 # intentionally root-owned.  Dependency-changing updates therefore detach
 # this one known bootstrap link lazily, just before the first mutable install.
 BAKED_FRONTEND_NODE_MODULES = Path("/app/shell-src/node_modules")
+# Actual boot source, independent of the mutable served checkout. Older image
+# input records omitted its modules; _image_runs verifies those missing keys
+# against both these protected bytes and the frozen image commit.
+BAKED_PLATFORM_REPO = Path("/app/platform-baked")
 
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
@@ -231,6 +235,9 @@ class PlatformUpdatePhase(str, Enum):
   PREPARING = "preparing"
   FETCHING = "fetching"
   RECONCILING = "reconciling"
+  # Local-change tests can run for many minutes; a phase of their own keeps a
+  # healthy update from looking stuck on the merge step.
+  TESTING = "testing"
   VALIDATING = "validating"
   BUILDING = "building"
   FINALIZING = "finalizing"
@@ -587,6 +594,7 @@ def _set_update_progress(
 ) -> None:
   """Publish one phase transition from either the event loop or worker thread."""
   with _PROGRESS_LOCK:
+    _log_progress_transition(phase, plan_id=plan_id, target_sha=target_sha, error=error)
     _UPDATE_PROGRESS.update(
       plan_id=plan_id,
       target_sha=target_sha,
@@ -600,6 +608,47 @@ def _set_update_progress(
       UPDATE_PROGRESS_PATH,
       json.dumps(_UPDATE_PROGRESS, sort_keys=True),
     )
+
+
+def _log_progress_transition(
+  phase: PlatformUpdatePhase,
+  *,
+  plan_id: str | None,
+  target_sha: str | None,
+  error: str | None,
+) -> None:
+  """Leave a traceable history of each update; the progress file keeps only the latest phase.
+
+  Caller holds ``_PROGRESS_LOCK``, so the previous phase is the one this replaces.
+  """
+  previous = _UPDATE_PROGRESS.get("phase")
+  started = float(_UPDATE_PROGRESS.get("updated_at") or 0.0)
+  same_plan = _UPDATE_PROGRESS.get("plan_id") == plan_id and started
+  took = f" after {time.time() - started:.1f}s in {previous}" if same_plan else ""
+  level = logging.WARNING if error else logging.INFO
+  log.log(
+    level, "platform update %s -> %s: phase %s%s%s",
+    (plan_id or "-")[:12], (target_sha or "-")[:12], phase.value, took,
+    f"; error: {error}" if error else "",
+  )
+
+
+def current_update_progress() -> PlatformUpdateProgress:
+  """Progress as readers should see it: a record a dead process left active is retired.
+
+  Most boots never take the reconcile lock, so without this an Apply cut off
+  by a restart would read as active until the next update, and a client
+  following that update would wait for an outcome that can no longer arrive.
+  """
+  progress = platform_update_progress()
+  if not progress["active"]:
+    return progress
+  try:
+    with _reconcile_flock(blocking=False):
+      pass
+  except PlatformUpdateError:
+    return progress  # A live reconcile holds the lock: the record is current.
+  return platform_update_progress()
 
 
 def _finish_interrupted_update_progress() -> None:
@@ -2015,11 +2064,14 @@ def _owed_activation(
   still-pending activation plus the changes from ``before``. Image work is
   judged against the official ``release`` ``target`` carries (``target``
   itself unless it is a prepared local revision on top of one)."""
+  paths, served_restart = _pending_activation_work(
+    repo, release=release or target,
+    additional_served_paths=_activation_paths_between(repo, before, target),
+  )
+  owed_paths = _without_python_inputs_installed_for(repo, paths, target)
   return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(repo, [
-      *_pending_activation_paths(repo, release=release or target),
-      *_activation_paths_between(repo, before, target),
-    ], target),
+    owed_paths,
+    served_restart_paths=served_restart,
   )
 
 
@@ -2078,6 +2130,21 @@ def _image_runs(
   installs."""
   if path in _PYTHON_DEPENDENCY_INPUTS:
     return image_installs_python_input(repo, path, content)
+  if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES and path not in baked:
+    image = frozen_image_sha()
+    if not image:
+      return False
+    image_content = _git_blob(repo, image, path)
+    if image_content is None:
+      return False
+    try:
+      baked_content = (BAKED_PLATFORM_REPO / path).read_bytes()
+    except OSError:
+      return False
+    # Only the newly declared boot keys need compatibility with existing image
+    # records. Never borrow served bytes, override a recorded hash, or accept
+    # an absent source blob as proof of what this image executes.
+    return baked_content == image_content and content == baked_content
   expected = baked.get(path)
   if content is None:
     return expected is None
@@ -2087,19 +2154,19 @@ def _image_runs(
   )
 
 
-def _pending_activation_paths(
+def _pending_activation_work(
   repo: Path = PLATFORM_REPO,
   *,
   served_to_head: list[str] | None = None,
   release: str | None = None,
-) -> list[str]:
-  """Every path whose activation is still owed by the running process.
+  additional_served_paths: list[str] | tuple[str, ...] = (),
+) -> tuple[list[str], list[str]]:
+  """Return owed paths and independently owed served boot-module restarts.
 
-  ``served_to_head`` lets a caller that has just diffed the served revision
-  against the local head (to write the activation marker) hand that result
-  over instead of having the same pair diffed again. Image work is judged
-  against ``release`` (an update's exact target), by default the newest
-  official release the checkout contains.
+  ``served_to_head`` avoids a repeated diff when the caller has it already;
+  ``additional_served_paths`` projects an update's before-to-target diff into
+  the same provenance check. Image work is judged against the exact official
+  ``release``, never the prepared local commit.
   """
   marker = _read_activation_marker()
   paths = list(marker["paths"]) if marker else []
@@ -2118,13 +2185,27 @@ def _pending_activation_paths(
       except Exception:
         head = None
       served_to_head = _activation_paths_between(repo, served, head)
-  paths.extend(served_to_head or [])
+  # Only the served-source diffs say whether the server still has to load a
+  # boot module. The marker cannot: boot keeps a local boot-module edit there
+  # as image work after the restart that loaded it.
+  served_paths = [*(served_to_head or []), *additional_served_paths]
+  paths.extend(served_paths)
   paths.extend(image_input_drift(repo) or [])
   owed = _image_work_owed(
     repo, [str(path) for path in paths if str(path)],
     release or _contained_official_source(repo),
   )
-  return sorted({*owed, *damaged})
+  return sorted({*owed, *damaged}), _served_boot_restart(served_paths, owed)
+
+
+def _served_boot_restart(served_paths: list[str], image_owed: list[str]) -> list[str]:
+  """Changed boot modules whose official image input is already satisfied, so
+  only a server restart is owed to load their served source."""
+  return sorted({
+    path for path in served_paths
+    if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
+    and path not in image_owed
+  })
 
 
 def _deployed_runtime_is_image_own(path: str) -> bool:
@@ -2265,10 +2346,11 @@ def _platform_activation_impact(
   served_to_head: list[str] | None = None,
   release: str | None = None,
 ) -> PlatformActivationImpact:
+  paths, served_restart = _pending_activation_work(
+    repo, served_to_head=served_to_head, release=release,
+  )
   return platform_activation.classify_activation(
-    _pending_activation_paths(
-      repo, served_to_head=served_to_head, release=release,
-    ),
+    paths, served_restart_paths=served_restart,
   )
 
 
@@ -2897,6 +2979,8 @@ def _finalize_update(
   touched_frontend = any(path.startswith("frontend/") for path in changed)
 
   backend_probe = platform_activation.backend_import_probe_required(changed)
+  if progress:
+    progress(PlatformUpdatePhase.TESTING)
   local_report = _check_local_tests(
     repo, snapshot=pre, prepared=tip, target=target,
     requires_image=(platform_activation.ActivationLevel.IMAGE_REBUILD.value
@@ -3371,6 +3455,7 @@ def _check_local_tests(
   """
   # Static and image-independent, so it runs first: when it already rejects
   # the candidate, running the tests could not change that verdict.
+  started = time.monotonic()
   removed = removed_references.find(repo, target, prepared, snapshot)
   tests = local_change_tests.select(repo, target, prepared, snapshot)
   unavailable = (
@@ -3391,11 +3476,19 @@ def _check_local_tests(
           runs.append(local_change_tests.run(checkout, tests))
         finally:
           app_git.remove_overlay_worktree(repo, checkout)
-  return {
+  report = {
     **local_change_tests.compare(tests, *runs),
     "removed_references": removed,
     "baseline_sha": snapshot, "candidate_sha": prepared, "target_sha": target,
   }
+  log.info(
+    "platform update local tests for %s: %s, %d selected file(s), "
+    "%d regression(s), %.1fs%s",
+    target[:12], report["status"], len(tests), len(report["regressions"]),
+    time.monotonic() - started,
+    f"; incomplete: {'; '.join(report['incomplete'])}" if report["incomplete"] else "",
+  )
+  return report
 
 
 def _local_change_rejection(report: dict) -> str | None:
@@ -4720,11 +4813,15 @@ def _record_update_activation(
   served = _served_platform_sha()
   changed_paths = _activation_paths_between(repo, served, head)
   release = target or _contained_official_source(repo)
-  changed_paths = _image_work_owed(repo, changed_paths, release)
-  incoming_impact = platform_activation.classify_activation(changed_paths)
+  image_owed = _image_work_owed(repo, changed_paths, release)
+  served_restart = _served_boot_restart(changed_paths, image_owed)
+  incoming_impact = platform_activation.classify_activation(
+    image_owed, served_restart_paths=served_restart,
+  )
   if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
     mark_activation_needed(
-      head or "", changed_paths, upstream_sha=target, repo=repo,
+      head or "", sorted({*image_owed, *served_restart}),
+      upstream_sha=target, repo=repo,
     )
   return _platform_activation_impact(
     repo, served_to_head=changed_paths, release=release,
@@ -4751,7 +4848,7 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
     if not target or not source or not (worktree / ".git").exists():
       raise PlatformUpdateError("The parked net merge is incomplete.")
-    answer = _resolved_tree(parked, worktree, source)
+    answer = _resolved_tree(parked, worktree)
     if parked.get("stage") == "working":
       committed = str(parked.get("right") or "")
       resolved_working = (
@@ -4850,12 +4947,17 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     return result.status
 
 
-def _resolved_tree(parked: dict, worktree: Path, source: str) -> str:
+def _parked_left(parked: dict) -> str:
+  """The local side the parked candidate merges from: the saved working
+  snapshot, else the served commit minus set-aside merged copies (``left``)."""
+  if parked.get("stage") == "working":
+    return str(parked.get("pre") or "")
+  return str(parked.get("left") or parked.get("served") or "")
+
+
+def _resolved_tree(parked: dict, worktree: Path) -> str:
   """The resolver's staged answer, only while its parked merge is intact."""
-  left = str(
-    parked.get("pre") if parked.get("stage") == "working"
-    else parked.get("left") or source
-  )
+  left = _parked_left(parked)
   right = str(parked.get("right") or "")
   merging = app_git.merge_in_progress(worktree)
   active_merge = (
@@ -5934,16 +6036,20 @@ def _platform_update_preview_unlocked(
       diff=None, diff_truncated=False, conflict_paths=[],
       local_image_paths=[],
     )
-  diff, truncated = _preview_diff(repo, base, target)
+  # Apply's proven equivalence anchors can advance the shared tree beyond
+  # Git's historical merge base. Do not show those already-incorporated paths
+  # as new file changes; commit history and activation still use the real base.
+  merged = _final_tree_merge(repo, local, target)
+  change_base = merged.merge_base_oid or base
+  diff, truncated = _preview_diff(repo, change_base, target)
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   parked = _read_conflict_flag() or {}
   conflict_paths = parked.get("paths") or []
   retired: tuple[app_git.RetiredPath, ...] = ()
   if not conflict_paths:
-    predicted = _final_tree_merge(repo, local, target)
     conflict_paths, retired = (
-      predicted.conflict_paths, predicted.reconciliation.retired_paths,
+      merged.conflict_paths, merged.reconciliation.retired_paths,
     )
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
@@ -5965,7 +6071,7 @@ def _platform_update_preview_unlocked(
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
     commits=commits,
-    files=_preview_files(repo, base, target),
+    files=_preview_files(repo, change_base, target),
     diff=diff, diff_truncated=truncated,
     conflict_paths=sorted(set(conflict_paths)),
     retired_paths=[item.as_dict() for item in retired],
@@ -6006,6 +6112,11 @@ async def apply_platform_update(
   except asyncio.CancelledError:
     if not started.is_set():
       task.cancel()
+    else:
+      log.warning(
+        "platform Apply %s: client disconnected; the update continues and "
+        "reports through update progress", plan_id[:12],
+      )
     while not task.done():
       try:
         await asyncio.shield(task)
@@ -6292,13 +6403,42 @@ def _platform_conflict_resolver_message(
 ) -> str:
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
+  review = ""
+  # Working-edit conflicts include the saved uncommitted snapshot; the
+  # incoming side may already contain the resolved committed changes. A flag
+  # written without the fixed snapshots (an older updater) gets no
+  # two-sided review text rather than an error.
+  source = right = base = None
+  if overlay and overlay.get("mode") == "net":
+    source = _parked_left(overlay)
+    right, base = overlay.get("right"), overlay.get("base")
+  if source and right and base:
+    review = (
+      "Integrate the intended changes from both fixed snapshots, not a winning "
+      "side's files. Preserve local behavior and incoming protections in one "
+      "coherent implementation; ask the owner about genuinely incompatible "
+      "behavior, not ordinary code conflicts. PR status is not evidence that "
+      "this incoming snapshot contains a replacement.\n\n"
+      "In the candidate, read each side's changes from their common base: "
+      f"`git diff {base} {source} --` (local) and "
+      f"`git diff {base} {right} --` (incoming). After resolving and staging, "
+      "review the complete staged result against BOTH inputs: "
+      f"`git diff --cached {source} --` (what changes locally) and "
+      f"`git diff --cached {right} --` (what changes from incoming). "
+      "Include non-conflicting files and deletions. Use tests from both input "
+      "snapshots as evidence of intended behavior; adapt tests when needed "
+      "without dropping their protections. Verify the affected contracts from "
+      "both sides in the candidate (`scripts/wt-pytest.sh <tests>`); passing "
+      "only the tests left after resolution does not prove preservation.\n\n"
+    )
   if overlay and overlay.get("replay"):
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
       "Paused chats resume once these edits are back.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
-      "both the update and the intent of those edits, stage them, then run "
+      "both the update and the intent of those edits.\n\n"
+      + review + "Stage the resolved files, then run "
       "`cd /data/platform/backend && python3 -c \"from app.platform_update "
       "import continue_platform_overlay_update as c; print(c())\"`. It "
       "merges your answer into the live checkout with the normal build and "
@@ -6316,11 +6456,13 @@ def _platform_conflict_resolver_message(
     )
     return opening + _conflict_units_guidance(overlay) + (
       "The running platform is untouched. Resolve all marked files together "
-      f"in the isolated candidate at `{overlay.get('worktree')}`; preserve "
-      "the intended local behavior and the incoming upstream behavior. A "
-      "file's tests belong with the side whose code you keep. Stage the "
-      "resolved files, run the tests covering them from the candidate "
-      "(`scripts/wt-pytest.sh <tests>`), then run `cd /data/platform/backend && "
+      f"in the isolated candidate at `{overlay.get('worktree')}`.\n\n"
+      + (review + "Then run " if review else (
+        "Preserve the intended local behavior and the incoming upstream "
+        "behavior, including both sides' tests. "
+        "Stage the resolved files, run the tests covering them from the "
+        "candidate (`scripts/wt-pytest.sh <tests>`), then run "
+      )) + "`cd /data/platform/backend && "
       "python3 -c \"from app.platform_update import "
       "continue_platform_overlay_update as c; print(c())\"`. It commits "
       "your answer on the reviewed release and runs the same startup check "

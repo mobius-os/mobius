@@ -25,6 +25,7 @@ RECOGNIZED_CAPABILITIES = (
   "connect_manage",
   "identity_manage",
   "railway_manage",
+  "helper_activity_read",
   "location_history_read",
 )
 SKILLS_COUNT_MAX = 5

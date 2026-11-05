@@ -190,13 +190,15 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      scrim but synchronously cancels any Android compositor scroll already in
 //      flight. Hidden/incoming frames receive false too.
 //
-//   3c. {type: 'moebius:frame-visibility', visible, navigationReady,
+//   3c. {type: 'moebius:frame-visibility', visible, covered, navigationReady,
 //        backgroundPlayback} parent → frame
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
-//      app-frame.html turns visible:false into a hidden page and pauses the
-//      frame's sound unless backgroundPlayback says the document owns an open
-//      media session (deliberate playback the drawer still controls).
+//      app-frame.html turns visible:false into a hidden page and holds the
+//      sound and animation frames of the app and every document it nests,
+//      unless backgroundPlayback says the document owns an open media session
+//      (deliberate playback the drawer still controls). covered holds the same
+//      work while the modal drawer is over a frame that stays painted.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -434,6 +436,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the scrim, but compositor momentum inside its iframe must be cancelled so
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
+  // The modal drawer is opening or open over this frame. It stays painted and
+  // honestly not hidden, but app-frame.html holds its sound and animation
+  // frames, the same as leaving does.
+  covered = false,
   // Whether this canvas's live frame is the app's shell navigation target:
   // `data-app-id` (below) and the app's saved shell location. An embedded
   // transcript view of the same app neither restores nor overwrites that place.
@@ -1661,6 +1667,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, {
       type: 'moebius:frame-visibility',
       visible,
+      covered,
       // Restoration that needs a new history entry waits for pane focus.
       navigationFocused: activeRef.current,
       // A chat handoff can keep pixels foreground after logical navigation ends.
@@ -1711,7 +1718,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, visible, active, swap.liveVersion, swap.liveLoaded])
+  }, [frameVisible, covered, visible, active, swap.liveVersion, swap.liveLoaded])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then

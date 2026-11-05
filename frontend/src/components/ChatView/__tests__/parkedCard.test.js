@@ -12,6 +12,10 @@ const vite = await createSsrRenderServer()
 const { default: ErrorCard } = await vite.ssrLoadModule(
   '/src/components/ChatView/ErrorCard.jsx',
 )
+const {
+  canStartRefusalFreshSession,
+  refusalActionSentence,
+} = await vite.ssrLoadModule('/src/components/ChatView/ErrorCard.jsx')
 const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
 )
@@ -265,6 +269,115 @@ test('an exhausted busy-model card stops promising retries and offers Resume', (
   assert.match(html, /Five automatic retries were used/)
   assert.match(html, />Resume<\/button>/)
   assert.doesNotMatch(html, /Trying again/)
+})
+
+const refusalBlock = {
+  type: 'error', resumable: true,
+  message: 'API Error: safeguards flagged this message. Details: `[category]`',
+  pause: { kind: 'provider_refusal', provider: 'claude' },
+}
+
+function withWindow(t) {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+}
+
+test('a provider refusal offers moves that change the request, never a timed retry', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: true,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.match(html, /usually fails again/)
+  assert.match(html, />Switch model<\/button>/)
+  assert.match(html, />Start fresh session<\/button>/)
+  assert.match(html, />Resume<\/button>/)
+  // The provider's raw report stays available but is not the headline.
+  assert.match(html, /Technical details/)
+  assert.doesNotMatch(html, /Trying again|auto-continue|role="alert"/)
+})
+
+test('a refusal card away from the transcript tail offers no actions', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: false,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.doesNotMatch(html, /Switch model<\/button>|Start fresh session<\/button>|>Resume</)
+})
+
+function withPathname(t, pathname) {
+  const previousLocation = globalThis.location
+  globalThis.location = { pathname }
+  t.after(() => {
+    if (previousLocation === undefined) delete globalThis.location
+    else globalThis.location = previousLocation
+  })
+}
+
+// ChatView passes the fresh-session action only through this gate, because
+// POST /compact is owner lifecycle control: a chat embed or a shared-workspace
+// guest gets a 403, so the button would only ever produce an error.
+function refusalCardFor(viewer) {
+  const freshSession = canStartRefusalFreshSession({ embedded: viewer.embedded })
+  return renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: true,
+    onResume() {},
+    onRefusalModelChoice: viewer.showPicker ? () => {} : undefined,
+    onRefusalFreshSession: freshSession ? () => {} : undefined,
+  }))
+}
+
+test('the owner is offered a fresh session after a refusal, and the copy says so', (t) => {
+  withWindow(t)
+  withPathname(t, '/shell/')
+  assert.equal(canStartRefusalFreshSession(), true)
+  const html = refusalCardFor({ embedded: false, showPicker: true })
+  assert.match(html, />Start fresh session<\/button>/)
+  assert.match(html, /Switch model, then Resume, or start a fresh session from a summary of this chat\./)
+})
+
+for (const [viewer, pathname, embedded] of [
+  ['an embedded chat', '/shell/', true],
+  ['a shared-workspace guest', '/shell/shared', false],
+]) {
+  test(`${viewer} is never offered a fresh session it cannot start`, (t) => {
+    withWindow(t)
+    withPathname(t, pathname)
+    assert.equal(canStartRefusalFreshSession({ embedded }), false)
+    const html = refusalCardFor({ embedded, showPicker: true })
+    assert.doesNotMatch(html, /Start fresh session|fresh session/)
+    assert.match(html, />Switch model<\/button>/)
+    assert.match(html, /Your work is saved\. Switch model, then Resume\./)
+  })
+}
+
+test('a refusal card with no moves on offer promises none', (t) => {
+  withWindow(t)
+  withPathname(t, '/shell/shared')
+  const html = refusalCardFor({ embedded: true, showPicker: false })
+  assert.doesNotMatch(html, /Switch model|fresh session/)
+  assert.match(html, /usually fails again\. Your work is saved\.<\/div>/)
+})
+
+test('the refusal sentence names exactly the offered actions', () => {
+  assert.equal(refusalActionSentence({}), '')
+  assert.equal(refusalActionSentence({ switchModel: true }), 'Switch model, then Resume.')
+  assert.equal(refusalActionSentence({ freshSession: true }), 'Start a fresh session from a summary of this chat.')
+  assert.match(refusalActionSentence({ switchModel: true, freshSession: true }), /^Switch model.*fresh session/)
 })
 
 for (const [continuationWait, title, explanation] of [
