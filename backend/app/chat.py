@@ -2868,8 +2868,8 @@ async def _clear_pending_strict(chat_id: str) -> list[str]:
   records its outcome as a `TerminalDisposition`: if the queue clear didn't
   durably land, the path must be able to OBSERVE that and leave the durable
   run marker set so reconciliation recovers the incomplete turn. Stop needs
-  the same certainty before it issues a receipt, since a receipt promises no
-  queued turn can still run. So this re-raises on a failed ack rather than
+  the same certainty before it issues a receipt, which reports the queued
+  turns it cleared. So this re-raises on a failed ack rather than
   logging-and-continuing.
 
   Returns the stable `cid`s it cleared. Stop uses them to resend ONLY the
@@ -3043,12 +3043,13 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
 async def stop_chat(
   chat_id: str | None = None, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
+) -> "ChatStopOutcome":
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
   after Stop. Session_id is preserved so the next message resumes.
 
-  Returns `(stopped, cleared_pending_cids)`. `cleared_pending_cids` is the
+  Returns a `ChatStopOutcome` (`(stopped, cleared_pending_cids)`; the
+  global sweep carries no receipt). `cleared_pending_cids` is the
   stable `cid` of the queued messages this Stop actually removed — the
   frontend resends ONLY those, so a message the turn-end drain already
   promoted into a continuation (gone from the queue, hence not in this list)
@@ -3068,7 +3069,7 @@ async def stop_chat(
     stopped_cid, _ = await stop_chat_for(cid, db=db, actor=actor, actor_id=actor_id)
     if stopped_cid:
       stopped_any = True
-  return stopped_any, []
+  return ChatStopOutcome(stopped_any, [])
 
 
 def browser_grant_active_chat_ids(db, grant_id: str) -> list[str]:
@@ -3253,14 +3254,16 @@ class ChatStopOutcome(tuple):
   """One per-chat Stop: the `(stopped, cleared_pending_cids)` pair internal
   callers use, plus `receipt`, which the Stop route returns.
 
-  `receipt` is `{chat_id, run_id}` only when Stop certifies that nothing of
-  this chat's lifecycle can still run without new owner input: every handle
-  stopped and the pending queue was cleared. A Stop that kept the queue (a
-  restart drain, a preserving caller, or a timed-out clear) leaves queued
-  turns that may still run, so it issues none. `run_id` comes from the
-  writer's Stop boundary (`ChatStopPrepared`), never from a read after the
-  interrupt: once Stop releases the transition lock the owner may resume, and
-  that successor must not inherit this Stop's meaning.
+  `receipt` is `{chat_id, run_id}` when Stop ended run `run_id` (every handle
+  stopped, or with no process the run was durably closed) and cleared the
+  queued turns it reports. With no running run, `run_id` is the chat's latest
+  idle run (`None` if it never ran). That is all it certifies: work that runs
+  afterwards (a Wait firing, a helper result, an owner resume) runs under a
+  different run id, so a caller binds its cancellation to `run_id` and treats
+  any later run as newer work. A Stop that kept the queue (a restart drain,
+  a preserving caller, or a failed clear) or could not close the run issues
+  none. `run_id` comes from the writer's Stop boundary (`ChatStopPrepared`),
+  never from a read after the interrupt.
   """
 
   def __new__(cls, stopped: bool, cleared_pending_cids: list[str], receipt: dict | None = None):
@@ -3381,11 +3384,25 @@ async def _stop_chat_for_locked(
   # and a SQLite-blocked commit can exceed Stop's 2s timeout. If the process
   # dies first, the retained marker lets crash recovery reconcile the
   # interrupted turn.
+  run_closed = True
   if not handles:
-    await _finish_run(chat_id, terminal_status="stopped")
+    # Strict so Stop knows whether the run really closed: a receipt names a
+    # run Stop ended, so a finish that did not land issues none (the open run
+    # is still left for reconciliation, as before).
+    try:
+      await _finish_run_strict(chat_id, terminal_status="stopped")
+    except Exception:
+      run_closed = False
+      log.warning(
+        "stop_chat_for: FinishRun did not persist chat_id=%s "
+        "(reconciliation will repair)", chat_id, exc_info=True,
+      )
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  receipt = {"chat_id": chat_id, "run_id": prepared.run_id} if queue_cleared else None
+  receipt = (
+    {"chat_id": chat_id, "run_id": prepared.run_id}
+    if queue_cleared and run_closed else None
+  )
   return ChatStopOutcome(True, cleared_pending_cids, receipt)
 
 

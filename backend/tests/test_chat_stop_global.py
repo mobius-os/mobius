@@ -91,14 +91,9 @@ def test_delegated_execution_bearer_cannot_stop_child_parent_foreign_or_all(
   async def record_stop(chat_id, *, db=None, actor=None, actor_id=None):
     del db
     calls.append(chat_id)
-    return False, []
-
-  async def record_chat_stop(chat_id, *, db=None, actor=None, actor_id=None):
-    stopped, cleared = await record_stop(chat_id, db=db, actor=actor, actor_id=actor_id)
-    return chat_mod.ChatStopOutcome(stopped, cleared)
+    return chat_mod.ChatStopOutcome(False, [])
 
   monkeypatch.setattr("app.routes.chat.stop_chat", record_stop)
-  monkeypatch.setattr("app.routes.chat.stop_chat_for", record_chat_stop)
   responses = [
     client.post(
       "/api/chat/stop", json={"chat_id": chat_ids[target]},

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.chat import stop_chat, stop_chat_for
+from app.chat import stop_chat
 from app.database import get_db
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, reject_cross_site, is_owner_input_principal,
@@ -28,13 +28,14 @@ async def chat_stop(
   turn-end drain already promoted into a continuation isn't double-sent
   (PM 115).
 
-  A per-chat Stop that stopped every handle and cleared the queue also
+  A per-chat Stop that ended the chat's run and cleared its queue also
   returns `stop_receipt: {chat_id, run_id}`, the chat's latest run at Stop's
-  serialized boundary (`None` if it never ran). An app binds its cancellation
-  to that run, not to a status read after this response, which can already
-  show a successor the owner resumed. The global sweep, an unconfirmed Stop,
-  and a Stop during a restart drain (which keeps queued turns so they survive
-  the restart) return `stop_receipt: None` (`ChatStopOutcome`).
+  serialized boundary (`None` if it never ran). It certifies only that run:
+  later work (an owner resume, a Wait firing, a helper result) runs under
+  another run id. An app binds its cancellation to that run, not to a status
+  read after this response. The global sweep, an unconfirmed Stop, and a Stop
+  that kept the queue or could not close the run return `stop_receipt: None`
+  (`ChatStopOutcome`).
   """
   require_nondelegated_owner_control(principal)
   if principal.scope == "app":
@@ -44,14 +45,11 @@ async def chat_stop(
     raise HTTPException(status_code=403, detail="Embedded chat id is required.")
   if body.chat_id:
     require_active_chat_access(db, body.chat_id, principal)
-  actor = "owner" if is_owner_input_principal(principal) else "agent"
-  actor_id = principal.run_id or principal.chat_id or principal.embed_session_id
-  stop_receipt = None
-  if body.chat_id:
-    outcome = await stop_chat_for(body.chat_id, db=db, actor=actor, actor_id=actor_id)
-    stop_receipt = outcome.receipt
-  else:
-    outcome = await stop_chat(None, db=db, actor=actor, actor_id=actor_id)
+  outcome = await stop_chat(
+    body.chat_id or None, db=db,
+    actor="owner" if is_owner_input_principal(principal) else "agent",
+    actor_id=principal.run_id or principal.chat_id or principal.embed_session_id,
+  )
   stopped, cleared_pending_cids = outcome
   cancelled_delegations = []
   if body.chat_id and stopped:
@@ -72,5 +70,5 @@ async def chat_stop(
     "stopped": stopped,
     "cleared_pending_cids": cleared_pending_cids,
     "cancelled_delegations": cancelled_delegations,
-    "stop_receipt": stop_receipt,
+    "stop_receipt": outcome.receipt,
   }

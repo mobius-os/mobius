@@ -1,11 +1,12 @@
-"""A per-chat Stop answers with the exact lifecycle it revoked.
+"""A per-chat Stop answers with the exact run it ended.
 
 An app that cancels work must bind that cancellation to the run Stop actually
-addressed. Reading status after the response can observe a successor the
-owner resumed in the meantime; releasing that successor would let the app
-start duplicate work. The receipt is therefore fixed at the writer's Stop
-boundary, inside the per-chat transition lock, and only a confirmed Stop
-issues one.
+addressed. Reading status after the response can observe a successor (an
+owner resume, a Wait firing, a helper result); releasing that successor would
+let the app start duplicate work. The receipt is therefore fixed at the
+writer's Stop boundary, inside the per-chat transition lock, and only a Stop
+that ended the run and cleared the queue issues one. It certifies only that
+run: any later work runs under a different run id.
 """
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -233,7 +234,7 @@ def test_resume_contending_for_the_stop_gate_is_admitted_after_the_receipt(
         resumed.append("resumed-run")
 
     contender = None
-    real_finish = runtime._finish_run
+    real_finish = runtime._finish_run_strict
 
     async def finish_while_the_owner_resumes(chat_id, **kwargs):
       nonlocal contender
@@ -243,7 +244,7 @@ def test_resume_contending_for_the_stop_gate_is_admitted_after_the_receipt(
       assert resumed == [], "a resume must not pass Stop's transition gate"
       return await real_finish(chat_id, **kwargs)
 
-    monkeypatch.setattr(runtime, "_finish_run", finish_while_the_owner_resumes)
+    monkeypatch.setattr(runtime, "_finish_run_strict", finish_while_the_owner_resumes)
     outcome = await runtime.stop_chat_for(chat.id, actor="owner")
     await contender
     return outcome
@@ -282,3 +283,62 @@ def test_failed_queue_clear_issues_no_receipt_and_keeps_the_queue(
   assert body["stop_receipt"] is None
   db.expire_all()
   assert [row["cid"] for row in db.get(models.Chat, chat.id).pending_messages] == ["queued-cid"]
+
+
+def test_stop_that_could_not_close_the_run_issues_no_receipt(
+  client, auth, db, chat, monkeypatch,
+):
+  """With no process to stop, the run only ends when FinishRun lands; a
+  receipt for a run that is still open would certify nothing."""
+  from app.chat_writer import ChatWriterActor
+  seed_run(db, chat, "orphaned-run", status="running")
+
+  def finish_fails(self, db, cmd):
+    raise RuntimeError("database is locked")
+
+  monkeypatch.setattr(ChatWriterActor, "_finish_run", finish_fails)
+
+  response = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
+
+  assert response.status_code == 200, response.text
+  assert response.json()["stopped"] is True
+  assert response.json()["stop_receipt"] is None
+  db.expire_all()
+  assert db.get(models.ChatRun, "orphaned-run").status == "running"
+
+
+def test_a_wait_firing_after_stop_runs_under_a_different_run_id(
+  client, auth, db, chat, monkeypatch,
+):
+  """Stop does not disarm a Wait outside a Goal; when it fires, the work it
+  starts is a new run, so a receipt-bound cancellation never covers it."""
+  import asyncio
+
+  from app import chat as runtime
+  from app import chat_waits
+  from app.timeutil import now_naive_utc
+
+  seed_run(db, chat, "declaring-run", status="running")
+  row = chat_waits.declare_wait(
+    db, chat_id=chat.id, description="after stop", condition_owner="test",
+    kind="command", command="true", deadline_secs=3600,
+    created_by_run_id="declaring-run",
+  )
+  db.commit()
+
+  response = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
+  assert response.status_code == 200, response.text
+  receipt = response.json()["stop_receipt"]
+  assert receipt == {"chat_id": chat.id, "run_id": "declaring-run"}
+
+  db.expire_all()
+  row = db.get(models.ChatWait, row.id)
+  row.status = "met"
+  row.met_at = now_naive_utc()
+  db.commit()
+  monkeypatch.setattr(runtime, "_schedule_continuation", lambda **_kwargs: True)
+  assert asyncio.run(chat_waits._deliver_resume(row.id)) is True
+
+  resumed = runtime_run_id(client, auth, chat)
+  assert resumed == f"wait-resume-{row.id}"
+  assert resumed != receipt["run_id"]

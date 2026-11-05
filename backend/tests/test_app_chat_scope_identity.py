@@ -892,3 +892,31 @@ def test_a_retry_behind_a_timed_out_start_reuses_its_first_turn_instead_of_a_sec
   assert accepted + _pending_cids(db, chat_id) == ["late-cid"]
   binding = db.get(models.AppChatScopeStart, (app_id, "cycle:retry"))
   assert binding.admitted_at is not None and binding.cancelled_at is None
+
+
+def test_a_chat_bound_to_a_scoped_start_keeps_its_scope(
+  client, owner_token, db, monkeypatch,
+):
+  """Moving the bound chat to another scope would let that scope's `/start`
+  bind the same chat as a second job."""
+  app_id, token = _make_app(client, owner_token, "pinned-scope")
+  _accept_first_turns(monkeypatch)
+  started = _start(client, token, "cycle:pinned")
+  assert started.status_code == 200, started.text
+  chat_id = started.json()["chat_id"]
+  auth = {"Authorization": f"Bearer {token}"}
+
+  moved = client.patch(
+    f"/api/app-chats/{chat_id}", json={"scope": "cycle:other"}, headers=auth,
+  )
+  unchanged = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"scope": "cycle:pinned", "title": "Renamed"}, headers=auth,
+  )
+
+  assert moved.status_code == 409, moved.text
+  assert unchanged.status_code == 200, unchanged.text
+  other = _start(client, token, "cycle:other")
+  assert other.status_code == 200, other.text
+  assert other.json()["chat_id"] != chat_id
+  assert db.get(models.AppChatScopeStart, (app_id, "cycle:pinned")).chat_id == chat_id

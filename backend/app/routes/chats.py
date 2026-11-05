@@ -4147,6 +4147,18 @@ async def patch_app_chat(
         body = body.model_copy(update={"model": selection["model"]})
         chat.provider = body.provider
         chat.session_id = None
+    if (
+      (body.scope or "").strip() not in ("", chat_scope(chat))
+      and db.query(models.AppChatScopeStart.chat_id).filter(
+        models.AppChatScopeStart.chat_id == chat.id,
+      ).first() is not None
+    ):
+      # A `/start` binding names this chat as its scope's one job; moving the
+      # chat to another scope would let that scope bind it a second time.
+      raise HTTPException(
+        status_code=409,
+        detail="Cannot change the scope of a chat started for a scoped job.",
+      )
     if body.title is not None:
       # An explicit app rename has the same title lock as an app-named chat.
       chat.title = body.title
