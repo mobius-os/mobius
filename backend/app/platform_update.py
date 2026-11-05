@@ -4880,12 +4880,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     # The server booted before these edits returned, so it still owes the
     # restart that loads them. The swap stays until a server serves them
     # (``confirm_platform_swap_loaded``) or its bound replacement confirms it,
-    # so that boot can still return a merged tree that cannot start.
+    # so that boot can still return a merged tree that cannot start. The boot
+    # tree stays the update it parked on: the answer is resolver work, which a
+    # revert sets aside (``_set_aside_unsaved_update_work``), not boot state.
     _record_update_activation(repo, head, recorded_upstream_sha(repo))
     record = read_prepared_update()
     if record is not None:
       _write_prepared_update(PreparedUpdate(**{
-        **record, "replayed": head, "booted_tree": _working_tree_oid(repo, head),
+        **record, "replayed": head,
+        "booted_tree": record["booted_tree"] or _commit_tree_oid(repo, record["prepared"]),
       }))
     return result.status
 

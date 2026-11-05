@@ -937,6 +937,40 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   _assert_restored_late_edits_finish_once_loaded(platform)
 
 
+def test_a_resolved_late_edit_that_fails_to_start_is_set_aside_on_revert(clone_env):
+  """The resolver's answer is work the reverted-to tree lacks: a boot that
+  cannot start it returns to the late edit and keeps the answer at a set-aside
+  ref the receipt names, not only in the reflog."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE'"),
+  }, msg="late conflicting edit")
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert _finish_prepared(platform) == "conflict"
+  replay = Path(pu._read_conflict_flag()["overlay"]["worktree"])
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  resolved = _served_sha(platform)
+  late = pu.read_prepared_update()["late"]
+
+  # The restart that loads the answer fails its startup check.
+  assert pu.settle_prepared_update_for_this_image(platform) == "replayed"
+  assert pu.revert_failed_update(platform)
+
+  assert _served_sha(platform) == late
+  assert "LINE_A = 'LATE'" in (platform / "backend/app/main.py").read_text()
+  refs = _reported_private_recovery_refs(platform)
+  assert refs and all(ref.startswith(pu._SET_ASIDE_PREFIX + "/") for ref in refs)
+  assert any(
+    _git(platform, "rev-parse", ref).stdout.strip() == resolved for ref in refs
+  ), "the resolver's answer must be named by a set-aside ref"
+  assert pu.read_prepared_update()["state"] == "prepared"
+
+
 def _assert_restored_late_edits_finish_once_loaded(platform: Path) -> None:
   """Late edits merged back after the server imported the update are not
   loaded yet: the swap stays (resumes held, a restart owed, the boot can still
