@@ -4894,13 +4894,13 @@ def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
       control = db.query(models.ChatRun.continuation_json).filter(
         models.ChatRun.id == run_token, models.ChatRun.chat_id == chat_id,
       ).scalar() or {}
+    return control.get("reason") == "manual" and control.get("allow_low_storage") is True
   except Exception:
     _get_logger().warning(
       "could not read Continue anyway permission chat_id=%s", chat_id,
       exc_info=True,
     )
     return False
-  return control.get("reason") == "manual" and control.get("allow_low_storage") is True
 
 
 async def run_chat(

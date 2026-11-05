@@ -118,6 +118,51 @@ def test_owner_continue_route_persists_override_and_rejects_changed_retry(client
   assert len(scheduled) == 1
 
 
+@pytest.mark.parametrize("caller", [
+  {"browser": "guest"}, {"app_id": 7},
+  {"scope": "chat_embed", "operations": frozenset({"chat:send"})},
+])
+def test_only_the_installation_owner_may_continue_below_the_storage_floor(
+  client, db, chat, monkeypatch, caller,
+):
+  from app.browser_access import BrowserLineage
+  from app.deps import Principal, get_chat_view_principal
+  from app.main import app
+
+  park(db, chat)
+  scheduled = []
+
+  async def capture(*args, **kwargs):
+    scheduled.append(kwargs)
+
+  owner = db.query(models.Owner).one()
+  fields = dict(caller)
+  if fields.pop("browser", None):
+    fields["browser"] = BrowserLineage("guest-grant", "guest-session")
+  principal = Principal(owner=owner, app_id=fields.pop("app_id", None), **fields)
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
+  monkeypatch.setitem(app.dependency_overrides, get_chat_view_principal, lambda: principal)
+  response = client.post(f"/api/chats/{chat.id}/messages", json={
+    "content": "", "cid": "guest-control", "continuation": "manual",
+    "resume_run_id": "waiting-run", "allow_low_storage": True,
+  })
+  assert response.status_code == 403, response.text
+  db.expire_all()
+  assert scheduled == []
+  assert db.query(models.ChatRun).filter_by(chat_id=chat.id).count() == 1
+  assert db.get(models.ChatRun, "waiting-run").status == "parked"
+
+
+@pytest.mark.parametrize("control", [["allow_low_storage"], "manual", 3])
+def test_malformed_permission_is_no_permission(db, chat, control):
+  db.add(models.ChatRun(
+    id="odd-run", chat_id=chat.id, status="running", provider="claude",
+    continuation_json=control,
+  ))
+  db.commit()
+  assert runtime._run_allows_low_storage(chat.id, "odd-run") is False
+
+
 def _low_storage(data_dir, *, allow_low_storage=False):
   return require_agent_turn_admission(
     data_dir, allow_low_storage=allow_low_storage, scratch_sweeper=_no_sweep,
