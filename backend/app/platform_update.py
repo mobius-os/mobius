@@ -4792,7 +4792,7 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
     if not target or not source or not (worktree / ".git").exists():
       raise PlatformUpdateError("The parked net merge is incomplete.")
-    answer = _resolved_tree(parked, worktree, source)
+    answer = _resolved_tree(parked, worktree)
     if parked.get("stage") == "working":
       committed = str(parked.get("right") or "")
       resolved_working = (
@@ -4891,12 +4891,17 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     return result.status
 
 
-def _resolved_tree(parked: dict, worktree: Path, source: str) -> str:
+def _parked_left(parked: dict) -> str:
+  """The local side the parked candidate merges from: the saved working
+  snapshot, else the served commit minus set-aside merged copies (``left``)."""
+  if parked.get("stage") == "working":
+    return str(parked.get("pre") or "")
+  return str(parked.get("left") or parked.get("served") or "")
+
+
+def _resolved_tree(parked: dict, worktree: Path) -> str:
   """The resolver's staged answer, only while its parked merge is intact."""
-  left = str(
-    parked.get("pre") if parked.get("stage") == "working"
-    else parked.get("left") or source
-  )
+  left = _parked_left(parked)
   right = str(parked.get("right") or "")
   merging = app_git.merge_in_progress(worktree)
   active_merge = (
@@ -5975,16 +5980,20 @@ def _platform_update_preview_unlocked(
       diff=None, diff_truncated=False, conflict_paths=[],
       local_image_paths=[],
     )
-  diff, truncated = _preview_diff(repo, base, target)
+  # Apply's proven equivalence anchors can advance the shared tree beyond
+  # Git's historical merge base. Do not show those already-incorporated paths
+  # as new file changes; commit history and activation still use the real base.
+  merged = _final_tree_merge(repo, local, target)
+  change_base = merged.merge_base_oid or base
+  diff, truncated = _preview_diff(repo, change_base, target)
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   parked = _read_conflict_flag() or {}
   conflict_paths = parked.get("paths") or []
   retired: tuple[app_git.RetiredPath, ...] = ()
   if not conflict_paths:
-    predicted = _final_tree_merge(repo, local, target)
     conflict_paths, retired = (
-      predicted.conflict_paths, predicted.reconciliation.retired_paths,
+      merged.conflict_paths, merged.reconciliation.retired_paths,
     )
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
@@ -6006,7 +6015,7 @@ def _platform_update_preview_unlocked(
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
     commits=commits,
-    files=_preview_files(repo, base, target),
+    files=_preview_files(repo, change_base, target),
     diff=diff, diff_truncated=truncated,
     conflict_paths=sorted(set(conflict_paths)),
     retired_paths=[item.as_dict() for item in retired],
@@ -6333,13 +6342,42 @@ def _platform_conflict_resolver_message(
 ) -> str:
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
+  review = ""
+  # Working-edit conflicts include the saved uncommitted snapshot; the
+  # incoming side may already contain the resolved committed changes. A flag
+  # written without the fixed snapshots (an older updater) gets no
+  # two-sided review text rather than an error.
+  source = right = base = None
+  if overlay and overlay.get("mode") == "net":
+    source = _parked_left(overlay)
+    right, base = overlay.get("right"), overlay.get("base")
+  if source and right and base:
+    review = (
+      "Integrate the intended changes from both fixed snapshots, not a winning "
+      "side's files. Preserve local behavior and incoming protections in one "
+      "coherent implementation; ask the owner about genuinely incompatible "
+      "behavior, not ordinary code conflicts. PR status is not evidence that "
+      "this incoming snapshot contains a replacement.\n\n"
+      "In the candidate, read each side's changes from their common base: "
+      f"`git diff {base} {source} --` (local) and "
+      f"`git diff {base} {right} --` (incoming). After resolving and staging, "
+      "review the complete staged result against BOTH inputs: "
+      f"`git diff --cached {source} --` (what changes locally) and "
+      f"`git diff --cached {right} --` (what changes from incoming). "
+      "Include non-conflicting files and deletions. Use tests from both input "
+      "snapshots as evidence of intended behavior; adapt tests when needed "
+      "without dropping their protections. Verify the affected contracts from "
+      "both sides in the candidate (`scripts/wt-pytest.sh <tests>`); passing "
+      "only the tests left after resolution does not prove preservation.\n\n"
+    )
   if overlay and overlay.get("replay"):
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
       "Paused chats resume once these edits are back.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
-      "both the update and the intent of those edits, stage them, then run "
+      "both the update and the intent of those edits.\n\n"
+      + review + "Stage the resolved files, then run "
       "`cd /data/platform/backend && python3 -c \"from app.platform_update "
       "import continue_platform_overlay_update as c; print(c())\"`. It "
       "merges your answer into the live checkout with the normal build and "
@@ -6357,11 +6395,13 @@ def _platform_conflict_resolver_message(
     )
     return opening + _conflict_units_guidance(overlay) + (
       "The running platform is untouched. Resolve all marked files together "
-      f"in the isolated candidate at `{overlay.get('worktree')}`; preserve "
-      "the intended local behavior and the incoming upstream behavior. A "
-      "file's tests belong with the side whose code you keep. Stage the "
-      "resolved files, run the tests covering them from the candidate "
-      "(`scripts/wt-pytest.sh <tests>`), then run `cd /data/platform/backend && "
+      f"in the isolated candidate at `{overlay.get('worktree')}`.\n\n"
+      + (review + "Then run " if review else (
+        "Preserve the intended local behavior and the incoming upstream "
+        "behavior, including both sides' tests. "
+        "Stage the resolved files, run the tests covering them from the "
+        "candidate (`scripts/wt-pytest.sh <tests>`), then run "
+      )) + "`cd /data/platform/backend && "
       "python3 -c \"from app.platform_update import "
       "continue_platform_overlay_update as c; print(c())\"`. It commits "
       "your answer on the reviewed release and runs the same startup check "
