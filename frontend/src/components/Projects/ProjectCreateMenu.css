@@ -12,11 +12,13 @@
   border: 0;
   border-radius: 10px;
   color: var(--accent-fg, #fff);
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   cursor: pointer;
 }
 
-.project-create-menu__trigger:hover { filter: brightness(1.08); }
+/* The trigger can carry its "New project" label, so it uses the label-safe
+   fill and deepens on hover; brightening would lower label contrast. */
+.project-create-menu__trigger:hover { background: var(--accent-fill-hover, var(--accent-hover)); }
 .project-create-menu__trigger:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
@@ -103,7 +105,8 @@
 .project-create-menu__import input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .project-create-menu__back { justify-self: start; min-height: 44px !important; padding: 4px 7px !important; color: var(--muted) !important; font-size: 12px; }
 .project-create-menu__privacy { margin: 0 6px !important; color: var(--muted) !important; }
-.project-create-menu__submit { min-height: 42px !important; justify-content: center; color: var(--accent-fg, #fff) !important; background: var(--accent) !important; font-weight: 700; }
+.project-create-menu__submit { min-height: 42px !important; justify-content: center; color: var(--accent-fg, #fff) !important; background: var(--accent-fill, var(--accent)) !important; font-weight: 700; }
+@media (hover: hover) { .project-create-menu__submit:hover:not(:disabled) { background: var(--accent-fill-hover, var(--accent-hover)) !important; } }
 
 .project-create-menu__sources { display: grid; gap: 7px; min-height: 120px; }
 .project-create-menu__source-list {

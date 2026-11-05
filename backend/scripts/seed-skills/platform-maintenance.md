@@ -49,6 +49,22 @@ Review the exact changed paths and use the smallest matching action:
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations do not activate a live install and do not require an immediate rebuild. They survive container replacement only through the release that contains them; see Dependencies below. |
 
+### Verify activation without confusing image and source versions
+
+`mapi /api/platform/status` names the remaining activation in
+`activation.required_actions`, `needs_restart`, and `unfinished_update`.
+Its `current_build_sha` is the immutable image revision, not the source the
+running server imported. `served_sha` identifies that served source; local
+reconciliation normally makes these revisions different. A server restart
+cannot change the image revision, so never request one just to make these
+values match. `image_build_applied` says whether the served source, including
+committed changes that need no restart, contains the image revision (`null`
+for an unstamped image); status and `mapi /api/version` report the same
+answer. `false` with no update offered after a check means the image was built
+outside the official releases; nothing needs doing. `/api/version` also reports
+`serving_source` and frontend freshness. Use those owning facts to verify a
+ready boot.
+
 ### Dependencies — live first, durable second
 
 1. Run `sudo -n true` once. Use `sudo` for apt or other system/global install

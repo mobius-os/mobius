@@ -60,7 +60,7 @@ function makeDomStub() {
     style: {
       _props: {},
       colorScheme: '',
-      setProperty(name, value) { this._props[name] = value },
+      setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] },
       getPropertyValue(name) { return this._props[name] },
     },
   }
@@ -68,6 +68,7 @@ function makeDomStub() {
     return {
       tagName: tag.toUpperCase(),
       id: '', rel: '', href: '', textContent: '', dataset: {},
+      setAttribute(k, v) { if (k === 'data-theme-font') this.dataset.themeFont = v; else this[k] = v },
       remove() {
         if (this.tagName === 'STYLE') styleNodes.delete(this.id)
         if (this.tagName === 'LINK') {
@@ -222,18 +223,55 @@ test('applyTheme removes prior font links before adding new ones', () => {
   assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
 })
 
-test('applyTheme sets bg on body, meta theme-color, inline --bg', () => {
+test('applyTheme lets the stylesheet own --bg; the bg hint only feeds theme-color', () => {
+  // A pre-paint inline --bg would outrank an owner background set in an html
+  // rule, a condition or a layer, so applying theme css removes it.
+  dom.documentElement.style.setProperty('--bg', '#0d0d0d')
   applyTheme({ css: ':root{}', bg: '#abcdef' }, ctx())
-  assert.equal(dom.document.body.style.background, '#abcdef')
-  assert.equal(dom.meta.content, '#abcdef')
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#abcdef')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
+  assert.equal(dom.documentElement.style.background, 'var(--bg)')
+  assert.equal(dom.meta.content, '#abcdef', 'no CSSOM in this stub: the hint is the fallback')
 })
 
-test('applyTheme ignores a non-hex bg (no DOM / no persist mutation)', () => {
+test('applyTheme reads the cascade background for theme-color and the boot hint', () => {
+  // The server hint can be a guess (an html-rule background is invisible to
+  // it); what the stylesheet resolves wins.
+  dom.document.defaultView = { getComputedStyle: () => ({ getPropertyValue: (n) => (n === '--bg' ? ' #ffffff' : '') }) }
+  applyTheme({ css: 'html { --bg: #ffffff; --text: #111111; }', bg: '#0d0d0d', mode: 'light' }, ctx())
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.equal(dom.meta.content, '#ffffff')
+  assert.equal(JSON.parse(store.getItem('mobius-theme')).bg, '#ffffff')
+})
+
+test('applyTheme records the background of the mode it switches to, not the previous one', () => {
+  // A theme keyed on data-theme resolves a different --bg once the attribute
+  // flips; theme-color and the next-boot hint must follow the new mode.
+  const cascade = { dark: '#000000', light: '#ffffff' }
+  dom.document.defaultView = {
+    getComputedStyle: () => ({
+      getPropertyValue: (n) => (n === '--bg' ? cascade[dom.documentElement.getAttribute('data-theme')] || '' : ''),
+    }),
+  }
+  dom.documentElement.setAttribute('data-theme', 'dark')
+  const css = ':root[data-theme="dark"] { --bg: #000000; } :root[data-theme="light"] { --bg: #ffffff; }'
+  applyTheme({ css, bg: '#000000', mode: 'light' }, ctx())
+  assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
+  assert.equal(dom.meta.content, '#ffffff')
+  assert.deepEqual(JSON.parse(store.getItem('mobius-theme')), { bg: '#ffffff', mode: 'light' })
+})
+
+test('applyTheme without css keeps the bg as the only (inline) source', () => {
+  applyTheme({ bg: '#abcdef' }, ctx())
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#abcdef')
+  assert.equal(dom.document.body.style.background, '#abcdef')
+})
+
+test('applyTheme ignores a non-hex bg (no meta / no persist mutation)', () => {
   dom.document.body.style.background = '#init'
   dom.meta.content = '#init'
   applyTheme({ css: ':root{}', bg: 'expression(alert(1))' }, ctx())
-  assert.equal(dom.document.body.style.background, '#init')
+  assert.equal(dom.document.body.style.background, 'var(--bg)', 'follows the cascade, never the hint')
   assert.equal(dom.meta.content, '#init')
   assert.equal(store.getItem('mobius-theme'), null)
 })
@@ -355,4 +393,83 @@ test('HEX_RE matches valid hex and rejects garbage', () => {
   assert.ok(HEX_RE.test('#fff'))
   assert.ok(!HEX_RE.test('rgb(0,0,0)'))
   assert.ok(!HEX_RE.test('#gg'))
+})
+
+
+// --- The served theme at the application boundary -------------------------
+//
+// These run the real appliers over the exact CSS the server serves
+// (themeCssCases.json `expected`, pinned to backend _ensure_core_vars).
+
+const { default: themeCssCases } = await import('./themeCssCases.json', { with: { type: 'json' } })
+const { INJECTED_DEFAULTS_MARKER, themeDefaultsForCss } = await import('../../theme.js')
+const served = (prefix) => themeCssCases.find((c) => c.name.startsWith(prefix)).expected
+const GOOGLE_FONTS = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
+const CORE_VAR_COUNT = Object.keys(themeDefaultsForCss('')).length
+
+function generatedVars(styleText) {
+  const at = styleText.indexOf(INJECTED_DEFAULTS_MARKER)
+  assert.ok(at >= 0, 'the generated defaults block survived import extraction')
+  const block = styleText.slice(at, styleText.indexOf('}\n}\n', at))
+  return [...block.matchAll(/(--[\w-]+):/g)].map((m) => m[1])
+}
+
+function runPrepaint(slot) {
+  dom.slotNodes.set('__mobius-theme__', { textContent: JSON.stringify(slot) })
+  const run = new Function('document', 'localStorage', 'location', 'window', PREPAINT_SRC)
+  run(dom.document, store, { pathname: '/' }, { parent: null })
+}
+
+for (const prefix of [
+  'a quoted multi-weight Google Fonts import',
+  'a bare multi-weight Google Fonts import',
+  'charset, layer order and several imports',
+]) {
+  test(`applyTheme keeps the import URL whole and the defaults complete: ${prefix}`, () => {
+    applyTheme({ css: served(prefix), bg: '#112233' }, ctx())
+    assert.ok(dom.fontLinks.some((l) => l.href === GOOGLE_FONTS), dom.fontLinks.map((l) => l.href).join(', '))
+    const style = dom.styleNodes.get('mobius-theme').textContent
+    assert.equal(style.includes('@import'), false)
+    assert.equal(generatedVars(style).length, CORE_VAR_COUNT)
+  })
+
+  test(`the pre-paint script extracts the same: ${prefix}`, () => {
+    runPrepaint({ css: served(prefix), bg: '#112233', mode: 'dark' })
+    assert.ok(dom.fontLinks.some((l) => l.href === GOOGLE_FONTS))
+    assert.equal(generatedVars(dom.styleNodes.get('mobius-theme').textContent).length, CORE_VAR_COUNT)
+  })
+}
+
+function assertEscapedImportApplied() {
+  assert.deepEqual(dom.fontLinks.map((l) => l.href), ['https://example.test/a);b.css'])
+  const style = dom.styleNodes.get('mobius-theme').textContent
+  assert.equal(style.includes('@import'), false)
+  assert.equal(style.includes('b.css'), false, 'no fragment of the URL is left as CSS')
+  assert.equal(generatedVars(style).length, CORE_VAR_COUNT)
+  assert.ok(style.endsWith(':root { --accent: #00ffff; }\n'))
+}
+
+test('applyTheme strips a bare import URL with an escaped ) whole and keeps the defaults', () => {
+  applyTheme({ css: served('an escaped ) in an unquoted import URL'), bg: '#0d0d0d' }, ctx())
+  assertEscapedImportApplied()
+})
+
+test('the pre-paint script strips the same escaped import whole', () => {
+  runPrepaint({ css: served('an escaped ) in an unquoted import URL'), bg: '#0d0d0d', mode: 'dark' })
+  assertEscapedImportApplied()
+})
+
+test('pre-paint with theme css leaves --bg to the stylesheet', () => {
+  // An html-rule background: the server's bg hint is the generated dark one.
+  runPrepaint({ css: served('an html rule outranks'), bg: '#0d0d0d', mode: 'light' })
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.equal(dom.meta.content, '#0d0d0d', 'theme-color is pre-CSS chrome: the hint is fine there')
+})
+
+test('pre-paint without css hints --bg inline until a stylesheet arrives', () => {
+  runPrepaint({ bg: '#f0eeeb', mode: 'light' })
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
+  applyTheme({ css: served('an html rule outranks'), bg: '#0d0d0d', mode: 'light' }, ctx())
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
 })

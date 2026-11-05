@@ -108,7 +108,11 @@ from app.tool_output_storage import (
   decode_tool_output,
   tool_output_length,
 )
-from app.usage_metrics import CHAT_TOKEN_FIELDS, summarize_chat_run_tokens
+from app.usage_metrics import (
+  CHAT_TOKEN_FIELDS,
+  run_usage_quality,
+  summarize_chat_run_tokens,
+)
 
 log = logging.getLogger(__name__)
 
@@ -2501,6 +2505,9 @@ def get_chat_usage(
 
   Historical rows created before usage capture remain visible with null
   counters, so callers can distinguish zero usage from missing coverage.
+  ``coverage.runs_by_quality`` and each run's ``usage_quality`` (one of
+  ``usage_metrics.USAGE_QUALITIES``) say whether the totals are a complete
+  aggregate or a lower bound; both fields are additive.
   This owner-only diagnostic is deliberately independent of the transcript:
   benchmark tooling can read it without parsing user-visible messages.
   """
@@ -2540,6 +2547,7 @@ def get_chat_usage(
         **{field: getattr(run, field) for field in CHAT_TOKEN_FIELDS},
         "model_context_window": run.model_context_window,
         "usage": run.usage_json,
+        "usage_quality": run_usage_quality(run.usage_json, run.status),
       }
       for run in runs
     ],
@@ -3657,7 +3665,12 @@ def list_app_chats(
           for field in CHAT_TOKEN_FIELDS
         },
       }
-  empty_usage = summarize_chat_run_tokens([])
+  # The app-chat contract keeps its compact coverage shape; per-run quality
+  # labels belong to the owner's /usage view.
+  empty_usage = {
+    "coverage": {"runs": 0, "runs_with_usage": 0},
+    "totals": dict.fromkeys(CHAT_TOKEN_FIELDS),
+  }
   return [
     _app_chat_summary(chat, usage_by_chat.get(chat.id, empty_usage))
     for chat in chats
