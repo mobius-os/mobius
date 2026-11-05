@@ -69,24 +69,75 @@ export function isImmersiveActive(request, activeView, activeAppId) {
  * Real-time frame messages are forwarded directly and do not pass through
  * this helper. Lifecycle replay is narrower:
  *   - becoming inactive releases the holder;
- *   - returning to the same cached frame does nothing (no sticky re-entry);
+ *   - returning to the same cached frame does not resurrect a request made
+ *     on an earlier visit (no sticky re-entry);
+ *   - a request the frame made on THIS return, while it was already shown but
+ *     before it became the active canvas (`requestedOnReturn`), is honoured on
+ *     activation: the shell tells a frame it is visible before it marks the
+ *     pane active, so an app that asks as soon as it reappears would otherwise
+ *     lose that fresh request to ordering alone;
  *   - promoting a newly loaded frame while continuously active replays that
  *     new frame's recorded intent, so an in-place app update stays seamless.
  *
  * `null` means no callback. A boolean is the value to send to Shell.
  */
-export function immersiveLifecycleValue(previous, current, recordedIntent) {
+export function immersiveLifecycleValue(previous, current, recordedIntent, requestedOnReturn = false) {
   if (!current?.appId) return null
   if (!current.active) return false
 
   const sameCanvas = previous?.appId != null
     && String(previous.appId) === String(current.appId)
-  const promotedWhileActive = sameCanvas
-    && previous.active === true
-    && previous.liveVersion !== current.liveVersion
+  if (!sameCanvas) return null
 
-  if (!promotedWhileActive) return null
+  if (previous.active !== true) {
+    return requestedOnReturn && recordedIntent === true ? true : null
+  }
+  if (previous.liveVersion === current.liveVersion) return null
   return recordedIntent === true
+}
+
+/**
+ * One canvas's immersive bookkeeping between frame messages and lifecycle
+ * transitions. AppCanvas reports what happened; this decides what reaches
+ * Shell, so the visit-bounded rules stay in one testable place.
+ *
+ * A live frame that posts while shown but not active leaves a pending
+ * request. It lives for exactly one showing: the next lifecycle transition
+ * consumes it, and the frame being hidden discards it. That keeps a post made
+ * during Shell's chat handoff (frame still painted after the pane went
+ * inactive) from replaying on a later return. An unfocused split pane is
+ * shown but inactive too; its request is honoured when the pane is focused,
+ * because the user could see the app when it asked and AppCanvas cannot tell
+ * that apart from a return. A later `false` post cancels it.
+ */
+export function createImmersiveLifecycle() {
+  let previous = null
+  let pendingVersion = null
+  return {
+    // A frame's moebius:immersive post. Returns whether to forward it to
+    // Shell now (only the live frame of the active canvas drives chrome).
+    frameRequested({ version, liveVersion, active, frameVisible }) {
+      if (version !== liveVersion) return false
+      if (active) return true
+      if (frameVisible) pendingVersion = version
+      return false
+    },
+    frameHidden() {
+      pendingVersion = null
+    },
+    // `current` is { appId, liveVersion, active }; returns immersiveLifecycleValue's result.
+    transition(current, recordedIntent) {
+      const value = immersiveLifecycleValue(
+        previous,
+        current,
+        recordedIntent,
+        pendingVersion != null && pendingVersion === current.liveVersion,
+      )
+      pendingVersion = null
+      previous = current
+      return value
+    },
+  }
 }
 
 // App ids are numeric from /api/apps but arrive as strings on some paths

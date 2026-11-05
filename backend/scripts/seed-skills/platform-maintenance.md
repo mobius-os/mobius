@@ -41,6 +41,7 @@ Review the exact changed paths and use the smallest matching action:
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
 | `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, or `backend/runtime/` | Image-owned. Container replacement installs the official image for the release, which carries no local edit to these files: the edit stays in the checkout, inactive, and the update reports it without waiting on it. Batch and test the change, then prepare it as an upstream contribution; it takes effect with the release that contains it. |
+| `backend/app/platform_boot.py` and the modules it imports (`platform_update.py`, `platform_activation.py`, `app_git.py`, `config.py`, and the rest of its import closure) | The pre-import update transaction runs from the image's baked copy, so a fix to it is not active at boot until an image containing it is installed. A restart loads only the served copy the running server uses. Do not substitute repeated restarts or bypass the image-owned startup and rollback checks. |
 | `backend/runtime/identity_broker.py` | The one served privileged runtime file: one server restart activates a valid edit; an invalid one falls back to the baked platform for that boot. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | `backend/scripts/seed-skills/` | One server restart applies the served templates to installed skills; untouched copies advance and edited ones stay for review. No image rebuild once the container runs an image that hands this job to the server. To use an edit immediately, write identical bytes to `/data/shared/skills/<name>.md`. |
@@ -95,6 +96,10 @@ Review the exact changed paths and use the smallest matching action:
    partner request may still create a Restart card without pending changes.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
+   A restart loads the whole working tree, not only your commits: check
+   `git -C /data/platform status` for uncommitted backend edits you do not own
+   and, before asking, tell the partner which chat's unfinished work would go
+   live with it.
 4. For activation, name the exact change that remains inactive and why only a
    restart can activate it. If no change is pending, say so. For a
    constitution-only change, default to leaving it pending unless the partner

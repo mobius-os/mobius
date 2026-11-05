@@ -449,9 +449,16 @@
   display: grid;
   place-items: center;
   background: var(--bg);
-  color: var(--muted);
+  /* Most swaps finish within a frame or two; flashing a label then reads as a
+     loading screen. The words appear only when opening is genuinely slow. */
+  color: transparent;
+  animation: shell-opening-label 0s linear 400ms forwards;
   font-size: 12px;
   letter-spacing: 0.01em;
+}
+
+@keyframes shell-opening-label {
+  to { color: var(--muted); }
 }
 
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */

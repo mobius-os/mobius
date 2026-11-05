@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { runInNewContext } from 'node:vm'
+import { createContext, runInContext, runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -59,7 +59,7 @@ test('frame suspension cancels compositor momentum without changing the resting 
   assert.match(frame, /element\.scrollTop = top < maxTop \? top \+ 1/)
   assert.match(frame, /element\.scrollTop = top;/)
   assert.match(frame, /data-mobius-frame-suspended/)
-  assert.match(frame, /suspendedScrollFrame = requestAnimationFrame\(holdSuspendedScroll\)/)
+  assert.match(frame, /suspendedScrollFrame = window\.__mobiusNativeFrame\(holdSuspendedScroll\)/)
 })
 
 const SHELL_ORIGIN = 'https://mobius.test'
@@ -255,7 +255,10 @@ test('the frame keeps an early visibility verdict for the app runtime', () => {
 // hidden ancestor never changes the frame's native Page Visibility. These
 // tests pin that the app frame itself turns the shell's verdict into silence.
 
-function bootFrame() {
+// The app frame runs in an opaque-origin sandbox: window.origin reads "null"
+// while location.origin is its URL's. A nested srcdoc document reads
+// location.origin as "null" too.
+function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = 'null' } = {}) {
   const source = frame.match(/<script data-mobius-background-pause>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(source, 'app-frame.html has the background pause script')
 
@@ -268,8 +271,10 @@ function bootFrame() {
   const attached = []
   const captureListeners = new Map()
   const document = new FakeDocument()
+  const childFrames = []
+  document.currentScript = { textContent: source }
   document.dispatchEvent = (event) => { visibilityEvents.push(event.type) }
-  document.querySelectorAll = () => attached
+  document.querySelectorAll = (selector) => (selector === 'iframe' ? childFrames : attached)
   document.addEventListener = (type, callback, capture) => {
     assert.equal(capture, true, 'frame playback listener is capture-phase')
     captureListeners.set(type, callback)
@@ -292,29 +297,72 @@ function bootFrame() {
     pause() { this.paused = true }
   }
 
-  let messageListener = null
+  class FakeElement {
+    constructor() { this.attributes = {} }
+    setAttribute(name, value) { this.attributes[name] = value }
+    getAttribute(name) { return name in this.attributes ? this.attributes[name] : null }
+  }
+  class FakeIframe extends FakeElement {
+    constructor() { super(); this.posted = []; this.contentWindow = { postMessage: (data) => this.posted.push(data) } }
+    get srcdoc() { return this.attributes.srcdoc }
+    set srcdoc(html) { this.attributes.srcdoc = html }
+  }
+
+  const messageListeners = []
+  const messageListener = (event) => messageListeners.forEach((listener) => listener(event))
+  const nativeFrames = new Map()
+  let lastNativeFrame = 0
   const parent = {}
   const window = {
     parent,
-    location: { origin: SHELL_ORIGIN },
+    origin,
+    location: { origin: locationOrigin },
     AudioContext: FakeAudioContext,
     webkitAudioContext: FakeAudioContext,
     HTMLMediaElement: FakeMediaElement,
-    addEventListener(type, callback) { if (type === 'message') messageListener = callback },
+    requestAnimationFrame(callback) { nativeFrames.set(++lastNativeFrame, callback); return lastNativeFrame },
+    cancelAnimationFrame(id) { nativeFrames.delete(id) },
+    addEventListener(type, callback) { if (type === 'message') messageListeners.push(callback) },
   }
-  runInNewContext(source, {
+  const context = createContext({
     window, document, Document: FakeDocument, HTMLMediaElement: FakeMediaElement, Event,
+    Element: FakeElement, HTMLIFrameElement: FakeIframe,
   })
+  runInContext(source, context)
 
   return {
     window,
     document,
     attached,
+    childFrames,
     visibilityEvents,
     Media: FakeMediaElement,
+    Iframe: FakeIframe,
+    Element: FakeElement,
+    source,
+    // The same script reaching this document a second time.
+    reinstall() { runInContext(source, context) },
+    // Run code inside the frame, stopped if it blocks for longer than timeout.
+    run(code, globals, timeout) {
+      Object.assign(context, globals)
+      return runInContext(code, context, { timeout })
+    },
+    // One browser frame: every callback the browser was given runs once.
+    paint() {
+      const due = [...nativeFrames.values()]
+      nativeFrames.clear()
+      due.forEach((callback) => callback(0))
+      return due.length
+    },
+    childLoaded(element) { captureListeners.get('load')({ target: element }) },
     setNativeVisibility(value) { nativeVisibility = value },
     shell(data, origin = SHELL_ORIGIN, eventSource = parent) {
       messageListener({ source: eventSource, origin, data: { type: 'moebius:frame-visibility', ...data } })
+    },
+    // Load this document into a child iframe of `host`, as the browser would.
+    nestIn(host, iframe) {
+      iframe.contentWindow.postMessage = (data) => messageListener({ source: parent, origin: SHELL_ORIGIN, data })
+      host.childFrames.push(iframe)
     },
     // The browser begins playback on its own (autoplay, or a clip that was
     // still loading): it starts playing, then dispatches a capture-phase play
@@ -527,4 +575,231 @@ test('an element the app removes while hidden is not restarted on return', async
   app.shell({ visible: true })
   await settle()
   assert.equal(clip.paused, true, 'a once-attached, now-detached element is left paused')
+})
+
+test('a hidden app keeps its animation frames for its return, as a really hidden page does', () => {
+  const app = bootFrame()
+  const ran = []
+  app.window.requestAnimationFrame(() => ran.push('before'))
+  app.shell({ visible: false })
+  app.window.requestAnimationFrame(() => ran.push('held'))
+  const cancelled = app.window.requestAnimationFrame(() => ran.push('cancelled'))
+  app.window.cancelAnimationFrame(cancelled)
+  assert.equal(app.paint(), 1, 'only the frame requested before the hide reaches the browser')
+  assert.deepEqual(ran, ['before'])
+
+  app.shell({ visible: true })
+  app.paint()
+  assert.deepEqual(ran, ['before', 'held'])
+})
+
+test('a held frame stays cancellable while held and after return, until it runs', () => {
+  const app = bootFrame()
+  const ran = []
+  app.shell({ visible: false })
+  const whileHeld = app.window.requestAnimationFrame(() => ran.push('while held'))
+  const afterReturn = app.window.requestAnimationFrame(() => ran.push('after return'))
+  app.window.requestAnimationFrame(() => ran.push('kept'))
+  app.window.cancelAnimationFrame(whileHeld)
+  app.shell({ visible: true })
+  app.window.cancelAnimationFrame(afterReturn)
+  assert.equal(app.paint(), 1)
+  assert.deepEqual(ran, ['kept'])
+})
+
+test('a held frame runs with the same receiver as one the browser runs directly', () => {
+  const app = bootFrame()
+  const receivers = []
+  // Sloppy-mode callbacks, as most app loops are written, so `this` is observable.
+  const record = runInNewContext('(function (sink) { return function () { sink.push(this) } })')(receivers)
+  app.window.requestAnimationFrame(record)
+  app.paint()
+  app.shell({ visible: false })
+  app.window.requestAnimationFrame(record)
+  app.shell({ visible: true })
+  app.paint()
+  assert.equal(receivers.length, 2)
+  assert.equal(receivers[1], receivers[0], 'releasing a held frame does not change what `this` is')
+})
+
+test('platform painting keeps running while the app is held', () => {
+  const app = bootFrame()
+  app.shell({ visible: false })
+  let painted = false
+  app.window.__mobiusNativeFrame(() => { painted = true })
+  app.paint()
+  assert.equal(painted, true)
+})
+
+test('the drawer holds an app beneath it without calling a painted page hidden', async () => {
+  const app = bootFrame()
+  const music = new app.window.AudioContext()
+  const loop = []
+  app.shell({ visible: true, covered: true })
+  app.window.requestAnimationFrame(() => loop.push('frame'))
+  await settle()
+  assert.equal(music.state, 'suspended', 'the sound stops as soon as the owner reaches for the drawer')
+  assert.equal(app.paint(), 0, 'the frame loop stops competing with the drawer')
+  assert.equal(app.document.hidden, false)
+  assert.deepEqual(app.visibilityEvents, [])
+
+  app.shell({ visible: true, covered: false })
+  await settle()
+  app.paint()
+  assert.equal(music.state, 'running', 'closing the drawer picks the app back up')
+  assert.deepEqual(loop, ['frame'])
+})
+
+test('leaving through the drawer keeps the app held and now reads as hidden', async () => {
+  const app = bootFrame()
+  const music = new app.window.AudioContext()
+  app.shell({ visible: true, covered: true })
+  app.shell({ visible: false })
+  await settle()
+  assert.equal(music.state, 'suspended')
+  assert.equal(app.document.hidden, true)
+  assert.deepEqual(app.visibilityEvents, ['visibilitychange'])
+})
+
+test('deliberate background playback is not held beneath the drawer either', async () => {
+  const app = bootFrame()
+  const podcast = new app.window.AudioContext()
+  app.shell({ visible: true, covered: true, backgroundPlayback: true })
+  await settle()
+  assert.equal(podcast.state, 'running')
+})
+
+test('every nested document an app writes runs the pause first', () => {
+  const app = bootFrame()
+  const viaProperty = new app.Iframe()
+  viaProperty.srcdoc = '<!doctype html><html><body>game</body></html>'
+  assert.match(viaProperty.attributes.srcdoc, /^<!doctype html><script data-mobius-background-pause>/)
+  assert.ok(viaProperty.attributes.srcdoc.endsWith('</script><html><body>game</body></html>'))
+  assert.ok(viaProperty.attributes.srcdoc.includes(app.source), 'nested documents reach their own children the same way')
+
+  const viaAttribute = new app.Iframe()
+  viaAttribute.setAttribute('SRCDOC', '<p>game</p>')
+  assert.match(viaAttribute.attributes.SRCDOC, /^<script data-mobius-background-pause>/)
+  assert.ok(viaAttribute.attributes.SRCDOC.endsWith('</script><p>game</p>'))
+})
+
+test('a nested document keeps its rendering mode behind leading comments', () => {
+  const app = bootFrame()
+  const iframe = new app.Iframe()
+  iframe.srcdoc = '  <!-- built for play -->\n<!DOCTYPE html><p>game</p>'
+  assert.match(iframe.attributes.srcdoc, /^ {2}<!-- built for play -->\n<!DOCTYPE html><script data-mobius-background-pause>/)
+})
+
+test('a nested document behind many comments and no doctype is wrapped at once', () => {
+  const app = bootFrame()
+  const iframe = new app.Iframe()
+  const html = '<!-- part -->\n'.repeat(40) + '<p>game</p>'
+  app.run('iframe.srcdoc = html', { iframe, html }, 1000)
+  assert.match(iframe.attributes.srcdoc, /^<script data-mobius-background-pause>/)
+  assert.ok(iframe.attributes.srcdoc.endsWith('</script>' + html))
+})
+
+test('an app reads back the srcdoc it set, so setting it again installs the pause once', () => {
+  const app = bootFrame()
+  const html = '<!doctype html><p>game</p>'
+  const viaProperty = new app.Iframe()
+  viaProperty.srcdoc = html
+  assert.equal(viaProperty.srcdoc, html)
+  assert.equal(viaProperty.getAttribute('srcdoc'), html)
+  const written = viaProperty.attributes.srcdoc
+  const readBack = viaProperty.srcdoc
+  viaProperty.srcdoc = readBack
+  assert.equal(viaProperty.attributes.srcdoc, written)
+
+  const viaAttribute = new app.Iframe()
+  viaAttribute.setAttribute('srcdoc', html)
+  assert.equal(viaAttribute.srcdoc, html)
+  assert.equal(viaAttribute.getAttribute('srcdoc'), html)
+  viaAttribute.setAttribute('srcdoc', viaAttribute.getAttribute('srcdoc'))
+  assert.equal(viaAttribute.attributes.srcdoc, written)
+})
+
+test('the pause installs once in a document however often it arrives', () => {
+  const app = bootFrame()
+  app.reinstall()
+  const game = new app.Iframe()
+  app.childFrames.push(game)
+  app.shell({ visible: false })
+  assert.equal(game.posted.length, 1)
+  assert.deepEqual(app.visibilityEvents, ['visibilitychange'])
+})
+
+test('other attributes and other elements pass through untouched', () => {
+  const app = bootFrame()
+  const iframe = new app.Iframe()
+  iframe.setAttribute('title', 'game')
+  assert.equal(iframe.attributes.title, 'game')
+  const other = new app.Element()
+  other.setAttribute('srcdoc', 'text')
+  assert.equal(other.attributes.srcdoc, 'text')
+})
+
+test('the frame script can never end its own element early', () => {
+  // A literal comment-open followed by a script tag switches the HTML parser
+  // into double-escaped script text, where the real closing tag is ignored.
+  const source = frame.match(/<script data-mobius-background-pause>([\s\S]*?)<\/script>/)[1]
+  assert.doesNotMatch(source, /<!--/)
+  assert.doesNotMatch(source, /<script/i)
+})
+
+test('each verdict reaches child frames, and a child that loads later hears the last one', () => {
+  const app = bootFrame()
+  const game = new app.Iframe()
+  app.childFrames.push(game)
+  app.shell({ visible: false, covered: false, navigationReady: false })
+  app.shell({ visible: true, covered: true })
+  assert.deepEqual(game.posted.map(({ visible, covered }) => ({ visible, covered })), [
+    { visible: false, covered: false },
+    { visible: true, covered: true },
+  ])
+  assert.equal(game.posted[0].type, 'moebius:frame-visibility')
+  assert.equal('navigationReady' in game.posted[0], false, 'children hear only the lifecycle verdict')
+
+  const late = new app.Iframe()
+  app.childLoaded(late)
+  assert.deepEqual({ visible: late.posted[0].visible, covered: late.posted[0].covered }, { visible: true, covered: true })
+})
+
+test('a nested srcdoc document pauses on the verdict its parent forwards', async () => {
+  const app = bootFrame()
+  const game = bootFrame({ locationOrigin: 'null' })
+  game.nestIn(app, new app.Iframe())
+  const music = new game.window.AudioContext()
+  app.shell({ visible: true, covered: true })
+  await settle()
+  assert.equal(music.state, 'suspended')
+  app.shell({ visible: true, covered: false })
+  await settle()
+  assert.equal(music.state, 'running')
+})
+
+test('a sandboxed nested document trusts only the frame that embeds it', async () => {
+  const app = bootFrame()
+  const game = bootFrame({ locationOrigin: 'null', origin: 'null' })
+  game.nestIn(app, new app.Iframe())
+  const music = new game.window.AudioContext()
+  game.shell({ visible: false }, SHELL_ORIGIN, {})
+  await settle()
+  assert.equal(music.state, 'running')
+  app.shell({ visible: false })
+  await settle()
+  assert.equal(music.state, 'suspended')
+})
+
+test('a child frame that loads before any verdict is not told anything', () => {
+  const app = bootFrame()
+  const child = new app.Iframe()
+  app.childLoaded(child)
+  assert.deepEqual(child.posted, [])
+})
+
+test('the drawer holds the app from the opening tap, before its panel commits', () => {
+  assert.match(shell, /covered=\{modalDrawerOpen \|\| drawerOpening\}/)
+  assert.match(canvas, /type: 'moebius:frame-visibility',\s+visible,\s+covered,/)
+  assert.match(canvas, /\[frameVisible, covered, visible, active, swap\.liveVersion, swap\.liveLoaded\]/)
 })

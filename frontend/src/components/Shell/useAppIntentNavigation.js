@@ -13,6 +13,7 @@ export default function useAppIntentNavigation({
   notifyShell,
   setAppIntents,
   navToRef,
+  requestComposer,
 }) {
   const openAppWithIntent = useCallback(async (
     target,
@@ -45,7 +46,7 @@ export default function useAppIntentNavigation({
     })
   }, [refreshApps, notifyShell])
 
-  const handleChatInternalNav = useCallback((url) => {
+  const handleChatInternalNav = useCallback((url, composer) => {
     const app = url.searchParams.get('app')
     const chat = url.searchParams.get('chat')
     const intent = url.searchParams.get('intent')
@@ -56,8 +57,9 @@ export default function useAppIntentNavigation({
         requestChatQuestionReveal(chat, url.searchParams.get('question'))
       }
       navToRef.current('chat', { chatId: chat })
+      if (typeof composer?.draft === 'string') requestComposer(chat, { draft: composer.draft })
     }
-  }, [openAppWithIntent])
+  }, [openAppWithIntent, requestComposer])
 
   return { openAppWithIntent, handleChatInternalNav }
 }

@@ -151,6 +151,7 @@ export const coldRestoredCanvasAppId =
  *   replaceImplicitBootTab
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
+ *   beforeDrawerOpenRef   captures focus before the modal makes content inert.
  *   beforeRestoreRouteRef optional synchronous Back/Forward destination hook,
  *                       run after validation but before workspace mutation.
  *
@@ -169,6 +170,7 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
   beforeRestoreRouteRef,
+  beforeDrawerOpenRef,
   navigationStorage = localStore(),
   routePath = '/shell/',
 }) {
@@ -207,6 +209,9 @@ export default function useNavigation({
   // An explicit tap/swipe close can start the panel transition immediately
   // while drawerOpenRef remains true until Back consumes the drawer sentinel.
   const [drawerVisible, setDrawerVisible] = useState(false)
+  // Set from the opening tap until the drawer commits. An app under the opening
+  // drawer stops competing for the device at once, not two painted frames later.
+  const [drawerOpening, setDrawerOpening] = useState(false)
   // Android's embedded-surface hit-test map can lag the input that opens the
   // drawer. When opening over an app, wait through one painted frame before
   // exposing the scrim so that input/compositor ownership settles first. The
@@ -657,10 +662,12 @@ export default function useNavigation({
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
+      setDrawerOpening(true)
       drawerPrepareRafRef.current = requestAnimationFrame(() => {
         drawerPrepareRafRef.current = requestAnimationFrame(() => {
           drawerPrepareRafRef.current = 0
           drawerPreparingRef.current = false
+          setDrawerOpening(false)
           commitDrawerOpen()
         })
       })
@@ -676,6 +683,7 @@ export default function useNavigation({
       drawerPrepareRafRef.current = 0
     }
     drawerPreparingRef.current = false
+    setDrawerOpening(false)
     return true
   }
 
@@ -717,6 +725,7 @@ export default function useNavigation({
           closeTraversal.recovered = true
         }
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
         return
       }
@@ -748,6 +757,7 @@ export default function useNavigation({
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
     drawerOpenRef.current = true
+    beforeDrawerOpenRef?.current?.()
     setDrawerVisible(true)
   }
 
@@ -1657,6 +1667,7 @@ export default function useNavigation({
       if (destination?.kind === 'drawer') {
         drawerPushedRef.current = true
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
       } else {
         drawerPushedRef.current = false
@@ -2026,7 +2037,9 @@ export default function useNavigation({
           const consumeRecoveredClose = () => {
             settleRecoveredDrawerClose(destination, recoveredSource)
           }
-          if (e.canIntercept) e.intercept({ handler: consumeRecoveredClose })
+          if (e.canIntercept) {
+            e.intercept({ handler: consumeRecoveredClose, focusReset: 'manual' })
+          }
           else setTimeout(consumeRecoveredClose, 0)
           return
         }
@@ -2073,7 +2086,11 @@ export default function useNavigation({
           // slide); otherwise let the traversal commit and consume right
           // after — the drawer branch of handleBack keys on our own refs,
           // not on the destination.
-          if (e.canIntercept) e.intercept({ handler: consume })
+          // A tap, toggle, or swipe close has already handed focus back (to
+          // the restored composer or Drawer's previous target) before this
+          // traversal starts. The Navigation API's default focus reset would
+          // then move focus to <body> and drop a restored touch keyboard.
+          if (e.canIntercept) e.intercept({ handler: consume, focusReset: 'manual' })
           else setTimeout(consume, 0)
           return
         }
@@ -2325,6 +2342,7 @@ export default function useNavigation({
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
+    drawerOpening,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
