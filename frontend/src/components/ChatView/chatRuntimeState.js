@@ -6,7 +6,6 @@
 import { groupActivityRuns } from './activityGrouping.js'
 import { stripAugmentation } from './msgText.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
-import { isDurableRestartOffer } from './restartCard.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -48,8 +47,8 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - A saved window the owner already read presents at once, idle or
  *   mid-reply: reopening a chat should not wait on the network. It opens at
  *   the reader's saved coordinate; runtime truth and any live reply reconcile
- *   beneath it. Sending and answers wait for activation and Resume stays
- *   blocked until it settles; Stop acts at once.
+ *   beneath it. Controls that act on live state wait for it (see
+ *   liveControlsReady).
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -74,41 +73,25 @@ export function chatEntryFrame({
   return { showEmpty, showLoadError, displayReady }
 }
 
-/** Owns "is this chat ready to act" for an answer tapped on a saved frame
- * (a question answer or a durable Restart offer), the way a composer
- * submit waits for activation. `wait(phase, stillApplies)` resolves at once
- * for a chat already ready (true) or already failed (false: the tap reports
- * its own cancellation instead of hanging until some later recovery). A tap
- * made while activation is pending is held: it resolves false if activation
- * fails or the view leaves the chat, and once runtime truth arrives it
- * proceeds only if `stillApplies()` (read then, against live state) says the
- * control still has something to act on; a now-moot tap is dropped quietly. */
-export function createActivationGate() {
-  let waiting = []
-  return {
-    wait(phase, stillApplies = () => true) {
-      if (phase === 'ready') return Promise.resolve(true)
-      if (phase === 'error') return Promise.resolve(false)
-      return new Promise(resolve => waiting.push(ready => resolve(ready && !!stillApplies())))
-    },
-    settle(ready) {
-      const resolved = waiting
-      waiting = []
-      for (const resolve of resolved) resolve(ready)
-    },
-  }
+/** Which controls a chat frame may offer, by activation phase. A saved frame
+ * presents before runtime truth, so its liveness, queue and open cards are
+ * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
+ * activation to settle. Stop (`stop`), whose queue resend is a send, waits
+ * too, and stays available on a failed activation, where the frame may show a
+ * turn that is still running and Stop is the only way to end it. */
+export function liveControlsReady(activationPhase, activationSettled) {
+  return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
 }
 
-/** Whether an answer held behind activation still targets an open card once
- * runtime truth has arrived: the chat's live answerable question, or a
- * durable Restart offer still awaiting the owner. Anything else was answered
- * or closed meanwhile, so the held tap is moot. */
-export function heldAnswerStillOpen(questionId, { answerableQuestionId, messages = [], streamItems = [] }) {
-  if (!questionId) return false
-  if (questionId === answerableQuestionId) return true
-  const blocks = [...streamItems, ...messages.flatMap(message => message?.blocks || [])]
-  const block = blocks.find(item => item?.type === 'question' && item.question_id === questionId)
-  return !!block && !block.answers && isDurableRestartOffer(block.platform_action)
+const ANSWER_BEFORE_ACTIVATION = 'This chat is still loading. Your choice is still here — submit it again in a moment.'
+
+/** The refusal an answer tapped before activation settles reports on its own
+ * card. Shaped as a 409 so the card shows this detail and keeps the choice. */
+export function answerBeforeActivationError() {
+  return Object.assign(new Error(ANSWER_BEFORE_ACTIVATION), {
+    status: 409,
+    detail: ANSWER_BEFORE_ACTIVATION,
+  })
 }
 
 /** Display-only history of a pause that a later continuation resolved. It

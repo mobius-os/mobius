@@ -43,18 +43,6 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,[\s\S]*cachedFrame: \(initialEntryPhase === 'cached' \|\| initialEntryPhase === 'stream-catchup'\)\s*&& revealed,/,
     'a coordinate-validated cache, idle or mid-reply, presents before runtime confirmation (chatEntryFrame); an unvalidated frame waits, and Send stays blocked either way',
   )
-  assert.match(chatView,
-    /const awaitActivation = useCallback\(\(stillApplies\) => activationGate\.wait\(\s*activationSettledRef\.current \? 'ready' : activationPhaseRef\.current,\s*stillApplies,/,
-    'row controls wait on the current activation phase, so a tap after failure resolves at once')
-  assert.match(chatView,
-    /const doSendSilent = useCallback\(async \([\s\S]*?\) => \{\s*(?:\/\/[^\n]*\n\s*)*const stillOpen = \(\) => heldAnswerStillOpen\(questionId, \{\s*answerableQuestionId: answerableQuestionIdRef\.current,[\s\S]*?\}\)\s*if \(!await awaitActivation\(stillOpen\)\) return false/,
-    'an answer or Restart offer tapped on that early frame waits for activation, then only answers a still-open card')
-  assert.doesNotMatch(chatView,
-    /async function handleStop\(\) \{(?:(?!\n  \}\n)[\s\S])*?(?:awaitActivation|activationGate)/,
-    'Stop acts immediately from a saved frame: it is idempotent and the server decides whether anything runs')
-  assert.match(chatView,
-    /const resumeBlocked = useCallback\(\(\) => \(\s*!activationSettledRef\.current\s*\|\|/,
-    'transcript and Goal Resume never act on the saved recovery run or Goal revision')
   assert.match(
     chatView,
     /const \[activationState, setActivationState\] = useState\(\(\) => \(\{[\s\S]*phase: provisionalNewChat \? 'ready' : 'pending',[\s\S]*const activationPhase = activationState.chatId === activationIdentity[\s\S]*const activationSettled = provisionalNewChat \|\| activationPhase === 'ready'/,

@@ -49,8 +49,8 @@ import {
 import {
   activationRetryDelay,
   chatEntryFrame,
-  createActivationGate,
-  heldAnswerStillOpen,
+  liveControlsReady,
+  answerBeforeActivationError,
 } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
@@ -559,12 +559,10 @@ export default function ChatView({
   // chatEntryFrame); this activation's runtime/detail verdict reconciles
   // beneath it. The accepted trade-off: a chat saved idle may flip to running
   // as that verdict lands, and a chat deleted elsewhere shows briefly before
-  // its 404 redirects. Nothing that depends on the live question, offer or
-  // run acts on the saved liveness: question answers and durable Restart
-  // offers wait for the verdict (through activationGate), Send waits for it
-  // too, and transcript and Goal Resume stay blocked until activation
-  // settles. Stop acts immediately: it is idempotent and the server decides
-  // whether anything is running.
+  // its 404 redirects. Nothing acts on the saved liveness: Send, a reply's
+  // Try again, Stop (with its queue resend), question answers and Restart
+  // offers, and transcript and Goal Resume all wait for the verdict (see
+  // liveControlsReady). Stop also stays available on a failed activation.
   // One identity-bound phase owns activation. A retained ChatView can receive
   // another chat before its previous effect runs, so the phase is never read
   // across identities. Provisional chats are locally authoritative from birth;
@@ -595,19 +593,7 @@ export default function ChatView({
   // A failed activation keeps Send usable as its in-place recovery: the tap
   // retries activation and the draft stays. Nothing sends before it settles.
   const activationFailed = activationPhase === 'error'
-  const [activationGate] = useState(createActivationGate)
-  useEffect(() => {
-    if (activationSettled || activationFailed) activationGate.settle(activationSettled)
-  }, [activationGate, activationSettled, activationFailed])
-  useEffect(() => () => activationGate.settle(false), [activationGate, activationIdentity])
-  // An answer tapped on the saved frame waits here; `stillApplies` re-reads
-  // live state once runtime truth lands (see createActivationGate).
-  const awaitActivation = useCallback((stillApplies) => activationGate.wait(
-    activationSettledRef.current ? 'ready' : activationPhaseRef.current,
-    stillApplies,
-  ), [activationGate])
-  // Live mirror of answerableQuestionId (assigned where it is derived below).
-  const answerableQuestionIdRef = useRef(null)
+  const liveControls = liveControlsReady(activationPhase, activationSettled)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -3972,18 +3958,16 @@ export default function ChatView({
     questionId,
     questionSubmissionContext = null,
   ) => {
-    // A saved frame shows its open question (or Restart offer) before
-    // activation settles; hold the tap until then rather than dropping it, and
-    // drop it quietly if runtime truth shows that card already closed.
-    const stillOpen = () => heldAnswerStillOpen(questionId, {
-      answerableQuestionId: answerableQuestionIdRef.current,
-      messages: messagesRef.current,
-      streamItems: latestItemsRef.current,
-    })
-    if (!await awaitActivation(stillOpen)) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
+    }
+    // A saved frame shows its open card before runtime truth confirms it is
+    // still open. Refuse the tap on the card itself (choices stay) so the
+    // owner answers again once the chat is ready.
+    if (!activationSettledRef.current) {
+      cancelPreparedQuestion()
+      throw answerBeforeActivationError()
     }
     // Synchronous re-entrancy guard: flip BEFORE any other logic so a
     // second concurrent call (fast double-tap) bails immediately. This
@@ -4197,8 +4181,6 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
     }
   }, [
-    awaitActivation,
-    messagesRef,
     streamSend,
     cancelQuestionSubmission,
     commitMessages,
@@ -5593,7 +5575,6 @@ export default function ChatView({
   const answerableQuestionId = liveQuestionId
     || pendingStreamQuestion?.question_id
     || null
-  answerableQuestionIdRef.current = answerableQuestionId
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
@@ -6116,7 +6097,7 @@ export default function ChatView({
       metaVisible={last || visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={showMessageMeta}
       // A queued message is already the next turn; Try again would only queue behind it.
-      onTryAgain={last && !turnActive && !hasPendingQuestion
+      onTryAgain={last && liveControls.act && !turnActive && !hasPendingQuestion
         && pendingQueue.pendingMessages.length === 0 ? handleTryAgain : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
       sealedSteerAssistant={active ? sealedSteerAssistant : sealedAssistantBeforeSteer(messages, group.start)}
@@ -6578,7 +6559,9 @@ export default function ChatView({
             ? handleProvisionalNewChatSubmit
             : handleSubmitSteer}
           inputRef={inputRef}
-          sending={composerBusy}
+          // Stop shows only on runtime truth: before it, the slot keeps the
+          // disabled Send/mic, so a saved frame cannot stop or resend a queue.
+          sending={liveControls.stop && composerBusy}
           listening={listening}
           listeningRef={listeningRef}
           onManualVoiceEdit={acceptManualEdit}
@@ -6600,7 +6583,7 @@ export default function ChatView({
             || providerSwitching
             || !!newChatSession?.submitted
           }
-          questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
+          questionBlocked={liveControls.stop && hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}
           onAddFiles={uploadGate.addFiles}
           onRemoveFile={handleComposerRemoveFile}
