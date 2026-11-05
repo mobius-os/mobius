@@ -48,7 +48,7 @@ function ProjectChatRow({ chat, onOpen, onOpenMenu }) {
   )
 }
 
-function ProjectChatRename({ chat, onSubmit, onCancel }) {
+export function ProjectChatRename({ chat, onSubmit, onCancel }) {
   const inputRef = useRef(null)
   const settledRef = useRef(false)
 
@@ -80,6 +80,7 @@ function ProjectChatRename({ chat, onSubmit, onCancel }) {
         maxLength={drawerNameMaxLength('chat')}
         aria-label="Rename chat"
         onKeyDown={event => {
+          if (event.nativeEvent?.isComposing) return
           if (event.key === 'Enter') {
             event.preventDefault()
             settle(event.currentTarget.value)
