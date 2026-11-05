@@ -427,7 +427,7 @@
   margin-top: 0;
 }
 .qcard__q--missing .qcard__hint {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-weight: 600;
 }
 

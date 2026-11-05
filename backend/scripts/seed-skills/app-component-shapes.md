@@ -187,7 +187,7 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
   flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px;  /* 50% circle is an allowed variant */
   display: flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent); font-size: 16px; font-weight: 700; line-height: 1;
+  color: var(--accent-text, var(--accent)); font-size: 16px; font-weight: 700; line-height: 1;
 }
 .ma-brand-text { min-width: 0; line-height: 1.15; }
 .ma-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.015em; }
@@ -361,21 +361,23 @@ Static container cards drop the `button` pseudo-states + chevron. State
 .ma-btn:active { transform: scale(0.97); }
 .ma-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ma-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
-.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.ma-btn-primary:hover { filter: brightness(1.06); }
+.ma-btn-primary { background: var(--accent-fill, var(--accent)); border-color: transparent; color: var(--accent-fg); }
+.ma-btn-primary:hover { background: var(--accent-fill-hover, var(--accent-hover)); }
 .ma-btn-secondary { background: var(--surface-2, var(--surface)); }
 .ma-btn-secondary:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.ma-btn-ghost { background: transparent; border-color: transparent; color: var(--accent); }
+.ma-btn-ghost { background: transparent; border-color: transparent; color: var(--accent-text, var(--accent)); }
 .ma-btn-ghost:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.ma-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--accent-fg); }
+.ma-btn-danger { background: var(--danger-fill, var(--danger)); border-color: transparent; color: var(--accent-fg); }
 .ma-btn-icon { width: 44px; padding: 0; border-radius: 8px; font-size: 18px; }   /* icon-only → needs aria-label */
 /* /mobius-ui:Button */
 ```
 
-The highest-value shared shape. The fill foreground is `var(--accent-fg)` —
-the shell sets it to white for the default purple accent, and a custom theme
-that goes light should set `--accent-fg` to a dark value (this replaces the
-old per-app `color: <dark>` override; theme it once at the token, not per app).
+The highest-value shared shape. A filled button uses a fill role
+(`--accent-fill`, `--danger-fill`) labelled with `--accent-fg`, and ghost text
+uses `--accent-text`; Möbius derives these from the theme so every label keeps
+4.5:1, including on a custom light accent. Each falls back to its base colour
+for a theme that predates the roles. Theme the label once at the token, not
+with a per-app `color: <dark>` override.
 A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 
 ---
@@ -432,7 +434,7 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 }
 .ma-seg-btn:hover { color: var(--text); }
 .ma-seg-btn.is-active { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); }
-.ma-seg.is-accent .ma-seg-btn.is-active { background: var(--accent); color: var(--accent-fg); box-shadow: none; }
+.ma-seg.is-accent .ma-seg-btn.is-active { background: var(--accent-fill, var(--accent)); color: var(--accent-fg); box-shadow: none; }
 /* /mobius-ui:Segmented */
 ```
 
@@ -631,7 +633,7 @@ error/conflict the owner must act on (`.is-error`), plainly worded
   background: var(--surface); border: 1px solid var(--border); color: var(--muted);
   font-size: 11px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
 }
-.ma-sync-pill.is-error { border-color: var(--danger); color: var(--danger); }
+.ma-sync-pill.is-error { border-color: var(--danger); color: var(--danger-text, var(--danger)); }
 /* /mobius-ui:SyncPill */
 ```
 

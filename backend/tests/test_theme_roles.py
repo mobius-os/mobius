@@ -351,7 +351,9 @@ def test_parsed_channels_round_half_up_and_translucency_is_unsupported():
 #
 # Recorded exception, not a pass: truly disabled controls (`:disabled`, e.g.
 # .qcard__submit at opacity .4, .secure-card__submit at .55) are dimmed below
-# 4.5:1 on purpose; WCAG 1.4.3 exempts inactive components.
+# 4.5:1 on purpose; WCAG 1.4.3 exempts inactive components. An operable
+# control that only looks unavailable (.qcard__submit--incomplete) is not
+# exempt and is checked below.
 
 SRC = REPO / "frontend" / "src"
 
@@ -429,7 +431,12 @@ def _composed_states():
   nudge = _rule("components/ChatView/ChatView.css", ".chat__question-nudge,\n.chat__resume-nudge")
   receipt = _rule("components/ChatView/SecureInputCard.css", ".secure-card__receipt")
   reveal = _rule("components/ChatView/SecureInputCard.css", ".secure-card--reveal .secure-card__receipt")
+  qcard = _rule("components/ChatView/QuestionCard.css", ".qcard")
   submit = _rule("components/ChatView/QuestionCard.css", ".qcard__submit")
+  incomplete = _rule("components/ChatView/QuestionCard.css", ".qcard__submit--incomplete")
+  action = _rule("components/ChatView/markdown/AppBlock.css", ".md-app-block__action")
+  primary = _rule("components/Drawer/UninstalledApps.css", ".uninstalled-popover__btn--primary")
+  pressed = _rule("components/ChatView/markdown/AppBlock.css", '.md-app-block__action[aria-pressed="true"]')
   # (label, text colour expr, background expr, backdrop expr)
   return [
     ("active drawer row", _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "color"),
@@ -447,6 +454,18 @@ def _composed_states():
     ("question submit hover", _prop(submit, "color"),
      _prop(_rule("components/ChatView/QuestionCard.css",
                  ".qcard__submit:hover:not(:disabled):not(.qcard__submit--incomplete)"), "background"),
+     "var(--surface)"),
+    ("incomplete question submit", _prop(incomplete, "color"), _prop(incomplete, "background"),
+     _prop(qcard, "background")),
+    ("app-block action", _prop(action, "color"), _prop(action, "background"), "var(--bg)"),
+    ("app-block action hover", _prop(action, "color"),
+     _prop(_rule("components/ChatView/markdown/AppBlock.css", ".md-app-block__action:hover"), "background"),
+     "var(--bg)"),
+    ("pressed app-block action", _prop(pressed, "color"), _prop(pressed, "background"), "var(--bg)"),
+    ("uninstalled app primary", _prop(primary, "color"), _prop(primary, "background"), "var(--surface)"),
+    ("uninstalled app primary hover", _prop(primary, "color"),
+     _prop(_rule("components/Drawer/UninstalledApps.css",
+                 ".uninstalled-popover__btn--primary:hover:not(:disabled)"), "background"),
      "var(--surface)"),
   ]
 

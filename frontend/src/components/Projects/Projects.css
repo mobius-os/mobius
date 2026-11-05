@@ -558,7 +558,7 @@
 .project-chats__row > span { min-width: 0; display: grid; gap: 1px; }
 .project-chats__row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
 .project-chats__row small { color: var(--muted); font-size: 10px; }
-.project-chats__row small.project-chats__status--working { color: var(--accent); }
+.project-chats__row small.project-chats__status--working { color: var(--accent-text, var(--accent)); }
 .project-chats__row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .project-finder__conflict {

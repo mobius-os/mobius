@@ -25,7 +25,7 @@
 .urm__technical summary { color: var(--text); cursor: pointer; min-height: 44px; align-content: center; }
 .urm__retired ul, .urm__technical ul { padding-left: 20px; margin: 8px 0 18px; }
 .urm__retired li, .urm__technical li { margin: 6px 0; }
-.urm__retired a { color: var(--accent); }
+.urm__retired a { color: var(--accent-text, var(--accent)); }
 .urm__sha { font-family: var(--mono); font-size: 12px; }
 .urm__notice { margin: 0; color: var(--text); }
 .urm__notice strong { display: block; margin-bottom: 8px; }
