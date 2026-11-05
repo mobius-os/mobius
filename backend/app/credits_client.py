@@ -14,9 +14,13 @@ the same reason.
 The installation key (``mbc_…``) belongs to the installation, not to an app,
 like every account credential Möbius · You holds: it stays in the Möbius
 backend, and an app receives only its ordinary app token. It lives in
-``<data_dir>/credits-client/credentials.json``, mode 0600, outside every
-storage route an app frame can read, and sealed with the installation secret
-like the identity link's secrets. The ``spend_credits`` gate and an app's
+``<data_dir>/credits-client/credentials.json``, mode 0600, a folder the file
+API (``routes/fs.py``) refuses to every caller, backups keep with the other
+secrets, and the ``/data`` safety repository ignores. The service address is
+sealed together with the key under the installation secret, so whoever can
+rewrite the file still cannot point the key at another address: a file that
+does not open under this installation's secret reads as unpaired. The
+``spend_credits`` gate and an app's
 ``max_price_micro`` hold for honest app code; an app service runs as an
 ordinary process on this machine, so they are not a boundary against a
 hostile one, which is why that grant is critical at install.
@@ -70,36 +74,34 @@ def _credentials_path() -> Path:
 
 
 def _fernet() -> Fernet:
-  material = f"mobius-credits-key-v1:{get_settings().secret_key}".encode()
+  material = f"mobius-credits-sealed-pairing-v1:{get_settings().secret_key}".encode()
   return Fernet(base64.urlsafe_b64encode(hashlib.sha256(material).digest()))
 
 
 def load_credentials() -> dict | None:
-  """The paired service, its key, and an id for this pairing; None if unpaired."""
+  """The paired service, its key, and an id for this pairing; None if unpaired.
+
+  Only the sealed pairing is trusted. The address is read from inside it, never
+  from beside it, so a file whose address was swapped, or that does not open
+  under this installation's secret, never sends the key anywhere.
+  """
   try:
     stored = json.loads(_credentials_path().read_text())
   except (OSError, ValueError):
     return None
-  if not isinstance(stored, dict):
-    return None
-  url, sealed = stored.get("operator_url"), stored.get("sealed_key")
-  if not isinstance(url, str) or not url:
-    return None
-  legacy = stored.get("key")
-  if sealed is None and isinstance(legacy, str) and legacy.startswith(KEY_PREFIX):
-    # Earlier builds stored the key unsealed. Seal it in place so an
-    # installation paired before the upgrade stays paired.
-    try:
-      _save_credentials(url, legacy)
-    except OSError:
-      pass  # Still usable this time; sealing is retried on the next read.
-    return _credentials(url, legacy)
-  if not isinstance(sealed, str) or not sealed:
+  sealed = stored.get("sealed") if isinstance(stored, dict) else None
+  if not isinstance(sealed, str):
     return None
   try:
-    key = _fernet().decrypt(sealed.encode()).decode()
+    pairing = json.loads(_fernet().decrypt(sealed.encode()))
   except (InvalidToken, ValueError):
-    # Sealed under another installation secret: connect again.
+    # Tampered with, or sealed under another installation secret: connect again.
+    return None
+  if not isinstance(pairing, dict):
+    return None
+  url, key = pairing.get("operator_url"), pairing.get("key")
+  if not isinstance(url, str) or not url or not isinstance(key, str) \
+      or not key.startswith(KEY_PREFIX):
     return None
   return _credentials(url, key)
 
@@ -124,10 +126,9 @@ def _save_credentials(operator_url: str, key: str) -> None:
     dir=path.parent, prefix=".credentials-", suffix=".tmp")
   try:
     with os.fdopen(descriptor, "w") as handle:
-      handle.write(json.dumps({
-        "operator_url": operator_url,
-        "sealed_key": _fernet().encrypt(key.encode()).decode(),
-      }))
+      sealed = _fernet().encrypt(
+        json.dumps({"operator_url": operator_url, "key": key}).encode())
+      handle.write(json.dumps({"sealed": sealed.decode()}))
     os.replace(temporary, path)
   except BaseException:
     Path(temporary).unlink(missing_ok=True)
@@ -140,9 +141,19 @@ def normalise_service_url(value: str) -> str:
     raise CreditsUnavailable("Enter the address of the credits service.", status=422)
   if "://" not in text:
     text = f"https://{text}"
-  parts = urlsplit(text)
-  if parts.scheme not in ("http", "https") or not parts.hostname:
+  try:
+    parts = urlsplit(text)
+    _ = parts.port  # urlsplit checks the port only when it is read
+  except ValueError:  # a port that is not a number, or an unclosed bracket
+    parts = None
+  if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
     raise CreditsUnavailable("That does not look like a web address.", status=422)
+  if parts.username is not None or parts.password is not None:
+    # The key is the only credential this address is used with; a name or
+    # password in it would be sent to the service with every read.
+    raise CreditsUnavailable(
+      "Leave the user name and password out of the credits service address.",
+      status=422)
   if parts.scheme == "http" and parts.hostname not in ("127.0.0.1", "localhost", "::1"):
     # A mistyped scheme would otherwise put a live key on the wire in clear
     # text on every read.
@@ -168,6 +179,8 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
       headers={"Authorization": f"Bearer {credentials['key']}"},
       follow_redirects=False,
     )
+  except httpx.InvalidURL as error:
+    raise CreditsUnavailable("That does not look like a web address.", status=422) from error
   except httpx.HTTPError as error:
     host = urlsplit(credentials["operator_url"]).hostname
     raise CreditsUnavailable(f"Could not reach {host}.", status=503) from error

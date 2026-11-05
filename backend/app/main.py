@@ -96,6 +96,7 @@ from app.routes import (
   github_access_router,
   reviewer_router,
   identity_router,
+  credits_router,
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
@@ -1080,6 +1081,7 @@ app.include_router(github_access_router)
 app.include_router(reviewer_router)
 app.include_router(contribution_reviews_router)
 app.include_router(identity_router)
+app.include_router(credits_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)

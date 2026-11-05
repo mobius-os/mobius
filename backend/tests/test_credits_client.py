@@ -1,13 +1,16 @@
 """A Möbius paired with a credits service: pairing, reads, and app charges."""
 
+import json
+
 import httpx
 import pytest
 from fastapi import HTTPException
 
 from app import credits_client, deps, models
-from app.auth import create_app_token
-from app.browser_access import BrowserLineage
+from app.auth import create_access_token, create_agent_token, create_app_token
+from app.browser_access import BrowserLineage, redeem_invitation
 from app.config import get_settings
+from tests.browser_access_fixtures import link_grant
 
 
 class FakeService:
@@ -81,6 +84,7 @@ def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
   stored = tmp_path / "credits-client" / "credentials.json"
   assert stored.stat().st_mode & 0o777 == 0o600
   assert "mbc_example_key" not in stored.read_text()
+  assert "mobius.you" not in stored.read_text()
   assert [p.name for p in stored.parent.iterdir()] == ["credentials.json"]
   assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
 
@@ -109,19 +113,61 @@ def test_an_address_without_a_credits_service_is_a_bad_gateway(client, auth, ser
   assert refused.status_code == 502 and refused.json()["detail"]["code"] == "not_found"
 
 
-def test_a_key_stored_unsealed_by_an_earlier_build_stays_paired_and_is_sealed(
-  service, tmp_path
+def _attacker_rewrites(stored, **fields):
+  """What an app able to write the file could do: keep what it cannot forge
+  (the sealed part) and change the rest."""
+  stored.write_text(json.dumps({**json.loads(stored.read_text()), **fields}))
+
+
+ATTACKER = "https://collector.attacker.example"
+
+
+def _the_key_went_only_to_the_paired_service(service):
+  assert service.calls
+  for call in service.calls:
+    assert call["url"].startswith("https://www.mobius.you/credits/"), call["url"]
+
+
+def test_a_credentials_file_pointed_at_another_address_never_sends_the_key_there(
+  client, auth, paired, tmp_path
 ):
   stored = tmp_path / "credits-client" / "credentials.json"
-  stored.parent.mkdir()
-  stored.write_text('{"operator_url": "https://www.mobius.you/credits", '
-                    '"key": "mbc_from_an_earlier_build"}')
-  assert credits_client.load_credentials()["key"] == "mbc_from_an_earlier_build"
-  assert "mbc_from_an_earlier_build" not in stored.read_text()
-  assert "sealed_key" in stored.read_text()
-  assert stored.stat().st_mode & 0o777 == 0o600
-  assert credits_client.load_credentials()["key"] == "mbc_from_an_earlier_build"
-  assert credits_client.summary()["mode"] == "customer"
+  _attacker_rewrites(stored, operator_url=ATTACKER, service_url=ATTACKER)
+  paired.calls.clear()
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["service_host"] == "www.mobius.you"
+  _the_key_went_only_to_the_paired_service(paired)
+
+
+def _key_sealed_beside_a_clear_address(_current):
+  sealed_key = credits_client._fernet().encrypt(b"mbc_example_key").decode()
+  return {"operator_url": ATTACKER, "sealed_key": sealed_key}
+
+
+def _key_in_the_clear(_current):
+  return {"operator_url": ATTACKER, "key": "mbc_example_key"}
+
+
+def _sealed_pairing_altered(current):
+  sealed = current["sealed"]
+  middle = len(sealed) // 2
+  changed = "A" if sealed[middle] != "A" else "B"
+  return {"sealed": sealed[:middle] + changed + sealed[middle + 1:]}
+
+
+@pytest.mark.parametrize("tamper", [
+  _key_sealed_beside_a_clear_address, _key_in_the_clear, _sealed_pairing_altered,
+])
+def test_a_credentials_file_this_installation_did_not_seal_reads_as_unpaired(
+  client, auth, paired, tmp_path, tamper
+):
+  stored = tmp_path / "credits-client" / "credentials.json"
+  stored.write_text(json.dumps(tamper(json.loads(stored.read_text()))))
+  paired.calls.clear()
+  assert credits_client.load_credentials() is None
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "unpaired"
+  assert client.post("/api/identity/credits/withdraw", headers=auth).status_code == 409
+  assert not paired.calls
 
 
 def test_a_key_sealed_under_another_installation_secret_reads_as_unpaired(
@@ -160,11 +206,28 @@ def test_overlapping_pairings_never_share_a_temporary_file(service, tmp_path, mo
 @pytest.mark.parametrize(("url", "key"), [
   ("https://www.mobius.you/credits", "sk_live_wrong_shape"),
   ("http://credits.example", "mbc_example_key"),
+  ("https://credits.example:abc", "mbc_example_key"),
+  ("https://credits.example:99999", "mbc_example_key"),
+  ("https://[credits.example", "mbc_example_key"),
+  ("https://name:secret@credits.example", "mbc_example_key"),
+  ("https://name@credits.example", "mbc_example_key"),
 ])
 def test_pairing_refuses_a_wrong_key_or_plain_http(client, auth, service, url, key):
   refused = client.post("/api/identity/credits/pair",
                         json={"operator_url": url, "key": key}, headers=auth)
   assert refused.status_code == 422 and not service.calls
+
+
+def test_an_address_the_http_client_cannot_use_is_refused_not_a_crash(
+  client, auth, service, monkeypatch
+):
+  def invalid(*_args, **_kwargs):
+    raise httpx.InvalidURL("Invalid port")
+
+  monkeypatch.setattr(credits_client.httpx, "request", invalid)
+  refused = client.post("/api/identity/credits/pair", headers=auth, json={
+    "operator_url": "https://credits.example", "key": "mbc_example_key"})
+  assert refused.status_code == 422, refused.text
 
 
 def test_summary_passes_the_service_payout_fields_through(client, auth, paired):
@@ -303,21 +366,6 @@ def test_an_app_pays_only_the_sellers_its_grant_lists(client, auth, db, paired):
   assert len(paired.calls) == calls
 
 
-def test_a_shared_browser_guest_cannot_read_the_owners_balance_or_history(db):
-  from app.routes import identity
-  owner = db.query(models.Owner).first()
-  guest = deps.Principal(owner=owner, app_id=None, browser=BrowserLineage("grant-1"))
-  with pytest.raises(HTTPException) as refused:
-    identity._refuse_shared_browser_guest(principal=guest)
-  assert refused.value.status_code == 403
-  private = {"/credits", "/credits/transactions", "/credits/topups/{topup_id}"}
-  routes = {route.path.removeprefix(identity.router.prefix): route
-            for route in identity.router.routes if hasattr(route, "dependant")}
-  for path in private:
-    calls = [dep.call for dep in routes[path].dependant.dependencies]
-    assert identity._refuse_shared_browser_guest in calls, path
-
-
 def test_an_app_that_spends_credits_can_read_the_price_it_pays(client, auth, db, paired):
   granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
   path = "/api/identity/credits/prices/ana?app_slug=prompts"
@@ -429,6 +477,90 @@ def test_an_app_approved_to_manage_credits_reaches_them(
       continue  # Their answers depend on the service's page; covered above.
     answer = client.request(method, path, json=body, headers=headers)
     assert answer.status_code == 200, (path, answer.text)
+
+
+# Moving money is an installation-owner control; seeing it is the owner's own.
+OWNER_ACTION_ROUTES = [route for route in OWNER_CREDIT_ROUTES if route[0] != "GET"]
+OWNER_PRIVATE_ROUTES = [
+  route for route in OWNER_CREDIT_ROUTES if not route[1].endswith("/prices/ana")]
+
+
+def _guest_lineage(db):
+  owner = db.query(models.Owner).first()
+  grant, invitation = link_grant(db, owner, "Guest")
+  _secret, session, _grant, _owner = redeem_invitation(db, invitation)
+  return BrowserLineage(grant.id, session.id)
+
+
+def _guest(db, app=None):
+  """A shared-browser guest's bearer, or the bearer of an app it opened."""
+  owner = db.query(models.Owner).first()
+  lineage = _guest_lineage(db)
+  if app is None:
+    token = create_access_token(
+      {"sub": owner.username}, token_epoch=owner.token_epoch, browser=lineage)
+  else:
+    token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
+                             browser=lineage)
+  return {"Authorization": f"Bearer {token}"}
+
+
+def _delegated_helper(db, app=None):
+  """A delegated helper's bearer, or the bearer of an app it opened."""
+  owner = db.query(models.Owner).first()
+  helper = {"delegation_id": "credits-helper", "delegation_chat": "credits-helper-chat"}
+  if app is None:
+    token = create_agent_token("credits-helper-chat", owner.username, owner.token_epoch,
+                               **helper)
+  else:
+    token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
+                             **helper)
+  return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize("through_app", [False, True], ids=["owner-bearer", "credits-app"])
+def test_a_delegated_helper_cannot_move_the_owners_credits(
+  client, auth, db, paired, through_app
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _delegated_helper(db, app if through_app else None)
+  # It acts with its parent's tools, so it can still read the balance.
+  assert client.get("/api/identity/credits", headers=headers).status_code == 200
+  calls = len(paired.calls)
+  for method, path, body in OWNER_ACTION_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("through_app", [False, True], ids=["owner-bearer", "credits-app"])
+def test_a_shared_browser_guest_cannot_see_or_move_the_owners_credits(
+  client, auth, db, paired, through_app
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _guest(db, app if through_app else None)
+  calls = len(paired.calls)
+  for method, path, body in OWNER_PRIVATE_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+  # The same bearer is otherwise live: the refusal is the credits rule.
+  assert client.get("/api/identity/credits/prices/ana", headers=headers).status_code == 200
+
+
+def test_every_credits_route_has_exactly_one_gate():
+  """A route added without its gate would be open to every app; one with two
+  gates would mean one of them is not saying the whole rule."""
+  from app.routes import credits
+  gates = {deps.get_credits_reader, deps.get_credits_controller,
+           deps.get_credits_spender, deps.get_credits_price_reader}
+  routes = [route for route in credits.router.routes if hasattr(route, "dependant")]
+  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 1  # and the app charge
+  for route in routes:
+    used = {dep.call for dep in route.dependant.dependencies} & gates
+    assert len(used) == 1, (route.path, used)
 
 
 # --- One app's idempotency key never replays another's ---------------------------

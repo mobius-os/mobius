@@ -341,6 +341,51 @@ def test_contribution_runtime_is_denied_to_privileged_filesystem_api(
     assert not (private_file.parent / "new-receipt.json").exists()
 
 
+def test_the_paired_credits_key_is_out_of_reach_of_the_filesystem_api(
+  client, auth, owner_token, db, fsroot,
+):
+  """An app with filesystem access must not read, swap or remove the credits
+  key: rewriting the file is how it would point the key at another address."""
+  root, work, made = fsroot
+  app_auth, _ = _app_auth(db, filesystem_access=True)
+  folder = root / "credits-client"
+  existed = folder.exists()
+  folder.mkdir(exist_ok=True)
+  if not existed:
+    made.append(folder)
+  stored = folder / "credentials.json"
+  original = '{"sealed": "stand-in"}'
+  if not stored.exists():
+    stored.write_text(original)
+  original = stored.read_text()
+  alias = work / "credits-alias"
+  alias.symlink_to(folder, target_is_directory=True)
+  alias_dir = alias.relative_to(root).as_posix()
+
+  for headers in (auth, app_auth):
+    root_tree = client.get("/api/fs/tree", headers=headers)
+    assert root_tree.status_code == 200, root_tree.text
+    assert "credits-client" not in {e["name"] for e in root_tree.json()["entries"]}
+    assert "credits-client" in root_tree.json()["redacted"]
+    for directory in ("credits-client", "/credits-client", "./credits-client", alias_dir):
+      for route in ("/api/fs/tree", "/api/fs/du", "/api/fs/git"):
+        assert client.get(route, params={"path": directory},
+                          headers=headers).status_code == 403, (route, directory)
+    for path in ("credits-client/credentials.json", "/credits-client/credentials.json",
+                 f"{alias_dir}/credentials.json", "credits-client/new.json"):
+      assert client.get("/api/fs/read", params={"path": path},
+                        headers=headers).status_code == 403, path
+      assert client.put(
+        "/api/fs/write", params={"path": path},
+        content='{"operator_url": "https://attacker.example"}',
+        headers={**headers, "Content-Type": "text/plain"},
+      ).status_code == 403, path
+      assert client.delete("/api/fs/delete", params={"path": path},
+                           headers=headers).status_code == 403, path
+  assert stored.read_text() == original
+  assert [p.name for p in folder.iterdir()] == ["credentials.json"]
+
+
 @pytest.mark.parametrize("rel", [
   "push/private_key.pem",
   "shared/connect/outbound/config.json",

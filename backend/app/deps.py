@@ -1348,28 +1348,52 @@ def get_owner_or_app_with_location_history_read(
   )
 
 
-def get_owner_or_app_with_credits_manage(
+def get_credits_reader(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app with the reviewed credits-management grant.
+  """Who may see the owner's credits: the balance, earnings and history.
 
-  The owner's credits are money at the paired credits service: the balance,
-  earnings and history are private financial information, and the routes behind
-  this gate buy, spend, publish prices and move earnings. That is its own
+  The owner, or an app holding the reviewed ``credits_manage`` grant; never a
+  shared-browser guest or work a guest started, since these are the
+  installation owner's private finances. Every credits route that reads the
+  owner's account uses this or ``get_credits_controller``, so the grant and the
+  guest refusal cannot be applied one without the other.
+  """
+  if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can see their credits.")
+  return _require_credits_manage(principal, db)
+
+
+def get_credits_controller(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Who may move the owner's credits: pair, buy, fund, publish, withdraw.
+
+  As ``get_credits_reader``, and never a delegated helper either: these are
+  installation-owner controls (``require_installation_owner_control``).
+  """
+  require_installation_owner_control(principal)
+  return _require_credits_manage(principal, db)
+
+
+def _require_credits_manage(principal: Principal, db: Session) -> models.Owner:
+  """The owner, or an app whose accepted contract holds ``credits_manage``.
+
+  The owner's credits are money at the paired credits service. That is its own
   critical grant, never implied by ``identity_manage``, whose consent covers
   only the sign-in link. Like that grant it lives in the accepted capability
   contract, so an app version that stops declaring it loses access on the next
   request.
   """
-  owner = principal.owner
   if principal.app_id is None:
-    return owner
+    return principal.owner
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
   if _contract_data(app).get("credits_manage") is True:
-    return owner
+    return principal.owner
   raise HTTPException(
     status_code=403,
     detail=(

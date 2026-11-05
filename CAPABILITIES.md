@@ -96,7 +96,9 @@ or its slug for an owner-built app) as `buyer_app`. The service reads the
 published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
 price it showed the owner. Retrying the same idempotency key charges once;
 the key is scoped to the paying app before it reaches the service, so two apps
-that pick the same key never replay each other's charge.
+that pick the same key never replay each other's charge. A 503 means the
+service could not be reached or did not answer in time, so the charge may have
+been made: retry with the same idempotency key, never a new one.
 Refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
 `key_spend_cap`). A refused key answers 409 `key_refused` and an address that is

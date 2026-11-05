@@ -102,11 +102,13 @@ _DENY_RELPATHS = (
   ".storage-meta",
   ".contribution-runtime",
   # Credential stores: the Web Push signing key, encrypted app secrets, the
-  # identity broker, the agent's signed-in browser sessions, and Connect
-  # runner tokens / pairing codes.
+  # identity broker, the paired credits service's key (credits_client.py),
+  # the agent's signed-in browser sessions, and Connect runner tokens /
+  # pairing codes.
   "push/private_key.pem",
   "app-secrets",
   "identity-broker",
+  "credits-client",
   "agent-browser-profiles",
   "shared/connect",
 )
