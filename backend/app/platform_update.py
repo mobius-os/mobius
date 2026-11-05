@@ -83,7 +83,7 @@ except ImportError:  # only a transitive dependency; pip vendors the same librar
   from pip._vendor.packaging.version import InvalidVersion, Version
 
 from app import (
-  app_git, local_change_tests, platform_activation, removed_references, restart_ledger,
+  app_git, local_change_tests, platform_activation, removed_references,
   runtime_provenance,
 )
 from app.platform_activation import PlatformActivationImpact
@@ -3752,6 +3752,15 @@ def late_edits_pending() -> bool:
   )
 
 
+def _current_boot_id() -> str:
+  """This server process's boot identity (``restart_ledger.current_boot_id``).
+
+  Read directly: this module runs in the baked boot step, whose closure must
+  not grow to include the restart ledger.
+  """
+  return os.environ.get("MOBIUS_BOOT_ID", "")
+
+
 def _serves_replayed(record: PreparedUpdate, repo: Path = PLATFORM_REPO) -> bool:
   """Whether this server imported the merged-back late edits (or newer):
   it serves them and started after they merged back."""
@@ -3759,7 +3768,7 @@ def _serves_replayed(record: PreparedUpdate, repo: Path = PLATFORM_REPO) -> bool
   return bool(record["replayed"] and served and (
     served == record["replayed"]
     or _is_ancestor(repo, record["replayed"], served)
-  ) and record["replayed_boot"] != restart_ledger.current_boot_id())
+  ) and record["replayed_boot"] != _current_boot_id())
 
 
 def _swap_position(repo: Path, record: PreparedUpdate, head: str) -> str:
@@ -4575,7 +4584,7 @@ def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
       # loads them. The record stays, so the next boot can still return a
       # tree that cannot start to the saved previous state.
       outcome = _replay_late_edits(
-        repo, record, serving_boot=restart_ledger.current_boot_id(),
+        repo, record, serving_boot=_current_boot_id(),
       )
       if outcome == "replayed":
         _record_update_activation(
@@ -4910,7 +4919,7 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     if record is not None:
       _write_prepared_update(PreparedUpdate(**{
         **record, "replayed": head,
-        "replayed_boot": restart_ledger.current_boot_id(),
+        "replayed_boot": _current_boot_id(),
       }))
     return result.status
 
