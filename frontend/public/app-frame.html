@@ -240,11 +240,29 @@
            exactly what was paused or held resumes, never what the app paused
            itself. backgroundPlayback marks a document with an open media
            session: its deliberate playback continues (the drawer controls
-           it), though the page still honestly reads as hidden. Child frames
-           are separate documents and keep their own lifecycle. -->
+           it), though the page still honestly reads as hidden.
+
+           A game's frame loop is the heaviest work a phone runs, and same-
+           process frames keep receiving animation frames behind a hidden
+           ancestor. So a held document's requestAnimationFrame callbacks wait
+           for its return too, which is what a really hidden page gets.
+
+           covered:true means the owner opened the modal drawer over this app:
+           it is still painted, and honestly not hidden, but holding it now
+           gives the drawer the whole device and silences the app before the
+           owner picks a destination.
+
+           Child frames are separate documents, so this same script installs
+           itself first in every srcdoc the app sets, and each verdict is
+           forwarded to every child frame. A child loaded from a URL has no
+           script of ours; it can listen for the forwarded message. -->
       <script data-mobius-background-pause>(function () {
+  // A document reached twice (an app copying a page that already carries this
+  // script) keeps the first install.
+  if (window.__mobiusNativeFrame) return;
   var shellHidden = false;
   var holding = false;
+  var verdict = null;
   var heldContexts = new Set();
   // element -> wasConnected at the time it was held. release() resumes each
   // held element except one that was in the page when held and the app has
@@ -352,6 +370,81 @@
     return nativePause.apply(this, arguments);
   };
 
+  // Animation frames: held callbacks use negative ids, which the browser never
+  // issues. Platform code that must keep painting uses the native function.
+  var nativeFrame = window.requestAnimationFrame;
+  var nativeCancelFrame = window.cancelAnimationFrame;
+  var heldFrames = new Map();
+  var lastHeldFrame = 0;
+  window.__mobiusNativeFrame = function (callback) {
+    return nativeFrame.call(window, callback);
+  };
+  window.requestAnimationFrame = function (callback) {
+    if (!holding) return nativeFrame.call(window, callback);
+    lastHeldFrame -= 1;
+    heldFrames.set(lastHeldFrame, callback);
+    return lastHeldFrame;
+  };
+  // A held id stays cancellable after release(), until its callback runs.
+  var resumedFrames = new Map();
+  window.cancelAnimationFrame = function (id) {
+    heldFrames.delete(id);
+    nativeCancelFrame.call(window, resumedFrames.has(id) ? resumedFrames.get(id) : id);
+    resumedFrames.delete(id);
+  };
+
+  // Nested documents. The tag is assembled so this inline script never contains
+  // a literal opening comment or script tag: the HTML parser would read that as
+  // escaped script text and miss the real end of this element.
+  var pauseTag = '<scr' + 'ipt data-mobius-background-pause>'
+    + document.currentScript.textContent + '</scr' + 'ipt>';
+  // A comment body never crosses its own end, so a run of comments with no
+  // doctype after it fails in linear time instead of backtracking.
+  var documentLead = new RegExp('^(?:\\s|<!' + '--(?:(?!--' + '>)[\\s\\S])*--' + '>)*<!doctype[^>]*>', 'i');
+  // After the doctype, so the nested page keeps its rendering mode.
+  function withPause(html) {
+    var text = String(html);
+    var lead = documentLead.exec(text);
+    var at = lead ? lead[0].length : 0;
+    return text.slice(0, at) + pauseTag + text.slice(at);
+  }
+  // The app reads back the srcdoc it set (the injected tag removed), so
+  // comparing or re-setting it neither reloads the child nor nests the script.
+  function readSrcdoc(value) {
+    var text = value == null ? value : String(value);
+    var at = text ? text.indexOf(pauseTag) : -1;
+    return at < 0 ? value : text.slice(0, at) + text.slice(at + pauseTag.length);
+  }
+  function isSrcdoc(element, name) {
+    return element instanceof HTMLIFrameElement && String(name).toLowerCase() === 'srcdoc';
+  }
+  var srcdocProperty = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc');
+  Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+    configurable: true,
+    enumerable: srcdocProperty.enumerable,
+    get: function () { return readSrcdoc(srcdocProperty.get.call(this)); },
+    set: function (html) { srcdocProperty.set.call(this, withPause(html)); }
+  });
+  // React and most authored code reach srcdoc through this path.
+  var nativeSetAttribute = Element.prototype.setAttribute;
+  var nativeGetAttribute = Element.prototype.getAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (!isSrcdoc(this, name)) return nativeSetAttribute.apply(this, arguments);
+    return nativeSetAttribute.call(this, name, withPause(value));
+  };
+  Element.prototype.getAttribute = function (name) {
+    var value = nativeGetAttribute.apply(this, arguments);
+    return isSrcdoc(this, name) ? readSrcdoc(value) : value;
+  };
+  function tellChild(frame) {
+    var child = frame.contentWindow;
+    if (child) child.postMessage(verdict, '*');
+  }
+  // A child that loads after a verdict has not heard it yet.
+  document.addEventListener('load', function (event) {
+    if (verdict && event.target instanceof HTMLIFrameElement) tellChild(event.target);
+  }, true);
+
   function eachLive(refs, callback) {
     refs.forEach(function (ref) {
       var value = ref.deref();
@@ -396,8 +489,20 @@
   function release() {
     var contexts = Array.from(heldContexts);
     var media = Array.from(heldMedia);
+    var frames = Array.from(heldFrames);
     heldContexts.clear();
     heldMedia.clear();
+    heldFrames.clear();
+    frames.forEach(function (entry) {
+      var id = entry[0];
+      var callback = entry[1];
+      resumedFrames.set(id, nativeFrame.call(window, function (time) {
+        resumedFrames.delete(id);
+        // A plain call, as the browser makes it, so the callback sees the same
+        // receiver whether or not it was held.
+        callback(time);
+      }));
+    });
     contexts.forEach(function (context) {
       if (context.state !== 'closed') contextApi(context).resume.call(context).catch(ignore);
     });
@@ -411,18 +516,30 @@
     });
   }
 
+  // The app frame's sandbox makes its window.origin opaque, but its URL names
+  // the shell's origin, which must have sent the verdict. A nested srcdoc
+  // document's URL has no origin ("null"), so it trusts only its embedder.
   window.addEventListener('message', function (event) {
-    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    if (event.source !== window.parent) return;
+    var expected = window.location.origin;
+    if (expected !== 'null' && event.origin !== expected) return;
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
     shellHidden = msg.visible === false;
-    var shouldHold = shellHidden && msg.backgroundPlayback !== true;
+    var shouldHold = (shellHidden || msg.covered === true) && msg.backgroundPlayback !== true;
     if (shouldHold && !holding) { holding = true; hold(); }
     else if (!shouldHold && holding) { holding = false; release(); }
     if (document.hidden !== wasHidden) {
       document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
     }
+    verdict = {
+      type: 'moebius:frame-visibility',
+      visible: msg.visible !== false,
+      covered: msg.covered === true,
+      backgroundPlayback: msg.backgroundPlayback === true
+    };
+    document.querySelectorAll('iframe').forEach(tellChild);
   });
 })();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
@@ -1309,7 +1426,7 @@
         element.scrollLeft = offset.left;
         element.scrollTop = offset.top;
       }
-      suspendedScrollFrame = requestAnimationFrame(holdSuspendedScroll);
+      suspendedScrollFrame = window.__mobiusNativeFrame(holdSuspendedScroll);
     }
 
     function setFrameInteractivity(interactive, suspendScrolling) {

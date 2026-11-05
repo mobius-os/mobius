@@ -15,13 +15,10 @@ import copy
 import concurrent.futures as _cf
 import functools
 import hashlib
-import itertools
 import json
 import logging
 import os
 import shutil
-import threading
-import tempfile
 import time
 import uuid
 from contextlib import suppress
@@ -67,9 +64,6 @@ _PROVIDER_USAGE_REFUSED_BACKOFF_SECONDS = 60.0
 # observed cold-read failure; Codex already owns a bounded protocol timeout and
 # Möbius can truthfully have no measurable balance yet.
 _CLAUDE_COLD_RETRY_DELAYS = (0.25, 0.75)
-# A staged restart reading older than this was abandoned by a crash before
-# os.replace; a live stage is published or unlinked within its own probe.
-_STAGED_READING_ABANDONED_SECONDS = 5 * 60.0
 
 # One browser query is shared across panes, but several browser sessions can
 # still open the same provider at once. Keep the external probe single-flight
@@ -88,14 +82,6 @@ class _CachedProviderUsage:
   consecutive_refusals: int = 0
 
 
-@dataclass
-class _ProviderUsagePublication:
-  latest_probe: int = 0
-  # Successful readings and sequential disconnects supersede older successes;
-  # an advisory failure alone cannot discard a concurrent successful reading.
-  authoritative_probe: int = 0
-
-
 class ProviderUsageRefused(RuntimeError):
   """The provider rate-limited the usage read itself (not the chat)."""
 
@@ -112,28 +98,21 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
   return value if value > 0 else None
 
 
+# Readers and invalidators all run on the server's one event loop: the
+# asyncio lock coalesces probes, and the generation fences an invalidation
+# that lands while a probe awaits. Nothing here is shared with other threads.
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
-# Probe coalescing locks, per event loop (see _provider_usage_lock).
-_provider_usage_locks: dict[
-  asyncio.AbstractEventLoop, dict[tuple[str, str], asyncio.Lock]
-] = {}
+_provider_usage_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _provider_usage_generation: dict[tuple[str, str], int] = {}
-_provider_usage_publication: dict[tuple[str, str], _ProviderUsagePublication] = {}
-_provider_usage_probe_ids = itertools.count(1)
-# Invalidation is called from sync auth endpoints as well as async readers.
-# asyncio.Lock only coalesces probes; this lock protects the authority check
-# and publication across threads/event loops.
-_provider_usage_authority_lock = threading.RLock()
 _claude_reset_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 def forget_provider_usage(provider_id: str, data_dir: str) -> None:
   """Discard superseded allowance readings, including probes still in flight."""
   key = _cache_key(provider_id, data_dir)
-  with _provider_usage_authority_lock:
-    _provider_usage_generation[key] = _provider_usage_generation.get(key, 0) + 1
-    _provider_usage_cache.pop(key, None)
-    _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
+  _provider_usage_generation[key] = _provider_usage_generation.get(key, 0) + 1
+  _provider_usage_cache.pop(key, None)
+  _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
 
 
 def provider_allowance_changed(provider_id: str, data_dir: str) -> None:
@@ -1204,39 +1183,34 @@ def _last_reading_path(data_dir: str, provider_id: str) -> Path:
   return Path(data_dir) / ".provider-usage" / f"{provider_id}-last-reading.json"
 
 
-def _prepare_reading(provider_id: str, data_dir: str, snapshot: dict) -> Path | None:
-  """Stage a restart fallback without holding the authority lock.
+def _remember_reading(provider_id: str, data_dir: str, snapshot: dict) -> None:
+  """Keep the last good reading on disk so a restart does not erase it.
 
   The in-memory cache already bridges short outages with a recent reading;
   a restart is such an outage, and the provider often refuses the first
   reads after it, so without this the gauge vanished for minutes.
   """
   path = _last_reading_path(data_dir, provider_id)
-  name = None
   try:
-    path.parent.mkdir(parents=True, exist_ok=True)
     _discard_abandoned_stages(path)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as staged:
-      json.dump({"observed_at": time.time(), "snapshot": snapshot}, staged)
-      staged.write("\n")
-      staged.flush()
-      os.fsync(staged.fileno())
-    return Path(name)
+    atomic_write(
+      path,
+      json.dumps({"observed_at": time.time(), "snapshot": snapshot}) + "\n",
+      mode=0o600,
+    )
   except OSError:
-    if name is not None:
-      Path(name).unlink(missing_ok=True)
     log.debug("%s usage reading not persisted", provider_id, exc_info=True)
-    return None
 
 
 def _discard_abandoned_stages(path: Path) -> None:
-  """Remove staged readings a crash left between mkstemp and os.replace."""
-  cutoff = time.time() - _STAGED_READING_ABANDONED_SECONDS
+  """Remove temp files a crash left inside an earlier atomic_write.
+
+  The only writer of this reading is synchronous on the server's one event
+  loop, so no write can be in flight here and any stage left is abandoned.
+  """
   for staged in path.parent.glob(f".{path.name}.*.tmp"):
     with suppress(OSError):
-      if staged.stat().st_mtime < cutoff:
-        staged.unlink()
+      staged.unlink()
 
 
 def _restored_reading(
@@ -1271,37 +1245,18 @@ def _stale_reading_is_servable(cached: _CachedProviderUsage, now: float) -> bool
   )
 
 
-def _provider_usage_lock(key: tuple[str, str]) -> asyncio.Lock:
-  """This loop's probe-coalescing lock for one provider account.
-
-  asyncio.Lock cannot safely wake a waiter on another thread's loop, so
-  probes coalesce within each loop and the authority lock handles cross-loop
-  invalidation and publication. Closed loops (each sync caller's asyncio.run)
-  are dropped whenever a new loop arrives, so the map stays bounded.
-  """
-  loop = asyncio.get_running_loop()
-  with _provider_usage_authority_lock:
-    locks = _provider_usage_locks.get(loop)
-    if locks is None:
-      for closed in [held for held in _provider_usage_locks if held.is_closed()]:
-        del _provider_usage_locks[closed]
-      locks = _provider_usage_locks[loop] = {}
-    return locks.setdefault(key, asyncio.Lock())
-
-
 def _held_usage(key: tuple[str, str]) -> dict[str, Any] | None:
   """The answer to give without probing, or None when a probe is due."""
-  with _provider_usage_authority_lock:
-    cached = _provider_usage_cache.get(key)
-    now = time.monotonic()
-    if cached is None or now >= cached.next_check_at:
-      return None
-    if cached.stale and not _stale_reading_is_servable(cached, now):
-      # Still inside a refusal backoff, but the old reading has expired.
-      return {**_unavailable(cached.snapshot.get("plan_label")), "stale": False}
-    snapshot = copy.deepcopy(cached.snapshot)
-    snapshot["stale"] = cached.stale
-    return snapshot
+  cached = _provider_usage_cache.get(key)
+  now = time.monotonic()
+  if cached is None or now >= cached.next_check_at:
+    return None
+  if cached.stale and not _stale_reading_is_servable(cached, now):
+    # Still inside a refusal backoff, but the old reading has expired.
+    return {**_unavailable(cached.snapshot.get("plan_label")), "stale": False}
+  snapshot = copy.deepcopy(cached.snapshot)
+  snapshot["stale"] = cached.stale
+  return snapshot
 
 
 def _snapshot_resets_are_current(
@@ -1393,31 +1348,22 @@ async def read_provider_usage(
   if held is not None:
     return held
 
-  async with _provider_usage_lock(key):
+  lock = _provider_usage_locks.setdefault(key, asyncio.Lock())
+  async with lock:
     # Another request may have refreshed while this one waited.
     held = None if force_refresh else _held_usage(key)
     if held is not None:
       return held
 
-    with _provider_usage_authority_lock:
-      prior = _provider_usage_cache.get(key)
-      generation = _provider_usage_generation.get(key, 0)
+    prior = _provider_usage_cache.get(key)
     if prior is None:
-      restored = _restored_reading(provider_id, data_dir)
-      with _provider_usage_authority_lock:
-        if generation == _provider_usage_generation.get(key, 0):
-          prior = _provider_usage_cache.get(key) or restored
-          if prior is not None:
-            _provider_usage_cache[key] = prior
+      prior = _restored_reading(provider_id, data_dir)
+      if prior is not None:
+        _provider_usage_cache[key] = prior
     # A sign-in can finish while an earlier account's read is in flight. Do
     # not let that older response repopulate the cache after sign-in cleared it.
     for attempt in range(2):
-      with _provider_usage_authority_lock:
-        current_generation = _provider_usage_generation.get(key, 0)
-        if generation != current_generation:
-          prior = None
-        generation = current_generation
-        probe = next(_provider_usage_probe_ids)
+      generation = _provider_usage_generation.get(key, 0)
       refusals = 0
       try:
         snapshot = await _provider_snapshot(provider_id, data_dir)
@@ -1434,109 +1380,51 @@ async def read_provider_usage(
         )
         snapshot = _unavailable(_configured_plan_label(provider_id, data_dir))
         next_check_at = time.monotonic() + backoff
-      now = time.monotonic()
-      ready = None
-      if snapshot.get("state") == "ready":
-        ready = copy.deepcopy(snapshot)
-        ready["observed_at"] = datetime.now(UTC).isoformat()
-        ready["stale"] = False
-        staged = _prepare_reading(provider_id, data_dir, ready)
-      elif snapshot.get("state") != "disconnected":
-        unavailable = copy.deepcopy(snapshot)
-        unavailable["stale"] = False
-      with _provider_usage_authority_lock:
-        publication = _provider_usage_publication.setdefault(
-          key, _ProviderUsagePublication(),
-        )
-        if probe < (
-          publication.authoritative_probe if ready is not None
-          else publication.latest_probe
-        ):
-          # Starting another read is not an observation. Only a published
-          # result can supersede this probe, and failures cannot erase success.
-          if ready is not None and staged is not None:
-            staged.unlink(missing_ok=True)
-          return _held_usage(key) or _unavailable(
-            _configured_plan_label(provider_id, data_dir),
-          )
-        if generation != _provider_usage_generation.get(key, 0):
-          if ready is not None and staged is not None:
-            staged.unlink(missing_ok=True)
-          prior = None
-          continue
-        current = _provider_usage_cache.get(key)
-        if (
-          current is not None and current.consecutive_refusals
-          and (
-            (ready is not None and probe < publication.latest_probe)
-            or (
-              ready is None and not force_refresh
-              and snapshot.get("state") != "disconnected"
-              and current.next_check_at > now
-            )
-          )
-        ):
-          # An ordinary advisory failure cannot shorten an active refusal
-          # hold, including before a concurrent successful reading arrives.
-          # Explicit refresh and sequential disconnect retain their authority.
-          next_check_at = max(next_check_at, current.next_check_at)
-          refusals = max(refusals, current.consecutive_refusals)
-        if (
-          ready is None and current is not None and current is not prior
-          and _stale_reading_is_servable(current, now)
-        ):
-          # This read started before the successful fill. Its failure,
-          # including a concurrent auth check, cannot revoke that observation.
-          held = _held_usage(key)
-          if not force_refresh or (held is not None and not current.stale):
-            publication.latest_probe = max(publication.latest_probe, probe)
-            current.next_check_at = max(current.next_check_at, next_check_at)
-            current.consecutive_refusals = refusals
-            # Extended holds remain subject to the stale/reset bounds.
-            current.stale = current.stale or held is None or bool(refusals)
-            fallback = held or copy.deepcopy(current.snapshot)
-            if not force_refresh:
-              fallback["stale"] = current.stale
-            return fallback
-        publication.latest_probe = max(publication.latest_probe, probe)
-        if ready is not None:
-          publication.authoritative_probe = probe
-          _provider_usage_cache[key] = _CachedProviderUsage(
-            observed_at=now, next_check_at=next_check_at, snapshot=ready,
-            stale=bool(refusals), consecutive_refusals=refusals,
-          )
-          if staged is not None:
-            try:
-              os.replace(staged, _last_reading_path(data_dir, provider_id))
-            except OSError:
-              staged.unlink(missing_ok=True)
-              log.debug("%s usage reading not persisted", provider_id, exc_info=True)
-          return copy.deepcopy(ready)
-        if snapshot.get("state") == "disconnected":
-          publication.authoritative_probe = probe
-          _provider_usage_cache.pop(key, None)
-          _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
-          return snapshot
-        if (
-          # A prior that another probe replaced or a disconnect removed is no
-          # longer this account's reading; never answer with it.
-          not force_refresh and prior is not None and current is prior
-          and _stale_reading_is_servable(prior, now)
-        ):
-          prior.next_check_at = next_check_at
-          prior.stale = True
-          prior.consecutive_refusals = refusals
-          fallback = copy.deepcopy(prior.snapshot)
-          fallback["stale"] = True
-          return fallback
-        _provider_usage_cache[key] = _CachedProviderUsage(
-          observed_at=now,
-          next_check_at=next_check_at,
-          snapshot=unavailable,
-          consecutive_refusals=refusals,
-        )
-        return unavailable
+      if generation == _provider_usage_generation.get(key, 0):
+        break
+      prior = None
     else:
       # A second sign-in during the retry is unusual; stay honest instead of
       # assigning either in-flight account's reading to the new one.
       return _unavailable(_configured_plan_label(provider_id, data_dir))
+
+    now = time.monotonic()
+    if snapshot.get("state") == "ready":
+      ready = copy.deepcopy(snapshot)
+      ready["observed_at"] = datetime.now(UTC).isoformat()
+      ready["stale"] = False
+      _provider_usage_cache[key] = _CachedProviderUsage(
+        observed_at=now,
+        next_check_at=next_check_at,
+        snapshot=ready,
+      )
+      _remember_reading(provider_id, data_dir, ready)
+      return copy.deepcopy(ready)
+
+    if snapshot.get("state") == "disconnected":
+      _provider_usage_cache.pop(key, None)
+      _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
+      return snapshot
+
+    if (
+      not force_refresh
+      and prior is not None
+      and _stale_reading_is_servable(prior, now)
+    ):
+      # Keep the original observation age for the stale ceiling.
+      prior.next_check_at = next_check_at
+      prior.stale = True
+      prior.consecutive_refusals = refusals
+      fallback = copy.deepcopy(prior.snapshot)
+      fallback["stale"] = True
+      return fallback
+
+    unavailable = copy.deepcopy(snapshot)
+    unavailable["stale"] = False
+    _provider_usage_cache[key] = _CachedProviderUsage(
+      observed_at=now,
+      next_check_at=next_check_at,
+      snapshot=unavailable,
+      consecutive_refusals=refusals,
+    )
+    return unavailable

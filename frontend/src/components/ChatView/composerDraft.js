@@ -244,6 +244,9 @@ export async function readComposerDraftAsync(chatId) {
   if (chatId == null) return { input: '', attachments: [] }
   if (!isOwnerWorkspace()) return readComposerDraft(chatId)
   const id = draftId(chatId)
+  // A cold start has not mirrored this chat yet: read session storage first so
+  // the comparison below weighs both persisted copies, not IndexedDB alone.
+  if (!liveDrafts.has(id)) readComposerDraft(chatId)
   const revisionAtStart = revisionOf(id)
   const current = liveDrafts.get(id)
   if (current?.source === 'live' || current?.source === 'durable') {

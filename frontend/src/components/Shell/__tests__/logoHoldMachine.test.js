@@ -2,6 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   HOLD_MS,
+  HOLD_FRAME_CHARGE_MS,
+  chargeAfterFrame,
   SWIPE_DX,
   HOLD_HAPTIC_ENTER_MS,
   HOLD_HAPTIC_EXIT_MS,
@@ -15,6 +17,30 @@ import {
 } from '../logoHoldMachine.js'
 
 // ── Hold threshold ──────────────────────────────────────────────────────────
+
+function chargeOver(frameMs, frames) {
+  let charged = 0
+  for (let i = 0; i < frames; i += 1) charged = chargeAfterFrame(charged, frameMs)
+  return charged
+}
+
+test('a hold on a healthy display takes exactly its threshold', () => {
+  for (const frameMs of [1000 / 120, 1000 / 60, 1000 / 30, HOLD_FRAME_CHARGE_MS]) {
+    const frames = Math.round(HOLD_MS / frameMs)
+    assert.equal(holdComplete(chargeOver(frameMs, frames + 1)), true)
+    assert.equal(holdComplete(chargeOver(frameMs, frames - 1)), false)
+  }
+})
+
+test('one long frame cannot turn a tap into a hold', () => {
+  // A busy game can hold a tap's release back for most of a second.
+  assert.equal(holdComplete(chargeOver(715, 1)), false)
+  assert.equal(holdComplete(chargeOver(715, 2)), false)
+})
+
+test('a real hold still completes on a starved display, charged frame by frame', () => {
+  assert.equal(holdComplete(chargeOver(175, Math.ceil(HOLD_MS / HOLD_FRAME_CHARGE_MS))), true)
+})
 
 test('holdComplete only past the threshold; a shorter press is a tap', () => {
   assert.equal(holdComplete(HOLD_MS - 1), false)

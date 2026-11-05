@@ -46,7 +46,12 @@ import {
   olderHistoryRetryDelayMs,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
-import { activationRetryDelay, chatEntryFrame } from './chatRuntimeState.js'
+import {
+  activationRetryDelay,
+  chatEntryFrame,
+  liveControlsReady,
+  answerBeforeActivationError,
+} from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -84,6 +89,7 @@ import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import CompactionProgress from './CompactionProgress.jsx'
 import useCompactCommands from './hooks/useCompactCommands.js'
+import { canStartRefusalFreshSession, refusalActionSentence } from './ErrorCard.jsx'
 import { chatCommandRejection, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import SideQuestionCard from './SideQuestionCard.jsx'
@@ -481,8 +487,8 @@ export default function ChatView({
   const decisionRevealId = questionActivation.reveal?.id
   const decisionAnchorKey = decisionQuestionId ? `question:${decisionQuestionId}` : null
   const inputRef = useRef(null)
-  const handleInternalNav = useCallback((url) => {
-    onInternalNav?.(url)
+  const handleInternalNav = useCallback((url, composer) => {
+    onInternalNav?.(url, composer)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
   // A turn can only RUN while online (it spawns a server-side agent), but a
@@ -550,9 +556,14 @@ export default function ChatView({
         : initialCacheEntryState,
   )
   // Cached rows are safe restoration geometry, but their persisted liveness can
-  // be stale. Do not publish a chat-to-chat handoff until this activation's
-  // runtime/detail verdict has arrived: otherwise an apparently idle cache can
-  // be promoted before the server reports that its turn is still running.
+  // be stale. A coordinate-validated saved frame still presents at once (see
+  // chatEntryFrame); this activation's runtime/detail verdict reconciles
+  // beneath it. The accepted trade-off: a chat saved idle may flip to running
+  // as that verdict lands, and a chat deleted elsewhere shows briefly before
+  // its 404 redirects. Nothing acts on the saved liveness: Send, a reply's
+  // Try again, Stop (with its queue resend), question answers and Restart
+  // offers, and transcript and Goal Resume all wait for the verdict (see
+  // liveControlsReady). Stop also stays available on a failed activation.
   // One identity-bound phase owns activation. A retained ChatView can receive
   // another chat before its previous effect runs, so the phase is never read
   // across identities. Provisional chats are locally authoritative from birth;
@@ -583,6 +594,7 @@ export default function ChatView({
   // A failed activation keeps Send usable as its in-place recovery: the tap
   // retries activation and the draft stays. Nothing sends before it settles.
   const activationFailed = activationPhase === 'error'
+  const liveControls = liveControlsReady(activationPhase, activationSettled)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -1680,7 +1692,7 @@ export default function ChatView({
         if (settled?.running === false) {
           retireSettledStreamRef.current?.()
         }
-        return runtime
+        return { ...runtime, transcriptCurrent: settled != null }
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
@@ -1694,8 +1706,8 @@ export default function ChatView({
         data,
         localAuthoritative,
       )) {
-        await fetchMessages({ force: true, authoritative: true })
-        return runtime
+        const refreshed = await fetchMessages({ force: true, authoritative: true })
+        return { ...runtime, transcriptCurrent: refreshed != null }
       }
       if (data.running) {
         setSending(true)
@@ -1764,7 +1776,10 @@ export default function ChatView({
           }
         })
       }
-      return runtime
+      // Reaching here idle and without a local owner means the retained
+      // page matched its transcript version and lifecycle cards (otherwise it
+      // was re-read above).
+      return { ...runtime, transcriptCurrent: !data.running && !localAuthoritative }
     } catch { /* background reconciliation is best-effort */ }
     return null
   }, [
@@ -2188,9 +2203,11 @@ export default function ChatView({
           fetchGenRef.current += 1
           invalidateSharedRuntimeRead(chatId)
           // Read fresh rather than joining a poll that predates the change.
-          await refreshRuntimeState()
+          const runtime = await refreshRuntimeState()
           // Idle lifecycle changes also add finished records to the transcript.
-          if (!sendingRef.current && !isStreamingRef.current) {
+          // Skip the detail page only when the runtime read proved the retained
+          // transcript current: every reconnect raises this signal per visible chat.
+          if (!runtime?.transcriptCurrent && !sendingRef.current && !isStreamingRef.current) {
             await fetchMessages({ force: true, authoritative: true })
           }
           continue
@@ -3947,10 +3964,16 @@ export default function ChatView({
     questionId,
     questionSubmissionContext = null,
   ) => {
-    if (!activationSettledRef.current) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
+    }
+    // A saved frame shows its open card before runtime truth confirms it is
+    // still open. Refuse the tap on the card itself (choices stay) so the
+    // owner answers again once the chat is ready.
+    if (!activationSettledRef.current) {
+      cancelPreparedQuestion()
+      throw answerBeforeActivationError()
     }
     // Synchronous re-entrancy guard: flip BEFORE any other logic so a
     // second concurrent call (fast double-tap) bails immediately. This
@@ -4391,8 +4414,11 @@ export default function ChatView({
   const refreshResume = useCallback(() => {
     void fetchMessages({ force: true, authoritative: true })
   }, [fetchMessages])
+  // The saved frame's recovery run, Goal revision and liveness are not
+  // runtime truth: Resume (transcript and Goal rail) waits for activation.
   const resumeBlocked = useCallback(() => (
-    isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
+    !activationSettledRef.current
+    || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
@@ -4411,6 +4437,21 @@ export default function ChatView({
     onRefresh: refreshResume,
     blocked: resumeBlocked,
   })
+  // A provider refusal is answered by changing the request, not by retrying
+  // it: the card reuses the composer's model picker and the /compact handoff.
+  // Stable references keep MsgContent's memo intact.
+  const runCompactCommandRef = useRef(null)
+  runCompactCommandRef.current = runCompactCommand
+  const handleRefusalModelChoice = useCallback(() => {
+    setModelSelectionRequest(request => request + 1)
+  }, [])
+  const handleRefusalFreshSession = useCallback(() => {
+    void runCompactCommandRef.current?.('', null)
+  }, [])
+  // The fresh session is the /compact handoff, which the server reserves for
+  // the owner's lifecycle control: a chat embed has no manual compaction and a
+  // shared-workspace guest is refused, so neither is offered the button.
+  const canStartFreshSession = canStartRefusalFreshSession({ embedded })
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
@@ -5365,9 +5406,10 @@ export default function ChatView({
     : null
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above. The display-ready gate
-  // publishes a running frame only after the activation verdict settles, while
-  // catch-up continues to reconcile into the same active assistant row.
+  // the saved-coordinate coverage check above. A coordinate-validated cached
+  // frame, idle or mid-reply, presents immediately at the reader's position;
+  // the activation verdict and stream catch-up reconcile beneath it into the
+  // same active assistant row. Sending stays blocked until activation settles.
   const transcriptPaintable = (
     initialEntryPhase === 'cached'
     || initialEntryPhase === 'stream-catchup'
@@ -5382,6 +5424,10 @@ export default function ChatView({
     activationPhase,
     activationSettled,
     transcriptPaintable,
+    // Before activation, `stream-catchup` can only come from a cached running
+    // window; afterwards activation is settled and this input is moot.
+    cachedFrame: (initialEntryPhase === 'cached' || initialEntryPhase === 'stream-catchup')
+      && revealed,
   })
 
   // Transcript geometry reads force a synchronous layout of the whole
@@ -5854,6 +5900,12 @@ export default function ChatView({
     if (pendingResumeBlock.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual) {
       return 'Response paused for restart. Möbius will continue automatically.'
     }
+    if (pendingResumeBlock.pause?.kind === 'provider_refusal') {
+      return ['This model declined to continue.', refusalActionSentence({
+        switchModel: showPicker,
+        freshSession: canStartFreshSession,
+      })].filter(Boolean).join(' ')
+    }
     return 'Turn paused — Resume available.'
   })()
   // Chat surfaces retain all work, but Goal labels use only its exact owners.
@@ -6044,6 +6096,8 @@ export default function ChatView({
       onQuestionSubmitIntent={prepareQuestionSubmission}
       onQuestionSubmitCancel={cancelQuestionSubmission}
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
+      onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
+      onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6441,6 +6495,8 @@ export default function ChatView({
                             : 'Provider limit reached — continuation available'
                         : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
+                          : pendingResumeBlock?.pause?.kind === 'provider_refusal'
+                            ? 'Model declined — choose how to continue'
                             : 'Turn paused — tap to resume'}
                     </button>
                   )}
@@ -6525,7 +6581,9 @@ export default function ChatView({
             ? handleProvisionalNewChatSubmit
             : handleSubmitSteer}
           inputRef={inputRef}
-          sending={composerBusy}
+          // Stop shows only on runtime truth: before it, the slot keeps the
+          // disabled Send/mic, so a saved frame cannot stop or resend a queue.
+          sending={liveControls.stop && composerBusy}
           listening={listening}
           listeningRef={listeningRef}
           onManualVoiceEdit={acceptManualEdit}
@@ -6547,7 +6605,7 @@ export default function ChatView({
             || providerSwitching
             || !!newChatSession?.submitted
           }
-          questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
+          questionBlocked={liveControls.stop && hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}
           onAddFiles={uploadGate.addFiles}
           onRemoveFile={handleComposerRemoveFile}
