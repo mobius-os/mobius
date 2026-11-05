@@ -381,6 +381,59 @@ def test_unreviewed_answer_evidence_keeps_all_visible_text_but_only_new_work():
   assert answer_check.unreviewed_evidence(None, 3) is None
 
 
+def _reasoning_after_a_reminder() -> list[dict]:
+  """What an agent did after its card was declined: it reasoned about the
+  check, saved a progress note, and wrote its answer as one plain thought,
+  with no reply text. Neither closing-draft shape matches it."""
+  return [
+    {"type": "tool", "tool": "mcp__mobius_control__request_question", "status": "done"},
+    {"type": "thinking", "content": "Wondering whether text written after the "
+     "first tool call is being ignored; the last time a card went through I had "
+     "made another call first, so saving a progress note before the card again.\n\n"},
+    {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"},
+    {"type": "thinking", "content": "The memory limit is still too low, so the "
+     "preview build keeps failing. Raising it in the build settings is the only "
+     "change needed before the deploy can be retried.\n\n"},
+  ]
+
+
+def test_answer_check_declines_a_card_again_while_the_answer_stays_unwritten():
+  first = _closing_draft_before_card()
+  seen = answer_check.visible_reply(first)
+  blocks = answer_check.unreviewed_evidence(
+    [*first, *_reasoning_after_a_reminder()], len(first),
+  )
+
+  def before_card(blocks, last=None):
+    return answer_check.reason(
+      blocks, chat_id="c", media_dir="/m", before_card=True, reminded=True,
+      seen_at_reminder=seen, last_assistant_message=last,
+    )
+
+  reason = before_card(blocks)
+  assert reason is not None
+  assert reason.startswith("Möbius check before your card is saved.")
+  assert "nothing new has reached the owner" in reason
+  assert "Everything the owner sees from this reply, verbatim:" in reason
+  # Reasoning is never quoted back or described as living in thinking.
+  for words in ("memory limit is still", "Wondering whether", "only in your thinking"):
+    assert words not in reason
+  # New reply text, dispatched or not, is the agent answering: its judgment
+  # decides from there.
+  answered = "The preview build needs a higher memory limit."
+  assert before_card([*blocks, {"type": "text", "content": answered}]) is None
+  assert before_card(blocks, last=answered) is None
+  # A retry after a brief thought is the agent judging its reply complete.
+  assert before_card([
+    *first[:2], {"type": "thinking", "content": "The reply covers it."},
+  ]) is None
+  # At the end of a turn, more reasoning after a reminder may end the turn.
+  assert answer_check.reason(
+    blocks, chat_id="c", media_dir="/m", before_card=False, reminded=True,
+    seen_at_reminder=seen,
+  ) is None
+
+
 def test_answer_check_after_a_step_flags_only_words_written_as_extra_thinking():
   progress = {"type": "text", "content": "Checking the preview build."}
   step = {"type": "tool", "tool": "Bash", "status": "done"}

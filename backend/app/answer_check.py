@@ -85,6 +85,23 @@ _MISSING_ANSWER = (
   "conclusion or a summary of actions taken. If it already answers the "
   "owner, leave it."
 )
+# Before a card after a reminder, the agent often believes it already wrote the
+# answer as reply text while the words went into its reasoning; from the inside
+# the two can look alike, so it may blame the check and retry. Saying plainly
+# that nothing new reached the owner answers that misreading without quoting
+# any reasoning.
+_STILL_UNWRITTEN = (
+  "Since the last check, nothing new has reached the owner: you went on "
+  "reasoning, and reasoning is never shown. {seen} If you believe you already "
+  "wrote more than that, it went into your reasoning, not your reply. If the "
+  "owner's latest message still needs an answer or a result, write it now as "
+  "ordinary reply text. If the quoted reply already answers it, leave it."
+)
+# New reasoning, with no new reply text, that still counts as the answer going
+# unwritten. A retry after a one-line "the reply already answers" thought stays
+# the agent's judgment; the answers swallowed again after a reminder were
+# several sentences each.
+_RETRY_REASONING_MIN_CHARS = 200
 _SEEN = "Everything the owner sees from this reply, verbatim: «{visible}»."
 _SEEN_EXCERPT = "The end of the owner's visible reply, verbatim: «…{visible}»."
 _SEEN_NOTHING = "The owner sees no text at all from this reply."
@@ -129,6 +146,7 @@ def reason(
   media_dir: str,
   before_card: bool,
   reminded: bool = False,
+  seen_at_reminder: str | None = None,
   last_assistant_message: object = None,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
@@ -140,6 +158,11 @@ def reason(
   turn (``reminded``), the length rule stays quiet: it has no new evidence, and
   a reply that ends with more reasoning and nothing more to say, as the
   reminder allows, must not be returned again for it.
+
+  A card is different: saving it ends the turn, so the owner gets a question
+  with no answer. ``seen_at_reminder`` is ``visible_reply`` when the last
+  reminder spoke, with ``blocks`` narrowed to what arrived since; if the agent
+  then reasoned at length but added no reply text, its card is declined again.
   """
   if not isinstance(blocks, list):
     return None
@@ -150,6 +173,11 @@ def reason(
   # thinking block here, so nothing in thinking closes the reply.
   undispatched = visible != dispatched
   if (
+    before_card and seen_at_reminder is not None
+    and _reasoned_without_replying(blocks, visible, seen_at_reminder)
+  ):
+    parts.append(_STILL_UNWRITTEN.format(seen=_seen(visible)))
+  elif (
     (not undispatched and _has_unsaid_draft(
       _closing_thinking(blocks), visible, _closing_draft_candidates,
     ))
@@ -206,6 +234,28 @@ def unreviewed_evidence(blocks: object, reviewed_through: int) -> object:
     block for index, block in enumerate(blocks)
     if index >= reviewed_through or _is_text(block)
   ]
+
+
+def visible_reply(blocks: object, last_assistant_message: object = None) -> str:
+  """The owner's visible reply, whitespace-normalized for comparison."""
+  if not isinstance(blocks, list):
+    return ""
+  return " ".join(
+    _with_undispatched_tail(_dispatched_text(blocks), last_assistant_message).split()
+  )
+
+
+def _reasoned_without_replying(blocks: list, visible: str, seen_at_reminder: str) -> bool:
+  """Whether the agent reasoned at length since a reminder but wrote no reply text.
+
+  ``blocks`` holds only thinking that arrived since that reminder.
+  """
+  if " ".join(visible.split()) != seen_at_reminder:
+    return False
+  new_reasoning = sum(
+    len(block["content"].strip()) for block in blocks if _is_thinking(block)
+  )
+  return new_reasoning >= _RETRY_REASONING_MIN_CHARS
 
 
 def _is_text(block: object) -> bool:

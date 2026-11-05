@@ -1363,12 +1363,14 @@ async def run_claude_sdk_turn(
   # the turn. After it speaks, it considers only blocks that arrived since (plus
   # all visible text), so an unchanged retry or continuation passes and a
   # second swallowed answer is caught, before a card or at the end, up to
-  # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
+  # answer_check.MAX_REMINDERS per turn. Before a card, long new reasoning with
+  # no new reply text since the reminder also counts as still unanswered. That cap, not the CLI's
   # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
   # fresh block list, which the identity check below treats as new. A Stop or
   # a saved owner card owns the turn's end, so neither is reopened.
   answer_check_reminders = 0
-  answer_check_reviewed: tuple[object, int] = (None, 0)
+  # (block list, blocks reviewed, visible reply) as of the last reminder.
+  answer_check_reviewed: tuple[object, int, str | None] = (None, 0, None)
   answer_check_media_dir = os.path.normpath(
     str(chat_media_dir(get_settings().data_dir, chat_id))
   )
@@ -1384,22 +1386,25 @@ async def run_claude_sdk_turn(
     ):
       return None
     blocks = getattr(bc, "assistant_blocks", None)
-    reviewed_list, reviewed_through = answer_check_reviewed
+    reviewed_list, reviewed_through, seen_at_reminder = answer_check_reviewed
+    if blocks is not reviewed_list:
+      reviewed_through, seen_at_reminder = 0, None
     reason = answer_check.reason(
-      answer_check.unreviewed_evidence(
-        blocks, reviewed_through if blocks is reviewed_list else 0,
-      ),
+      answer_check.unreviewed_evidence(blocks, reviewed_through),
       chat_id=chat_id,
       media_dir=answer_check_media_dir,
       before_card=before_card,
       reminded=answer_check_reminders > 0,
+      seen_at_reminder=seen_at_reminder,
       last_assistant_message=last_assistant_message,
     )
     if reason is None:
       return None
     answer_check_reminders += 1
     answer_check_reviewed = (
-      blocks, len(blocks) if isinstance(blocks, list) else 0,
+      blocks,
+      len(blocks) if isinstance(blocks, list) else 0,
+      answer_check.visible_reply(blocks, last_assistant_message),
     )
     log.info(
       "Claude visible-answer check spoke chat_id=%s before_card=%s reminder=%d",

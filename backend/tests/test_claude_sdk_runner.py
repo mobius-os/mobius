@@ -62,6 +62,7 @@ from tests.test_answer_check import (
   _DRAFT,
   _answer_as_second_thinking_part,
   _closing_draft_before_card,
+  _reasoning_after_a_reminder,
   _viewed_before_after,
 )
 
@@ -3908,6 +3909,34 @@ async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder
     if output:
       assert output["permissionDecision"] == "deny"
       assert "preview build memory limit" not in output["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_keeps_declining_a_card_while_the_answer_stays_unwritten(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options))
+      bus.assistant_blocks.extend(_reasoning_after_a_reminder())
+      decisions.append(await _fire_pre_card_hook(self.options))
+      # The agent finally writes the answer as reply text: the card goes through.
+      bus.assistant_blocks.append(
+        {"type": "text", "content": "The preview build needs a higher memory limit."},
+      )
+      decisions.append(await _fire_pre_card_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-unwritten-chat", bc=bus)
+
+  assert result["error"] is None
+  assert ["hookSpecificOutput" in d for d in decisions] == [True, True, False]
+  reason = decisions[1]["hookSpecificOutput"]["permissionDecisionReason"]
+  assert "nothing new has reached the owner" in reason
+  assert "memory limit is still" not in reason
 
 
 @pytest.mark.asyncio
