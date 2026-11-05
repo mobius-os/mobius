@@ -17,9 +17,12 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
     return () => { if (scopeRef.current === scope) scopeRef.current = null }
   }, [chatId, runId, goalId, goalRevision, hasTarget])
 
-  const resume = useCallback(async () => {
+  const resume = useCallback(async ({ allowLowStorage = false } = {}) => {
     if (blocked?.() || attemptRef.current?.pending) return false
-    if (!hasTarget && !attemptRef.current) {
+    // A saved retry replays only the same action; pressing the other one
+    // starts a new attempt (the server refuses a second start).
+    const saved = attemptRef.current?.allowLowStorage === allowLowStorage ? attemptRef.current : null
+    if (!hasTarget && !saved) {
       // A restart can briefly show a durable pause before its replacement run
       // is readable. Refresh, but do not turn that expected handoff into an
       // owner-facing error.
@@ -28,7 +31,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       return false
     }
     const scope = scopeRef.current
-    const attempt = attemptRef.current || { cid: crypto.randomUUID(), runId, goalId, goalRevision }
+    const attempt = saved || { cid: crypto.randomUUID(), runId, goalId, goalRevision, allowLowStorage }
     attempt.pending = true
     attemptRef.current = attempt
     setState({ pending: true, error: '', unavailable: false })
@@ -36,6 +39,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       const result = await send('', undefined, {
         cid: attempt.cid,
         continuation: 'manual',
+        ...(attempt.allowLowStorage ? { allowLowStorage: true } : {}),
         ...(attempt.goalId != null
           ? { resumeGoalId: attempt.goalId, resumeGoalRevision: attempt.goalRevision }
           : { resumeRunId: attempt.runId || undefined }),
@@ -49,6 +53,7 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       return true
     } catch (error) {
       if (scopeRef.current !== scope) return false
+      const action = attempt.allowLowStorage ? 'Continue anyway' : 'Resume'
       // Retain the identity for an ambiguous retry, including a durable outbox
       // replay. A rejected request never creates a new transcript/queue row.
       attempt.pending = false
@@ -64,8 +69,8 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
             : error?.code === 'model_selection_required'
               ? 'Choose a model before resuming.'
               : error?.outboxRetained
-          ? 'Resume is saved and will retry when Möbius reconnects.'
-          : 'Could not confirm Resume. Your draft and queued messages are unchanged. Try again.',
+          ? `${action} is saved and will retry when Möbius reconnects.`
+          : `Could not confirm ${action}. Your draft and queued messages are unchanged. Try again.`,
       })
       return false
     } finally {

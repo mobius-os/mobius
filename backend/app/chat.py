@@ -4883,6 +4883,26 @@ async def _complete_turn(
   return disposition
 
 
+def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
+  """Whether this exact run is the owner's warned low-storage Continue anyway.
+
+  An unreadable control means no permission: the turn keeps normal admission.
+  """
+  from app.database import SessionLocal
+  try:
+    with SessionLocal() as db:
+      control = db.query(models.ChatRun.continuation_json).filter(
+        models.ChatRun.id == run_token, models.ChatRun.chat_id == chat_id,
+      ).scalar() or {}
+    return control.get("reason") == "manual" and control.get("allow_low_storage") is True
+  except Exception:
+    _get_logger().warning(
+      "could not read Continue anyway permission chat_id=%s", chat_id,
+      exc_info=True,
+    )
+    return False
+
+
 async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -4929,9 +4949,26 @@ async def run_chat(
   runtime_settled = False
   setup_failure_settled = False
   try:
-    await require_agent_turn_admission(
-      get_settings().data_dir,
-    )
+    try:
+      await require_agent_turn_admission(get_settings().data_dir)
+    except AgentTurnDeferred as deferred:
+      # Only a storage wait consults the committed Continue anyway control,
+      # which belongs to this physical run alone, never its later retries,
+      # helpers, queued follow-ups or other chats.
+      if deferred.resource != "storage" or not (
+        chat_id and run_token
+        and await asyncio.to_thread(_run_allows_low_storage, chat_id, run_token)
+      ):
+        raise
+      await require_agent_turn_admission(
+        get_settings().data_dir, allow_low_storage=True,
+      )
+      # Only a turn the override actually admitted is told storage is low.
+      from app.continuations import LOW_STORAGE_NOTICE
+      if messages:
+        messages = [*messages[:-1], messages[-1].model_copy(update={
+          "content": f"{messages[-1].content}\n\n{LOW_STORAGE_NOTICE}",
+        })]
     # A prior turn may still be releasing this chat's browser resources.
     async with _browser_lifecycle_lock(chat_id):
       pass

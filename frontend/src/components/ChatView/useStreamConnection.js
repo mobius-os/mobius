@@ -1656,6 +1656,7 @@ export default function useStreamConnection(chatId, {
       selected_options = undefined,
       continuation = undefined,
       resumeRunId = undefined,
+      allowLowStorage = false,
       resumeGoalId = undefined,
       resumeGoalRevision = undefined,
     } = {},
@@ -1713,6 +1714,7 @@ export default function useStreamConnection(chatId, {
       if (selected_options && Object.keys(selected_options).length) body.selected_options = selected_options
       if (continuation) body.continuation = continuation
       if (resumeRunId) body.resume_run_id = resumeRunId
+      if (allowLowStorage) body.allow_low_storage = true
       if (resumeGoalId != null) body.resume_goal_id = resumeGoalId
       if (resumeGoalRevision != null) body.resume_goal_revision = resumeGoalRevision
       if (attachments && attachments.length > 0) {

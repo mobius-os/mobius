@@ -778,6 +778,16 @@ async def _send_message_impl(
   is_card_answer = bool(body.answers or body.selected_options)
   if not is_card_answer:
     require_nondelegated_owner_control(principal)
+  # The disk floor protects the whole installation, so only its owner may
+  # lift it: never a shared-browser guest, an app, an embed or an agent.
+  if body.allow_low_storage and (
+    principal.scope != "owner" or principal.browser is not None
+    or not is_owner_input_principal(principal)
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner can continue below the storage floor.",
+    )
   chat = get_active_chat_for_principal(db, chat_id, principal)
   agent_exact_retry = False
   if is_card_answer and not is_owner_input_principal(principal):
@@ -1473,6 +1483,7 @@ async def _send_message_locked(
       if not manual_resume_matches(
         control, control_id=body.cid, run_id=body.resume_run_id,
         goal_id=body.resume_goal_id, goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       ):
         raise HTTPException(409, detail={
           "code": "recovery_changed",
@@ -1800,6 +1811,7 @@ async def _send_message_locked(
         resume_run_id=body.resume_run_id,
         resume_goal_id=body.resume_goal_id,
         resume_goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
