@@ -71,10 +71,10 @@ def pending_restart_paths() -> list[str]:
     if not head_sha:
       return []
     changed = platform_update._activation_paths_between(repo, served, head_sha)
-    pending = platform_update._pending_activation_paths(
+    pending, served_restart = platform_update._pending_activation_work(
       repo, served_to_head=changed,
     )
-    return _restart_loaded(pending)
+    return sorted({*_restart_loaded(pending), *served_restart})
   except Exception:
     return []
 

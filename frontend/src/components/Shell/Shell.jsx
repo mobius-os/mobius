@@ -235,6 +235,16 @@ const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
 // they need a short deadline rather than holding notifications behind a stalled request.
 const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
+// A list read that is merely slow (a busy server building every drawer row) would
+// miss the same short bound on every retry, and the abandoned reads keep the server
+// busy. Each retry doubles the bound, below the stream's 30s connect deadline.
+const SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS = 20_000
+function reconnectListTimeoutMs(failedAttempts = 0) {
+  return Math.min(
+    SYSTEM_RECONNECT_LIST_TIMEOUT_MS * 2 ** Math.max(0, failedAttempts),
+    SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS,
+  )
+}
 // Run/wait events arriving this close together share one scoped rows read.
 const CHAT_ROW_REFRESH_BATCH_MS = 250
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
@@ -516,6 +526,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
+  // Immersive hides the drawer panel (Shell.css), so a modal drawer cannot stay
+  // logically open underneath it: its dimming, tap-blocking scrim would cover
+  // the app with nothing visible to dismiss. This happens when an app claims
+  // immersive while the owner has the drawer open (e.g. during a game's load).
+  useLayoutEffect(() => {
+    if (immersiveActive && modalDrawerOpen) closeDrawerRef.current()
+  }, [immersiveActive, modalDrawerOpen])
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
   // branches are unit-tested in workspaceView.test.js, and so one commit flips
@@ -3524,18 +3541,19 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(async ({ signal } = {}) => {
+  const reconcileSystemStateOnOpen = useCallback(async ({ signal, failedAttempts = 0 } = {}) => {
+    const listTimeoutMs = reconnectListTimeoutMs(failedAttempts)
     // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
       ...invalidateEventFedCachesAfterReconnect(queryClient),
-      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
+      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: listTimeoutMs, signal })),
     ])
     await reconcileDeletedChatIdentities()
     signal?.throwIfAborted()
-    const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
+    const refreshedChats = await fetchFreshChats({ timeoutMs: listTimeoutMs, signal })
     signal?.throwIfAborted()
     const reconciledLocalIds = reconcileLocalChatRuns(
       refreshedChats,

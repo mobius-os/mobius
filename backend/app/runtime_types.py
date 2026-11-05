@@ -26,6 +26,9 @@ class RunnerResult(TypedDict):
   credits_depleted: NotRequired[bool]
   # A token-context rejection is distinct from an HTTP request-byte limit.
   context_window_exceeded: NotRequired[bool]
+  # The provider's safety check declined the turn; retrying it unchanged on
+  # the same model is refused again.
+  provider_refusal: NotRequired[bool]
 
 
 class ChatEvent(TypedDict):
