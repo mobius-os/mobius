@@ -101,6 +101,8 @@ from app.github_contribution_git import (
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
+  opens_new_standalone_pr,
+  reviewed_base_is_sole_merge_base,
   _merge_error_patch,
   _record_patch_with,
   _normalize_head_attribution,
@@ -1336,7 +1338,15 @@ def _inspect_prepared_review(
     # unmergeable. A dirty or moved checkout is the more urgent thing to say,
     # so those are reported first.
     upstream_sha = str(record.get("last_submit_upstream_sha") or "")
-    if _GIT_SHA.match(upstream_sha):
+    if _GIT_SHA.match(upstream_sha) and opens_new_standalone_pr(plan):
+      # Mirror Send: a new standalone PR opens, even over an overlap, only
+      # while GitHub would show exactly its reviewed diff.
+      if not reviewed_base_is_sole_merge_base(
+        lambda *args: app_git._run(repo, *args, check=False, read_only=True),
+        upstream_sha, head_oid, base_oid,
+      ):
+        return _review_status_problem(record_id, code="upstream_conflict")
+    elif _GIT_SHA.match(upstream_sha):
       merge_preview = app_git.preview_merge_refs(repo, upstream_sha, branch)
       if merge_preview is None:
         raise ContributionSubmitError(
@@ -1344,23 +1354,7 @@ def _inspect_prepared_review(
           code="review_unavailable",
         )
       if merge_preview.status == "conflict":
-        # Mirror Send: a new standalone PR whose sole upstream merge base is
-        # still the reviewed base opens with its exact diff; the overlap is
-        # its next update.
-        bases = app_git._run(
-          repo, "merge-base", "--all", upstream_sha, head_oid,
-          check=False, read_only=True,
-        ) if plan.get("action") == "pr" and not stack else None
-        if bases is not None and bases.returncode not in (0, 1):
-          raise ContributionSubmitError(
-            "The recorded upstream merge base could not be checked locally.",
-            code="review_unavailable",
-          )
-        if not (
-          bases is not None and bases.returncode == 0
-          and bases.stdout.split() == [base_oid.lower()]
-        ):
-          return _review_status_problem(record_id, code="upstream_conflict")
+        return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,
@@ -1765,6 +1759,7 @@ _STAGEABLE_STATUSES = frozenset(("prepared", "open", "draft"))
 _SOURCE_SYNC_RESERVE = 1024
 _STAGE_CLEARED_FIELDS = (
   "last_submit_error", "last_submit_error_code", "last_submit_error_detail",
+  "last_submit_upstream_conflict",
 )
 
 

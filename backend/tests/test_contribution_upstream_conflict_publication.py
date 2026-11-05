@@ -78,17 +78,22 @@ def test_conflict_is_reported_as_a_fact_with_the_exact_upstream_tip(histories):
 
 def test_new_standalone_pr_conflict_returns_the_exact_upstream_tip(histories):
   repo, _upstream, shas = histories
-  patch = git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"])
+  patch = git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"], shas["head"])
   assert patch == {
     "last_submit_upstream_branch": "main",
     "last_submit_upstream_sha": shas["conflicting"],
+    # GitHub runs no PR workflows on a conflicting PR, so the record says so.
+    "last_submit_upstream_conflict": {
+      "upstream_branch": "main", "upstream_sha": shas["conflicting"],
+      "head_sha": shas["head"], "next_pr_action": "merge_upstream_into_pr",
+    },
   }
 
 
 def test_clean_new_pr_preflight_keeps_its_exact_shape(histories):
   repo, upstream, shas = histories
   upstream["sha"] = shas["base"]
-  assert git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"]) == {
+  assert git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"], shas["head"]) == {
     "last_submit_upstream_branch": "main", "last_submit_upstream_sha": shas["base"]}
 
 
@@ -97,7 +102,7 @@ def test_reviewed_base_absent_from_upstream_still_refuses(histories):
   repo, upstream, shas = histories
   upstream["sha"] = shas["rewritten"]
   with pytest.raises(ContributionSubmitError) as error:
-    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"])
+    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"], shas["head"])
   assert error.value.code == "upstream_conflict"
   assert error.value.record_patch["last_submit_upstream_sha"] == shas["rewritten"]
 
@@ -126,7 +131,7 @@ def test_unknown_merge_facts_are_never_labelled_conflicts(tmp_path, monkeypatch,
   monkeypatch.setattr(git_ops, "_git", lambda *a, **k: pytest.fail("no merge without an upstream tip"))
   with pytest.raises(ContributionSubmitError) as error:
     if operation == "new_pr":
-      git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE)
+      git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE, HEAD)
     else:
       git_ops._assert_merges_with_upstream(tmp_path, "owner/repo", "fix/topic")
   assert error.value.code == code
@@ -145,7 +150,7 @@ def test_an_unreadable_ancestry_comparison_is_not_a_conflict_or_a_pass(tmp_path,
     pytest.fail(f"unexpected git {args}")
   monkeypatch.setattr(git_ops, "_git", fake_git)
   with pytest.raises(ContributionSubmitError) as error:
-    git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE)
+    git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE, HEAD)
   assert error.value.code == "upstream_merge_unavailable" and "Could not compare" in error.value.message
   assert "fatal: bad object" in error.value.detail
 
@@ -176,7 +181,7 @@ def test_a_merge_tree_that_could_not_run_is_never_a_conflict_or_a_publishable_fa
     if operation == "inspect":
       git_ops.inspect_upstream_merge(tmp_path, "owner/repo", "fix/topic")
     elif operation == "new_pr":
-      git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE)
+      git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE, HEAD)
     else:
       git_ops._assert_merges_with_upstream(tmp_path, "owner/repo", "fix/topic")
   assert error.value.code == "upstream_merge_unavailable"
@@ -209,8 +214,39 @@ def test_upstream_already_holding_part_of_the_topic_is_not_the_reviewed_diff(his
   assert run(repo, "merge-base", upstream["sha"], "fix/two-step") == shared
   assert git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/two-step").conflicts
   with pytest.raises(ContributionSubmitError) as error:
-    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/two-step", shas["base"])
+    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/two-step", shas["base"], HEAD)
   assert error.value.code == "upstream_conflict"
+
+
+def test_a_clean_merge_after_upstream_took_part_of_the_topic_still_refuses(histories):
+  """A clean merge is not proof of the reviewed diff either.
+
+  Upstream merged the topic's first commit and nothing else, so the branch
+  merges cleanly, yet GitHub would show only the second commit.
+  """
+  repo, upstream, shas = histories
+  run(repo, "checkout", "-q", "-b", "fix/partly-landed", shas["base"])
+  (repo / "first.jsx").write_text("first\n")
+  run(repo, "add", "first.jsx")
+  run(repo, "commit", "-qm", "first reviewed step")
+  shared = run(repo, "rev-parse", "HEAD")
+  (repo / "second.jsx").write_text("second\n")
+  run(repo, "add", "second.jsx")
+  run(repo, "commit", "-qm", "second reviewed step")
+  run(repo, "checkout", "-q", "-b", "upstream-took-first", shas["base"])
+  run(repo, "merge", "-q", "--no-ff", "-m", "upstream takes the first step", shared)
+  upstream["sha"] = run(repo, "rev-parse", "HEAD")
+  run(repo, "checkout", "-q", "fix/partly-landed")
+  assert not git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/partly-landed").conflicts
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/partly-landed", shas["base"], HEAD)
+  assert error.value.code == "upstream_conflict"
+  assert "already contains part of this PR" in error.value.message
+  assert error.value.record_patch == {
+    "last_submit_upstream_branch": "main", "last_submit_upstream_sha": upstream["sha"]}
+  # A stack layer or an existing-PR update keeps its clean-merge-only gate.
+  assert git_ops._assert_merges_with_upstream(repo, "owner/repo", "fix/partly-landed") == {
+    "last_submit_upstream_branch": "main", "last_submit_upstream_sha": upstream["sha"]}
 
 
 def test_reviewed_base_as_one_of_several_merge_bases_is_not_the_reviewed_diff(histories):
@@ -245,7 +281,7 @@ def test_reviewed_base_as_one_of_several_merge_bases_is_not_the_reviewed_diff(hi
   assert bases == {reviewed_base, side}
   assert git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/criss-cross").conflicts
   with pytest.raises(ContributionSubmitError) as error:
-    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/criss-cross", reviewed_base)
+    git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/criss-cross", reviewed_base, HEAD)
   assert error.value.code == "upstream_conflict"
 
 
@@ -263,12 +299,12 @@ def standalone_record(record_id, repo):
   }
 
 
-def send_fakes(monkeypatch, *, base_on_upstream=True):
+def send_fakes(monkeypatch, *, base_on_upstream=True, merge_conflict=True):
   git_calls, gh_calls = [], []
   fork_ready = {"value": False}
   def fake_git(repo_path, *args, check=True):
     git_calls.append(args)
-    if (preflight := _submit_preflight_response(args, merge_conflict=True)) is not None:
+    if (preflight := _submit_preflight_response(args, merge_conflict=merge_conflict, merge_base=None)) is not None:
       return preflight
     if args == ("merge-base", "--all", _UPSTREAM_SHA, "fix/demo-polish"):
       return _cp(BASE + "\n") if base_on_upstream else _cp(returncode=1)
@@ -339,6 +375,12 @@ def test_send_opens_the_exact_reviewed_pr_over_an_upstream_overlap(client, owner
   assert record["status"] == "open" and record["number"] == 42
   assert record["last_submit_upstream_sha"] == _UPSTREAM_SHA
   assert "last_submit_error" not in record and "last_submit_error_code" not in record
+  # GitHub runs no PR workflows on a conflicting PR: the record says it needs
+  # upstream merged in, so the PR cannot sit there silently.
+  signal = {"upstream_branch": "main", "upstream_sha": _UPSTREAM_SHA,
+            "head_sha": HEAD, "next_pr_action": "merge_upstream_into_pr"}
+  assert record["last_submit_upstream_conflict"] == signal
+  assert stored(app_id, "rec-overlap")["last_submit_upstream_conflict"] == signal
   # The reviewed diff was proven to be what GitHub shows, and published as-is.
   assert ("merge-base", "--all", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
   assert ("push", "--force-with-lease=refs/heads/fix/demo-polish:", "fork",
@@ -382,6 +424,28 @@ def test_send_refuses_when_the_reviewed_base_left_upstream(client, owner_token, 
   assert detail["record"]["status"] == "prepared"
   assert detail["record"]["last_submit_error_code"] == "upstream_conflict"
   assert detail["record"]["last_submit_upstream_sha"] == _UPSTREAM_SHA
+  assert not any(call[:1] == ("push",) for call in git_calls)
+  assert not any(call[:2] == ("pr", "create") for call in gh_calls)
+
+
+def test_send_refuses_a_clean_merge_whose_reviewed_base_is_no_longer_the_merge_base(
+    client, owner_token, monkeypatch):
+  """Upstream took part of the topic: it merges cleanly, but GitHub would show
+  a smaller diff than the one reviewed, so nothing is pushed."""
+  _write_token(login="octocat")
+  _allow_synthetic_source_provenance(monkeypatch)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo = Path(get_settings().data_dir) / "contrib" / "rec-partly-landed" / "repo"
+  (repo / ".git").mkdir(parents=True)
+  _write_contribution(app_id, "rec-partly-landed", standalone_record("rec-partly-landed", repo), DIFF)
+  git_calls, gh_calls = send_fakes(monkeypatch, base_on_upstream=False, merge_conflict=False)
+  response = client.post(f"/api/github/contributions/{app_id}/rec-partly-landed/submit",
+                         headers={"Authorization": f"Bearer {app_token}"})
+  assert response.status_code == 409
+  detail = response.json()["detail"]
+  assert detail["code"] == "upstream_conflict"
+  assert detail["record"]["status"] == "prepared"
+  assert "last_submit_upstream_conflict" not in detail["record"]
   assert not any(call[:1] == ("push",) for call in git_calls)
   assert not any(call[:2] == ("pr", "create") for call in gh_calls)
 
@@ -461,6 +525,18 @@ def test_review_status_still_blocks_an_overlapping_existing_pr_update(client, ow
   assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES["upstream_conflict"]
 
 
+def test_review_status_blocks_a_clean_standalone_pr_upstream_already_took(client, owner_token):
+  """Mirror Send on the clean path: upstream holding the topic merges cleanly
+  but moves the merge base, so the reviewed diff is not what GitHub shows."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "already-landed")
+  head = subprocess.check_output(["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True).strip()
+  _record_upstream(app_id, "already-landed", head)
+  verdict = review_status(client, app_id, app_token)
+  assert verdict["state"] == "needs_refresh" and verdict["code"] == "upstream_conflict", verdict
+
+
 def test_review_status_blocks_an_overlap_whose_reviewed_base_left_upstream(client, owner_token):
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
@@ -492,7 +568,8 @@ def test_an_existing_pr_update_keeps_the_gate_even_if_its_action_witness_regress
 
 
 @pytest.mark.parametrize(("answer", "code"), [
-  ("moved", "upstream_conflict"), ("several", "upstream_conflict"), ("unreadable", "review_unavailable"),
+  ("moved", "upstream_conflict"), ("several", "upstream_conflict"),
+  ("unreadable", "upstream_merge_unavailable"),
 ])
 def test_review_status_requires_the_reviewed_base_as_the_sole_merge_base(client, owner_token, monkeypatch, answer, code):
   """The advisory projection mirrors Send's exact merge-base proof.

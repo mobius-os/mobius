@@ -844,35 +844,92 @@ def _assert_merges_with_upstream(
   return merge.record_patch
 
 
-def upstream_merge_for_new_pr(
-  repo: Path, upstream_repo: str, branch: str, base_sha: str,
-) -> dict:
-  """Preflight a NEW standalone PR, where an upstream conflict is not a refusal.
+def opens_new_standalone_pr(
+  plan: dict, *, existing_pr_number: int | None = None,
+  direct_base: str | None = None,
+) -> bool:
+  """Whether publishing ``plan`` opens a new PR against the default branch.
 
-  The owner approved this exact reviewed change. GitHub shows a new PR as
-  ``merge-base..head``. Only when the sole merge base of today's upstream tip
-  and the head IS the reviewed base is that byte-for-byte the reviewed diff,
-  so the PR may open and resolving the overlap becomes its next update.
-  Ancestry alone is not enough: upstream may already contain some of the
-  head's own commits, which moves the merge base and shrinks the published
-  diff. Otherwise it still refuses. Stacks and existing-PR updates keep
-  ``_assert_merges_with_upstream``.
+  Only such a PR may open over an upstream overlap, and only it is shown by
+  GitHub as ``merge-base..head``. A stack layer or an existing PR's update
+  must still merge cleanly before anything is pushed.
   """
-  merge = inspect_upstream_merge(repo, upstream_repo, branch)
-  if not merge.conflicts:
-    return merge.record_patch
-  bases = _git(repo, "merge-base", "--all", merge.sha, branch, check=False)
+  return (
+    existing_pr_number is None
+    and direct_base is None
+    and not isinstance(plan.get("stack"), dict)
+    and plan.get("action") == "pr"
+  )
+
+
+def reviewed_base_is_sole_merge_base(
+  run: Callable[..., subprocess.CompletedProcess],
+  upstream_sha: str, head: str, base_sha: str,
+) -> bool:
+  """Whether GitHub would show a new PR as exactly its reviewed diff.
+
+  GitHub shows a new PR as ``merge-base..head``. That is byte-for-byte the
+  reviewed ``base..head`` only when the reviewed base is the SOLE merge base
+  of upstream and head. Ancestry alone is not enough: upstream may already
+  hold some of the head's own commits (moving the merge base and shrinking
+  the diff), or the histories may criss-cross. ``run`` executes one git
+  command without raising, so Send and the read-only status card share this
+  one proof. A git failure is an unknown answer and raises.
+  """
+  bases = run("merge-base", "--all", upstream_sha, head)
   if bases.returncode not in (0, 1):
     raise ContributionSubmitError(
-      f"Could not compare this PR's reviewed base with upstream {merge.branch}. "
+      "Could not compare this PR's reviewed base with upstream. "
       "Nothing was published.",
-      record_patch=merge.record_patch,
       code="upstream_merge_unavailable",
       detail=readable_output(bases.stderr or bases.stdout or ""),
     )
-  if bases.returncode != 0 or (bases.stdout or "").split() != [str(base_sha).lower()]:
-    raise _upstream_conflict_error(merge)
-  return merge.record_patch
+  return bases.returncode == 0 and (bases.stdout or "").split() == [
+    str(base_sha).lower()
+  ]
+
+
+def upstream_merge_for_new_pr(
+  repo: Path, upstream_repo: str, branch: str, base_sha: str, head_sha: str,
+) -> dict:
+  """Preflight a NEW standalone PR: publish only the exact reviewed diff.
+
+  The PR may open even while it conflicts with newer upstream, because the
+  owner approved this exact change and resolving the overlap is its next
+  update. The returned patch then carries ``last_submit_upstream_conflict``
+  so Contribute and agents see that the open PR needs upstream merged in
+  (GitHub runs no PR workflows while it conflicts). Clean or not, a reviewed
+  base that is no longer the sole merge base refuses. Stacks and existing-PR
+  updates keep ``_assert_merges_with_upstream``.
+  """
+  merge = inspect_upstream_merge(repo, upstream_repo, branch)
+  try:
+    exact = reviewed_base_is_sole_merge_base(
+      lambda *args: _git(repo, *args, check=False), merge.sha, branch, base_sha,
+    )
+  except ContributionSubmitError as exc:
+    raise _merge_error_patch(exc, merge.record_patch) from None
+  if not exact:
+    raise _upstream_conflict_error(merge) if merge.conflicts else (
+      ContributionSubmitError(
+        f"Upstream {merge.branch} already contains part of this PR, so GitHub "
+        "would not show the reviewed diff. Leave feedback so your agent can "
+        "refresh the branch before it is pushed.",
+        record_patch=merge.record_patch,
+        code="upstream_conflict",
+      )
+    )
+  if not merge.conflicts:
+    return merge.record_patch
+  return {
+    **merge.record_patch,
+    "last_submit_upstream_conflict": {
+      "upstream_branch": merge.branch,
+      "upstream_sha": merge.sha,
+      "head_sha": str(head_sha).lower(),
+      "next_pr_action": "merge_upstream_into_pr",
+    },
+  }
 
 
 def _canonical_reviewed_oid(value: object, label: str) -> str:

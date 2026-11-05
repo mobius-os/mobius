@@ -6516,7 +6516,9 @@ def _cp(stdout="", stderr="", returncode=0):
 _UPSTREAM_SHA = "d" * 40
 
 
-def _submit_preflight_response(args, *, merge_conflict: bool = False):
+def _submit_preflight_response(
+  args, *, merge_conflict: bool = False, merge_base: str | None = "b" * 40,
+):
   if (
     len(args) >= 3 and
     args[:2] == ("rev-parse", "--verify") and
@@ -6533,6 +6535,10 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
     return _cp(_UPSTREAM_SHA + "\n")
   if args[:1] == ("merge-tree",):
     return _cp(returncode=1 if merge_conflict else 0)
+  if args[:2] == ("merge-base", "--all") and merge_base is not None:
+    # A new standalone PR proves its reviewed base is still the sole merge
+    # base with upstream, so GitHub shows exactly the reviewed diff.
+    return _cp(merge_base + "\n")
   return None
 
 
@@ -11706,7 +11712,9 @@ def test_submit_contribution_rejects_overlap_when_reviewed_base_left_upstream(
 
   def fake_git(repo_path, *args, check=True):
     git_calls.append(args)
-    if (preflight := _submit_preflight_response(args, merge_conflict=True)) is not None:
+    if (preflight := _submit_preflight_response(
+      args, merge_conflict=True, merge_base=None,
+    )) is not None:
       return preflight
     if args[:2] == ("merge-base", "--all"):
       return _cp("c" * 40 + "\n")
@@ -16245,4 +16253,3 @@ def test_single_claim_rechecks_the_confirmed_proposal_before_writing(
   assert raised.value.detail["not_attempted"] is True
   assert armed == []
   assert _record_bytes(app_id, [record_id]) == before
-
