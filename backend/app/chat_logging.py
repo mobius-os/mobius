@@ -50,6 +50,24 @@ def get_logger() -> logging.Logger:
   return logger
 
 
+def install_platform_warning_log() -> None:
+  """Keep the platform's own warnings readable after the fact.
+
+  Records from `app.*` modules (slow database checkouts, dropped work) have no
+  handler, so Python's last-resort handler prints them to the container's
+  stderr and nowhere else: an agent asked to check the logs cannot read them.
+  Send them to the shared chat log as well. Any handler on the chain switches
+  the last-resort output off, so it is attached explicitly to keep the
+  container output exactly as it was.
+  """
+  platform_logger = logging.getLogger("app")
+  handler = get_chat_log_handler()
+  if handler in platform_logger.handlers:
+    return
+  platform_logger.addHandler(handler)
+  platform_logger.addHandler(logging.lastResort)
+
+
 def safe_commit(db: Session) -> bool:
   """Commit a request session without leaving it poisoned after lock bursts."""
   try:

@@ -36,7 +36,10 @@ from sqlalchemy import inspect as inspect_database
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
-from app.chat_logging import get_logger as get_chat_logger
+from app.chat_logging import (
+  get_logger as get_chat_logger,
+  install_platform_warning_log,
+)
 from app.config import get_settings
 from app.database import (
   Base,
@@ -279,6 +282,7 @@ def _assert_provider_defaults(provider_names) -> None:
 @asynccontextmanager
 async def lifespan(app):
   _log = logging.getLogger(__name__)
+  install_platform_warning_log()
   record_memory_checkpoint("lifespan_start")
   # Before anything is spawned: no agent or tool may inherit server secrets.
   from app.config import withhold_server_secrets_from_children
