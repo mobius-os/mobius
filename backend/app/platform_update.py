@@ -83,7 +83,8 @@ except ImportError:  # only a transitive dependency; pip vendors the same librar
   from pip._vendor.packaging.version import InvalidVersion, Version
 
 from app import (
-  app_git, local_change_tests, platform_activation, removed_references, runtime_provenance,
+  app_git, local_change_tests, platform_activation, removed_references, restart_ledger,
+  runtime_provenance,
 )
 from app.platform_activation import PlatformActivationImpact
 from app.restart_util import run_candidate_startup_check
@@ -3332,6 +3333,10 @@ class PreparedUpdate(TypedDict):
   # swapped until a server serves them, so a merged tree that cannot start is
   # still returned to ``late`` by the boot transaction.
   replayed: str | None
+  # The boot already serving when ``replayed`` merged back (None when it
+  # merged before the server imported). That boot never loaded it, even when
+  # the commit is the one it serves (the edits came back uncommitted).
+  replayed_boot: str | None
   # The container replacement whose success confirms an image-requiring
   # update: ``{"controller": "railway" | "host", "id": ...}``. Only that exact
   # operation retires the record (``reconcile_bound_operation``). None means
@@ -3343,8 +3348,10 @@ class PreparedUpdate(TypedDict):
   # Bookkeeping the swap replaced, restored exactly if the swap is reverted:
   # ``{"upstream": sha | None, "activation": marker text | None}``.
   restore: dict | None
-  # The complete working tree (in-progress edits included) the merge-back
-  # left, so a revert sets aside only work made after it.
+  # The tree the boot itself established, so a revert sets aside only work
+  # made after it: what the boot's merge-back left (in-progress edits
+  # included), or the update alone when a resolver merged the late edits
+  # back later; that answer is resolver work, not boot state.
   booted_tree: str | None
 
 
@@ -3368,6 +3375,7 @@ def read_prepared_update() -> PreparedUpdate | None:
     late=record.get("late") or None,
     late_committed=record.get("late_committed") or None,
     replayed=record.get("replayed") or None,
+    replayed_boot=record.get("replayed_boot"),
     operation=_valid_operation(record.get("operation")),
     protocol=record.get("protocol") if isinstance(record.get("protocol"), int) else 0,
     restore=record.get("restore") if isinstance(record.get("restore"), dict) else None,
@@ -3490,7 +3498,7 @@ def _prepare(
     state="prepared", snapshot=snapshot, prepared=prepared, target=target,
     image_digest=image_digest, requires_image=requires_image, late=None,
     local_tests=local_report,
-    late_committed=None, replayed=None, operation=None,
+    late_committed=None, replayed=None, replayed_boot=None, operation=None,
     protocol=BOOT_PROTOCOL, restore=None, booted_tree=None,
   )
   _write_prepared_update(record)
@@ -3601,8 +3609,8 @@ def _swap_in(repo: Path, record: PreparedUpdate) -> PreparedUpdate:
   late = carried.pre
   swapped = PreparedUpdate(**{
     **record, "state": "swapped", "late": late,
-    "late_committed": carried.served, "replayed": None, "restore": restore,
-    "booted_tree": None,
+    "late_committed": carried.served, "replayed": None, "replayed_boot": None,
+    "restore": restore, "booted_tree": None,
   })
   try:
     _git("update-ref", _LATE_REF, late, repo=repo)
@@ -3745,12 +3753,13 @@ def late_edits_pending() -> bool:
 
 
 def _serves_replayed(record: PreparedUpdate, repo: Path = PLATFORM_REPO) -> bool:
-  """Whether this server imported the merged-back late edits (or newer)."""
+  """Whether this server imported the merged-back late edits (or newer):
+  it serves them and started after they merged back."""
   served = _served_platform_sha()
   return bool(record["replayed"] and served and (
     served == record["replayed"]
     or _is_ancestor(repo, record["replayed"], served)
-  ))
+  ) and record["replayed_boot"] != restart_ledger.current_boot_id())
 
 
 def _swap_position(repo: Path, record: PreparedUpdate, head: str) -> str:
@@ -3778,9 +3787,12 @@ def _replay_parked(record: PreparedUpdate) -> bool:
   )
 
 
-def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
+def _replay_late_edits(
+  repo: Path, record: PreparedUpdate, *, serving_boot: str | None = None,
+) -> str:
   """Merge late edits onto the booted update, or park them; the caller holds
-  the reconcile lock and has checked the checkout is exactly the update."""
+  the reconcile lock and has checked the checkout is exactly the update.
+  ``serving_boot`` is the boot that already imported the update, if any."""
   local = _local_branch(repo)
   head = record["prepared"]
   # Late edits are local work and the booted update is the incoming
@@ -3810,7 +3822,7 @@ def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
     _restore_working_edits(repo, local)
   replayed = _rev(repo, local)
   _write_prepared_update(PreparedUpdate(**{
-    **record, "replayed": replayed,
+    **record, "replayed": replayed, "replayed_boot": serving_boot,
     "booted_tree": _working_tree_oid(repo, replayed),
   }))
   return "replayed"
@@ -4496,7 +4508,8 @@ def _settle_reverted(
       RESTART_NEEDED_FLAG.unlink(missing_ok=True)
   prepared = PreparedUpdate(**{
     **record, "state": "prepared", "late": None, "late_committed": None,
-    "replayed": None, "operation": None, "restore": None, "booted_tree": None,
+    "replayed": None, "replayed_boot": None, "operation": None, "restore": None,
+    "booted_tree": None,
   })
   if set_aside:
     reason += f" Work made on the new version is kept at {set_aside}."
@@ -4561,7 +4574,9 @@ def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
       # so it cannot have loaded them: merge now and record the restart that
       # loads them. The record stays, so the next boot can still return a
       # tree that cannot start to the saved previous state.
-      outcome = _replay_late_edits(repo, record)
+      outcome = _replay_late_edits(
+        repo, record, serving_boot=restart_ledger.current_boot_id(),
+      )
       if outcome == "replayed":
         _record_update_activation(
           repo, _rev(repo, local), recorded_upstream_sha(repo),
@@ -4842,6 +4857,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
         _working_overlay_commit(repo, committed, late.merged_tree_oid),
         late_working,
       )
+    record = read_prepared_update() if parked.get("replay") else None
+    if record is not None and not record["booted_tree"]:
+      # The boot established only the update; the answer is resolver work,
+      # which a revert sets aside (``_set_aside_unsaved_update_work``).
+      # Recorded before the merge clears the conflict flag, after which a boot
+      # would take the merged tree for its own (``_settle_swap``).
+      _write_prepared_update(PreparedUpdate(**{
+        **record, "booted_tree": _commit_tree_oid(repo, record["prepared"]),
+      }))
     _reattach_detached_head(repo, local)
     carried = _carry_working_edits(repo, local)
     if parked.get("replay") and resolved_working is not None:
@@ -4878,17 +4902,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _record_update_activation(repo, head, target)
       return result.status
     # The server booted before these edits returned, so it still owes the
-    # restart that loads them. The swap stays until a server serves them
+    # restart that loads them. The swap stays until a later boot serves them
     # (``confirm_platform_swap_loaded``) or its bound replacement confirms it,
-    # so that boot can still return a merged tree that cannot start. The boot
-    # tree stays the update it parked on: the answer is resolver work, which a
-    # revert sets aside (``_set_aside_unsaved_update_work``), not boot state.
+    # so that boot can still return a merged tree that cannot start.
     _record_update_activation(repo, head, recorded_upstream_sha(repo))
     record = read_prepared_update()
     if record is not None:
       _write_prepared_update(PreparedUpdate(**{
         **record, "replayed": head,
-        "booted_tree": record["booted_tree"] or _commit_tree_oid(repo, record["prepared"]),
+        "replayed_boot": restart_ledger.current_boot_id(),
       }))
     return result.status
 

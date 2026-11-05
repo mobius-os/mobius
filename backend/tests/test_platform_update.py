@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import uuid
 import select
 import signal
 import subprocess
@@ -206,6 +207,7 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", tmp_path / ".restart")
   monkeypatch.setattr(pu, "SERVING_SOURCE_FILE", tmp_path / ".serving-source")
   monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / ".serving-sha")
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-0")  # _boot_started_server starts the next
   monkeypatch.setattr(pu, "CONFLICT_FLAG", tmp_path / ".conflict")
   monkeypatch.setattr(pu, "ROLLED_BACK_FLAG", tmp_path / ".rolled-back")
   monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
@@ -645,7 +647,9 @@ def test_long_local_history_merges_once_and_never_replays_commits(
 
 
 def _boot_started_server(platform: Path, source: str = "platform") -> None:
-  """What the boot script records once it has chosen what uvicorn serves."""
+  """What the boot script records once it has chosen what uvicorn serves,
+  in a boot of its own."""
+  os.environ["MOBIUS_BOOT_ID"] = f"boot-{uuid.uuid4().hex}"
   pu.SERVING_SOURCE_FILE.write_text(source + "\n")
   pu.SERVING_SHA_FILE.write_text(_served_sha(platform) + "\n")
 
@@ -937,10 +941,15 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   _assert_restored_late_edits_finish_once_loaded(platform)
 
 
-def test_a_resolved_late_edit_that_fails_to_start_is_set_aside_on_revert(clone_env):
+@pytest.mark.parametrize("killed_before_record", [False, True])
+def test_a_resolved_late_edit_that_fails_to_start_is_set_aside_on_revert(
+  clone_env, monkeypatch, killed_before_record,
+):
   """The resolver's answer is work the reverted-to tree lacks: a boot that
   cannot start it returns to the late edit and keeps the answer at a set-aside
-  ref the receipt names, not only in the reflog."""
+  ref the receipt names, not only in the reflog. That holds when the process
+  died after the merge cleared the conflict flag, before it recorded the
+  merge-back: the next boot must not take the answer for its own tree."""
   origin, platform = clone_env
   _park_resolved_line_a_conflict(platform, origin)
   _local_commit(platform, edits={
@@ -953,7 +962,17 @@ def test_a_resolved_late_edit_that_fails_to_start_is_set_aside_on_revert(clone_e
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
   )
   _git(replay, "add", "backend/app/main.py")
-  assert pu.continue_platform_overlay_update(platform) == "updated"
+  if killed_before_record:
+    def killed(*args, **kwargs):
+      raise KeyboardInterrupt("killed")
+    with monkeypatch.context() as patch:
+      patch.setattr(pu, "_record_update_activation", killed)
+      with pytest.raises(KeyboardInterrupt):
+        pu.continue_platform_overlay_update(platform)
+    assert not pu.CONFLICT_FLAG.exists()
+    assert pu.read_prepared_update()["replayed"] is None
+  else:
+    assert pu.continue_platform_overlay_update(platform) == "updated"
   resolved = _served_sha(platform)
   late = pu.read_prepared_update()["late"]
 
@@ -1043,6 +1062,26 @@ def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
   assert "late conflicting commit" in _git(
     platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF,
   ).stdout
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+
+
+def test_startup_merge_back_of_only_uncommitted_edits_waits_for_a_restart(
+  clone_env,
+):
+  """A server that imported the update before its late edits came back has
+  not loaded them, even when they all return uncommitted and the checkout's
+  commit is still the one it serves."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY'\n")
+  assert pu.swap_in_prepared_update(cutover=True, repo=platform)
+  _boot_started_server(platform)  # started on the update without the edits
+
+  assert pu.complete_platform_swap(platform) == "replayed"
+
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
   _assert_restored_late_edits_finish_once_loaded(platform)
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
 
@@ -1365,7 +1404,12 @@ def test_a_late_uncommitted_edit_that_conflicts_parks_after_boot(clone_env):
   assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
     " M backend/app/main.py",
   ]
-  assert not pu.late_edits_pending()
+  # The edits came back uncommitted, so the checkout's commit is still the one
+  # this server imported; only a later boot has loaded them.
+  _assert_restored_late_edits_finish_once_loaded(platform)
+  assert "LINE_A = 'RESOLVED WITH DIRTY'" in (
+    platform / "backend/app/main.py"
+  ).read_text()
 
 
 def test_an_answer_that_fails_the_startup_check_is_never_prepared(
