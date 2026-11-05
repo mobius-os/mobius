@@ -13,8 +13,14 @@ from .test_platform_update import (
 )
 
 
-def _running(platform, monkeypatch, image, served):
+def _running(platform, monkeypatch, image, served, *, official=True):
   monkeypatch.setattr(pu, "current_build_sha", lambda: image)
+  # An official image's frozen build record and the lineage fetched from the
+  # canonical origin at build both name it; any other image proves nothing.
+  monkeypatch.setattr(pu, "frozen_image_sha", lambda: image)
+  monkeypatch.setattr(
+    pu, "image_lineage", lambda: frozenset({image}) if official else frozenset(),
+  )
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   if served is not None:
     pu.SERVING_SHA_FILE.write_text(served + "\n")
@@ -259,3 +265,70 @@ def test_paired_replacement_accepts_a_local_merged_descendant(
   assert merged != image
   assert pu._serving_settled_update(record, platform) is True
   assert (platform / "local.txt").read_text() == "keep me\n"
+
+
+def test_unofficial_image_without_local_object_is_not_a_release(
+  clone_env, monkeypatch,
+):
+  """A fork or PR-merge image's build SHA alone never offers an update."""
+  _origin, platform = clone_env
+  served = _served_sha(platform)
+  _running(platform, monkeypatch, "a" * 40, served, official=False)
+
+  status = pu.platform_status(platform)
+  preview = pu.platform_update_preview(platform)
+
+  assert status["checked_target_sha"] == pu._rev(platform, "origin/main")
+  assert status["available"] is False
+  assert preview["available"] is False
+  assert preview["target_sha"] == pu._rev(platform, "origin/main")
+
+
+def test_local_overlay_image_never_becomes_the_upstream_release(
+  clone_env, monkeypatch,
+):
+  _origin, platform = clone_env
+  release = pu.recorded_upstream_sha(platform)
+  local = _local_commit(platform, edits={"local.txt": "image built from me\n"})
+  _running(platform, monkeypatch, local, local, official=False)
+
+  status = pu.check_for_updates(platform)
+
+  assert status["checked_target_sha"] == release
+  assert pu.recorded_upstream_sha(platform) == release
+  assert pu._contained_official_source(platform) == release
+  assert pu.applied_release_sha(platform) == release
+
+
+def test_unfetched_official_image_keeps_the_contained_source_proof(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  stale = pu.recorded_upstream_sha(platform)
+  merged = _advance_origin(origin, edits={"release.txt": "merged\n"})
+  _git(platform, "fetch", "origin")
+  _git(platform, "merge", "--ff-only", merged)
+  image = _advance_origin(origin, edits={"release.txt": "image\n"})
+  _running(platform, monkeypatch, image, merged)
+  assert not pu._rev(platform, image)
+
+  assert pu.platform_status(platform)["checked_target_sha"] == image
+  assert pu.recorded_upstream_sha(platform) == stale
+  assert pu._contained_official_source(platform) == merged
+
+
+def test_live_source_update_confirms_the_image_release_without_restart(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  old = _served_sha(platform)
+  image = _advance_origin(origin, edits={"frontend/src/release.js": "x\n"})
+  _running(platform, monkeypatch, image, old)
+
+  assert pu.reconcile_clone(platform).status == "updated"
+  status = pu.platform_status(platform)
+
+  assert pu.SERVING_SHA_FILE.read_text().strip() == old  # no restart happened
+  assert status["needs_restart"] is False
+  assert status["image_build_applied"] is True
+  assert status["state"] == "up_to_date"

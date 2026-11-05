@@ -315,7 +315,8 @@ class PlatformUpdateState(str, Enum):
 
   UP_TO_DATE = "up_to_date"
   # Source is installed, but this process has not proved that it serves the
-  # installed image's release. Neither HEAD nor a saved marker proves loading.
+  # installed image's release. A saved marker never proves loading; HEAD does
+  # only once nothing between the boot commit and it is owed activation.
   SOURCE_UNCONFIRMED = "source_unconfirmed"
   AVAILABLE = "available"
   CONFLICT = "conflict"
@@ -338,8 +339,9 @@ class PlatformStatus(TypedDict):
   # Served checkout revision, including the reconciled local source. A normal
   # restart can advance this without changing the image's build identity.
   served_sha: str | None
-  # Containment in the captured served commit, not the upstream marker or
-  # current checkout. None only for unstamped development images.
+  # Containment in the served source: the captured boot commit, or the
+  # checkout once everything since boot activated live. Never the upstream
+  # marker. None only for unstamped development images.
   image_build_applied: bool | None
   # Exact release this response compared with the served source. For a
   # self-hosted check this is the freshly fetched origin/main; for a managed
@@ -1466,8 +1468,8 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
   return _rev(repo, UPSTREAM_BRANCH) or None
 
 
-def _latest_known_release(repo: Path) -> str | None:
-  """The newest known release, including the installed image's source floor.
+def _tracked_release(repo: Path) -> str | None:
+  """The newest release the clone's refs know: ``origin/main`` unless it lags.
 
   A reviewed Apply can install an exact target fetched outside the tracking
   ref, leaving ``origin/main`` behind the installed ``upstream`` marker until
@@ -1480,14 +1482,24 @@ def _latest_known_release(repo: Path) -> str | None:
   # A missing tracking ref stays unavailable, never "up to date".
   if not remote:
     return None
-  release = installed if installed and _is_ancestor(repo, remote, installed) else remote
-  image = current_build_sha()
-  if image and re.fullmatch(r"[0-9a-f]{40}", image) and (
+  return installed if installed and _is_ancestor(repo, remote, installed) else remote
+
+
+def _latest_known_release(repo: Path) -> str | None:
+  """The newest known release, including the running image's official source.
+
+  Only the frozen build record counts, and only when the image's official
+  lineage (fetched from the canonical origin at build) contains it: a
+  configurable build SHA, a fork, or a local-overlay image proves nothing
+  about upstream. Such an image may be newer than the clone's refs before its
+  object is fetched; preview must obtain that object before admitting a plan,
+  while GET status stays fetch-free.
+  """
+  release = _tracked_release(repo)
+  image = frozen_image_sha()
+  if release and image and image in image_lineage() and (
     not _rev(repo, image) or _is_ancestor(repo, release, image)
   ):
-    # Immutable image metadata is evidence of an installed release even before
-    # its object is fetched. Preview must obtain that object before admitting
-    # a plan; GET status stays fetch-free.
     return image
   return release
 
@@ -1538,6 +1550,9 @@ def _contained_official_source(repo: Path) -> str | None:
   if not head:
     return None
   known = _latest_known_release(repo)
+  if known and not _rev(repo, known):
+    # A not-yet-fetched image release says nothing about what HEAD contains.
+    known = _tracked_release(repo)
   base = _git(
     "merge-base", head, known, repo=repo, check=False,
   ).stdout.strip() if known else ""
@@ -5547,11 +5562,6 @@ def platform_status(
   )
   image_sha = current_build_sha()
   served_sha = _served_platform_sha()
-  stamped_image = bool(image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha))
-  image_build_applied = (
-    source_contains_image_release(repo, served_sha, image_sha)
-    if stamped_image else None
-  )
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
@@ -5571,6 +5581,16 @@ def platform_status(
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
+  # The server serves its boot commit plus every change since that activates
+  # live; once nothing is owed, the checkout is what it serves.
+  image_build_applied = None
+  if image_sha and re.fullmatch(r"[0-9a-f]{40}", image_sha):
+    serves_head = bool(served_sha) and (
+      activation["level"] == platform_activation.ActivationLevel.LIVE.value
+    )
+    image_build_applied = source_contains_image_release(
+      repo, local if serves_head else served_sha, image_sha,
+    )
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")
