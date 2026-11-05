@@ -66,8 +66,26 @@ export function chatEntryFrame({
   return { showEmpty, showLoadError, displayReady }
 }
 
+/** Display-only history of a pause that a later continuation resolved. It
+ * wraps the original pause as `source`, so the card classifies it exactly as
+ * the live pause card did, and its distinct type keeps every Resume,
+ * tail-recovery and nudge path from treating it as actionable. */
+export const PAUSE_RECORD_BLOCK = 'pause_record'
+
+// Continuations the owner or a parent agent chose. Each stays visible even
+// when the work paused again immediately.
+const DELIBERATE_CONTINUATIONS = new Set(['manual', 'question_answer', 'helper_answer'])
+
+const samePause = (a, b) => (a?.pause?.kind ?? null) === (b?.pause?.kind ?? null)
+  && (a?.code ?? null) === (b?.code ?? null)
+
 /**
- * A confirmed continuation replaces its actionable pause with one resume notice.
+ * A confirmed continuation settles its actionable pause into a history record:
+ * the chat keeps showing that work paused (a platform update, low storage, a
+ * limit) beside the resume notice, without a stale Resume control or "will
+ * continue" copy. An automatic retry that paused again for the same cause and
+ * produced nothing else is hidden, so a re-parking wait reads as one pause and
+ * one resume; a different cause or a deliberate continuation keeps its record.
  * The durable transcript is untouched. Runtime and stream identity can confirm
  * the successor before its transcript row has been hydrated.
  */
@@ -81,19 +99,28 @@ export function supersedeResumedPauseBlocks(messages, {
   let projected = messages
   let previousVisibleIndex = -1
   let activeAssistantInTranscript = false
+  // For each resuming row, the pause it settled: the cause a retry repeats.
+  const pauseResumedBy = new Map()
   const supersedePause = index => {
     const previous = projected[index]
     const blocks = Array.isArray(previous?.blocks) ? previous.blocks : []
     const tail = blocks.at(-1)
     if (previous?.role !== 'assistant' || tail?.type !== 'error'
-        || tail.resumable !== true) return
+        || tail.resumable !== true) return null
     if (projected === messages) projected = [...messages]
     const remainingBlocks = blocks.slice(0, -1)
+    const repeated = pauseResumedBy.get(index)
+    if (repeated && samePause(repeated, tail) && remainingBlocks.length === 0
+        && !DELIBERATE_CONTINUATIONS.has(previous.continuation_reason)
+        && !previous.goal_summaries?.length && !previous.wait_summaries?.length) {
+      projected[index] = { ...previous, blocks: [], hidden: true }
+      return repeated
+    }
     projected[index] = {
       ...previous,
-      blocks: remainingBlocks,
-      ...(remainingBlocks.length === 0 ? { hidden: true } : {}),
+      blocks: [...remainingBlocks, { type: PAUSE_RECORD_BLOCK, source: tail }],
     }
+    return tail
   }
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]
@@ -106,7 +133,8 @@ export function supersedeResumedPauseBlocks(messages, {
     const resumes = isContinuationMessage(message)
       || (message?.role === 'assistant' && !!message.continuation_reason)
     if (resumes && previousVisibleIndex >= 0) {
-      supersedePause(previousVisibleIndex)
+      const settled = supersedePause(previousVisibleIndex)
+      if (settled) pauseResumedBy.set(index, settled)
     }
 
     previousVisibleIndex = index

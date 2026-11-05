@@ -5,7 +5,9 @@ from app.chat_writer import create_chat
 from app import models
 from app.activity_position import attach_activity_positions, record_activity_position
 from app.broadcast import ChatBroadcast
-from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
+from app.chat_event_sink import (
+  ChatEventSink, active_sink_activity_position, register_active_sink, unregister_active_sink,
+)
 
 
 def test_saved_position_is_exact_chat_utf16_and_does_not_move_on_retry(db):
@@ -45,11 +47,23 @@ def test_absence_is_saved_not_backfilled_from_a_later_turn(db):
   db.commit()
   record_activity_position(db, 'anchor-quiet', 'delegation:one:completed')
   db.commit()
+  saved = db.get(models.ChatActivityPosition, ('anchor-quiet', 'delegation:one:completed'))
+  assert saved is not None
+  assert saved.position is None
   sink = ChatEventSink(ChatBroadcast('anchor-quiet'), chat_id='anchor-quiet')
   register_active_sink('anchor-quiet', sink)
   try:
+    sink.publish({'type': 'text', 'content': 'a later response'})
+    later_position = active_sink_activity_position('anchor-quiet')
+    assert later_position is not None
+    record_activity_position(db, 'anchor-quiet', 'peer:later')
     record_activity_position(db, 'anchor-quiet', 'delegation:one:completed')
     db.commit()
+    db.expire_all()
+    saved = db.get(models.ChatActivityPosition, ('anchor-quiet', 'delegation:one:completed'))
+    assert saved is not None
+    assert saved.position is None
+    assert db.get(models.ChatActivityPosition, ('anchor-quiet', 'peer:later')).position == later_position
     events = [{'id': 'delegation:one:completed'}, {'id': 'peer:historical'}]
     attach_activity_positions(db, 'anchor-quiet', events)
     assert all(event['display_position'] is None for event in events)

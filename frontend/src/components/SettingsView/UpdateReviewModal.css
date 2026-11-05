@@ -20,11 +20,12 @@
 .urm__body h3 { font-size: 14px; font-weight: 600; margin: 22px 0 6px; color: var(--text); }
 .urm__body h3:first-child { margin-top: 0; }
 .urm__body p { margin: 0 0 12px; }
-.urm__overview p, .urm__technical { color: var(--muted); }
+.urm__overview p, .urm__retired p, .urm__technical { color: var(--muted); }
 .urm__technical { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 18px; font-size: 13px; }
 .urm__technical summary { color: var(--text); cursor: pointer; min-height: 44px; align-content: center; }
-.urm__technical ul { padding-left: 20px; margin: 8px 0 18px; }
-.urm__technical li { margin: 6px 0; }
+.urm__retired ul, .urm__technical ul { padding-left: 20px; margin: 8px 0 18px; }
+.urm__retired li, .urm__technical li { margin: 6px 0; }
+.urm__retired a { color: var(--accent); }
 .urm__sha { font-family: var(--mono); font-size: 12px; }
 .urm__notice { margin: 0; color: var(--text); }
 .urm__notice strong { display: block; margin-bottom: 8px; }

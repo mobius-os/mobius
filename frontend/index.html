@@ -38,9 +38,14 @@
          import consumed by Vite) also preserves the URL app-frame.html loads. -->
     <link rel="stylesheet" href="/vendor/fonts/mobius-fonts.css" />
     <script src="/vendor/fonts/mobius-font-readiness.js"></script>
-    <!-- Preloading the primary text face avoids a FOUT on first paint without
-         blocking secondary weights until they're needed. -->
+    <!-- Preload exactly the faces the first shell screen renders (body text,
+         semibold labels, bold title/brand). Without these hints the browser only
+         discovers 600/700 after the shell JavaScript has run, which costs a whole
+         extra round trip before launch can finish on slow links. Weight 500 and
+         the monospace faces are left to load on demand. -->
     <link rel="preload" href="/vendor/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/vendor/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/vendor/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin />
     <!-- KaTeX CSS is self-hosted under the stable /vendor/katex/ alias (built
          into the image by the Dockerfile), so a KaTeX bump never edits this
          file. Its JS is an on-demand application chunk, loaded only when a
@@ -265,11 +270,52 @@
         }, 500);
       };
     })();</script>
+    <!-- Slow-boot progress line on the launch cover, drawn as a pseudo-element
+         so #splash stays an empty slot (the standalone app host inserts its
+         loading mark there). It stays invisible for the first 1.5s so an
+         ordinary cached launch or controlled shell refresh never flashes it.
+         CanvasText follows the color-scheme the pre-paint script set from the
+         saved theme. -->
+    <style data-mobius-launch-progress>
+      #splash::after {
+        content: '';
+        position: absolute;
+        top: env(safe-area-inset-top, 0px);
+        left: 0;
+        width: 32%;
+        height: 3px;
+        border-radius: 3px;
+        background: CanvasText;
+        opacity: 0;
+        transform: translateX(-100%);
+        animation:
+          mobius-launch-progress-in .4s ease 1.5s forwards,
+          mobius-launch-progress-sweep 1.6s cubic-bezier(.45, 0, .55, 1) 1.5s infinite;
+      }
+      @keyframes mobius-launch-progress-in { to { opacity: .45; } }
+      @keyframes mobius-launch-progress-sweep {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(320%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #splash::after {
+          width: 100%;
+          transform: none;
+          animation: mobius-launch-progress-pulse 2.4s ease-in-out 1.5s infinite;
+        }
+        @keyframes mobius-launch-progress-pulse {
+          0%, 100% { opacity: .12; }
+          50% { opacity: .45; }
+        }
+      }
+    </style>
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
   <body style="margin:0;background:var(--bg,#0d0d0d)">
     <!-- Keep startup visually continuous with the saved theme without adding a
-         second brand mark after the device's native splash screen. -->
+         second brand mark after the device's native splash screen. Its only
+         decoration is the delayed, artwork-free progress line styled above,
+         so a slow boot reads as working rather than frozen. -->
     <div id="splash" aria-hidden="true" style="position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict"></div>
     <div id="root"></div>
     <script>
@@ -289,36 +335,119 @@
       if ('scrollRestoration' in history) {
         history.scrollRestoration = 'manual'
       }
-      // If the shell JS fails to load within 8s, offer an ordinary reload first
-      // and keep the operator repair path as the last resort.
-      setTimeout(function() {
-        if (!document.getElementById('root').hasChildNodes()) {
-          // The normal authenticated handoff intentionally retains the cover.
-          // A failed JavaScript boot has no Shell callback to release it, so
-          // remove it before exposing the recovery action.
-          var splash = document.getElementById('splash')
-          if (splash) splash.remove()
-          var d = document.createElement('div')
-          var retry = document.createElement('a')
-          d.setAttribute('role', 'alert')
-          d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;width:max-content;max-width:calc(100vw - 48px);background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;color:#cbd5e1;text-align:center'
-          retry.href = window.location.href
-          retry.textContent = 'Try again'
-          retry.style.cssText = 'color:#c4b5fd;text-decoration:none;font-weight:600'
-          retry.addEventListener('click', function(event) {
-            event.preventDefault()
-            window.location.reload()
-          })
-          d.append(
-            'Möbius failed to load. ', retry,
-            '. If it still won’t load, open Recovery from your deployment control panel.',
-          )
-          document.body.appendChild(d)
-          if (window.__mobiusReleaseShellReloadTransition) {
-            window.__mobiusReleaseShellReloadTransition()
-          }
+      // A boot failure offers an ordinary reload first and keeps the operator
+      // repair path as the last resort. "Failed" means the entry modules could
+      // not be fetched, or they arrived and still mounted nothing. A first visit
+      // on a slow link can spend well over 8s just downloading them; calling
+      // that a failure invites a reload that restarts the download from zero.
+      // The first look stays at 8s because an ordinary launch has mounted well
+      // before then, so only an already-slow boot ever reaches these rules.
+      var BOOT_FIRST_CHECK_MS = 8000
+      var BOOT_RECHECK_MS = 2000
+      // Downloaded modules get this long to evaluate and mount, parse time on a
+      // low-end phone included, before the boot counts as broken.
+      var BOOT_MOUNT_GRACE_MS = 4000
+      // Past this with the network still pending, say the connection is slow
+      // and offer the reload, but keep the cover: the boot may still finish.
+      var BOOT_SLOW_NOTICE_MS = 60000
+      var bootFailed = false
+      var bootNotice = null
+      var sessionExchangePending = false
+      var sessionExchangeSettledAt = 0
+      var entryModules = Array.prototype.map.call(
+        document.querySelectorAll('script[type="module"][src], link[rel="modulepreload"][href]'),
+        function (el) { return el.src || el.href },
+      )
+      // main.jsx passes its pre-render session exchange (installed shells only)
+      // through here, so that network wait counts as loading rather than as
+      // downloaded modules that mounted nothing.
+      window.__mobiusBootSessionExchange = function (exchange) {
+        sessionExchangePending = true
+        return exchange.finally(function () {
+          sessionExchangePending = false
+          sessionExchangeSettledAt = performance.now()
+        })
+      }
+      // A failed module-graph fetch fires a non-bubbling `error` on the entry
+      // script element at execution time (after parsing), so a capturing
+      // window listener registered here is always in time to see it.
+      window.addEventListener('error', function (event) {
+        var target = event.target
+        if (target && target.tagName === 'SCRIPT' && target.type === 'module') showBootFailure()
+      }, true)
+      // When the boot last waited on the network, or null while it still does.
+      // Resource Timing names entries by the absolute URLs el.src/el.href give.
+      // The entry modules are among the page's first resources, so the
+      // 250-entry buffer cannot realistically have dropped them; if one were
+      // missing, this stays null and only the slow notice can appear, never a
+      // failure the page cannot see.
+      function bootNetworkSettledAt() {
+        if (sessionExchangePending) return null
+        var settledAt = sessionExchangeSettledAt
+        for (var i = 0; i < entryModules.length; i++) {
+          var timing = performance.getEntriesByName(entryModules[i])[0]
+          if (!timing) return null
+          settledAt = Math.max(settledAt, timing.responseEnd)
         }
-      }, 8000)
+        return settledAt
+      }
+      function checkBoot() {
+        if (bootFailed || document.getElementById('root').hasChildNodes()) return
+        var settledAt = bootNetworkSettledAt()
+        if (settledAt !== null && performance.now() - settledAt >= BOOT_MOUNT_GRACE_MS) {
+          showBootFailure()
+          return
+        }
+        if (settledAt === null && !bootNotice && performance.now() >= BOOT_SLOW_NOTICE_MS) {
+          showBootNotice('Möbius is still loading on a slow connection. ', ' or keep waiting.')
+        }
+        setTimeout(checkBoot, BOOT_RECHECK_MS)
+      }
+      setTimeout(checkBoot, BOOT_FIRST_CHECK_MS)
+      function showBootFailure() {
+        if (bootFailed || document.getElementById('root').hasChildNodes()) return
+        bootFailed = true
+        // The normal authenticated handoff intentionally retains the cover.
+        // A failed JavaScript boot has no Shell callback to release it, so
+        // remove it before exposing the recovery action.
+        var splash = document.getElementById('splash')
+        if (splash) splash.remove()
+        showBootNotice(
+          'Möbius failed to load. ',
+          '. If it still won’t load, open Recovery from your deployment control panel.',
+        )
+      }
+      // One notice at a time, and it leaves as soon as React mounts: a boot that
+      // finishes after the notice appeared must not keep reporting trouble.
+      function showBootNotice(beforeRetry, afterRetry) {
+        var root = document.getElementById('root')
+        if (bootNotice) {
+          bootNotice.remove()
+        } else {
+          new MutationObserver(function (records, observer) {
+            if (!root.hasChildNodes()) return
+            observer.disconnect()
+            bootNotice.remove()
+          }).observe(root, { childList: true })
+        }
+        var d = document.createElement('div')
+        var retry = document.createElement('a')
+        d.setAttribute('role', 'alert')
+        d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;width:max-content;max-width:calc(100vw - 48px);background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;color:#cbd5e1;text-align:center'
+        retry.href = window.location.href
+        retry.textContent = 'Try again'
+        retry.style.cssText = 'color:#c4b5fd;text-decoration:none;font-weight:600'
+        retry.addEventListener('click', function(event) {
+          event.preventDefault()
+          window.location.reload()
+        })
+        d.append(beforeRetry, retry, afterRetry)
+        bootNotice = d
+        document.body.appendChild(d)
+        if (window.__mobiusReleaseShellReloadTransition) {
+          window.__mobiusReleaseShellReloadTransition()
+        }
+      }
     </script>
     <script>
       // `updateViaCache: 'none'` tells the browser to bypass its HTTP

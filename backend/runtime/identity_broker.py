@@ -96,11 +96,13 @@ MANAGED_EXACT_ROUTES = frozenset({
   ("POST", "/api/instance/v1/railway/connect/start"),
   ("POST", "/api/instance/v1/railway/plan/refresh"),
 })
-# The only managed read that takes a query: the opt-in inventory extensions,
-# each spelled exactly ``<name>=1`` in canonical order.
+# Opt-in read extensions, each spelled exactly ``<name>=1`` in canonical order.
 MANAGED_QUERY_ROUTES = {
   ("GET", "/api/instance/v1/railway"): frozenset({"region_options", "workspace_ids"}),
 }
+MANAGED_RAILWAY_METRICS = re.compile(
+  rf"/api/instance/v1/railway/instances/{MANAGED_INSTANCE_ID}/metrics"
+)
 MANAGED_RAILWAY_INSTANCE_WRITES = (
   ("PATCH", re.compile(rf"/api/instance/v1/railway/instances/{MANAGED_INSTANCE_ID}")),
   ("PATCH", re.compile(
@@ -116,8 +118,9 @@ MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 # 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present;
 # 3 = standalone web search endpoint; 4 = flat gateway wire for Codex web.run;
 # 5 = account review routes; 6 = shared access; 7 = recipient invitation response;
-# 8 = native push relay routes; 9 = Railway inventory read options.
-BROKER_ROUTE_EPOCH = 9
+# 8 = native push relay routes; 9 = Railway inventory read options;
+# 10 = community listing sort; 11 = Railway display-only cost read option.
+BROKER_ROUTE_EPOCH = 11
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -195,6 +198,12 @@ _COMMUNITY_ROUTES = (
 )
 
 
+# The registry's listing rankings (mobius.you `LISTING_SORTS` in
+# services/mobius_launch/community_registry.py). The app route offers the same
+# values; extend all three together.
+COMMUNITY_LISTING_SORTS = frozenset({"updated", "trending", "installs"})
+
+
 def _community_scope(method: str, route_path: str, query: str) -> str | None:
   scope = next(
     (
@@ -213,11 +222,16 @@ def _community_scope(method: str, route_path: str, query: str) -> str | None:
   }:
     return None
   allowed = (
-    {"q", "limit", "offset"}
+    {"q", "limit", "offset", "sort"}
     if route_path == "/v1/community/apps"
     else {"limit", "offset"}
   )
-  return scope if _canonical_query_pairs(query, allowed) is not None else None
+  pairs = _canonical_query_pairs(query, allowed)
+  if pairs is None:
+    return None
+  if any(key == "sort" and value not in COMMUNITY_LISTING_SORTS for key, value in pairs):
+    return None
+  return scope
 
 
 def _canonical_query_pairs(
@@ -464,6 +478,8 @@ def _managed_upstream_path(method: str, path: str) -> str | None:
   upstream, separator, query = path.removeprefix(MANAGED_PREFIX).partition("?")
   if separator:
     allowed = MANAGED_QUERY_ROUTES.get((method, upstream))
+    if method == "GET" and MANAGED_RAILWAY_METRICS.fullmatch(upstream):
+      allowed = frozenset({"cost"})
     pairs = _canonical_query_pairs(query, allowed) if allowed else None
     if not pairs or any(value != "1" for _key, value in pairs):
       return None

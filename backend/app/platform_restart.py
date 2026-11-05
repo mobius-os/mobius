@@ -79,6 +79,33 @@ def pending_restart_paths() -> list[str]:
     return []
 
 
+def uncommitted_restart_paths() -> list[str]:
+  """Uncommitted paths a restart would ALSO load, for card text.
+
+  A restart serves whatever valid source is on disk, not only the requesting
+  chat's commits, so another chat's unfinished edit goes live with it. Naming
+  those files lets the owner see that before pressing Restart now. Display-only
+  like ``pending_restart_paths``: it reflects the tree when the card is saved,
+  never blocks a restart, and any error yields an empty list.
+  """
+  try:
+    from app import platform_update
+
+    repo = platform_update.PLATFORM_REPO
+    paths: set[str] = set()
+    for args in (
+      ("diff", "--name-only", "--no-renames", "HEAD", "--"),
+      ("ls-files", "--others", "--exclude-standard"),
+    ):
+      proc = platform_update._git(*args, repo=repo, check=False)
+      if proc.returncode != 0:
+        return []
+      paths.update(line.strip() for line in proc.stdout.splitlines())
+    return _restart_loaded(path for path in paths if path)
+  except Exception:
+    return []
+
+
 def _restart_loaded(paths) -> list[str]:
   from app import platform_activation
 

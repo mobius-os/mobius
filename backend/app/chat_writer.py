@@ -806,13 +806,16 @@ def recover_start_continuation(
     )
     if not expected_control:
       return None
-    from app.continuations import continuation_protocol_source
+    from app.continuations import continuation_protocol_source, undelivered_input
     source = continuation_protocol_source(
       reason=reason,
       control_id=continuation_id,
       run_token=physical.id,
       source_work_id=control.get("source_work_id"),
       goal_id=control.get("goal_id"),
+      undelivered=undelivered_input(
+        db, chat, db.get(models.ChatRun, supersedes_run_token),
+      ),
     )
     messages = transcript_rows.read_all(db, chat)
     for key in ("viewport", "timezone"):
@@ -3800,12 +3803,13 @@ class ChatWriterActor:
     ]
     provider_source = cmd.user_msg
     if resuming:
-      from app.continuations import continuation_protocol_source
+      from app.continuations import continuation_protocol_source, undelivered_input
       provider_source = continuation_protocol_source(
         reason="manual",
         control_id=incoming_cid or cmd.run_token,
         run_token=cmd.run_token,
         goal_id=prior.goal_id if prior is not None else None,
+        undelivered=undelivered_input(db, chat, prior),
       )
       # Explicit null keeps an unrelated reply's recovery goal-less.
       provider_source["goal_id"] = prior.goal_id if prior is not None else None
@@ -4140,13 +4144,14 @@ class ChatWriterActor:
           )
 
     if control_only:
-      from app.continuations import continuation_protocol_source
+      from app.continuations import continuation_protocol_source, undelivered_input
       source = continuation_protocol_source(
         reason=cmd.reason,
         control_id=cmd.cid,
         run_token=cmd.run_token,
         source_work_id=cmd.source_work_id,
         goal_id=superseded.goal_id if superseded is not None else None,
+        undelivered=undelivered_input(db, chat, superseded),
       )
       source["goal_id"] = superseded.goal_id if superseded is not None else None
       source["ts"] = next_message_ts(existing + pending)

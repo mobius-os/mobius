@@ -134,7 +134,11 @@ docker cp "$work/candidate.bundle" "$name:/tmp/candidate.bundle"
 docker exec "$name" chmod 0644 /tmp/candidate.bundle
 as_mobius git -C /data/platform fetch -q /tmp/candidate.bundle \
   "$bundle_ref:refs/remotes/origin/main" || fail "the previous release could not fetch the candidate"
-reply=$(api POST /api/auth/setup '{"username":"owner","password":"upgrade-path-owner-password"}')
+# Releases with a one-time owner setup code issue it on the status read and
+# keep it in the data folder; older releases have none and ignore the field.
+api GET /api/auth/setup/status >/dev/null
+setup_code=$(as_mobius cat /data/setup-code 2>/dev/null | tr -d '[:space:]' || true)
+reply=$(api POST /api/auth/setup "{\"username\":\"owner\",\"password\":\"upgrade-path-owner-password\",\"setup_code\":\"$setup_code\"}")
 [ "$(code "$reply")" = 200 ] || fail "owner setup failed: $(body "$reply")"
 token=$(field "$(body "$reply")" 'd["access_token"]')
 # Releases before #1561 refused such edits by design; test the promise from

@@ -111,6 +111,10 @@ def _live_turn(chat_id: str, *, pending=None, partial="partial answer"):
   """A live turn with a registered handle + sink, mid-stream (a real partial
   accumulated INTO the sink so the drain's finalize can preserve it)."""
   _seed(chat_id, pending=pending)
+  # Streaming output means the provider already received this turn's input.
+  with SessionLocal() as db:
+    db.get(models.ChatRun, f"rt-{chat_id}").provider_execution_admitted = True
+    db.commit()
   bc = create_broadcast(chat_id)
   sink = chat_mod._ChatEventSink(bc, chat_id, run_token=f"rt-{chat_id}")
   chat_mod.register_active_sink(chat_id, sink)

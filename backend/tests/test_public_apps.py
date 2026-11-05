@@ -98,7 +98,8 @@ def test_owner_publishes_exact_snapshot_without_exposing_an_owner_token(
 
 
 def test_public_host_delegates_game_input_to_the_app_frame(client, auth):
-  """A shared game can go fullscreen and read a controller on its public link."""
+  """A shared game can go fullscreen, read a controller, and read the device's
+  motion sensors on its public link."""
   app = _create(client, auth)
   assert _publish(client, auth, app["id"]).status_code == 200
 
@@ -106,7 +107,7 @@ def test_public_host_delegates_game_input_to_the_app_frame(client, auth):
   assert '<iframe id="app"' in page
   # A bare feature targets only the src origin, which the opaque app document
   # never matches; `*` is what actually reaches it.
-  assert 'allow="fullscreen *; gamepad *"' in page
+  assert 'allow="fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"' in page
 
 
 def test_private_edit_does_not_change_live_snapshot_until_publish_update(

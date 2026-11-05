@@ -1319,6 +1319,35 @@ def get_owner_or_app_with_railway_manage(
   )
 
 
+def get_owner_or_app_with_location_history_read(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with the reviewed location-history grant.
+
+  Like ``identity_manage``, the grant lives in the accepted capability
+  contract, so an app version that stops declaring it loses access on the
+  next request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("location_history_read") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.location_history_read=true in its manifest "
+      "to read your location history."
+    ),
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

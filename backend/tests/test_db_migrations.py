@@ -763,9 +763,10 @@ def test_app_identity_migration_materializes_legacy_source_without_overwriting_d
 
   from app import compiler
 
-  async def fake_compile(source, *, out_path, source_path):
+  async def fake_compile(source, *, out_path, source_path, source_root):
     assert source == stored
     assert Path(source_path) == source_dir / "index.jsx"
+    assert Path(source_root) == source_dir
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_text("compiled legacy app", encoding="utf-8")
 

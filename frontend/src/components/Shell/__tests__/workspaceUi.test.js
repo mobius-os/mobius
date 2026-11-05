@@ -269,11 +269,12 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
-  // The AppCanvas wrapper is wrapped in its own inline ErrorBoundary so one
-  // canvas throw degrades locally instead of replacing the whole shell.
+  // The AppCanvas wrapper is wrapped in its own LazySurface (an inline
+  // ErrorBoundary by default) so one canvas throw or failed chunk download
+  // degrades locally instead of replacing the whole shell.
   assert.match(
     shell,
-    /<ErrorBoundary[^>]*key=\{`ab-\$\{id\}`\}[^>]*variant="inline"[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
+    /<LazySurface[^>]*key=\{`ab-\$\{id\}`\}[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
   )
 })
 

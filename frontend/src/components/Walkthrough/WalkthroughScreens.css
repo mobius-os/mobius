@@ -273,23 +273,6 @@
 .wt-setup .wt-note, .wt-setup .wt-success { margin-top: 0; }
 
 /* ---------- access confirmation: a small popup in the guide's own window ---------- */
-.wt-confirm { position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; padding: 20px; background: color-mix(in srgb, var(--bg, #0d0d0d) 70%, transparent); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); animation: wt-fade-in .25s ease both; }
-.wt-confirm__panel { display: grid; gap: 14px; width: min(440px, 100%); max-height: 100%; overflow-y: auto; padding: 18px; border: 1px solid var(--border, #252b36); border-radius: 16px; background: var(--surface, #14181f); box-shadow: 0 20px 50px rgba(0, 0, 0, .45); }
-.wt-confirm__panel header { display: flex; align-items: center; gap: 12px; }
-.wt-confirm__panel h3 { margin: 0; font-size: 17px; font-weight: 800; letter-spacing: -.02em; line-height: 1.25; }
-.wt-confirm__icon { width: 52px; height: 52px; flex: none; border-radius: 14px; font-size: 20px; }
-.wt-confirm .wt-note { margin: 0; }
-.wt-confirm__label { margin: 0 0 8px; color: var(--muted, #a1a1aa); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.wt-confirm__meta a { color: var(--accent-text, #b9a7f5); }
-.wt-confirm__meta { margin: 8px 0 0; color: var(--muted, #a1a1aa); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
-.wt-confirm__empty { margin: 0; padding: 10px 12px; border: 1px solid var(--border, #252b36); border-radius: 12px; color: var(--muted, #a1a1aa); background: var(--surface-2, #1a1f28); font-size: 13px; }
-.wt-confirm__list { display: grid; gap: 8px; max-height: 220px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
-.wt-confirm__row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border, #252b36); border-radius: 12px; background: var(--surface-2, #1a1f28); }
-.wt-confirm__row div { display: grid; gap: 2px; min-width: 0; }
-.wt-confirm__row strong { font-size: 13.5px; }
-.wt-confirm__row span { color: var(--muted, #a1a1aa); font-size: 12.5px; line-height: 1.45; }
-.wt-confirm__dot { flex: none; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: var(--danger, #f87171); }
-.wt-confirm__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 
 /* ---------- phones ---------- */
 @media (max-width: 700px) {
@@ -322,7 +305,7 @@
   .wt-words__word { opacity: 1; animation: none; }
   .wt-reveal--rise, .wt-reveal--blur, .wt-reveal--drift { animation: none; opacity: 1; filter: none; transform: none; }
   .wt-reveal__inner { animation: none; transform: none; }
-  .wt-mock__open, .wt-wk__row, .wt-profile, .wt-user, .wt-steps, .wt-steps__row, .wt-native, .wt-picker, .wt-app, .wt-app__bars i, .wt-app__rows li, .wt-store-card, .wt-next li, .wt-confirm { animation: none; }
+  .wt-mock__open, .wt-wk__row, .wt-profile, .wt-user, .wt-steps, .wt-steps__row, .wt-native, .wt-picker, .wt-app, .wt-app__bars i, .wt-app__rows li, .wt-store-card, .wt-next li { animation: none; }
 }
 
 /* The "Shape Möbius" screen: one miniature Möbius, menu and chat together, that repaints as a whole

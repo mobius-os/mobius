@@ -1,76 +1,64 @@
-/* Folders shared from your other browsers and devices: everything agents can reach, each pausable from here. */
-import { useEffect, useState } from 'react'
-import { api } from '../../api/client.js'
-import { deviceId } from '../../lib/sharedFolders/folderStore.js'
+/* Folders shared from your other browsers, one card per browser, each pausable from here. */
 import StatusDot from '../ui/StatusDot.jsx'
+import SharedFolderDeviceCard from './SharedFolderDeviceCard.jsx'
+import { folderCount, otherFolderStatus, rightsLabel } from './sharedFolderLabels.js'
 import '../ProviderAuth/ProviderAuth.css'
 
-function rightsLabel(folder) {
-  return folder.mode === 'edit' && folder.access === 'remembered' ? 'Read & edit' : 'Read only'
+export default function OtherDeviceFolders({ devices, onPause }) {
+  return devices.map(device => <OtherDevice key={device.id} device={device} onPause={onPause} />)
 }
 
-async function fetchOtherFolders() {
-  const response = await api.sharedFolders.list()
-  if (!response.ok) return []
-  const { folders = [] } = await response.json()
-  const here = deviceId()
-  return folders.filter(folder => folder.device?.id !== here)
-}
-
-function status(folder) {
-  if (!folder.online) return { color: '--muted', label: 'Offline' }
-  if (folder.state === 'paused') return { color: '--muted', label: 'Paused' }
-  return { color: '--green', label: 'Online' }
-}
-
-export default function OtherDeviceFolders({ localFolders }) {
-  const [folders, setFolders] = useState([])
-  const [refreshes, setRefreshes] = useState(0)
-  // Refresh whenever this browser's own list changes (a cheap, owner-paced moment).
-  const localKey = localFolders.map(folder => `${folder.id}:${folder.state}`).join(',')
-  useEffect(() => {
-    let current = true
-    fetchOtherFolders()
-      .then(list => { if (current) setFolders(list) })
-      .catch(() => {})
-    return () => { current = false }
-  }, [localKey, refreshes])
-  // Pausing works from here; resuming needs the device that shares the folder.
-  const pause = async (id) => {
-    await api.sharedFolders.pause([id]).catch(() => {})
-    setRefreshes(count => count + 1)
-  }
-  if (!folders.length) return null
+function OtherDevice({ device, onPause }) {
+  const pausable = device.folders.filter(folder => otherFolderStatus(folder).usable)
+  const pauseAll = pausable.length > 1 && (
+    <button
+      type="button"
+      className="settings__btn settings__btn--outline settings__btn--sm"
+      aria-label={`Pause all folders on ${device.label}`}
+      onClick={() => { void onPause(pausable.map(folder => folder.id)) }}
+    >
+      Pause all
+    </button>
+  )
   return (
-    <div className="shared-folders__others">
-      <p className="shared-folders__others-title">Shared from your other browsers</p>
-      <div className="settings__providers shared-folders__others-list">
-        {folders.map(folder => {
-          const shown = status(folder)
-          return (
-            <div key={folder.id} className="provider-row shared-folders__other">
-              <div className="provider-row__main">
-                <span className="provider-row__info">
-                  <span className="provider-row__name-line">
-                    <span className="provider-row__name">{folder.name}</span>
-                  </span>
-                  <span className="provider-row__sub">{folder.device?.label} · {rightsLabel(folder)}</span>
-                  <StatusDot color={shown.color}>{shown.label}</StatusDot>
-                </span>
-                {folder.online && folder.state === 'ready' && (
-                  <button
-                    type="button"
-                    className="settings__btn settings__btn--outline settings__btn--sm shared-folders__other-pause"
-                    aria-label={`Pause ${folder.name} on ${folder.device?.label}`}
-                    onClick={() => { void pause(folder.id) }}
-                  >
-                    Pause
-                  </button>
-                )}
-              </div>
-            </div>
-          )
-        })}
+    <SharedFolderDeviceCard
+      label={device.label}
+      offline={!device.online}
+      detail={`${folderCount(device.folders.length)} · ${device.online ? 'Online now' : 'Möbius is closed there'}`}
+      action={pauseAll}
+    >
+      <div className="shared-folders__device-folders">
+        {device.folders.map(folder => (
+          <OtherFolderRow key={folder.id} device={device} folder={folder} onPause={onPause} />
+        ))}
+      </div>
+      {!device.online && <p className="shared-folders__device-note">Open Möbius there to let agents in.</p>}
+    </SharedFolderDeviceCard>
+  )
+}
+
+function OtherFolderRow({ device, folder, onPause }) {
+  const shown = otherFolderStatus(folder)
+  return (
+    <div className="provider-row shared-folders__other">
+      <div className="provider-row__main">
+        <span className="provider-row__info">
+          <span className="provider-row__name-line">
+            <span className="provider-row__name">{folder.name}</span>
+          </span>
+          <span className="provider-row__sub">{rightsLabel(folder)}</span>
+          <StatusDot color={shown.color}>{shown.label}</StatusDot>
+        </span>
+        {shown.usable && (
+          <button
+            type="button"
+            className="settings__btn settings__btn--outline settings__btn--sm shared-folders__other-pause"
+            aria-label={`Pause ${folder.name} on ${device.label}`}
+            onClick={() => { void onPause([folder.id]) }}
+          >
+            Pause
+          </button>
+        )}
       </div>
     </div>
   )

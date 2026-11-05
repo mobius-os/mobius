@@ -432,7 +432,11 @@ reply=$(api GET /api/version) || fail "cannot read the previous version"
 version=$(field "$(body "$reply")" 'd.get("sha")') || fail "unreadable previous version: $reply"
 [[ $version == "$PREVIOUS" ]] || fail "the previous app reports $version"
 # END PREVIOUS IDENTITY
-reply=$(api POST /api/auth/setup '{"username":"owner","password":"mixed-upgrade-owner-password"}') || fail "owner setup failed"
+# Releases with a one-time owner setup code issue it on the status read and
+# keep it in the data folder; older releases have none and ignore the field.
+api GET /api/auth/setup/status >/dev/null || true
+setup_code=$(docker exec -u mobius "$app" cat /data/setup-code 2>/dev/null | tr -d '[:space:]' || true)
+reply=$(api POST /api/auth/setup "{\"username\":\"owner\",\"password\":\"mixed-upgrade-owner-password\",\"setup_code\":\"$setup_code\"}") || fail "owner setup failed"
 [[ $(code "$reply") == 200 ]] || fail "owner setup failed: $(body "$reply")"
 token=$(field "$(body "$reply")" 'd["access_token"]') || fail "owner setup returned no token"
 # The worker's chat drain authenticates with the owner's service token.
