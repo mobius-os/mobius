@@ -171,6 +171,13 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
         </button>
       </div>
       {confirmRestart && <p className="platform-updates__description" role="status">Restarting briefly pauses active chats. This page will reconnect automatically. Confirm within 4 seconds, or let this prompt expire.</p>}
+      {!busy && !conflict && !settling && !unfinished && !recoveryRequired && level === 'live' && platform?.image_build_applied === false && (
+        <p className="platform-updates__description">{available && platform.update_contains_image_release
+          ? 'The container is updated, but the code update is still required. Review the update to bring them together while keeping your local changes.'
+          : !platform.served_sha
+            ? 'The running code could not be identified, so it cannot be confirmed against this container.'
+            : 'The running code does not include this container\'s own revision. Check for updates: if none is offered, the container was built outside the official releases (such as a fork or test build) and nothing needs doing.'}</p>
+      )}
       {settling && !busy && !activeRebuild && !recoveryRequired && (
         <div className="platform-updates__description">
           <p>The new container is running this update. Möbius keeps the previous version ready until the replacement is confirmed; other updates wait until then.</p>
@@ -179,7 +186,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           )}
         </div>
       )}
-      {!busy && !unavailable && !conflict && !recoveryRequired && restartNeeded && (
+      {!busy && !unavailable && !conflict && !recoveryRequired && restartNeeded && !platform?.unfinished_update && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
       {activeRebuild && rebuild.status_unavailable && (

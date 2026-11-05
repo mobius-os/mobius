@@ -321,6 +321,10 @@ class PlatformUpdateState(str, Enum):
   """User-visible state for the platform updater."""
 
   UP_TO_DATE = "up_to_date"
+  # Source is installed, but this process has not proved that it serves the
+  # installed image's release. A saved marker never proves loading; HEAD does
+  # only once nothing between the boot commit and it is owed activation.
+  SOURCE_UNCONFIRMED = "source_unconfirmed"
   AVAILABLE = "available"
   CONFLICT = "conflict"
   RESTART_NEEDED = "restart_needed"
@@ -337,7 +341,17 @@ class PlatformStatus(TypedDict):
   available: bool
   needs_restart: bool
   activation: PlatformActivationImpact
+  # Immutable image identity, not the revision imported by this server.
   current_build_sha: str | None
+  # Served checkout revision, including the reconciled local source. A normal
+  # restart can advance this without changing the image's build identity.
+  served_sha: str | None
+  # Containment in the served source: the captured boot commit, or the
+  # checkout once everything since boot activated live. Never the upstream
+  # marker. None only for unstamped development images.
+  image_build_applied: bool | None
+  # An available update carries the image's release, so applying it pairs them.
+  update_contains_image_release: bool
   # Exact release this response compared with the served source. For a
   # self-hosted check this is the freshly fetched origin/main; for a managed
   # deployment it is the verified image release selected by the controller.
@@ -1919,6 +1933,59 @@ def _served_platform_sha() -> str | None:
   except Exception:
     return None
   return sha or None
+
+
+def source_contains_image_release(
+  repo: Path, source_sha: str | None, image_sha: str | None,
+) -> bool:
+  """Prove image/source pairing without requiring identical merge SHAs.
+
+  Image identity comes from immutable build metadata. Missing source identity
+  or Git objects cannot borrow proof from HEAD or a reconciliation marker.
+  This is completion evidence, not a boot guard: image-only recovery may run
+  older compatible source until its ordinary reviewed source update lands.
+  """
+  if not all(
+    isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)
+    for sha in (source_sha, image_sha)
+  ):
+    return False
+  try:
+    return _git(
+      "merge-base", "--is-ancestor", image_sha, source_sha,
+      repo=repo, check=False, timeout=5,
+    ).returncode == 0
+  except (OSError, subprocess.SubprocessError):
+    return False
+
+
+def serves_image_release(
+  repo: Path, served_sha: str | None, image_sha: str | None,
+  *, activation: PlatformActivationImpact | None = None,
+) -> bool | None:
+  """Whether the source this server serves contains the image's release.
+
+  Either the served commit contains it, or HEAD does and nothing since the
+  served commit is owed activation. That answer comes only from
+  :func:`_platform_activation_impact` over the caller's served-to-HEAD diff
+  (``activation`` when the caller has it), so an unknown served commit is
+  never live. ``/api/version`` skips the diff when the served commit already
+  contains the image. None for an unstamped image.
+  """
+  if not (isinstance(image_sha, str) and re.fullmatch(r"[0-9a-f]{40}", image_sha)):
+    return None
+  if source_contains_image_release(repo, served_sha, image_sha):
+    return True
+  if not served_sha:
+    return False
+  head = _rev(repo, "HEAD")
+  if not source_contains_image_release(repo, head, image_sha):
+    return False
+  if activation is None:
+    activation = _platform_activation_impact(
+      repo, served_to_head=_activation_paths_between(repo, served_sha, head),
+    )
+  return activation["level"] == platform_activation.ActivationLevel.LIVE.value
 
 
 def _activation_paths_between(
@@ -5604,6 +5671,7 @@ def platform_status(
     if (repo / ".git").exists() else []
   )
   image_sha = current_build_sha()
+  served_sha = _served_platform_sha()
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
@@ -5622,6 +5690,9 @@ def platform_status(
   restart_needed = (
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
+  )
+  image_build_applied = serves_image_release(
+    repo, served_sha, image_sha, activation=activation,
   )
   target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
@@ -5656,6 +5727,9 @@ def platform_status(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
       current_build_sha=image_sha,
+      served_sha=served_sha,
+      image_build_applied=image_build_applied,
+      update_contains_image_release=False,
       checked_target_sha=checked_target_sha,
       installed_release_sha=upstream_sha,
       recorded_upstream_sha=upstream_sha,
@@ -5678,6 +5752,11 @@ def platform_status(
   # release exists; the preview/check path fetches and proves the source object
   # before it creates an actionable plan.
   available = bool(target_sha or target) and not target_contained
+  # Only an update that carries the image's own release brings them together.
+  update_contains_image_release = bool(
+    available and image_build_applied is False and target
+    and _rev(repo, image_sha) and _is_ancestor(repo, image_sha, target)
+  )
 
   if rolled_back:
     # A not-yet-landed target whose last apply failed (import probe or build).
@@ -5688,6 +5767,8 @@ def platform_status(
     state = activation_state
   elif available:
     state = PlatformUpdateState.AVAILABLE
+  elif image_build_applied is False:
+    state = PlatformUpdateState.SOURCE_UNCONFIRMED
   else:
     state = PlatformUpdateState.UP_TO_DATE
 
@@ -5695,6 +5776,9 @@ def platform_status(
     state=state.value, available=available, needs_restart=restart_needed,
     activation=activation,
     current_build_sha=image_sha,
+    served_sha=served_sha,
+    image_build_applied=image_build_applied,
+    update_contains_image_release=update_contains_image_release,
     checked_target_sha=checked_target_sha,
     installed_release_sha=upstream_sha,
     recorded_upstream_sha=upstream_sha,
