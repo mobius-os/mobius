@@ -1278,6 +1278,7 @@ export default function useStreamConnection(chatId, {
               if (event.response_mode) incoming.response_mode = event.response_mode
               if (event.secure_input) incoming.secure_input = event.secure_input
               if (event.platform_action) incoming.platform_action = event.platform_action
+              if (event.message) incoming.message = event.message
               if (event.question_id) incoming.question_id = event.question_id
               // Re-arm the replayed event with any answer the user already
               // submitted this turn. After a reconnect wipe upsertQuestionItem

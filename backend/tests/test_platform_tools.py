@@ -513,7 +513,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   ]
   restart = tools[platform_tools.RESTART_TOOL_NAME]
   assert restart["inputSchema"] == {
-    "type": "object", "properties": {}, "additionalProperties": False,
+    "type": "object", "properties": {"message": control.CARD_MESSAGE_PROPERTY},
+    "additionalProperties": False,
   }
   assert "platform derives" in restart["description"]
   assert "without waking an agent" in restart["description"]
@@ -691,7 +692,7 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert "unavailable" in denied_cancel["content"][0]["text"]
 
 
-def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
+def test_request_restart_takes_only_a_closing_message(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   receipt = {
@@ -703,7 +704,7 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   monkeypatch.setattr(
     control._APPROVALS,
     "request_restart",
-    lambda: calls.append("request_restart") or receipt,
+    lambda **arguments: calls.append(arguments) or receipt,
   )
 
   response = control._call_tool({
@@ -712,14 +713,19 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   })
   assert response["isError"] is False
   assert json.loads(response["content"][0]["text"]) == receipt
-  assert calls == ["request_restart"]
+  with_message = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {"message": "The fix is committed."},
+  })
+  assert with_message["isError"] is False
+  assert calls == [{}, {"message": "The fix is committed."}]
 
   invalid = control._call_tool({
     "name": platform_tools.RESTART_TOOL_NAME,
     "arguments": {"command": "restart"},
   })
   assert invalid["isError"] is True
-  assert "takes no arguments" in invalid["content"][0]["text"]
+  assert "takes only message" in invalid["content"][0]["text"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -1058,20 +1064,31 @@ def test_question_tool_requires_only_owner_facing_meaning():
 
 
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """Every exposed saved-card tool carries the same complete instruction."""
+  """Every exposed saved-card tool carries the same complete instruction, and
+  the closing message travels in the card call itself where the card has one."""
   control = _control_module()
   instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
   for name in (
     control.REQUEST_APPROVAL_TOOL,
     control.REQUEST_QUESTION_TOOL,
     control.REQUEST_RESTART_TOOL,
-    control.REQUEST_SECRET_TOOL,
   ):
-    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    definition = control._TOOL_DEFINITIONS[name]
+    description = definition["description"].lower()
     assert description.count(instruction) == 1
     assert "closeout before this call" not in description
-  assert "before this call, write your closing message" in instruction
+    message = definition["inputSchema"]["properties"]["message"]
+    assert message is control.CARD_MESSAGE_PROPERTY
+    assert "message" not in definition["inputSchema"].get("required", [])
+  assert "put your closing message in `message`" in instruction
   assert "where things stand" in instruction
+  assert "at most a one-sentence lead-in" in control.CARD_MESSAGE_PROPERTY["description"]
+  # The sealed card has no message field, so its closing message stays prose.
+  secret = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]
+  secret_instruction = control.SECRET_CARD_TERMINAL_INSTRUCTION.lower()
+  assert secret["description"].lower().count(secret_instruction) == 1
+  assert "message" not in secret["inputSchema"]["properties"]
+  assert "before this call, write your closing message" in secret_instruction
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
