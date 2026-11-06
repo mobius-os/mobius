@@ -834,11 +834,16 @@ def merge_with_upstream(
     ).returncode != 0:
       raise unknown(f"Commit {rev} is not available locally.")
   # ``--no-messages`` leaves only the tree id and the conflicted-file list,
-  # whose paths git quotes, so a path that is not UTF-8 cannot break decoding.
-  merged = _git(
-    repo, "merge-tree", "--write-tree", "--no-messages", upstream_sha, branch,
-    check=False,
-  )
+  # whose paths git quotes by default. A repository that turns
+  # ``core.quotePath`` off can still print a path that is not UTF-8, which
+  # leaves the verdict unknown rather than crashing.
+  try:
+    merged = _git(
+      repo, "merge-tree", "--write-tree", "--no-messages", upstream_sha, branch,
+      check=False,
+    )
+  except UnicodeDecodeError:
+    raise unknown("git merge-tree printed a path that is not UTF-8.") from None
   # ``merge-tree --write-tree`` exits 0 when clean and 1 when conflicted.
   # Histories with no common ancestor cannot merge at all (git refuses them
   # fatally), which is a deterministic fact about the two commits, proven

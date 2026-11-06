@@ -213,6 +213,12 @@ def test_a_conflict_over_a_non_utf8_path_is_still_a_conflict(histories):
   run(repo, "commit", "-qam", "upstream")
   upstream["sha"] = run(repo, "rev-parse", "HEAD")
   assert git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/bytes").conflicts
+  # With path quoting turned off the raw path cannot be decoded: an unknown
+  # verdict, never a crash.
+  run(repo, "config", "core.quotePath", "false")
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/bytes")
+  assert error.value.code == "upstream_merge_unavailable"
 
 
 @pytest.mark.parametrize("operation", ["inspect", "new_pr", "gate"])
