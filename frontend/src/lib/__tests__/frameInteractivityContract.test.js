@@ -273,6 +273,16 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = 'null' } = {}) {
   const document = new FakeDocument()
   const childFrames = []
   document.currentScript = { textContent: source }
+  // The root scroller, recording every overflow write and forced layout.
+  const rootWrites = []
+  const rootStyle = {
+    props: new Map(),
+    getPropertyValue(name) { return this.props.get(name)?.[0] ?? '' },
+    getPropertyPriority(name) { return this.props.get(name)?.[1] ?? '' },
+    setProperty(name, value, priority = '') { this.props.set(name, [value, priority]); rootWrites.push(value) },
+    removeProperty(name) { this.props.delete(name); rootWrites.push('') },
+  }
+  document.scrollingElement = { style: rootStyle, get offsetHeight() { rootWrites.push('layout'); return 0 } }
   document.dispatchEvent = (event) => { visibilityEvents.push(event.type) }
   document.querySelectorAll = (selector) => (selector === 'iframe' ? childFrames : attached)
   document.addEventListener = (type, callback, capture) => {
@@ -335,6 +345,8 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = 'null' } = {}) {
     document,
     attached,
     childFrames,
+    rootStyle,
+    rootWrites,
     visibilityEvents,
     Media: FakeMediaElement,
     Iframe: FakeIframe,
@@ -603,7 +615,8 @@ test('a held frame stays cancellable while held and after return, until it runs'
   app.window.cancelAnimationFrame(whileHeld)
   app.shell({ visible: true })
   app.window.cancelAnimationFrame(afterReturn)
-  assert.equal(app.paint(), 1)
+  // The return also schedules the platform's own scroller refresh.
+  assert.equal(app.paint(), 2)
   assert.deepEqual(ran, ['kept'])
 })
 
@@ -737,6 +750,32 @@ test('other attributes and other elements pass through untouched', () => {
   const other = new app.Element()
   other.setAttribute('srcdoc', 'text')
   assert.equal(other.attributes.srcdoc, 'text')
+})
+
+test('a re-shown document rebuilds its own root scroller, keeping the page\'s value', () => {
+  // On macOS Chrome a nested page can stop scrolling after the shell hides and
+  // re-shows its app, until the owner clicks inside it. Toggling the page's own
+  // root overflow off and on (from inside that page) restores scrolling.
+  const app = bootFrame()
+  app.rootStyle.setProperty('overflow', 'auto')
+  app.rootWrites.length = 0
+
+  app.shell({ visible: true })
+  app.paint(); app.paint()
+  assert.deepEqual(app.rootWrites, [], 'an already-visible document is left alone')
+
+  app.shell({ visible: false })
+  app.shell({ visible: true })
+  assert.deepEqual(app.rootWrites, ['hidden', 'layout', 'auto'], 'rebuilt at once')
+  app.paint()
+  app.paint()
+  assert.deepEqual(app.rootWrites, ['hidden', 'layout', 'auto', 'hidden', 'layout', 'auto'], 'and again once shown')
+  assert.equal(app.rootStyle.getPropertyValue('overflow'), 'auto')
+
+  const plain = bootFrame()
+  plain.shell({ visible: false })
+  plain.shell({ visible: true })
+  assert.equal(plain.rootStyle.getPropertyValue('overflow'), '', 'no inline value is left behind')
 })
 
 test('the frame script can never end its own element early', () => {

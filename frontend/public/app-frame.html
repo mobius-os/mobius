@@ -516,6 +516,33 @@
     });
   }
 
+  // The shell hides a parked app with visibility:hidden on an ancestor. When
+  // it shows the app again, Chrome (seen on macOS, where a sandboxed nested
+  // page runs in its own process) can leave a nested document's root scroller
+  // stuck: wheel events still reach the page, but it no longer scrolls until
+  // the owner clicks inside it. Rebuilding that document's own scroller fixes
+  // it; nudging it from the embedding document does not. So each document
+  // (this script runs in every nested srcdoc too, and the verdict is forwarded
+  // down) briefly switches its root scroller's overflow off and back on when
+  // it becomes visible again: immediately, and again once the shown state has
+  // painted. The toggle is synchronous, keeps the scroll offset, and restores
+  // the page's own inline value.
+  function refreshOwnScrolling() {
+    var root = document.scrollingElement || document.documentElement;
+    var value = root.style.getPropertyValue('overflow');
+    var priority = root.style.getPropertyPriority('overflow');
+    root.style.setProperty('overflow', 'hidden', 'important');
+    void root.offsetHeight;
+    if (value) root.style.setProperty('overflow', value, priority);
+    else root.style.removeProperty('overflow');
+  }
+  function refreshOwnScrollingWhenShown() {
+    refreshOwnScrolling();
+    nativeFrame.call(window, function () {
+      nativeFrame.call(window, refreshOwnScrolling);
+    });
+  }
+
   // The app frame's sandbox makes its window.origin opaque, but its URL names
   // the shell's origin, which must have sent the verdict. A nested srcdoc
   // document's URL has no origin ("null"), so it trusts only its embedder.
@@ -526,7 +553,9 @@
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
+    var wasShellHidden = shellHidden;
     shellHidden = msg.visible === false;
+    if (wasShellHidden && !shellHidden) refreshOwnScrollingWhenShown();
     var shouldHold = (shellHidden || msg.covered === true) && msg.backgroundPlayback !== true;
     if (shouldHold && !holding) { holding = true; hold(); }
     else if (!shouldHold && holding) { holding = false; release(); }
