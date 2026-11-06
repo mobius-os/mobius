@@ -673,7 +673,7 @@ def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over
   """The recovered PR still records the overlap it opened over, checked
   against the upstream tip the first attempt recorded."""
   git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_conflict=merge_conflict)
-  assert ("merge-tree", "--write-tree", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  assert ("merge-tree", "--write-tree", "--no-messages", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
   if merge_conflict:
     assert patch["last_submit_upstream_conflict"] == {
       "upstream_branch": "main", "upstream_sha": _UPSTREAM_SHA,
@@ -697,7 +697,7 @@ def test_an_unknown_overlap_answer_never_fails_a_confirmed_recovery(monkeypatch,
   """The overlap recheck is advisory: once the open PR is confirmed, git timing
   out, failing to start or refusing records no flag and the recovery completes."""
   git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_tree=merge_tree)
-  assert ("merge-tree", "--write-tree", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  assert ("merge-tree", "--write-tree", "--no-messages", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
   assert "last_submit_upstream_conflict" not in patch
 
 

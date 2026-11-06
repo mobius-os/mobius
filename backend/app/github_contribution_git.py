@@ -116,9 +116,6 @@ def _run_cmd(
     cwd=str(cwd),
     capture_output=True,
     text=True,
-    # Paths and messages in git output need not be UTF-8; never let decoding
-    # them turn a known result into a crash.
-    errors="replace",
     input=input_text,
     timeout=timeout,
     check=False,
@@ -241,6 +238,19 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
     exc.message,
     exc.status_code,
     record_patch={**patch, **exc.record_patch},
+    code=exc.code,
+    detail=exc.detail,
+  )
+
+
+def _nothing_published(
+  exc: ContributionSubmitError, record_patch: dict,
+) -> ContributionSubmitError:
+  """Send's wording for a shared check that refused before any public step."""
+  return ContributionSubmitError(
+    f"{exc.message} Nothing was published.",
+    exc.status_code,
+    record_patch=record_patch,
     code=exc.code,
     detail=exc.detail,
   )
@@ -794,13 +804,7 @@ def inspect_upstream_merge(
   try:
     return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
   except ContributionSubmitError as exc:
-    raise ContributionSubmitError(
-      f"{exc.message} Nothing was published.",
-      exc.status_code,
-      record_patch=exc.record_patch,
-      code=exc.code,
-      detail=exc.detail,
-    ) from None
+    raise _nothing_published(exc, exc.record_patch) from None
 
 
 def merge_with_upstream(
@@ -829,8 +833,11 @@ def merge_with_upstream(
       check=False,
     ).returncode != 0:
       raise unknown(f"Commit {rev} is not available locally.")
+  # ``--no-messages`` leaves only the tree id and the conflicted-file list,
+  # whose paths git quotes, so a path that is not UTF-8 cannot break decoding.
   merged = _git(
-    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
+    repo, "merge-tree", "--write-tree", "--no-messages", upstream_sha, branch,
+    check=False,
   )
   # ``merge-tree --write-tree`` exits 0 when clean and 1 when conflicted.
   # Histories with no common ancestor cannot merge at all (git refuses them
@@ -933,13 +940,7 @@ def upstream_merge_for_new_pr(
       lambda *args: _git(repo, *args, check=False), merge.sha, branch, base_sha,
     )
   except ContributionSubmitError as exc:
-    raise ContributionSubmitError(
-      f"{exc.message} Nothing was published.",
-      exc.status_code,
-      record_patch=merge.record_patch,
-      code=exc.code,
-      detail=exc.detail,
-    ) from None
+    raise _nothing_published(exc, merge.record_patch) from None
   if not exact:
     raise _upstream_conflict_error(merge) if merge.conflicts else (
       ContributionSubmitError(
