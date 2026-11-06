@@ -23,11 +23,13 @@ import asyncio
 import base64
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import logging
 import os
 import shutil
 import stat
+import subprocess
 import threading
 import time
 import uuid
@@ -748,8 +750,45 @@ class ClaudeProvider(BaseProvider):
     "low", "medium", "high", "xhigh", "max", "ultracode",
   })
 
+  # A status read starts the CLI (~0.4 s) and the date moves only on a new
+  # sign-in, which forgets the held value; Settings reads it on every open.
+  LOGIN_EXPIRY_HOLD_SECONDS = 600.0
+
+  def __init__(self):
+    self._login_expiry_lock = threading.Lock()
+    self._login_expiry_generation = 0
+    self._held_login_expiry: tuple[float, str | None] | None = None
+
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return await _fetch_claude_models(data_dir)
+
+  def login_expires_at(self, data_dir: str) -> str | None:
+    """When the stored Claude sign-in hard-expires (ISO 8601 UTC), or None.
+
+    Möbius refreshes access tokens itself, but the sign-in behind them ends
+    on a fixed date that renewing does not move; after it, chats fail "Not
+    logged in". The CLI reports that date as `loginExpiresAt` (from the
+    stored refresh-token expiry; null for API keys and logins without one)
+    and warns it may end up to three days earlier. A successful read, null
+    included, is held; a failed one raises and is never held.
+    """
+    with self._login_expiry_lock:
+      held = self._held_login_expiry
+      if held is not None and time.monotonic() - held[0] < self.LOGIN_EXPIRY_HOLD_SECONDS:
+        return held[1]
+      generation = self._login_expiry_generation
+    value = _read_claude_login_expiry(self.build_env(dict(os.environ), data_dir))
+    with self._login_expiry_lock:
+      # A read that began before a sign-in change may describe the old login.
+      if generation == self._login_expiry_generation:
+        self._held_login_expiry = (time.monotonic(), value)
+    return value
+
+  def forget_account_reads(self) -> None:
+    """Drop the held sign-in expiry, including a read in flight."""
+    with self._login_expiry_lock:
+      self._login_expiry_generation += 1
+      self._held_login_expiry = None
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
@@ -859,6 +898,36 @@ class ClaudeProvider(BaseProvider):
     if codex_auth.exists():
       env["CODEX_HOME"] = str(codex_auth.parent)
     return env
+
+
+def _read_claude_login_expiry(env: dict[str, str]) -> str | None:
+  """Read `loginExpiresAt` from `claude auth status --json` (metadata only).
+
+  The status output also names the account (email, organization), so only
+  the validated timestamp leaves this function and nothing from the output is
+  logged. Raises on any failed or malformed read.
+  """
+  cli = shutil.which(ClaudeProvider.cli_cmd, path=env.get("PATH"))
+  if not cli:
+    raise RuntimeError("claude CLI not found")
+  proc = subprocess.run(
+    [cli, "auth", "status", "--json"], env=env, stdin=subprocess.DEVNULL,
+    capture_output=True, timeout=15, check=False,
+  )
+  if proc.returncode != 0:
+    raise RuntimeError(f"claude auth status exited {proc.returncode}")
+  payload = json.loads(proc.stdout.decode("utf-8"))
+  if not isinstance(payload, dict):
+    raise ValueError("claude auth status did not return an object")
+  raw = payload.get("loginExpiresAt")
+  if raw is None:
+    return None
+  if not isinstance(raw, str):
+    raise ValueError("claude auth status loginExpiresAt is not a string")
+  expires = datetime.fromisoformat(raw)
+  if expires.tzinfo is None:
+    raise ValueError("claude auth status loginExpiresAt has no timezone")
+  return expires.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # Möbius owns helpers for every provider (``spawn_agent`` on the control

@@ -720,9 +720,13 @@ async def _provider_signin_changed(provider_id: str) -> None:
   Every sign-in and sign-out ends here, so no picker keeps the offline fallback
   cached before connecting (or live models cached before disconnecting).
   """
-  from app.providers import forget_provider_models
+  from app.providers import PROVIDERS, ClaudeProvider, forget_provider_models
   from app.provider_usage import forget_provider_usage
   forget_provider_usage(provider_id, get_settings().data_dir)
+  provider = PROVIDERS.get(provider_id)
+  if isinstance(provider, ClaudeProvider):
+    # A new sign-in has its own expiry; sign-out has none.
+    provider.forget_account_reads()
   await forget_provider_models(provider_id)
   get_system_broadcast().publish({
     "type": "model_providers_changed", "provider": provider_id,
@@ -759,15 +763,22 @@ def _write_credentials(token_data: dict) -> None:
   account = token_data.get("account") or {}
   email = account.get("email_address", "")
 
-  creds = {
-    "claudeAiOauth": {
-      "accessToken": token_data["access_token"],
-      "refreshToken": token_data["refresh_token"],
-      "expiresAt": int(time.time() * 1000) + token_data["expires_in"] * 1000,
-      "scopes": token_data.get("scope", "").split(),
-      "email": email,
-    }
+  now_ms = int(time.time() * 1000)
+  oauth = {
+    "accessToken": token_data["access_token"],
+    "refreshToken": token_data["refresh_token"],
+    "expiresAt": now_ms + token_data["expires_in"] * 1000,
+    "scopes": token_data.get("scope", "").split(),
+    "email": email,
   }
+  # The sign-in's hard end, stored the way the CLI's own login stores it. The
+  # CLI reports it as `loginExpiresAt` and check_auth honors it; refreshes keep
+  # it, since renewing does not move that date. Absent stays absent.
+  refresh_expires_in = token_data.get("refresh_token_expires_in")
+  if (isinstance(refresh_expires_in, (int, float))
+      and not isinstance(refresh_expires_in, bool) and refresh_expires_in > 0):
+    oauth["refreshTokenExpiresAt"] = now_ms + int(refresh_expires_in * 1000)
+  creds = {"claudeAiOauth": oauth}
   path = os.path.join(cli_home, ".credentials.json")
   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
   with os.fdopen(fd, "w") as f:
@@ -898,9 +909,10 @@ async def providers_status(
   model pickers can disable disconnected providers instead of guessing.
 
   Availability is safe to share across the app/embed boundary; the owner's
-  Möbius trial balance is not. `trial` is therefore attached only for a true
-  owner caller, so an app or chat-embed principal sees the same availability
-  fields without the owner's credit units and grant expiries.
+  Möbius trial balance and Claude sign-in expiry are not. `trial` (mobius)
+  and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
+  read failed) are therefore attached only for a true owner caller, so an app
+  or chat-embed principal sees the same availability fields without them.
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
@@ -927,6 +939,15 @@ async def providers_status(
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
       except Exception:
         out[pid]["trial"] = None
+    if pid == "claude" and error is None and is_owner_caller:
+      try:
+        out[pid]["login_expires_at"] = await run_in_threadpool(
+          provider.login_expires_at, data_dir,
+        )
+      except Exception as exc:
+        # The status output names the account; log only the failure kind.
+        log.info("claude sign-in expiry unavailable: %s", type(exc).__name__)
+        out[pid]["login_expires_at"] = None
   return out
 
 
