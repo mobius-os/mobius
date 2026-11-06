@@ -17,7 +17,7 @@ test('idle waking helpers own one visible automatic Waiting handoff', () => {
       { task_key: 'verify-build', title: 'verify-build' },
     ],
   }
-  assert.equal(classifyChatHandoff({ backgroundHelpers: helpers, authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
+  assert.equal(classifyChatHandoff({ authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
   assert.deepEqual(helperPresentation(helpers, { kind: 'automatic' }), {
     count: 2,
     tasks: ['review-copy', 'verify-build'],
@@ -60,12 +60,11 @@ test('waits without timestamps keep their ordinary fallback labels', () => {
   assert.equal(resource.next, 'checks again automatically')
 })
 
-test('live parent work suppresses the helper handoff without erasing it', () => {
-  const backgroundHelpers = { count: 1, items: [] }
-  assert.equal(classifyChatHandoff({ backgroundHelpers, authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
+test('live parent work suppresses the automatic handoff', () => {
+  assert.equal(classifyChatHandoff({ authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
   assert.equal(classifyChatHandoff({
     turnActive: true,
-    backgroundHelpers,
+    authoritativeHandoff: { kind: 'automatic' },
   }), 'working')
 })
 
@@ -115,7 +114,7 @@ test('only eligible handoffs claim an automatic Goal wake', async () => {
   assert.equal(classifyChatHandoff({ resourcePause: { pause: { kind: 'model_capacity' } } }), 'none')
   assert.equal(classifyChatHandoff({ resourcePause: { pause: { kind: 'rate_limit' } } }), 'none')
   assert.equal(classifyChatHandoff({ resourcePause: { pause: { kind: 'rate_limit' } }, autoResumeEnabled: true }), 'automatic')
-  assert.equal(classifyChatHandoff({ backgroundHelpers: { count: 1 }, turnActive: true }), 'working')
+  assert.equal(classifyChatHandoff({ turnActive: true }), 'working')
 })
 
 test('a delivered wait with no blocker is eligible, but server eligibility wins', async () => {
@@ -165,6 +164,6 @@ for (const kind of ['model_capacity', 'rate_limit', 'memory', 'storage']) {
 }
 
 test('helper count alone cannot promise an automatic executor', () => {
-  assert.equal(classifyChatHandoff({ backgroundHelpers: { count: 3, items: [] } }), 'none')
+  assert.equal(classifyChatHandoff({}), 'none')
   assert.equal(helperPresentation({ count: 3 }).automatic, false)
 })

@@ -332,7 +332,10 @@ manifest, layered by how always-on they are:
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
   app's own authority (`backend/app/app_tools.py`). Only the platform reaches
-  `tools/`: HTTP calls to the service there get 404, so `call` is trustworthy. Helpers get the tools too:
+  `tools/`: HTTP calls to the service there get 404, so `call` is trustworthy.
+  A non-public service also gets `limited_providers`, the provider ids (e.g.
+  `["claude"]`) whose runs recently hit a usage or rate limit; a tool that runs
+  a provider CLI itself can skip those instead of failing first. Helpers get the tools too:
   the request's `actor` has `delegated: true` for a helper. Current helpers
   use one trusted mode and report `access: "write"`; `"read"` remains only as
   a defensive value for a retired or orphaned delegated identity, not a

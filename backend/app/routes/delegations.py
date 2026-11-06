@@ -487,11 +487,8 @@ def read_delegation_result(
     )
   payload = serialize_delegation(db, row)
   # A settled outcome is received even without report text (a failure that
-  # wrote nothing); a truncated report and still-working helpers stay owed.
-  if (
-    not payload.get("result_truncated")
-    and record_result_read_by_parent(db, row)
-  ):
+  # wrote nothing); still-working helpers stay owed.
+  if record_result_read_by_parent(db, row):
     db.commit()
     publish_parent_waiting_changed(row.parent_chat_id)
   return payload

@@ -3676,6 +3676,15 @@ function applySpeechHints(value, hints, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 	}
 	return text;
 }
+function speechBoundaryAfter(segments, index) {
+	const segment = segments[index];
+	if (segments[index + 1]?.sourceIndex === segment.sourceIndex) return null;
+	return {
+		segmentIndex: segment.sourceIndex,
+		kind: segment.kind,
+		pauseAfterMs: segment.pauseAfterMs
+	};
+}
 function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 	if (!input || typeof input !== "object") throw invalid("Speech input is required.");
 	if (input.document == null) {
@@ -3690,7 +3699,8 @@ function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 			segments: splitSpeakable(text).map((piece) => ({
 				text: piece,
 				kind: "paragraph",
-				pauseAfterMs: 0
+				pauseAfterMs: 0,
+				sourceIndex: 0
 			}))
 		};
 	}
@@ -3720,7 +3730,7 @@ function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 	const hints = sanitizeSpeechHints(document.hints);
 	const segments = [];
 	let total = 0;
-	for (const raw of document.segments) {
+	for (const [sourceIndex, raw] of document.segments.entries()) {
 		const text = applySpeechHints(raw.text, hints, maxTextChars);
 		if (!text) continue;
 		total += text.length;
@@ -3733,7 +3743,8 @@ function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 			segments.push({
 				text: piece,
 				kind,
-				pauseAfterMs: index === pieces.length - 1 ? pauseAfterMs : 0
+				pauseAfterMs: index === pieces.length - 1 ? pauseAfterMs : 0,
+				sourceIndex
 			});
 		});
 	}
@@ -3770,7 +3781,70 @@ var init_speechWorkerAsset = __esmMin((() => {
 
 //#endregion
 //#region src/runtime/speech.js
-var speech_exports = /* @__PURE__ */ __exportAll({ synthesizeInFrame: () => synthesizeInFrame });
+var speech_exports = /* @__PURE__ */ __exportAll({
+	releaseSpeechEngine: () => releaseSpeechEngine,
+	retainSpeechEngine: () => retainSpeechEngine,
+	synthesizeInFrame: () => synthesizeInFrame
+});
+function retireEngine(engine) {
+	if (!engine) return;
+	engine.worker.onmessage = null;
+	engine.worker.onerror = null;
+	try {
+		engine.worker.terminate();
+	} catch {}
+	if (engine.blobUrl) URL.revokeObjectURL(engine.blobUrl);
+}
+function unparkEngine() {
+	const engine = idleEngine;
+	idleEngine = null;
+	clearTimeout(idleTimer);
+	idleTimer = null;
+	return engine;
+}
+function releaseSpeechEngine() {
+	retireEngine(unparkEngine());
+}
+function retainSpeechEngine(retain) {
+	retainIdleEngine = retain !== false;
+	if (!retainIdleEngine) releaseSpeechEngine();
+}
+function parkEngine(engine) {
+	if (!retainIdleEngine || idleEngine) {
+		retireEngine(engine);
+		return;
+	}
+	engine.worker.onmessage = null;
+	engine.worker.onerror = () => {
+		if (idleEngine === engine) releaseSpeechEngine();
+	};
+	idleEngine = engine;
+	idleTimer = setTimeout(releaseSpeechEngine, IDLE_RELEASE_MS);
+}
+function sameVoice(left, right) {
+	if (left === right) return true;
+	if (!left || !right || left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
+	return true;
+}
+function engineKey(input, manifest) {
+	const voice = input?.clonedVoiceSamples || manifest.clonedVoiceSamples;
+	return {
+		model: JSON.stringify([
+			input?.modelId || "",
+			input?.engineId || "",
+			manifest.temperature ?? null,
+			manifest.assetBytes
+		]),
+		voice: voice instanceof Float32Array ? voice.slice() : null
+	};
+}
+function takeIdleEngine(key) {
+	const engine = idleEngine;
+	if (engine && engine.key.model === key.model && sameVoice(engine.key.voice, key.voice)) return unparkEngine();
+	releaseSpeechEngine();
+	return null;
+}
 function speechError(code, message, name = "CapabilityError") {
 	const error = new Error(message);
 	error.code = code;
@@ -3782,19 +3856,22 @@ function speechError(code, message, name = "CapabilityError") {
 *
 * `openModelStream` opens the shell-side request that supplies model bytes; it
 * receives handlers for the manifest and each chunk, and returns a session whose
-* `control('start')` releases the stream once the engine has allocated.
+* `control('start')` releases the stream once the engine has allocated. When an
+* idle engine already holds the manifest's model, the stream is cancelled
+* before any bytes move and generation starts at once.
 */
 function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 	const document = normalizeSpeechInput({
 		text: input?.text,
 		document: input?.document
 	}, maxTextChars);
-	let worker = null;
-	let blobUrl = "";
+	let engine = null;
+	let loaded = false;
 	let stream = null;
 	let finished = false;
-	let startupComplete = false;
 	let startupTimer = null;
+	let requestId = "";
+	let ready = Promise.resolve();
 	let settleResult;
 	let failResult;
 	const result = new Promise((resolve, reject) => {
@@ -3808,41 +3885,42 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		startupTimer = null;
 	};
 	const armStartupTimeout = () => {
-		if (finished || startupComplete) return;
+		if (finished || loaded) return;
 		clearStartupTimeout();
 		startupTimer = setTimeout(() => fail(speechError("timeout", "The speech engine stopped making progress while starting.", "TimeoutError")), LOAD_TIMEOUT_MS);
 	};
-	const cleanup = () => {
+	const closeStream = () => {
+		const open = stream;
+		stream = null;
 		try {
-			stream?.cancel?.();
+			open?.cancel?.();
 		} catch {}
-		try {
-			worker?.terminate();
-		} catch {}
-		if (blobUrl) {
-			URL.revokeObjectURL(blobUrl);
-			blobUrl = "";
-		}
+	};
+	const finish = (keepEngine) => {
+		finished = true;
+		clearStartupTimeout();
+		closeStream();
+		const used = engine;
+		engine = null;
+		if (!used) return;
+		if (keepEngine && loaded) parkEngine(used);
+		else retireEngine(used);
 	};
 	const fail = (error) => {
 		if (finished) return;
-		finished = true;
-		clearStartupTimeout();
-		cleanup();
+		finish(false);
 		failResult(error);
 	};
 	const succeed = (value) => {
 		if (finished) return;
-		finished = true;
-		clearStartupTimeout();
-		cleanup();
+		finish(true);
 		settleResult(value);
 	};
 	armStartupTimeout();
 	let queue = Promise.resolve();
 	const send = (message, transfer = []) => {
 		queue = queue.then(() => ready).then(() => {
-			if (!finished && worker) worker.postMessage(message, transfer);
+			if (!finished && engine) engine.worker.postMessage(message, transfer);
 		});
 		queue.catch(() => {});
 	};
@@ -3859,14 +3937,25 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			segmentIndex,
 			segmentCount: document.segments.length
 		});
+		requestId = `frame-${nextRequestId++}`;
 		send({
 			type: "generate",
-			requestId: `frame-${segmentIndex}`,
+			requestId,
 			text: segment.text
 		});
 	};
+	const startGenerating = () => {
+		loaded = true;
+		clearStartupTimeout();
+		channel.event("loading", {
+			stage: "preparing",
+			percent: 100
+		});
+		generateNext();
+	};
 	const onWorkerMessage = (data) => {
 		if (!data || finished) return;
+		if (data.requestId && data.requestId !== requestId) return;
 		if (data.type === "load-ready") {
 			armStartupTimeout();
 			stream?.control?.("start");
@@ -3878,13 +3967,7 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			return;
 		}
 		if (data.type === "load-complete") {
-			startupComplete = true;
-			clearStartupTimeout();
-			channel.event("loading", {
-				stage: "preparing",
-				percent: 100
-			});
-			generateNext();
+			startGenerating();
 			return;
 		}
 		if (data.type === "audio") {
@@ -3892,30 +3975,32 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			return;
 		}
 		if (data.type === "generate-complete") {
-			const segment = document.segments[segmentIndex];
-			channel.event("boundary", {
-				segmentIndex,
-				kind: segment.kind,
-				pauseAfterMs: segment.pauseAfterMs
-			});
+			const boundary = speechBoundaryAfter(document.segments, segmentIndex);
+			if (boundary) channel.event("boundary", boundary);
 			segmentIndex += 1;
 			generateNext();
 			return;
 		}
 		if (data.type === "worker-error" || data.type === "generate-error") fail(speechError("engine_failed", data.error?.message || "Speech stopped unexpectedly."));
 	};
-	const ready = (async () => {
+	const bindEngine = (value) => {
+		engine = value;
+		engine.worker.onerror = (event) => fail(speechError("engine_blocked", event?.message || `The speech engine could not start: ${"/speech/pocket-tts-worker.js"} did not load.`));
+		engine.worker.onmessage = ({ data }) => onWorkerMessage(data);
+	};
+	const startEngine = async (key) => {
 		const response = await fetch(SPEECH_WORKER_URL, { credentials: "same-origin" });
 		if (!response.ok) throw speechError("engine_missing", `The speech engine script returned ${response.status}.`);
 		const source = await response.text();
 		if (finished) return;
-		blobUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
-		worker = new Worker(blobUrl);
+		const blobUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+		bindEngine({
+			key,
+			worker: new Worker(blobUrl),
+			blobUrl
+		});
 		armStartupTimeout();
-		worker.onerror = (event) => fail(speechError("engine_blocked", event?.message || `The speech engine could not start: ${"/speech/pocket-tts-worker.js"} did not load.`));
-		worker.onmessage = ({ data }) => onWorkerMessage(data);
-	})();
-	ready.catch(fail);
+	};
 	channel.event("loading", {
 		stage: "starting",
 		percent: 0
@@ -3925,6 +4010,17 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		engineId: input?.engineId,
 		onManifest: (value) => {
 			armStartupTimeout();
+			if (finished) return;
+			const key = engineKey(input, value);
+			const warm = takeIdleEngine(key);
+			if (warm) {
+				bindEngine(warm);
+				closeStream();
+				startGenerating();
+				return;
+			}
+			ready = startEngine(key);
+			ready.catch(fail);
 			send({
 				type: "load-start",
 				wasmUrl: new URL(SPEECH_WASM_URL, globalThis.location.href).href,
@@ -3955,24 +4051,30 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			armStartupTimeout();
 			send({ type: "load-finish" });
 		},
-		onError: fail
+		onError: (error) => {
+			if (stream) fail(error);
+		}
 	});
 	return {
 		result,
 		cancel() {
 			if (finished) return;
-			finished = true;
-			clearStartupTimeout();
-			cleanup();
+			if (loaded) engine?.worker.postMessage({ type: "cancel-generate" });
+			finish(true);
 			failResult(speechError("aborted", "Speech stopped.", "AbortError"));
 		}
 	};
 }
-var LOAD_TIMEOUT_MS;
+var LOAD_TIMEOUT_MS, IDLE_RELEASE_MS, idleEngine, idleTimer, retainIdleEngine, nextRequestId;
 var init_speech = __esmMin((() => {
 	init_speechDocument();
 	init_speechWorkerAsset();
 	LOAD_TIMEOUT_MS = 18e4;
+	IDLE_RELEASE_MS = 6e4;
+	idleEngine = null;
+	idleTimer = null;
+	retainIdleEngine = true;
+	nextRequestId = 1;
 }));
 
 //#endregion
@@ -3995,12 +4097,19 @@ function asCapabilityError(msg, capability) {
 		capability
 	});
 }
-function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
+function makeCapabilities({ declarations = {}, hostWindow, selfWindow, visibility } = {}) {
 	const ownWindow = selfWindow || globalThis.window;
 	const parentWindow = hostWindow || ownWindow?.parent;
 	const embedded = !!ownWindow && parentWindow && parentWindow !== ownWindow;
 	const sessions = /* @__PURE__ */ new Map();
 	let currentDeclarations = declarations && typeof declarations === "object" ? declarations : {};
+	let speech = null;
+	let visible = visibility?.visible ?? true;
+	const syncSpeechRetention = () => speech?.retainSpeechEngine(visible && !!currentDeclarations[SPEECH_CAPABILITY]);
+	const stopWatchingVisibility = visibility?.onVisibilityChange?.((next) => {
+		visible = next;
+		syncSpeechRetention();
+	});
 	function describe(name) {
 		const value = currentDeclarations?.[name];
 		return value && typeof value === "object" ? value : null;
@@ -4169,9 +4278,13 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 				listener(value);
 			} catch {}
 		};
-		Promise.resolve().then(() => (init_speech(), speech_exports)).then(({ synthesizeInFrame }) => {
+		Promise.resolve().then(() => (init_speech(), speech_exports)).then((module) => {
+			if (!speech) {
+				speech = module;
+				syncSpeechRetention();
+			}
 			if (internal.settled) return;
-			const engine = synthesizeInFrame({
+			const engine = speech.synthesizeInFrame({
 				input,
 				maxTextChars: Number(declaration?.limits?.max_text_chars) || 5e4,
 				channel: { event: emit },
@@ -4216,13 +4329,19 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 		},
 		_updateDeclarations(next) {
 			currentDeclarations = next && typeof next === "object" ? next : {};
+			syncSpeechRetention();
 		},
 		_destroy() {
 			ownWindow?.removeEventListener?.("message", onMessage);
-			for (const session of sessions.values()) settle(session, "error", new CapabilityError("aborted", "Capability host was detached.", {
-				name: "AbortError",
-				capability: session.capability
-			}));
+			stopWatchingVisibility?.();
+			for (const session of sessions.values()) {
+				session.localControl?.cancel();
+				settle(session, "error", new CapabilityError("aborted", "Capability host was detached.", {
+					name: "AbortError",
+					capability: session.capability
+				}));
+			}
+			speech?.releaseSpeechEngine();
 		}
 	};
 }
@@ -4701,7 +4820,10 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		isOnline: () => _online
 	});
 	const signal = makeSignal(appId, storage, appInstanceId);
-	const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} });
+	const capabilities = makeCapabilities({
+		declarations: capabilityContract?.runtime || {},
+		visibility: _visibility
+	});
 	const projects = makeProjects();
 	const chat = makeChat({
 		appId,

@@ -143,6 +143,8 @@ def test_an_unreadable_ancestry_comparison_is_not_a_conflict_or_a_pass(tmp_path,
   monkeypatch.setattr(git_ops, "_upstream_default_branch", lambda *a: "main")
   monkeypatch.setattr(git_ops, "fetch_upstream_head", lambda *a: _UPSTREAM_SHA)
   def fake_git(_repo, *args, check=True):
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      return _cp()
     if args[:1] == ("merge-tree",):
       return _cp(returncode=1)
     if args[:2] == ("merge-base", "--all"):
@@ -152,7 +154,71 @@ def test_an_unreadable_ancestry_comparison_is_not_a_conflict_or_a_pass(tmp_path,
   with pytest.raises(ContributionSubmitError) as error:
     git_ops.upstream_merge_for_new_pr(tmp_path, "owner/repo", "fix/topic", BASE, HEAD)
   assert error.value.code == "upstream_merge_unavailable" and "Could not compare" in error.value.message
+  assert "Nothing was published" in error.value.message
   assert "fatal: bad object" in error.value.detail
+
+
+def test_the_shared_merge_base_proof_does_not_claim_a_send_outcome():
+  """The read-only review-status card asks the same question and publishes
+  nothing either way, so only Send says that nothing was published."""
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.reviewed_base_is_sole_merge_base(
+      lambda *args: _cp(stderr="fatal: bad object", returncode=128), _UPSTREAM_SHA, HEAD, BASE)
+  assert error.value.code == "upstream_merge_unavailable"
+  assert "published" not in error.value.message
+
+
+@pytest.mark.parametrize("operation", ["inspect", "new_pr", "gate"])
+def test_an_upstream_tip_missing_locally_is_unknown_not_a_conflict(histories, operation):
+  """``merge-tree`` exits 1 for a commit it cannot find, the same code as a
+  conflict. A tip that is gone locally (its temporary ref deleted and
+  collected, or a recreated checkout) is an unknown verdict for Send."""
+  repo, upstream, shas = histories
+  upstream["sha"] = "e" * 40
+  with pytest.raises(ContributionSubmitError) as error:
+    if operation == "inspect":
+      git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/topic")
+    elif operation == "new_pr":
+      git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"], shas["head"])
+    else:
+      git_ops._assert_merges_with_upstream(repo, "owner/repo", "fix/topic")
+  assert error.value.code == "upstream_merge_unavailable"
+  assert "Nothing was published" in error.value.message
+  assert error.value.record_patch == {
+    "last_submit_upstream_branch": "main", "last_submit_upstream_sha": "e" * 40}
+
+
+def test_the_shared_merge_check_does_not_claim_a_send_outcome(histories):
+  repo, _upstream, _shas = histories
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.merge_with_upstream(repo, "main", "e" * 40, "fix/topic")
+  assert error.value.code == "upstream_merge_unavailable"
+  assert "published" not in error.value.message
+
+
+def test_a_conflict_over_a_non_utf8_path_is_still_a_conflict(histories):
+  """Git prints paths as raw bytes; decoding them never hides the verdict."""
+  repo, upstream, shas = histories
+  path = (b"a\xff.txt").decode("utf-8", "surrogateescape")
+  run(repo, "checkout", "-q", shas["base"])
+  (repo / path).write_text("1\n")
+  run(repo, "add", "-A")
+  run(repo, "commit", "-qm", "base")
+  base = run(repo, "rev-parse", "HEAD")
+  (repo / path).write_text("2\n")
+  run(repo, "commit", "-qam", "topic")
+  run(repo, "branch", "fix/bytes")
+  run(repo, "checkout", "-q", base)
+  (repo / path).write_text("3\n")
+  run(repo, "commit", "-qam", "upstream")
+  upstream["sha"] = run(repo, "rev-parse", "HEAD")
+  assert git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/bytes").conflicts
+  # With path quoting turned off the raw path cannot be decoded: an unknown
+  # verdict, never a crash.
+  run(repo, "config", "core.quotePath", "false")
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/bytes")
+  assert error.value.code == "upstream_merge_unavailable"
 
 
 @pytest.mark.parametrize("operation", ["inspect", "new_pr", "gate"])
@@ -170,6 +236,8 @@ def test_a_merge_tree_that_could_not_run_is_never_a_conflict_or_a_publishable_fa
   monkeypatch.setattr(git_ops, "_upstream_default_branch", lambda *a: "main")
   monkeypatch.setattr(git_ops, "fetch_upstream_head", lambda *a: _UPSTREAM_SHA)
   def fake_git(_repo, *args, check=True):
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      return _cp()
     if args[:1] == ("merge-tree",):
       return _cp(stderr=stderr, returncode=returncode)
     if args == ("merge-base", _UPSTREAM_SHA, "fix/topic"):
@@ -241,7 +309,7 @@ def test_a_clean_merge_after_upstream_took_part_of_the_topic_still_refuses(histo
   with pytest.raises(ContributionSubmitError) as error:
     git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/partly-landed", shas["base"], HEAD)
   assert error.value.code == "upstream_base_moved"
-  assert "no longer its only merge base" in error.value.message
+  assert "not its only merge base" in error.value.message
   assert error.value.record_patch == {
     "last_submit_upstream_branch": "main", "last_submit_upstream_sha": upstream["sha"]}
   # A stack layer or an existing-PR update keeps its clean-merge-only gate.
@@ -275,7 +343,7 @@ def test_a_clean_merge_over_a_rewritten_reviewed_base_is_not_called_an_overlap(h
     git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/on-dropped-base", reviewed_base, HEAD)
   assert error.value.code == "upstream_base_moved"
   assert "already contains" not in error.value.message
-  assert "no longer its only merge base with upstream main" in error.value.message
+  assert "not its only merge base with upstream main" in error.value.message
 
 
 def test_reviewed_base_as_one_of_several_merge_bases_is_not_the_reviewed_diff(histories):
@@ -561,6 +629,124 @@ def test_existing_pr_update_keeps_the_clean_merge_gate(monkeypatch, tmp_path):
                 expected_existing_head_sha="c" * 40,
                 plan={"action": "pr_update", "pr_metadata": {
                   "old_title": "Polish demo", "old_body": "## What\n\nPolishes the demo."}})
+
+
+def recovered_submit(monkeypatch, tmp_path, *, merge_conflict=True, merge_tree=None,
+                     record_extra=None, plan=None, **kwargs):
+  """A lost create response or a crash leaves the PR open; the retry finds it
+  and returns before the merge preflight, never consulting today's upstream."""
+  _write_token(login="octocat")
+  repo = Path(get_settings().data_dir) / "contrib" / f"rec-retry-{tmp_path.name}" / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_path = tmp_path / "reviewed.diff"
+  diff_path.write_text(DIFF)
+  record = {
+    **standalone_record("rec-retry", repo),
+    "last_submit_stage": "pushed", "last_submit_push_sha": HEAD,
+    "last_submit_upstream_branch": "main", "last_submit_upstream_sha": _UPSTREAM_SHA,
+    **(record_extra or {}),
+  }
+  record["plan"].update(plan or {})
+  git_calls, _gh_calls = send_fakes(monkeypatch, merge_conflict=merge_conflict)
+  if merge_tree is not None:
+    fake_git = git_ops._git
+    def git_with_merge_tree(repo_path, *args, check=True):
+      if args[:1] == ("merge-tree",):
+        git_calls.append(args)
+        return merge_tree()
+      return fake_git(repo_path, *args, check=check)
+    monkeypatch.setattr(git_ops, "_git", git_with_merge_tree)
+  monkeypatch.setattr(git_ops, "_assert_fresh", lambda *a, **k: (BASE, HEAD, record["plan"]["diff_sha256"]))
+  monkeypatch.setattr(git_ops, "_assert_coauthor_trailer", lambda *a: None)
+  monkeypatch.setattr(git_ops, "_assert_head_attribution", lambda *a, **k: None)
+  monkeypatch.setattr(github_contributions, "_authoritative_public_reconciliation",
+                      lambda *a, **k: github_contributions.PublicReconciliation(
+                        head_repository="octocat/app-demo-1",
+                        pr_url="https://github.com/mobius-os/app-demo/pull/42",
+                        pr_number=42, publication_stage="ready"))
+  monkeypatch.setattr(git_ops, "inspect_upstream_merge",
+                      lambda *a: pytest.fail("a recovery must not depend on today's upstream"))
+  url, number, patch = _submit_prepared_pr(record, diff_path, **kwargs)
+  assert (url, number) == ("https://github.com/mobius-os/app-demo/pull/42", 42)
+  assert patch["last_submit_push_sha"] == HEAD
+  return git_calls, patch
+
+
+@pytest.mark.parametrize("merge_conflict", [True, False])
+def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over(
+  monkeypatch, tmp_path, merge_conflict,
+):
+  """The recovered PR still records the overlap it opened over, checked
+  against the upstream tip the first attempt recorded."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_conflict=merge_conflict)
+  assert ("merge-tree", "--write-tree", "--no-messages", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  if merge_conflict:
+    assert patch["last_submit_upstream_conflict"] == {
+      "upstream_branch": "main", "upstream_sha": _UPSTREAM_SHA,
+      "head_sha": HEAD, "next_pr_action": "merge_upstream_into_pr"}
+  else:
+    assert "last_submit_upstream_conflict" not in patch
+
+
+def _merge_tree_times_out():
+  raise subprocess.TimeoutExpired(["git", "merge-tree"], 30)
+
+
+def _merge_tree_cannot_start():
+  raise OSError("git could not start")
+
+
+@pytest.mark.parametrize("merge_tree", [
+  _merge_tree_times_out, _merge_tree_cannot_start,
+], ids=["timeout", "oserror"])
+def test_an_unknown_overlap_answer_never_fails_a_confirmed_recovery(monkeypatch, tmp_path, merge_tree):
+  """The overlap recheck is advisory: once the open PR is confirmed, git timing
+  out, failing to start or refusing records no flag and the recovery completes."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_tree=merge_tree)
+  assert ("merge-tree", "--write-tree", "--no-messages", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  assert "last_submit_upstream_conflict" not in patch
+
+
+@pytest.mark.parametrize("missing_ref", ["upstream", "branch"])
+def test_a_recovery_whose_recorded_tip_is_gone_records_no_overlap(histories, missing_ref):
+  """Real git: the recorded upstream tip (or the branch) is no longer local,
+  which ``merge-tree`` reports with a conflict's exit code. Recovery records
+  no flag rather than a false overlap, and does not fail."""
+  repo, _upstream, shas = histories
+  record = {"last_submit_upstream_branch": "main",
+            "last_submit_upstream_sha": "e" * 40 if missing_ref == "upstream" else shas["conflicting"]}
+  branch = "fix/topic" if missing_ref == "upstream" else "fix/gone"
+  assert github_contributions._recovered_upstream_overlap(repo, record, branch, shas["head"]) == {}
+  # The same recheck still records a real overlap.
+  record["last_submit_upstream_sha"] = shas["conflicting"]
+  assert github_contributions._recovered_upstream_overlap(
+    repo, record, "fix/topic", shas["head"])["last_submit_upstream_conflict"]["upstream_sha"] == shas["conflicting"]
+
+
+@pytest.mark.parametrize("missing", [
+  {"last_submit_upstream_sha": None}, {"last_submit_upstream_branch": None},
+  {"last_submit_upstream_sha": "not-a-sha"}, {"last_submit_upstream_branch": "-main"},
+], ids=["no-sha", "no-branch", "malformed-sha", "malformed-branch"])
+def test_a_recovery_without_a_recorded_upstream_tip_records_no_overlap(monkeypatch, tmp_path, missing):
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, record_extra=missing)
+  assert not any(call[:1] == ("merge-tree",) for call in git_calls)
+  assert "last_submit_upstream_conflict" not in patch
+
+
+@pytest.mark.parametrize("kwargs", [
+  {"direct_base_branch": "main",
+   "plan": {"stack": {"id": "demo", "position": 1, "total": 2, "base_branch": "main"}}},
+  {"plan": {"stack": {"id": "demo", "position": 1, "total": 2, "base_branch": "main"}}},
+  {"direct_base_branch": "main", "expected_existing_pr_number": 42,
+   "expected_existing_head_repository": "octocat/app-demo-1", "expected_existing_head_sha": "c" * 40,
+   "plan": {"action": "pr_update", "pr_metadata": {
+     "old_title": "Polish demo", "old_body": "## What\n\nPolishes the demo."}}},
+], ids=["stack-layer", "stack-record", "existing-pr-update"])
+def test_a_recovered_stack_or_update_records_no_overlap(monkeypatch, tmp_path, kwargs):
+  """Only a new standalone PR may open over an overlap, so only it is rechecked."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, **kwargs)
+  assert not any(call[:1] == ("merge-tree",) for call in git_calls)
+  assert "last_submit_upstream_conflict" not in patch
 
 
 # -- the advisory review-status projection mirrors Send -----------------------------

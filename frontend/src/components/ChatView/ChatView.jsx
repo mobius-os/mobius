@@ -5905,7 +5905,6 @@ export default function ChatView({
     turnActive,
     ownerInput: hasPendingQuestion,
     waits: armedWaits,
-    backgroundHelpers,
     resourcePause: pendingResumeBlock,
     autoResumeEnabled,
     authoritativeHandoff: serverHandoff,
