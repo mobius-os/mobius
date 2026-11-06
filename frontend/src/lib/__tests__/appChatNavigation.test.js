@@ -114,3 +114,14 @@ test('a draft the chat cannot take starts a new chat instead of vanishing', asyn
     assert.equal(readComposerDraft('cannot-take').input, 'Owner text', 'the refused chat keeps its own composer')
   })
 })
+
+test('a failure to open or create the chat reaches the caller to report', async () => {
+  await withBrowser(async () => new Response('{}'), async () => {
+    const fail = message => () => Promise.reject(new Error(message))
+    await assert.rejects(openChatWithAppDraft('can-open', 'Crash report', { open: fail('open failed'), openNew: () => {} }),
+      /open failed/)
+    saveFailedSendAttempt('needs-new', { cid: 'prior', draftIdentity: 'prior-draft', text: 'Owner text', attachments: [] })
+    await assert.rejects(openChatWithAppDraft('needs-new', 'Crash report', { open: () => {}, openNew: fail('create failed') }),
+      /create failed/)
+  })
+})

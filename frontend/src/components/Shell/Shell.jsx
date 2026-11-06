@@ -2951,7 +2951,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           refreshChats()
         },
         openNew: reportInNewChat,
-      })
+      }).catch(error => console.error('Opening a chat for the crash report failed.', error))
     } else {
       reportInNewChat()
     }
