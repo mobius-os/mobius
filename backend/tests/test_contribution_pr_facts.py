@@ -1,8 +1,12 @@
 """The server's PR machine facts come from GitHub's live answers, and an unread fact stays unknown."""
-from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine
+import json
+from types import SimpleNamespace
+
+from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine, contribution_same_work as same_work
+from app.contribution_errors import ContributionSubmitError
 from app import contribution_review_runs as domain
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import setup, CHECKS, PULL, REPO, SHA, TARGET  # noqa: F401  (fixture)
+from tests.test_contribution_review_runs import setup, BASE, CHECKS, PULL, REPO, SHA, TARGET  # noqa: F401  (fixture)
 
 OLD = "c" * 40
 AUTHOR = {"id": 9, "login": "Alex", "type": "User"}
@@ -33,6 +37,59 @@ def test_reviews_are_the_writers_standing_opinions_with_ghosts_and_lost_commits_
                               {"by": "qa-bot", "state": "APPROVED", "commit": SHA, "bot": True}]
   # A change request whose commit is gone still blocks; a bot's approval never counts.
   assert machine.action_blocker(found, "merge") == "The approval is for an older version."
+
+
+def comment(login, commit=SHA, kind="User"):
+  """One writer's newest review, as GitHub's latestReviews reports it when it was a plain comment."""
+  return review(login, "COMMENTED", commit, kind)
+
+
+def test_reviews_end_with_each_writers_newest_review_when_it_was_a_plain_comment():
+  found = facts([review("Sam", "CHANGES_REQUESTED", OLD)], checks=read_with(
+    [review("Sam", "CHANGES_REQUESTED", OLD)], latestReviews={"nodes": [
+      comment("Sam"), review("Kim", "APPROVED"), comment("qa-bot", kind="Bot"), {"state": "COMMENTED", "author": None}]}))
+  assert found["reviews"] == [{"by": "Sam", "state": "CHANGES_REQUESTED", "commit": OLD, "bot": False},
+                              {"by": "Sam", "state": "COMMENTED", "commit": SHA, "bot": False},
+                              {"by": "qa-bot", "state": "COMMENTED", "commit": SHA, "bot": True},
+                              {"by": "ghost", "state": "COMMENTED", "commit": "", "bot": False}]
+
+
+def test_a_reviewer_who_looked_again_and_only_commented_is_found_so_by_the_machine():
+  nodes = [review("sam", "CHANGES_REQUESTED", OLD)]
+  checks = read_with(nodes, latestReviews={"nodes": [comment("sam")]})
+  found = facts(None, actor_id=9, checks=checks)
+  decision = machine.decide(found)
+  assert (decision["state"], decision["looked_again"], decision["rereview_from"]) == ("author.looked_again", ["sam"], [])
+  assert machine.action_blocker(found, "ask_approval") == ""
+  assert machine.decide(facts(None, actor_id=9, checks=read_with(nodes)))["state"] == "author.waiting_rereview"
+
+
+def test_comments_are_evidence_never_an_opinion_and_never_my_standing_review():
+  mine = [review("Me", "CHANGES_REQUESTED", OLD)]
+  found = facts(None, checks=read_with(mine, latestReviews={"nodes": [comment("Me")]}), login="me")
+  assert found["myReview"] == {"state": "CHANGES_REQUESTED", "commit": OLD}
+  commented = facts(None, checks=read_with([], latestReviews={"nodes": [comment("sam")]}))
+  assert machine.action_blocker(commented, "merge") == "Nobody but the author has approved it yet."
+
+
+def test_a_missing_or_malformed_comment_read_leaves_no_comments_and_never_makes_the_read_incomplete():
+  for latest in ({}, {"latestReviews": None}, {"latestReviews": "no"}, {"latestReviews": {"nodes": None}}):
+    found = facts(None, checks=read_with([review("sam", "APPROVED")], **latest))
+    assert found["readComplete"] is True and [r["state"] for r in found["reviews"]] == ["APPROVED"]
+
+
+def test_the_check_read_asks_for_every_persons_latest_review_but_only_writers_opinions():
+  asked = []
+
+  def gh(cwd, *args, **_ignored):
+    asked.append(next(arg for arg in args if arg.startswith("query=")))
+    return SimpleNamespace(stdout=json.dumps({"data": {"node": CHECKS}}))
+
+  domain.pull_checks(gh, None, TARGET)
+  query = asked[0]
+  # GitHub rejects writersOnly on latestReviews, which would fail every check read; mocks cannot catch it.
+  assert "latestReviews(first:100){" in query and "latestReviews(first:100," not in query
+  assert "latestOpinionatedReviews(first:100, writersOnly:true){" in query
 
 
 def test_a_change_request_with_no_commit_blocks_and_never_approves():
@@ -150,3 +207,111 @@ def test_a_run_whose_first_turn_never_started_stops_holding_the_pr(setup):
   late.created_at = late.created_at - timedelta(seconds=routes.FIRST_TURN_GRACE_SECONDS + 5)
   db.commit()
   assert routes._pr_job(db, row.owner_id, "example/project", 7)["state"] == "stalled"
+
+
+class ComparingGitHub:
+  """A stand-in for `gh` that answers the base tip and the comparisons the same-work proof reads."""
+
+  def __init__(self, compares, base=BASE):
+    self.compares = compares  # commit -> a comparison; a commit not listed is unreadable
+    self.base = base
+    self.reads = []
+
+  def __call__(self, cwd, *args, **_ignored):
+    self.reads.append(args[1])
+    if args[1] == "repos/example/project/git/ref/heads/main":
+      return self._answer({"object": {"sha": self.base}})
+    base, commit = args[1].removeprefix("repos/example/project/compare/").split("...")
+    assert base == self.base, "compared against something other than the base tip"
+    if commit not in self.compares:
+      raise ContributionSubmitError("gh: Not Found (HTTP 404)")
+    return self._answer(self.compares[commit])
+
+  @staticmethod
+  def _answer(value):
+    return SimpleNamespace(stdout=json.dumps(value), stderr="", returncode=0)
+
+
+WORK = {"files": [{"filename": "a.js", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1 @@\n+x"}]}
+APPROVED_OLD = [review("sam", "APPROVED", OLD)]
+
+
+def read_facts(github, nodes=None, *, target=TARGET, pull=None, repo=REPO, **changes):
+  pull = pull or {**PULL, "number": 7, "user": AUTHOR}
+  checks = read_with(APPROVED_OLD if nodes is None else nodes, **changes)
+  return pr_facts.read_facts(github, None, target, repo, pull, actor_id=9, job=None, checks=checks)
+
+
+def test_an_approval_of_an_older_commit_carries_over_when_the_prs_own_change_is_the_same():
+  github = ComparingGitHub({OLD: WORK, SHA: WORK})
+  found = read_facts(github)
+  assert found["reviews"][0]["sameWork"] is True
+  assert machine.action_blocker(found, "merge") == ""
+  assert github.reads == [f"repos/example/project/compare/{BASE}...{commit}" for commit in (SHA, OLD)]
+
+
+def test_an_approval_of_an_older_commit_that_could_not_be_proved_the_same_stays_old():
+  changed = {"files": [{**WORK["files"][0], "patch": "@@ -1 +1 @@\n+y"}]}
+  for compares, proof in (({OLD: WORK, SHA: changed}, False), ({OLD: WORK}, None), ({}, None)):
+    found = read_facts(ComparingGitHub(compares))
+    assert found["reviews"][0]["sameWork"] is proof
+    assert machine.action_blocker(found, "merge") == "The approval is for an older version."
+
+
+def test_the_base_tip_comes_from_the_callers_target_or_else_from_the_prs_base_branch():
+  own = ComparingGitHub({OLD: WORK, SHA: WORK})
+  read_facts(own)
+  assert not any("git/ref" in endpoint for endpoint in own.reads)
+  without = {key: value for key, value in TARGET.items() if key not in ("base_sha", "base_ref")}
+  fresh = ComparingGitHub({OLD: WORK, SHA: WORK}, base="e" * 40)
+  assert read_facts(fresh, target=without)["reviews"][0]["sameWork"] is True
+  assert fresh.reads[0] == "repos/example/project/git/ref/heads/main"
+
+
+def test_an_unreadable_base_branch_leaves_the_approval_unproved_and_never_breaks_the_read():
+  without = {key: value for key, value in TARGET.items() if key != "base_sha"}
+  broken = ComparingGitHub({OLD: WORK, SHA: WORK})
+  broken.base = None  # GitHub's answer names no sha
+  found = read_facts(broken, target=without)
+  assert "sameWork" not in found["reviews"][0] and found["readComplete"] is True
+  nameless = ComparingGitHub({OLD: WORK, SHA: WORK})
+  assert "sameWork" not in read_facts(nameless, target=without, pull={**PULL, "base": {}, "user": AUTHOR})["reviews"][0]
+  assert nameless.reads == []
+
+
+def test_nothing_is_compared_unless_an_approval_of_an_older_commit_could_decide_an_open_pr():
+  github = ComparingGitHub({OLD: WORK, SHA: WORK})
+  here = [review("sam", "APPROVED", OLD), review("kim", "APPROVED", SHA)]
+  assert "sameWork" not in read_facts(github, here)["reviews"][0]
+  assert "sameWork" not in read_facts(github, [review("Alex", "APPROVED", OLD)])["reviews"][0]
+  assert "sameWork" not in read_facts(github, [review("qa-bot", "APPROVED", OLD, "Bot")])["reviews"][0]
+  assert "sameWork" not in read_facts(github, [review("sam", "CHANGES_REQUESTED", OLD)])["reviews"][0]
+  assert "sameWork" not in read_facts(github, pull={**PULL, "state": "closed", "user": AUTHOR})["reviews"][0]
+  assert "sameWork" not in read_facts(github, pull={**PULL, "merged": True, "state": "closed", "user": AUTHOR})["reviews"][0]
+  assert read_facts(github, None, latestOpinionatedReviews=None)["readComplete"] is False
+  assert github.reads == []
+
+
+def test_nothing_is_compared_for_a_draft_or_for_someone_who_cannot_merge():
+  github = ComparingGitHub({OLD: WORK, SHA: WORK})
+  assert "sameWork" not in read_facts(github, pull={**PULL, "draft": True, "user": AUTHOR})["reviews"][0]
+  assert "sameWork" not in read_facts(github, repo={**REPO, "permissions": {"pull": True}})["reviews"][0]
+  assert github.reads == []
+  assert read_facts(github, repo={**REPO, "permissions": {"push": True}})["reviews"][0]["sameWork"] is True
+
+
+def test_only_a_few_approved_commits_are_proved_so_the_merge_path_never_waits_on_many_reads():
+  many = [f"{index:040x}" for index in range(1, 7)]
+  github = ComparingGitHub({**{commit: WORK for commit in many}, SHA: WORK})
+  found = read_facts(github, [review(f"person{index}", "APPROVED", commit) for index, commit in enumerate(many)])
+  proved = [item for item in found["reviews"] if "sameWork" in item]
+  assert len(proved) == same_work.MAX_APPROVED_COMMITS and len(github.reads) == 1 + same_work.MAX_APPROVED_COMMITS
+
+
+def test_an_approval_at_the_head_by_a_bot_or_by_the_author_does_not_stop_an_older_approval_being_compared():
+  for at_head in (review("qa-bot", "APPROVED", SHA, "Bot"), review("Alex", "APPROVED", SHA)):
+    github = ComparingGitHub({OLD: WORK, SHA: WORK})
+    found = read_facts(github, [review("sam", "APPROVED", OLD), at_head])
+    assert found["reviews"][0]["sameWork"] is True
+    assert machine.action_blocker(found, "merge") == ""
+    assert len(github.reads) == 2
