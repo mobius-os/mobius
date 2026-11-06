@@ -153,6 +153,9 @@ class StoreListingIn(BaseModel):
   screenshots: list[StoreListingScreenshotIn] = Field(
     default_factory=list, max_length=MAX_STORE_SCREENSHOTS,
   )
+  # An SPDX id from store_licenses.OFFERED_LICENSES. Omitted keeps the
+  # current license; the save refuses any other value.
+  license: str | None = Field(default=None, max_length=40)
 
 
 class AppResolveUpdate(BaseModel):

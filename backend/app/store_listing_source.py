@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Callable
 
-from app import app_git, icon_assets, models, workspace_files
+from app import app_git, icon_assets, models, store_licenses, workspace_files
 from app.storage_io import atomic_write
 from app.community_publish import (
   DESCRIPTION_MAX_BYTES,
@@ -71,6 +71,9 @@ class ListingEdit:
   screenshots: tuple[ListingScreenshot, ...] = ()
   hero: ListingImage | None = None
   icon: ListingImage | None = None
+  # An SPDX id the Store offers. None keeps the current license; there is
+  # no way to remove one, since publishing requires it.
+  license: str | None = None
 
 
 def record_icon_for_save(root: Path, app: models.App, manifest: dict) -> bytes | None:
@@ -137,8 +140,9 @@ def note_what_saving_fixes(checklist: list[dict], root: Path, app: models.App) -
     icon["message"] = message
 
 
-def _listing_fields_removed(manifest: dict) -> dict:
-  return {key: value for key, value in manifest.items() if key not in {"icon", "store"}}
+def _listing_fields_removed(manifest: dict, *, license_too: bool = False) -> dict:
+  listing = {"icon", "store", "license"} if license_too else {"icon", "store"}
+  return {key: value for key, value in manifest.items() if key not in listing}
 
 
 def _worktree_manifest(root: Path) -> dict | None:
@@ -216,6 +220,15 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
       if None in manifests or not _manifest_change_is_listing(*manifests):
         return True
       continue
+    if path == store_licenses.LICENSE_FILE:
+      # Only the exact text a save writes for the declared license counts;
+      # a save never deletes one.
+      content = read(path, MANIFEST_MAX_BYTES)
+      candidate = manifests[1] or {}
+      spdx = store_licenses.offered_license(candidate)
+      if not spdx or content != store_licenses.license_text(spdx, candidate):
+        return True
+      continue
     # Only a listing file may differ; nothing else is even read.
     if path not in icons and not EDITOR_ART.fullmatch(path):
       return True
@@ -239,12 +252,17 @@ _EDITOR_STORE_FIELDS = frozenset({"tagline", "description", "hero", "screenshots
 def _manifest_change_is_listing(accepted: dict, candidate: dict) -> bool:
   """Whether the manifest changed only as a listing save would change it.
 
-  Everything outside ``store`` and ``icon`` is unchanged; store keys the
-  editor does not manage are unchanged; and the icon is the accepted one or
-  a path the save itself writes. The owner sees only the applied listing,
-  so anything else would be accepted unseen.
+  Everything outside ``store``, ``icon`` and an offered ``license`` is
+  unchanged; store keys the editor does not manage are unchanged; and the
+  icon is the accepted one or a path the save itself writes. The owner sees
+  only the applied listing, so anything else would be accepted unseen.
   """
-  if _listing_fields_removed(accepted) != _listing_fields_removed(candidate):
+  # A save may set the license only to one the Store offers.
+  license_too = bool(store_licenses.offered_license(candidate))
+  if (
+    _listing_fields_removed(accepted, license_too=license_too)
+    != _listing_fields_removed(candidate, license_too=license_too)
+  ):
     return False
 
   def unmanaged(manifest: dict) -> dict:
@@ -653,10 +671,27 @@ def write_listing(root: Path, app: models.App, edit: ListingEdit) -> Callable[[]
     if has_icon:
       manifest["icon"] = icon_rel
     manifest["store"] = store
+    if edit.license is not None:
+      if edit.license not in store_licenses.OFFERED_SPDX:
+        raise ListingEditError(
+          "listing_license_invalid", "Choose one of the licenses the Store offers.",
+        )
+      license_changed = store_licenses.offered_license(current) != edit.license
+      manifest["license"] = edit.license
+      # The text follows the choice. An unchanged choice keeps the author's
+      # own LICENSE (their copyright line), writing one only when none exists.
+      if license_changed or not store_licenses.has_license_file(
+        entry.name for entry in root.iterdir() if entry.is_file()
+      ):
+        changes.write(
+          store_licenses.LICENSE_FILE,
+          store_licenses.license_text(edit.license, manifest),
+        )
     changes.write(
       "mobius.json",
       bom + _spliced_manifest(
-        original, manifest, tuple(key for key in ("icon", "store") if key in manifest),
+        original, manifest,
+        tuple(key for key in ("icon", "store", "license") if key in manifest),
       ).encode("utf-8"),
     )
 
