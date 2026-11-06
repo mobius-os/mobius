@@ -1635,19 +1635,16 @@ export const api = {
     // as theme.css.reset-bak-<unix-ts> for rollback. Used by the
     // `?reset-theme=1` URL-parameter recovery flow in useTheme.
     reset: () => apiFetch('/theme/reset', { method: 'POST' }),
+    // The light/dark switch: the server rewrites theme.css for `mode` and
+    // returns the theme it now serves, shaped like `get`.
+    setMode: (mode) => apiFetch('/theme/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
   },
   storage: {
     shared: {
-      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
-      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
       getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
-      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
-        method: 'PUT',
-        body: JSON.stringify({ content: JSON.stringify(mode) }),
-      }),
     },
   },
   notify: {

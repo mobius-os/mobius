@@ -302,7 +302,8 @@ test('applyTheme honours an explicit mode over inferred', () => {
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'dark')
 })
 
-test('applyTheme infers mode from --bg in CSS when no bg arg', () => {
+test('applyTheme infers mode from the cascade --bg when no bg arg', () => {
+  dom.document.defaultView = { getComputedStyle: () => ({ getPropertyValue: (n) => (n === '--bg' ? '#f0eeeb' : '') }) }
   applyTheme({ css: ':root { --bg: #f0eeeb; }' }, ctx())
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
 })
@@ -402,10 +403,11 @@ test('HEX_RE matches valid hex and rejects garbage', () => {
 // (themeCssCases.json `expected`, pinned to backend _ensure_core_vars).
 
 const { default: themeCssCases } = await import('./themeCssCases.json', { with: { type: 'json' } })
-const { INJECTED_DEFAULTS_MARKER, themeDefaultsForCss } = await import('../../theme.js')
+const INJECTED_DEFAULTS_MARKER = 'Möbius: injected defaults for variables the theme omitted'
 const served = (prefix) => themeCssCases.find((c) => c.name.startsWith(prefix)).expected
 const GOOGLE_FONTS = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
-const CORE_VAR_COUNT = Object.keys(themeDefaultsForCss('')).length
+// Every served block holds every core variable (backend test_theme_roles.py).
+const CORE_VAR_COUNT = generatedVars(themeCssCases[0].expected).length
 
 function generatedVars(styleText) {
   const at = styleText.indexOf(INJECTED_DEFAULTS_MARKER)

@@ -1,11 +1,10 @@
 """Theme colour roles: text-safe and fill-safe tokens, their augmentation, and
-parity between every place that spells the shipped palette.
+parity between the two places that spell the shipped palette.
 
-The shipped palette is written three times on purpose (server default and
-augmentation, the shell's toggle palettes, the app frame's no-signal
-fallbacks) because each must paint before the others can be consulted. These
-tests are what keeps the three copies identical, so a palette edit fails here
-instead of flashing a stale colour in one surface.
+The shipped palette is written twice on purpose (the server default and the
+app frame's no-signal fallbacks, which must paint before the server can be
+consulted). These tests keep the two copies identical, so a palette edit
+fails here instead of flashing a stale colour in an app.
 """
 
 import json
@@ -18,26 +17,17 @@ from app import theme
 from app.theme import DEFAULT_THEME, _LIGHT_DEFAULTS, _ensure_core_vars
 
 REPO = Path(__file__).resolve().parents[2]
-THEME_JS = REPO / "frontend" / "src" / "theme.js"
 APP_FRAME = REPO / "frontend" / "public" / "app-frame.html"
-ROLE_CASES = REPO / "frontend" / "src" / "lib" / "__tests__" / "themeRoleCases.json"
+ROLE_CASES = Path(__file__).with_name("theme_role_cases.json")
 CSS_CASES = REPO / "frontend" / "src" / "lib" / "__tests__" / "themeCssCases.json"
 
 SURFACES = ("--bg", "--surface", "--surface-2")
 TEXT_ROLES = ("--accent-text", "--danger-text", "--green-text", "--warning", "--warning-text")
 FILL_ROLES = ("--accent-fill", "--accent-fill-hover", "--danger-fill", "--green-fill")
-TYPOGRAPHY = ("--font", "--mono")
 
 
 def _vars(block: str) -> dict[str, str]:
   return {m.group(1): m.group(2).strip() for m in re.finditer(r"(--[\w-]+)\s*:\s*([^;]+);", block)}
-
-
-def _js_object(name: str) -> dict[str, str]:
-  source = THEME_JS.read_text(encoding="utf-8")
-  m = re.search(rf"export const {name} = \{{(.*?)\n\}}", source, re.S)
-  assert m, f"{name} not found in theme.js"
-  return {k: v for k, v in re.findall(r"'(--[\w-]+)':\s*'([^']+)'", m.group(1))}
 
 
 def _frame_blocks() -> tuple[dict[str, str], dict[str, str]]:
@@ -66,34 +56,10 @@ def _contrast(a: str, b: str) -> float:
 # --- palette parity --------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode,colors,roles", [
-  ("dark", "DARK_COLORS", "DARK_ROLES"),
-  ("light", "LIGHT_COLORS", "LIGHT_ROLES"),
-])
-def test_server_palette_matches_the_shell_toggle_palette(mode, colors, roles):
-  expected = {**_js_object(colors), **_js_object(roles), "--accent-fg": "#ffffff"}
-  served = {k: v for k, v in _shipped(mode).items() if k not in TYPOGRAPHY}
-  assert served == expected
-
-
-def test_generated_typography_matches_the_shell():
-  source = THEME_JS.read_text(encoding="utf-8")
-  block = re.search(r"export const THEME_TYPOGRAPHY = \{(.*?)\n\}", source, re.S).group(1)
-  typography = dict(re.findall(r"'(--[\w-]+)':\s*\"([^\"]+)\"", block))
-  assert typography == {k: _shipped("dark")[k] for k in TYPOGRAPHY}
-
-
 def test_app_frame_fallbacks_match_the_server_palette():
   frame_dark, frame_light = _frame_blocks()
   assert frame_dark == _vars(DEFAULT_THEME)
   assert {**frame_dark, **frame_light} == _shipped("light")
-
-
-def test_injected_defaults_marker_matches_the_shell_parser():
-  """The shell drops a previously served injected block when it rebuilds
-  theme.css; it finds that block by this exact comment."""
-  m = re.search(r"'(Möbius: injected defaults[^']*)'", THEME_JS.read_text(encoding="utf-8"))
-  assert m and m.group(1) == theme.INJECTED_DEFAULTS_MARKER
 
 
 # --- shipped contrast --------------------------------------------------------
@@ -212,10 +178,8 @@ def _css_cases() -> list[dict]:
   return json.loads(CSS_CASES.read_text(encoding="utf-8"))
 
 
-def test_cross_language_stylesheet_cases():
-  """The same table runs through withThemeDefaults in
-  frontend/src/lib/__tests__/themeRoles.test.js, which the shell's toggle
-  paints, so the optimistic paint and /api/theme are the same bytes."""
+def test_stylesheet_cases():
+  """The shell's applier tests paint these `expected` values as served CSS."""
   cases = _css_cases()
   assert len(cases) >= 20
   for case in cases:
@@ -346,8 +310,7 @@ def test_theme_bg_is_the_owner_winning_root_value():
   assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#0d0d0d"
 
 
-def test_cross_language_role_cases():
-  """The same table runs in frontend/src/lib/__tests__/themeRoles.test.js."""
+def test_role_cases():
   cases = json.loads(ROLE_CASES.read_text(encoding="utf-8"))
   assert len(cases) >= 10
   for case in cases:
