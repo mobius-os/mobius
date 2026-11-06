@@ -93,8 +93,11 @@ def license_text(spdx: str, manifest: dict) -> bytes:
   return _shipped_text(spdx).encode("utf-8")
 
 
+def is_license_file(path: str) -> bool:
+  """Whether the repository-relative ``path`` is a root license text."""
+  return "/" not in path and path.casefold() in LICENSE_FILE_NAMES
+
+
 def has_license_file(paths: Iterable[str]) -> bool:
   """Whether a root license text is among the repository-relative ``paths``."""
-  return any(
-    "/" not in path and path.casefold() in LICENSE_FILE_NAMES for path in paths
-  )
+  return any(is_license_file(path) for path in paths)

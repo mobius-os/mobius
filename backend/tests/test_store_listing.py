@@ -1713,6 +1713,42 @@ def test_keeping_the_same_license_keeps_the_authors_own_text(client, auth, db):
   assert json.loads((source / "mobius.json").read_text())["license"] == "MIT"
 
 
+@pytest.mark.parametrize("old_text", ["COPYING", "LICENSE.md", "license"])
+def test_changing_the_license_replaces_the_old_license_text(client, auth, old_text):
+  source = _source()
+  manifest = json.loads(_MANIFEST)
+  manifest["license"] = "GPL-3.0-or-later"
+  (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
+  (source / old_text).write_text("GNU GENERAL PUBLIC LICENSE\nVersion 3\n")
+  (source / "NOTICE").write_text("Includes work by Example Author.\n")
+  app_id = _create(client, auth, source)
+
+  assert _save(client, auth, app_id, **_complete_listing(license="MIT")).status_code == 200
+
+  roots = sorted(entry.name for entry in source.iterdir() if entry.is_file())
+  assert [name for name in roots if name.casefold() in {
+    "license", "license.md", "license.txt", "copying",
+  }] == ["LICENSE"]
+  assert (source / "LICENSE").read_text(encoding="utf-8").startswith("MIT License\n")
+  # Other notices are not license texts and stay as they are.
+  assert (source / "NOTICE").read_text() == "Includes work by Example Author.\n"
+  assert app_git._run(source, "status", "--porcelain").stdout == ""
+  assert _item(_preview(client, auth, app_id), "license")["done"] is True
+
+
+def test_keeping_the_license_keeps_an_alternate_license_text(client, auth):
+  source = _source()
+  manifest = json.loads(_MANIFEST)
+  manifest["license"] = "MIT"
+  (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
+  (source / "COPYING").write_text("MIT License\n\nCopyright (c) 2026 Example Author\n")
+  app_id = _create(client, auth, source)
+
+  assert _save(client, auth, app_id, **_complete_listing(license="MIT")).status_code == 200
+  assert "2026 Example Author" in (source / "COPYING").read_text()
+  assert not (source / "LICENSE").exists()
+
+
 def test_only_an_offered_license_can_be_saved(client, auth):
   source = _source()
   app_id = _create(client, auth, source)
@@ -1753,6 +1789,34 @@ def test_unreviewed_license_edits_cannot_ride_along(client, auth, edit):
 
   assert refused.status_code == 409, refused.text
   assert refused.json()["detail"]["code"] == "source_has_draft"
+
+
+@pytest.mark.parametrize("license_written", [True, False])
+def test_removing_an_old_license_text_rides_along_only_with_the_saved_license(
+  client, auth, license_written,
+):
+  from app import store_licenses
+
+  source = _source()
+  (source / "COPYING").write_text("Old terms\n")
+  app_id = _create(client, auth, source)
+  manifest = json.loads(_MANIFEST)
+  manifest["license"] = "Apache-2.0"
+  (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
+  if license_written:
+    # What an interrupted license change leaves behind.
+    (source / "LICENSE").write_bytes(store_licenses.license_text("Apache-2.0", manifest))
+  (source / "COPYING").unlink()
+  app_git._run(source, "add", "-A")
+  app_git._run(source, "commit", "-qm", "license change only")
+
+  saved = _save(client, auth, app_id, **_complete_listing(license="Apache-2.0"))
+
+  if license_written:
+    assert saved.status_code == 200, saved.text
+  else:
+    assert saved.status_code == 409, saved.text
+    assert saved.json()["detail"]["code"] == "source_has_draft"
 
 
 def test_a_license_an_interrupted_save_wrote_may_ride_along(client, auth):

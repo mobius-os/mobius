@@ -220,13 +220,15 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
       if None in manifests or not _manifest_change_is_listing(*manifests):
         return True
       continue
-    if path == store_licenses.LICENSE_FILE:
-      # Only the exact text a save writes for the declared license counts;
-      # a save never deletes one.
-      content = read(path, MANIFEST_MAX_BYTES)
+    if store_licenses.is_license_file(path):
+      # Only the exact LICENSE a save writes for the declared license counts,
+      # and a save removes another root license text only while writing it.
       candidate = manifests[1] or {}
       spdx = store_licenses.offered_license(candidate)
-      if not spdx or content != store_licenses.license_text(spdx, candidate):
+      saved = read(store_licenses.LICENSE_FILE, MANIFEST_MAX_BYTES)
+      if not spdx or saved != store_licenses.license_text(spdx, candidate):
+        return True
+      if path != store_licenses.LICENSE_FILE and read(path, 0) is not None:
         return True
       continue
     # Only a listing file may differ; nothing else is even read.
@@ -679,14 +681,19 @@ def write_listing(root: Path, app: models.App, edit: ListingEdit) -> Callable[[]
       license_changed = store_licenses.offered_license(current) != edit.license
       manifest["license"] = edit.license
       # The text follows the choice. An unchanged choice keeps the author's
-      # own LICENSE (their copyright line), writing one only when none exists.
-      if license_changed or not store_licenses.has_license_file(
-        entry.name for entry in root.iterdir() if entry.is_file()
-      ):
+      # own license text (their copyright line), writing one only when none
+      # exists. A changed choice replaces every root license text, so the old
+      # terms (in COPYING, LICENSE.md, ...) never sit beside the new LICENSE.
+      root_files = [entry.name for entry in root.iterdir() if entry.is_file()]
+      if license_changed or not store_licenses.has_license_file(root_files):
         changes.write(
           store_licenses.LICENSE_FILE,
           store_licenses.license_text(edit.license, manifest),
         )
+      if license_changed:
+        for name in root_files:
+          if name != store_licenses.LICENSE_FILE and store_licenses.is_license_file(name):
+            changes.delete(name)
     changes.write(
       "mobius.json",
       bom + _spliced_manifest(
