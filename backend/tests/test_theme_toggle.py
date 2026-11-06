@@ -230,6 +230,17 @@ def test_every_import_spelling_stays_first():
   assert persisted.count("@import") == 3
 
 
+def test_only_real_leading_statements_are_kept_first():
+  prelude = ("@charset \"utf-8\";\n/* @import url(https://fonts.example.test/off.css); */\n"
+             "@import url(https://fonts.example.test/a.css) layer(fonts) screen;\n@layer base, theme;")
+  rule = ".x::before { content: '@import \"b.css\";'; }"
+  persisted, _ = toggle_once(f"{prelude}\n{CUSTOM_DARK}\n{rule}\n", "dark")
+  assert persisted.startswith(prelude + "\n\n:root {")
+  assert persisted.count("@import") == 3, "the comment and the string are not imports"
+  assert persisted.rstrip().endswith(rule)
+  assert "mobius-defaults" not in persisted
+
+
 # --- the endpoint ------------------------------------------------------------
 
 
@@ -310,6 +321,19 @@ def test_the_preview_is_built_once_per_theme(client, auth, shared, events, monke
   (shared / "theme.css").write_text(CUSTOM_DARK.replace("#ff00ff", "#0fa"))
   assert client.get("/api/theme", headers=auth).json()["toggle"] != first
   assert len(builds) == 2
+
+
+def test_a_failing_preview_never_stops_the_theme_loading(client, auth, shared, events, monkeypatch):
+  (shared / "theme.css").write_text(CUSTOM_DARK)
+  theme._toggle_preview.cache_clear()
+
+  def fail(*_args):
+    raise ValueError("unexpected css")
+
+  monkeypatch.setattr(theme, "toggled_theme_css", fail)
+  served = client.get("/api/theme", headers=auth)
+  assert served.status_code == 200
+  assert "toggle" not in served.json() and served.json()["mode"] == "dark"
 
 
 def test_saving_the_current_mode_changes_nothing(client, auth, shared, events):

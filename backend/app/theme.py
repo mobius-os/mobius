@@ -25,14 +25,6 @@ from typing import NamedTuple
 
 _log = logging.getLogger(__name__)
 
-# A whole @import statement in any of its four spellings: url('X'),
-# url("X"), bare url(X), or a plain "X"/'X' string. Mirrors the client's
-# pattern in frontend/src/lib/applyTheme.js; a trailing `;` is required so an
-# @import-looking substring inside a quoted value is not taken for a rule.
-_IMPORT_RE = re.compile(
-  r"""@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|(?:[^"'()\s\\]|\\[\s\S])+)\s*\)|"[^"]*"|'[^']*')\s*;[^\S\n]*\n?""",
-)
-
 # The secondary-surface token was renamed --surface2 -> --surface-2 with no
 # compatibility alias. `migrate_theme_surface2_token` rewrites a saved theme once
 # at boot; the lookahead matches only the exact legacy token, never a longer name.
@@ -144,15 +136,6 @@ def _served_theme(owner_css: str) -> dict:
   """The `{css, bg}` the server serves for `owner_css` as theme.css."""
   css = _ensure_core_vars(owner_css.strip())
   return {"css": css, "bg": _theme_bg(css)}
-
-
-def extract_imports(css: str) -> tuple[list[str], str]:
-  """Split @import statements from CSS: (statements verbatim, remaining_css).
-
-  An @import is only honoured before every other rule, so a rewrite that
-  puts a new rule first must lift the statements back above it."""
-  statements = [m.group(0).strip() for m in _IMPORT_RE.finditer(css)]
-  return statements, _IMPORT_RE.sub("", css)
 
 
 def get_bg_color(data_dir: str) -> str:
@@ -1055,8 +1038,12 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   swapped.  Roles are not written unless the owner declared them; the
   generated block paints them, so a later base edit re-derives them.
   """
-  statements, rest = extract_imports(css)
-  rest = _GENERATED_BLOCK_RE.sub("", rest)
+  # The leading @charset/@import/@layer statements only count before every
+  # rule, so they stay first, verbatim. The lexer reads them, so an @import
+  # inside a comment or a string is never taken for one.
+  owner = _GENERATED_BLOCK_RE.sub("", css)
+  _, prelude_end = _prelude_bounds(owner)
+  prelude, rest = owner[:prelude_end].strip(), owner[prelude_end:]
   rule = _first_root_rule(rest)
   declared = rule[2] if rule else {}
   extras = (rest[:rule[0]] + rest[rule[1]:] if rule else rest).strip()
@@ -1078,10 +1065,9 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
 
   font = declared.get("--font") or "'Inter', system-ui, sans-serif"
   mono = declared.get("--mono") or "'JetBrains Mono', ui-monospace, monospace"
-  imports = "".join(f"{statement}\n" for statement in statements)
   lines = "\n".join(f"  {key}: {value};" for key, value in colors.items())
   return (
-    (imports + "\n" if imports else "")
+    (prelude + "\n\n" if prelude else "")
     + f":root {{\n  /* Colors - {new_mode} theme */\n{lines}\n\n  /* Typography */\n"
     + f"  --font: {font};\n  --mono: {mono};\n"
     + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n}}\n"
@@ -1108,8 +1094,15 @@ def theme_with_toggle(data_dir: str) -> dict:
   would produce, so the shell paints it on tap before the save returns.
   Only `GET /api/theme` carries it; page slots stay `theme_data`."""
   bundle = load_effective_theme(data_dir)
-  css, bg, mode = _toggle_preview(bundle.css, bundle.mode)
-  return {**theme_data(data_dir, bundle), "toggle": {"css": css, "bg": bg, "mode": mode}}
+  data = theme_data(data_dir, bundle)
+  try:
+    css, bg, mode = _toggle_preview(bundle.css, bundle.mode)
+  except Exception:
+    # The preview only makes the tap instant; without it the switch waits for
+    # the save. It must never stop the theme itself from loading.
+    _log.warning("theme toggle preview failed", exc_info=True)
+    return data
+  return {**data, "toggle": {"css": css, "bg": bg, "mode": mode}}
 
 
 _THEME_MODE_LOCK = threading.Lock()
