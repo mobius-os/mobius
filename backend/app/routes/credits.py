@@ -95,6 +95,12 @@ def pair_credits(
   return _credits(credits_client.pair, body.operator_url, body.key)
 
 
+@router.post("/pair/account")
+def pair_credits_with_account(_owner: models.Owner = Depends(get_credits_controller)):
+  """Connect a Möbius launched from mobius.you to its owner's wallet in one step."""
+  return _credits(credits_client.pair_with_account)
+
+
 @router.post("/unpair")
 def unpair_credits(_owner: models.Owner = Depends(get_credits_controller)):
   return credits_client.unpair()

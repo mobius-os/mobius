@@ -93,6 +93,8 @@ MANAGED_UPSTREAM_POLICIES = (
 MANAGED_EXACT_ROUTES = frozenset({
   ("GET", "/api/instance/v1/agent"),
   ("POST", "/api/instance/v1/agent/trial"),
+  # The launcher issues this installation its own credits key.
+  ("POST", "/api/instance/v1/credits/key"),
   ("POST", "/api/instance/v1/railway/connect/start"),
   ("POST", "/api/instance/v1/railway/plan/refresh"),
 })

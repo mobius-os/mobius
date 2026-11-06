@@ -85,6 +85,23 @@ export default function WalletSection({
   )
 }
 
+/** Credits for a Möbius launched from mobius.you that is not connected yet. */
+export function WalletConnect({ busy = false, refusal = null, onConnect = () => {} }) {
+  return (
+    <section className="settings__section credits">
+      <h2 className="settings__section-title">Credits</h2>
+      <p className="credits__quiet">
+        Connect this Möbius to your mobius.you credits to buy credits and use
+        apps that charge per use.
+      </p>
+      {refusal && <p className="credits__refusal" role="alert">{refusal}</p>}
+      <button type="button" className="credits__buy" disabled={busy} aria-busy={busy} onClick={onConnect}>
+        {busy ? 'Connecting…' : 'Connect credits'}
+      </button>
+    </section>
+  )
+}
+
 function WalletBuyForm({ terms, busy, onBuy }) {
   const amounts = terms.amounts_cents
   const [cents, setCents] = useState(amounts[0])

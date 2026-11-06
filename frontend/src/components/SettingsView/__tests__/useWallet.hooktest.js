@@ -274,3 +274,57 @@ test('a paid checkout refreshes the balance and releases its lifecycle', async t
   t.mock.timers.tick(CHECKOUT_LIMIT)
   assert.equal(hook.result.current.notice, 'paid')
 })
+
+/** An unpaired Möbius launched from mobius.you, which the launcher can pair. */
+function stubUnpaired({ refuse = false } = {}) {
+  const server = { paired: false, calls: [] }
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^.*\/api/, '')
+    server.calls.push({ path, method: init.method || 'GET' })
+    if (path === '/identity/credits') {
+      return json(server.paired
+        ? { mode: 'customer', pairing: 'p-account', balance: { available: '0.00' } }
+        : { mode: 'unpaired', pairing: null, can_pair_with_account: true })
+    }
+    if (path === '/identity/credits/pair/account') {
+      if (refuse) {
+        return json({ detail: { code: 'credits_unavailable', message: 'mobius.you could not connect your credits just now.' } }, 503)
+      }
+      server.paired = true
+      return json({ paired: true })
+    }
+    if (path.startsWith('/identity/credits/transactions')) return json({ transactions: [] })
+    if (path === '/identity/credits/purchase-terms') return json({ ...USD, pairing: 'p-account' })
+    throw new Error(`unexpected ${path}`)
+  }
+  return server
+}
+
+test('connecting_with_the_account_pairs_and_shows_the_wallet', async () => {
+  const server = stubUnpaired()
+  const { result } = renderHook(useWallet, { active: true })
+  await tick()
+  assert.equal(result.current.summary.mode, 'unpaired')
+  assert.equal(result.current.summary.can_pair_with_account, true)
+
+  await result.current.pairWithAccount()
+  await tick()
+
+  assert.ok(server.calls.some(c => c.path === '/identity/credits/pair/account' && c.method === 'POST'))
+  assert.equal(result.current.summary.mode, 'customer')
+  assert.equal(result.current.refusal, null)
+  assert.equal(result.current.busy, false)
+})
+
+test('a_refused_connection_says_why_and_stays_unpaired', async () => {
+  stubUnpaired({ refuse: true })
+  const { result } = renderHook(useWallet, { active: true })
+  await tick()
+
+  await result.current.pairWithAccount()
+  await tick()
+
+  assert.equal(result.current.summary.mode, 'unpaired')
+  assert.equal(result.current.refusal, 'mobius.you could not connect your credits just now.')
+  assert.equal(result.current.busy, false)
+})

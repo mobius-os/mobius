@@ -79,6 +79,93 @@ def test_an_unpaired_installation_is_told_so(client, auth, service):
   assert not service.calls
 
 
+class FakeLauncher:
+  """The identity broker's route to the launcher, as the credits client calls it."""
+
+  def __init__(self, status=200, body=None):
+    self.status = status
+    self.body = body if body is not None else {
+      "service_url": "https://www.mobius.you/credits", "key": "mbc_from_launcher"}
+    self.posts = []
+
+  def __call__(self, *, timeout):
+    launcher = self
+
+    class Client:
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *_exc):
+        return False
+
+      def post(self, path):
+        launcher.posts.append(path)
+        return httpx.Response(launcher.status, json=launcher.body,
+                              request=httpx.Request("POST", "http://broker" + path))
+
+    return Client()
+
+
+@pytest.fixture
+def launcher(monkeypatch):
+  """This Möbius was launched from mobius.you and can reach its launcher."""
+  monkeypatch.setattr(get_settings(), "mobius_sso_issuer", "https://www.mobius.you")
+  monkeypatch.setattr(get_settings(), "mobius_sso_instance_id", "mob_example")
+  fake = FakeLauncher()
+  monkeypatch.setattr(credits_client, "broker_client", fake)
+  return fake
+
+
+def test_a_launched_installation_pairs_with_its_owners_wallet_without_a_key(
+  client, auth, service, launcher
+):
+  before = client.get("/api/identity/credits", headers=auth).json()
+  assert before["mode"] == "unpaired" and before["can_pair_with_account"] is True
+
+  paired = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert paired.status_code == 200 and paired.json() == {"paired": True}
+  assert launcher.posts == ["/managed/api/instance/v1/credits/key"]
+  # The key is checked at the service before it is kept, exactly like a pasted one.
+  assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/balance"
+  assert service.calls[-1]["headers"]["Authorization"] == "Bearer mbc_from_launcher"
+  assert credits_client.load_credentials()["key"] == "mbc_from_launcher"
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
+
+
+def test_a_self_hosted_installation_is_not_offered_account_pairing(
+  client, auth, service, monkeypatch
+):
+  monkeypatch.setattr(credits_client, "broker_client", FakeLauncher())
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["can_pair_with_account"] is False
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "not_managed"
+  assert credits_client.broker_client.posts == []
+  assert credits_client.load_credentials() is None
+
+
+@pytest.mark.parametrize("status, body, balance", [
+  (503, {"error": {"code": "credits_unavailable", "message": "unavailable"}}, (200, {})),
+  (200, {"service_url": "https://www.mobius.you/credits"}, (200, {})),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": "mbc_from_launcher"},
+   (401, {"detail": {"code": "invalid_api_key", "message": "no"}})),
+], ids=["launcher-unavailable", "no-key", "service-refuses-key"])
+def test_account_pairing_that_does_not_complete_leaves_the_installation_unpaired(
+  client, auth, service, launcher, status, body, balance
+):
+  launcher.status, launcher.body = status, body
+  service.answers["balance"] = balance
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code >= 400
+  assert credits_client.load_credentials() is None
+
+
 def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
   client, auth, service, tmp_path
 ):
@@ -489,6 +576,7 @@ OWNER_CREDIT_ROUTES = [
   ("POST", "/api/identity/credits/convert", None),
   ("POST", "/api/identity/credits/withdraw", None),
   ("POST", "/api/identity/credits/disconnect", None),
+  ("POST", "/api/identity/credits/pair/account", None),
   ("POST", "/api/identity/credits/unpair", None),
 ]
 
@@ -560,7 +648,7 @@ def test_an_app_approved_to_manage_credits_reaches_them(
   read = client.get("/api/identity/credits", headers=headers)
   assert read.status_code == 200 and read.json()["balance"] == {"balance": "2.25"}
   for method, path, body in OWNER_CREDIT_ROUTES:
-    if path.endswith(("/pair", "/unpair", "/topup", "/connect")):
+    if path.endswith(("/pair", "/pair/account", "/unpair", "/topup", "/connect")):
       continue  # Their answers depend on the service's page; covered above.
     answer = client.request(method, path, json=body, headers=headers)
     assert answer.status_code == 200, (path, answer.text)

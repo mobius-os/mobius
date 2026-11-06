@@ -577,6 +577,7 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
   for method, path in (
     ("GET", "/managed/api/instance/v1/agent"),
     ("POST", "/managed/api/instance/v1/agent/trial"),
+    ("POST", "/managed/api/instance/v1/credits/key"),
     ("GET", "/managed/api/instance/v1/railway?region_options=1&workspace_ids=1"),
   ):
     response = broker.proxy(
@@ -614,6 +615,9 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
     ("POST", "/managed/api/instance/v1/agent"),
     ("GET", "/managed/api/instance/v1/agent/trial"),
     ("POST", "/managed/api/instance/v1/agent/trial/extra"),
+    ("GET", "/managed/api/instance/v1/credits/key"),
+    ("POST", "/managed/api/instance/v1/credits/key/extra"),
+    ("POST", "/managed/api/instance/v1/credits"),
   ):
     with pytest.raises(FileNotFoundError):
       broker.proxy(

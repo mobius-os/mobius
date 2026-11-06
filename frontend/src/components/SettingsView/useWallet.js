@@ -183,5 +183,24 @@ export function useWallet({ active }) {
     }
   }, [terms, load])
 
-  return { summary, terms, activity, busy, notice, refusal, buy }
+  // A Möbius launched from mobius.you connects to its owner's own wallet: the
+  // server asks the launcher for this installation's key, so nobody copies one.
+  const pairWithAccount = useCallback(async () => {
+    if (!mounted.current) return
+    setRefusal(null)
+    setNotice(null)
+    setBusy(true)
+    try {
+      await jsonOrThrow(await apiFetch('/identity/credits/pair/account', { method: 'POST' }))
+      await load()
+    } catch (error) {
+      if (mounted.current) {
+        setRefusal(error?.message || 'Your credits could not be connected. Try again in a moment.')
+      }
+    } finally {
+      if (mounted.current) setBusy(false)
+    }
+  }, [load])
+
+  return { summary, terms, activity, busy, notice, refusal, buy, pairWithAccount }
 }

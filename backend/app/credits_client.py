@@ -43,6 +43,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import get_settings
+from app.runtime_identity import broker_client
 
 TIMEOUT_SECONDS = 20.0
 KEY_PREFIX = "mbc_"
@@ -50,6 +51,9 @@ KEY_PREFIX = "mbc_"
 _HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 _TOPUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Where a Möbius launched from mobius.you asks its launcher for a key of its
+# own; the identity broker adds the installation's managed credential.
+ACCOUNT_KEY_ROUTE = "/managed/api/instance/v1/credits/key"
 
 
 class CreditsUnavailable(Exception):
@@ -239,7 +243,8 @@ def summary() -> dict:
   credentials = load_credentials()
   if credentials is None:
     return {"mode": "unpaired", "service_host": None, "pairing": None,
-            "balance": None, "earnings": None, "error": None}
+            "balance": None, "earnings": None, "error": None,
+            "can_pair_with_account": get_settings().mobius_sso_enabled}
   result = {
     "mode": "customer",
     "service_host": urlsplit(credentials["operator_url"]).hostname,
@@ -272,6 +277,34 @@ def pair(operator_url: str, key: str) -> dict:
   _call("GET", "balance", candidate)
   _save_credentials(candidate["operator_url"], key)
   return {"paired": True}
+
+
+def pair_with_account() -> dict:
+  """Connect to the owner's own wallet, with no key for anyone to copy.
+
+  A Möbius launched from mobius.you asks its launcher, through the identity
+  broker that holds its managed credential, for a key of its own. The
+  launcher issues one and retires any key this installation had, and
+  ``pair`` then checks it at the service and seals it like any other.
+  """
+  if not get_settings().mobius_sso_enabled:
+    raise CreditsUnavailable(
+      "This Möbius was not launched from mobius.you, so it needs a credits key "
+      "from the credits operator.", status=409, code="not_managed")
+  try:
+    with broker_client(timeout=TIMEOUT_SECONDS) as client:
+      response = client.post(ACCOUNT_KEY_ROUTE)
+  except (httpx.HTTPError, OSError) as error:
+    raise CreditsUnavailable("Could not reach mobius.you.", status=503) from error
+  try:
+    body = response.json()
+  except ValueError:
+    body = None
+  if response.status_code != 200 or not isinstance(body, dict):
+    raise CreditsUnavailable(
+      "mobius.you could not connect your credits just now. Try again in a moment.",
+      status=503, code="credits_unavailable")
+  return pair(str(body.get("service_url") or ""), str(body.get("key") or ""))
 
 
 def unpair() -> dict:

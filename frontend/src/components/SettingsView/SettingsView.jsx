@@ -27,7 +27,7 @@ import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
-import WalletSection from './WalletSection.jsx'
+import WalletSection, { WalletConnect } from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
@@ -1157,6 +1157,13 @@ export default function SettingsView({
             notice={wallet.notice}
             refusal={wallet.refusal}
             onBuy={wallet.buy}
+          />
+        )}
+        {showOwnerAccounts && wallet.summary?.mode === 'unpaired' && wallet.summary.can_pair_with_account && (
+          <WalletConnect
+            busy={wallet.busy}
+            refusal={wallet.refusal}
+            onConnect={wallet.pairWithAccount}
           />
         )}
 
