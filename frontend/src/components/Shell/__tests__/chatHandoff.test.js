@@ -55,7 +55,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
   )
   assert.match(
     chatView,
-    /const doSend = useCallback[\s\S]*if \(!activationSettledRef\.current\) return false[\s\S]*submissionBlocked=\{[\s\S]*!activationSettled/,
+    /const doSend = useCallback\([\s\S]{0,1200}if \(isProviderSwitchBlocking\(chatId\) \|\| !activationSettledRef\.current\) \{[^}]*return false\n\s*\}[\s\S]*submissionBlocked=\{[\s\S]*!activationSettled/,
     'every visible and programmatic send remains blocked until this chat activation settles',
   )
   assert.match(
