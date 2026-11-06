@@ -224,6 +224,26 @@ def test_request_label_names_the_route_and_lets_go_of_the_request():
   assert not any(referent is scope for referent in gc.get_referents(label))
 
 
+def test_request_label_read_while_the_request_settles_still_names_the_route():
+  """A task's database hold can end on a worker thread while the request
+  settles the label on the loop; the read must not see a cleared scope."""
+  from app.main import _RequestLabel
+
+  interleaved = []
+
+  class SettlingScope(dict):
+    def get(self, key, default=None):
+      if key == "method" and not interleaved:
+        interleaved.append(True)
+        label.settle()  # the request ends between the two scope reads
+      return super().get(key, default)
+
+  scope = SettlingScope(type="http", method="GET", route=SimpleNamespace(path="/items/{item_id}"))
+  label = _RequestLabel(scope)
+  assert label() == "GET /items/{item_id}"
+  assert label() == "GET /items/{item_id}"
+
+
 def test_long_database_hold_is_named_by_its_resolved_label(monkeypatch, records):
   recorder = stall_recorder.StallRecorder(request_seconds=2)
   monkeypatch.setattr(stall_recorder, "_recorder", recorder)

@@ -787,9 +787,12 @@ class _RequestLabel:
     self._text: str | None = None
 
   def __call__(self) -> str:
-    if self._scope is None:
+    # A task's hold can end on a worker thread while the request settles on
+    # the loop: read the scope once, since ``settle`` sets the text first.
+    scope = self._scope
+    if scope is None:
       return self._text
-    return f'{self._scope.get("method", "?")} {activity.route_template(self._scope)}'
+    return f'{scope.get("method", "?")} {activity.route_template(scope)}'
 
   def settle(self) -> None:
     self._text = self()
