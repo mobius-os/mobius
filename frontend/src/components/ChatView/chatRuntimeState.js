@@ -76,9 +76,10 @@ export function chatEntryFrame({
 /** Which controls a chat frame may offer, by activation phase. A saved frame
  * presents before runtime truth, so its liveness, queue and open cards are
  * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
- * activation to settle. Stop (`stop`), whose queue resend is a send, waits
- * too, and stays available on a failed activation, where the frame may show a
- * turn that is still running and Stop is the only way to end it. */
+ * activation to settle. Stop (`stop`) waits too, and stays available on a
+ * failed activation, where the frame may show a turn that is still running and
+ * Stop is the only way to end it; its queued resend then returns to the
+ * composer (stopResendTarget). */
 export function liveControlsReady(activationPhase, activationSettled) {
   return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
 }

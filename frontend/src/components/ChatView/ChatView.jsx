@@ -135,7 +135,7 @@ import {
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
-import { resolveStopResend, ownerQueuedSnapshot } from './resolveStopResend.js'
+import { resolveStopResend, ownerQueuedSnapshot, stopResendTarget } from './resolveStopResend.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -4768,20 +4768,18 @@ export default function ChatView({
         queuedSnapshot, cleared,
         { text: combined, attachments: combinedAttachments },
       )
-      // Stop stays available on a failed activation, but doSend starts no turn
-      // before activation settles. Its resend would then be refused after Stop
-      // already cleared the queue, so the queued work goes back into the
-      // composer, where Send retries activation and sends it.
-      const resendQueued = ({ text, attachments }) => {
-        if (!hasSendablePayload(text, attachments)) return
-        if (!activationSettledRef.current) {
-          appendToComposer(text, attachments)
-          return
+      // Before activation settles the work goes back to the composer instead
+      // of a send doSend would refuse (stopResendTarget).
+      const resendQueued = (resend) => {
+        const { text, attachments } = resend
+        const target = stopResendTarget(resend, activationSettledRef.current)
+        if (target === 'composer') appendToComposer(text, attachments)
+        else if (target === 'send') {
+          doSend(text, {
+            pin: false,
+            attachments: attachments.length > 0 ? attachments : undefined,
+          })
         }
-        doSend(text, {
-          pin: false,
-          attachments: attachments.length > 0 ? attachments : undefined,
-        })
       }
 
       if (!stoppedCleanly) {
@@ -4793,7 +4791,7 @@ export default function ChatView({
         // chat.pending_messages, so a refetch returns [] and re-queueing
         // from authoritative server state would silently drop the queued
         // text (the "Stop ate my message" bug). Restore from the LOCAL
-        // snapshot instead, via the same doSend re-send path — and
+        // snapshot instead, via the shared resendQueued (above) — and
         // narrowed by clearedPendingCids through the SHARED resolveResend
         // (above) so a queued message the natural turn-end drain already
         // consumed (cleared set []) is NOT re-sent here: re-sending it

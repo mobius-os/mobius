@@ -419,3 +419,95 @@ test('work returned to the composer follows the owner draft and keeps its files'
     else globalThis.sessionStorage = previousStorage
   }
 })
+
+test('returned files get their own chip ids, so removing one keeps the rest', t => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  const deleted = []
+  t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (options?.method === 'DELETE') deleted.push(decodeURIComponent(url.split('/').pop()))
+    return Promise.resolve({ ok: true })
+  })
+  const record = name => ({ name, size: 3, mime_type: 'text/plain', status: 'done' })
+  try {
+    persistComposerDraft('returned-ids', '', [record('a.txt'), record('b.txt')])
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-ids',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    hook.result.current.appendToComposer('', [record('q.png')])
+    const ids = hook.result.current.pendingFiles.map(file => file.id)
+    assert.equal(ids.every(Boolean), true)
+    assert.equal(new Set(ids).size, 3)
+
+    hook.result.current.handleComposerRemoveFile(ids[0])
+    assert.deepEqual(hook.result.current.pendingFiles.map(file => file.name), ['b.txt', 'q.png'])
+    assert.deepEqual(deleted, ['a.txt'])
+
+    // A saved draft restored later gets ids the same way.
+    persistComposerDraft('returned-ids', '', [record('c.txt'), record('d.txt')])
+    hook.result.current.restoreDurableDraft()
+    const restored = hook.result.current.pendingFiles.map(file => file.id)
+    assert.equal(new Set(restored.filter(Boolean)).size, 2)
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('returning only files retires an older ambiguous send like returned text', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('returned-files', {
+      cid: 'cid-older', draftIdentity: 'draft-older', text: 'older', attachments: [],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-files',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const older = hook.result.current.failedSendAttemptRef.current
+    assert.ok(older)
+    hook.result.current.appendToComposer('', [
+      { name: 'queued.png', size: 9, mime_type: 'image/png' },
+    ])
+    assert.equal(hook.result.current.failedSendAttemptRef.current, null)
+    assert.equal(hook.result.current.sendFailure, null)
+    // The older send's late confirmation no longer clears the returned file.
+    hook.result.current.reconcileFailedAttempt(
+      [{ role: 'user', cid: 'cid-older', content: 'older' }], [],
+      { expectedAttempt: older },
+    )
+    assert.deepEqual(hook.result.current.pendingFiles.map(file => file.name), ['queued.png'])
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('text returned while history shows another message joins the set-aside draft', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    persistComposerDraft('returned-history', 'Owner draft', [])
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-history',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    hook.result.current.setDraftAside('Owner draft')
+    hook.result.current.setComposerInput('An earlier message')
+    hook.result.current.appendToComposer('Queued follow-up')
+    assert.equal(hook.result.current.input, 'An earlier message')
+    assert.equal(readComposerDraft('returned-history').input, 'Owner draft\nQueued follow-up')
+    assert.equal(hook.result.current.takeDraftBack(), 'Owner draft\nQueued follow-up')
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})

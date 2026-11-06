@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveStopResend, ownerQueuedSnapshot } from '../resolveStopResend.js'
+import { resolveStopResend, ownerQueuedSnapshot, stopResendTarget } from '../resolveStopResend.js'
 
 function snap(overrides = {}) {
   const ts = overrides.ts ?? 100
@@ -132,4 +132,19 @@ test('empty cleared set returns no attachments even if the snapshot had some', (
   const got = resolveStopResend(snapshot, [], combined('q', [{ name: 'f.pdf' }]))
   assert.equal(got.text, '')
   assert.deepEqual(got.attachments, [], 'nothing cleared → no attachments to resend')
+})
+
+// -- stopResendTarget: a Stop on a failed activation keeps its queued work ----
+test('stopResendTarget sends once activation has settled', () => {
+  assert.equal(stopResendTarget(combined('queued'), true), 'send')
+})
+
+test('stopResendTarget returns unsettled work to the composer, files included', () => {
+  assert.equal(stopResendTarget(combined('queued'), false), 'composer')
+  assert.equal(stopResendTarget(combined('', [{ name: 'q.png' }]), false), 'composer')
+})
+
+test('stopResendTarget has nothing to do for an empty resend', () => {
+  assert.equal(stopResendTarget(combined(''), true), 'none')
+  assert.equal(stopResendTarget(combined('  ', []), false), 'none')
 })

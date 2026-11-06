@@ -1,3 +1,4 @@
+import { hasSendablePayload } from './composerSubmission.js'
 import { cidOf } from './messageIdentity.js'
 
 /**
@@ -88,4 +89,20 @@ export function resolveStopResend(queuedSnapshot, clearedPendingCids, combined) 
     }
   }
   return { text, attachments }
+}
+
+/**
+ * Where Stop's resolved resend goes: 'none' when there is nothing to send,
+ * 'send' once activation has settled, otherwise 'composer'. Stop stays
+ * available on a failed activation, but no turn starts before activation
+ * settles, and Stop has already cleared the queue, so the work waits in the
+ * composer for the owner to send again instead of being refused and lost.
+ *
+ * @param {{text: string, attachments: Array}} resend from resolveStopResend
+ * @param {boolean} activationSettled
+ * @returns {'none'|'send'|'composer'}
+ */
+export function stopResendTarget({ text, attachments }, activationSettled) {
+  if (!hasSendablePayload(text, attachments)) return 'none'
+  return activationSettled ? 'send' : 'composer'
 }

@@ -66,23 +66,6 @@ test('Stop serializes behind an in-flight steer; steer bails under a committed S
   )
 })
 
-test('Stop after a failed activation returns its queued resend to the composer', () => {
-  // Stop stays available on a failed activation, but doSend refuses every turn
-  // until activation settles. Both Stop branches resend through one helper
-  // that keeps the queued work in the composer instead of dropping it.
-  const stop = source.slice(
-    source.indexOf('async function handleStop()'),
-    source.indexOf('const handlingSteerRef = useRef(false)'),
-  )
-  assert.match(
-    stop,
-    /if \(!activationSettledRef\.current\) \{\s*appendToComposer\(text, attachments\)\s*return\s*\}\s*doSend\(text,/,
-    'an unsettled activation must keep the resend instead of calling doSend',
-  )
-  assert.equal(stop.match(/resendQueued\(resolveResend\(clearedPendingCids\)\)/g)?.length, 2,
-    'the clean and timed-out Stop branches share the resend')
-})
-
 test('durable queued input stays visible through transient and terminal disconnect', () => {
   // 'retrying' is a ~300ms transparent auto-reconnect; gating on it would
   // blank and pop the rail/tray on every mobile blip (review 2026-07-17).

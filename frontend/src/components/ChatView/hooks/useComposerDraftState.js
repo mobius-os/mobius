@@ -235,18 +235,27 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
   }, [handleComposerInputChange, inputRef, setComposerInput])
 
   /** Add text and already-uploaded files after the owner's draft, e.g. work
-   * that could not be sent, so it waits in the composer instead of vanishing. */
+   * that could not be sent, so it waits in the composer instead of vanishing.
+   * Like any owner edit, it retires an older ambiguous send, whose late
+   * confirmation would otherwise clear the returned work with it. While history
+   * shows another message, the text joins the draft set aside, not the box. */
   const appendToComposer = useCallback((text, attachments = []) => {
     const files = draftAttachmentsRef.current
     const names = new Set(files.map(file => file?.name))
-    const added = attachments
-      .filter(file => file?.name && !names.has(file.name))
-      .map(file => ({ ...file, id: `appended-${file.name}`, status: 'done' }))
+    const added = attachments.filter(file => file?.name && !names.has(file.name))
+    if (!text && added.length === 0) return
+    clearFailedAttempt()
+    setSendFailure(null)
     if (added.length > 0) restoreFiles([...files, ...added])
     if (!text) return
-    const current = inputValueRef.current || ''
-    handleComposerInputChange(current.trim() ? `${current.trimEnd()}\n${text}` : text)
-  }, [handleComposerInputChange, restoreFiles])
+    const join = current => (current.trim() ? `${current.trimEnd()}\n${text}` : text)
+    if (draftAsideRef.current != null) {
+      draftAsideRef.current = join(draftAsideRef.current)
+      persistDraft(inputValueRef.current, draftAttachmentsRef.current)
+    } else {
+      setComposerInput(join(inputValueRef.current || ''))
+    }
+  }, [clearFailedAttempt, persistDraft, restoreFiles, setComposerInput])
 
   const restoreDurableDraft = useCallback(() => {
     const saved = readComposerDraft(chatId)
