@@ -574,13 +574,10 @@ def test_existing_pr_update_keeps_the_clean_merge_gate(monkeypatch, tmp_path):
                   "old_title": "Polish demo", "old_body": "## What\n\nPolishes the demo."}})
 
 
-@pytest.mark.parametrize("merge_conflict", [True, False])
-def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over(
-  monkeypatch, tmp_path, merge_conflict,
-):
+def recovered_submit(monkeypatch, tmp_path, *, merge_conflict=True, merge_tree=None,
+                     record_extra=None, plan=None, **kwargs):
   """A lost create response or a crash leaves the PR open; the retry finds it
-  and returns before the merge preflight. It still records the overlap the PR
-  opened over, checked against the upstream tip the first attempt recorded."""
+  and returns before the merge preflight, never consulting today's upstream."""
   _write_token(login="octocat")
   repo = Path(get_settings().data_dir) / "contrib" / f"rec-retry-{tmp_path.name}" / "repo"
   (repo / ".git").mkdir(parents=True)
@@ -590,8 +587,18 @@ def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over
     **standalone_record("rec-retry", repo),
     "last_submit_stage": "pushed", "last_submit_push_sha": HEAD,
     "last_submit_upstream_branch": "main", "last_submit_upstream_sha": _UPSTREAM_SHA,
+    **(record_extra or {}),
   }
+  record["plan"].update(plan or {})
   git_calls, _gh_calls = send_fakes(monkeypatch, merge_conflict=merge_conflict)
+  if merge_tree is not None:
+    fake_git = git_ops._git
+    def git_with_merge_tree(repo_path, *args, check=True):
+      if args[:1] == ("merge-tree",):
+        git_calls.append(args)
+        return merge_tree()
+      return fake_git(repo_path, *args, check=check)
+    monkeypatch.setattr(git_ops, "_git", git_with_merge_tree)
   monkeypatch.setattr(git_ops, "_assert_fresh", lambda *a, **k: (BASE, HEAD, record["plan"]["diff_sha256"]))
   monkeypatch.setattr(git_ops, "_assert_coauthor_trailer", lambda *a: None)
   monkeypatch.setattr(git_ops, "_assert_head_attribution", lambda *a, **k: None)
@@ -602,8 +609,19 @@ def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over
                         pr_number=42, publication_stage="ready"))
   monkeypatch.setattr(git_ops, "inspect_upstream_merge",
                       lambda *a: pytest.fail("a recovery must not depend on today's upstream"))
-  url, number, patch = _submit_prepared_pr(record, diff_path)
+  url, number, patch = _submit_prepared_pr(record, diff_path, **kwargs)
   assert (url, number) == ("https://github.com/mobius-os/app-demo/pull/42", 42)
+  assert patch["last_submit_push_sha"] == HEAD
+  return git_calls, patch
+
+
+@pytest.mark.parametrize("merge_conflict", [True, False])
+def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over(
+  monkeypatch, tmp_path, merge_conflict,
+):
+  """The recovered PR still records the overlap it opened over, checked
+  against the upstream tip the first attempt recorded."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_conflict=merge_conflict)
   assert ("merge-tree", "--write-tree", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
   if merge_conflict:
     assert patch["last_submit_upstream_conflict"] == {
@@ -611,6 +629,52 @@ def test_a_retry_completing_an_earlier_new_pr_records_the_overlap_it_opened_over
       "head_sha": HEAD, "next_pr_action": "merge_upstream_into_pr"}
   else:
     assert "last_submit_upstream_conflict" not in patch
+
+
+def _merge_tree_times_out():
+  raise subprocess.TimeoutExpired(["git", "merge-tree"], 30)
+
+
+def _merge_tree_cannot_start():
+  raise OSError("git could not start")
+
+
+@pytest.mark.parametrize("merge_tree", [
+  _merge_tree_times_out, _merge_tree_cannot_start,
+  lambda: _cp(stderr="fatal: unable to read tree 0123", returncode=128),
+], ids=["timeout", "oserror", "exit-128"])
+def test_an_unknown_overlap_answer_never_fails_a_confirmed_recovery(monkeypatch, tmp_path, merge_tree):
+  """The overlap recheck is advisory: once the open PR is confirmed, git timing
+  out, failing to start or refusing records no flag and the recovery completes."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, merge_tree=merge_tree)
+  assert ("merge-tree", "--write-tree", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
+  assert "last_submit_upstream_conflict" not in patch
+
+
+@pytest.mark.parametrize("missing", [
+  {"last_submit_upstream_sha": None}, {"last_submit_upstream_branch": None},
+  {"last_submit_upstream_sha": "not-a-sha"},
+], ids=["no-sha", "no-branch", "malformed-sha"])
+def test_a_recovery_without_a_recorded_upstream_tip_records_no_overlap(monkeypatch, tmp_path, missing):
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, record_extra=missing)
+  assert not any(call[:1] == ("merge-tree",) for call in git_calls)
+  assert "last_submit_upstream_conflict" not in patch
+
+
+@pytest.mark.parametrize("kwargs", [
+  {"direct_base_branch": "main",
+   "plan": {"stack": {"id": "demo", "position": 1, "total": 2, "base_branch": "main"}}},
+  {"plan": {"stack": {"id": "demo", "position": 1, "total": 2, "base_branch": "main"}}},
+  {"direct_base_branch": "main", "expected_existing_pr_number": 42,
+   "expected_existing_head_repository": "octocat/app-demo-1", "expected_existing_head_sha": "c" * 40,
+   "plan": {"action": "pr_update", "pr_metadata": {
+     "old_title": "Polish demo", "old_body": "## What\n\nPolishes the demo."}}},
+], ids=["stack-layer", "stack-record", "existing-pr-update"])
+def test_a_recovered_stack_or_update_records_no_overlap(monkeypatch, tmp_path, kwargs):
+  """Only a new standalone PR may open over an overlap, so only it is rechecked."""
+  git_calls, patch = recovered_submit(monkeypatch, tmp_path, **kwargs)
+  assert not any(call[:1] == ("merge-tree",) for call in git_calls)
+  assert "last_submit_upstream_conflict" not in patch
 
 
 # -- the advisory review-status projection mirrors Send -----------------------------
