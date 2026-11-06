@@ -385,3 +385,37 @@ test('an app draft keeps saved files and later owner edits survive hide and show
     else globalThis.sessionStorage = previousStorage
   }
 })
+
+test('work returned to the composer follows the owner draft and keeps its files', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    persistComposerDraft('returned-work', 'Owner draft', [{
+      name: 'mine.txt', size: 3, mime_type: 'text/plain', status: 'done',
+    }])
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-work',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    hook.result.current.appendToComposer('Queued follow-up', [
+      { name: 'mine.txt', size: 3, mime_type: 'text/plain' },
+      { name: 'queued.png', size: 9, mime_type: 'image/png' },
+    ])
+    assert.equal(hook.result.current.input, 'Owner draft\nQueued follow-up')
+    assert.deepEqual(hook.result.current.pendingFiles.map(file => [file.name, file.status]), [
+      ['mine.txt', 'done'], ['queued.png', 'done'],
+    ])
+    assert.deepEqual(readComposerDraft('returned-work'), {
+      input: 'Owner draft\nQueued follow-up',
+      attachments: [
+        { name: 'mine.txt', size: 3, mime_type: 'text/plain', status: 'done' },
+        { name: 'queued.png', size: 9, mime_type: 'image/png', status: 'done' },
+      ],
+    })
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})

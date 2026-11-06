@@ -234,6 +234,20 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     })
   }, [handleComposerInputChange, inputRef, setComposerInput])
 
+  /** Add text and already-uploaded files after the owner's draft, e.g. work
+   * that could not be sent, so it waits in the composer instead of vanishing. */
+  const appendToComposer = useCallback((text, attachments = []) => {
+    const files = draftAttachmentsRef.current
+    const names = new Set(files.map(file => file?.name))
+    const added = attachments
+      .filter(file => file?.name && !names.has(file.name))
+      .map(file => ({ ...file, id: `appended-${file.name}`, status: 'done' }))
+    if (added.length > 0) restoreFiles([...files, ...added])
+    if (!text) return
+    const current = inputValueRef.current || ''
+    handleComposerInputChange(current.trim() ? `${current.trimEnd()}\n${text}` : text)
+  }, [handleComposerInputChange, restoreFiles])
+
   const restoreDurableDraft = useCallback(() => {
     const saved = readComposerDraft(chatId)
     if (draftAsideRef.current != null) {
@@ -268,6 +282,7 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     handleComposerAddFiles,
     handleComposerRemoveFile,
     restoreComposerText,
+    appendToComposer,
     restoreDurableDraft,
     setDraftAside,
     takeDraftBack,

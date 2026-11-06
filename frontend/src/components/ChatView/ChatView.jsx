@@ -722,14 +722,11 @@ export default function ChatView({
     handleComposerAddFiles,
     handleComposerRemoveFile,
     restoreComposerText,
+    appendToComposer,
     restoreDurableDraft,
     setDraftAside,
     takeDraftBack,
   } = useComposerDraftState({ chatId, hidden, inputRef })
-  const appendToComposer = useCallback((text) => {
-    const current = inputValueRef.current || ''
-    handleComposerInputChange(current.trim() ? `${current.trimEnd()}\n${text}` : text)
-  }, [handleComposerInputChange, inputValueRef])
   // Big uploads wait here until the owner chooses to share the folder instead.
   const uploadGate = useSharedFolderUploadGate({
     chatId, addFiles: handleComposerAddFiles, appendToComposer,
@@ -4771,6 +4768,21 @@ export default function ChatView({
         queuedSnapshot, cleared,
         { text: combined, attachments: combinedAttachments },
       )
+      // Stop stays available on a failed activation, but doSend starts no turn
+      // before activation settles. Its resend would then be refused after Stop
+      // already cleared the queue, so the queued work goes back into the
+      // composer, where Send retries activation and sends it.
+      const resendQueued = ({ text, attachments }) => {
+        if (!hasSendablePayload(text, attachments)) return
+        if (!activationSettledRef.current) {
+          appendToComposer(text, attachments)
+          return
+        }
+        doSend(text, {
+          pin: false,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        })
+      }
 
       if (!stoppedCleanly) {
         // The SDK interrupt timed out (handle.stop()'s 2s bound — see
@@ -4804,14 +4816,7 @@ export default function ChatView({
         //
         // The 2s timeout is NOT surfaced as a user-facing error; only a
         // genuine re-queue POST failure (doSend's catch) shows a block.
-        const { text: resendText, attachments: resendAttachments } =
-          resolveResend(clearedPendingCids)
-        if (hasSendablePayload(resendText, resendAttachments)) {
-          doSend(resendText, {
-            pin: false,
-            attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
-          })
-        }
+        resendQueued(resolveResend(clearedPendingCids))
         return
       }
       dispatchQuestionFollowHandoff({ type: 'cancelled' })
@@ -4839,7 +4844,7 @@ export default function ChatView({
       )
       setSendFailure(null)
       // Sync sendingRef to the just-committed state so the synchronous
-      // doSend(resendText) call below reads the post-stop value.
+      // resend below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
       // sendingRef via the top-of-component mirror, but until then the
       // ref still holds the pre-stop `true`. We need the value RIGHT
@@ -4855,21 +4860,13 @@ export default function ChatView({
       // timeout branch uses, so the two paths can't drift: empty cleared
       // set → nothing re-sent (the natural-finish-races-Stop double-send),
       // exact match → that subset, partial/legacy → full combined.
-      const { text: resendText, attachments: resendAttachments } =
-        resolveResend(clearedPendingCids)
-
-      if (hasSendablePayload(resendText, resendAttachments)) {
-        // doSend's guard reads sendingRef/isStreamingRef (just synced to false
-        // above) → fresh-send path. pin:false so the synthetic combined-from-
-        // queue message doesn't yank the viewport to top, pushing the partial
-        // the user just stopped (and the original turn-1 user msg) above the
-        // viewport. Mode stays whatever the user had — they were reading the
-        // partial, the new turn streams in continuing from there.
-        doSend(resendText, {
-          pin: false,
-          attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
-        })
-      }
+      // doSend's guard reads sendingRef/isStreamingRef (just synced to false
+      // above) → fresh-send path. pin:false so the synthetic combined-from-
+      // queue message doesn't yank the viewport to top, pushing the partial
+      // the user just stopped (and the original turn-1 user msg) above the
+      // viewport. Mode stays whatever the user had — they were reading the
+      // partial, the new turn streams in continuing from there.
+      resendQueued(resolveResend(clearedPendingCids))
     } finally {
       handlingStopRef.current = false
     }
