@@ -125,19 +125,27 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
 
 def is_owner_typed(message: object) -> bool:
-  """Whether a queued row is the owner's own message: a visible row not
-  positively identified as another sender's (an app's request, a browser
-  guest's message, a helper's answer). Rows queued before owner input was
-  stamped count as the owner's. Stop holds only these rows for the owner's
-  next send; a promotion that starts one releases the rest (`HoldPending`,
-  `PromotePending`)."""
+  """Whether Stop keeps a queued row for the owner's next send: a visible row
+  not positively marked as another sender's (an app's request, a browser
+  guest's message, an agent's message, a helper's answer). Rows queued before
+  owner input was stamped count, so Stop never drops the owner's text; they
+  just cannot release holds (`releases_holds`)."""
   return bool(
     isinstance(message, Mapping)
     and not message.get("hidden")
     and message.get("_initiated_by_app_id") is None
     and message.get("_browser_grant_id") is None
+    and not message.get("_agent_input")
     and helper_answer_question_id(message) is None
   )
+
+
+def releases_holds(message: object) -> bool:
+  """Whether starting this row releases the rows a Stop held, so they follow
+  it: the owner's own message, with positive proof (`_owner_input_at`, which
+  only the owner's send stamps). Releasing stamps the held rows as owner
+  input, so nothing less than that proof may do it."""
+  return is_owner_typed(message) and bool(message.get("_owner_input_at"))
 
 
 def release_holds(rows: list[Any], released_at: str) -> list[Any]:

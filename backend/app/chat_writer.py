@@ -66,6 +66,7 @@ from app.goals import admit_goal
 from app.chat_titles import apply_generated_title, first_message_title
 from app.continuations import (
   DEPENDENCY_RESULT_MESSAGE_KIND, SIDE_QUESTION_MESSAGE_KIND, has_runnable_pending,
+  release_holds, releases_holds,
 )
 from app.json_safety import json_safe
 from app.upload_lifecycle import claim_uploads, release_uploads
@@ -4805,8 +4806,14 @@ class ChatWriterActor:
     if cmd.browser_grant_id is not None:
       new_msg["_browser_grant_id"] = cmd.browser_grant_id
     new_msg.pop("_owner_input_at", None)
+    new_msg.pop("_agent_input", None)
     if cmd.owner_input:
       new_msg["_owner_input_at"] = datetime.now(UTC).isoformat()
+    elif (cmd.initiated_by_app_id is None and cmd.browser_grant_id is None
+          and not new_msg.get("hidden")):
+      # A visible row neither the owner, an app nor a guest sent: an agent's.
+      # Stop drops it, and it never releases the owner's held rows.
+      new_msg["_agent_input"] = True
     ensure_user_cid(new_msg)
     incoming_cid = new_msg.get("cid")
     existing_message = None
@@ -4959,6 +4966,7 @@ class ChatWriterActor:
       new_msg = dict(raw_msg)
       new_msg.pop("_owner_authored", None)
       new_msg.pop("_owner_input_at", None)
+      new_msg.pop("_agent_input", None)
       new_msg.pop("held", None)
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
@@ -5414,7 +5422,6 @@ class ChatWriterActor:
     # Rows a Stop held wait for the owner (`HoldPending`, `ReleaseHeld`):
     # only unheld rows run, unless this is the owner's empty Send.
     if cmd.owner_send:
-      from app.continuations import release_holds
       runnable = release_holds(runnable, datetime.now(UTC).isoformat())
     pool = [row for row in runnable if not row.get("held")]
     if not pool:
@@ -5437,12 +5444,11 @@ class ChatWriterActor:
           or msg.get("_browser_grant_id") != head_grant):
         break
       promote_count += 1
-    from app.continuations import is_owner_typed, release_holds
     promoted_group = pool[:promote_count]
     promoted_ids = {id(row) for row in promoted_group}
     remaining_pending = [row for row in runnable if id(row) not in promoted_ids]
     # The owner's next message runs first and the held queue follows it.
-    if any(is_owner_typed(row) for row in promoted_group):
+    if any(releases_holds(row) for row in promoted_group):
       remaining_pending = release_holds(remaining_pending, datetime.now(UTC).isoformat())
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
@@ -5457,6 +5463,7 @@ class ChatWriterActor:
     ]
     owner_input_at = datetime.fromisoformat(max(owner_inputs)) if owner_inputs else None
     agent_pending.pop("_owner_input_at", None)
+    agent_pending.pop("_agent_input", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -5839,7 +5846,6 @@ class ChatWriterActor:
     return {"held": held}
 
   def _release_held(self, db, cmd: ReleaseHeld) -> dict:
-    from app.continuations import release_holds
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("ReleaseHeld: chat not found or deleted")
@@ -7051,6 +7057,7 @@ def _pending_messages_for_transcript(
     # owner-steer marker; strip it so it never reaches the transcript.
     msg.pop("_owner_authored", None)
     msg.pop("_owner_input_at", None)
+    msg.pop("_agent_input", None)
     msg.pop("held", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.

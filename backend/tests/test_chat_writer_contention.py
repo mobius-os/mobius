@@ -2282,3 +2282,28 @@ def test_wedged_recovery_writes_only_the_recovery_row_without_reading_history(ac
   messages = _load_chat()["messages"]
   assert len(messages) == 52
   assert messages[-1]["blocks"][-1]["message"] == "interrupted"
+
+
+def test_a_visible_row_neither_owner_app_nor_guest_queued_is_marked_as_an_agents(actor):
+  from app.chat_writer import AppendPending
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
+  _await(actor.submit(AppendPending(chat_id="c1", user_msg={"role": "user", "content": "x", "cid": "ag"})))
+  _await(actor.submit(AppendPending(chat_id="c1", owner_input=True,
+    user_msg={"role": "user", "content": "y", "cid": "own"})))
+  rows = {row["cid"]: row for row in _load_chat()["pending_messages"]}
+  assert rows["ag"].get("_agent_input") is True and "_owner_input_at" not in rows["ag"]
+  assert "_agent_input" not in rows["own"] and rows["own"]["_owner_input_at"]
+
+
+def test_a_row_without_owner_proof_never_releases_held_rows(actor):
+  """A legacy unstamped row is kept by Stop but proves no owner send now."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "legacy", "ts": 11, "cid": "old"},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["_consumed_cids"] == ["old"]
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]

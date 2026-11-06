@@ -226,3 +226,40 @@ def test_a_refused_empty_send_leaves_the_queue_held(client, auth, db, chat, sche
   assert response.status_code == 409, response.text
   assert scheduled == []
   assert pending(db, chat) == [("a", True)]
+
+
+def test_an_agents_message_never_releases_the_owners_held_queue(client, auth, db, chat, scheduled):
+  """Only the owner's send carries owner proof. A top-level agent token
+  may post into the idle chat, but its message runs alone: the held rows
+  stay held, unstamped, and no stopped Goal is credited with owner input."""
+  from datetime import timedelta
+  from app import auth as auth_mod
+  from app.chat_writer import create_chat
+  queue(db, chat, ("a", "first"), ("b", "second"))
+  stop(client, auth, chat)
+  db.add(create_chat(id="agent-home", title="Agent", messages=[]))
+  db.add(models.ChatRun(id="agent-run", chat_id="agent-home", provider="claude"))
+  db.commit()
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token("agent-home", owner.username, owner.token_epoch,
+                                      run_id="agent-run", expires_delta=timedelta(minutes=5))
+
+  response = send(client, {"Authorization": f"Bearer {token}"}, chat, content="from an agent", cid="ag")
+
+  assert response.status_code == 202, response.text
+  assert response.json()["message"]["content"] == "from an agent"
+  db.expire_all()
+  rows = db.get(models.Chat, chat.id).pending_messages
+  assert [(row["cid"], row.get("held")) for row in rows] == [("a", True), ("b", True)]
+  assert all(row["_owner_input_at"] == OWNER["_owner_input_at"] for row in rows)
+  assert db.get(models.ChatRun, scheduled[0]["run_token"]).owner_input_at is None
+
+
+def test_stop_drops_a_message_an_agent_queued(client, auth, db, chat):
+  chat.pending_messages = [
+    {"role": "user", "content": "mine", "cid": "a", "ts": 1, **OWNER},
+    {"role": "user", "content": "agent", "cid": "ag", "ts": 2, "_agent_input": True},
+  ]
+  db.commit()
+  stop(client, auth, chat)
+  assert pending(db, chat) == [("a", True)]
