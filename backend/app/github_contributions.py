@@ -2408,6 +2408,27 @@ def _find_existing_pr(
   return None
 
 
+def _recovered_upstream_overlap(repo: Path, record: dict, branch: str) -> dict:
+  """The upstream overlap a recovered new PR opened over, as Send records it.
+
+  A retry that completes an earlier attempt's PR returns before the merge
+  preflight. The flag describes what that PR opened over, so this rechecks the
+  exact upstream tip the earlier attempt preflighted and recorded with its
+  pushed branch, not today's upstream. An unknown answer records no flag;
+  the already-public PR's recovery never fails on it.
+  """
+  upstream_branch = str(record.get("last_submit_upstream_branch") or "")
+  upstream_sha = str(record.get("last_submit_upstream_sha") or "").lower()
+  if not upstream_branch or not _GIT_SHA.fullmatch(upstream_sha):
+    return {}
+  try:
+    merge = _git_ops.merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except ContributionSubmitError:
+    return {}
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  return _git_ops.upstream_overlap_patch(merge, str(plan.get("head_sha") or ""))
+
+
 def _authoritative_public_reconciliation(
   record: dict,
   *,
@@ -3794,7 +3815,16 @@ def _submit_prepared_pr(
         recovery.pr_number,
         _reviewed_pr_labels(plan),
       )
-      completed_patch = _git_ops._record_patch_with(pushed_patch, label_patch)
+      overlap_patch = (
+        _recovered_upstream_overlap(repo, record, branch)
+        if _git_ops.opens_new_standalone_pr(
+          plan, existing_pr_number=expected_existing_pr_number,
+          direct_base=direct_base,
+        ) else {}
+      )
+      completed_patch = _git_ops._record_patch_with(
+        _git_ops._record_patch_with(pushed_patch, overlap_patch), label_patch,
+      )
       if attempt_event is not None:
         attempt_event(
           "complete", reconcile_request, completed_patch,

@@ -788,6 +788,13 @@ def inspect_upstream_merge(
       code=exc.code,
       detail=exc.detail,
     ) from None
+  return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+
+
+def merge_with_upstream(
+  repo: Path, upstream_branch: str, upstream_sha: str, branch: str,
+) -> UpstreamMerge:
+  """Report whether ``branch`` merges with one exact, already-local upstream tip."""
   merged = _git(
     repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
   )
@@ -875,8 +882,7 @@ def reviewed_base_is_sole_merge_base(
   bases = run("merge-base", "--all", upstream_sha, head)
   if bases.returncode not in (0, 1):
     raise ContributionSubmitError(
-      "Could not compare this PR's reviewed base with upstream. "
-      "Nothing was published.",
+      "Could not compare this PR's reviewed base with upstream.",
       code="upstream_merge_unavailable",
       detail=readable_output(bases.stderr or bases.stdout or ""),
     )
@@ -895,9 +901,8 @@ def upstream_merge_for_new_pr(
   update. The returned patch then carries ``last_submit_upstream_conflict``,
   which Send records only once the PR is open, so Contribute and agents see
   that it needs upstream merged in (GitHub runs no PR workflows while it
-  conflicts). Clean or not, a reviewed base that is no longer the sole merge
-  base refuses. Stacks and existing-PR
-  updates keep ``_assert_merges_with_upstream``.
+  conflicts). Clean or not, a reviewed base that is not the sole merge base
+  refuses. Stacks and existing-PR updates keep ``_assert_merges_with_upstream``.
   """
   merge = inspect_upstream_merge(repo, upstream_repo, branch)
   try:
@@ -905,22 +910,32 @@ def upstream_merge_for_new_pr(
       lambda *args: _git(repo, *args, check=False), merge.sha, branch, base_sha,
     )
   except ContributionSubmitError as exc:
-    raise _merge_error_patch(exc, merge.record_patch) from None
+    raise ContributionSubmitError(
+      f"{exc.message} Nothing was published.",
+      exc.status_code,
+      record_patch=merge.record_patch,
+      code=exc.code,
+      detail=exc.detail,
+    ) from None
   if not exact:
     raise _upstream_conflict_error(merge) if merge.conflicts else (
       ContributionSubmitError(
-        f"This PR's reviewed base is no longer its only merge base with "
-        f"upstream {merge.branch}, so GitHub would not show the reviewed "
-        "diff. Nothing was published. Leave feedback so your agent can "
-        "refresh the branch before it is pushed.",
+        f"This PR's reviewed base is not its only merge base with upstream "
+        f"{merge.branch}, so GitHub would not show the reviewed diff. Nothing "
+        "was published. Leave feedback so your agent can refresh the branch "
+        "before it is pushed.",
         record_patch=merge.record_patch,
         code="upstream_base_moved",
       )
     )
+  return {**merge.record_patch, **upstream_overlap_patch(merge, head_sha)}
+
+
+def upstream_overlap_patch(merge: UpstreamMerge, head_sha: str) -> dict:
+  """The ``last_submit_upstream_conflict`` a new PR opened over ``merge`` records."""
   if not merge.conflicts:
-    return merge.record_patch
+    return {}
   return {
-    **merge.record_patch,
     "last_submit_upstream_conflict": {
       "upstream_branch": merge.branch,
       "upstream_sha": merge.sha,
