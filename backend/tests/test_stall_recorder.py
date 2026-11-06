@@ -125,6 +125,36 @@ def test_late_request_with_no_busy_thread_is_marked_waiting(tmp_path, records):
   assert not [e for e in records if e["kind"] == "snapshot"]
 
 
+def test_a_failing_snapshot_keeps_the_watchdog_and_its_stall_line(tmp_path, records):
+  """A snapshot that raises must not kill the watchdog (losing the stall it
+  claimed) or let a late request claim that no thread was busy."""
+  def broken(exclude):
+    raise RuntimeError("frame walk failed")
+
+  async def scenario():
+    loop = asyncio.get_running_loop()
+    loop.slow_callback_duration = 0.05
+    recorder = stall_recorder.StallRecorder(request_seconds=0.05, snapshot_threads=broken)
+    task = asyncio.create_task(recorder.run(tmp_path / "stalls.jsonl"))
+    await asyncio.sleep(0.15)
+    _block_the_loop()
+    await asyncio.sleep(0.15)
+    _block_the_loop()
+    await asyncio.sleep(0.15)
+    token = recorder.request_started({"type": "http", "method": "GET"})
+    await asyncio.sleep(0.15)
+    recorder.request_responded(token, 200)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+  stalls = [e for e in records if e["kind"] == "loop_stall"]
+  assert len(stalls) == 2 and all(e["ms"] >= 300 for e in stalls)
+  (late,) = [e for e in records if e["kind"] == "slow_request"]
+  assert late["no_busy_threads"] is False
+
+
 def _block_the_loop():
   time.sleep(0.4)
 

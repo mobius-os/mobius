@@ -9,10 +9,11 @@ started by hand (``/api/debug/profile``) usually misses it.
 While on, a watchdog thread notices, as it happens:
 
 - a request that has not started its response after ``request_seconds``
-  (the database's long-hold threshold: work no healthy request should take).
-  The clock runs from the request's arrival, so it includes receiving the
-  body: a slow upload counts, and shows ``no_busy_threads``. Streams start
-  their response at once, so they never count;
+  (the database's long-hold threshold). The clock runs from the request's
+  arrival, so it includes receiving the body: a slow upload counts, and so do
+  routes that wait on purpose before answering (long-polls, waits), which
+  show ``no_busy_threads``. Streams start their response at once, so they
+  never count;
 - an event loop whose heartbeat is late by asyncio's own
   ``slow_callback_duration``, the threshold its debug mode reports slow
   callbacks at;
@@ -20,7 +21,8 @@ While on, a watchdog thread notices, as it happens:
   ``database``; no stacks).
 
 Everything late at one watchdog tick shares one snapshot of busy threads and
-the app frames of parked ones. Records are JSON lines in
+the app frames of parked ones, when one was taken: short loop stalls, database
+holds and late requests with no busy thread carry none. Records are JSON lines in
 ``logs/stalls.jsonl`` with one rotation, each file bounded like the chat log;
 event lines reference their snapshot line by ``snapshot``. Records hold the
 shape of work, never its content: route templates (no concrete paths, ids,
@@ -47,6 +49,7 @@ from app.activity import route_template
 from app.chat_logging import LOG_FILE_MAX_BYTES
 from app.stack_sampler import thread_snapshot
 
+_warn = logging.getLogger(__name__)
 _log = logging.getLogger("mobius.stalls")
 _log.propagate = False
 _log.setLevel(logging.INFO)
@@ -106,7 +109,7 @@ class StallRecorder:
           stall = self._stall
           if stall is not None and stall["ms"] is None:
             stall["ms"] = round(late * 1000)
-            if stall["snapshot"] is None:
+            if not stall["taken"]:
               continue  # still snapshotting: the watchdog writes the line
             self._stall = None
           else:
@@ -129,6 +132,7 @@ class StallRecorder:
     with self._lock:
       self._inflight[token] = {
         "scope": scope, "start": time.monotonic(), "checked": False,
+        "unknown": False,
         "snapshot": None,
       }
     return token
@@ -149,7 +153,9 @@ class StallRecorder:
         # Checked while late and no thread was busy: the request was
         # waiting (on an upstream, the client, or a lock, queue or future
         # inside the server), not held up by CPU or a blocked event loop.
-        "no_busy_threads": entry["checked"] and entry["snapshot"] is None,
+        "no_busy_threads": (
+          entry["checked"] and not entry["unknown"] and entry["snapshot"] is None
+        ),
       })
 
   def emit(self, event: dict) -> None:
@@ -160,6 +166,7 @@ class StallRecorder:
 
   def _watch(self, stop: threading.Event, threshold: float) -> None:
     own = threading.get_ident()
+    snapshot_failed = False
     while not stop.wait(threshold):
       now = time.monotonic()
       with self._lock:
@@ -170,16 +177,28 @@ class StallRecorder:
         # One heartbeat sleep plus the stall threshold without a tick.
         stall = None
         if self._stall is None and now - self._last_tick >= 2 * threshold:
-          stall = self._stall = {"snapshot": None, "ms": None}
+          stall = self._stall = {"snapshot": None, "ms": None, "taken": False}
       if late or stall:
-        snapshot_id = self._snapshot(own, now, keep_idle=stall is not None)
+        try:
+          snapshot_id = self._snapshot(own, now, keep_idle=stall is not None)
+        except Exception:
+          # A failed snapshot must not stop the watchdog, or every later
+          # stall would go unrecorded; the events are still written.
+          if not snapshot_failed:
+            _warn.exception("stall log snapshot failed")
+            snapshot_failed = True
+          snapshot_id, failed = None, True
+        else:
+          failed = False
         done = None
         with self._lock:
           for entry in late:
             entry["checked"] = True
             entry["snapshot"] = snapshot_id
+            entry["unknown"] = failed
           if stall is not None:
             stall["snapshot"] = snapshot_id
+            stall["taken"] = True
             if stall["ms"] is not None:  # the loop already woke
               done, self._stall = stall, None
         if done is not None:
