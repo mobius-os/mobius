@@ -543,6 +543,9 @@ export default function QuestionCard({
                       pointerSelectionRef.current = null
                       // Markdown links, image previews and code-copy buttons
                       // act independently of the surrounding answer choice.
+                      // Portaled previews (the image lightbox) bubble React
+                      // events here from outside this option's DOM subtree.
+                      if (!event.currentTarget.contains(event.target)) return
                       if (event.target.closest('a, button, input, textarea, select, summary, [role="button"]')) return
                       if (
                         event.detail !== 0

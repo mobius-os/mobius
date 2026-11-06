@@ -392,9 +392,13 @@ test('Markdown choice links and child controls do not choose an answer; keyboard
     onAnswer: (...args) => { posted = args },
   })
   const option = () => find(card.result.current, node => node.props?.role === 'radio')
+  const inside = { contains: () => true }
   try {
+    // A portaled image lightbox bubbles its backdrop click through React.
+    option().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
+    assert.equal(option().props['aria-checked'], false)
     for (const tag of ['a', 'button']) {
-      option().props.onClick({ detail: 0, target: { closest: () => ({ tagName: tag }) } })
+      option().props.onClick({ detail: 0, currentTarget: inside, target: { closest: () => ({ tagName: tag }) } })
       assert.equal(option().props['aria-checked'], false)
     }
     const surface = {}
@@ -413,7 +417,7 @@ test('clicking formatted option text toggles multi-select without altering Markd
     questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`' }] }],
   })
   const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
-  const click = index => options()[index].props.onClick({ detail: 0, target: { closest: () => null } })
+  const click = index => options()[index].props.onClick({ detail: 0, currentTarget: { contains: () => true }, target: { closest: () => null } })
   try {
     click(0)
     click(1)
