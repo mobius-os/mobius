@@ -92,7 +92,12 @@ def test_branch_brings_attached_files_and_full_tool_outputs(client, auth, db):
     f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
   ).json()["id"]
 
-  assert (data_dir / "chats" / branch_id / "uploads" / "notes.txt").read_text() == "hello"
+  copied = data_dir / "chats" / branch_id / "uploads" / "notes.txt"
+  assert copied.read_text() == "hello"
+  # A copy, not a link: editing the branch's file in place leaves the source's.
+  with copied.open("w") as handle:
+    handle.write("edited in the branch")
+  assert (uploads / "notes.txt").read_text() == "hello"
   assert not (data_dir / "chats" / branch_id / "uploads" / "later.txt").exists()
   assert client.get(f"/api/chats/{branch_id}/tool-output/toolu_1", headers=auth).text == "full one"
   assert client.get(f"/api/chats/{branch_id}/tool-output/toolu_2", headers=auth).status_code == 404
@@ -453,14 +458,14 @@ def test_failed_upload_copy_leaves_no_branch_folder(client, auth, db, monkeypatc
   uploads.mkdir(parents=True, exist_ok=True)
   (uploads / "one.txt").write_text("one")
   (uploads / "two.txt").write_text("two")
-  real_copy = chat_branches._link_or_copy
+  real_copy = chat_branches.shutil.copy2
 
-  def _fail_second(source, target):
-    if source.name == "two.txt":
+  def _fail_second(source, target, *args, **kwargs):
+    if Path(source).name == "two.txt":
       raise OSError("disk full")
-    real_copy(source, target)
+    return real_copy(source, target, *args, **kwargs)
 
-  monkeypatch.setattr(chat_branches, "_link_or_copy", _fail_second)
+  monkeypatch.setattr(chat_branches.shutil, "copy2", _fail_second)
   before = set((data_dir / "chats").iterdir())
   with pytest.raises(OSError):
     client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth)
@@ -487,11 +492,21 @@ def _codex_turn(monkeypatch, thread_fork):
 
   threads = {"fresh": _thread("fresh-thread"), "forked": _thread("forked-thread")}
   fork_calls = []
+  goals = {"source-thread": "Plan the whole trip", "forked-thread": "Plan the whole trip"}
+  cleared = []
 
   class FakeClient:
     async def thread_fork(self, thread_id, params):
       fork_calls.append((thread_id, params))
       return thread_fork()
+
+    async def request(self, method, params, response_model):
+      assert method == "thread/goal/get"
+      return SimpleNamespace(goal=goals.get(params["threadId"]))
+
+    async def thread_goal_clear(self, thread_id):
+      cleared.append(thread_id)
+      goals.pop(thread_id, None)
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
@@ -519,6 +534,7 @@ def _codex_turn(monkeypatch, thread_fork):
     resumed_context="<resumed_context>Rome or Paris?</resumed_context>",
     fork_from={"session_id": "source-thread", "at": "turn-7"},
   ))
+  threads["cleared_goals"] = cleared
   return result, threads, fork_calls
 
 
@@ -543,6 +559,9 @@ def test_codex_branch_turn_runs_on_the_source_thread_forked_through_the_reply(mo
   assert threads["forked"].turn_args[0].endswith("Paris instead")
   assert "<resumed_context>" not in threads["forked"].turn_args[0]
   assert threads["fresh"].turn_args is None
+  # The source thread's saved native goal is the source's: the fork drops it
+  # before its first turn, and the source keeps it.
+  assert threads["cleared_goals"] == ["forked-thread"]
 
 
 def test_codex_branch_fork_failure_of_any_kind_starts_fresh_with_text_history(monkeypatch):
@@ -649,3 +668,89 @@ def test_copied_question_and_paused_turn_cards_are_inert_in_the_branch(client, a
   db.expire_all()
   source = db.get(models.Chat, source_id)
   assert transcript_rows.read_all(db, source)[-1]["blocks"][1]["resumable"] is True
+
+
+# ── What copied rows reference comes with them ───────────────────────────
+
+def test_branch_brings_the_deliverables_its_rows_show(client, auth, db):
+  from app import generated_files
+
+  data_dir = get_settings().data_dir
+  messages = [
+    {"role": "user", "content": "Write the plan", "cid": "u1", "ts": 1},
+    {"id": "a1", "role": "assistant", "content": "Here it is", "ts": 2, "blocks": [
+      {"type": "generated_files", "files": [{"name": "plan.pdf", "mime_type": "application/pdf"}]},
+    ]},
+    {"role": "user", "content": "And a map", "cid": "u2", "ts": 3},
+    {"id": "a2", "role": "assistant", "content": "Map", "ts": 4, "blocks": [
+      {"type": "generated_files", "files": [{"name": "map.png", "mime_type": "image/png"}]},
+    ]},
+  ]
+  source_id = _chat(client, auth, db, messages)
+  store = generated_files.stored_dir(data_dir, source_id, create=True)
+  (store / "f-plan").write_bytes(b"%PDF plan")
+  (store / "f-map").write_bytes(b"png map")
+  db.add_all([
+    models.GeneratedFile(chat_id=source_id, name="plan.pdf", path="f-plan", size=9, mime_type="application/pdf"),
+    models.GeneratedFile(chat_id=source_id, name="map.png", path="f-map", size=7, mime_type="image/png"),
+  ])
+  db.commit()
+
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth).json()["id"]
+
+  served = client.get(f"/api/chats/{branch_id}/generated-files/plan.pdf", headers=auth)
+  assert served.status_code == 200 and served.content == b"%PDF plan"
+  assert client.get(f"/api/chats/{branch_id}/generated-files/map.png", headers=auth).status_code == 404
+  assert client.get(f"/api/chats/{source_id}/generated-files/plan.pdf", headers=auth).content == b"%PDF plan"
+
+
+def test_branch_rekeys_and_brings_full_edit_diffs(client, auth, db):
+  from app.tool_edit_preview import edit_diff_sidecar_id
+
+  source_full = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+the complete change"
+  messages = [
+    {"role": "user", "content": "Edit it", "cid": "u1", "ts": 1},
+    {"id": "a1", "role": "assistant", "content": "Done", "ts": 2, "blocks": [{
+      "type": "tool", "tool": "Edit", "tool_use_id": "edit-1",
+      "edit_preview": {"diff": source_full[:20], "truncated": True, "full_id": "placeholder"},
+    }]},
+  ]
+  source_id = _chat(client, auth, db, messages)
+  source_key = edit_diff_sidecar_id(source_id, "edit-1")
+  row = transcript_rows.read_all(db, db.get(models.Chat, source_id))[-1]
+  row["blocks"][0]["edit_preview"]["full_id"] = source_key
+  client.put(f"/api/chats/{source_id}", json={"messages": [messages[0], row]}, headers=auth)
+  db.add(models.ToolOutput(chat_id=source_id, tool_use_id=source_key, output=source_full))
+  db.commit()
+
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth).json()["id"]
+
+  branch_key = edit_diff_sidecar_id(branch_id, "edit-1")
+  db.expire_all()
+  copied = transcript_rows.read_all(db, db.get(models.Chat, branch_id))[-1]
+  assert copied["blocks"][0]["edit_preview"]["full_id"] == branch_key
+  [entry] = client.get(f"/api/chats/{branch_id}/edit-diffs", headers=auth).json()["entries"]
+  assert entry["preview"]["diff"] == source_full
+  source_row = transcript_rows.read_all(db, db.get(models.Chat, source_id))[-1]
+  assert source_row["blocks"][0]["edit_preview"]["full_id"] == source_key
+
+
+def test_codex_branch_fork_point_reads_sessions_where_codex_keeps_them(client, auth, db, monkeypatch, tmp_path):
+  # Codex keeps sessions in the CODEX_HOME its provider env names.
+  home = tmp_path / "codex-home"
+  monkeypatch.setattr("app.providers.CodexProvider.build_env",
+                      lambda self, base_env, data_dir, chat_id=None: {**base_env, "CODEX_HOME": str(home)})
+  tid = str(uuid.uuid4())
+  folder = home / "sessions" / "2026" / "11" / "05"
+  folder.mkdir(parents=True)
+  (folder / f"rollout-2026-11-05T01-00-00-{tid}.jsonl").write_text(json.dumps(
+    {"timestamp": _iso(2), "type": "event_msg", "payload": {"type": "task_started", "turn_id": "this-run"}},
+  ) + "\n")
+  source_id = _chat(client, auth, db, CONVERSATION[:2], provider="codex", session_id=tid)
+  db.add(models.ChatRun(id="a1", root_run_id="a1", chat_id=source_id, status="completed",
+                        provider="codex", provider_session_id=tid, started_at=T0, ended_at=T1))
+  db.commit()
+
+  origin = _branch_origin(client, auth, db, source_id, "a1")
+
+  assert origin["fork"] == {"provider": "codex", "session_id": tid, "at": "this-run"}

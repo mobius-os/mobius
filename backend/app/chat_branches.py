@@ -10,9 +10,10 @@ that turn is reseeded from the copied rows exactly like a chat whose provider
 session was lost (``chat_context._build_resumed_context``).
 
 What the copied rows need to keep working in their new chat is copied with
-them: attached upload files (``/api/chats/{id}/uploads/{name}``) and full tool
-outputs (``/api/chats/{id}/tool-output/{tool_use_id}``), both addressed by the
-viewing chat's id.
+them, all addressed by the viewing chat's id: attached upload files
+(``/api/chats/{id}/uploads/{name}``), agent deliverables
+(``/api/chats/{id}/generated-files/{name}``), full tool outputs, and full edit
+diffs, whose sidecar keys embed the chat and are re-keyed for the branch.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import chat_writer, models, transcript_rows
+from app import chat_writer, generated_files, models, transcript_rows
 from app.codex_rollouts import rollout_paths
+from app.tool_edit_preview import edit_diff_sidecar_id
 from app.upload_lifecycle import attachment_names
 
 BRANCH_TITLE_PREFIX = "Branch · "
@@ -156,11 +158,16 @@ def top_level_chat_cwd(data_dir: str) -> str:
   return str(data_dir) if Path(data_dir).exists() else str(Path.cwd())
 
 
-def _top_level_claude_config_dir(data_dir: str) -> str | None:
-  """The ``CLAUDE_CONFIG_DIR`` an owner's Claude turn runs with (None: the CLI default)."""
+def _top_level_provider_dir(provider_id: str, data_dir: str) -> str | None:
+  """Where an owner's turn of ``provider_id`` keeps its sessions, from its own env.
+
+  ``CLAUDE_CONFIG_DIR`` (None: the CLI default) or ``CODEX_HOME``, exactly as
+  the provider's ``build_env`` sets them for a turn.
+  """
   from app.providers import registered_provider
 
-  return registered_provider("claude").build_env({}, data_dir).get("CLAUDE_CONFIG_DIR")
+  key = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}[provider_id]
+  return registered_provider(provider_id).build_env({}, data_dir).get(key)
 
 
 def reply_fork(
@@ -189,13 +196,14 @@ def reply_fork(
   try:
     if run.provider == "claude":
       at = claude_fork_point(
-        _top_level_claude_config_dir(data_dir), top_level_chat_cwd(data_dir),
+        _top_level_provider_dir("claude", data_dir), top_level_chat_cwd(data_dir),
         run.provider_session_id, started_at, ended_at,
       )
     elif run.provider == "codex":
-      at = codex_fork_point(
-        Path(data_dir) / "cli-auth" / "codex", run.provider_session_id, started_at, ended_at,
-      )
+      codex_home = _top_level_provider_dir("codex", data_dir)
+      if not codex_home:
+        return None
+      at = codex_fork_point(Path(codex_home), run.provider_session_id, started_at, ended_at)
     else:
       return None
   except (OSError, ValueError):
@@ -243,7 +251,7 @@ def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict 
     from app.claude_sdk_runner import _resumable
 
     if not _resumable(
-      fork["session_id"], top_level_chat_cwd(data_dir), _top_level_claude_config_dir(data_dir),
+      fork["session_id"], top_level_chat_cwd(data_dir), _top_level_provider_dir("claude", data_dir),
     ):
       return None
   return {"session_id": fork["session_id"], "at": fork["at"]}
@@ -298,11 +306,49 @@ def _attachment_names(rows: list) -> set[str]:
   return names
 
 
-def _link_or_copy(source: Path, target: Path) -> None:
-  try:
-    os.link(source, target)
-  except OSError:
-    shutil.copy2(source, target)
+def _generated_file_names(rows: list) -> set[str]:
+  """Deliverables the rows show (``generated_files`` blocks, by display name)."""
+  return {
+    item["name"]
+    for row in rows if isinstance(row, dict)
+    for block in row.get("blocks") or [] if isinstance(block, dict) and block.get("type") == "generated_files"
+    for item in block.get("files") or [] if isinstance(item, dict) and isinstance(item.get("name"), str)
+  }
+
+
+def _rekey_edit_diffs(value, branch_id: str, renamed: dict[str, str]) -> dict[str, str]:
+  """Point each copied full edit diff at the branch's own sidecar key.
+
+  A sidecar key embeds its chat (``edit_diff_sidecar_id``); returns
+  ``{source key: branch key}`` for the sidecars to copy.
+  """
+  if isinstance(value, dict):
+    preview = value.get("edit_preview")
+    tool_use_id = value.get("tool_use_id")
+    if isinstance(preview, dict) and isinstance(preview.get("full_id"), str) and isinstance(tool_use_id, str):
+      branch_key = edit_diff_sidecar_id(branch_id, tool_use_id)
+      renamed[preview["full_id"]] = branch_key
+      preview["full_id"] = branch_key
+    for child in value.values():
+      _rekey_edit_diffs(child, branch_id, renamed)
+  elif isinstance(value, list):
+    for child in value:
+      _rekey_edit_diffs(child, branch_id, renamed)
+  return renamed
+
+
+def _copy_tool_outputs(db: Session, source_id: str, branch_id: str, keys: dict[str, str]) -> None:
+  """Copy the source's stored tool outputs under ``{source key: branch key}``."""
+  ordered = sorted(keys)
+  # Chunked to stay far below SQLite's bound-parameter limit on long chats.
+  for start in range(0, len(ordered), 500):
+    for output in db.query(models.ToolOutput).filter(
+      models.ToolOutput.chat_id == source_id,
+      models.ToolOutput.tool_use_id.in_(ordered[start:start + 500]),
+    ).all():
+      db.add(models.ToolOutput(
+        chat_id=branch_id, tool_use_id=keys[output.tool_use_id], output=output.output,
+      ))
 
 
 def branch_chat(
@@ -310,9 +356,9 @@ def branch_chat(
 ) -> models.Chat:
   """Create and commit the branch of ``source`` through one reply.
 
-  Upload files are linked into the branch's folder before the commit and the
-  folder is removed if copying or the commit fails, so a failed branch leaves
-  nothing.
+  Files are copied (never linked, so editing one in the branch cannot change
+  the source) before the commit, and the branch's folder is removed if
+  copying or the commit fails, so a failed branch leaves nothing.
   """
   if source.created_by_app_id is not None or db.query(models.Delegation.id).filter(
     models.Delegation.child_chat_id == source.id,
@@ -323,11 +369,13 @@ def branch_chat(
   messages = transcript_rows.read_all(db, source)
   rows = branch_rows(source, messages, through_id)
   fork = reply_fork(db, source, messages, through_id, data_dir=data_dir)
+  branch_id = str(uuid.uuid4())
+  edit_diffs = _rekey_edit_diffs(rows, branch_id, {})
   settings = source.agent_settings_json if isinstance(source.agent_settings_json, dict) else {}
   branched_settings = {k: copy.deepcopy(settings[k]) for k in _BRANCHED_SETTINGS if k in settings}
   title = f"{BRANCH_TITLE_PREFIX}{source.title or 'New chat'}"[:256]
   branch = chat_writer.create_chat(
-    id=str(uuid.uuid4()),
+    id=branch_id,
     title=title,
     messages=rows,
     provider=source.provider,
@@ -346,7 +394,6 @@ def branch_chat(
   names = _attachment_names(rows)
   source_uploads = Path(data_dir) / "chats" / source.id / "uploads"
   branch_uploads = Path(data_dir) / "chats" / branch.id / "uploads"
-  tool_ids = _tool_use_ids(rows, set())
   try:
     uploads = []
     for entry in source.uploads or []:
@@ -358,20 +405,33 @@ def branch_chat(
       ):
         continue
       branch_uploads.mkdir(parents=True, exist_ok=True)
-      _link_or_copy(source_uploads / name, branch_uploads / name)
+      shutil.copy2(source_uploads / name, branch_uploads / name)
       uploads.append(copy.deepcopy(entry))
     branch.uploads = uploads
     db.add(branch)
-    ordered_ids = sorted(tool_ids)
-    # Chunked to stay far below SQLite's bound-parameter limit on long chats.
-    for start in range(0, len(ordered_ids), 500):
-      for output in db.query(models.ToolOutput).filter(
-        models.ToolOutput.chat_id == source.id,
-        models.ToolOutput.tool_use_id.in_(ordered_ids[start:start + 500]),
-      ).all():
-        db.add(models.ToolOutput(
-          chat_id=branch.id, tool_use_id=output.tool_use_id, output=output.output,
-        ))
+    deliverables = _generated_file_names(rows)
+    for record in db.query(models.GeneratedFile).filter(
+      models.GeneratedFile.chat_id == source.id,
+    ).all() if deliverables else []:
+      # The download route serves only a bare name inside the chat's store.
+      if (
+        record.name not in deliverables or record.path in ("", "..")
+        or Path(record.path).name != record.path
+      ):
+        continue
+      try:
+        source_file = generated_files.stored_dir(data_dir, source.id) / record.path
+      except OSError:
+        continue
+      if not source_file.is_file():
+        continue
+      shutil.copy2(source_file, generated_files.stored_dir(data_dir, branch.id, create=True) / record.path)
+      db.add(models.GeneratedFile(
+        chat_id=branch.id, name=record.name, path=record.path,
+        size=record.size, mime_type=record.mime_type,
+      ))
+    tool_ids = _tool_use_ids(rows, set())
+    _copy_tool_outputs(db, source.id, branch.id, {key: key for key in tool_ids} | edit_diffs)
     db.commit()
   except Exception:
     db.rollback()

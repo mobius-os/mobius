@@ -8,7 +8,6 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
-import functools
 import hashlib
 import json
 import math
@@ -6770,21 +6769,24 @@ async def _run_chat_impl_with_db(
           goal_brief_refresh=goal_brief_refresh,
         )
       else:
-        claude_turn = functools.partial(
-          run_claude_sdk_turn,
-          session_id=claude_session_id,
-          base_env=sdk_env,
-          cwd=cwd,
-          chat_id=chat_id,
-          skill_text=system_prompt,
-          bc=sink,
-          agent_settings=runner_agent_settings,
-          skills_enabled=_skills_enabled(settings.data_dir),
-          run_policy=run_policy,
-          connector_plan=connector_turn_plan,
-          coordination_enabled=coordination_tools_enabled,
-          goal_brief_refresh=goal_brief_refresh,
-        )
+        async def claude_turn(*, user_message: str, fork_from: dict | None):
+          return await run_claude_sdk_turn(
+            user_message=user_message,
+            session_id=claude_session_id,
+            base_env=sdk_env,
+            cwd=cwd,
+            chat_id=chat_id,
+            skill_text=system_prompt,
+            bc=sink,
+            agent_settings=runner_agent_settings,
+            skills_enabled=_skills_enabled(settings.data_dir),
+            run_policy=run_policy,
+            connector_plan=connector_turn_plan,
+            coordination_enabled=coordination_tools_enabled,
+            goal_brief_refresh=goal_brief_refresh,
+            fork_from=fork_from,
+          )
+
         runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)
         if branch_fork is not None and fork_rejected(runner_result):
           # Claude refused the branch's fork point before starting a session:

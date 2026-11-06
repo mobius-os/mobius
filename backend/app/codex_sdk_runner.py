@@ -1216,9 +1216,13 @@ async def _fork_codex_thread(codex, sdk, fork_from: dict, thread_options: dict):
   app-server request itself, as backend/scripts/fork_session.py does, with the
   wire forms of the same ``thread_options`` a new thread starts with. An
   option it has no wire form for raises, and the caller starts fresh instead.
-  Personality is inherited from the source thread.
+  Personality is inherited from the source thread; a native goal the source
+  thread saved is the source's, so it is cleared before any turn can start it,
+  as the resume path clears a retired one.
   """
   from openai_codex import AsyncThread
+
+  client = control_client(codex)
 
   approval = {
     sdk["ApprovalMode"].auto_review: {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
@@ -1235,9 +1239,11 @@ async def _fork_codex_thread(codex, sdk, fork_from: dict, thread_options: dict):
     "cwd": thread_options.get("cwd"),
     "model": thread_options.get("model"),
   }
-  forked = await control_client(codex).thread_fork(
+  forked = await client.thread_fork(
     fork_from["session_id"], {k: v for k, v in params.items() if v is not None},
   )
+  if await _codex_thread_goal(client, sdk, forked.thread.id) is not None:
+    await client.thread_goal_clear(forked.thread.id)
   return AsyncThread(codex, forked.thread.id)
 
 
