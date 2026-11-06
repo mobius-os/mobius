@@ -175,7 +175,6 @@ import { composerHistoryFromMessages } from './composerHistory.js'
 import { createQueuedEditOrder } from './queuedEditOrder.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
-  detachedSendFailureMessage,
   isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
@@ -1608,15 +1607,6 @@ export default function ChatView({
     pendingQueue.pendingMessagesRef,
     reconcileFailedSendAttempt,
   ])
-  // A send that never took the composer draft has no
-  // failed-attempt record to reconcile. Once the transcript shows its cid
-  // landed, its "couldn't confirm" banner is stale.
-  const settleDetachedSendConfirmation = useCallback(async (cid, banner) => {
-    await fetchMessages({ force: true, expectedFailedAttempt: null })
-    if (sendAttemptIsDurable({ cid }, messagesRef.current, pendingQueue.pendingMessagesRef.current)) {
-      setSendFailure(current => (current === banner ? null : current))
-    }
-  }, [fetchMessages, messagesRef, pendingQueue.pendingMessagesRef, setSendFailure])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
   // assistant output, but queued-message affordances depend on the durable
@@ -3227,11 +3217,6 @@ export default function ChatView({
     // a stale callback or failed-file-only draft must not close the keyboard,
     // claim scroll ownership, or freeze queue geometry when nothing will send.
     const usesComposerFiles = !Array.isArray(opts.attachments)
-    // A send the owner triggers outside the composer carries
-    // its own text and cid: the composer's draft is not its payload, so the
-    // send neither clears it, nor restores the sent text into it on failure,
-    // nor reads or writes the failed-attempt record that belongs to that draft.
-    const takesComposerDraft = opts.fromComposer !== false
     const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
     const attachments = Array.isArray(opts.attachments)
       ? opts.attachments
@@ -3248,7 +3233,7 @@ export default function ChatView({
 
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
-    if (takesComposerDraft && listeningRef.current) stopVoiceRef.current?.()
+    if (listeningRef.current) stopVoiceRef.current?.()
 
     // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
     // textarea. Physical-tail geometry is authoritative; mode can lag a
@@ -3306,22 +3291,12 @@ export default function ChatView({
     function releaseComposerFilesAfterAccepted() {
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
-    function restoreComposerAfterFailedSend() {
-      if (takesComposerDraft) restoreComposerText(text, { preserveFailedAttempt: true })
-      if (usesComposerFiles) restoreFiles(composerFileSnapshot)
-    }
     function clearComposerFailedAttempt() {
-      if (takesComposerDraft) clearFailedAttempt()
+      clearFailedAttempt()
     }
-    function failureMessage(err) {
-      const online = getOnlineSnapshot()
-      return takesComposerDraft
-        ? sendFailureMessage(err, { online })
-        : detachedSendFailureMessage(err, { online })
-    }
-    function settleUnconfirmedSend(failedAttempt, banner) {
-      if (takesComposerDraft) void settleAmbiguousSendConfirmation(failedAttempt)
-      else void settleDetachedSendConfirmation(cid, banner)
+    function restoreComposerAfterFailedSend() {
+      restoreComposerText(text, { preserveFailedAttempt: true })
+      if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
     function revealPendingQuestion() {
@@ -3337,13 +3312,11 @@ export default function ChatView({
     // server may have accepted it, an unchanged restored draft reuses that cid
     // and lets the backend's durable identity gate answer the ambiguity.
     const draftIdentity = sendDraftIdentity(chatId, text, attachments)
-    const cid = takesComposerDraft
-      ? cidForSendAttempt({
-          failedAttempt: failedSendAttemptRef.current,
-          draftIdentity,
-          mintCid: mintSendCid,
-        })
-      : (opts.cid ?? mintSendCid())
+    const cid = cidForSendAttempt({
+      failedAttempt: failedSendAttemptRef.current,
+      draftIdentity,
+      mintCid: mintSendCid,
+    })
 
     // ACTIVE-TURN PATH: every send gets one optimistic pending row immediately.
     // Ordinary sends present it in the queue; a direct steer reserves it in the
@@ -3382,9 +3355,9 @@ export default function ChatView({
         // its first presentation is the inline steering surface, never the tray.
         pendingQueue.reserveForSteer([cid])
       }
-      if (takesComposerDraft) setComposerInput('')
+      setComposerInput('')
       clearComposerFilesForSend()
-      if (takesComposerDraft && inputRef.current) {
+      if (inputRef.current) {
         resetComposerTextarea(inputRef.current)
         // Drop the multi-line `data-composer-tall` attribute so send/mic
         // re-center vertically. Without this, the pill stays in
@@ -3614,21 +3587,19 @@ export default function ChatView({
           // the user's editable draft.
           pendingQueue.cancelByCid(queuedMsg.cid)
           forgetSendIntent({ cid: queuedMsg.cid })
-          if (takesComposerDraft) {
-            failedAttempt = {
-              cid,
-              draftIdentity,
-              text,
-              transportContent: text,
-              attachments: composerFileSnapshot,
-            }
-            rememberFailedAttempt(failedAttempt)
+          failedAttempt = {
+            cid,
+            draftIdentity,
+            text,
+            transportContent: text,
+            attachments: composerFileSnapshot,
           }
+          rememberFailedAttempt(failedAttempt)
           restoreComposerAfterFailedSend()
         }
-        const banner = modelSelectionBlocked ? null : failureMessage(err)
+        const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
         setSendFailure(banner)
-        if (!keepQueued && isAmbiguousSendFailure(err)) settleUnconfirmedSend(failedAttempt, banner)
+        if (!keepQueued && isAmbiguousSendFailure(err)) void settleAmbiguousSendConfirmation(failedAttempt)
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3668,9 +3639,9 @@ export default function ChatView({
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    if (takesComposerDraft) setComposerInput('')
+    setComposerInput('')
     clearComposerFilesForSend()
-    if (takesComposerDraft && inputRef.current) {
+    if (inputRef.current) {
       resetComposerTextarea(inputRef.current)
       // Drop the multi-line `data-composer-tall` attribute — see queue-path
       // comment above for the full rationale.
@@ -3838,16 +3809,14 @@ export default function ChatView({
         releaseComposerFilesAfterAccepted()
         clearComposerFailedAttempt()
       } else {
-        if (takesComposerDraft) {
-          failedAttempt = {
-            cid,
-            draftIdentity,
-            text,
-            transportContent: sendText,
-            attachments: composerFileSnapshot,
-          }
-          rememberFailedAttempt(failedAttempt)
+        failedAttempt = {
+          cid,
+          draftIdentity,
+          text,
+          transportContent: sendText,
+          attachments: composerFileSnapshot,
         }
+        rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3860,9 +3829,9 @@ export default function ChatView({
           return next
         })
       }
-      const banner = modelSelectionBlocked ? null : failureMessage(err)
+      const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
       setSendFailure(banner)
-      if (!keepQueued && isAmbiguousSendFailure(err)) settleUnconfirmedSend(failedAttempt, banner)
+      if (!keepQueued && isAmbiguousSendFailure(err)) void settleAmbiguousSendConfirmation(failedAttempt)
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -3897,7 +3866,6 @@ export default function ChatView({
     commitMessages,
     fetchMessages,
     settleAmbiguousSendConfirmation,
-    settleDetachedSendConfirmation,
     clearFiles,
     restoreFiles,
     releaseFiles,
@@ -6067,6 +6035,15 @@ export default function ChatView({
     pendingQueue.steerReservedMessages,
   )
 
+  // The agent's stretch runs until the owner visibly speaks: answered cards,
+  // waits and helper results are hidden carriers, not a break. Only the reply
+  // that ends the stretch carries its time and Copy. The live reply's
+  // placeholder is a group too, so an earlier reply hands over immediately.
+  const endsAgentStretch = group => {
+    let next = group.end + 1
+    while (peerTimeline.messages[next]?.hidden) next += 1
+    return !replyGroups.has(next)
+  }
   // A DB refresh may commit the steer before its cut reaches this socket.
   // Keep the identity-owned active row in its transcript slot through that
   // handoff; moving it to the tail would paint the owner message above it.
@@ -6115,6 +6092,7 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
+      endsStretch={endsAgentStretch(group)}
       // Only an idle latest reply pins its actions. A live reply may not yet
       // have a stored row; that must not leave the previous reply pinned too.
       metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}

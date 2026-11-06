@@ -76,6 +76,17 @@ test('a revealed action row retains its accessible semantics', () => {
   assert.doesNotMatch(row, /aria-hidden/)
 })
 
+test('only the reply that ends the agent’s stretch fills its row; earlier ones keep it empty', () => {
+  // A reply that ended on a question card, wait or helper hand-off is
+  // followed by more agent replies before the owner speaks again: one time
+  // and Copy belong at the end of that stretch, not after each card.
+  const html = renderReply([turn], { endsStretch: false, metaVisible: true })
+  assert.equal(metaRows(html).length, 1, 'the row still reserves its line')
+  assert.match(html, /<div class="chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"><\/div>/)
+  assert.doesNotMatch(html, /<time|aria-label="Copy message"/)
+  assert.match(renderReply([turn], { endsStretch: true }), /<time class="chat__ts">/)
+})
+
 test('a streaming reply already reserves its action row, empty until it settles', () => {
   // Settling must fill the line, not add one: a followed transcript would
   // grow and jump at the end of every turn (streaming-cursor.spec).

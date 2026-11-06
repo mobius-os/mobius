@@ -76,6 +76,12 @@ test('older reply actions reveal only on tap; only the latest reply keeps its ro
     'a new turn or assistant message clears an old tap reveal before paint')
 })
 
+test('a reply ends the agent’s stretch unless another reply follows past hidden carriers', () => {
+  assert.match(chatView, /const endsAgentStretch = group => \{\s*let next = group\.end \+ 1\s*while \(peerTimeline\.messages\[next\]\?\.hidden\) next \+= 1\s*return !replyGroups\.has\(next\)\s*\}/,
+    'answered cards, waits and helper results are hidden and do not end the stretch; the live placeholder is a group')
+  assert.match(chatView, /endsStretch=\{endsAgentStretch\(group\)\}/)
+})
+
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {
   assert.ok(
     metaRow.indexOf('<time className="chat__ts">')

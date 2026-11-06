@@ -1,5 +1,7 @@
 /* One reply owns live/saved source rows, continuous prose, its final References,
-   and the one action row at its end: its time and Copy of its answer. */
+   and the one action row at its end: its time and Copy of its answer. Only
+   the reply that ends the agent's stretch (before the owner next speaks)
+   fills that row; earlier replies keep it empty. */
 import { Fragment, memo, useMemo, useContext } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
@@ -26,6 +28,7 @@ function AssistantReply({
   chatId,
   isStreaming = false,
   isLastMsg = true,
+  endsStretch = true,
   metaVisible = false,
   onRevealMeta,
   pendingQuestionRef,
@@ -69,10 +72,10 @@ function AssistantReply({
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
   const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
-  // A reply gets its actions once, at its end, only after it has settled.
+  // A stretch gets its actions once, at its end, only after it has settled.
   const outcome = useMemo(() => (
-    isStreaming ? null : replyOutcome(rows.map(row => row.message))
-  ), [rows, isStreaming])
+    isStreaming || !endsStretch ? null : replyOutcome(rows.map(row => row.message))
+  ), [rows, isStreaming, endsStretch])
   const answerText = outcome?.answer || ''
   if (!msg) return null
 
