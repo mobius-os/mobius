@@ -110,6 +110,7 @@ import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
+import BranchOrigin from './BranchOrigin.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime, isProviderLimitPause, pauseTiming } from './resetTime.js'
@@ -397,6 +398,9 @@ export default function ChatView({
   // `/new` and `/clear`: Shell starts the chat (startChatFromCommand) and
   // resolves true once it exists.
   onNewChatCommand = null,
+  // A reply's Branch action: Shell opens a new chat continuing this one
+  // through that reply (branchChat) and resolves true once it is open.
+  onBranchChat = null,
   onStreamEnd,
   onRuntimeSettledIdle = null,
   onFirstMessage,
@@ -4220,6 +4224,11 @@ export default function ChatView({
     }
   }
 
+  const branchFromReply = useCallback(
+    throughId => onBranchChat(chatId, throughId),
+    [onBranchChat, chatId],
+  )
+
   function askSideQuestionFromCommand(question) {
     if (!question) {
       setSendFailure('Type a question after /btw.')
@@ -5922,10 +5931,22 @@ export default function ChatView({
       // have a stored row; that must not leave the previous reply pinned too.
       metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={showMessageMeta}
+      // A chat an app owns stays with that app: no Branch.
+      onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
       sealedSteerAssistant={active ? sealedSteerAssistant : sealedAssistantBeforeSteer(messages, group.start)}
     />
   }
+  // A branch marks where its copied history ends (BranchOrigin). The divider
+  // renders only when that position is within the loaded page.
+  const branchOrigin = chatInfo?.branch_origin
+  const branchOriginIndex = Number.isInteger(branchOrigin?.through_count)
+    ? branchOrigin.through_count : null
+  const branchOriginRow = branchOriginIndex != null
+    ? <BranchOrigin key="branch-origin" origin={branchOrigin} onInternalNav={internalNav} />
+    : null
+  const branchOriginAtEnd = branchOriginIndex != null
+    && branchOriginIndex === offset + displayedMessages.length
   const appendedReply = replyGroups.get(messages.length)
   const activeAssistantSurface = activeMirrorMsgIdx < 0 && appendedReply?.start === messages.length
     ? renderAssistantReply(appendedReply) : null
@@ -6111,7 +6132,12 @@ export default function ChatView({
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
-            const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
+            // Every row's output starts with its peer slot, so the branch
+            // divider rides there, before the first row after the copied history.
+            const peerRows = [
+              offset + i === branchOriginIndex ? branchOriginRow : null,
+              <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />,
+            ]
             const replyGroup = replyGroups.get(i)
             if (replyGroup) return i === replyGroup.start
               ? [peerRows, renderAssistantReply(replyGroup)] : []
@@ -6168,6 +6194,8 @@ export default function ChatView({
           }).concat(activeMirrorMsgIdx < 0 && activeAssistantSurface
             ? [activeAssistantSurface]
             : [])}
+          {/* A fresh branch with nothing after its copied history yet. */}
+          {branchOriginAtEnd && branchOriginRow}
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
             <li className="chat__msg chat__msg--assistant">

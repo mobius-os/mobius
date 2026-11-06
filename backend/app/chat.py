@@ -65,6 +65,13 @@ from app.chat_event_sink import (
   steered_into_turn_event,
   unregister_active_sink,
 )
+from app.chat_branches import (
+  branch_first_turn,
+  first_turn_fork,
+  forget_fork,
+  top_level_chat_cwd,
+  with_resumed_context,
+)
 from app.chat_context import (
   _RESUME_CONTEXT_CHAR_BUDGET,
   _build_app_context,
@@ -6332,16 +6339,27 @@ async def _run_chat_impl_with_db(
   # A close() below detaches chat_row. Precompute the only provider-time value
   # that still reads it (the bounded fallback for a session that cannot be
   # resumed) while the Session can refresh attributes expired by the
-  # prompt/settings snapshot commits.
+  # prompt/settings snapshot commits. A branch's first turn has no session of
+  # its own: it starts as an exact fork of its source session when one is
+  # still possible, and is otherwise reseeded like a lost session.
+  first_branch_turn = (
+    not session_id and run_policy is None and chat_row is not None
+    and branch_first_turn(db, chat_row)
+  )
+  branch_fork = (
+    first_turn_fork(db, chat_row, provider_id, settings.data_dir) if first_branch_turn else None
+  )
   resumed_context_fallback = (
     _build_resumed_context(chat_row, keep_task=run_policy is not None)
     if (
-      (session_id or fresh_delegated_session)
+      (session_id or fresh_delegated_session or first_branch_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and run_policy is None
     )
     else None
   )
+  if first_branch_turn and branch_fork is None:
+    user_message = with_resumed_context(user_message, resumed_context_fallback)
 
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
@@ -6423,11 +6441,7 @@ async def _run_chat_impl_with_db(
     db, run_policy, provider_id=provider_id, connector_plan=connector_turn_plan,
   )
   data_dir = Path(settings.data_dir)
-  cwd = (
-    run_policy.cwd
-    if run_policy is not None
-    else str(data_dir) if data_dir.exists() else str(Path.cwd())
-  )
+  cwd = run_policy.cwd if run_policy is not None else top_level_chat_cwd(str(data_dir))
 
   if fresh_delegated_session:
     return await _refuse_delegated_write_replay(
@@ -6488,8 +6502,7 @@ async def _run_chat_impl_with_db(
           "starting fresh and reseeding from DB transcript", session_id, chat_id,
         )
         codex_session_id = None
-        if resumed_context_fallback:
-          user_message = f"{resumed_context_fallback}\n\n{user_message}"
+        user_message = with_resumed_context(user_message, resumed_context_fallback)
       runner_result = await run_codex_sdk_turn(
         user_message=user_message,
         session_id=codex_session_id,
@@ -6502,6 +6515,7 @@ async def _run_chat_impl_with_db(
         agent_settings=runner_agent_settings,
         system_prompt=system_prompt,
         resumed_context=resumed_context_fallback,
+        fork_from=branch_fork,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
         retire_native_goal=historical_goal_mode,
         run_policy=run_policy,
@@ -6623,7 +6637,7 @@ async def _run_chat_impl_with_db(
     # stored chats and the 30-day-expired ones. The check is done here
     # (not in the runner) because the chat's transcript is already in
     # scope — _resumable lives in claude_sdk_runner and is imported.
-    from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
+    from app.claude_sdk_runner import _resumable, fork_rejected, run_claude_sdk_turn
     claude_session_id = session_id
     # A helper on a shared host resumes through its host (or is reseeded
     # there); only a private Claude session needs a resumable transcript.
@@ -6642,9 +6656,7 @@ async def _run_chat_impl_with_db(
         session_id, chat_id,
         "retired" if session_retired else "not resumable",
       )
-      resumed_block = resumed_context_fallback
-      if resumed_block:
-        user_message = f"{resumed_block}\n\n{user_message}"
+      user_message = with_resumed_context(user_message, resumed_context_fallback)
       # No user-facing SSE event here: continuity is invisible by
       # design (the agent keeps going with full context), and the
       # frontend stream consumer renders no "notice" type anyway. The
@@ -6696,21 +6708,47 @@ async def _run_chat_impl_with_db(
           goal_brief_refresh=goal_brief_refresh,
         )
       else:
-        runner_result = await run_claude_sdk_turn(
-          user_message=user_message,
-          session_id=claude_session_id,
-          base_env=sdk_env,
-          cwd=cwd,
-          chat_id=chat_id,
-          skill_text=system_prompt,
-          bc=sink,
-          agent_settings=runner_agent_settings,
-          skills_enabled=_skills_enabled(settings.data_dir),
-          run_policy=run_policy,
-          connector_plan=connector_turn_plan,
-          coordination_enabled=coordination_tools_enabled,
-          goal_brief_refresh=goal_brief_refresh,
-        )
+        async def claude_turn(*, user_message: str, fork_from: dict | None):
+          return await run_claude_sdk_turn(
+            user_message=user_message,
+            session_id=claude_session_id,
+            base_env=sdk_env,
+            cwd=cwd,
+            chat_id=chat_id,
+            skill_text=system_prompt,
+            bc=sink,
+            agent_settings=runner_agent_settings,
+            skills_enabled=_skills_enabled(settings.data_dir),
+            run_policy=run_policy,
+            connector_plan=connector_turn_plan,
+            coordination_enabled=coordination_tools_enabled,
+            goal_brief_refresh=goal_brief_refresh,
+            fork_from=fork_from,
+          )
+
+        runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)
+        if branch_fork is not None and fork_rejected(runner_result):
+          # Claude refused the branch's fork point before starting a session:
+          # forget it and run this same turn once on the text reseed, as the
+          # Codex runner does in place.
+          log.warning(
+            "claude branch fork of %s refused for chat_id=%s (%s); reseeding as text",
+            branch_fork["session_id"], chat_id, runner_result.get("error"),
+          )
+          try:
+            await settled.run_settled(forget_fork, chat_id)
+          except Exception:
+            # Only costs a later first turn the same refused attempt.
+            log.warning("forgetting the refused fork failed chat_id=%s", chat_id, exc_info=True)
+          if _run_generation_superseded(chat_id, run_gen):
+            # Stopped between the attempts: end as stopped, without a retry.
+            _log_superseded_run(chat_id, "claude-branch-fork-retry")
+            runner_result = {"session_id": None, "cost_usd": None, "error": None, "prompt_sent": False}
+          else:
+            runner_result = await claude_turn(
+              user_message=with_resumed_context(user_message, resumed_context_fallback),
+              fork_from=None,
+            )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err and runner_result.get("prompt_sent", True):

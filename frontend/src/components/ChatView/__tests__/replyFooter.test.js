@@ -380,3 +380,32 @@ test('an error the reply recovered from does not count as failing', () => {
     { type: 'text', content: 'Done.' },
   )]), { answer: 'Done.', failed: false })
 })
+
+test('a settled reply offers Branch right after Copy', () => {
+  const branched = []
+  const html = renderReply([turn], { onBranch: through => branched.push(through) })
+  const row = actionRow(html)
+  assert.match(row, /aria-label="Branch in new chat"/)
+  assert.ok(row.indexOf('aria-label="Copy message"') < row.indexOf('aria-label="Branch in new chat"'),
+    'Branch sits to the right of Copy')
+  assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'))
+})
+
+test('an earlier reply in the agent’s stretch keeps Copy and Branch without the time', () => {
+  const row = actionRow(renderReply([turn], { endsStretch: false, metaVisible: true, onBranch: () => {} }))
+  assert.doesNotMatch(row, /<time/)
+  assert.ok(row.indexOf('aria-label="Copy message"') >= 0
+    && row.indexOf('aria-label="Copy message"') < row.indexOf('aria-label="Branch in new chat"'))
+})
+
+test('no Branch while the reply is still being written or without a branch action', () => {
+  assert.doesNotMatch(renderReply([turn], { isStreaming: true, metaVisible: true, onBranch: () => {} }),
+    /Branch in new chat/)
+  assert.doesNotMatch(renderReply([turn]), /Branch in new chat/)
+})
+
+test('no Branch on a reply the server has not stored under an id yet', () => {
+  const { id: _id, ...unsaved } = turn
+  assert.doesNotMatch(renderReply([unsaved], { metaVisible: true, onBranch: () => {} }),
+    /Branch in new chat/)
+})

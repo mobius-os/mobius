@@ -1,7 +1,10 @@
 /* MessageMetaRow keeps a message's time and actions in one revealable row:
    beside an owner message's bubble, or beneath a reply (`side="start"`),
-   with Copy immediately after its time, aligned with the reply's prose.
-   `copy(button)` returns the clipboard payload (see MessageCopyButton). */
+   with Copy immediately after its time, aligned with the reply's prose, and
+   Branch after Copy on a settled reply.
+   `copy(button)` returns the clipboard payload (see MessageCopyButton);
+   `branch()` opens a new chat continuing through this reply. */
+import MessageBranchButton from './MessageBranchButton.jsx'
 import MessageCopyButton from './MessageCopyButton.jsx'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
@@ -9,6 +12,7 @@ import { formatDateTime } from '../../lib/dateTimeFormat.js'
 export default function MessageMetaRow({
   timestamp,
   copy,
+  branch,
   side = 'end',
   visible,
 }) {
@@ -28,6 +32,7 @@ export default function MessageMetaRow({
         </time>
       )}
       {copy && <MessageCopyButton read={copy} />}
+      {branch && <MessageBranchButton branch={branch} />}
     </div>
   )
 }
