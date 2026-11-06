@@ -61,6 +61,7 @@ from collections import deque
 from collections.abc import Awaitable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
@@ -472,9 +473,31 @@ def _resumable(
   base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
   if not base:
     return False
+  return claude_session_path(base, cwd, session_id).is_file()
+
+
+def claude_session_path(config_dir: str | os.PathLike, cwd: str, session_id: str) -> Path:
+  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``."""
   proj = "-" + cwd.strip("/").replace("/", "-")
-  return os.path.isfile(
-    os.path.join(base, "projects", proj, f"{session_id}.jsonl")
+  return Path(config_dir) / "projects" / proj / f"{session_id}.jsonl"
+
+
+# The CLI's refusals of a resume target. It prints them and exits before any
+# session starts, so no session id has been reported (see fork_rejected).
+_RESUME_TARGET_REFUSALS = ("No message found with message.uuid", "No conversation found")
+
+
+def fork_rejected(result: RunnerResult) -> bool:
+  """Whether a turn started with ``fork_from`` failed because the fork was refused.
+
+  Only a refused resume target ends a turn before Claude reports its new
+  session id. Usage limits, auth and provider errors come from the API after
+  the session started, so they keep the fork for the next attempt.
+  """
+  error = result.get("error")
+  return (
+    bool(error) and not result.get("session_id")
+    and any(refusal in str(error) for refusal in _RESUME_TARGET_REFUSALS)
   )
 
 

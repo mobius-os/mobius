@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import functools
 import hashlib
 import json
 import math
@@ -143,6 +144,11 @@ from app.providers import (
 )
 from app.runner_registry import registry
 from app.session_links import resume_retired
+
+
+def _with_resumed_context(user_message: str, resumed_context: str | None) -> str:
+  """A fresh session's request, behind the chat's reseeded history when it has one."""
+  return f"{resumed_context}\n\n{user_message}" if resumed_context else user_message
 
 
 NO_AGENT_CONNECTED_MESSAGE = (
@@ -6413,8 +6419,8 @@ async def _run_chat_impl_with_db(
     )
     else None
   )
-  if branch_first_turn and branch_fork is None and resumed_context_fallback:
-    user_message = f"{resumed_context_fallback}\n\n{user_message}"
+  if branch_first_turn and branch_fork is None:
+    user_message = _with_resumed_context(user_message, resumed_context_fallback)
 
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
@@ -6561,8 +6567,7 @@ async def _run_chat_impl_with_db(
           "starting fresh and reseeding from DB transcript", session_id, chat_id,
         )
         codex_session_id = None
-        if resumed_context_fallback:
-          user_message = f"{resumed_context_fallback}\n\n{user_message}"
+        user_message = _with_resumed_context(user_message, resumed_context_fallback)
       runner_result = await run_codex_sdk_turn(
         user_message=user_message,
         session_id=codex_session_id,
@@ -6697,7 +6702,7 @@ async def _run_chat_impl_with_db(
     # stored chats and the 30-day-expired ones. The check is done here
     # (not in the runner) because the chat's transcript is already in
     # scope — _resumable lives in claude_sdk_runner and is imported.
-    from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
+    from app.claude_sdk_runner import _resumable, fork_rejected, run_claude_sdk_turn
     claude_session_id = session_id
     # A helper on a shared host resumes through its host (or is reseeded
     # there); only a private Claude session needs a resumable transcript.
@@ -6716,9 +6721,7 @@ async def _run_chat_impl_with_db(
         session_id, chat_id,
         "retired" if session_retired else "not resumable",
       )
-      resumed_block = resumed_context_fallback
-      if resumed_block:
-        user_message = f"{resumed_block}\n\n{user_message}"
+      user_message = _with_resumed_context(user_message, resumed_context_fallback)
       # No user-facing SSE event here: continuity is invisible by
       # design (the agent keeps going with full context), and the
       # frontend stream consumer renders no "notice" type anyway. The
@@ -6770,8 +6773,8 @@ async def _run_chat_impl_with_db(
           goal_brief_refresh=goal_brief_refresh,
         )
       else:
-        runner_result = await run_claude_sdk_turn(
-          user_message=user_message,
+        claude_turn = functools.partial(
+          run_claude_sdk_turn,
           session_id=claude_session_id,
           base_env=sdk_env,
           cwd=cwd,
@@ -6784,8 +6787,21 @@ async def _run_chat_impl_with_db(
           connector_plan=connector_turn_plan,
           coordination_enabled=coordination_tools_enabled,
           goal_brief_refresh=goal_brief_refresh,
-          fork_from=branch_fork,
         )
+        runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)
+        if branch_fork is not None and fork_rejected(runner_result):
+          # Claude refused the branch's fork point before starting a session:
+          # forget it and run this same turn once on the text reseed, as the
+          # Codex runner does in place.
+          log.warning(
+            "claude branch fork of %s refused for chat_id=%s (%s); reseeding as text",
+            branch_fork["session_id"], chat_id, runner_result.get("error"),
+          )
+          forget_fork(db, chat_id)
+          runner_result = await claude_turn(
+            user_message=_with_resumed_context(user_message, resumed_context_fallback),
+            fork_from=None,
+          )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err and runner_result.get("prompt_sent", True):
@@ -6817,8 +6833,6 @@ async def _run_chat_impl_with_db(
         if chat_obj:
           chat_obj.session_id = new_session_id
           _safe_commit(db)
-      if err and branch_fork is not None:
-        forget_fork(db, chat_id)
       if err:
         log.error("claude SDK error chat_id=%s: %s", chat_id, err)
       else:

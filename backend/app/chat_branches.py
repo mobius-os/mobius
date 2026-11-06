@@ -28,6 +28,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app import chat_writer, models, transcript_rows
+from app.codex_rollouts import rollout_paths
 from app.upload_lifecycle import attachment_names
 
 BRANCH_TITLE_PREFIX = "Branch · "
@@ -98,10 +99,9 @@ def claude_fork_point(
   a tool call ended mid-step; cutting there would leave an unanswered call, so
   it has no fork point.
   """
-  path = (
-    config_dir / "projects" / ("-" + cwd.strip("/").replace("/", "-"))
-    / f"{uuid.UUID(session_id)}.jsonl"
-  )
+  from app.claude_sdk_runner import claude_session_path
+
+  path = claude_session_path(config_dir, cwd, str(uuid.UUID(session_id)))
   if not path.is_file():
     return None
   last = None
@@ -122,7 +122,7 @@ def codex_fork_point(
   codex_home: Path, thread_id: str, started_at: datetime, ended_at: datetime,
 ) -> str | None:
   """The id of the last Codex turn the run started; forks keep whole turns."""
-  matches = sorted((codex_home / "sessions").glob(f"**/rollout-*-{uuid.UUID(thread_id)}.jsonl"))
+  matches = rollout_paths(codex_home, thread_id)
   if len(matches) != 1:
     return None
   last = None
@@ -189,8 +189,8 @@ def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict 
   if not isinstance(fork.get("session_id"), str) or not isinstance(fork.get("at"), str):
     return None
   if provider_id == "claude":
-    from app.claude_sdk_runner import _resumable
-    if not _resumable(fork["session_id"], str(data_dir), str(Path(data_dir) / "cli-auth" / "claude")):
+    from app.claude_sdk_runner import claude_session_path
+    if not claude_session_path(Path(data_dir) / "cli-auth" / "claude", str(data_dir), fork["session_id"]).is_file():
       return None
   return {"session_id": fork["session_id"], "at": fork["at"]}
 

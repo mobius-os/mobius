@@ -130,6 +130,11 @@ HELPER_PROGRESS_INTERVAL_S = 3.0
 MAX_GENERATED_IMAGE_PIXELS = 32_000_000
 
 
+def _with_resumed_context(user_message: str, resumed_context: str | None) -> str:
+  """A fresh session's request, behind the chat's reseeded history when it has one."""
+  return f"{resumed_context}\n\n{user_message}" if resumed_context else user_message
+
+
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
   """Supply the configured-data fallback without overriding provider setup."""
   env.setdefault("CODEX_HOME", str(Path(data_dir) / "cli-auth" / "codex"))
@@ -2176,8 +2181,7 @@ async def _run_codex_sdk_turn(
             "Codex branch fork of %s failed for chat %s (%s); starting fresh "
             "with the copied history", fork_from["session_id"], chat_id, exc,
           )
-          if resumed_context:
-            user_message = f"{resumed_context}\n\n{user_message}"
+          user_message = _with_resumed_context(user_message, resumed_context)
       if thread is None:
         thread = await codex.thread_start(**thread_options)
       record_memory_checkpoint_once(
@@ -2236,8 +2240,7 @@ async def _run_codex_sdk_turn(
             "codex session reseed activity log failed chat_id=%s",
             chat_id, exc_info=True,
           )
-        if resumed_context:
-          user_message = f"{resumed_context}\n\n{user_message}"
+        user_message = _with_resumed_context(user_message, resumed_context)
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,

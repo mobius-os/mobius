@@ -272,25 +272,53 @@ def test_branch_without_a_forkable_session_falls_back_to_text_history(client, au
   assert "Rome or Paris?" in captured["user_message"]
 
 
-def test_failed_claude_fork_is_dropped_so_the_next_turn_reseeds_as_text(client, auth, db, monkeypatch):
+def test_refused_claude_fork_reruns_the_same_turn_on_the_text_reseed(client, auth, db, monkeypatch):
   source_id, sid = _forkable_source(client, auth, db)
   branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
   calls = []
 
   async def _runner(**kwargs):
     calls.append(kwargs)
-    return {"session_id": None, "cost_usd": 0.0, "error": "No message found with uuid cut-here"}
+    if kwargs["fork_from"] is not None:
+      # What the CLI prints, before any session, when the cut point is gone.
+      return {"session_id": None, "cost_usd": 0.0,
+              "error": "Command failed with exit code 1: No message found with message.uuid of: cut-here"}
+    return {"session_id": "new-session", "cost_usd": 0.0, "error": None}
 
   _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead", runner=_runner)
 
-  assert calls[0]["fork_from"] == {"session_id": sid, "at": "cut-here"}
+  assert [call["fork_from"] for call in calls] == [{"session_id": sid, "at": "cut-here"}, None]
+  assert "<resumed_context>" not in calls[0]["user_message"]
+  assert "<resumed_context>" in calls[1]["user_message"]
+  assert "Rome or Paris?" in calls[1]["user_message"]
   db.expire_all()
   branch = db.get(models.Chat, branch_id)
-  # With no fork, the next first turn is the text reseed
-  # (test_branch_without_a_forkable_session_falls_back_to_text_history).
   assert branch.branch_origin["fork"] is None
-  assert branch.session_id is None
-  assert chat_branches.first_turn_fork(branch, "claude", get_settings().data_dir) is None
+  assert branch.session_id == "new-session"
+
+
+@pytest.mark.parametrize("result", [
+  {"session_id": None, "error": "You've hit your usage limit · resets 5pm"},
+  {"session_id": None, "error": "Invalid API key · Please run /login"},
+  # A refusal-like text after the session started is an ordinary turn error.
+  {"session_id": "forked-session", "error": "No conversation found in tool output"},
+])
+def test_ordinary_turn_failure_keeps_the_branch_fork(client, auth, db, monkeypatch, result):
+  source_id, sid = _forkable_source(client, auth, db)
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
+  calls = []
+
+  async def _runner(**kwargs):
+    calls.append(kwargs)
+    return {"cost_usd": 0.0, **result}
+
+  _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead", runner=_runner)
+
+  assert len(calls) == 1
+  db.expire_all()
+  assert db.get(models.Chat, branch_id).branch_origin["fork"] == {
+    "provider": "claude", "session_id": sid, "at": "cut-here",
+  }
 
 
 def _source_with_runs(client, auth, db, messages, run_ids, **fields):

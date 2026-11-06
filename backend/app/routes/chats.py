@@ -76,7 +76,8 @@ from app.chat_titles import (
   first_user_message_title,
   renamed_event,
 )
-from app.database import get_db
+from app.database import SessionLocal, get_db
+from app.settled import run_settled
 from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal, presented_deferred_goals, presented_dependency_goals
 from app.helper_transcripts import read_helper_conversation
@@ -1958,21 +1959,15 @@ class ChatBranchRequest(BaseModel):
   through_id: str = Field(min_length=1, max_length=256)
 
 
-@router.post("/{chat_id}/branch", dependencies=[Depends(reject_cross_site)])
-async def branch_owner_chat(
-  chat_id: str,
-  body: ChatBranchRequest,
-  _: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-):
-  """Start a new chat that continues this one from the chosen reply."""
+def _branch_in_own_session(chat_id: str, through_id: str) -> str:
+  """Create the branch on a session of its own; returns the new chat's id.
+
+  Runs as one settled thread step: once it has started, it commits or cleans
+  up its links before the request can unwind, even if the client goes away.
+  """
   from app.chat_branches import BranchPointError, branch_chat
 
-  project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
-  db.rollback()
-  # A branch joins its source's project; serialize with project deletion so
-  # it can never land in a project that is being removed.
-  async with serialize_project_lifecycle(project_id):
+  with SessionLocal() as db:
     source = get_active_chat_or_404(db, chat_id)
     if source.project_id is not None and db.query(models.Project.id).filter(
       models.Project.id == source.project_id,
@@ -1981,14 +1976,29 @@ async def branch_owner_chat(
       raise HTTPException(409, "This chat's project was deleted.")
     try:
       # Finding the fork point reads the source's provider session file,
-      # which can be large; keep that off the event loop.
-      branch = await run_in_threadpool(
-        branch_chat, db, source, body.through_id, data_dir=get_settings().data_dir,
-      )
+      # which can be large; this keeps it off the event loop.
+      return branch_chat(db, source, through_id, data_dir=get_settings().data_dir).id
     except BranchPointError as exc:
       raise HTTPException(409, str(exc)) from exc
-  db.refresh(branch)
+
+
+@router.post("/{chat_id}/branch", dependencies=[Depends(reject_cross_site)])
+async def branch_owner_chat(
+  chat_id: str,
+  body: ChatBranchRequest,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Start a new chat that continues this one from the chosen reply."""
+  project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
+  db.rollback()
+  # A branch joins its source's project; serialize with project deletion so
+  # it can never land in a project that is being removed.
+  async with serialize_project_lifecycle(project_id):
+    branch_id = await run_settled(_branch_in_own_session, chat_id, body.through_id)
+  branch = db.query(models.Chat).filter(models.Chat.id == branch_id).one()
   activity.log_event("chat_created", chat_id=branch.id)
+  _reclaim_expired_tombstones_after_chat_write(db)
   return _chat_create_response(branch, db)
 
 

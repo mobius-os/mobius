@@ -1890,7 +1890,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       return true
     } catch (error) {
       recordClientError({ where: 'branch-chat', error })
-      notifyShell("Couldn't branch this chat — please try again.", { variant: 'error' })
+      // A refusal (409) says why, such as a reply still being written.
+      notifyShell(error?.status === 409 && typeof error.detail === 'string'
+        ? error.detail
+        : "Couldn't branch this chat — please try again.", { variant: 'error' })
       return false
     }
   }
