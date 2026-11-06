@@ -236,7 +236,10 @@ export function init({
     isOnline: () => _online,
   })
   const signal = makeSignal(appId, storage, appInstanceId)
-  const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
+  const capabilities = makeCapabilities({
+    declarations: capabilityContract?.runtime || {},
+    visibility: _visibility,
+  })
   const projects = makeProjects()
   const chat = makeChat({ appId, getToken: scopedToken, storage })
   const fileExport = makeFileExport()
