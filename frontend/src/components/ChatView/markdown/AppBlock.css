@@ -45,10 +45,11 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
    (`item_facts: "values"`), and an app's confirmation rows always keep them. */
 .md-app-block__item-main .md-app-block__facts { flex-basis:100%; align-items:baseline; gap:0; margin-top:-6px; padding:0; color:var(--muted); font-size:13px; line-height:18px; }
 .md-app-block__item-main .md-app-block__facts > div { gap:4px; }
-.md-app-block__item-main .md-app-block__facts > div + div::before { content:'·'; margin:0 2px; color:var(--muted); }
+.md-app-block__item-main .md-app-block__facts > div + div::before { content:'·'; margin:0 2px 0 6px; color:var(--muted); }
 .md-app-block__item-main .md-app-block__facts dt { font-size:13px; }
 .md-app-block__item-main .md-app-block__facts dd { color:var(--muted); font-size:13px; }
 .md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div { gap:0; }
+.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div + div::before { margin:0 6px; }
 .md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts dt {
   position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; }
 .md-app-block__item-note { flex-basis:100%; margin:0 0 4px; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
