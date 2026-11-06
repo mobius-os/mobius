@@ -12,7 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import useConfirmArming from './useConfirmArming.js'
 import { blockActions, blockItems } from '../markdown/appBlock.js'
 import {
-  sessionDocumentReset, sessionRetained, sessionState, sessionStateUpdate,
+  SESSION_FEATURES, sessionDocumentReset, sessionRetained, sessionState, sessionStateUpdate,
 } from '../markdown/appBlockSession.js'
 
 const UNNEGOTIATED = Object.freeze({ generation: null, supported: null })
@@ -114,7 +114,7 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const checkpointData = state?.checkpoint?.data ?? null
   const recoveryError = state?.recoveryError ?? null
   const blockSession = useMemo(() => ({
-    sessionId, actions, items, retain: retained, recoveryError,
+    sessionId, actions, items, features: SESSION_FEATURES, retain: retained, recoveryError,
     checkpoint: checkpointId ? { id: checkpointId, data: checkpointData } : null,
   }), [sessionId, actions, items, retained, recoveryError, checkpointId, checkpointData])
 

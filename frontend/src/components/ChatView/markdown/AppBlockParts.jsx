@@ -84,7 +84,7 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
   if (!items.length) return null
   const first = items.findIndex(item => item.confirmation)
   const last = items.findLastIndex(item => item.confirmation)
-  return <ul className="md-app-block__items">{items.map((item, i) => <li key={i}>
+  return <ul className="md-app-block__items">{items.map((item, i) => <li key={i} className={item.confirmation ? 'is-confirmation' : undefined}>
     {i === first ? <span ref={listEdgeRefs?.start} className="md-app-block__list-edge is-start" aria-hidden="true" /> : null}
     <div className="md-app-block__item-main">
       {item.confirmation
@@ -121,7 +121,8 @@ export function AppBlockView({ app, intent, height, onHostRequest }) {
 export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionFor, toggle = null,
   summary = '', sectionRef = null, listEdgeRefs = null, children = null }) {
   const action = actionFor(block.action)
-  return <section ref={sectionRef} className="md-app-block" aria-label={block.title}>
+  const valueFacts = block.itemFacts === 'values' ? ' md-app-block--value-facts' : ''
+  return <section ref={sectionRef} className={`md-app-block${valueFacts}`} aria-label={block.title}>
     <header>
       <strong>{block.title}</strong>
       <Badges badges={block.badges} />
@@ -129,7 +130,8 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
         Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>
     </header>
     {/* While the rows are the app's confirmation, nothing is added around them. */}
-    {block.confirmation ? null : <p className="md-app-block__source">From this conversation</p>}
+    {/* A live title is the app's; the rows are still the conversation's. */}
+    {block.confirmation ? null : <p className="md-app-block__source">{block.liveTitle ? 'Rows from this conversation' : 'From this conversation'}</p>}
     {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
     <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} />

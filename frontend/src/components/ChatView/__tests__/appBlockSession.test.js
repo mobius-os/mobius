@@ -245,3 +245,12 @@ test('a recovery hold shows no live title, row state or open link', () => {
   assert.equal(replacement.items.size, 0)
   assert.equal(sessionSnapshot(rowBlock(), replacement).title, 'Saved title')
 })
+
+test('the host advertises row-state, and a report can opt in to value-only row facts', async () => {
+  const { SESSION_FEATURES } = await import('../markdown/appBlockSession.js')
+  assert.deepEqual([...SESSION_FEATURES], ['row-state'])
+  assert.equal(parseRows({ itemFacts: 'values' }).itemFacts, 'values')
+  assert.equal(parseRows({ itemFacts: 'labels' }).itemFacts, '')
+  assert.equal(sessionSnapshot(rowBlock(), parseRows({ itemFacts: 'values' })).itemFacts, 'values')
+  assert.equal(parseRows({ items: [{ intent: 'open:a', status: 'Merged', statusTone: 'accent' }] }).items.get('open:a').statusTone, 'accent')
+})

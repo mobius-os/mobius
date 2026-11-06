@@ -31,6 +31,9 @@ function Session({ blockSession }) {
         retain: Boolean(state.confirming), summary: `Sent ${state.sent}`,
         // A live title only once something was sent; until then the saved one shows.
         ...(state.sent ? { title: `${state.sent} sent` } : {}),
+        // Once sent, every listed row reports a result link (row-state hosts).
+        ...(state.sent ? { items: blockSession.items.map((item, i) => ({ intent: item.intent, status: 'Open', statusTone: 'success',
+          links: [{ label: `#${i + 1}`, url: `https://example.com/pull/${i + 1}` }] })) } : {}),
         actions: blockSession.actions.map(action => ({
           key: action.key, label: action.label, status: state.sent ? 'Sent' : 'Ready',
           confirming: state.confirming === action.key,

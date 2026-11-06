@@ -168,7 +168,8 @@ test('the block\'s own action shows the app list as the block\'s rows, with noth
   assert.doesNotMatch(html, /come from the conversation|will act on|md-app-block__confirmation/, 'no explanation section')
   assert.doesNotMatch(html, /From this conversation/, 'not even the caption')
   // Both ends of the list are observed: the start in its first row, the end in its last.
-  const rows = html.split('<li>').slice(1)
+  const rows = html.split('<li class="is-confirmation">').slice(1)
+  assert.equal(rows.length, 2, 'app rows are marked as confirmation rows, which always keep their labels')
   assert.match(rows[0], /^<span class="md-app-block__list-edge is-start"/)
   assert.match(rows[1], /md-app-block__list-edge is-end" aria-hidden="true"><\/span><\/li>/)
   assert.match(html, /<footer><div class="md-app-block__session">[^]*>Not now<\/button><button type="button" class="md-app-block__action">Confirm</)
@@ -376,4 +377,49 @@ test('a hidden action leaves no empty footer', () => {
   const html = rowView({ title: '2 pull requests opened', actions: [{ key: 'send-batch:sel-1', hidden: true }] })
   assert.doesNotMatch(html, /<footer>/)
   assert.match(html, /<strong>2 pull requests opened<\/strong>/)
+})
+
+// Fact labels are visible unless a block opts in, and never hidden on an
+// app's confirmation rows: an old app may carry meaning in the label alone.
+function directionView(fence, actions) {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Transfer', intent: 'transfer:t1' }, items: [{ title: 'Transfer', intent: 'open:t1',
+      facts: [{ label: 'From account', value: 'Alice' }, { label: 'To account', value: 'Bob' }] }], ...fence }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions }, 's', new Set(['transfer:t1']), new Set(['open:t1']))
+  return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {} }))
+}
+const confirmTransfer = (from, to) => [{ key: 'transfer:t1', confirming: true,
+  confirmation: [{ title: 'Transfer 10', facts: [{ label: 'From account', value: from }, { label: 'To account', value: to }] }] }]
+
+test('an old app keeps visible fact labels on its rows and confirmation rows', () => {
+  const idle = directionView({}, [{ key: 'transfer:t1', label: 'Transfer' }])
+  assert.match(idle, /<section class="md-app-block"/, 'no value-only opt-in')
+  assert.match(idle, /<dt>From account<\/dt><dd>Alice<\/dd>/)
+  const forward = directionView({}, confirmTransfer('Alice', 'Bob'))
+  const backward = directionView({}, confirmTransfer('Bob', 'Alice'))
+  assert.match(forward, /<li class="is-confirmation">/)
+  assert.match(forward, /<dt>From account<\/dt><dd>Alice<\/dd><\/div><div><dt>To account<\/dt><dd>Bob<\/dd>/)
+  assert.match(backward, /<dt>From account<\/dt><dd>Bob<\/dd><\/div><div><dt>To account<\/dt><dd>Alice<\/dd>/)
+})
+
+test('value-only row facts are an explicit opt-in, from the block or the session, and never cover confirmation rows', () => {
+  for (const [fence, extra] of [[{ item_facts: 'values' }, {}], [{}, { itemFacts: 'values' }]]) {
+    const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+      action: { label: 'Transfer', intent: 'transfer:t1' }, items: [{ title: 'Transfer', intent: 'open:t1', facts: [{ label: 'Project', value: 'owner/a' }] }], ...fence }) })
+    const view = actions => renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], locked: false, confirmArmed: true, onEvent() {},
+      state: sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions, ...extra }, 's', new Set(['transfer:t1']), new Set(['open:t1'])) }))
+    assert.match(view([{ key: 'transfer:t1', label: 'Transfer' }]), /<section class="md-app-block md-app-block--value-facts"/)
+    // The opt-in hides labels only on rows that are not confirmation rows (AppBlock.css).
+    assert.match(view(confirmTransfer('Alice', 'Bob')), /<li class="is-confirmation">[^]*<dt>From account<\/dt>/)
+  }
+  for (const value of ['labels', true, 'VALUES']) {
+    assert.equal(appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, item_facts: value }) }).itemFacts, '')
+  }
+})
+
+test('a merged row can use the accent tone, and a live title scopes the caption to the rows', () => {
+  const html = rowView({ title: '1 pull request merged', items: [{ intent: 'open:a', status: 'Merged', statusTone: 'accent' }] })
+  assert.match(html, /md-app-block__pill is-accent">Merged</)
+  assert.match(html, /md-app-block__source">Rows from this conversation</)
+  assert.match(rowView({}), /md-app-block__source">From this conversation</)
 })

@@ -12,7 +12,13 @@ export const SESSION_LIMITS = Object.freeze({
   confirmationItems: 256, confirmationFacts: 8, confirmationText: 512,
   title: 120, items: 12, itemStatus: 40, itemNote: 200, itemLinks: 2, itemLinkLabel: 40,
 })
-const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger'])
+const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'accent'])
+/** What this host draws from a session report beyond the original fields,
+ *  advertised in `blockSession.features` and `app-block-init`: `row-state`
+ *  covers `title`, `items`, `itemFacts`, `open` and the `accent` tone. An app
+ *  that does not see it is on an older host and should keep its older
+ *  presentation. */
+export const SESSION_FEATURES = Object.freeze(['row-state'])
 const RECOVERY_ERROR = 'This app session needs recovery. Open the app to check the result before trying again.'
 export const INCOMPLETE_CONFIRMATION = 'Open the app to review this action. Its full current identity is unavailable here.'
 export const AMBIGUOUS_CONFIRMATION = 'Open the app to review these actions. More than one is asking for confirmation at once.'
@@ -109,6 +115,7 @@ export function sessionState(message, sessionId, keys, intents = new Set()) {
   return {
     actions, notice: shortText(message.notice, SESSION_LIMITS.notice), summary: shortText(message.summary, SESSION_LIMITS.summary),
     title: shortText(message.title, SESSION_LIMITS.title), items: sessionItems(message.items, intents),
+    itemFacts: message.itemFacts === 'values' ? 'values' : '',
     retain: message.retain === true || Boolean(checkpoint), checkpoint: checkpoint ?? null,
     checkpointInvalid: checkpoint === undefined, recoveryError: message.recoveryError === true ? RECOVERY_ERROR : null,
     checkpointAck: checkpointId(message.checkpointAck) ? message.checkpointAck : null,
@@ -120,7 +127,7 @@ function recoveryHold(previous, incoming, error = previous?.checkpoint && !previ
   const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
     .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
       hidden: false, open: false, note: error || RECOVERY_ERROR }))
-  return { ...incoming, actions, title: '', items: new Map(), checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
+  return { ...incoming, actions, title: '', items: new Map(), itemFacts: '', checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
     recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
 }
 
@@ -175,7 +182,8 @@ export function sessionSnapshot(block, state) {
   const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
   // The app's live title and row state replace the saved snapshot's; an
   // open confirmation (above) shows only the app's list.
-  return { ...block, title: state?.title || block.title, badges: badges(block.badges, block.action?.intent),
+  return { ...block, title: state?.title || block.title, liveTitle: Boolean(state?.title),
+    itemFacts: state?.itemFacts || block.itemFacts, badges: badges(block.badges, block.action?.intent),
     items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent),
       live: confirming ? null : state?.items?.get(item.intent) || null })) }
 }

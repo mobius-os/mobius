@@ -304,3 +304,31 @@ test('an admitted module without session support falls back to a fresh visible v
   const view = page.frameLocator('.md-app-block__view iframe.canvas--live')
   await expect(view.locator('#fixture-intent')).toHaveText('review:plain')
 })
+
+test('row titles and result links are 44px targets, and row fact labels stay visible by default', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:rows', title: 'Two rows',
+    interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Row one', intent: 'open:r1', facts: [{ label: 'From account', value: 'Alice' }] },
+      { title: 'Row two', intent: 'open:r2', facts: [{ label: 'To account', value: 'Bob' }] }] }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  const height = locator => locator.evaluate(node => node.getBoundingClientRect().height)
+  for (const title of await block.locator('.md-app-block__item-title').all()) expect(await height(title)).toBeGreaterThanOrEqual(44)
+  // Without the value-only opt-in, a sighted reader sees each label.
+  const label = block.locator('.md-app-block__facts dt').first()
+  await expect(label).toHaveText('From account')
+  expect(await label.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(20)
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  const links = block.locator('.md-app-block__item-state .md-app-block__link')
+  await expect(links).toHaveCount(2)
+  for (const link of await links.all()) expect(await height(link)).toBeGreaterThanOrEqual(44)
+})
