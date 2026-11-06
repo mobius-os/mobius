@@ -997,6 +997,11 @@ Review correctness, maintainability, simplicity, tests, security_privacy,
 technical_debt and the combined result against base {target['base_sha']}.
 This child must not author a repair, mutate public GitHub or infer owner consent.
 Record concrete full-diff evidence and checks against head {target['head_sha']}.
+Checks share one small container whatever `nproc` and `free` report (its real
+quota is in /sys/fs/cgroup/cpu.max and memory.max). Run only the focused tests
+for the changed files, one process at a time, and never `pytest -n` above 2:
+every xdist worker loads the whole app, so many workers exhaust memory and
+restart the instance for every chat.
 POST {run_endpoint(row)}/independent-reviews with your own run bearer:
 repo, number, head_sha, reviewed_base_sha, state all_clear or needs_you, summary,
 all six scope values, tests and tests_passed boolean. Failed or unclear tests

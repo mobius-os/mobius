@@ -82,6 +82,10 @@ DELEGATED_CONTROL_TOOL_NAMES = (
   *APP_BUILD_TOOL_NAMES,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
+# Bookkeeping whose successful call has nothing for the owner to act on. The
+# chat folds it into the surrounding activity (agent_activity.is_routine_tool);
+# apps declare the same for their own tools with `tools[].routine`.
+ROUTINE_CONTROL_TOOL_NAMES = frozenset({CHECKPOINT_CHAT_TOOL_NAME})
 # Above app_tools.TOOL_TIMEOUT_SECONDS and the control server's own HTTP wait,
 # so the innermost limit is the one that reports.
 CONTROL_TOOL_TIMEOUT_SECONDS = 630

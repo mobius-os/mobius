@@ -45,6 +45,7 @@ from app.chat_writer import (
   ResolvePlatformRestartCard,
   RestartCardStateChanged,
 )
+from app.app_chat_scopes import ScopedStartRefused
 from app.chat_steering import (
   has_live_steerable_turn,
   steer_into_active_turn,
@@ -379,6 +380,7 @@ async def _append_to_pending(
       owner_input=owner_input,
       front=front, require_answer_match=require_answer_match,
       restore_archived=restore_archived,
+      scoped_start=body._scoped_start,
     ),
   )
   return result["stored"]
@@ -410,7 +412,7 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
-  except (RestartCardStateChanged, RestartCardActionConflict):
+  except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartRefused):
     raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
@@ -778,6 +780,16 @@ async def _send_message_impl(
   is_card_answer = bool(body.answers or body.selected_options)
   if not is_card_answer:
     require_nondelegated_owner_control(principal)
+  # The disk floor protects the whole installation, so only its owner may
+  # lift it: never a shared-browser guest, an app, an embed or an agent.
+  if body.allow_low_storage and (
+    principal.scope != "owner" or principal.browser is not None
+    or not is_owner_input_principal(principal)
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner can continue below the storage floor.",
+    )
   chat = get_active_chat_for_principal(db, chat_id, principal)
   agent_exact_retry = False
   if is_card_answer and not is_owner_input_principal(principal):
@@ -1473,6 +1485,7 @@ async def _send_message_locked(
       if not manual_resume_matches(
         control, control_id=body.cid, run_id=body.resume_run_id,
         goal_id=body.resume_goal_id, goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       ):
         raise HTTPException(409, detail={
           "code": "recovery_changed",
@@ -1800,6 +1813,8 @@ async def _send_message_locked(
         resume_run_id=body.resume_run_id,
         resume_goal_id=body.resume_goal_id,
         resume_goal_revision=body.resume_goal_revision,
+        scoped_start=body._scoped_start,
+        allow_low_storage=body.allow_low_storage,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -1809,6 +1824,8 @@ async def _send_message_locked(
     # the send immediately, and run_chat sees the marker).
     try:
       result = await await_ack(ack)
+    except ScopedStartRefused:
+      raise
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
     if isinstance(result, StartTurnRecoveryChanged):

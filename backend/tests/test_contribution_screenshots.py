@@ -552,6 +552,9 @@ def submit(tmp_path, monkeypatch):
     "_assert_merges_with_upstream": lambda *_a, **_k: {
       "last_submit_upstream_branch": "main", "last_submit_upstream_sha": base,
     },
+    "upstream_merge_for_new_pr": lambda *_a, **_k: {
+      "last_submit_upstream_branch": "main", "last_submit_upstream_sha": base,
+    },
   }.items():
     monkeypatch.setattr(git_ops + name, value)
   monkeypatch.setattr(github_contributions.shutil, "which", lambda name: f"/bin/{name}")
@@ -665,7 +668,7 @@ def stack(tmp_path, monkeypatch):
   for name in (
     "_assert_clean_worktree", "_assert_fresh", "_assert_coauthor_trailer",
     "_assert_head_attribution", "_assert_merges_with_upstream",
-    "_assert_upstream_push_permission",
+    "upstream_merge_for_new_pr", "_assert_upstream_push_permission",
   ):
     monkeypatch.setattr(git_ops + name, lambda *_a, **_k: None)
   monkeypatch.setattr(git_ops + "_upstream_default_branch", lambda *_a: "main")

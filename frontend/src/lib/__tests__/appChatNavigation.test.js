@@ -1,10 +1,10 @@
-/* App chat navigation only navigates: no fallback, draft replacement or send. */
+/* App chat navigation never replaces, drops or sends the owner's or the app's draft. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import 'fake-indexeddb/auto'
 import { createStore, set as setIdbValue } from 'idb-keyval'
 import { saveFailedSendAttempt } from '../../components/ChatView/sendAttemptRecovery.js'
-import { openExistingChat, stageAppChatDraft } from '../appChatNavigation.js'
+import { openChatWithAppDraft, openExistingChat, stageAppChatDraft } from '../appChatNavigation.js'
 import {
   _clearComposerDraftMemoryForTests, persistComposerDraft, readComposerDraft, readComposerHandoff,
   stageComposerHandoff,
@@ -95,5 +95,33 @@ test('an app draft is additive and idempotent and leaves the handoff slot alone'
     assert.equal(readComposerHandoff('other').autoSendDraft, 'Queued send',
       "another chat's pending send keeps its slot")
     assert.equal(await stageAppChatDraft('empty', 'Only draft'), 'Only draft')
+  })
+})
+
+test('a draft the chat cannot take starts a new chat instead of vanishing', async () => {
+  await withBrowser(async () => new Response('{}'), async () => {
+    persistComposerDraft('can-take', 'Owner text', [])
+    const routes = []
+    const targets = { open: draft => routes.push(['open', draft]), openNew: draft => routes.push(['new', draft]) }
+    await openChatWithAppDraft('can-take', 'Crash report', targets)
+    await openChatWithAppDraft('can-take', '', targets)
+    persistComposerDraft('cannot-take', 'Owner text', [])
+    saveFailedSendAttempt('cannot-take', { cid: 'prior', draftIdentity: 'prior-draft', text: 'Owner text', attachments: [] })
+    await openChatWithAppDraft('cannot-take', 'Crash report', targets)
+    assert.deepEqual(routes, [
+      ['open', 'Owner text\n\nCrash report'], ['open', undefined], ['new', 'Crash report'],
+    ])
+    assert.equal(readComposerDraft('cannot-take').input, 'Owner text', 'the refused chat keeps its own composer')
+  })
+})
+
+test('a failure to open or create the chat reaches the caller to report', async () => {
+  await withBrowser(async () => new Response('{}'), async () => {
+    const fail = message => () => Promise.reject(new Error(message))
+    await assert.rejects(openChatWithAppDraft('can-open', 'Crash report', { open: fail('open failed'), openNew: () => {} }),
+      /open failed/)
+    saveFailedSendAttempt('needs-new', { cid: 'prior', draftIdentity: 'prior-draft', text: 'Owner text', attachments: [] })
+    await assert.rejects(openChatWithAppDraft('needs-new', 'Crash report', { open: () => {}, openNew: fail('create failed') }),
+      /create failed/)
   })
 })

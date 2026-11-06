@@ -78,7 +78,7 @@ function makeFrameDom() {
     style: {
       colorScheme: '',
       _props: {},
-      setProperty(name, value) { this._props[name] = value },
+      setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] },
       getPropertyValue(name) { return this._props[name] },
     },
   }
@@ -182,15 +182,149 @@ test('frame live applier ignores a non-hex bg', () => {
   dom.body.style.background = '#init'
   dom.documentElement.style.setProperty('--bg', '#init')
   const applyTheme = loadLiveApplyTheme(dom)
-  applyTheme(':root{}', 'expression(alert(1))')
+  applyTheme('', 'expression(alert(1))')
   assert.equal(dom.body.style.background, '#init')
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#init')
 })
 
-test('frame live applier writes a valid hex bg', () => {
+test('frame live applier hands --bg to the theme stylesheet once css applies', () => {
+  // An inline --bg (the pre-paint hint) would outrank an owner background in
+  // an html rule, a condition or a layer, so applying css removes it.
+  const dom = makeFrameDom()
+  dom.documentElement.style.setProperty('--bg', '#0d0d0d')
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme(':root{}', '#0d0d0d')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.equal(dom.body.style.background, 'var(--bg)')
+})
+
+test('frame live applier writes a valid hex bg when no css arrives', () => {
   const dom = makeFrameDom()
   const applyTheme = loadLiveApplyTheme(dom)
-  applyTheme(':root{}', '#abcdef')
+  applyTheme('', '#abcdef')
   assert.equal(dom.body.style.background, '#abcdef')
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#abcdef')
+})
+
+// --- Generated theme defaults versus the frame's static fallbacks ------
+//
+// The frame's static fallbacks and every served theme's generated defaults
+// share the `mobius-defaults` cascade layer, declared first by the static
+// <style>, so it is the weakest layer. Within it the theme style (applied
+// after) replaces the static values; any owner rule -- unlayered, in an owner
+// layer, or on `html` -- beats both. This drives the real inlined applier for
+// the initial (`moebius:frame-init`) and live (`moebius:frame-theme`) paths --
+// both call applyTheme(themeCss, bg) -- and resolves the root with a small
+// layer-aware cascade oracle, then checks no inline --bg overrides it.
+
+const { default: themeCssCases } = await import('./themeCssCases.json', { with: { type: 'json' } })
+const { DARK_ROLES, LIGHT_ROLES, contrastRatio } = await import('../../theme.js')
+
+function frameStaticCss() {
+  return FRAME_HTML.match(/<style>(\s*\/\* Fallback defaults[\s\S]*?)<\/style>/)[1]
+}
+
+// Root custom properties after the cascade for the shapes used here: @layer
+// statements and blocks (named or anonymous), @media (skipped: the query is
+// taken as false), `:where(:root)`, `:where(:root[data-theme="light"])`,
+// `html` and `:root`. Normal declarations: unlayered beats layered, a later
+// layer beats an earlier one, then specificity, then source order. Fixtures
+// here contain no quoted braces or semicolons.
+function resolveRoot(css, dataTheme) {
+  const specificity = { ':where(:root)': 0, html: 1, ':root': 10 }
+  if (dataTheme === 'light') specificity[':where(:root[data-theme="light"])'] = 0
+  const layers = []
+  const declare = (name) => { if (!layers.includes(name)) layers.push(name) }
+  const decls = []
+  let anonymous = 0
+  const walk = (text, layer) => {
+    let start = 0
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === ';') {
+        const statement = text.slice(start, i).trim()
+        const m = /^@layer\s+(.+)$/s.exec(statement)
+        if (m) m[1].split(',').forEach((n) => declare(n.trim()))
+        start = i + 1
+      } else if (text[i] === '{') {
+        let depth = 1
+        let j = i + 1
+        for (; depth; j++) depth += text[j] === '{' ? 1 : text[j] === '}' ? -1 : 0
+        const prelude = text.slice(start, i).trim().replace(/\s+/g, ' ')
+        const body = text.slice(i + 1, j - 1)
+        if (prelude.startsWith('@layer')) {
+          const name = prelude.slice(6).trim() || `<anonymous ${anonymous++}>`
+          declare(name)
+          walk(body, name)
+        } else if (prelude in specificity) {
+          for (const part of body.split(';')) {
+            const d = /^\s*(--[\w-]+)\s*:([\s\S]*)$/.exec(part)
+            if (d) decls.push({ layer, spec: specificity[prelude], order: decls.length, name: d[1], value: d[2].trim() })
+          }
+        }
+        i = j - 1
+        start = j
+      }
+    }
+  }
+  walk(css.replace(/\/\*[\s\S]*?\*\//g, ''), null)
+  const rank = (d) => (d.layer === null ? layers.length : layers.indexOf(d.layer))
+  decls.sort((a, b) => rank(a) - rank(b) || a.spec - b.spec || a.order - b.order)
+  return Object.fromEntries(decls.map((d) => [d.name, d.value]))
+}
+
+function frameRoot(dom, dataTheme) {
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined,
+    'no inline --bg may outrank the stylesheet cascade')
+  return resolveRoot(`${frameStaticCss()}\n${dom.styleNodes.get('mobius-theme').textContent}`, dataTheme)
+}
+
+const served = (prefix) => themeCssCases.find((c) => c.name.startsWith(prefix)).expected
+
+test('frame: the static fallbacks sit in the defaults layer, declared first', () => {
+  const css = frameStaticCss().replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.match(css, /^\s*@layer mobius-defaults \{/)
+  const root = resolveRoot(css, 'dark')
+  assert.equal(root['--accent-text'], DARK_ROLES['--accent-text'])
+})
+
+test('frame: owner rules win over generated and static defaults, initially and live', () => {
+  const dom = makeFrameDom()
+  dom.documentElement.style.setProperty('--bg', '#0d0d0d') // the pre-paint hint
+  const applyTheme = loadLiveApplyTheme(dom)
+
+  // frame-init: owner values in a named layer.
+  applyTheme(served('a named owner layer'), '#0d0d0d')
+  let root = frameRoot(dom, 'dark')
+  assert.equal(root['--accent'], '#00ffff')
+  assert.equal(root['--text'], '#112233')
+  for (const name of ['--bg', '--surface', '--accent-fill', '--warning-text']) assert.ok(root[name], `${name} resolves`)
+
+  // frame-theme live swap: an html-rule background the server hint cannot see.
+  applyTheme(served('an html rule outranks'), '#0d0d0d')
+  root = frameRoot(dom, 'dark')
+  assert.equal(root['--bg'], '#ffffff')
+  assert.equal(root['--text'], '#111111')
+
+  // Another live swap: layer-order statement, and a light custom accent
+  // against the static light block that carries the shipped purple role.
+  applyTheme(served('a layer-order statement'), '#0d0d0d')
+  assert.equal(frameRoot(dom, 'dark')['--accent'], '#00ffff')
+  applyTheme(served('duplicate declarations in one root'), '#f0eeeb')
+  root = frameRoot(dom, 'light')
+  assert.equal(root['--accent'], '#0ea5e9')
+  assert.notEqual(root['--accent-text'], LIGHT_ROLES['--accent-text'])
+  assert.ok(contrastRatio(root['--accent-text'], root['--surface-2']) >= 4.5)
+  assert.equal(root['--surface-2'], '#e8e6e2', 'the light default, not the static dark one')
+})
+
+test('frame: an escaped ) in a bare import URL is stripped whole and the owner root still wins', () => {
+  const dom = makeFrameDom()
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme(served('an escaped ) in an unquoted import URL'), '#0d0d0d')
+  assert.deepEqual(dom.fontLinks.map((l) => l.href), ['https://example.test/a);b.css'])
+  const style = dom.styleNodes.get('mobius-theme').textContent
+  assert.equal(style.includes('b.css'), false)
+  const root = frameRoot(dom, 'dark')
+  assert.equal(root['--accent'], '#00ffff')
+  assert.ok(root['--accent-fill'] && root['--surface'])
 })

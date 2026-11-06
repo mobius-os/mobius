@@ -5913,7 +5913,6 @@ export default function ChatView({
     turnActive,
     ownerInput: hasPendingQuestion,
     waits: armedWaits,
-    backgroundHelpers,
     resourcePause: pendingResumeBlock,
     autoResumeEnabled,
     authoritativeHandoff: serverHandoff,
@@ -6098,6 +6097,7 @@ export default function ChatView({
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
+      canOverrideStorage={canStartFreshSession}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}

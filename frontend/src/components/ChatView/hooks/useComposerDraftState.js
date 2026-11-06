@@ -120,8 +120,13 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     return draft
   }, [])
 
+  // The first time the chat is shown, a recovered handoff or failed send
+  // becomes the saved draft. Only once: showing the chat again must not
+  // restore that snapshot over the owner's later edits.
+  const initialRestoredRef = useRef(false)
   useEffect(() => {
-    if (hidden) return
+    if (hidden || initialRestoredRef.current) return
+    initialRestoredRef.current = true
     if ((initial.source === 'pending' || initial.source === 'failed')
         && (initial.input || initial.attachments.length > 0)) {
       persistComposerDraft(chatId, initial.input, initial.attachments)

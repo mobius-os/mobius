@@ -12,7 +12,9 @@ the provider, and the provider's own id for the model's tool call. A later
 reviewer can fork the provider session at that call
 (``scripts/fork_chat.py --after-call``) and ask the agent about that moment.
 Its ``actor`` is the calling run's, so an app can tell a helper, and refuse
-writes for a read-only one.
+writes for a read-only one. A service that may run provider CLIs also gets
+``limited_providers``: the providers whose recent runs hit a usage or rate
+limit, so it can skip them instead of failing a call first.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app import app_consent, app_services, models
+from app import app_consent, app_services, models, provider_availability
 from app.app_capabilities import agent_tools_from_contract
 
 
@@ -55,6 +57,9 @@ class AppTool:
   # A tool the app's prompt fragment tells every agent to use is loaded up front
   # like the platform's own controls; other app tools stay deferrable.
   always_load: bool = False
+  # Owner-declared routine bookkeeping: the chat folds a successful call into
+  # the surrounding activity (agent_activity.is_routine_tool).
+  routine: bool = False
 
   def listing(self) -> dict[str, Any]:
     listing = {
@@ -106,6 +111,7 @@ def live_app_tools(db: Session) -> list[AppTool]:
         description=declaration["description"],
         input_schema=declaration["input_schema"],
         always_load=declaration.get("always_load") is True,
+        routine=declaration.get("routine") is True,
       ))
   return tools
 
@@ -151,6 +157,9 @@ async def call_app_tool(
   if tool is None:
     raise HTTPException(404, "App tool not found.")
   app = db.get(models.App, tool.app_id)
+  request = {"arguments": arguments, "call": moment}
+  if app_services.runs_provider_clis(app.capability_contract.get("service") or {}):
+    request["limited_providers"] = provider_availability.limited_providers(db)
   status, body, _headers, media_type = await app_services.invoke_service(
     app,
     owner,
@@ -160,7 +169,7 @@ async def call_app_tool(
       "path": f"/tools/{tool.name}",
       "query": {},
       "headers": {},
-      "body": {"arguments": arguments, "call": moment},
+      "body": request,
       "public": False,
       "actor": actor,
     },

@@ -6,7 +6,9 @@ check, and an explicit provider-success acknowledgement clears only a limit no
 newer than that run.
 Read by
 ``background_agents.resolve_background_provider`` to skip a provider that is
-currently out of quota when choosing which background/app agent to run.
+currently out of quota when choosing which background/app agent to run, and
+passed to app tool calls (``app_tools``) so an app that runs a provider CLI
+itself can skip it too.
 """
 
 from __future__ import annotations
@@ -28,6 +30,15 @@ def provider_within_quota(db, provider: str) -> bool:
   if row is None or row.limited_until is None:
     return True
   return now_naive_utc() >= row.limited_until
+
+
+def limited_providers(db) -> list[str]:
+  """Providers whose quota observation currently suppresses selection."""
+  now = now_naive_utc()
+  return sorted(
+    row.provider for row in db.query(ProviderAvailability)
+    .filter(ProviderAvailability.limited_until > now)
+  )
 
 
 def mark_provider_limited(
