@@ -48,6 +48,7 @@ export function startToolLifecycle(prev, event) {
     input: event?.input || '',
     output: '',
     status: 'running',
+    ...(event?.routine === true ? { routine: true } : {}),
     ...(event?.recall ? { recall: event.recall } : {}),
     ...(event?.app_activity ? { app_activity: event.app_activity } : {}),
     ...(event?.peer_message ? { peer_message: event.peer_message } : {}),

@@ -14,9 +14,10 @@ from app.agent_activity import (
   ActivityCommand,
   AgentActivityBinding,
 )
-from app.app_tools import exposed_tool_name
+from app.app_tools import exposed_tool_name, live_app_tools
 from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
 from app.manifest_contract import validate_manifest_contract
+from app.platform_tools import CONTROL_TOOL_NAMES, DELEGATED_CONTROL_TOOL_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +84,25 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         except OSError:
           pass
         pairs.extend((str(path), command) for path in forms)
-    return AgentActivityBinding.of(pairs, tool_pairs)
+    return AgentActivityBinding.of(pairs, tool_pairs, _routine_app_tools(db))
   except Exception:
     log.exception("app activity binding unavailable; activity cards disabled")
     return EMPTY_AGENT_ACTIVITY_BINDING
+
+
+def _routine_app_tools(db: Session) -> list[str]:
+  """App tools whose reviewed declaration marks them routine.
+
+  Taken from the tools agents are actually served (live apps, duplicate names
+  resolved). An app tool never takes a platform tool's name: the control
+  server serves the platform's. A lookup failure only drops routine marks.
+  """
+  platform = {*CONTROL_TOOL_NAMES, *DELEGATED_CONTROL_TOOL_NAMES}
+  try:
+    return [
+      tool.exposed_name for tool in live_app_tools(db)
+      if tool.routine and tool.exposed_name not in platform
+    ]
+  except Exception:
+    log.exception("app tool routine marks unavailable; routine calls show as usual")
+    return []
