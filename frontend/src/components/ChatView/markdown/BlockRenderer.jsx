@@ -90,7 +90,7 @@ export function ProgressiveMarkdown({
         aria-atomic={isStreaming ? 'false' : undefined}
       >
         {tokens.map((token, i) => {
-          const appCard = appLinkCardFromParagraph(token, window.location.href)
+          const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
           if (appCard) {
             return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
           }
@@ -163,7 +163,7 @@ export function StandardMarkdown({
   return (
     <div className="standard-markdown md-blocks">
       {visibleTokens.map((token, i) => {
-        const appCard = appLinkCardFromParagraph(token, window.location.href)
+        const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
         if (appCard) {
           return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
         }

@@ -1,4 +1,5 @@
 import DependencyBacklinks from './DependencyBacklinks.jsx'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { LocalAnswersContext } from './localAnswersContext.js'
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -272,7 +273,7 @@ export default function QuestionCard({
     if (!node) return
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
     node.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
-    node.querySelector('button.qcard__opt, textarea')?.focus({ preventScroll: true })
+    node.querySelector('.qcard__opt[tabindex="0"], textarea')?.focus({ preventScroll: true })
   }
 
   function selectOption(question, label) {
@@ -490,9 +491,9 @@ export default function QuestionCard({
             data-question-index={qi}
           >
             {q.header && (
-              <div className="qcard__header">{q.header}</div>
+              <div className="qcard__header"><StandardMarkdown text={q.header} onInternalNav={onInternalNav} /></div>
             )}
-            <div className="qcard__text">{q.question}</div>
+            <div className="qcard__text"><StandardMarkdown text={q.question} onInternalNav={onInternalNav} /></div>
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
@@ -526,11 +527,10 @@ export default function QuestionCard({
                   ? isChosen
                   : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
                 const dimmed = answered && !isChosen
-                const OptionSurface = inactive ? 'div' : 'button'
                 return (
-                  <OptionSurface
+                  <div
                     key={oi}
-                    type={inactive ? undefined : 'button'}
+                    tabIndex={inactive ? undefined : 0}
                     role={isMulti ? 'checkbox' : 'radio'}
                     aria-checked={isActive}
                     aria-disabled={inactive || undefined}
@@ -541,6 +541,9 @@ export default function QuestionCard({
                     onClick={inactive ? undefined : (event) => {
                       const selectionBeforePointer = pointerSelectionRef.current
                       pointerSelectionRef.current = null
+                      // Markdown links, image previews and code-copy buttons
+                      // act independently of the surrounding answer choice.
+                      if (event.target.closest('a, button, input, textarea, select, summary, [role="button"]')) return
                       if (
                         event.detail !== 0
                         && pointerSelectionChangedWithin(
@@ -550,24 +553,30 @@ export default function QuestionCard({
                       ) return
                       selectOption(q.question, opt.label)
                     }}
-                    title={opt.description || ''}
+                    onKeyDown={inactive ? undefined : (event) => {
+                      if (event.target !== event.currentTarget || event.repeat) return
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        selectOption(q.question, opt.label)
+                      }
+                    }}
                   >
                     <span
                       className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
                       aria-hidden="true"
                     />
-                    {/* Description renders inline, not only as title= — a
-                        title tooltip is invisible on touch, and this is a
-                        phone-first surface. */}
+                    {/* Keep explanations visible on touch; Markdown may
+                        contain links and controls, so the choice itself is
+                        not a native button containing nested controls. */}
                     {opt.description ? (
-                      <span className="qcard__opt-body">
-                        <span className="qcard__opt-label">{opt.label}</span>
-                        <span className="qcard__opt-desc">{opt.description}</span>
-                      </span>
+                      <div className="qcard__opt-body">
+                        <div className="qcard__opt-label"><StandardMarkdown text={opt.label} onInternalNav={onInternalNav} /></div>
+                        <div className="qcard__opt-desc"><StandardMarkdown text={opt.description} onInternalNav={onInternalNav} /></div>
+                      </div>
                     ) : (
-                      opt.label
+                      <div className="qcard__opt-label"><StandardMarkdown text={opt.label} onInternalNav={onInternalNav} /></div>
                     )}
-                  </OptionSurface>
+                  </div>
                 )
               })}
             </div>}

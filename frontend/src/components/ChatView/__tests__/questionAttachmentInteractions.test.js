@@ -382,3 +382,63 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
     assert.equal(error.props.children, 'Attach at most 20 files to one card.')
   } finally { card.unmount(); globalThis.fetch = originalFetch }
 })
+
+test('Markdown choice links and child controls do not choose an answer; keyboard choices preserve raw labels', async () => {
+  const question = 'Install **both**?'
+  const label = '**Update**'
+  let posted
+  const card = renderHook(QuestionCard, { chatId: 'markdown-events', questionId: 'markdown-events-q',
+    questions: [{ question, options: [{ label, description: '[Notes](https://example.com)' }] }],
+    onAnswer: (...args) => { posted = args },
+  })
+  const option = () => find(card.result.current, node => node.props?.role === 'radio')
+  try {
+    for (const tag of ['a', 'button']) {
+      option().props.onClick({ detail: 0, target: { closest: () => ({ tagName: tag }) } })
+      assert.equal(option().props['aria-checked'], false)
+    }
+    const surface = {}
+    option().props.onKeyDown({ key: 'Enter', currentTarget: surface, target: {}, preventDefault: () => assert.fail('child keys must stay with the child') })
+    assert.equal(option().props['aria-checked'], false)
+    option().props.onKeyDown({ key: ' ', currentTarget: surface, target: surface, preventDefault: () => {} })
+    assert.equal(option().props['aria-checked'], true)
+    await submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted[0], `- ${question}: ${label}`)
+    assert.deepEqual(posted[1], { [question]: label })
+  } finally { card.unmount() }
+})
+
+test('clicking formatted option text toggles multi-select without altering Markdown labels', () => {
+  const card = renderHook(QuestionCard, { chatId: 'markdown-multi', questionId: 'markdown-multi-q',
+    questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`' }] }],
+  })
+  const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
+  const click = index => options()[index].props.onClick({ detail: 0, target: { closest: () => null } })
+  try {
+    click(0)
+    click(1)
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [true, true])
+    click(0)
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [false, true])
+  } finally { card.unmount() }
+})
+
+test('an incomplete Submit focuses the first Markdown answer choice', () => {
+  const priorWindow = globalThis.window
+  globalThis.window = { ...priorWindow, matchMedia: () => ({ matches: true }) }
+  let focused = false
+  const card = renderHook(QuestionCard, { chatId: 'markdown-focus', questionId: 'markdown-focus-q',
+    questions: [{ question: '**Choose**', options: [{ label: '**A**' }] }],
+  })
+  const questionNode = {
+    scrollIntoView: () => {},
+    querySelector: selector => {
+      assert.equal(selector, '.qcard__opt[tabindex="0"], textarea')
+      return { focus: () => { focused = true } }
+    },
+  }
+  try {
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => ({ querySelector: () => questionNode }) } })
+    assert.equal(focused, true)
+  } finally { card.unmount(); globalThis.window = priorWindow }
+})
