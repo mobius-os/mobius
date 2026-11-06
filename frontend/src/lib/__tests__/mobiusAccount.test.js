@@ -79,3 +79,16 @@ test('recovery is offered for ready or failed deployments unless withheld', () =
   assert.equal(deploymentCanRecover({ status: 'deploying', actions: {} }), false)
   assert.equal(deploymentPresentation({ status: 'delete_failed', last_error: 'check the build' }).tone, 'danger')
 })
+
+test('this Möbius may report a plain-HTTP address on any host; other deployments may not', () => {
+  const signedOut = { account_mode: 'signed_out', account_unavailable: false, instance_id: null, profile: null, member_since: null }
+  // Self-hosted installs may serve plain HTTP on a LAN address.
+  const lan = { ...here, url: 'http://192.0.2.10:8000' }
+  assert.equal(parseIdentity({ ...signedOut, deployments: [lan] }).deployments[0].url, 'http://192.0.2.10:8000')
+  assert.throws(() => parseIdentity({ ...signedOut, deployments: [{ ...here, url: 'http://user:pw@192.0.2.10:8000' }] }), /invalid account response/)
+  assert.throws(() => parseIdentity({ ...signedOut, deployments: [{ ...here, url: 'javascript:alert(1)' }] }), /invalid account response/)
+  // An address the account service reports for another deployment keeps the HTTPS rule.
+  const linked = { ...signedOut, account_mode: 'linked', profile }
+  const other = { id: 'mob_x', name: 'Other', status: 'Active', url: 'http://192.0.2.20:8000', current: false }
+  assert.throws(() => parseIdentity({ ...linked, deployments: [here, other] }), /invalid account response/)
+})

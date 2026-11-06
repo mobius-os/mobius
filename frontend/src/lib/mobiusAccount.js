@@ -119,6 +119,24 @@ function parseProfile(profile, { degraded = false, nullableEmail = false } = {})
   }
 }
 
+/**
+ * This Möbius's own address, as the local bridge reports it (its configured
+ * frontend origin). It is display-only and may be plain HTTP on any host,
+ * which self-hosted installations support; addresses the account service
+ * reports for other deployments keep webUrl's stricter rule.
+ */
+function localDeploymentUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return null
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return null
+  }
+  if (parsed.username || parsed.password) return null
+  return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed : null
+}
+
 function parseDeployment(item) {
   if (
     !isObject(item)
@@ -127,7 +145,7 @@ function parseDeployment(item) {
     || !boundedText(item.status, 1, 64)
     || !nullableText(item.region, 64)
     || (item.current !== undefined && typeof item.current !== 'boolean')
-    || !webUrl(item.url)
+    || !(item.current === true ? localDeploymentUrl(item.url) : webUrl(item.url))
   ) return null
   return {
     id: item.id,
