@@ -58,18 +58,14 @@ export function ownerQueuedSnapshot(snapshot) {
  *   text means "do not resend".
  */
 export function resolveStopResend(queuedSnapshot, clearedPendingCids) {
-  return collapseQueued(stopResendRows(queuedSnapshot, clearedPendingCids))
-}
-
-function stopResendRows(queuedSnapshot, clearedPendingCids) {
   const rows = queuedSnapshot || []
-  if (!Array.isArray(clearedPendingCids)) return rows
+  if (!Array.isArray(clearedPendingCids)) return collapseQueued(rows)
   const clearedSet = new Set(clearedPendingCids)
   const toResend = rows.filter(m => clearedSet.has(cidOf(m)))
   // Exact match — including the empty-set drain case, where nothing is
   // re-sent. A cleared cid without a snapshot entry resends everything
   // rather than drop it.
-  return toResend.length === clearedPendingCids.length ? toResend : rows
+  return collapseQueued(toResend.length === clearedPendingCids.length ? toResend : rows)
 }
 
 /**
@@ -95,30 +91,4 @@ export function collapseQueued(rows) {
     }
   }
   return { text, attachments }
-}
-
-/**
- * Queued owner rows an unanswered stop request may have cleared. When a stop
- * request gets no reply and a retry is accepted, the server ran them one after
- * the other: the first may have cleared rows the accepted reply cannot name.
- * A row that reply did not clear, the server no longer holds (`serverPending`,
- * null when unread) and the transcript does not show was most likely cleared
- * that way. It goes back to the composer rather than being resent, because a
- * turn-end drain whose rows have not reached this view yet looks the same.
- *
- * @param {Array} queuedSnapshot the owner rows Stop snapshotted
- * @param {{clearedPendingCids: string[]|null, serverPending: Array|null, deliveredCids: Set<string>}} evidence
- * @returns {Array} the rows to return to the composer
- */
-export function rowsLostToUnansweredStop(queuedSnapshot, {
-  clearedPendingCids,
-  serverPending,
-  deliveredCids,
-}) {
-  const accounted = new Set([
-    ...stopResendRows(queuedSnapshot, clearedPendingCids).map(cidOf),
-    ...(serverPending || []).map(cidOf),
-    ...deliveredCids,
-  ])
-  return (queuedSnapshot || []).filter(row => !accounted.has(cidOf(row)))
 }

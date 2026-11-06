@@ -36,6 +36,10 @@ async def chat_stop(
   read after this response. The global sweep, an unconfirmed Stop, and a Stop
   that kept the queue or could not close the run return `stop_receipt: None`
   (`ChatStopOutcome`).
+
+  A retry carrying the same `request_id` as the chat's last answered Stop is
+  answered with that Stop's result, so a client whose reply was lost still
+  learns which queued messages it cleared.
   """
   require_nondelegated_owner_control(principal)
   if principal.scope == "app":
@@ -49,6 +53,7 @@ async def chat_stop(
     body.chat_id or None, db=db,
     actor="owner" if is_owner_input_principal(principal) else "agent",
     actor_id=principal.run_id or principal.chat_id or principal.embed_session_id,
+    request_id=body.request_id or None,
   )
   stopped, cleared_pending_cids = outcome
   cancelled_delegations = []

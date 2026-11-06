@@ -20,6 +20,7 @@ export const QUEUED_SAVE_NOTES = Object.freeze({
   empty: 'A queued message can’t be empty.',
   confirming: 'Delivery is being confirmed. Your edit is kept here.',
   waiting: 'Reconnect to save this edit. Your changes are kept here.',
+  stopping: 'Stop is finishing, so this edit wasn’t saved. Your changes are kept here.',
   context_pending: 'This message includes app context. It can be edited after delivery is confirmed.',
   error: 'Couldn’t save this edit. Try again.',
 })
@@ -33,7 +34,7 @@ export const QUEUED_SAVE_NOTES = Object.freeze({
  * @param {(value: string) => void} options.showValue  puts text in the box
  * @param {(cid: string, text: string) => Promise<string>} options.saveQueued
  *        the queue's save; resolves to 'saved', 'gone', 'confirming',
- *        'waiting', 'context_pending', or 'error'
+ *        'waiting', 'stopping', 'context_pending', or 'error'
  * @param {{ set: (draft: string) => void, take: () => (string|null) }} [options.draftAside]
  *        the draft's durable owner: `set` keeps the set-aside draft as the
  *        stored draft while the box shows other messages, and `take` hands

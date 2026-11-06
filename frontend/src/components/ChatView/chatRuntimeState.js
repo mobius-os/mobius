@@ -685,34 +685,28 @@ export function shouldRetryStopAfterConfirm({
   return !!requestSucceeded && !confirmFailed && confirmRunning === true
 }
 
-/** Ask the server to Stop one chat. A stop the runtime still shows running is
- * sent again, and so is a request with no reply (a dropped connection or a
- * 5xx): it may still be running on the server, which runs one Stop per chat
- * at a time, so the retry is answered only after it. A 4xx is a refusal.
- * Changes no local state; the caller does that only once `accepted`.
- * `unanswered` says an earlier request may have cleared queued rows that
- * `clearedPendingCids` (from the first accepted reply) cannot name, and
- * `serverPending` is the server's queue after the stop, or null if unread. */
+/** Ask the server to Stop one chat. A request with no reply (a dropped
+ * connection, a timeout or a 5xx) is retried under the same request id: the
+ * server runs one Stop per chat at a time and answers a retry of its last
+ * Stop with that Stop's outcome, so the cleared set a lost reply carried is
+ * not lost. A stop the runtime still shows running is sent again as a new
+ * Stop. A 4xx is a refusal. Changes no local state; the caller does that only
+ * once `accepted`. */
 export async function requestChatStop({
   postStop,
   readRuntime,
+  mintRequestId,
   delays = [0, 250, 700, 1200],
   wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
 }) {
-  const outcome = {
-    accepted: false,
-    stoppedCleanly: false,
-    clearedPendingCids: null,
-    unanswered: false,
-    serverPending: null,
-  }
+  const outcome = { accepted: false, stoppedCleanly: false, clearedPendingCids: null }
+  let requestId = mintRequestId()
   for (const retryDelayMs of delays) {
     if (retryDelayMs > 0) await wait(retryDelayMs)
     let res = null
-    try { res = await postStop() } catch { /* no reply */ }
+    try { res = await postStop(requestId) } catch { /* no reply */ }
     if (!res?.ok) {
       if (res && res.status < 500) break
-      outcome.unanswered = true
       continue
     }
     outcome.accepted = true
@@ -728,12 +722,10 @@ export async function requestChatStop({
       confirmRunning: runtime ? runtime.running : null,
       confirmFailed: runtime == null,
     }
-    outcome.serverPending = Array.isArray(runtime?.pending_messages)
-      ? runtime.pending_messages
-      : null
     outcome.stoppedCleanly = stopConfirmedIdle({ stopSucceeded: true, ...confirm })
     if (outcome.stoppedCleanly
         || !shouldRetryStopAfterConfirm({ requestSucceeded: true, ...confirm })) break
+    requestId = mintRequestId()
   }
   return outcome
 }

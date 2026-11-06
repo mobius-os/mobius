@@ -40,6 +40,19 @@ test('the row open in the chat box offers no Send now, which would skip the edit
   assert.doesNotMatch(html, /queued__row--in-composer(?:(?!queued__row ).)*queued__steer/s)
 })
 
+test('while a Stop is pending every row action is off, since Stop resends what it captured', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items, steerActive: true, stopping: true,
+  }))
+  for (const label of ['Send this queued message now', 'Edit queued message', 'Cancel queued message']) {
+    const buttons = html.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`, 'g')) || []
+    assert.equal(buttons.length, 2, label)
+    assert.ok(buttons.every(button => / disabled=""/.test(button)), `${label} is off`)
+  }
+  const idle = renderToStaticMarkup(createElement(QueuedMessages, { items, steerActive: true }))
+  assert.doesNotMatch(idle, /aria-label="Cancel queued message"[^>]* disabled=""/)
+})
+
 function primaryButton(props) {
   return renderToStaticMarkup(createElement(PrimaryAction, {
     sending: false, listening: false, hasInput: true, hasUploading: false,

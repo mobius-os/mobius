@@ -730,6 +730,8 @@ class ChatRequest(BaseModel):
 
 class ChatStopRequest(BaseModel):
   chat_id: str = ""
+  # Stable across a client's retries of one Stop; see chat.stop_chat_for.
+  request_id: str = Field(default="", max_length=128)
 
 
 # One effort vocabulary for owner and app-attributed chat configuration.

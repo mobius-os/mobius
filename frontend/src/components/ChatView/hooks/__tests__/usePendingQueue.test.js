@@ -336,6 +336,21 @@ test('clear resets state and ref synchronously', () => {
   assert.deepEqual(result.current.pendingMessagesRef.current, [])
 })
 
+test('clear(cids) drops only the rows an accepted Stop captured', () => {
+  // A message sent while Stop was pending is not in Stop's resend; it must
+  // stay queued, in flight, and steerable.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'captured', ts: 1 }), { inFlight: false })
+  result.current.add(fixtureMsg({ cid: 'sent-during-stop', ts: 2 }), { inFlight: true })
+  result.current.reserveForSteer(['captured', 'sent-during-stop'])
+  result.current.clear(['captured'])
+  assert.deepEqual(result.current.pendingMessagesRef.current.map(row => row.cid), ['sent-during-stop'])
+  assert.deepEqual([...result.current.steerReservedMessages].map(row => row.cid), ['sent-during-stop'])
+  result.current.hydrate([])
+  assert.deepEqual(result.current.pendingMessagesRef.current.map(row => row.cid), ['sent-during-stop'],
+    'its in-flight mark survives, so a racing reconcile keeps it')
+})
+
 test('stop-timeout: restoring the local snapshot preserves the queue a refetch would drop', () => {
   // handleStop snapshots the queue, POSTs /chat/stop, and clear()s it once
   // the server accepts. On an SDK interrupt TIMEOUT the backend has already

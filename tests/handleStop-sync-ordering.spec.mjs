@@ -1,14 +1,16 @@
 /**
- * Locks in the R1 invariant from .pm/features/_034-design.md:
+ * Locks in Stop's ordering contract (originally the R1 invariant from
+ * .pm/features/_034-design.md):
  *
- *   handleStop must clear the pending-queue ref SYNCHRONOUSLY before
- *   the `/chat/stop` await. During that await the SSE stream closes
- *   server-side (kill proc + close broadcast), which fires the natural
- *   onStreamEnd path in useStreamConnection → ChatView's onStreamEnd →
- *   if pendingMessagesRef has items it would call fetchMessages with
- *   force:true → that fetch resolving BEFORE handleStop continues
- *   post-await would overwrite the just-promoted partial + the
- *   soon-to-be-sent combined turn with stale DB state.
+ *   handleStop changes nothing local until the server accepts the Stop, so
+ *   the queued row stays in the tray, with its actions off, through the
+ *   `/chat/stop` await. During that await the SSE stream closes server-side
+ *   (kill proc + close broadcast), which fires the natural onStreamEnd path;
+ *   while a Stop is in flight that path must NOT refetch, or a stale page
+ *   resolving before handleStop continues would overwrite the just-promoted
+ *   partial + the soon-to-be-sent combined turn and resurrect queue rows.
+ *   Once Stop is accepted, the captured row leaves the tray and comes back
+ *   as one resent turn.
  *
  * Originated by Ticket 034. Lives in tests/ alongside the other
  * Playwright lock-ins so it runs in the same suite.
@@ -56,7 +58,7 @@ test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
 test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
-  test('Stop with a queued message clears the queue and never resurrects it during the stop POST', async ({ page }) => {
+  test('Stop keeps the queued row until accepted, never resurrects one, then resends it', async ({ page }) => {
     let stopHits = 0
     let stopHeld = false
     let stopReleased = false
@@ -170,7 +172,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     // reachable overlap: Steer hides its confirmed row while its POST is in
     // flight, which reveals Stop; Stop serializes behind that request. Resolve
     // Steer as not_steered so it restores the durable row before handleStop
-    // snapshots and clears it.
+    // snapshots it.
     await page.locator('[data-chat-surface="painted"] .chat__steer').click()
     await expect.poll(() => steerHits).toBe(1)
     const stop = page.locator('[data-chat-surface="painted"] .chat__stop')
@@ -179,13 +181,16 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     resolveSteer()
     await expect.poll(() => stopHits).toBe(1)
     const surface = page.locator('[data-chat-surface="painted"]')
-    await expect(surface.locator('.queued__row')).toHaveCount(0)
+    // Unaccepted, Stop has changed nothing: the row stays, but its actions
+    // are off, since Stop resends the text it captured.
+    await expect(surface.locator('.queued__row')).toHaveCount(1)
+    await expect(surface.locator('.queued__cancel')).toBeDisabled()
     await expect(stop).toBeVisible()
     expect(await stream.state()).toEqual({ requests: 1, open: true, terminals: 0, aborts: 0 })
 
     // Observe every queue DOM mutation during the controlled await, not just
-    // the sentinel text at the end. No queued row (including the original)
-    // may reappear. Keep the Stop response held until natural completion has
+    // the sentinel text at the end. The original row stays and no other
+    // (such as the stale page's) may appear. Keep the Stop response held until natural completion has
     // visibly retired the live action and several paint checkpoints settle.
     await page.evaluate(() => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
@@ -221,11 +226,11 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     expect(stopHeld).toBe(true)
     expect(stopReleased).toBe(false)
     expect(samples.length).toBeGreaterThanOrEqual(4)
-    expect(samples.every(count => count === 0), `queue counts during Stop await: ${samples}`).toBe(true)
-    // With an ordinary non-Goal chat and a synchronously empty ref, natural
-    // completion has no reason to request the stale page at all.
+    expect(samples.every(count => count === 1), `queue counts during Stop await: ${samples}`).toBe(true)
+    // In an ordinary non-Goal chat, natural completion during a pending Stop
+    // must not request the stale page at all.
     expect(staleRefetches).toEqual([])
-    await expect(surface.locator('.queued__row')).toHaveCount(0)
+    await expect(surface.locator('.queued__row')).toHaveCount(1)
 
     resolveStop()
     await expect.poll(() => ordinaryMessageHits).toBe(3)
@@ -238,6 +243,11 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       windowState.observer.disconnect()
       return windowState.samples
     })
-    expect(allSamples.every(count => count === 0), `queue counts through Stop response: ${allSamples}`).toBe(true)
+    // One row until Stop is accepted, then none; never a second or a return.
+    const firstEmpty = allSamples.indexOf(0)
+    expect(firstEmpty, `queue counts through Stop response: ${allSamples}`).toBeGreaterThan(0)
+    expect(allSamples.slice(0, firstEmpty).every(count => count === 1)
+      && allSamples.slice(firstEmpty).every(count => count === 0),
+    `queue counts through Stop response: ${allSamples}`).toBe(true)
   })
 })

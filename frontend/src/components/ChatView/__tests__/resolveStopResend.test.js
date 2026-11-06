@@ -15,7 +15,6 @@ import {
   collapseQueued,
   ownerQueuedSnapshot,
   resolveStopResend,
-  rowsLostToUnansweredStop,
 } from '../resolveStopResend.js'
 
 function snap(overrides = {}) {
@@ -144,47 +143,4 @@ test('collapseQueued joins text by line and de-duplicates files by name', () => 
   ])
   assert.equal(got.text, 'first\nsecond')
   assert.deepEqual(got.attachments.map(a => a.name), ['a.png', 'b.pdf'])
-})
-
-// -- rowsLostToUnansweredStop: what an unanswered request may have cleared --
-const lostEvidence = (overrides = {}) => ({
-  clearedPendingCids: [], serverPending: [], deliveredCids: new Set(), ...overrides,
-})
-
-test('rows an unanswered stop request cleared return to the composer', () => {
-  // The first request cleared c-11 and c-22 but its reply was lost; the
-  // accepted retry cleared nothing more.
-  const snapshot = [snap({ ts: 11, content: 'first' }), snap({ ts: 22, content: 'second' })]
-  const lost = rowsLostToUnansweredStop(snapshot, lostEvidence())
-  assert.deepEqual(lost.map(row => row.cid), ['c-11', 'c-22'])
-})
-
-test('rows resent, still held by the server, or already in the transcript are not lost', () => {
-  const snapshot = [
-    snap({ ts: 11, content: 'resent' }),
-    snap({ ts: 22, content: 'held' }),
-    snap({ ts: 33, content: 'drained into a turn' }),
-    snap({ ts: 44, content: 'lost' }),
-  ]
-  const lost = rowsLostToUnansweredStop(snapshot, lostEvidence({
-    clearedPendingCids: ['c-11'],
-    serverPending: [{ cid: 'c-22', ts: 22 }],
-    deliveredCids: new Set(['c-33']),
-  }))
-  assert.deepEqual(lost.map(row => row.cid), ['c-44'])
-})
-
-test('nothing is lost when the resend already falls back to every row', () => {
-  const snapshot = [snap({ ts: 11, content: 'a' }), snap({ ts: 22, content: 'b' })]
-  assert.deepEqual(rowsLostToUnansweredStop(snapshot, lostEvidence({ clearedPendingCids: null })), [])
-  assert.deepEqual(
-    rowsLostToUnansweredStop(snapshot, lostEvidence({ clearedPendingCids: ['c-99'] })), [],
-    'an unmatched cleared cid resends the whole snapshot',
-  )
-})
-
-test('an unread server queue cannot vouch for a row', () => {
-  const snapshot = [snap({ ts: 11, content: 'a' })]
-  const lost = rowsLostToUnansweredStop(snapshot, lostEvidence({ serverPending: null }))
-  assert.deepEqual(lost.map(row => row.cid), ['c-11'])
 })

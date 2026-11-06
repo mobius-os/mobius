@@ -188,6 +188,12 @@ _clear_after_terminal_generation: dict[str, int] = {}
 # Terminal outcome paired with each handoff generation: explicit Stop uses
 # ``stopped``; restart draining uses ``interrupted``.
 _clear_after_terminal_status: dict[str, str] = {}
+# The last client-identified Stop per chat and its outcome. A client retries a
+# Stop whose reply it lost under the same request id; the retry waits on the
+# transition lock behind the original and gets the original outcome, whose
+# `cleared_pending_cids` the client must resend. In memory: a restart drops it,
+# and a restart drain keeps the queue anyway.
+_answered_stops: dict[str, tuple[str, "ChatStopOutcome"]] = {}
 
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
@@ -3043,6 +3049,7 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
 async def stop_chat(
   chat_id: str | None = None, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
+  request_id: str | None = None,
 ) -> "ChatStopOutcome":
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
@@ -3056,7 +3063,9 @@ async def stop_chat(
   isn't double-sent. The global sweep (`chat_id=None`) returns `[]` for it —
   that path doesn't resend."""
   if chat_id is not None:
-    return await stop_chat_for(chat_id, db=db, actor=actor, actor_id=actor_id)
+    return await stop_chat_for(
+      chat_id, db=db, actor=actor, actor_id=actor_id, request_id=request_id,
+    )
   from app.broadcast import _broadcasts
   # Snapshot `_broadcasts` via `list()` first — iterating the live
   # mapping can raise RuntimeError if a concurrent task creates a
@@ -3149,6 +3158,7 @@ async def stop_browser_grant_runs(grant_id: str, db: Session = None) -> dict:
 async def stop_chat_for(
   chat_id: str, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
+  request_id: str | None = None,
 ) -> "ChatStopOutcome":
   """Kills the agent subprocess for a specific chat.
 
@@ -3174,9 +3184,19 @@ async def stop_chat_for(
   the same per-chat transition gate as sends, settings changes, and provider
   handoffs: once Stop wins that gate, a racing send cannot observe the old
   handle, queue behind it, and then be stranded when Stop releases ownership.
+
+  `request_id` makes a client's Stop idempotent: a retry with the id of the
+  chat's last answered Stop gets that Stop's outcome instead of a second Stop,
+  so a lost reply's cleared set is not lost with it.
   """
   async with chat_queue.get_transition_lock(chat_id):
-    return await _stop_chat_for_locked(chat_id, db=db, actor=actor, actor_id=actor_id)
+    answered = _answered_stops.get(chat_id)
+    if request_id and answered and answered[0] == request_id:
+      return answered[1]
+    outcome = await _stop_chat_for_locked(chat_id, db=db, actor=actor, actor_id=actor_id)
+    if request_id:
+      _answered_stops[chat_id] = (request_id, outcome)
+    return outcome
 
 
 async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:

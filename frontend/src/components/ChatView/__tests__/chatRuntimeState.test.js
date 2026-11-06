@@ -974,11 +974,13 @@ test('only a stream with a read inside one keepalive counts as delivering', () =
 })
 
 function stopReplies(replies, runtimes = []) {
-  const calls = { stop: 0, runtime: 0 }
+  const calls = { stop: [], runtime: 0 }
+  let minted = 0
   return {
     calls,
-    postStop: async () => {
-      const reply = replies[calls.stop++]
+    postStop: async requestId => {
+      const reply = replies[calls.stop.length]
+      calls.stop.push(requestId)
       if (reply instanceof Error) throw reply
       return {
         ok: reply.status < 300,
@@ -987,42 +989,34 @@ function stopReplies(replies, runtimes = []) {
       }
     },
     readRuntime: async () => runtimes[calls.runtime++] ?? null,
+    mintRequestId: () => `stop-${++minted}`,
     wait: async () => {},
   }
 }
 
-test('a Stop the server never answers is retried, then reported unaccepted', async () => {
-  const server = stopReplies([new Error('dropped'), { status: 502 }, { status: 504 }, new Error('dropped')])
+test('a Stop the server never answers is retried under one id, then reported unaccepted', async () => {
+  const server = stopReplies([new Error('dropped'), { status: 502 }, { status: 504 }, new Error('timeout')])
   const outcome = await requestChatStop(server)
-  assert.equal(server.calls.stop, 4, 'every attempt is spent on an unanswered Stop')
-  assert.equal(outcome.accepted, false)
-  assert.equal(outcome.stoppedCleanly, false)
+  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-1', 'stop-1', 'stop-1'])
+  assert.deepEqual(outcome, { accepted: false, stoppedCleanly: false, clearedPendingCids: null })
   assert.equal(server.calls.runtime, 0)
 })
 
-test('a retry answers a Stop whose first reply was lost, and says so', async () => {
-  // The lost request may have cleared the queue; the retry runs after it on
-  // the server and has nothing left to clear.
+test('a retry after a lost reply reuses its request id, so the server can replay what it cleared', async () => {
   const server = stopReplies(
-    [new Error('dropped'), { status: 200, body: { stopped: true, cleared_pending_cids: [] } }],
-    [{ running: false, pending_messages: [{ cid: 'held' }] }],
+    [new Error('dropped'), { status: 200, body: { stopped: true, cleared_pending_cids: ['q1'] } }],
+    [{ running: false }],
   )
   const outcome = await requestChatStop(server)
-  assert.deepEqual(outcome, {
-    accepted: true,
-    stoppedCleanly: true,
-    clearedPendingCids: [],
-    unanswered: true,
-    serverPending: [{ cid: 'held' }],
-  })
+  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-1'])
+  assert.deepEqual(outcome, { accepted: true, stoppedCleanly: true, clearedPendingCids: ['q1'] })
 })
 
 test('a refused Stop is not retried', async () => {
   const server = stopReplies([{ status: 403 }, { status: 200, body: { stopped: true } }])
   const outcome = await requestChatStop(server)
-  assert.equal(server.calls.stop, 1)
+  assert.equal(server.calls.stop.length, 1)
   assert.equal(outcome.accepted, false)
-  assert.equal(outcome.unanswered, false)
 })
 
 test('an interrupt timeout is accepted without a clean stop or a runtime read', async () => {
@@ -1034,17 +1028,17 @@ test('an interrupt timeout is accepted without a clean stop or a runtime read', 
   assert.equal(server.calls.runtime, 0)
 })
 
-test('a Stop still running at confirmation is sent again and keeps the first cleared set', async () => {
+test('a Stop still running at confirmation is sent again as a new Stop and keeps the first cleared set', async () => {
   const server = stopReplies(
     [
       { status: 200, body: { stopped: true, cleared_pending_cids: ['q1'] } },
       { status: 200, body: { stopped: true, cleared_pending_cids: [] } },
     ],
-    [{ running: true, pending_messages: [] }, { running: false, pending_messages: [] }],
+    [{ running: true }, { running: false }],
   )
   const outcome = await requestChatStop(server)
-  assert.equal(server.calls.stop, 2)
+  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-2'],
+    'a deliberate re-stop must not be answered with the first Stop\'s replay')
   assert.equal(outcome.stoppedCleanly, true)
   assert.deepEqual(outcome.clearedPendingCids, ['q1'])
-  assert.equal(outcome.unanswered, false)
 })

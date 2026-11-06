@@ -27,7 +27,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
-import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
+import { api, apiFetch, getToken, jsonOrThrow } from '../../api/client.js'
 import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
@@ -135,12 +135,7 @@ import {
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
-import {
-  collapseQueued,
-  ownerQueuedSnapshot,
-  resolveStopResend,
-  rowsLostToUnansweredStop,
-} from './resolveStopResend.js'
+import { ownerQueuedSnapshot, resolveStopResend } from './resolveStopResend.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -295,6 +290,9 @@ const ChatNetworkInspector = lazy(() => import('./ChatNetworkInspector.jsx'))
 
 
 const CHAT_FETCH_TIMEOUT_MS = 15000
+// Stop holds the chat's transition lock through a bounded interrupt and its
+// escalation; past this a request counts as unanswered and is retried.
+const STOP_REQUEST_TIMEOUT_MS = 20000
 
 const MESSAGE_META_VISIBLE_MS = 5000
 // The floating jump-to-latest control is driven by follow-state plus physical
@@ -875,8 +873,8 @@ export default function ChatView({
   // composer) lives entirely inside usePendingQueue. Every mutation
   // goes through the hook's named ops; reads use pendingQueue.pendingMessages
   // for render and pendingQueue.pendingMessagesRef for closure-safe
-  // synchronous access (handleStop's pre-await clear, fetchMessages'
-  // cid preservation).
+  // synchronous access (handleStop's snapshot and its clear on acceptance,
+  // fetchMessages' cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [], {
     chatId, principalKey: outboxPrincipalKey(getToken()),
   })
@@ -1147,6 +1145,11 @@ export default function ChatView({
   // the await on /chat/stop) would otherwise both snapshot the same
   // pending queue and both call doSend(combined) → duplicate sends.
   const handlingStopRef = useRef(false)
+  // Drives the tray: its row actions are off while a Stop is pending.
+  const [stopPending, setStopPending] = useState(false)
+  // A stream-end refetch that a pending Stop skipped; a Stop the server never
+  // accepts runs it afterwards.
+  const stopSkippedRefetchRef = useRef(false)
 
   // Bumped by handleStop (and any future hard-clear of local state)
   // so any in-flight fetchMessages can't resurrect cleared data.
@@ -1317,11 +1320,6 @@ export default function ChatView({
     if (!cid || sendIntentByCidRef.current.get(cid) !== replacement) return
     if (previous) sendIntentByCidRef.current.set(cid, previous)
     else sendIntentByCidRef.current.delete(cid)
-  }
-
-  function forgetAllSendIntents() {
-    sendIntentByCidRef.current.clear()
-    queuedContinuationRef.current = null
   }
 
   // The first-message exception is shared by every direct/promotion/steer
@@ -1946,8 +1944,9 @@ export default function ChatView({
         // this boundary, so either condition earns one terminal reconcile.
         // While a Stop is in flight it owns the queue: it resends what the
         // server cleared, and a refetch would overwrite the promoted partial.
-        if (endingGoal || (!handlingStopRef.current
-            && pendingQueue.pendingMessagesRef.current.length > 0)) {
+        const queued = pendingQueue.pendingMessagesRef.current.length > 0
+        if (queued && handlingStopRef.current) stopSkippedRefetchRef.current = true
+        if (endingGoal || (queued && !handlingStopRef.current)) {
           fetchMessages({ force: true, authoritative: true })
         }
         setPinnedSettleSeq(seq => seq + 1)
@@ -4463,6 +4462,8 @@ export default function ChatView({
   // and an edit opened during a slow cancellation waits for its outcome
   // instead of racing the DELETE.
   const handleCancelPending = useCallback((cid) => queuedEditOrder.run(cid, async () => {
+    // A pending Stop resends the text it captured; the tray's X is off then.
+    if (handlingStopRef.current) return
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
@@ -4557,6 +4558,7 @@ export default function ChatView({
   }, [chatId, setSendFailure])
 
   const updateQueuedContent = useCallback(async (cid, content) => {
+    if (handlingStopRef.current) return 'stopping'
     const local = await editLocalIntent(cid, {
       chatId, principalKey: outboxPrincipalKey(getToken()), content,
     })
@@ -4609,6 +4611,8 @@ export default function ChatView({
     // and clear it in a finally so transient errors don't strand it.
     if (handlingStopRef.current) return
     handlingStopRef.current = true
+    stopSkippedRefetchRef.current = false
+    setStopPending(true)
     try {
       // An in-flight steer POST must settle before Stop snapshots: its
       // outcome determines whether those rows still belong to the queue or
@@ -4658,17 +4662,17 @@ export default function ChatView({
       const queuedSnapshot = ownerQueuedSnapshot(pendingQueue.pendingMessagesRef.current)
 
       // Nothing local changes until the server accepts the Stop. A Stop it
-      // never answers leaves the tray, steer reservations, send intents and
-      // any queued continuation exactly as they were, and Stop stays offered.
-      // A request that got no reply is retried, so one that did run on the
-      // server is answered by the retry (requestChatStop). An edit or
-      // cancellation opened meanwhile waits for the outcome, so the snapshot
-      // stays what the resend sends.
-      const stopping = requestChatStop({
-        postStop: () => fetch(`${BASE}/api/chat/stop`, {
+      // never answers, or refuses, leaves the tray, steer reservations, send
+      // intents and any queued continuation exactly as they were, says so,
+      // and stays offered. Retries of one Stop share its request id, so the
+      // server answers a retry with the original outcome (requestChatStop).
+      // The tray's row actions are off meanwhile (stopPending).
+      const { accepted, stoppedCleanly, clearedPendingCids } = await requestChatStop({
+        postStop: requestId => apiFetch('/chat/stop', {
           method: 'POST',
-          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ chat_id: chatId }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, request_id: requestId }),
+          timeoutMs: STOP_REQUEST_TIMEOUT_MS,
         }),
         readRuntime: async () => {
           try {
@@ -4678,25 +4682,25 @@ export default function ChatView({
             return null
           }
         },
+        mintRequestId: mintSendCid,
       })
-      for (const row of queuedSnapshot) queuedEditOrder.run(cidOf(row), () => stopping)
-      const {
-        accepted,
-        stoppedCleanly,
-        clearedPendingCids,
-        unanswered,
-        serverPending,
-      } = await stopping
-      if (!accepted) return
+      if (!accepted) {
+        setSendFailure('Möbius couldn’t confirm Stop. Your queued messages are unchanged—try Stop again.')
+        if (stopSkippedRefetchRef.current) fetchMessages({ force: true, authoritative: true })
+        return
+      }
 
-      // The server has cleared its queue (it reports which cids it removed:
-      // null = an older backend without the field). Discard any refetch begun
-      // during the request: it can land after the resend below and overwrite
-      // the promoted partial and the resent turn with older server state.
-      // pendingQueue.clear() updates pendingMessagesRef.current to [] at once.
+      // The server has cleared what it reports (null = an older backend
+      // without the field). Take the captured rows out of the tray; rows
+      // queued since stay. Discard any refetch begun during the request: it
+      // can land after the resend below and overwrite the promoted partial
+      // and the resent turn with older server state. pendingQueue.clear()
+      // updates pendingMessagesRef.current at once.
+      const capturedCids = queuedSnapshot.map(cidOf)
       fetchGenRef.current += 1
-      forgetAllSendIntents()
-      pendingQueue.clear()
+      forgetSendIntent({ cidList: capturedCids })
+      queuedContinuationRef.current = null
+      pendingQueue.clear(capturedCids)
 
       // Resolve WHAT to resend from the queued snapshot + the set the
       // backend reports it actually cleared, via the SHARED, pure
@@ -4712,16 +4716,6 @@ export default function ChatView({
       const resendQueued = () => {
         const { text, attachments } = resolveStopResend(queuedSnapshot, clearedPendingCids)
         doSend(text, { pin: false, attachments, fromComposer: false, returnToComposer: true })
-        if (!unanswered) return
-        // An earlier request got no reply but may have cleared rows the
-        // accepted reply cannot name (rowsLostToUnansweredStop).
-        const deliveredCids = new Set(messagesRef.current
-          .filter(message => message?.role === 'user')
-          .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])]))
-        const lost = collapseQueued(rowsLostToUnansweredStop(queuedSnapshot, {
-          clearedPendingCids, serverPending, deliveredCids,
-        }))
-        appendToComposer(lost.text, lost.attachments)
       }
 
       if (!stoppedCleanly) {
@@ -4809,6 +4803,7 @@ export default function ChatView({
       resendQueued()
     } finally {
       handlingStopRef.current = false
+      setStopPending(false)
     }
   }
 
@@ -6495,6 +6490,7 @@ export default function ChatView({
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
+            stopping={stopPending}
             turnActive={turnActive}
             online={online}
             restarting={restartPending}

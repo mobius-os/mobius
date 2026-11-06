@@ -75,7 +75,7 @@ import { cidOf } from '../messageIdentity.js'
  *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
- *   clear: () => void,
+ *   clear: (cidList?: string[]) => void,
  * }}
  */
 
@@ -451,15 +451,27 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [hydrate])
 
-  const clear = useCallback(() => {
-    if (initialReadPendingRef.current) {
-      for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
+  // Drop every row, or only the rows in `cidList` (what an accepted Stop
+  // took into its resend), keeping rows queued since and their tracking.
+  const clear = useCallback((cidList = null) => {
+    const only = cidList ? new Set(cidList) : null
+    const dropped = only
+      ? pendingMessagesRef.current.filter(row => only.has(cidOf(row)))
+      : pendingMessagesRef.current
+    for (const row of dropped) {
+      const cid = cidOf(row)
+      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+      localMessageCidsRef.current.delete(cid)
+      inFlightCidsRef.current.delete(cid)
     }
-    localMessageCidsRef.current.clear()
-    inFlightCidsRef.current.clear()
-    pendingMessagesRef.current = []
-    setPendingMessages([])
-    applySteerReservations(new Set())
+    if (!only) {
+      localMessageCidsRef.current.clear()
+      inFlightCidsRef.current.clear()
+    }
+    const kept = only ? pendingMessagesRef.current.filter(row => !only.has(cidOf(row))) : []
+    pendingMessagesRef.current = kept
+    setPendingMessages(kept)
+    applySteerReservations(prev => (only ? new Set([...prev].filter(cid => !only.has(cid))) : new Set()))
   }, [applySteerReservations])
 
   // Explicit in-flight controls. add() already marks an optimistic entry
