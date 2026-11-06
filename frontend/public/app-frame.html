@@ -516,6 +516,39 @@
     });
   }
 
+  // The shell hides a parked app with visibility:hidden on an ancestor. When
+  // it shows the app again, Chrome (seen on macOS, where a sandboxed nested
+  // page runs in its own process) can leave a nested document's root scroller
+  // stuck: wheel events still reach the page, but it no longer scrolls until
+  // the owner clicks inside it. Rebuilding that document's own scroller fixes
+  // it; nudging it from the embedding document does not. So each document
+  // (this script runs in every nested srcdoc too, and the verdict is forwarded
+  // down) briefly switches its root scroller's overflow off and back on when
+  // it becomes visible again: immediately, and again once the shown state has
+  // painted. The toggle is synchronous, keeps the scroll offset, and restores
+  // the page's own inline overflow. That is saved per axis: the shorthand reads
+  // empty when only one axis is set inline or the axes differ in priority, so
+  // restoring it would erase a page's one-axis scroll lock.
+  var OVERFLOW_AXES = ['overflow-x', 'overflow-y'];
+  function refreshOwnScrolling() {
+    var root = document.scrollingElement || document.documentElement;
+    var own = OVERFLOW_AXES.map(function (axis) {
+      return [axis, root.style.getPropertyValue(axis), root.style.getPropertyPriority(axis)];
+    });
+    root.style.setProperty('overflow', 'hidden', 'important');
+    void root.offsetHeight;
+    root.style.removeProperty('overflow');
+    own.forEach(function (axis) {
+      if (axis[1]) root.style.setProperty(axis[0], axis[1], axis[2]);
+    });
+  }
+  function refreshOwnScrollingWhenShown() {
+    refreshOwnScrolling();
+    nativeFrame.call(window, function () {
+      nativeFrame.call(window, refreshOwnScrolling);
+    });
+  }
+
   // The app frame's sandbox makes its window.origin opaque, but its URL names
   // the shell's origin, which must have sent the verdict. A nested srcdoc
   // document's URL has no origin ("null"), so it trusts only its embedder.
@@ -526,7 +559,9 @@
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
+    var wasShellHidden = shellHidden;
     shellHidden = msg.visible === false;
+    if (wasShellHidden && !shellHidden) refreshOwnScrollingWhenShown();
     var shouldHold = (shellHidden || msg.covered === true) && msg.backgroundPlayback !== true;
     if (shouldHold && !holding) { holding = true; hold(); }
     else if (!shouldHold && holding) { holding = false; release(); }
