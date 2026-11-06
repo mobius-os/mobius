@@ -40,19 +40,6 @@ test('the row open in the chat box offers no Send now, which would skip the edit
   assert.doesNotMatch(html, /queued__row--in-composer(?:(?!queued__row ).)*queued__steer/s)
 })
 
-test('while a Stop is pending every row action is off, since Stop resends what it captured', () => {
-  const html = renderToStaticMarkup(createElement(QueuedMessages, {
-    items, steerActive: true, stopping: true,
-  }))
-  for (const label of ['Send this queued message now', 'Edit queued message', 'Cancel queued message']) {
-    const buttons = html.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`, 'g')) || []
-    assert.equal(buttons.length, 2, label)
-    assert.ok(buttons.every(button => / disabled=""/.test(button)), `${label} is off`)
-  }
-  const idle = renderToStaticMarkup(createElement(QueuedMessages, { items, steerActive: true }))
-  assert.doesNotMatch(idle, /aria-label="Cancel queued message"[^>]* disabled=""/)
-})
-
 function primaryButton(props) {
   return renderToStaticMarkup(createElement(PrimaryAction, {
     sending: false, listening: false, hasInput: true, hasUploading: false,
@@ -80,6 +67,20 @@ test('an open queued message can be saved while a question waits or the draft up
     'a draft still waits for the question card')
   assert.match(primaryButton({ hasUploading: true }), /aria-label="Send"[^>]*disabled/,
     'a draft still waits for its uploads')
+})
+
+test('an empty box offers to send a held queue instead of the mic', () => {
+  const sendQueue = /<button[^>]*aria-label="Send queued messages"[^>]*>/
+  const html = primaryButton({ hasInput: false, onSendQueue() {} })
+  assert.match(html, sendQueue)
+  assert.doesNotMatch(html.match(sendQueue)[0], /disabled/)
+  assert.match(primaryButton({ hasInput: false, onSendQueue() {}, submissionBlocked: true }),
+    /aria-label="Send queued messages"[^>]*disabled/)
+  assert.match(primaryButton({ hasInput: true, onSendQueue() {} }), /aria-label="Send"/,
+    'typed text is sent as its own message')
+  assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/)
+  assert.match(primaryButton({ hasInput: false, onSendQueue() {}, listening: true }),
+    /aria-label="Stop recording"/)
 })
 
 test('the strip counts the draft\'s files, which stay with the draft', () => {

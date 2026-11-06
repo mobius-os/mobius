@@ -76,10 +76,9 @@ export function chatEntryFrame({
 /** Which controls a chat frame may offer, by activation phase. A saved frame
  * presents before runtime truth, so its liveness, queue and open cards are
  * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
- * activation to settle. Stop (`stop`) waits too, and stays available on a
- * failed activation, where the frame may show a turn that is still running and
- * Stop is the only way to end it; doSend refuses its queued resend then and
- * returns it to the composer. */
+ * activation to settle. Stop (`stop`), whose queue resend is a send, waits
+ * too, and stays available on a failed activation, where the frame may show a
+ * turn that is still running and Stop is the only way to end it. */
 export function liveControlsReady(activationPhase, activationSettled) {
   return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
 }
@@ -683,49 +682,4 @@ export function shouldRetryStopAfterConfirm({
   confirmFailed = false,
 }) {
   return !!requestSucceeded && !confirmFailed && confirmRunning === true
-}
-
-/** Ask the server to Stop one chat. A request with no reply (a dropped
- * connection, a timeout or a 5xx) is retried under the same request id: the
- * server runs one Stop per chat at a time and answers a retry of its last
- * Stop with that Stop's outcome, so the cleared set a lost reply carried is
- * not lost. A stop the runtime still shows running is sent again as a new
- * Stop. A 4xx is a refusal. Changes no local state; the caller does that only
- * once `accepted`. */
-export async function requestChatStop({
-  postStop,
-  readRuntime,
-  mintRequestId,
-  delays = [0, 250, 700, 1200],
-  wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
-}) {
-  const outcome = { accepted: false, stoppedCleanly: false, clearedPendingCids: null }
-  let requestId = mintRequestId()
-  for (const retryDelayMs of delays) {
-    if (retryDelayMs > 0) await wait(retryDelayMs)
-    let res = null
-    try { res = await postStop(requestId) } catch { /* no reply */ }
-    if (!res?.ok) {
-      if (res && res.status < 500) break
-      continue
-    }
-    outcome.accepted = true
-    let data = null
-    try { data = await res.json() } catch { /* legacy success without a body */ }
-    if (outcome.clearedPendingCids === null && Array.isArray(data?.cleared_pending_cids)) {
-      outcome.clearedPendingCids = data.cleared_pending_cids
-    }
-    // {stopped: false}: the interrupt timed out and the runner is still alive.
-    if (!stopRequestSucceeded({ responseOk: true, data })) break
-    const runtime = await readRuntime()
-    const confirm = {
-      confirmRunning: runtime ? runtime.running : null,
-      confirmFailed: runtime == null,
-    }
-    outcome.stoppedCleanly = stopConfirmedIdle({ stopSucceeded: true, ...confirm })
-    if (outcome.stoppedCleanly
-        || !shouldRetryStopAfterConfirm({ requestSucceeded: true, ...confirm })) break
-    requestId = mintRequestId()
-  }
-  return outcome
 }

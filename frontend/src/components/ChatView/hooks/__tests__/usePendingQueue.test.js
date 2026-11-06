@@ -326,52 +326,6 @@ test('hydrate reuses the local row identity when the server row shares its cid',
   assert.equal(list[0].ts, 12345)
 })
 
-test('clear resets state and ref synchronously', () => {
-  // handleStop calls clear() then reads pendingMessagesRef.current
-  // synchronously to decide whether to skip an in-flight fetchMessages.
-  const { result } = renderHook(usePendingQueue)
-  result.current.add(fixtureMsg({ ts: 1 }))
-  result.current.add(fixtureMsg({ cid: 'cid-2', ts: 2 }))
-  result.current.clear()
-  assert.deepEqual(result.current.pendingMessagesRef.current, [])
-})
-
-test('clear(cids) drops only the rows an accepted Stop captured', () => {
-  // A message sent while Stop was pending is not in Stop's resend; it must
-  // stay queued, in flight, and steerable.
-  const { result } = renderHook(usePendingQueue)
-  result.current.add(fixtureMsg({ cid: 'captured', ts: 1 }), { inFlight: false })
-  result.current.add(fixtureMsg({ cid: 'sent-during-stop', ts: 2 }), { inFlight: true })
-  result.current.reserveForSteer(['captured', 'sent-during-stop'])
-  result.current.clear(['captured'])
-  assert.deepEqual(result.current.pendingMessagesRef.current.map(row => row.cid), ['sent-during-stop'])
-  assert.deepEqual([...result.current.steerReservedMessages].map(row => row.cid), ['sent-during-stop'])
-  result.current.hydrate([])
-  assert.deepEqual(result.current.pendingMessagesRef.current.map(row => row.cid), ['sent-during-stop'],
-    'its in-flight mark survives, so a racing reconcile keeps it')
-})
-
-test('stop-timeout: restoring the local snapshot preserves the queue a refetch would drop', () => {
-  // handleStop snapshots the queue, POSTs /chat/stop, and clear()s it once
-  // the server accepts. On an SDK interrupt TIMEOUT the backend has already
-  // cleared persisted pending, so hydrating the empty server response WIPES
-  // the queue while re-adding the snapshot KEEPS it.
-  const { result } = renderHook(usePendingQueue)
-  const snapshot = [
-    fixtureMsg({ cid: 'q1', ts: 11, content: 'first queued' }),
-    fixtureMsg({ cid: 'q2', ts: 22, content: 'second queued' }),
-  ]
-  for (const m of snapshot) result.current.add(m)
-  result.current.clear()
-  assert.deepEqual(result.current.pendingMessagesRef.current, [])
-  result.current.hydrate([])
-  assert.deepEqual(result.current.pendingMessagesRef.current, [],
-    'hydrating the empty server response on a stop timeout drops the queue')
-  for (const m of snapshot) result.current.add(m)
-  const restored = result.current.pendingMessagesRef.current
-  assert.equal(restored.length, 2, 'both queued messages are restored')
-})
-
 test('hydrate([]) PRESERVES an optimistic entry whose POST is still in flight', () => {
   // A reconcile-fetch that lands while an optimistic entry's persistence POST
   // is still in flight must NOT drop it: the server is racing this read.

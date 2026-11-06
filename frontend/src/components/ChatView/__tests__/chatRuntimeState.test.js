@@ -25,7 +25,6 @@ import {
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
   shouldRetireSettledRunMarker,
-  requestChatStop,
   shouldRetryStopAfterConfirm,
   startedMessagesFromResponse,
   stopConfirmedIdle,
@@ -971,74 +970,4 @@ test('only a stream with a read inside one keepalive counts as delivering', () =
   assert.equal(runtimeStreamDelivering({ ...stream, connectionError: 'retrying', lastReadAt: now - 5_000 }), false)
   assert.equal(runtimeStreamDelivering({ ...stream, isStreaming: false, lastReadAt: now - 5_000 }), false)
   assert.ok(RUNTIME_STREAM_FRESH_MS > 30_000, 'longer than the server keepalive interval')
-})
-
-function stopReplies(replies, runtimes = []) {
-  const calls = { stop: [], runtime: 0 }
-  let minted = 0
-  return {
-    calls,
-    postStop: async requestId => {
-      const reply = replies[calls.stop.length]
-      calls.stop.push(requestId)
-      if (reply instanceof Error) throw reply
-      return {
-        ok: reply.status < 300,
-        status: reply.status,
-        json: async () => reply.body,
-      }
-    },
-    readRuntime: async () => runtimes[calls.runtime++] ?? null,
-    mintRequestId: () => `stop-${++minted}`,
-    wait: async () => {},
-  }
-}
-
-test('a Stop the server never answers is retried under one id, then reported unaccepted', async () => {
-  const server = stopReplies([new Error('dropped'), { status: 502 }, { status: 504 }, new Error('timeout')])
-  const outcome = await requestChatStop(server)
-  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-1', 'stop-1', 'stop-1'])
-  assert.deepEqual(outcome, { accepted: false, stoppedCleanly: false, clearedPendingCids: null })
-  assert.equal(server.calls.runtime, 0)
-})
-
-test('a retry after a lost reply reuses its request id, so the server can replay what it cleared', async () => {
-  const server = stopReplies(
-    [new Error('dropped'), { status: 200, body: { stopped: true, cleared_pending_cids: ['q1'] } }],
-    [{ running: false }],
-  )
-  const outcome = await requestChatStop(server)
-  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-1'])
-  assert.deepEqual(outcome, { accepted: true, stoppedCleanly: true, clearedPendingCids: ['q1'] })
-})
-
-test('a refused Stop is not retried', async () => {
-  const server = stopReplies([{ status: 403 }, { status: 200, body: { stopped: true } }])
-  const outcome = await requestChatStop(server)
-  assert.equal(server.calls.stop.length, 1)
-  assert.equal(outcome.accepted, false)
-})
-
-test('an interrupt timeout is accepted without a clean stop or a runtime read', async () => {
-  const server = stopReplies([{ status: 200, body: { stopped: false, cleared_pending_cids: ['q1'] } }])
-  const outcome = await requestChatStop(server)
-  assert.equal(outcome.accepted, true)
-  assert.equal(outcome.stoppedCleanly, false)
-  assert.deepEqual(outcome.clearedPendingCids, ['q1'])
-  assert.equal(server.calls.runtime, 0)
-})
-
-test('a Stop still running at confirmation is sent again as a new Stop and keeps the first cleared set', async () => {
-  const server = stopReplies(
-    [
-      { status: 200, body: { stopped: true, cleared_pending_cids: ['q1'] } },
-      { status: 200, body: { stopped: true, cleared_pending_cids: [] } },
-    ],
-    [{ running: true }, { running: false }],
-  )
-  const outcome = await requestChatStop(server)
-  assert.deepEqual(server.calls.stop, ['stop-1', 'stop-2'],
-    'a deliberate re-stop must not be answered with the first Stop\'s replay')
-  assert.equal(outcome.stoppedCleanly, true)
-  assert.deepEqual(outcome.clearedPendingCids, ['q1'])
 })

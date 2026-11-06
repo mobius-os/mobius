@@ -144,7 +144,7 @@ test('retained sends move into the tray while authoritative failures restore the
   )
   assert.match(
     freshSend,
-    /\} else \{\s*failedAttempt = returnFailedSend\(sendText\)/,
+    /else \{[\s\S]*?rememberFailedAttempt\(failedAttempt\)[\s\S]*?restoreComposerAfterFailedSend\(\)/,
     'only the non-retained branch may restore the composer',
   )
   assert.match(chatView, /if \(keepQueued\) \{[\s\S]*?status: 'locally_queued', cid: silentCid/,

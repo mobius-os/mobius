@@ -1,21 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { getAuthHeaders, BASE } from '../../api/client.js'
 
-// A saved draft or queued message stores only its files' server metadata. Give
-// each one the chip id that removal and rendering key on; a live chip keeps its own.
-function asChips(fileList) {
-  return (Array.isArray(fileList) ? fileList : []).map((file, index) => ({
-    id: file.id || `restored-${index}-${file.name || 'file'}`,
-    name: file.name,
-    size: file.size,
-    mime_type: file.mime_type,
-    objectUrl: file.objectUrl || null,
-    status: file.status || 'done',
-    error: file.error || null,
-    group: file.group,
-  }))
-}
-
 /**
  * Hook encapsulating file upload state and API calls for chat attachments.
  *
@@ -31,7 +16,17 @@ function asChips(fileList) {
  * }}
  */
 export default function useFileUpload({ chatId, initialFiles = [], onFilesChange }) {
-  const [files, setFiles] = useState(() => asChips(initialFiles))
+  const normalizedInitialFiles = initialFiles.map((file, index) => ({
+    id: file.id || `restored-${index}-${file.name || 'file'}`,
+    name: file.name,
+    size: file.size,
+    mime_type: file.mime_type,
+    objectUrl: file.objectUrl || null,
+    status: file.status || 'done',
+    error: file.error || null,
+    group: file.group,
+  }))
+  const [files, setFiles] = useState(() => normalizedInitialFiles)
   // Keep a ref in sync so the unmount cleanup can revoke object URLs
   // without closing over a stale `files` state value.
   const filesRef = useRef(files)
@@ -213,7 +208,8 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
   }, [clearFiles, discardUpload])
 
   const restoreFiles = useCallback((fileList) => {
-    commitFiles(asChips(fileList))
+    const restored = Array.isArray(fileList) ? fileList : []
+    commitFiles(restored)
   }, [commitFiles])
 
   return { files, addFiles, removeFile, clearFiles, restoreFiles, releaseFiles, discardFiles }

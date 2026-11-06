@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import { hasSendablePayload } from '../composerSubmission.js'
+import { hasSendablePayload, queueAwaitsOwnerSend } from '../composerSubmission.js'
 
 test('plain text remains sendable without an attachment', () => {
   assert.equal(hasSendablePayload('hello', []), true)
@@ -60,11 +60,9 @@ test('failed recovery records the exact content passed by both send paths', () =
   const end = source.indexOf('\n  }, [', start)
   const doSend = source.slice(start, end)
   const queueSend = doSend.indexOf('queueRequest = sendAfterSettingsSaved(\n          text,')
-  const queueRecovery = doSend.indexOf('failedAttempt = returnFailedSend(text)', queueSend)
+  const queueRecovery = doSend.indexOf('transportContent: text,', queueSend)
   const contextSend = doSend.indexOf('const result = await sendAfterSettingsSaved(\n        sendText,')
-  const contextRecovery = doSend.indexOf('failedAttempt = returnFailedSend(sendText)', contextSend)
-  // The helper records what each path hands it as the attempt's transport content.
-  assert.match(doSend, /function returnFailedSend\(transportContent\) \{\s*const attempt = \{[^}]*transportContent,/)
+  const contextRecovery = doSend.indexOf('transportContent: sendText,', contextSend)
 
   assert.ok(queueSend >= 0 && queueRecovery > queueSend && queueRecovery < contextSend,
     'queued/raw recovery must record the raw content passed to transport')
@@ -87,4 +85,14 @@ test('a fresh send lands its pin once, at submit, not again on acknowledgement',
   assert.equal(landings.length, 1, 'the fresh path commits its send intent exactly once')
   assert.ok(transport > 0 && landings[0] < transport,
     'the single landing happens at submit, before the POST is acknowledged')
+})
+
+test('a queue a Stop held waits for the owner\'s send only while no turn runs', () => {
+  const held = [{ cid: 'a', content: 'first', held: true }, { cid: 'b', content: 'second', held: true }]
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: held }), true)
+  assert.equal(queueAwaitsOwnerSend({ turnActive: true, pendingMessages: held }), false,
+    'during a turn the queue drains after it as usual')
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [{ cid: 'a' }] }), false,
+    'an ordinary queue keeps its Stop')
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [] }), false)
 })

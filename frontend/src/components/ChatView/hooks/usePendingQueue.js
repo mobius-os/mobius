@@ -34,10 +34,8 @@ import { cidOf } from '../messageIdentity.js'
  *   - attachments?: array
  *
  * Critical contract: pendingMessagesRef.current MUST update
- * SYNCHRONOUSLY on every mutation. Once the server accepts a Stop,
- * handleStop clears the queue and resends from its snapshot in the same
- * task; if any mutation here only scheduled a render, doSend and the
- * natural onStreamEnd handler would read stale ref contents.
+ * SYNCHRONOUSLY on every mutation: doSend and the natural onStreamEnd
+ * handler read it in the same task as a mutation.
  *
  * Reconcile contract: hydrate() is a MERGE, not a wholesale replace.
  * It must never drop an optimistic-only entry whose own persistence
@@ -75,7 +73,6 @@ import { cidOf } from '../messageIdentity.js'
  *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
- *   clear: (cidList?: string[]) => void,
  * }}
  */
 
@@ -451,27 +448,16 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [hydrate])
 
-  // Drop every row, or only the rows in `cidList` (what an accepted Stop
-  // took into its resend), keeping rows queued since and their tracking.
-  const clear = useCallback((cidList = null) => {
-    const only = cidList ? new Set(cidList) : null
-    const dropped = only
-      ? pendingMessagesRef.current.filter(row => only.has(cidOf(row)))
-      : pendingMessagesRef.current
-    for (const row of dropped) {
-      const cid = cidOf(row)
-      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-      localMessageCidsRef.current.delete(cid)
-      inFlightCidsRef.current.delete(cid)
+  // A chat or principal switch starts from an empty queue.
+  const clear = useCallback(() => {
+    if (initialReadPendingRef.current) {
+      for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
     }
-    if (!only) {
-      localMessageCidsRef.current.clear()
-      inFlightCidsRef.current.clear()
-    }
-    const kept = only ? pendingMessagesRef.current.filter(row => !only.has(cidOf(row))) : []
-    pendingMessagesRef.current = kept
-    setPendingMessages(kept)
-    applySteerReservations(prev => (only ? new Set([...prev].filter(cid => !only.has(cid))) : new Set()))
+    localMessageCidsRef.current.clear()
+    inFlightCidsRef.current.clear()
+    pendingMessagesRef.current = []
+    setPendingMessages([])
+    applySteerReservations(new Set())
   }, [applySteerReservations])
 
   // Explicit in-flight controls. add() already marks an optimistic entry
@@ -610,7 +596,6 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     restoreByCid,
     hydrate,
     hydrateFromTranscript,
-    clear,
     markInFlight,
     clearInFlight,
   }

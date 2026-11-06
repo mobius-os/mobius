@@ -13,3 +13,13 @@ export function hasSendablePayload(text, attachments = []) {
     && (attachment.status === undefined || attachment.status === 'done')
   ))
 }
+
+/**
+ * Whether the queue waits for the owner's send: a Stop held it (the server
+ * marks each held row `held`) and no turn is running. The composer then offers
+ * an empty Send that runs the whole queue, instead of a Stop with nothing left
+ * to stop.
+ */
+export function queueAwaitsOwnerSend({ turnActive, pendingMessages }) {
+  return !turnActive && (pendingMessages || []).some(row => row?.held === true)
+}

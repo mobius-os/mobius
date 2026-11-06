@@ -28,9 +28,7 @@ import {
  * opens the message in the chat box (ChatInputBar's history), where Enter
  * saves it in the same queue position; while it is open there the row says
  * so instead of offering the pencil. The X cancels (DELETE the pending
- * message on the backend). While a Stop is pending (`stopping`) the rows'
- * actions are off: Stop resends the text it captured, so an edit or cancel
- * then would be lost.
+ * message on the backend).
  *
  * Visual model: a soft, slightly raised stack — distinct from the chat
  * transcript so it's clear these are "not yet sent" turns. Lives between
@@ -39,7 +37,7 @@ import {
 export default function QueuedMessages({
   items, onCancel, onEditInComposer, inComposerCid = null, onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
-  restarting = false, stopping = false,
+  restarting = false,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -212,7 +210,7 @@ export default function QueuedMessages({
                     onClick={() => onSteerOne?.(cidOf(msg))}
                     aria-label="Send this queued message now"
                     title="Send now"
-                    disabled={steerBusy || stopping}
+                    disabled={steerBusy}
                   >
                     <DoubleChevronRight width={16} height={16} aria-hidden="true" />
                   </button>
@@ -229,7 +227,7 @@ export default function QueuedMessages({
                     onClick={() => onEditInComposer?.(cidOf(msg))}
                     aria-label="Edit queued message"
                     title={rejected ? 'Retry keeps the original message unchanged.' : 'Edit in the chat box'}
-                    disabled={rejected || stopping}
+                    disabled={rejected}
                   >
                     <Pencil width={16} height={16} aria-hidden="true" />
                   </button>
@@ -241,7 +239,6 @@ export default function QueuedMessages({
                   onClick={() => onCancel?.(cidOf(msg))}
                   aria-label={rejected ? 'Discard local copy of this message' : 'Cancel queued message'}
                   title={rejected ? 'Discard local copy' : 'Cancel'}
-                  disabled={stopping}
                 >
                   <X width={16} height={16} aria-hidden="true" />
                 </button>
