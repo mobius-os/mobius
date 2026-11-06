@@ -526,15 +526,21 @@
   // down) briefly switches its root scroller's overflow off and back on when
   // it becomes visible again: immediately, and again once the shown state has
   // painted. The toggle is synchronous, keeps the scroll offset, and restores
-  // the page's own inline value.
+  // the page's own inline overflow. That is saved per axis: the shorthand reads
+  // empty when only one axis is set inline or the axes differ in priority, so
+  // restoring it would erase a page's one-axis scroll lock.
+  var OVERFLOW_AXES = ['overflow-x', 'overflow-y'];
   function refreshOwnScrolling() {
     var root = document.scrollingElement || document.documentElement;
-    var value = root.style.getPropertyValue('overflow');
-    var priority = root.style.getPropertyPriority('overflow');
+    var own = OVERFLOW_AXES.map(function (axis) {
+      return [axis, root.style.getPropertyValue(axis), root.style.getPropertyPriority(axis)];
+    });
     root.style.setProperty('overflow', 'hidden', 'important');
     void root.offsetHeight;
-    if (value) root.style.setProperty('overflow', value, priority);
-    else root.style.removeProperty('overflow');
+    root.style.removeProperty('overflow');
+    own.forEach(function (axis) {
+      if (axis[1]) root.style.setProperty(axis[0], axis[1], axis[2]);
+    });
   }
   function refreshOwnScrollingWhenShown() {
     refreshOwnScrolling();

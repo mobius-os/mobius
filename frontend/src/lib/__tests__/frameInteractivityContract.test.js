@@ -273,14 +273,29 @@ function bootFrame({ locationOrigin = SHELL_ORIGIN, origin = 'null' } = {}) {
   const document = new FakeDocument()
   const childFrames = []
   document.currentScript = { textContent: source }
-  // The root scroller, recording every overflow write and forced layout.
+  // The root scroller's inline style, with CSSOM shorthand semantics: the
+  // overflow shorthand writes and removes both axes, and reads as empty unless
+  // both axes are set with the same value and priority. Records every write
+  // and forced layout.
   const rootWrites = []
+  const axes = ['overflow-x', 'overflow-y']
   const rootStyle = {
     props: new Map(),
-    getPropertyValue(name) { return this.props.get(name)?.[0] ?? '' },
-    getPropertyPriority(name) { return this.props.get(name)?.[1] ?? '' },
-    setProperty(name, value, priority = '') { this.props.set(name, [value, priority]); rootWrites.push(value) },
-    removeProperty(name) { this.props.delete(name); rootWrites.push('') },
+    names(name) { return name === 'overflow' ? axes : [name] },
+    read(name) {
+      const [first, ...rest] = this.names(name).map((n) => this.props.get(n))
+      return first && rest.every((d) => d && d[0] === first[0] && d[1] === first[1]) ? first : null
+    },
+    getPropertyValue(name) { return this.read(name)?.[0] ?? '' },
+    getPropertyPriority(name) { return this.read(name)?.[1] ?? '' },
+    setProperty(name, value, priority = '') {
+      for (const n of this.names(name)) this.props.set(n, [value, priority])
+      rootWrites.push(`${name}:${value}${priority ? '!' : ''}`)
+    },
+    removeProperty(name) {
+      for (const n of this.names(name)) this.props.delete(n)
+      rootWrites.push(`-${name}`)
+    },
   }
   document.scrollingElement = { style: rootStyle, get offsetHeight() { rootWrites.push('layout'); return 0 } }
   document.dispatchEvent = (event) => { visibilityEvents.push(event.type) }
@@ -766,16 +781,38 @@ test('a re-shown document rebuilds its own root scroller, keeping the page\'s va
 
   app.shell({ visible: false })
   app.shell({ visible: true })
-  assert.deepEqual(app.rootWrites, ['hidden', 'layout', 'auto'], 'rebuilt at once')
+  const once = ['overflow:hidden!', 'layout', '-overflow', 'overflow-x:auto', 'overflow-y:auto']
+  assert.deepEqual(app.rootWrites, once, 'rebuilt at once')
   app.paint()
   app.paint()
-  assert.deepEqual(app.rootWrites, ['hidden', 'layout', 'auto', 'hidden', 'layout', 'auto'], 'and again once shown')
+  assert.deepEqual(app.rootWrites, [...once, ...once], 'and again once shown')
   assert.equal(app.rootStyle.getPropertyValue('overflow'), 'auto')
 
   const plain = bootFrame()
   plain.shell({ visible: false })
   plain.shell({ visible: true })
-  assert.equal(plain.rootStyle.getPropertyValue('overflow'), '', 'no inline value is left behind')
+  assert.deepEqual([...plain.rootStyle.props], [], 'no inline value is left behind')
+})
+
+test('the scroller rebuild keeps a page\'s one-axis and mixed-priority overflow', () => {
+  // The shorthand reads empty for these, so they must be restored per axis.
+  const oneAxis = bootFrame()
+  oneAxis.rootStyle.setProperty('overflow-y', 'hidden')
+  oneAxis.shell({ visible: false })
+  oneAxis.shell({ visible: true })
+  oneAxis.paint(); oneAxis.paint()
+  assert.deepEqual([...oneAxis.rootStyle.props], [['overflow-y', ['hidden', '']]])
+
+  const mixed = bootFrame()
+  mixed.rootStyle.setProperty('overflow-x', 'hidden', 'important')
+  mixed.rootStyle.setProperty('overflow-y', 'auto')
+  mixed.shell({ visible: false })
+  mixed.shell({ visible: true })
+  mixed.paint(); mixed.paint()
+  assert.deepEqual([...mixed.rootStyle.props].sort(), [
+    ['overflow-x', ['hidden', 'important']],
+    ['overflow-y', ['auto', '']],
+  ])
 })
 
 test('the frame script can never end its own element early', () => {
