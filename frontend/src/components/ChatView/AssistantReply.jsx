@@ -1,18 +1,28 @@
 /* One reply owns live/saved source rows, continuous prose, its final References,
-   and the one action row at its end: its time, Copy of its answer, and Try
-   again where offered. */
+   and the one action row at its end: Copy of its answer and, on the reply
+   that ends the agent's stretch (before the owner next speaks), its time. */
 import { Fragment, memo, useMemo, useContext } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import { renderedReplyClipboard, replyOutcome } from './messageCopy.js'
-import { ownsRecoveryAction } from './recoveryCard.js'
 import { carryDurableBlockState, streamItemsToAssistantPayload } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
 import { mergeProjectedActivity } from './peerTimeline.js'
 import { presentAssistantReply, presentAssistantActivity, replyQuestionSuppression } from './assistantReplies.js'
 import { PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
+
+/** Whether a reply ends the agent's stretch: no other reply follows before
+ * the next visible row (an owner message or a visible marker). Answered
+ * cards, waits and helper results are hidden carriers, not a break, and the
+ * live reply's placeholder is a group, so an earlier reply hands its time
+ * over as soon as the next one starts. */
+export function endsAgentStretch(messages, replyGroups, group) {
+  let next = group.end + 1
+  while (messages[next]?.hidden) next += 1
+  return !replyGroups.has(next)
+}
 
 // Both the component and payload stay memoized: a composer edit must not
 // recreate the expensive answer tree or its live-to-saved disclosure identities.
@@ -28,9 +38,9 @@ function AssistantReply({
   chatId,
   isStreaming = false,
   isLastMsg = true,
+  endsStretch = true,
   metaVisible = false,
   onRevealMeta,
-  onTryAgain,
   onBranch,
   pendingQuestionRef,
   resumeCardRef,
@@ -83,18 +93,6 @@ function AssistantReply({
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
   const branchThroughId = rows[rows.length - 1].message.id
   const metaKey = presentationRows[0].key
-  // An error card that owns recovery already offers Try now or Resume. Any
-  // other failure (a plain provider error) leaves Try again as the way on.
-  const cardOwnsRecovery = ownsRecoveryAction({
-    block: outcome?.endingError,
-    // endingError is by definition the last row's last rendered entry.
-    entryIndex: 0,
-    lastEntryIndex: 0,
-    isLastMessage: isLastMsg,
-    canResume: !!messageProps.onResume,
-  })
-  const tryAgain = outcome && onTryAgain && !cardOwnsRecovery
-    ? () => onTryAgain(metaKey) : undefined
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     onClick={outcome && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
@@ -156,11 +154,10 @@ function AssistantReply({
     {/* Mounted while streaming too, empty: settling fills the reserved line
         instead of adding one under a followed transcript. */}
     <MessageMetaRow
-      timestamp={outcome ? presentationRows[0].message.ts : null}
+      timestamp={outcome && endsStretch ? presentationRows[0].message.ts : null}
       copy={answerText ? button => renderedReplyClipboard(
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}
-      onTryAgain={tryAgain}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.
       branch={outcome && onBranch && branchThroughId != null
