@@ -3251,7 +3251,10 @@ async def _stop_chat_for_locked(
   # lock — generation is its own state). The lock acquisition is bounded by
   # TERMINAL_LOCK_TIMEOUT_SECS so a wedged lock holder can't hang Stop; on a
   # timeout or a failed hold the queue stays as it was and Stop issues no
-  # receipt. Holding deletes nothing, so it is safe inside a restart drain too.
+  # receipt. The owner's typed rows survive (held), so it is safe inside a
+  # restart drain too; what HoldPending drops (app, guest and agent rows,
+  # queued helper results, retired Goal controls) a restart would not run
+  # for the stopped work either.
   log = _get_logger()
   queue_held = False
   if not preserve_pending:

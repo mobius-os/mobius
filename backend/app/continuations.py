@@ -138,6 +138,17 @@ def is_owner_typed(message: object) -> bool:
   )
 
 
+def release_holds(rows: list[Any], released_at: str) -> list[Any]:
+  """Return the queue with every hold released. The owner's send is owner
+  input now, so each released row is stamped with that time: a Goal a Stop
+  paused resumes for it like for a freshly typed message."""
+  return [
+    {**{k: v for k, v in row.items() if k != "held"}, "_owner_input_at": released_at}
+    if isinstance(row, Mapping) and row.get("held") else row
+    for row in rows
+  ]
+
+
 def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
   """Whether the queue holds work that can run without the owner: any row a
   Stop did not hold. Held rows are not runnable work, so checks that mean

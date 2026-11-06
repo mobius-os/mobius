@@ -1762,7 +1762,7 @@ def test_reconciliation_works_independent_of_actor():
 # These commands were imported but never actually dispatched against the real
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
-OWNER = {"_owner_input_at": "2026-11-06T10:00:00+00:00"}
+OWNER = {"_owner_input_at": "2020-01-01T10:00:00+00:00"}
 
 
 def test_hold_pending_keeps_owner_rows_and_drops_app_and_guest_rows(actor):
@@ -2082,8 +2082,8 @@ def test_promote_pending_skips_held_rows_until_the_owner_releases_them(actor):
 
 
 def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
-  """The owner's empty send: the held rows become the same combined turn the
-  queue would normally drain into."""
+  """The owner's empty send: released, the held rows become the same combined
+  turn the queue would normally drain into, as owner input of that moment."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -2091,9 +2091,10 @@ def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
       {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
     ],
   )
-  result = _await(actor.submit(PromotePending(
-    chat_id="c1", run_token="rt1", release_held=True,
-  )))
+  assert _await(actor.submit(ReleaseHeld(chat_id="c1"))) == {"released": 2}
+  released = _load_chat()["pending_messages"]
+  assert all(row["_owner_input_at"] > OWNER["_owner_input_at"] for row in released)
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
   assert result["promoted"]["content"] == "first\nsecond"
   assert result["promoted"]["_consumed_cids"] == ["a", "b"]
   chat = _load_chat()
@@ -2145,9 +2146,9 @@ def test_a_machine_turn_leaves_the_held_queue_held(actor):
   assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]
 
 
-def test_an_empty_send_runs_the_held_rows_before_a_queued_machine_row(actor):
-  """The held rows are the one combined turn an empty Send starts; a hidden
-  machine row queued ahead of them keeps its place behind that turn."""
+def test_a_released_queue_keeps_its_order_behind_a_queued_machine_row(actor):
+  """Released rows are ordinary queue rows again: a hidden machine row queued
+  ahead of them runs first, and the owner's rows follow as their own turn."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -2157,11 +2158,26 @@ def test_an_empty_send_runs_the_held_rows_before_a_queued_machine_row(actor):
       {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
     ],
   )
-  result = _await(actor.submit(PromotePending(
-    chat_id="c1", run_token="rt1", release_held=True,
-  )))
-  assert result["promoted"]["content"] == "first\nsecond"
-  assert [m["cid"] for m in _load_chat()["pending_messages"]] == ["w"]
+  _await(actor.submit(ReleaseHeld(chat_id="c1")))
+  first = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert first["promoted"]["_consumed_cids"] == ["w"]
+  second = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt2")))
+  assert second["promoted"]["content"] == "first\nsecond"
+
+
+def test_a_guest_message_does_not_release_the_owners_held_rows():
+  from app.continuations import is_owner_typed
+  guest = {"role": "user", "content": "guest", "_browser_grant_id": "grant", **OWNER}
+  assert is_owner_typed(guest) is False
+  assert is_owner_typed({**guest, "_browser_grant_id": None}) is True
+
+
+def test_a_steered_held_row_reaches_the_transcript_without_its_hold(actor):
+  from app.chat_writer import _pending_messages_for_transcript
+  [stored] = _pending_messages_for_transcript(
+    [{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}], [],
+  )
+  assert "held" not in stored
 
 
 def test_release_held_rejoins_the_ordinary_queue(actor):

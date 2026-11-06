@@ -81,16 +81,14 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 log = logging.getLogger(__name__)
 
 
-async def start_queued_owner_continuation(
-  chat_id: str, db: Session, *, release_held: bool = False,
-) -> dict | None:
+async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
   """Start an already-committed owner response through the ordinary queue.
 
   Caller holds the queue lock (saved input also holds the transition gate).
   A still-finishing publishing turn
   owns its terminal drain; otherwise this is the one immediate admission path
   shared by saved questions, sealed consumer outcomes and the owner's empty
-  send (`release_held`).
+  send.
   """
   if is_chat_running(chat_id):
     return None
@@ -103,11 +101,9 @@ async def start_queued_owner_continuation(
   try:
     drain_token = alloc_run_token()
     messages, next_user, session_id = await chat_queue.promote_pending_messages_locked(
-      db, chat_id, drain_token, release_held=release_held,
+      db, chat_id, drain_token,
     )
     if not next_user:
-      if release_held:
-        raise HTTPException(409, detail="Nothing is queued to send.")
       raise HTTPException(503, detail="Could not resume the question; please try again.")
     get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
     _schedule_continuation(
@@ -120,31 +116,40 @@ async def start_queued_owner_continuation(
     raise
 
 
-async def _send_queue(chat_id: str, db: Session, principal: Principal):
-  """The owner's empty send: start the next turn from the queued messages.
+async def _send_queue(
+  chat_id: str, db: Session, principal: Principal, restore_archived: bool,
+):
+  """The owner's empty send: release the queue a Stop held.
 
-  After a Stop holds the queue, nothing runs it until the owner sends. It
-  takes exactly the admission an ordinary owner message would: while other
-  work owns the chat (a running turn, a restart drain, an activation, an
-  auto-resuming provider-limit park) the held rows rejoin the ordinary queue
-  and drain after that work; otherwise they start now as one turn.
+  The held rows rejoin the ordinary queue as owner input of this moment, so
+  they take exactly the admission an ordinary owner message would: while
+  other work owns the chat (a running turn, a restart drain, an activation,
+  an auto-resuming provider-limit park) they drain after it; otherwise the
+  queue starts now, as the same turn it would normally drain into. A shared
+  browser guest cannot send the owner's queue: it would run as the owner's
+  work, outside the guest's revocable grant.
   """
-  if not is_owner_input_principal(principal):
+  if not is_owner_input_principal(principal) or principal.browser is not None:
     raise HTTPException(403, detail="Only the owner can send queued messages.")
+  from app.chat_writer import ReleaseHeld
+  await await_ack(get_writer().submit(ReleaseHeld(
+    chat_id=chat_id, restore_archived=restore_archived,
+  )))
+  db.expire_all()
+  chat = db.get(models.Chat, chat_id)
+  if not has_runnable_pending(chat.pending_messages):
+    raise HTTPException(409, detail="Nothing is queued to send.")
   from app.platform_restart import activation_barrier_wait_id
   if (
     is_chat_running(chat_id) or is_draining()
     or activation_barrier_wait_id(db, chat_id) is not None
     or _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
   ):
-    from app.chat_writer import ReleaseHeld
-    await await_ack(get_writer().submit(ReleaseHeld(chat_id=chat_id)))
-    db.expire_all()
     return JSONResponse(status_code=202, content={
       "status": "queued", "running": is_chat_running(chat_id),
     })
   try:
-    started = await start_queued_owner_continuation(chat_id, db, release_held=True)
+    started = await start_queued_owner_continuation(chat_id, db)
   except chat_queue.PendingAdmissionBlocksPromotion as exc:
     if exc.reason == "activation":
       raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
@@ -1467,7 +1472,7 @@ async def _send_message_locked(
   ) is None:
     raise _model_selection_required_conflict()
   if body.continuation == "queue":
-    return await _send_queue(chat_id, db, principal)
+    return await _send_queue(chat_id, db, principal, restore_archived)
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,

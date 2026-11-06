@@ -13,7 +13,7 @@ from app import chat as chat_mod
 from app import chat_queue, models
 
 
-OWNER = {"_owner_input_at": "2026-11-06T10:00:00+00:00"}
+OWNER = {"_owner_input_at": "2020-01-01T10:00:00+00:00"}
 
 
 def queue(db, chat, *rows):
@@ -158,3 +158,58 @@ def test_held_rows_are_not_runnable_work(db, chat):
   assert chat_mod.is_chat_busy(db, chat) is False
   park = models.ChatRun(id="p", chat_id=chat.id, status="parked", park_reason="compaction")
   assert chat_mod._park_continues_automatically(chat, park) is True
+
+
+def test_a_browser_guest_cannot_send_the_owners_held_queue(db, chat, scheduled):
+  """The released queue would run as the owner's work, outside the guest's
+  revocable grant, so the guest is refused before anything is released."""
+  from types import SimpleNamespace
+  from fastapi import HTTPException
+  from app.deps import Principal
+  from app.routes import chats_stream
+  queue(db, chat, ("a", "first"))
+  chat.pending_messages = [{**chat.pending_messages[0], "held": True}]
+  db.commit()
+  guest = Principal(owner=None, app_id=None, scope="owner", browser=SimpleNamespace(grant_id="grant"))
+
+  with pytest.raises(HTTPException) as refused:
+    asyncio.run(chats_stream._send_queue(chat.id, db, guest, False))
+
+  assert refused.value.status_code == 403
+  assert pending(db, chat) == [("a", True)]
+  assert scheduled == []
+
+
+def test_an_empty_send_is_fresh_owner_input_for_a_goal_stop_paused(
+  client, auth, db, chat, scheduled,
+):
+  """The rows were typed before Stop; pressing Send is the owner's input now,
+  so the Goal the Stop paused may resume for it."""
+  from app.goals import has_owner_input_after_hold, stage_goal_hold
+  goal = models.ChatGoal(id="g", chat_id=chat.id, objective="Finish", revision=1,
+                         plan_json={"tasks": []})
+  db.add(goal)
+  stage_goal_hold(goal, cause="stop", actor="owner", source_id="stop")
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+
+  response = send(client, auth, chat, content="", continuation="queue")
+
+  assert response.status_code == 202, response.text
+  db.expire_all()
+  run = db.get(models.ChatRun, scheduled[0]["run_token"])
+  assert has_owner_input_after_hold(run, db.get(models.ChatGoal, "g")) is True
+
+
+def test_an_empty_send_restores_an_archived_chat_like_a_typed_one(client, auth, db, chat, scheduled):
+  from datetime import UTC, datetime
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+  db.expire_all()
+  db.get(models.Chat, chat.id).archived_at = datetime.now(UTC)
+  db.commit()
+
+  assert send(client, auth, chat, content="", continuation="queue").status_code == 202
+
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).archived_at is None

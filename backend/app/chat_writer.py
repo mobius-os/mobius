@@ -1079,11 +1079,6 @@ class PromotePending(_Command):
   # Only the actual terminal drain may recover an unhanded Goal. Queue
   # sweeps and ordinary promotions carry no finishing-attempt authority.
   ending_run_token: str = ""
-  # The owner's empty Send: the rows a Stop held (`HoldPending`) start as
-  # one turn and every hold is released. Without it, held rows never start
-  # by themselves; a promotion that starts an owner-typed row releases them
-  # so they follow it.
-  release_held: bool = False
 
 
 @dataclass
@@ -1128,13 +1123,15 @@ class UpdatePending(_Command):
 
 @dataclass
 class ReleaseHeld(_Command):
-  """The owner's empty Send while other work owns the chat (a running turn,
-  a restart, an activation or a provider-limit park): the held rows rejoin
-  the ordinary queue and drain after that work, exactly as a message the
-  owner typed then would. Returns `{"released"}`."""
+  """The owner's empty Send: the held rows rejoin the ordinary queue as owner
+  input of this moment and run at the ordinary turn boundary, now or after
+  the work that owns the chat, exactly as a message the owner typed then
+  would. Like a typed send it restores an archived chat. Returns
+  `{"released"}`."""
 
   chat_id: str = ""
   run_token: str = ""
+  restore_archived: bool = False
 
 
 @dataclass
@@ -4953,6 +4950,7 @@ class ChatWriterActor:
       new_msg = dict(raw_msg)
       new_msg.pop("_owner_authored", None)
       new_msg.pop("_owner_input_at", None)
+      new_msg.pop("held", None)
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
       # mid-turn steer after reload unless the committed Q2 row names the
@@ -5404,11 +5402,9 @@ class ChatWriterActor:
     retired_control = len(runnable) + len(rejected) != len(pending)
     if retired_control or rejected_changed:
       chat.pending_messages = rejected + runnable
-    # Rows a Stop held wait for the owner. An empty Send (`release_held`)
-    # starts them as one turn; otherwise only unheld rows run.
-    held = [row for row in runnable if row.get("held")]
-    free = [row for row in runnable if not row.get("held")]
-    pool = (held or free) if cmd.release_held else free
+    # Rows a Stop held wait for the owner (`HoldPending`, `ReleaseHeld`):
+    # only unheld rows run.
+    pool = [row for row in runnable if not row.get("held")]
     if not pool:
       settlement = self._settle_unhanded_goal(db, chat, cmd)
       if settlement is not None:
@@ -5429,20 +5425,13 @@ class ChatWriterActor:
           or msg.get("_browser_grant_id") != head_grant):
         break
       promote_count += 1
-    from app.continuations import is_owner_typed
-    promoted_ids = {id(row) for row in pool[:promote_count]}
+    from app.continuations import is_owner_typed, release_holds
+    promoted_group = pool[:promote_count]
+    promoted_ids = {id(row) for row in promoted_group}
+    remaining_pending = [row for row in runnable if id(row) not in promoted_ids]
     # The owner's next message runs first and the held queue follows it.
-    release = cmd.release_held or any(
-      is_owner_typed(row) for row in pool[:promote_count]
-    )
-
-    def settled(row: dict) -> dict:
-      return {k: v for k, v in row.items() if k != "held"} if release else row
-
-    promoted_group = [settled(row) for row in pool[:promote_count]]
-    remaining_pending = [
-      settled(row) for row in runnable if id(row) not in promoted_ids
-    ]
+    if any(is_owner_typed(row) for row in promoted_group):
+      remaining_pending = release_holds(remaining_pending, datetime.now(UTC).isoformat())
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
@@ -5792,8 +5781,8 @@ class ChatWriterActor:
     A held row stays queued and visible but is never promoted by itself: the
     owner's next send releases it (`PromotePending`). So a Stop neither loses
     what the owner typed nor starts it behind their back. A row an app or a
-    browser guest queued (`is_owner_typed` is false) goes with the Stop, as
-    the app or guest that stops expects.
+    browser guest queued, or a visible row an agent queued (`is_owner_typed`
+    is false), goes with the Stop, as the work that stops expects.
 
     A ``hidden`` queued row is never owner speech: it is usually a machine-owned
     carrier (wait/activation result, a peer-message wake, or a secure-input
@@ -5837,16 +5826,15 @@ class ChatWriterActor:
     return {"held": held}
 
   def _release_held(self, db, cmd: ReleaseHeld) -> dict:
+    from app.continuations import release_holds
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("ReleaseHeld: chat not found or deleted")
     pending = list(chat.pending_messages or [])
     released = sum(1 for row in pending if isinstance(row, dict) and row.get("held"))
     if released:
-      chat.pending_messages = [
-        {k: v for k, v in row.items() if k != "held"} if isinstance(row, dict) else row
-        for row in pending
-      ]
+      chat.pending_messages = release_holds(pending, datetime.now(UTC).isoformat())
+      chat_archive.restore_on_accepted_input(chat, cmd.restore_archived)
       if not _commit_or_rollback(db):
         raise _PersistFailed("ReleaseHeld did not persist")
     return {"released": released}
@@ -7050,6 +7038,7 @@ def _pending_messages_for_transcript(
     # owner-steer marker; strip it so it never reaches the transcript.
     msg.pop("_owner_authored", None)
     msg.pop("_owner_input_at", None)
+    msg.pop("held", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)
