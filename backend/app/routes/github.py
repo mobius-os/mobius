@@ -1136,6 +1136,7 @@ _REVIEW_STATUS_MESSAGES = {
   "branch_moved": (
     "The staged branch moved after this review was prepared."
   ),
+  "missing_branch": "The staged branch is no longer in the checkout.",
   "missing_diff_hash": (
     "This older review does not have the fingerprint needed for safe sending."
   ),
@@ -1430,9 +1431,12 @@ def _inspect_prepared_review(
         "The reviewed branch is no longer based on its recorded parent.",
         code="invalid_ancestry",
       )
-    actual_head = app_git._run(
-      repo, "rev-parse", branch, read_only=True,
-    ).stdout.strip()
+    # A deleted branch is permanent drift, not a transient read failure.
+    actual_head = app_git._resolve_commit(
+      repo, f"refs/heads/{branch}", read_only=True,
+    )
+    if actual_head is None:
+      return _review_status_problem(record_id, code="missing_branch")
     if actual_head != head_oid:
       raise ContributionSubmitError(
         "This branch changed after review.", code="branch_moved",
