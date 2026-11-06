@@ -24,8 +24,8 @@ def test_extract_imports_splits_imports_from_css():
   )
   imports, remaining = extract_imports(css)
   assert imports == [
-    "https://fonts.googleapis.com/css2?family=Poppins",
-    "https://fonts.googleapis.com/css2?family=Fira+Code",
+    "@import url('https://fonts.googleapis.com/css2?family=Poppins');",
+    "@import url(\"https://fonts.googleapis.com/css2?family=Fira+Code\");",
   ]
   assert "@import" not in remaining
   assert "--font" in remaining

@@ -17,6 +17,7 @@
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { QueryClient } from '@tanstack/query-core'
 
 // Same minimal DOM stub as themeService.test.js — toggleTheme calls
 // applyThemeToDom internally, which needs it.
@@ -207,6 +208,47 @@ test('a preview for another starting mode is not painted', async () => {
   assert.deepEqual(api.calls, ['light'])
   assert.equal(styleText(), LIGHT.css)
 })
+
+// The shell's service worker answers /api/theme stale-while-revalidate: a
+// fetch gets the body the worker held when it started.
+function makeServiceWorker(body) {
+  const sw = { body }
+  globalThis.self = { location: { origin: 'http://shell.test' } }
+  globalThis.caches = {
+    open: async () => ({ put: async (_url, res) => { sw.body = await res.json() } }),
+  }
+  return sw
+}
+
+for (const [label, start] of [['no preview', DARK], ['a preview', served(DARK, LIGHT)]]) {
+  test(`a refetch the save's announcement starts cannot repaint over the answer (${label})`, async (t) => {
+    t.after(() => { delete globalThis.caches; delete globalThis.self })
+    const sw = makeServiceWorker(start)
+    const qc = new QueryClient()
+    qc.setQueryData(['theme'], start)
+    let refetch
+    const api = {
+      theme: {
+        setMode: async () => {
+          // The server publishes theme_updated before it answers; the shell's
+          // reaction refetches and the worker serves what it holds now.
+          const held = sw.body
+          refetch = qc.fetchQuery({
+            queryKey: ['theme'],
+            queryFn: () => new Promise((resolve) => setTimeout(() => resolve(held), 5)),
+          }).catch(() => {})
+          return { ok: true, status: 200, json: async () => served(LIGHT, DARK) }
+        },
+      },
+    }
+    await themeService.toggleTheme(qc, 'dark', api)
+    await refetch
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.deepEqual(qc.getQueryData(['theme']), served(LIGHT, DARK),
+      'the cache keeps the saved theme and its next preview')
+    assert.deepEqual(sw.body, served(LIGHT, DARK), 'the next refetch is served the saved theme')
+  })
+}
 
 test('both theme query keys are seeded and then marked stale without a refetch', async () => {
   const qc = makeQueryClient(served(DARK, LIGHT))

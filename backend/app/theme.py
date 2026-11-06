@@ -10,8 +10,10 @@ app-frame.html should NOT define their own :root variables — they come
 from here.
 """
 
+import functools
 import hashlib
 import json
+import logging
 import math
 import re
 import shutil
@@ -21,9 +23,14 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import NamedTuple
 
-# Matches @import url('...') or @import url("...") statements.
+_log = logging.getLogger(__name__)
+
+# A whole @import statement in any of its four spellings: url('X'),
+# url("X"), bare url(X), or a plain "X"/'X' string. Mirrors the client's
+# pattern in frontend/src/lib/applyTheme.js; a trailing `;` is required so an
+# @import-looking substring inside a quoted value is not taken for a rule.
 _IMPORT_RE = re.compile(
-  r"""@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?""",
+  r"""@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|(?:[^"'()\s\\]|\\[\s\S])+)\s*\)|"[^"]*"|'[^']*')\s*;[^\S\n]*\n?""",
 )
 
 # The secondary-surface token was renamed --surface2 -> --surface-2 with no
@@ -140,14 +147,12 @@ def _served_theme(owner_css: str) -> dict:
 
 
 def extract_imports(css: str) -> tuple[list[str], str]:
-  """Split @import url() lines from CSS, return (urls, remaining_css).
+  """Split @import statements from CSS: (statements verbatim, remaining_css).
 
-  Browsers ignore @import inside <style> tags in some contexts, so
-  callers should convert these to <link> tags instead.
-  """
-  urls = _IMPORT_RE.findall(css)
-  remaining = _IMPORT_RE.sub("", css)
-  return urls, remaining
+  An @import is only honoured before every other rule, so a rewrite that
+  puts a new rule first must lift the statements back above it."""
+  statements = [m.group(0).strip() for m in _IMPORT_RE.finditer(css)]
+  return statements, _IMPORT_RE.sub("", css)
 
 
 def get_bg_color(data_dir: str) -> str:
@@ -1050,7 +1055,7 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   swapped.  Roles are not written unless the owner declared them; the
   generated block paints them, so a later base edit re-derives them.
   """
-  urls, rest = extract_imports(css)
+  statements, rest = extract_imports(css)
   rest = _GENERATED_BLOCK_RE.sub("", rest)
   rule = _first_root_rule(rest)
   declared = rule[2] if rule else {}
@@ -1073,7 +1078,7 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
 
   font = declared.get("--font") or "'Inter', system-ui, sans-serif"
   mono = declared.get("--mono") or "'JetBrains Mono', ui-monospace, monospace"
-  imports = "".join(f"@import url('{url}');\n" for url in urls)
+  imports = "".join(f"{statement}\n" for statement in statements)
   lines = "\n".join(f"  {key}: {value};" for key, value in colors.items())
   return (
     (imports + "\n" if imports else "")
@@ -1088,14 +1093,23 @@ def _other_mode(mode: str) -> str:
   return "dark" if mode == "light" else "light"
 
 
+@functools.lru_cache(maxsize=1)
+def _toggle_preview(css: str, mode: str) -> tuple[str, str, str]:
+  """(css, bg, mode) of the theme the switch would save. Rebuilding it costs
+  far more than serving the theme, so the one current preview is kept until
+  the effective theme changes."""
+  new_mode = _other_mode(mode)
+  preview = _served_theme(toggled_theme_css(css, mode, new_mode))
+  return preview["css"], preview["bg"], new_mode
+
+
 def theme_with_toggle(data_dir: str) -> dict:
   """`theme_data` plus `toggle`: the `{css, bg, mode}` the light/dark switch
   would produce, so the shell paints it on tap before the save returns.
   Only `GET /api/theme` carries it; page slots stay `theme_data`."""
   bundle = load_effective_theme(data_dir)
-  mode = _other_mode(bundle.mode)
-  preview = _served_theme(toggled_theme_css(bundle.css, bundle.mode, mode))
-  return {**theme_data(data_dir, bundle), "toggle": {**preview, "mode": mode}}
+  css, bg, mode = _toggle_preview(bundle.css, bundle.mode)
+  return {**theme_data(data_dir, bundle), "toggle": {"css": css, "bg": bg, "mode": mode}}
 
 
 _THEME_MODE_LOCK = threading.Lock()
@@ -1113,7 +1127,11 @@ def set_theme_mode(data_dir: str, mode: str) -> bool:
     css = toggled_theme_css(get_theme_css(data_dir), old_mode, mode)
     shared = Path(data_dir) / "shared"
     shared.mkdir(parents=True, exist_ok=True)
-    snapshot_theme_if_present(data_dir)
+    try:
+      snapshot_theme_if_present(data_dir)
+    except OSError as exc:
+      # Best-effort, as on every theme.css write: /data git still holds it.
+      _log.warning("theme.css snapshot failed: %s", exc)
     atomic_write(shared / "theme.css", css)
     atomic_write(shared / "theme-mode", json.dumps(mode))
     return True

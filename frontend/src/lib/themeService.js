@@ -3,15 +3,13 @@ import { applyTheme, cascadeBg, inferMode } from './applyTheme.js'
 import { captureLayoutSpace, clientPointToLayout } from './layoutSpace.js'
 
 /**
- * Owns the theme lifecycle: read, transform, apply (DOM + body bg
- * + meta theme-color), persist (storage API), notify (server SSE),
- * seed/invalidate (React Query). Single source of truth for theme
- * mutations triggered by the Settings UI.
+ * Owns the shell's side of the theme: apply (DOM + body bg + meta
+ * theme-color), the light/dark switch (`POST /api/theme/mode`, which the
+ * server announces over SSE), and seeding/invalidating React Query.
  *
- * Why module-not-hook: applyThemeToDom + persistTheme are pure
- * side-effect helpers callable from anywhere — `useTheme` invokes
- * applyThemeToDom from an effect; SettingsView's toggleTheme will
- * orchestrate cache seed + apply + persist. A hook would add
+ * Why module-not-hook: applyThemeToDom is a pure side-effect helper callable
+ * from anywhere — `useTheme` invokes it from an effect, and SettingsView's
+ * toggleTheme orchestrates cache seed + apply + save. A hook would add
  * render-cycle coupling the helpers don't need.
  *
  * The AGENT-DRIVEN path (agent writes /data/shared/theme.css
@@ -256,7 +254,7 @@ export function getEffectiveTheme() {
 // PRE-toggle (stale) theme — and `useTheme`'s apply effect then repaints
 // that stale theme OVER the toggle's correct optimistic paint, snapping
 // the UI back to the old mode (the "stuck on dark / reverts" symptom).
-// We just persisted the authoritative new theme, so overwrite the cached
+// The server just saved the authoritative new theme, so overwrite the cached
 // `/api/theme` body with it: the SWR serve is now correct and the re-apply
 // is a no-op instead of a regression. Best-effort — no SW / no Cache
 // Storage (tests, SSR, private mode) just skips this; the optimistic paint
@@ -355,9 +353,16 @@ export async function toggleTheme(queryClient, currentMode, api) {
     }
     throw err
   }
+  // The server announced theme_updated before it answered, so this shell may
+  // already be refetching /api/theme and getting the worker's older body (the
+  // pre-tap theme, or the preview without its own `toggle`). Store the answer
+  // in the worker first, so any later refetch gets it, then drop the
+  // refetches already in flight before seeding: one landing after the seed
+  // would repaint the old mode.
+  await _refreshThemeSwCache(theme)
+  await _cancelThemeQueries(queryClient)
   _seedThemeQueries(queryClient, theme)
   _paint(theme)
-  await _refreshThemeSwCache(theme)
   themeQueries.invalidate(queryClient, { refetchType: 'none' })
   themeQueries.mode.invalidate(queryClient, { refetchType: 'none' })
   return { newMode: theme.mode, newCss: theme.css, newBg: theme.bg }

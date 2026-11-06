@@ -221,6 +221,15 @@ def test_imports_stay_first():
   assert "@import url('https://fonts.example.test/a.css');" in painted
 
 
+def test_every_import_spelling_stays_first():
+  imports = ("@import url(https://fonts.example.test/a.css);\n"
+             "@import \"https://fonts.example.test/b.css\";\n"
+             "@import url(\"https://fonts.example.test/c.css\");\n")
+  persisted, _ = toggle_once(imports + CUSTOM_DARK, "dark")
+  assert persisted.startswith(imports + "\n:root {")
+  assert persisted.count("@import") == 3
+
+
 # --- the endpoint ------------------------------------------------------------
 
 
@@ -274,6 +283,33 @@ def test_the_save_rewrites_what_is_on_disk_not_what_the_shell_loaded(client, aut
   assert root_var(saved, "--accent") == "#00ffaa"
   assert root_var(saved, "--bg") == LIGHT["--bg"]
   assert any(p.name.startswith("theme.css.bak-") for p in shared.iterdir())
+
+
+def test_a_failed_snapshot_does_not_block_the_switch(client, auth, shared, events, monkeypatch):
+  (shared / "theme.css").write_text(CUSTOM_DARK)
+
+  def fail(_data_dir):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(theme, "snapshot_theme_if_present", fail)
+  saved = client.post("/api/theme/mode", headers=auth, json={"mode": "light"})
+  assert saved.status_code == 200 and saved.json()["mode"] == "light"
+  assert root_var((shared / "theme.css").read_text(), "--bg") == LIGHT["--bg"]
+
+
+def test_the_preview_is_built_once_per_theme(client, auth, shared, events, monkeypatch):
+  (shared / "theme.css").write_text(CUSTOM_DARK)
+  theme._toggle_preview.cache_clear()
+  builds = []
+  real = theme.toggled_theme_css
+  monkeypatch.setattr(theme, "toggled_theme_css", lambda *a: builds.append(a) or real(*a))
+  first = client.get("/api/theme", headers=auth).json()["toggle"]
+  assert client.get("/api/theme", headers=auth).json()["toggle"] == first
+  assert len(builds) == 1
+  # A different size, so the stat-keyed theme memo sees the edit at once.
+  (shared / "theme.css").write_text(CUSTOM_DARK.replace("#ff00ff", "#0fa"))
+  assert client.get("/api/theme", headers=auth).json()["toggle"] != first
+  assert len(builds) == 2
 
 
 def test_saving_the_current_mode_changes_nothing(client, auth, shared, events):
