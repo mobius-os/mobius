@@ -159,6 +159,7 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   await expect(block.locator('.md-app-block__items > li')).toHaveCount(12)
   await expect(block.locator('.md-app-block__items > li').first()).toContainText('fixture/repo: Change one')
   await expect(block).not.toContainText('comes from')
+  await expect(block).not.toContainText('From this conversation')
   await expect(block.locator('.md-app-block__badge')).toHaveCount(0)
 
   // The twelve rows may extend past the viewport even on desktop.

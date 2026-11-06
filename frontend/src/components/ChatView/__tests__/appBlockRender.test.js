@@ -165,6 +165,7 @@ test('the block\'s own action shows the app list as the block\'s rows, with noth
   assert.match(html, /<span class="md-app-block__item-title">owner\/repo: Fix it<\/span>/, 'app rows link nowhere')
   assert.match(html, /<dt>Project<\/dt><dd>owner\/repo<\/dd><\/div><div><dt>Change<\/dt><dd>1 file · \+2 −0<\/dd>/)
   assert.doesNotMatch(html, /come from the conversation|will act on|md-app-block__confirmation/, 'no explanation section')
+  assert.doesNotMatch(html, /From this conversation/, 'not even the caption')
   // Both ends of the list are observed: the start in its first row, the end in its last.
   const rows = html.split('<li>').slice(1)
   assert.match(rows[0], /^<span class="md-app-block__list-edge is-start"/)
@@ -183,6 +184,7 @@ test('the one confirming item shows its own app list in place of its row, beside
 test('an incomplete confirmation keeps the conversation rows and says why Confirm is disabled', () => {
   const html = passiveView([{ key: 'send-batch:sel-1', confirming: true, confirmation: [{ title: '', facts: [] }] }])
   assert.deepEqual(rowTitles(html), ['Row A', 'Row B'])
+  assert.match(html, /From this conversation/, 'the saved rows keep their caption')
   assert.doesNotMatch(html, /md-app-block__list-edge/)
   assert.match(html, /class="md-app-block__action" disabled="">Confirm/)
   assert.match(html, /Its full current identity is unavailable here/)

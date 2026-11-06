@@ -472,7 +472,8 @@ most 16384.
   else, and never restores or overwrites the app's saved place in the shell.
   If the app is not installed, the block keeps its snapshot and says so.
 - Every block is captioned "From this conversation": its title, facts and
-  badges are the agent's words, not status the app verified.
+  badges are the agent's words, not status the app verified. The caption is
+  hidden only while a passive session shows the app's own confirmation rows.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -585,9 +586,10 @@ reader to open the app. Describe the exact targets your app will act on now,
 from your own data, not the block's saved snapshot. The host draws your list
 as the block's own rows, in the same layout (title, then facts), in place of
 the saved rows: all of them for the block's `action`, or the one row whose
-`action` is confirming. It adds no heading or explanation: give each item the
-facts the card's own rows show, and the rows look the same before and after
-the press unless something changed. The rows link nowhere, and the block's
+`action` is confirming. It adds no heading or explanation and hides the "From
+this conversation" caption meanwhile: give each item the facts the card's own
+rows show, and the rows look the same before and after the press unless
+something changed. The rows link nowhere, and the block's
 saved badges are hidden unless you supply `badges`. The host never shortens the list: a
 missing, empty, oversized or malformed `confirmation` keeps the saved rows
 and Confirm disabled, and shows "Open the app to review this action. Its full
