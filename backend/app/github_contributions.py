@@ -2417,12 +2417,16 @@ def _recovered_upstream_overlap(
   preflight. The flag describes what that PR opened over, so this rechecks the
   exact upstream tip the earlier attempt preflighted and recorded with its
   pushed branch, not today's upstream. The check is advisory: an unknown
-  answer (git refusing, timing out or failing to start) records no flag, and
-  the already-public PR's recovery never fails on it.
+  answer (that tip no longer available locally, or git refusing, timing out
+  or failing to start) records no flag, and the already-public PR's recovery
+  never fails on it.
   """
   upstream_branch = str(record.get("last_submit_upstream_branch") or "")
   upstream_sha = str(record.get("last_submit_upstream_sha") or "").lower()
-  if not upstream_branch or not _GIT_SHA.fullmatch(upstream_sha):
+  if (
+    not _BRANCH_NAME.fullmatch(upstream_branch)
+    or not _GIT_SHA.fullmatch(upstream_sha)
+  ):
     return {}
   try:
     merge = _git_ops.merge_with_upstream(repo, upstream_branch, upstream_sha, branch)

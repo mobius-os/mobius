@@ -143,6 +143,8 @@ def test_an_unreadable_ancestry_comparison_is_not_a_conflict_or_a_pass(tmp_path,
   monkeypatch.setattr(git_ops, "_upstream_default_branch", lambda *a: "main")
   monkeypatch.setattr(git_ops, "fetch_upstream_head", lambda *a: _UPSTREAM_SHA)
   def fake_git(_repo, *args, check=True):
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      return _cp()
     if args[:1] == ("merge-tree",):
       return _cp(returncode=1)
     if args[:2] == ("merge-base", "--all"):
@@ -167,6 +169,53 @@ def test_the_shared_merge_base_proof_does_not_claim_a_send_outcome():
 
 
 @pytest.mark.parametrize("operation", ["inspect", "new_pr", "gate"])
+def test_an_upstream_tip_missing_locally_is_unknown_not_a_conflict(histories, operation):
+  """``merge-tree`` exits 1 for a commit it cannot find, the same code as a
+  conflict. A tip that is gone locally (its temporary ref deleted and
+  collected, or a recreated checkout) is an unknown verdict for Send."""
+  repo, upstream, shas = histories
+  upstream["sha"] = "e" * 40
+  with pytest.raises(ContributionSubmitError) as error:
+    if operation == "inspect":
+      git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/topic")
+    elif operation == "new_pr":
+      git_ops.upstream_merge_for_new_pr(repo, "owner/repo", "fix/topic", shas["base"], shas["head"])
+    else:
+      git_ops._assert_merges_with_upstream(repo, "owner/repo", "fix/topic")
+  assert error.value.code == "upstream_merge_unavailable"
+  assert "Nothing was published" in error.value.message
+  assert error.value.record_patch == {
+    "last_submit_upstream_branch": "main", "last_submit_upstream_sha": "e" * 40}
+
+
+def test_the_shared_merge_check_does_not_claim_a_send_outcome(histories):
+  repo, _upstream, _shas = histories
+  with pytest.raises(ContributionSubmitError) as error:
+    git_ops.merge_with_upstream(repo, "main", "e" * 40, "fix/topic")
+  assert error.value.code == "upstream_merge_unavailable"
+  assert "published" not in error.value.message
+
+
+def test_a_conflict_over_a_non_utf8_path_is_still_a_conflict(histories):
+  """Git prints paths as raw bytes; decoding them never hides the verdict."""
+  repo, upstream, shas = histories
+  path = (b"a\xff.txt").decode("utf-8", "surrogateescape")
+  run(repo, "checkout", "-q", shas["base"])
+  (repo / path).write_text("1\n")
+  run(repo, "add", "-A")
+  run(repo, "commit", "-qm", "base")
+  base = run(repo, "rev-parse", "HEAD")
+  (repo / path).write_text("2\n")
+  run(repo, "commit", "-qam", "topic")
+  run(repo, "branch", "fix/bytes")
+  run(repo, "checkout", "-q", base)
+  (repo / path).write_text("3\n")
+  run(repo, "commit", "-qam", "upstream")
+  upstream["sha"] = run(repo, "rev-parse", "HEAD")
+  assert git_ops.inspect_upstream_merge(repo, "owner/repo", "fix/bytes").conflicts
+
+
+@pytest.mark.parametrize("operation", ["inspect", "new_pr", "gate"])
 @pytest.mark.parametrize(("returncode", "stderr"), [(128, "fatal: unable to read tree 0123"),
                                                     (129, "error: unknown option `write-tree'"),
                                                     (2, "")])
@@ -181,6 +230,8 @@ def test_a_merge_tree_that_could_not_run_is_never_a_conflict_or_a_publishable_fa
   monkeypatch.setattr(git_ops, "_upstream_default_branch", lambda *a: "main")
   monkeypatch.setattr(git_ops, "fetch_upstream_head", lambda *a: _UPSTREAM_SHA)
   def fake_git(_repo, *args, check=True):
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      return _cp()
     if args[:1] == ("merge-tree",):
       return _cp(stderr=stderr, returncode=returncode)
     if args == ("merge-base", _UPSTREAM_SHA, "fix/topic"):
@@ -641,8 +692,7 @@ def _merge_tree_cannot_start():
 
 @pytest.mark.parametrize("merge_tree", [
   _merge_tree_times_out, _merge_tree_cannot_start,
-  lambda: _cp(stderr="fatal: unable to read tree 0123", returncode=128),
-], ids=["timeout", "oserror", "exit-128"])
+], ids=["timeout", "oserror"])
 def test_an_unknown_overlap_answer_never_fails_a_confirmed_recovery(monkeypatch, tmp_path, merge_tree):
   """The overlap recheck is advisory: once the open PR is confirmed, git timing
   out, failing to start or refusing records no flag and the recovery completes."""
@@ -651,10 +701,26 @@ def test_an_unknown_overlap_answer_never_fails_a_confirmed_recovery(monkeypatch,
   assert "last_submit_upstream_conflict" not in patch
 
 
+@pytest.mark.parametrize("missing_ref", ["upstream", "branch"])
+def test_a_recovery_whose_recorded_tip_is_gone_records_no_overlap(histories, missing_ref):
+  """Real git: the recorded upstream tip (or the branch) is no longer local,
+  which ``merge-tree`` reports with a conflict's exit code. Recovery records
+  no flag rather than a false overlap, and does not fail."""
+  repo, _upstream, shas = histories
+  record = {"last_submit_upstream_branch": "main",
+            "last_submit_upstream_sha": "e" * 40 if missing_ref == "upstream" else shas["conflicting"]}
+  branch = "fix/topic" if missing_ref == "upstream" else "fix/gone"
+  assert github_contributions._recovered_upstream_overlap(repo, record, branch, shas["head"]) == {}
+  # The same recheck still records a real overlap.
+  record["last_submit_upstream_sha"] = shas["conflicting"]
+  assert github_contributions._recovered_upstream_overlap(
+    repo, record, "fix/topic", shas["head"])["last_submit_upstream_conflict"]["upstream_sha"] == shas["conflicting"]
+
+
 @pytest.mark.parametrize("missing", [
   {"last_submit_upstream_sha": None}, {"last_submit_upstream_branch": None},
-  {"last_submit_upstream_sha": "not-a-sha"},
-], ids=["no-sha", "no-branch", "malformed-sha"])
+  {"last_submit_upstream_sha": "not-a-sha"}, {"last_submit_upstream_branch": "-main"},
+], ids=["no-sha", "no-branch", "malformed-sha", "malformed-branch"])
 def test_a_recovery_without_a_recorded_upstream_tip_records_no_overlap(monkeypatch, tmp_path, missing):
   git_calls, patch = recovered_submit(monkeypatch, tmp_path, record_extra=missing)
   assert not any(call[:1] == ("merge-tree",) for call in git_calls)

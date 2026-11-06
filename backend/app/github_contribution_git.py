@@ -116,6 +116,9 @@ def _run_cmd(
     cwd=str(cwd),
     capture_output=True,
     text=True,
+    # Paths and messages in git output need not be UTF-8; never let decoding
+    # them turn a known result into a crash.
+    errors="replace",
     input=input_text,
     timeout=timeout,
     check=False,
@@ -788,13 +791,44 @@ def inspect_upstream_merge(
       code=exc.code,
       detail=exc.detail,
     ) from None
-  return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  try:
+    return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except ContributionSubmitError as exc:
+    raise ContributionSubmitError(
+      f"{exc.message} Nothing was published.",
+      exc.status_code,
+      record_patch=exc.record_patch,
+      code=exc.code,
+      detail=exc.detail,
+    ) from None
 
 
 def merge_with_upstream(
   repo: Path, upstream_branch: str, upstream_sha: str, branch: str,
 ) -> UpstreamMerge:
-  """Report whether ``branch`` merges with one exact, already-local upstream tip."""
+  """Report whether ``branch`` merges with one exact, already-local upstream tip.
+
+  Raises ``upstream_merge_unavailable`` when the merge cannot be judged, for
+  example when either commit is not available locally. Callers that refuse to
+  publish on that say so themselves.
+  """
+  def unknown(detail: str) -> ContributionSubmitError:
+    return ContributionSubmitError(
+      f"Contribute could not check whether this PR merges with upstream "
+      f"{upstream_branch}. Leave feedback so your agent can inspect it.",
+      record_patch=UpstreamMerge(upstream_branch, upstream_sha, False).record_patch,
+      code="upstream_merge_unavailable",
+      detail=readable_output(detail),
+    )
+
+  # ``merge-tree`` exits 1 both for a conflict and for a commit it cannot
+  # find, so both commits must exist before its exit code means anything.
+  for rev in (upstream_sha, branch):
+    if _git(
+      repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}",
+      check=False,
+    ).returncode != 0:
+      raise unknown(f"Commit {rev} is not available locally.")
   merged = _git(
     repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
   )
@@ -802,27 +836,16 @@ def merge_with_upstream(
   # Histories with no common ancestor cannot merge at all (git refuses them
   # fatally), which is a deterministic fact about the two commits, proven
   # structurally rather than from localized stderr. Anything else (a fatal
-  # 128, a usage error, missing objects) is an unknown merge verdict, not a
+  # 128, a usage error, unreadable objects) is an unknown merge verdict, not a
   # conflict, and never a licence to publish.
-  unrelated = merged.returncode not in (0, 1) and _git(
-    repo, "merge-base", upstream_sha, branch, check=False,
-  ).returncode == 1
-  merge = UpstreamMerge(
-    upstream_branch, upstream_sha, merged.returncode == 1 or unrelated,
+  if merged.returncode in (0, 1):
+    return UpstreamMerge(upstream_branch, upstream_sha, merged.returncode == 1)
+  if _git(repo, "merge-base", upstream_sha, branch, check=False).returncode == 1:
+    return UpstreamMerge(upstream_branch, upstream_sha, True)
+  raise unknown(
+    merged.stderr or merged.stdout or
+    f"git merge-tree exited {merged.returncode} without diagnostic output."
   )
-  if merged.returncode not in (0, 1) and not unrelated:
-    raise ContributionSubmitError(
-      f"Contribute could not check whether this PR merges with upstream "
-      f"{upstream_branch}. Nothing was published. Leave feedback so your "
-      "agent can inspect it.",
-      record_patch=merge.record_patch,
-      code="upstream_merge_unavailable",
-      detail=readable_output(
-        merged.stderr or merged.stdout or
-        f"git merge-tree exited {merged.returncode} without diagnostic output."
-      ),
-    )
-  return merge
 
 
 def _upstream_conflict_error(merge: UpstreamMerge) -> ContributionSubmitError:
