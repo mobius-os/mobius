@@ -135,13 +135,26 @@ export function sessionStateUpdate(previous, safe) {
 }
 
 /** The snapshot to show beside live state. While the app asks for
- *  confirmation, only badges the app itself supplies are shown. */
+ *  confirmation, only badges the app itself supplies are shown, and the
+ *  app's list becomes the rows it acts on: every row for the block's own
+ *  action, or the confirming item's row. Those rows are marked `confirmation`
+ *  and carry no link; the first one of an item keeps that item's action and
+ *  live badges. */
 export function sessionSnapshot(block, state) {
-  const confirming = Boolean(state?.actions.some(action => action.confirming))
+  const confirming = state?.actions.find(action => action.confirming)
   const live = key => state?.actions.find(action => action.key === key)?.badges
   const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
-  return { ...block, badges: badges(block.badges, block.action?.intent),
-    items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) })) }
+  let items = block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) }))
+  if (confirming?.confirmation) {
+    const rows = (owner = null) => confirming.confirmation.map((item, i) => ({ title: item.title, facts: item.facts,
+      badges: i === 0 && owner ? owner.badges : [], action: i === 0 ? owner?.action ?? null : null, confirmation: true }))
+    if (block.action?.intent === confirming.key) items = rows()
+    else {
+      const at = items.findIndex(item => item.action?.intent === confirming.key)
+      if (at >= 0) items = [...items.slice(0, at), ...rows(items[at]), ...items.slice(at + 1)]
+    }
+  }
+  return { ...block, badges: badges(block.badges, block.action?.intent), items }
 }
 
 /** Passive execution needs the owner's accepted grant and the server's

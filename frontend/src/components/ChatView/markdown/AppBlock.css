@@ -2,8 +2,8 @@
 .md-app-block { border:1px solid var(--border); border-radius:12px; margin:16px 0; overflow:hidden; background:var(--bg); }
 /* Assistant replies shrink to their prose (.chat__msg--assistant aligns
    flex-start). A reply with a block takes the column's width instead, so the
-   block never resizes to what it currently shows: the in-place confirmation
-   list cannot widen it and move Confirm out of the action's place. */
+   block never resizes to what it currently shows: the app's confirmation
+   rows cannot widen it and move Confirm out of the action's place. */
 .chat__text--assistant:has(.md-app-block) { align-self:stretch; width:100%; }
 .md-app-block > header { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; padding:12px 16px 8px; }
 .md-app-block > header strong { flex:1 1 12rem; min-width:0; overflow-wrap:anywhere; font-size:16px; }
@@ -23,7 +23,7 @@
 .md-app-block__badge.is-danger { background:color-mix(in srgb, var(--danger) 18%, transparent); color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:color-mix(in srgb, var(--accent) 65%, var(--text)); }
 .md-app-block__items { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); }
-.md-app-block__items > li { display:flex; align-items:center; gap:12px; padding:8px 16px; }
+.md-app-block__items > li { position:relative; display:flex; align-items:center; gap:12px; padding:8px 16px; }
 .md-app-block__items > li + li { border-top:1px solid var(--border); }
 .md-app-block__item-main { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; flex:1; min-width:0; }
 .md-app-block__item-title { display:inline-flex; align-items:center; min-height:44px; font-weight:600; overflow-wrap:anywhere; }
@@ -66,18 +66,8 @@
 .md-app-block__note.is-danger { color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__note.is-attention { color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__note.is-success { color:color-mix(in srgb, var(--green) 65%, var(--text)); }
-.md-app-block__confirmation { display:grid; gap:10px; padding:12px 16px; border-top:1px solid var(--border); font-size:14px; }
-.md-app-block__confirmation > ul { display:grid; gap:12px; list-style:none; margin:0; padding:0; }
-.md-app-block__confirmation li { display:grid; gap:4px; min-width:0; overflow-wrap:anywhere; }
-.md-app-block__confirmation li > span { font-weight:600; }
-.md-app-block__confirmation dl { display:grid; gap:2px; margin:0; }
-/* The label column fits its content but never past 40%, and both cells wrap
-   anywhere, so a long label cannot squeeze the value to nothing. */
-.md-app-block__confirmation dl > div { display:grid; grid-template-columns:fit-content(40%) minmax(0, 1fr); gap:12px; }
-.md-app-block__confirmation dt, .md-app-block__confirmation dd { min-width:0; overflow-wrap:anywhere; }
-.md-app-block__confirmation dt { color:var(--muted); }
-.md-app-block__confirmation dt, .md-app-block__confirmation dd, .md-app-block__confirmation p { margin:0; font-size:13px; }
-.md-app-block__provenance { color:var(--muted); }
 .md-app-block__session-host { position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; clip-path:inset(50%); }
-.md-app-block__list-end { display:block; height:1px; }
-@media (max-width:480px) { .md-app-block__confirmation dl > div { grid-template-columns:minmax(0, 1fr); gap:0; } }
+/* The two ends of the app's confirmation rows, observed for arming Confirm. */
+.md-app-block__list-edge { position:absolute; left:0; width:1px; height:1px; pointer-events:none; }
+.md-app-block__list-edge.is-start { top:0; }
+.md-app-block__list-edge.is-end { bottom:0; }

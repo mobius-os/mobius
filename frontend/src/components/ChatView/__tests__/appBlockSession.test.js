@@ -62,6 +62,28 @@ test('live badges replace saved badges; while confirming only app badges show', 
   assert.deepEqual(sessionSnapshot(block, appOwned).badges, [{ label: 'Reviewed', tone: 'success' }])
 })
 
+test('while confirming, the app list is the rows: all of them for the block action, else the item\'s own row', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+    app: 'example', intent: 'open:a', title: 'Fix', interaction: 'inline', action: { label: 'Send all', intent: 'send:a' },
+    items: [{ title: 'One', intent: 'open:1' }, { title: 'Two', intent: 'open:2', action: { label: 'Send', intent: 'send:b' } },
+      { title: 'Three', intent: 'open:3' }] }) })
+  const list = [{ title: 'App one', facts: [{ label: 'Project', value: 'owner/repo' }] }, { title: 'App two', facts: [] }]
+  const all = sessionSnapshot(block, parse({ actions: [{ key: 'send:a', confirming: true, confirmation: list }] }))
+  assert.deepEqual(all.items, [
+    { title: 'App one', facts: [{ label: 'Project', value: 'owner/repo' }], badges: [], action: null, confirmation: true },
+    { title: 'App two', facts: [], badges: [], action: null, confirmation: true }])
+  assert.equal(all.title, 'Fix', 'the header stays the saved snapshot')
+  const one = sessionSnapshot(block, parse({ actions: [{ key: 'send:b', confirming: true, confirmation: list,
+    badges: [{ label: 'Reviewed', tone: 'success' }] }] }))
+  assert.deepEqual(one.items.map(item => [item.title, item.action?.intent ?? null, item.confirmation === true]),
+    [['One', null, false], ['App one', 'send:b', true], ['App two', null, true], ['Three', null, false]])
+  assert.deepEqual(one.items.map(item => item.badges.length), [0, 1, 0, 0], 'the item\'s live badges stay on its first row')
+  // Without a complete list (incomplete or ambiguous), the saved rows stay.
+  const incomplete = sessionSnapshot(block, parse({ actions: [{ key: 'send:a', confirming: true }] }))
+  assert.deepEqual(incomplete.items.map(item => item.title), ['One', 'Two', 'Three'])
+  assert.equal(incomplete.items.some(item => item.confirmation), false)
+})
+
 test('idle offscreen sessions are released; unacknowledged and unresolved owners are retained', () => {
   const idle = { actions: [{ busy: false, confirming: false }], retain: false, ackNonce: 'one' }
   assert.equal(sessionRetained(idle, null), false)

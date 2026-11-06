@@ -73,41 +73,24 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
       <SessionLinks links={state.links} />
       {control}
     </div>
-    {state.note && !state.confirming ? <p className={`md-app-block__note is-${state.tone}`} role="status">{state.note}</p> : null}
-  </div>
-}
-
-/** What Confirm will do, exactly as the app supplied it. The provenance note
- *  comes first: it describes the saved snapshot, not the app's list. */
-export function SessionConfirmation({ action, appName, listEndRef = null }) {
-  if (!action) return null
-  return <div className="md-app-block__confirmation" role="group" aria-label={`Confirm with ${appName}`}>
-    <p className="md-app-block__provenance" role="note">
-      {`The saved title and details above come from the conversation. The list below comes from ${appName}.`}</p>
-    {action.confirmation
-      ? <><strong>{appName} will act on:</strong><ul>{action.confirmation.map((item, i) => <li key={i}>
-        <span>{item.title}</span>
-        <dl>{item.facts.map((fact, j) => <div key={j}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
-      </li>)}</ul></>
-      : <p role="status">{action.note}</p>}
-    {/* After the last item: Confirm (drawn above) arms only once this end has
-        been on screen, so the whole list has passed through the viewport. */}
-    <span ref={listEndRef} className="md-app-block__list-end" aria-hidden="true" />
+    {/* A confirmation's own rows replace the note; one that cannot be shown
+        (incomplete or ambiguous) says why here. */}
+    {state.note && !state.confirmation ? <p className={`md-app-block__note is-${state.tone}`} role="status">{state.note}</p> : null}
   </div>
 }
 
 /** The passive block for one parsed session state. The parser allows at most
- *  one enabled confirmation, and this is the action whose list is shown. */
+ *  one enabled confirmation; its app-supplied list is shown as the block's
+ *  rows (sessionSnapshot), whose two ends `listEdgeRefs` observes. */
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
-  sectionRef = null, confirmRef = null, listEndRef = null, notice = '', children = null }) {
+  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
   const actionFor = target => target
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
       confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} />
     : null
   return <AppBlockLayout block={sessionSnapshot(block, state)} app={app} onInternalNav={onInternalNav}
-    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef}>
-    <SessionConfirmation action={state?.actions.find(action => action.confirming)} appName={app.name} listEndRef={listEndRef} />
+    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs}>
     {notice ? <p className="md-app-block__notice" role="status">{notice}</p> : null}
     {state?.notice ? <p className="md-app-block__notice" role="status">{state.notice}</p> : null}
     {children}
@@ -135,14 +118,16 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   // Observers follow the committed showing (set after it renders).
   const [showing, setShowing] = useState(null)
   const [confirmRef, confirmView] = useOnScreen(showing)
+  const [listStartRef, listStartView] = useOnScreen(showing)
   const [listEndRef, listEndView] = useOnScreen(showing)
+  const listEdgeRefs = { start: listStartRef, end: listEndRef }
   const [retained, setRetained] = useState(false)
   const [staticOpen, setStaticOpen] = useState(false)
   // Without admission no new frame starts; a retained one keeps its own.
   const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
   const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
-    confirmView, listEndView, admitted })
+    confirmView, listStartView, listEndView, admitted })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
@@ -152,7 +137,7 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   return <PassiveBlockView block={block} app={app} state={session.state} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
-    confirmRef={confirmRef} listEndRef={listEndRef}>
+    confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>
 }

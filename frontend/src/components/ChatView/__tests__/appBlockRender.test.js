@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { PassiveBlockView, SessionConfirmation, SessionControls, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { PassiveBlockView, SessionControls, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -141,21 +141,6 @@ test('Confirm is disabled without the complete app list or while an event awaits
   assert.equal(controls(live({ hidden: true })), '')
 })
 
-test('the confirmation lists exactly the app-supplied items and marks conversation text', () => {
-  const html = renderToStaticMarkup(createElement(SessionConfirmation, { appName: 'Example', action: live({ confirming: true,
-    confirmation: [{ title: 'owner/repo: Fix it', facts: [{ label: 'Destination', value: 'owner/repo → main' }] },
-      { title: 'Second', facts: [] }] }) }))
-  assert.match(html, /Example will act on:/)
-  assert.equal((html.match(/<li>/g) || []).length, 2)
-  assert.match(html, /owner\/repo → main/)
-  assert.match(html, /The saved title and details above come from the conversation\. The list below comes from Example\.[^]*will act on:/,
-    'the provenance note precedes, and so does not disclaim, the app list')
-  const incomplete = renderToStaticMarkup(createElement(SessionConfirmation, { appName: 'Example',
-    action: live({ confirming: true, disabled: true, note: 'Open the app to review this action. Its full current identity is unavailable here.' }) }))
-  assert.match(incomplete, /Its full current identity is unavailable here/)
-  assert.doesNotMatch(incomplete, /<li>/)
-})
-
 function passiveView(actions) {
   const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
     action: { label: 'Send all', intent: 'send-batch:sel-1' },
@@ -169,10 +154,38 @@ function passiveView(actions) {
 const target = title => ({ confirming: true, confirmation: [{ title, facts: [{ label: 'Version', value: title }] }] })
 const enabledConfirms = html => (html.match(/class="md-app-block__action">Confirm</g) || []).length
 
-test('the one confirming action shows its own app list beside the only enabled Confirm', () => {
+const rowTitles = html => [...html.matchAll(/class="md-app-block__item-title"[^>]*>([^<]*)</g)].map(match => match[1])
+
+test('the block\'s own action shows the app list as the block\'s rows, with nothing added', () => {
+  const html = passiveView([{ key: 'send-batch:sel-1', confirming: true, confirmation: [
+    { title: 'owner/repo: Fix it', facts: [{ label: 'Project', value: 'owner/repo' }, { label: 'Change', value: '1 file · +2 −0' }] },
+    { title: 'Second', facts: [] }] }, { key: 'send:a', label: 'Send A' }, { key: 'send:b', label: 'Send B' }])
+  assert.deepEqual(rowTitles(html), ['owner/repo: Fix it', 'Second'], 'the app rows replace every conversation row')
+  assert.doesNotMatch(html, /Row A|Row B|open%3Aa/)
+  assert.match(html, /<span class="md-app-block__item-title">owner\/repo: Fix it<\/span>/, 'app rows link nowhere')
+  assert.match(html, /<dt>Project<\/dt><dd>owner\/repo<\/dd><\/div><div><dt>Change<\/dt><dd>1 file · \+2 −0<\/dd>/)
+  assert.doesNotMatch(html, /come from the conversation|will act on|md-app-block__confirmation/, 'no explanation section')
+  // Both ends of the list are observed: the start in its first row, the end in its last.
+  const rows = html.split('<li>').slice(1)
+  assert.match(rows[0], /^<span class="md-app-block__list-edge is-start"/)
+  assert.match(rows[1], /md-app-block__list-edge is-end" aria-hidden="true"><\/span><\/li>/)
+  assert.match(html, /<footer><div class="md-app-block__session">[^]*>Not now<\/button><button type="button" class="md-app-block__action">Confirm</)
+  assert.equal(enabledConfirms(html), 1)
+})
+
+test('the one confirming item shows its own app list in place of its row, beside the only enabled Confirm', () => {
   const html = passiveView([{ key: 'send-batch:sel-1', label: 'Send all' }, { key: 'send:a', ...target('Target A') }, { key: 'send:b', label: 'Send B' }])
   assert.equal(enabledConfirms(html), 1)
-  assert.match(html, /Target A/)
+  assert.deepEqual(rowTitles(html), ['Target A', 'Row B'])
+  assert.match(html, /Target A<\/span>[^]*<dt>Version<\/dt><dd>Target A<\/dd>[^]*>Not now<\/button>/, 'its first row keeps the item\'s action')
+})
+
+test('an incomplete confirmation keeps the conversation rows and says why Confirm is disabled', () => {
+  const html = passiveView([{ key: 'send-batch:sel-1', confirming: true, confirmation: [{ title: '', facts: [] }] }])
+  assert.deepEqual(rowTitles(html), ['Row A', 'Row B'])
+  assert.doesNotMatch(html, /md-app-block__list-edge/)
+  assert.match(html, /class="md-app-block__action" disabled="">Confirm/)
+  assert.match(html, /Its full current identity is unavailable here/)
 })
 
 test('several confirming actions are ambiguous: no Confirm is enabled and no list is shown', () => {
