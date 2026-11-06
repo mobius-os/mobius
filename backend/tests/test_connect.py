@@ -547,7 +547,7 @@ async def test_mobius_supervised_runner_is_not_offered_an_install_command(
 
 
 @pytest.mark.asyncio
-async def test_outbound_revoke_fails_closed_until_remote_confirms(
+async def test_outbound_revoke_ends_local_access_when_remote_is_unreachable(
   tmp_path, monkeypatch,
 ):
   profiles = tmp_path / "outbound"
@@ -573,10 +573,36 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
   stopped = []
   monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
 
-  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
-    await connect_outbound.revoke_profile(profile_id)
-  assert connect_outbound._profile_dir(profile_id).is_dir()
-  assert stopped == []
+  assert await connect_outbound.revoke_profile(profile_id) is False
+  assert not connect_outbound._profile_dir(profile_id).exists()
+  assert stopped[0] == profile_id
+
+
+def test_outbound_revoke_stops_runner_before_contacting_remote(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"connections": [{"url": "https://friend.example", "host_id": "h", "token": "t"}]},
+  )
+  events = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: events.append("stop"))
+
+  def notify(_config):
+    meta = json.loads(connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"))
+    # Supervision must not relaunch the runner during the remote notice.
+    assert not connect_outbound._needs_relaunch(profile_id, meta)
+    events.append("notify")
+
+  monkeypatch.setattr(connect_outbound, "_disconnect_remote", notify)
+  assert connect_outbound._revoke_profile(profile_id) is True
+  assert events[:2] == ["stop", "notify"]
 
 
 def test_outbound_revoke_uses_single_connection_from_multi_config(
@@ -600,13 +626,13 @@ def test_outbound_revoke_uses_single_connection_from_multi_config(
   )
   monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: None)
 
-  connect_outbound._revoke_profile(profile_id)
+  assert connect_outbound._revoke_profile(profile_id) is True
 
   assert disconnected == [{**connection, "name": None}]
   assert not connect_outbound._profile_dir(profile_id).exists()
 
 
-def test_outbound_revoke_keeps_ambiguous_multi_connection_credentials(
+def test_outbound_revoke_never_sends_ambiguous_credentials_but_ends_access(
   tmp_path, monkeypatch,
 ):
   profiles = tmp_path / "outbound"
@@ -629,11 +655,10 @@ def test_outbound_revoke_keeps_ambiguous_multi_connection_credentials(
   stopped = []
   monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
 
-  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
-    connect_outbound._revoke_profile(profile_id)
+  assert connect_outbound._revoke_profile(profile_id) is False
 
-  assert connect_outbound._profile_dir(profile_id).is_dir()
-  assert stopped == []
+  assert not connect_outbound._profile_dir(profile_id).exists()
+  assert stopped[0] == profile_id
 
 
 def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
@@ -683,7 +708,7 @@ def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
     "_disconnect_remote",
     lambda _config: pytest.fail("revoked credentials must not be required"),
   )
-  connect_outbound._revoke_profile(profile_id)
+  assert connect_outbound._revoke_profile(profile_id) is True
   assert not connect_outbound._profile_dir(profile_id).exists()
 
 
@@ -696,7 +721,7 @@ def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
   ],
   ids=["missing-config", "corrupt-config", "missing-credential"],
 )
-def test_outbound_revoke_keeps_ambiguous_unreadable_credentials(
+def test_outbound_revoke_ends_access_with_unreadable_credentials(
   tmp_path, monkeypatch, config_text,
 ):
   profiles = tmp_path / "outbound"
@@ -717,11 +742,10 @@ def test_outbound_revoke_keeps_ambiguous_unreadable_credentials(
   stopped = []
   monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
 
-  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
-    connect_outbound._revoke_profile(profile_id)
+  assert connect_outbound._revoke_profile(profile_id) is False
 
-  assert connect_outbound._profile_dir(profile_id).is_dir()
-  assert stopped == []
+  assert not connect_outbound._profile_dir(profile_id).exists()
+  assert stopped[0] == profile_id
 
 
 def test_outbound_revoke_does_not_signal_a_reused_runner_pid(monkeypatch):
@@ -936,17 +960,17 @@ def test_outbound_mutations_require_permission_and_report_domain_failures(
   async def rejected_pairing(_label, _command, agent=False):
     raise connect_outbound.OutboundConnectError("Pairing was rejected.")
 
-  async def rejected_revocation(_profile_id):
-    raise connect_outbound.OutboundConnectError("Access was kept.")
+  async def unconfirmed_revocation(_profile_id):
+    return False
 
   monkeypatch.setattr(connect_outbound, "create_profile", rejected_pairing)
-  monkeypatch.setattr(connect_outbound, "revoke_profile", rejected_revocation)
+  monkeypatch.setattr(connect_outbound, "revoke_profile", unconfirmed_revocation)
   response = client.post(path, headers=granted, json=body)
   assert response.status_code == 400
   assert response.json()["detail"] == "Pairing was rejected."
   response = client.delete(path + "/o_0123456789abcdef", headers=granted)
-  assert response.status_code == 409
-  assert response.json()["detail"] == "Access was kept."
+  assert response.status_code == 200
+  assert response.json() == {"ok": True, "remote_notified": False}
 
 
 def test_pairing_code_exchange_is_rate_limited(client):

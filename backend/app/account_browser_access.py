@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from app import browser_access as access
 from app.config import get_settings
 from app.timeutil import now_naive_utc
 
+log = logging.getLogger(__name__)
 PENDING_TTL = timedelta(minutes=10)
 
 
@@ -144,6 +146,14 @@ def start(db: Session, grant_id: str):
   return cookie, url
 
 
+def cookie_matches_state(db: Session, state: str, cookie: str) -> bool:
+  """Whether this cookie is the one bound to this callback state."""
+  if not isinstance(state, str) or not 20 <= len(state) <= 256 or not isinstance(cookie, str) or not 20 <= len(cookie) <= 256:
+    return False
+  pending = db.query(access.BrowserAccountPending).filter_by(state_hash=access.digest(state)).first()
+  return pending is not None and hmac.compare_digest(pending.cookie_hash, access.digest(cookie))
+
+
 def pending_for_callback(db: Session, state: str, cookie: str):
   if not isinstance(state, str) or not 20 <= len(state) <= 256 or not isinstance(cookie, str) or not 20 <= len(cookie) <= 256:
     raise _invalid()
@@ -219,22 +229,30 @@ def verified_for_cookie(db: Session, cookie: str) -> access.BrowserAccountPendin
   return pending
 
 
+def _consume_verified(db: Session, pending_id: str):
+  """Spend one verified pending proof; return it with its locked, usable grant.
+
+  The caller commits or rolls back."""
+  now = now_naive_utc()
+  pending = db.get(access.BrowserAccountPending, pending_id)
+  if (pending is None or pending.verified_at is None
+      or pending.verified_expires_at is None or pending.verified_expires_at <= now):
+    raise _invalid()
+  consumed = db.execute(update(access.BrowserAccountPending).where(
+    access.BrowserAccountPending.id == pending_id,
+    access.BrowserAccountPending.consumed_at.is_(None),
+    access.BrowserAccountPending.expires_at > now,
+  ).values(consumed_at=now)).rowcount
+  if consumed != 1:
+    raise _invalid()
+  grant = access._lock_active_grant(db, pending.grant_id)
+  _require_usable(db, grant, pending)
+  return pending, grant
+
+
 def complete(db: Session, pending_id: str, previous_session_secret: str | None = None):
   try:
-    now = now_naive_utc()
-    pending = db.get(access.BrowserAccountPending, pending_id)
-    if (pending is None or pending.verified_at is None
-        or pending.verified_expires_at is None or pending.verified_expires_at <= now):
-      raise _invalid()
-    consumed = db.execute(update(access.BrowserAccountPending).where(
-      access.BrowserAccountPending.id == pending_id,
-      access.BrowserAccountPending.consumed_at.is_(None),
-      access.BrowserAccountPending.expires_at > now,
-    ).values(consumed_at=now)).rowcount
-    if consumed != 1:
-      raise _invalid()
-    grant = access._lock_active_grant(db, pending.grant_id)
-    _require_usable(db, grant, pending)
+    _pending, grant = _consume_verified(db, pending_id)
     owner = access._owner(db, grant.owner_id)
     secret, session = access.open_session(db, grant, owner, previous_session_secret)
     db.commit()
@@ -242,3 +260,22 @@ def complete(db: Session, pending_id: str, previous_session_secret: str | None =
   except Exception:
     db.rollback()
     raise
+
+
+async def leave(db: Session, pending_id: str) -> access.BrowserAccessGrant:
+  """The verified recipient gives up their own grant: the owner's revoke.
+
+  Access lives on this instance, so the recipient need not wait for the owner.
+  Revocation commits first; cleanup that cannot finish now stays visible and
+  retryable in the owner's Connect, exactly as after the owner's own revoke."""
+  try:
+    _pending, grant = _consume_verified(db, pending_id)
+    db.commit()
+  except Exception:
+    db.rollback()
+    raise
+  grant = access.revoke_grant(db, grant.id, grant.owner_id)
+  ended = await access.end_grant(db, grant)
+  if ended.stop_error is not None:
+    log.warning("browser grant %s left; stopping its work failed: %r", grant.id, ended.stop_error)
+  return grant

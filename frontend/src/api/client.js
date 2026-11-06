@@ -154,6 +154,22 @@ export function renewSharedBrowserSession() {
   return sharedBrowserRenewal
 }
 
+// Give up this account's shared access for good, after it proved its identity.
+// This is the owner's revoke, run for the recipient; it installs no session.
+export async function leaveSharedBrowserAccess(pendingId) {
+  if (!sharedBrowserEnabled || !pendingId) throw new Error('SHARED_ACCESS_INVALID_ACCOUNT_FLOW')
+  clearSharedBrowserSession()
+  const response = await fetch(`${BASE}/api/connect/browser-access/session/account/leave`, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pending_id: pendingId }),
+  })
+  if (!response.ok) throw new Error('SHARED_ACCESS_LEAVE_FAILED')
+  const data = await response.json()
+  if (data?.left !== true) throw new Error('SHARED_ACCESS_LEAVE_FAILED')
+  return { name: typeof data.name === 'string' ? data.name : '' }
+}
+
 export async function leaveSharedBrowserSession() {
   const grantId = sharedBrowserGrantId || pendingSharedBrowserLogoutGrantId
   if (!grantId) throw new Error('SHARED_ACCESS_LOGOUT_UNAVAILABLE')

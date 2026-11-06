@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app import auth, models, project_builders
 from app.config import get_settings
 from app.database import get_db
-from app.deps import SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site
+from app.deps import SharedAppPrincipal, browser_guest_without_full_access, get_current_owner, get_shared_app_principal, reject_cross_site
 from app.path_utils import validate_path_within_base
 from app.project_retention import PROJECT_LIFECYCLE_LOCK
 from app.shared_app_retention import owned_snapshot_root
@@ -81,7 +81,7 @@ class SharedAppMemberUpdate(BaseModel):
 def _require_membership_administration(principal: SharedAppPrincipal) -> None:
   # Existing shared-app owners keep their resource-confined member powers.
   # Browser guests cannot create independent access that escapes their grant.
-  if principal.browser is not None:
+  if browser_guest_without_full_access(principal):
     raise HTTPException(403, "Only the installation owner can change shared access.")
 
 
