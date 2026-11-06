@@ -27,6 +27,9 @@ function isRoutineEntry(entry) {
   const item = entry?.item
   if (item?.type === 'tool') return isRoutineTool(item)
   if (item?.type !== 'activity' || !item.entries?.length) return false
+  // A compact block that also carries a peer message or helper result is not
+  // only bookkeeping: moving it would move that item above the answer too.
+  if (item.positioned_entries?.length) return false
   return (!Number.isInteger(item.tool_count) || item.tool_count === item.entries.length)
     && item.entries.every(inner => isRoutineTool(inner?.item))
 }

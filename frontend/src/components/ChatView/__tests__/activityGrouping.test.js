@@ -140,6 +140,12 @@ test('a saved reply\'s compact routine block joins its earlier compact line', ()
   // A compact block that counts steps it does not show is not known routine.
   const partial = entry('activity', { entries: [routineSave()], tool_count: 2 })
   assert.deepEqual(joinRoutineToActivity([work, answer, partial]), [work, answer, partial])
+  // Nor is one that carries a peer message or helper result: it keeps its place.
+  const carrying = entry('activity', {
+    entries: [routineSave(), routineSave()], tool_count: 2,
+    positioned_entries: [entry('peer_message', { content: 'Done on my side.' })],
+  })
+  assert.deepEqual(joinRoutineToActivity([work, answer, carrying]), [work, answer, carrying])
 })
 
 test('failed or undeclared saves keep their own place and wording', () => {
