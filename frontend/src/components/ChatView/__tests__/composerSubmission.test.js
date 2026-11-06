@@ -91,7 +91,7 @@ test('a queue a Stop held waits for the owner\'s send only while no turn runs', 
   const held = [{ cid: 'a', content: 'first', held: true }, { cid: 'b', content: 'second', held: true }]
   assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: held }), true)
   assert.equal(queueAwaitsOwnerSend({ turnActive: true, pendingMessages: held }), false,
-    'during a turn the queue drains after it as usual')
+    'during a turn nothing can start the held rows, so no send is offered')
   assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [{ cid: 'a' }] }), false,
     'an ordinary queue keeps its Stop')
   assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [] }), false)

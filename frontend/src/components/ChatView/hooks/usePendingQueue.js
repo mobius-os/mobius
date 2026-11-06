@@ -76,6 +76,14 @@ import { cidOf } from '../messageIdentity.js'
  * }}
  */
 
+// Mirrors the server: starting the owner's own typed message releases the
+// rows a Stop held, so they follow it (continuations.is_owner_typed). An app's
+// or a browser guest's row, or a hidden carrier, leaves them held.
+function _releasesHolds(row) {
+  return !!row && !row.hidden && !row.held
+    && row._initiated_by_app_id == null && row._browser_grant_id == null
+}
+
 function _fromServerList(serverList) {
   return (serverList || []).map(m => ({
     ...m,
@@ -320,7 +328,10 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const current = pendingMessagesRef.current
     const promotedGroup = current.filter(m => wanted.has(cidOf(m)))
     if (promotedGroup.length === 0) return null
-    const kept = current.filter(m => !wanted.has(cidOf(m)))
+    const remaining = current.filter(m => !wanted.has(cidOf(m)))
+    const kept = promotedGroup.some(_releasesHolds)
+      ? remaining.map(m => (m.held ? { ...m, held: false } : m))
+      : remaining
     for (const m of promotedGroup) {
       if (m.cid != null) {
         inFlightCidsRef.current.delete(m.cid)

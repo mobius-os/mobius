@@ -884,3 +884,32 @@ test('recovery copies stay visible but never block or enter the Steer candidate 
     'optimistic candidates still need server confirmation before dispatch')
   hook.unmount()
 })
+
+test('starting the owner\'s own message releases the held rows locally, as the server does', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'held-a', ts: 1, held: true }),
+    fixtureMsg({ cid: 'held-b', ts: 2, held: true }),
+  ])
+  result.current.add(fixtureMsg({ cid: 'typed', ts: 3 }))
+  result.current.promoteManyByCid(['typed'])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, row.held]),
+    [['held-a', false], ['held-b', false]],
+  )
+})
+
+test('a machine or app row starting leaves the held rows held', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'wake', ts: 1, hidden: true }),
+    fixtureMsg({ cid: 'app', ts: 2, _initiated_by_app_id: 4 }),
+    fixtureMsg({ cid: 'held-a', ts: 3, held: true }),
+  ])
+  result.current.promoteManyByCid(['wake'])
+  result.current.promoteManyByCid(['app'])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, row.held]),
+    [['held-a', true]],
+  )
+})

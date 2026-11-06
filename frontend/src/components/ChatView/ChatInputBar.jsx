@@ -171,7 +171,7 @@ export function PrimaryActionGlyphs({ action }) {
 export function PrimaryAction({
   sending, listening, hasInput, hasUploading, showSteer, steerReady,
   submissionBlocked, questionBlocked, savesQueued = false, resendsHistory = false,
-  onSubmit, onStop, onSteer, onToggleVoice, onSendQueue,
+  onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   // A queued message open in the chat box is saved in place. That edits the
   // queue rather than sending, so a running turn, a waiting question card, and
@@ -243,23 +243,6 @@ export function PrimaryAction({
         // (canSubmit ignores offline). Gating it on `offline` was a leftover
         // from the old online-only composer and silently swallowed offline taps.
         disabled={!holdsQueuedEdit && ((hasUploading && !resendsHistory) || submissionBlocked)}
-      >
-        <PrimaryActionGlyphs action="send" />
-      </button>
-    )
-  }
-  // A Stop held the queue and the box is empty: Send runs the whole queue.
-  if (onSendQueue && !listening) {
-    return (
-      <button
-        key="primary"
-        className="chat__action chat__send"
-        type="button"
-        onPointerDown={(e) => e.preventDefault()}
-        onTouchEnd={(e) => { e.preventDefault(); onSendQueue() }}
-        onClick={onSendQueue}
-        aria-label="Send queued messages"
-        disabled={submissionBlocked}
       >
         <PrimaryActionGlyphs action="send" />
       </button>
@@ -996,7 +979,6 @@ export default function ChatInputBar({
               onStop={onStop}
               onSteer={onSteer}
               onToggleVoice={onToggleVoice}
-              onSendQueue={onSendQueue}
             />
           </div>
         </div>

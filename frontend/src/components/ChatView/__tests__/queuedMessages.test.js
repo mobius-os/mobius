@@ -69,18 +69,26 @@ test('an open queued message can be saved while a question waits or the draft up
     'a draft still waits for its uploads')
 })
 
-test('an empty box offers to send a held queue instead of the mic', () => {
-  const sendQueue = /<button[^>]*aria-label="Send queued messages"[^>]*>/
-  const html = primaryButton({ hasInput: false, onSendQueue() {} })
-  assert.match(html, sendQueue)
-  assert.doesNotMatch(html.match(sendQueue)[0], /disabled/)
-  assert.match(primaryButton({ hasInput: false, onSendQueue() {}, submissionBlocked: true }),
-    /aria-label="Send queued messages"[^>]*disabled/)
-  assert.match(primaryButton({ hasInput: true, onSendQueue() {} }), /aria-label="Send"/,
-    'typed text is sent as its own message')
-  assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/)
-  assert.match(primaryButton({ hasInput: false, onSendQueue() {}, listening: true }),
-    /aria-label="Stop recording"/)
+test('a held queue is sent from its tray while the empty composer keeps the mic', () => {
+  const sendHeld = /<button[^>]*aria-label="Send queued messages"[^>]*>/
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), held: true, onSendHeld() {},
+  }))
+  assert.match(html, sendHeld)
+  assert.match(html, /Stopped — sends when you send/)
+  assert.doesNotMatch(renderToStaticMarkup(createElement(QueuedMessages, { items })), sendHeld,
+    'an ordinary queue has no send-all control')
+  assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/,
+    'dictation stays reachable')
+})
+
+test('held rows never claim to send after a running turn', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), held: true, turnActive: true,
+  }))
+  assert.match(html, /Stopped — sends when you send/)
+  assert.doesNotMatch(html, /after the current turn/)
+  assert.doesNotMatch(html, /aria-label="Send queued messages"/)
 })
 
 test('the strip counts the draft\'s files, which stay with the draft', () => {

@@ -3197,6 +3197,25 @@ export default function ChatView({
   // and Stop read the whole queue only after every row's chain settles.
   const [queuedEditOrder] = useState(createQueuedEditOrder)
 
+  // A queued send or the held queue began a NEW run: take the rows the server
+  // consumed out of the tray, show the started rows and own the turn's live
+  // state. A run start resets the build rail, and the turn is not the bridge
+  // turn from mount, so its first promote appends a fresh assistant.
+  function adoptStartedQueueTurn(result, fallbackRow = null) {
+    const consumed = result.message?._consumed_cids
+    if (Array.isArray(consumed)) pendingQueue.promoteManyByCid(consumed)
+    const rows = startedMessagesFromResponse(result) || (fallbackRow ? [fallbackRow] : null)
+    if (rows) commitMessages(prev => appendMessageBatch(prev, rows))
+    onMessageStartRef.current?.()
+    promotedRef.current = false
+    setBuildPhases(railAtRunStart())
+    setSending(true)
+    sendingRef.current = true
+    setServerRunningState(true)
+    forgetSendIntent({ cidList: consumed })
+    bridgeHook.markBridged()
+  }
+
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
     // Every submit path funnels through doSend, including shell-owned
@@ -3430,32 +3449,16 @@ export default function ChatView({
             fetchMessages({ force: true })
           }
           if (result.started) {
-            if (Array.isArray(result.message?._consumed_cids)) {
-              pendingQueue.promoteManyByCid(result.message._consumed_cids)
-            }
-            const startedMessages = startedMessagesFromResponse(result)
-            if (startedMessages) {
-              commitMessages(prev => appendMessageBatch(prev, startedMessages))
-            }
-            onMessageStartRef.current?.()
-            promotedRef.current = false
             // started=true means this send began a NEW run (stale-pending
-            // self-heal) rather than queueing behind one — a run start, so
-            // the rail resets. A plain enqueue (started falsy) must NOT
-            // touch the in-flight build's rail.
-            setBuildPhases(railAtRunStart())
-            setSending(true)
-            setServerRunningState(true)
+            // self-heal) rather than queueing behind one. A plain enqueue
+            // (started falsy) must NOT touch the in-flight build's rail.
+            adoptStartedQueueTurn(result)
             // The queued send was promoted straight into the active turn, so
             // it's a new visible user message and follows the send rule just
             // like a fresh send. The pin targets the stable cid (the started
             // row carries the same cid the client minted).
             landSentMessage(cid, { intent: queuedPinIntent })
-            forgetSendIntent({
-              cid,
-              cidList: result.message?._consumed_cids,
-            })
-            bridgeHook.markBridged()
+            forgetSendIntent({ cid })
           }
         }
         // Mid-turn steer: the backend delivered the send into the live provider
@@ -3507,42 +3510,18 @@ export default function ChatView({
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
-          if (Array.isArray(result.message?._consumed_cids)) {
-            pendingQueue.promoteManyByCid(result.message._consumed_cids)
-          }
-          pendingQueue.cancelByCid(cid)
-          onMessageStartRef.current?.()
-          promotedRef.current = false
           // Same run-start semantics as the branch above: this send became
-          // the first message of a NEW run, so the rail resets here too.
-          setBuildPhases(railAtRunStart())
-          // Apply the shared send-intent rule before appending. A message that
-          // raced into a started turn
-          // is still a new send becoming the active turn, so it pins only
-          // when first-or-at-physical-tail. The decision was captured at send time.
-          const startedMessages = startedMessagesFromResponse(result)
-          commitMessages(prev => {
-            if (startedMessages) return appendMessageBatch(prev, startedMessages)
-            // Strip the queue-envelope fields but KEEP cid — the visible user
-            // row needs it as its stable data-cid pin target.
-            const { queued: _q, position: _p, ...msg } = queuedMsg
-            return appendMessageBatch(prev, [msg])
-          })
-          setSending(true)
-          setServerRunningState(true)
-          // New visible user msg → pin the stable cid to the top when the rule
-          // allows; otherwise the funnel retires any stale pin to the reader's
-          // anchor and reservation stays available below.
+          // the first message of a NEW run. Strip the queue-envelope fields
+          // but KEEP cid — the visible user row needs it as its stable
+          // data-cid pin target when the server echoes no started rows.
+          const { queued: _q, position: _p, ...msg } = queuedMsg
+          adoptStartedQueueTurn(result, msg)
+          pendingQueue.cancelByCid(cid)
+          // A message that raced into a started turn is still a new send
+          // becoming the active turn, so it pins only when first-or-at-
+          // physical-tail. The decision was captured at send time.
           landSentMessage(cid, { intent: queuedPinIntent })
-          forgetSendIntent({
-            cid,
-            cidList: result.message?._consumed_cids,
-          })
-          // This is a NEW turn (not the bridge turn from mount).
-          // Retire the bridge gate so the upcoming promote appends a
-          // fresh assistant instead of replacing whichever message
-          // is currently last.
-          bridgeHook.markBridged()
+          forgetSendIntent({ cid })
         }
         // Invariant: every observable queue-path status must resolve
         // the optimistic entry's in-flight flag. queued/steered/started
@@ -4698,18 +4677,7 @@ export default function ChatView({
         fetchMessages({ force: true, authoritative: true })
         return
       }
-      const consumed = result.message?._consumed_cids || []
-      pendingQueue.promoteManyByCid(consumed)
-      forgetSendIntent({ cidList: consumed })
-      const rows = startedMessagesFromResponse(result)
-      if (rows) commitMessages(prev => appendMessageBatch(prev, rows))
-      onMessageStartRef.current?.()
-      promotedRef.current = false
-      setBuildPhases(railAtRunStart())
-      setSending(true)
-      sendingRef.current = true
-      setServerRunningState(true)
-      bridgeHook.markBridged()
+      adoptStartedQueueTurn(result)
     } catch (err) {
       setSendFailure(queueSendFailureMessage(err))
       fetchMessages({ force: true, authoritative: true })
@@ -6386,6 +6354,8 @@ export default function ChatView({
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
+            held={pendingQueue.pendingMessages.some(row => row?.held === true)}
+            onSendHeld={queueHeld ? handleSendQueue : undefined}
           />
         <CompactionProgress
           progress={compactionProgress}
