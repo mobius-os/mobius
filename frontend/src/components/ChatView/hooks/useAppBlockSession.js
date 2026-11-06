@@ -30,6 +30,7 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const actions = useMemo(() => blockActions(block), [block])
   const items = useMemo(() => blockItems(block), [block])
   const keys = useMemo(() => new Set(actions.map(action => action.key)), [actions])
+  const intents = useMemo(() => new Set(items.map(item => item.intent)), [items])
   const arming = useConfirmArming({ state, generation: negotiation.generation, supported: negotiation.supported,
     confirmView, listStartView, listEndView })
   const { disarm, noteReport, mayConfirm } = arming
@@ -84,12 +85,12 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const onBlockState = useCallback((message, { generation }) => {
     const current = negotiationRef.current
     if (current.supported !== true || generation !== current.generation) return
-    const safe = sessionState(message, sessionId, keys)
+    const safe = sessionState(message, sessionId, keys, intents)
     if (!safe) return
     noteReport(safe)
     setState(previous => sessionStateUpdate(previous, safe))
     if (!safe.checkpointInvalid && safe.ackNonce && safe.ackNonce === eventRef.current?.nonce) clearEvent()
-  }, [sessionId, keys, clearEvent, noteReport])
+  }, [sessionId, keys, intents, clearEvent, noteReport])
 
   // Reserve synchronously: a second click before React commits, or before
   // the app acknowledges this exact nonce, cannot send another event.

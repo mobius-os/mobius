@@ -5,7 +5,7 @@ import { Suspense, useEffect, useId, useState } from 'react'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
 import { sessionSnapshot } from './appBlockSession.js'
-import { AppBlockLayout, AppCanvas, StaticAppBlock } from './AppBlockParts.jsx'
+import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, StatusPill } from './AppBlockParts.jsx'
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
 import { passiveBlockMode } from './blockOwnership.js'
@@ -44,16 +44,12 @@ export function sessionLocked(session, admitted) {
 }
 
 
-function SessionLinks({ links }) {
-  if (!links.length) return null
-  return <span className="md-app-block__links">{links.map(link =>
-    <a key={link.url} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>)}</span>
-}
-
 /** Host-drawn controls for one app action. Before this document reports,
  *  saved actions are history, not controls. Confirm takes the action's own
- *  fixed-size place; "Not now" sits beside it. */
-export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent }) {
+ *  fixed-size place; "Not now" sits beside it. An `open` action is a plain
+ *  link to the block in its app (`openHref`) and sends no event. */
+export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent,
+  openHref = '', onInternalNav = null }) {
   const waitingId = useId()
   if (!state) return <span className="md-app-block__pending" role="status">Loading…</span>
   if (state.hidden) return null
@@ -70,13 +66,18 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
       {waiting ? <span id={waitingId} className="md-app-block__sr-only">
         Confirm turns on once the first and last rows above have been on screen.</span> : null}
     </span>
-    : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
-      aria-busy={state.busy || undefined} title={state.label || target.label}
-      onClick={() => onEvent(target.intent, 'activate')}>{state.label || target.label}</button>
+    : state.open && openHref
+      ? <AppLink className="md-app-block__action is-secondary" href={openHref} onInternalNav={onInternalNav}>
+        {state.label || target.label}</AppLink>
+      : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
+        aria-busy={state.busy || undefined} title={state.label || target.label}
+        onClick={() => onEvent(target.intent, 'activate')}>
+        {state.busy ? <span className="md-app-block__spinner" aria-hidden="true" /> : null}
+        {state.label || target.label}</button>
   return <div className="md-app-block__session">
     <div className="md-app-block__session-row">
-      {state.status ? <span className={`md-app-block__status is-${state.statusTone}`}>{state.status}</span> : null}
-      <SessionLinks links={state.links} />
+      <StatusPill status={state.status} tone={state.statusTone} />
+      <ExternalLinks links={state.links} />
       {control}
     </div>
     {/* A confirmation's own rows replace the note; one that cannot be shown
@@ -94,7 +95,7 @@ export function PassiveBlockView({ block, app, state, locked, confirmArmed = fal
   const actionState = key => state?.actions.find(action => action.key === key) || null
   const actionFor = target => target
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
-      confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} />
+      confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} openHref={block.href} onInternalNav={onInternalNav} />
     : null
   const snapshot = sessionSnapshot(block, state)
   const count = snapshot.confirmation ? snapshot.items.length : 0
@@ -102,7 +103,7 @@ export function PassiveBlockView({ block, app, state, locked, confirmArmed = fal
     actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs}>
     {/* Always present, so the polite announcement is heard when the rows change. */}
     <p className="md-app-block__sr-only" role="status">
-      {count ? `${app.name} lists ${count} ${count === 1 ? 'item' : 'items'} to confirm.` : ''}</p>
+      {count ? `${app.name} lists ${count} ${count === 1 ? 'item' : 'items'} to confirm.` : state?.title || ''}</p>
     {notice ? <p className="md-app-block__notice" role="status">{notice}</p> : null}
     {state?.notice ? <p className="md-app-block__notice" role="status">{state.notice}</p> : null}
     {children}

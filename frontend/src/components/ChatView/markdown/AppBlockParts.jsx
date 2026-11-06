@@ -2,7 +2,7 @@
    links into the app; nothing app-owned runs until the reader explicitly
    opens the embedded view. */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowUpRight, ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { openInternalLink } from '../internalLink.js'
@@ -46,6 +46,31 @@ export function Facts({ facts }) {
   </div>)}</dl>
 }
 
+/** App-reported links open outside Möbius, marked by an arrow. */
+export function ExternalLinks({ links }) {
+  if (!links.length) return null
+  return <span className="md-app-block__links">{links.map(link =>
+    <a key={link.url} className="md-app-block__link" href={link.url} target="_blank" rel="noopener noreferrer">
+      {link.label}<ArrowUpRight width={14} height={14} aria-hidden="true" /></a>)}</span>
+}
+
+/** A short app-reported status as a pill; `busy` adds a small spinner. */
+export function StatusPill({ status, tone = 'neutral', busy = false }) {
+  if (!status && !busy) return null
+  return <span className={`md-app-block__pill is-${tone}`}>
+    {busy ? <span className="md-app-block__spinner" aria-hidden="true" /> : null}
+    {status || <span className="md-app-block__sr-only">Working</span>}</span>
+}
+
+/** A row's live state from a passive session (appBlockSession.js sessionItems). */
+function ItemState({ live }) {
+  if (!live) return null
+  return <span className="md-app-block__item-state">
+    <ExternalLinks links={live.links} />
+    <StatusPill status={live.status} tone={live.statusTone} busy={live.busy} />
+  </span>
+}
+
 /** Every shape says why it offers no app view when its app is missing. */
 export function UnavailableNotice({ slug, loading }) {
   return <p className="md-app-block__notice" role="status">
@@ -67,7 +92,9 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
         : <AppLink className="md-app-block__item-title" href={item.href} onInternalNav={onInternalNav}>{item.title}</AppLink>}
       <Badges badges={item.badges} />
       <Facts facts={item.facts} />
+      {item.live?.note ? <p className="md-app-block__item-note">{item.live.note}</p> : null}
     </div>
+    <ItemState live={item.live} />
     {actionFor(item.action)}
     {i === last ? <span ref={listEdgeRefs?.end} className="md-app-block__list-edge is-end" aria-hidden="true" /> : null}
   </li>)}</ul>

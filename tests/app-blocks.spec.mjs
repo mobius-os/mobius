@@ -182,7 +182,9 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   await confirm.evaluate(button => { button.click(); button.click() })
   await expect(block.locator('.md-app-block__summary')).toHaveText('Sent 1')
   await expect(block.locator('footer .md-app-block__action')).toHaveText('Send all')
-  await expect(block.locator('footer .md-app-block__status')).toHaveText('Sent')
+  await expect(block.locator('footer .md-app-block__pill')).toHaveText('Sent')
+  // The app's live title replaces the saved one once it reports.
+  await expect(block.locator('header strong')).toHaveText('1 sent')
   const lines = (await log.textContent()).split('\n')
   expect(lines.filter(line => line.endsWith(' confirm'))).toHaveLength(1)
   expect(lines.some(line => line.includes('foreign'))).toBe(false)

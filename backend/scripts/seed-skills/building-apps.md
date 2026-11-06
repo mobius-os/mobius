@@ -465,6 +465,10 @@ most 16384.
   reply.
   Every intent field has the same bound. A repeated item intent or badge
   label keeps only its first entry.
+- An item is drawn as its title over one quiet metadata line: its fact values
+  joined by a dot, with the labels kept for assistive technology only. Write
+  item facts whose values read on their own ("owner/repo", "3 files · +88
+  −21"); block-level facts keep their visible labels.
 - Every block links to `/shell/?app=<slug>&intent=<intent>`, and each item to
   its own intent. Nothing app-owned runs until the reader clicks the expand
   control or an action; the app's ordinary view then opens in the transcript
@@ -550,13 +554,32 @@ the frame's window, so the host cannot tell documents apart by sender: it drops
 any report with a missing, older or newer generation, acknowledgements
 included.
 
-- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, confirming?,
-  confirmation?, note?, tone?, status?, statusTone?, links?, badges?}`, one
-  per key from `actions` (a key you do not report stays "Loading…"; use
-  `hidden: true` to remove its control). Unknown keys are dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
+- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, open?,
+  confirming?, confirmation?, note?, tone?, status?, statusTone?, links?,
+  badges?}`, one per key from `actions` (a key you do not report stays
+  "Loading…"; use `hidden: true` to remove its control). Unknown keys are
+  dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
   `links` are up to 12 `{label, url}` with uncredentialed `https:` URLs; tones
   are `neutral|success|attention|danger`; `badges` replaces the block's saved
-  badges for that action (omit to keep them, `[]` to clear them).
+  badges for that action (omit to keep them, `[]` to clear them). `status` is
+  drawn as a small pill in its tone and `note` as one plain line beside the
+  control, never in a warning colour. `busy` adds a spinner to the disabled
+  control. `open: true` turns the control into a link that opens the block in
+  your app (the block's own intent) with `label` as its text; it sends no
+  event, so use it when nothing can be done from the chat. It is ignored while
+  the action is confirming.
+- `title` (120): plain text that replaces the block's saved title while your
+  document reports, for a header that says what happened ("3 pull requests
+  opened"). Omit it or send `''` to keep the saved title.
+- `items`: up to 12 `{intent, status?, statusTone?, busy?, note?, links?}`,
+  live state for the block's listed rows, matched by the row's `intent` (the
+  intents in `blockSession.items`); unknown intents are dropped and the first
+  report for an intent wins. `status` (40) is a pill with `statusTone`, `busy`
+  adds a spinner to it, `note` (200) is one short plain line under the row,
+  and `links` are up to 2 `{label (40), url}` with uncredentialed `https:`
+  URLs, opened outside Möbius. Row state is decoration only: it adds no
+  control, is hidden while a confirmation owns the block, and is dropped while
+  the block is held for recovery.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.

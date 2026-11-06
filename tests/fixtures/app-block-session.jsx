@@ -29,6 +29,8 @@ function Session({ blockSession }) {
         type: 'moebius:app-block-state', sessionId: blockSession.sessionId, generation: blockSession.generation,
         ackNonce: state.ack,
         retain: Boolean(state.confirming), summary: `Sent ${state.sent}`,
+        // A live title only once something was sent; until then the saved one shows.
+        ...(state.sent ? { title: `${state.sent} sent` } : {}),
         actions: blockSession.actions.map(action => ({
           key: action.key, label: action.label, status: state.sent ? 'Sent' : 'Ready',
           confirming: state.confirming === action.key,
