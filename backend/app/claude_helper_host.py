@@ -559,6 +559,9 @@ class ClaudeHelperHost(Host):
       turn.dispatch_tool_error = True
       if not turn.done.is_set() and turn.dispatch_id in self._turn_by_dispatch:
         self._specs[turn.dispatch_id] = turn.spec
+        # Nothing was consumed, so a Stop during the re-ask must not stop the
+        # (resumable) agent this turn addresses.
+        turn.dispatch_consumed = False
       log.warning("helper dispatch tool error kind=%s id=%s", turn.kind, turn.dispatch_id)
 
   async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
