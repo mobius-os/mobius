@@ -10,7 +10,9 @@ While on, a watchdog thread notices, as it happens:
 
 - a request that has not started its response after ``request_seconds``
   (the database's long-hold threshold: work no healthy request should take).
-  Streams start their response at once, so they never count;
+  The clock runs from the request's arrival, so it includes receiving the
+  body: a slow upload counts, and shows ``no_busy_threads``. Streams start
+  their response at once, so they never count;
 - an event loop whose heartbeat is late by asyncio's own
   ``slow_callback_duration``, the threshold its debug mode reports slow
   callbacks at;
@@ -72,7 +74,9 @@ class StallRecorder:
     # reference never resolves to a snapshot from an earlier boot.
     self._run_id = secrets.token_hex(4)
     self._last_tick = time.monotonic()
-    self._stall_snapshot: str | None = None
+    # The stall the watchdog is snapshotting: whichever of the watchdog and
+    # the woken heartbeat finishes last writes its loop_stall line.
+    self._stall: dict | None = None
 
   async def run(self, log_path: Path) -> None:
     """Watch for stalls and write records until cancelled."""
@@ -83,7 +87,9 @@ class StallRecorder:
     )
     _log.addHandler(handler)
     stop = threading.Event()
-    self._last_tick = time.monotonic()
+    with self._lock:
+      self._last_tick = time.monotonic()
+      self._stall = None
     watchdog = threading.Thread(
       target=self._watch, args=(stop, threshold), name="stall-recorder",
       daemon=True,
@@ -91,15 +97,24 @@ class StallRecorder:
     watchdog.start()
     try:
       while True:
-        before = self._last_tick = time.monotonic()
         await asyncio.sleep(threshold)
-        late = time.monotonic() - before - threshold
-        # Taken every tick, so a snapshot can only belong to this stall.
+        now = time.monotonic()
+        # Under the lock, so the watchdog can only claim the current tick.
         with self._lock:
-          snapshot, self._stall_snapshot = self._stall_snapshot, None
-        if late >= threshold:
+          late = now - self._last_tick - threshold
+          self._last_tick = now
+          stall = self._stall
+          if stall is not None and stall["ms"] is None:
+            stall["ms"] = round(late * 1000)
+            if stall["snapshot"] is None:
+              continue  # still snapshotting: the watchdog writes the line
+            self._stall = None
+          else:
+            stall = None
+        if stall is not None or late >= threshold:
           self.emit({
-            "kind": "loop_stall", "ms": round(late * 1000), "snapshot": snapshot,
+            "kind": "loop_stall", "ms": round(late * 1000),
+            "snapshot": stall and stall["snapshot"],
           })
     finally:
       stop.set()
@@ -131,9 +146,10 @@ class StallRecorder:
         "kind": "slow_request", "method": scope.get("method", "?"),
         "route": route_template(scope), "status": status,
         "ms": round(elapsed * 1000), "snapshot": entry["snapshot"],
-        # Checked while late and nothing in the server was busy: it was
-        # waiting on something external (an upstream, a long poll).
-        "server_idle": entry["checked"] and entry["snapshot"] is None,
+        # Checked while late and no thread was busy: the request was
+        # waiting (on an upstream, the client, or a lock, queue or future
+        # inside the server), not held up by CPU or a blocked event loop.
+        "no_busy_threads": entry["checked"] and entry["snapshot"] is None,
       })
 
   def emit(self, event: dict) -> None:
@@ -152,24 +168,31 @@ class StallRecorder:
           if not entry["checked"] and now - entry["start"] >= self.request_seconds
         ]
         # One heartbeat sleep plus the stall threshold without a tick.
-        stalled = (
-          self._stall_snapshot is None
-          and now - self._last_tick >= 2 * threshold
-        )
-      if late or stalled:
-        snapshot_id = self._snapshot(own, now, keep_idle=stalled)
+        stall = None
+        if self._stall is None and now - self._last_tick >= 2 * threshold:
+          stall = self._stall = {"snapshot": None, "ms": None}
+      if late or stall:
+        snapshot_id = self._snapshot(own, now, keep_idle=stall is not None)
+        done = None
         with self._lock:
           for entry in late:
             entry["checked"] = True
             entry["snapshot"] = snapshot_id
-          if stalled:
-            self._stall_snapshot = snapshot_id
+          if stall is not None:
+            stall["snapshot"] = snapshot_id
+            if stall["ms"] is not None:  # the loop already woke
+              done, self._stall = stall, None
+        if done is not None:
+          self.emit({
+            "kind": "loop_stall", "ms": done["ms"], "snapshot": done["snapshot"],
+          })
 
   def _snapshot(self, own: int, now: float, *, keep_idle: bool) -> str | None:
     """Record what the server is doing; nothing busy is no evidence.
 
-    A request can stay late only because it waits on something outside the
-    server, with every thread idle; such snapshots are dropped. A stalled
+    A request can stay late with every thread idle, waiting on an upstream,
+    the client, or a lock, queue or future; such snapshots are dropped
+    (always-parked daemons would make every one look relevant). A stalled
     event loop is busy by definition, so its snapshots are always kept.
     """
     threads = self._snapshot_threads(exclude=frozenset({own}))

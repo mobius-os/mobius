@@ -156,13 +156,16 @@ the stall log: add `"stall_log": true` to `/data/tracing.json` (the opt-in
 tracing file; it needs no collector or extra packages and works without
 `"enabled"`) and restart. It then writes `/data/logs/stalls.jsonl` (one
 rotation to `.jsonl.1`): requests slower to start responding than a long
-database hold (`DB_CHECKOUT_WARN_SECONDS`, 2 s by default), event-loop stalls
-past asyncio's slow-callback threshold (0.1 s), and long database holds. Each
-event links by `snapshot` to a line showing what every busy thread was doing
-at that moment; `server_idle: true` marks a request that was only waiting on
-something external. Records name route templates and code locations, never
-concrete paths or query strings. Read it before reproducing a reported
-slowdown.
+database hold (`DB_CHECKOUT_WARN_SECONDS`, 2 s by default, counted from
+arrival so a slow upload counts), event-loop stalls past asyncio's
+slow-callback threshold (0.1 s), and long database holds. Each event links by
+`snapshot` to a line showing what every busy thread was doing at that moment.
+`no_busy_threads: true` marks a late request while no thread was busy: it was
+waiting, on an upstream, the client, or a lock, queue or future inside the
+server, not on CPU or a blocked event loop. Records name route templates and
+code locations, never concrete paths or query strings; `<unmatched>` means no
+API route matched or routing had not run yet. Read it before reproducing a
+reported slowdown.
 
 Exercising owner-input cards programmatically (for a test, never to answer for
 the owner): while a card is open, posting a chat message returns 409

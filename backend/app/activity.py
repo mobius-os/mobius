@@ -378,7 +378,9 @@ def route_template(scope) -> str:
   """The matched route template of an HTTP request, never its concrete path.
 
   FastAPI leaves the matched route in the ASGI scope once routing ran; the
-  template carries no ids, file names or query values.
+  template carries no ids, file names or query values. ``<unmatched>`` covers
+  both a path no API route matched (static files, 404s) and work done before
+  routing ran, such as middleware.
   """
   return getattr(scope.get("route"), "path", None) or "<unmatched>"
 

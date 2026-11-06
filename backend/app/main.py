@@ -771,6 +771,31 @@ class _SecurityHeadersMiddleware:
       raise
 
 
+class _RequestLabel:
+  """``METHOD /route/{template}`` for database holds, resolved lazily because
+  routing has not run when the request arrives.
+
+  Tasks the request starts inherit this label and can outlive it, so the
+  label settles to a string when the request ends and drops the scope (and
+  with it the request's headers).
+  """
+
+  __slots__ = ("_scope", "_text")
+
+  def __init__(self, scope):
+    self._scope = scope
+    self._text: str | None = None
+
+  def __call__(self) -> str:
+    if self._scope is None:
+      return self._text
+    return f'{self._scope.get("method", "?")} {activity.route_template(self._scope)}'
+
+  def settle(self) -> None:
+    self._text = self()
+    self._scope = None
+
+
 class _DatabaseRequestContextMiddleware:
   """Attributes connection checkout time to the owning HTTP request."""
 
@@ -780,14 +805,13 @@ class _DatabaseRequestContextMiddleware:
   async def __call__(self, scope, receive, send):
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
-    # Resolved when a hold turns out long, after routing matched a template.
-    token = set_database_request_label(
-      lambda: f'{scope.get("method", "?")} {activity.route_template(scope)}',
-    )
+    label = _RequestLabel(scope)
+    token = set_database_request_label(label)
     try:
       return await self.app(scope, receive, send)
     finally:
       reset_database_request_label(token)
+      label.settle()
 
 
 class _RequestErrorTelemetryMiddleware:
