@@ -1506,7 +1506,14 @@ async def run_claude_sdk_turn(
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
-        "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        # The queued-prompt gate keeps Stop and a saved owner card final, so a
+        # failure refuses the prompt rather than letting it start new work.
+        # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
+        # one closed would turn a completed tool (even the saved card itself)
+        # into an error result, inviting a duplicate.
+        "UserPromptSubmit": [HookMatcher(
+          matcher=None, hooks=[queued_prompt_hook], on_failure="block",
+        )],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),

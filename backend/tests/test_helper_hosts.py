@@ -1016,6 +1016,43 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
       assert "# Interruptions in Möbius" in agent.prompt
 
 
+def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tmp_path):
+  """A raising or timed-out identity/env hook must block, not run unscoped."""
+  from contextlib import ExitStack
+  from types import SimpleNamespace
+
+  factory = claude_host._host_options(
+    key=SimpleNamespace(cwd=str(tmp_path)), host_env={},
+    skill_text="C", connector_plan=None, skills_enabled=False,
+    model=None, supports_effort=True,
+  )
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None,
+                         pre_compact=None, subagent_stop=None)
+  with ExitStack() as stack:
+    options = factory(host, None, stack)
+  assert [m.on_failure for m in options.hooks["PreToolUse"]] == ["block"]
+  for event in ("PostToolUse", "PostToolUseFailure", "PreCompact", "SubagentStop"):
+    assert all(m.on_failure is None for m in options.hooks[event]), event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name,agent_id", [
+  ("Read", None),  # dispatcher reaching for an unregistered tool
+  ("ToolSearch", None),
+  ("Read", "unknown-agent"),
+])
+async def test_helper_pre_tool_use_never_returns_none_under_block_policy(tool_name, agent_id):
+  """Under on_failure="block" a None return blocks; no-opinion paths return {}."""
+  host = claude_host.ClaudeHelperHost.__new__(claude_host.ClaudeHelperHost)
+  host._turn_by_dispatch, host._specs, host._turn_by_tool_use = {}, {}, {}
+  host._turn_by_agent, host._agent_identity = {}, {}
+  host._identity_closed, host._rejected_agents = True, set()
+  result = await host.pre_tool_use(
+    {"tool_name": tool_name, "tool_input": {}, "agent_id": agent_id}, "t1", {},
+  )
+  assert isinstance(result, dict)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,expected_agent", [
   ("claude-haiku-4-5-20251001", "mobius-helper"),
