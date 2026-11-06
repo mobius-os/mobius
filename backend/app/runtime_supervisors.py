@@ -142,6 +142,11 @@ class RuntimeSupervisors:
 
   async def start_process_services(self) -> None:
     """Start services that are safe without a serviceable database."""
+    from app import stall_recorder
+    self._spawn(
+      "stall-recorder",
+      stall_recorder.run(Path(self.settings.data_dir) / "logs"),
+    )
     await self._start_frontend_watcher()
     from app.connect_outbound import supervise_outbound_connects
     self._spawn("connect-outbound", supervise_outbound_connects())
