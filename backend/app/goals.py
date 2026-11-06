@@ -341,9 +341,9 @@ def _helper_blockers(db, run, goal) -> list[str]:
   what reaches the coordinator, so blocking would be uncleared forever.
   """
   from app.delegations import _self_resuming_helper_rows
-  from app.goal_plans import _active_helper_nodes, _delegation_tree, _helper_key
+  from app.goal_plans import active_goal_helpers, goal_helper_tree
 
-  tree = _delegation_tree(db, run, goal, all_attempts=True)
+  tree = goal_helper_tree(db, run, goal)
   tree_ids, owners, frontier = set(), {goal.chat_id}, list(tree)
   while frontier:
     node = frontier.pop()
@@ -352,12 +352,11 @@ def _helper_blockers(db, run, goal) -> list[str]:
   owners |= {row.child_chat_id for row in db.query(models.Delegation.child_chat_id)
              .filter(models.Delegation.id.in_(tree_ids))} if tree_ids else set()
   # A still-working helper is already named by its task; list it only once.
-  active = _active_helper_nodes(tree)
-  active_ids = {node["id"] for node in active}
-  return [_helper_key(node) for node in active] + [
+  active = active_goal_helpers(tree)
+  return list(active.values()) + [
     "helper:" + row.id
     for row, _status in _self_resuming_helper_rows(db, owners)
-    if row.app_id is None and row.id not in active_ids and (
+    if row.app_id is None and row.id not in active and (
       row.id in tree_ids
       or (row.parent_chat_id == goal.chat_id and row.goal_id == goal.id)
     )
@@ -427,8 +426,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
-    GoalPlanConflict, GoalPlanError, active_goal_helpers, normalize_tasks,
-    staged_task_edits,
+    GoalPlanConflict, GoalPlanError, normalize_tasks, staged_task_edits,
   )
   # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (

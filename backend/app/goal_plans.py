@@ -663,16 +663,18 @@ def _helper_key(node: dict[str, Any]) -> str:
   return str(node.get("task_key") or node["id"])
 
 
-def active_goal_helpers(
+def goal_helper_tree(
   db: Session, physical: models.ChatRun, root: models.ChatGoal,
-) -> list[str]:
-  """Task keys of this Goal's helpers still working, with or without a plan."""
-  return [
-    _helper_key(node)
-    # Presentation folds superseded attempts, but settlement cannot abandon
-    # an older child merely because a newer attempt used the same task key.
-    for node in _active_helper_nodes(_delegation_tree(db, physical, root, all_attempts=True))
-  ]
+) -> list[dict[str, Any]]:
+  """Every helper attempt under this Goal, at any depth, for settlement."""
+  # Presentation folds superseded attempts, but settlement cannot abandon
+  # an older child merely because a newer attempt used the same task key.
+  return _delegation_tree(db, physical, root, all_attempts=True)
+
+
+def active_goal_helpers(tree: list[dict[str, Any]]) -> dict[str, str]:
+  """Delegation id to task key of each helper in tree still working."""
+  return {node["id"]: _helper_key(node) for node in _active_helper_nodes(tree)}
 
 
 def serialize_plan(
