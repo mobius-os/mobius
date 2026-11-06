@@ -2,7 +2,7 @@ import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListR
 import { invalidateEventFedCachesAfterReconnect } from './eventFedCaches.js'
 import { ownerStore, sessionStore } from '../../lib/workspaceStorage.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
-import { openExistingChat, stageAppChatDraft } from '../../lib/appChatNavigation.js'
+import { openChatWithAppDraft, openExistingChat } from '../../lib/appChatNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -2918,8 +2918,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [projectsQuery.isSuccess])
 
   // Route a mini-app crash report to the chat that built the app (its
-  // `chat_id`), falling back to a new chat when that chat was deleted. The
-  // report is set as a DRAFT (not auto-sent) so the owner reviews before
+  // `chat_id`), falling back to a new chat when that chat was deleted or
+  // cannot take a draft. The report is added after the owner's unsent DRAFT
+  // there (never sent, never replacing it) so the owner reviews before
   // sending. AppCanvas forwards ONLY its LIVE frame's app-error here (it
   // swallows a hidden incoming preview frame's), so there is no window-level
   // e.source guard to make — source attribution now lives entirely in
@@ -2934,19 +2935,25 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const buildingChatId = appReportChatId(appEntry, chatId)
     const buildingChat = buildingChatId
       && chatsRef.current.find(c => c.id === buildingChatId)
+    const reportInNewChat = () => newChatRef.current?.({ draft: report, forceNew: true })
     if (buildingChat) {
-      stageComposerHandoff(buildingChatId, report)
       // Open the building chat in the crashed app's OWN pane (fallback: focused
       // pane) so a background app's crash report lands beside it (contract §1.4.7).
       const ownerPane = paneModel.paneOf(
         workspaceStateRef.current.ws,
         tabModel.tabKey(tabModel.makeTab('app', appId)),
       )
-      navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
-      requestComposer(buildingChatId, { draft: report })
-      refreshChats()
+      // Like an app's draft, the report follows the owner's unsent text there.
+      void openChatWithAppDraft(buildingChatId, report, {
+        open: draft => {
+          navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
+          requestComposer(buildingChatId, { draft })
+          refreshChats()
+        },
+        openNew: reportInNewChat,
+      })
     } else {
-      newChatRef.current?.({ draft: report, forceNew: true })
+      reportInNewChat()
     }
   }, [refreshChats, requestComposer, workspaceStateRef])
 
@@ -2998,17 +3005,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         const targetState = await probeDeletion(
           `/chats/${encodeURIComponent(request.chatId)}?limit=1&compact=1`,
         )
-        if (targetState === 'deleted') {
+        const openNewChat = async () => {
           await newChatRef.current?.({
             draft: request.draft || undefined,
             forceNew: true,
           })
           refreshChats()
-          return
         }
-        // A failed send awaiting resolution keeps the composer; drop the draft.
-        open(await stageAppChatDraft(request.chatId, request.draft).catch(() => undefined))
-        return
+        if (targetState === 'deleted') return openNewChat()
+        return openChatWithAppDraft(request.chatId, request.draft, { open, openNew: openNewChat })
       }
       if (request.type === 'moebius:open-app') {
         await openAppWithIntent(request.appId, request.intent)

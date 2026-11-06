@@ -25,6 +25,19 @@ export async function stageAppChatDraft(chatId, draft) {
   return input
 }
 
+/** Open a chat with an app's draft added there. When that chat cannot take
+ *  it (see stageAppChatDraft), the draft starts a new chat instead of being
+ *  dropped. `open` receives the combined draft, or undefined without one. */
+export async function openChatWithAppDraft(chatId, draft, { open, openNew }) {
+  let combined
+  try {
+    combined = await stageAppChatDraft(chatId, draft)
+  } catch {
+    return openNew(draft)
+  }
+  return open(combined)
+}
+
 /** `moebius:open-existing-chat`: open exactly this chat or report why not.
  *  Never a new-chat fallback, and nothing is staged for a missing target. */
 export async function openExistingChat(request, navigate) {
