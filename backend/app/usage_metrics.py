@@ -35,7 +35,8 @@ CHAT_TOKEN_FIELDS = (
 # - partial: a lower bound (a run that ended before the provider reported
 #   every call, or a sum of calls whose counters may be incomplete);
 # - unknown: usage recorded in a shape that is not this run's total;
-# - missing: no usage recorded (in flight, failed early, or before tracking).
+# - missing: no usage recorded (in flight, failed early, before tracking, or
+#   only a session cost snapshot).
 # Unknown and missing never read as a zero, and unknown never adds to totals.
 USAGE_QUALITIES = ("final", "partial", "unknown", "missing")
 _AGGREGATE_CALCULATIONS = ("result_aggregate", "thread_delta")
@@ -49,7 +50,8 @@ def run_usage_quality(usage: Any, status: str | None) -> str:
   a stopped or failed run may have cut a model call short before its usage
   arrived.
   """
-  if usage is None:
+  # A Claude cost-only acknowledgement stores a cost snapshot, not usage.
+  if usage is None or (isinstance(usage, dict) and usage.keys() == {"provider_cost"}):
     return "missing"
   calculation = usage.get("calculation") if isinstance(usage, dict) else None
   if calculation in _AGGREGATE_CALCULATIONS:

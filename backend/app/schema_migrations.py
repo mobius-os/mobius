@@ -7013,6 +7013,124 @@ def _add_app_chat_scope_starts(eng) -> None:
     ))
 
 
+def _repair_claude_session_costs(eng) -> None:
+  """Repair only historical costs whose token snapshots prove their scope.
+
+  No transcript changes or provider-file reads. Preserve original totals and
+  a labelled baseline in usage_json; ambiguous or old per-call data stays as is.
+  The marker makes retry after a crash before the ledger insert idempotent.
+  """
+  import json
+  from sqlalchemy import inspect as sa_inspect, text
+  import math
+
+  # Migration behavior is frozen here, not imported from mutable runtime code.
+  def amount(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+      return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+  def snapshot(usage, cost):
+    recorded = usage.get("provider_cost")
+    if isinstance(recorded, dict) and recorded.get("scope") == "session":
+      return amount(recorded.get("total_usd"))
+    models = usage.get("provider_model_usage")
+    if not isinstance(models, dict) or not models or amount(cost) is None:
+      return None
+    values = [amount(m.get("costUSD")) if isinstance(m, dict) else None
+              for m in models.values()]
+    if any(value is None for value in values):
+      return None
+    total = sum(values)
+    return total if math.isclose(total, cost, rel_tol=1e-9, abs_tol=1e-9) else None
+
+  fields = (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
+            ("cacheReadInputTokens", "cache_read_input_tokens"),
+            ("cacheCreationInputTokens", "cache_creation_input_tokens"))
+
+  def baseline_basis(usage, previous_usage):
+    models = usage.get("provider_model_usage") or {}
+    current = usage.get("provider_usage") or {}
+    previous = (previous_usage or {}).get("provider_model_usage") or {}
+    if not all(isinstance(v, dict) for v in (models, current, previous)):
+      return None
+    if not all(isinstance(current.get(raw), int) and not isinstance(current[raw], bool)
+               and current[raw] >= 0 for _, raw in fields):
+      return None
+    per_call = any(isinstance(model, dict) and all(
+      model.get(key) == current[raw] for key, raw in fields
+    ) for model in models.values())
+    evidence_keys = ("costUSD",) + tuple(key for key, _ in fields)
+    for name, model in models.items():
+      before = previous.get(name)
+      if isinstance(model, dict) and isinstance(before, dict) and all(
+        isinstance(model.get(key), int) and isinstance(before.get(key), int)
+        and model[key] - before[key] == current[raw] for key, raw in fields
+      ):
+        # A primary-model delta cannot justify subtracting other models' spend.
+        # Require the rest of the breakdown to be unchanged; when both per-call
+        # and cumulative interpretations fit, preserve the original record.
+        if per_call:
+          return None
+        model_cost, before_cost = amount(model.get("costUSD")), amount(before.get("costUSD"))
+        if models.keys() == previous.keys() and all(
+          isinstance(other, dict) and isinstance(previous[other_name], dict)
+          and all(other.get(key) == previous[other_name].get(key)
+                  for key in evidence_keys)
+          for other_name, other in models.items() if other_name != name
+        ) and model_cost is not None and before_cost is not None and model_cost >= before_cost:
+          return "previous"
+        return None
+    return "zero" if per_call else None
+
+  if "chat_runs" not in sa_inspect(eng).get_table_names():
+    return
+  columns = {column["name"] for column in sa_inspect(eng).get_columns("chat_runs")}
+  if not {"id", "chat_id", "provider", "provider_session_id", "started_at",
+          "cost_usd", "usage_json"}.issubset(columns):
+    # Pre-telemetry tables have no cost evidence to repair. Their historical
+    # migrations and the ordinary schema-readiness check still own upgrades.
+    return
+  previous_key = None
+  previous_usage = None
+  previous_total = None
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, chat_id, provider_session_id, cost_usd, usage_json "
+      "FROM chat_runs WHERE provider = 'claude' "
+      "AND provider_session_id IS NOT NULL "
+      "ORDER BY chat_id, provider_session_id, started_at, id"
+    )).mappings()
+    for row in rows:
+      key = (row["chat_id"], row["provider_session_id"])
+      if key != previous_key:
+        previous_usage = previous_total = None
+        previous_key = key
+      try:
+        usage = json.loads(row["usage_json"] or "null")
+      except (TypeError, ValueError):
+        usage = None
+      if not isinstance(usage, dict):
+        previous_usage = previous_total = None
+        continue
+      total = snapshot(usage, row["cost_usd"])
+      basis = baseline_basis(usage, previous_usage)
+      if total is not None and "provider_cost" not in usage:
+        baseline = previous_total if basis == "previous" else 0.0
+        cost = (max(0.0, total - baseline) if basis is not None
+                and baseline is not None and total >= baseline else None)
+        if cost is not None:
+          usage["provider_cost"] = {
+            "scope": "session", "total_usd": total,
+            "baseline_usd": baseline, "historical_repair": True,
+          }
+          conn.execute(text(
+            "UPDATE chat_runs SET cost_usd = :cost, usage_json = :usage "
+            "WHERE id = :id"
+          ), {"id": row["id"], "cost": cost, "usage": json.dumps(usage)})
+      previous_usage, previous_total = usage, total
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7134,6 +7252,7 @@ _SCHEMA_MIGRATIONS = (
   ("0097_core_contribution_review_runs", _allow_core_contribution_review_runs),
   ("0098_run_end_reason", _add_run_end_reason),
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
+  ("0100_claude_session_costs", _repair_claude_session_costs),
 )
 
 

@@ -1909,4 +1909,8 @@ async def run_claude_sdk_turn(
             finally:
               teardown.finish()
 
-  return await _run_once()
+  result = await _run_once()
+  # CLI 2.1.277+ restores the earlier session's cost on resume. The durable
+  # metrics owner has the prior snapshot and derives the additive turn cost.
+  result["cost_scope"] = "session"
+  return result
