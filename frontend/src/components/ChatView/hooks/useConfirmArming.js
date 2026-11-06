@@ -13,10 +13,10 @@
    Every observation arrives as `{ showing, visible }` and counts only for the
    showing it names: an element's position under an earlier list (the same
    sentinel before 256 rows pushed it away) can never arm a new showing.
-   The list is drawn as the block's rows, above or below Confirm depending on
-   where the action sits, so both of its ends having been on screen means the
-   whole list has passed through the viewport; a long list just needs
-   scrolling. A double-click, a swapped list or an unseen list never arms. */
+   The list is drawn as the block's only rows, above its one Confirm, so
+   both ends having been on screen means the reader scrolled from the first
+   row to Confirm (an endpoint gate: a jump past the middle is not detected).
+   A double-click, a swapped list or an unseen list never arms. */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export const CONFIRM_ARM_MS = 500

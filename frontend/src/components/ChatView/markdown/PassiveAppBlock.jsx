@@ -1,7 +1,7 @@
 /* Passive block session: a hidden, inert instance of an admitted app reports
    current state while the block is near the viewport; the host draws every
    control. See building-apps.md "Passive block sessions". */
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useId, useState } from 'react'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
 import { sessionSnapshot } from './appBlockSession.js'
@@ -54,15 +54,21 @@ function SessionLinks({ links }) {
  *  saved actions are history, not controls. Confirm takes the action's own
  *  fixed-size place; "Not now" sits beside it. */
 export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent }) {
+  const waitingId = useId()
   if (!state) return <span className="md-app-block__pending" role="status">Loading…</span>
   if (state.hidden) return null
+  // Only assistive technology hears why an otherwise ready Confirm waits.
+  const waiting = state.confirming && Boolean(state.confirmation) && !confirmArmed && !locked
   const control = state.confirming
     ? <span className="md-app-block__controls">
       <button type="button" className="md-app-block__cancel" disabled={locked}
         onClick={() => onEvent(target.intent, 'cancel')}>Not now</button>
       <button ref={confirmRef} type="button" className="md-app-block__action"
         disabled={locked || state.disabled || !state.confirmation || !confirmArmed}
+        aria-describedby={waiting ? waitingId : undefined}
         onClick={() => onEvent(target.intent, 'confirm')}>Confirm</button>
+      {waiting ? <span id={waitingId} className="md-app-block__sr-only">
+        Confirm turns on once the first and last rows above have been on screen.</span> : null}
     </span>
     : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
       aria-busy={state.busy || undefined} title={state.label || target.label}
@@ -80,8 +86,9 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
 }
 
 /** The passive block for one parsed session state. The parser allows at most
- *  one enabled confirmation; its app-supplied list is shown as the block's
- *  rows (sessionSnapshot), whose two ends `listEdgeRefs` observes. */
+ *  one enabled confirmation; while it is open its app-supplied list is the
+ *  block's only rows, with one Not now/Confirm (sessionSnapshot), and
+ *  `listEdgeRefs` observes the list's two ends. */
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
   sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
@@ -89,8 +96,13 @@ export function PassiveBlockView({ block, app, state, locked, confirmArmed = fal
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
       confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} />
     : null
-  return <AppBlockLayout block={sessionSnapshot(block, state)} app={app} onInternalNav={onInternalNav}
+  const snapshot = sessionSnapshot(block, state)
+  const count = snapshot.confirmation ? snapshot.items.length : 0
+  return <AppBlockLayout block={snapshot} app={app} onInternalNav={onInternalNav}
     actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs}>
+    {/* Always present, so the polite announcement is heard when the rows change. */}
+    <p className="md-app-block__sr-only" role="status">
+      {count ? `${app.name} lists ${count} ${count === 1 ? 'item' : 'items'} to confirm.` : ''}</p>
     {notice ? <p className="md-app-block__notice" role="status">{notice}</p> : null}
     {state?.notice ? <p className="md-app-block__notice" role="status">{state.notice}</p> : null}
     {children}

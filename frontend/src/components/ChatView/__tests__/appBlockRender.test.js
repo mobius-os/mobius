@@ -128,7 +128,7 @@ test('Confirm takes the action\'s own fixed-size place with Not now beside it', 
 
 test('Confirm is shown disabled in place until it has been armed', () => {
   const html = controls(live({ confirming: true, confirmation: [{ title: 'Exact', facts: [] }] }), false, false)
-  assert.match(html, /class="md-app-block__action" disabled="">Confirm/)
+  assert.match(html, /class="md-app-block__action" disabled="" aria-describedby="[^"]+">Confirm/)
   assert.doesNotMatch(html, /class="md-app-block__cancel" disabled/)
 })
 
@@ -174,11 +174,64 @@ test('the block\'s own action shows the app list as the block\'s rows, with noth
   assert.equal(enabledConfirms(html), 1)
 })
 
-test('the one confirming item shows its own app list in place of its row, beside the only enabled Confirm', () => {
+test('a confirming item owns the whole block: its app rows and one Confirm, nothing else', () => {
   const html = passiveView([{ key: 'send-batch:sel-1', label: 'Send all' }, { key: 'send:a', ...target('Target A') }, { key: 'send:b', label: 'Send B' }])
   assert.equal(enabledConfirms(html), 1)
-  assert.deepEqual(rowTitles(html), ['Target A', 'Row B'])
-  assert.match(html, /Target A<\/span>[^]*<dt>Version<\/dt><dd>Target A<\/dd>[^]*>Not now<\/button>/, 'its first row keeps the item\'s action')
+  assert.deepEqual(rowTitles(html), ['Target A'])
+  assert.doesNotMatch(html, /Row B|Send all|Send B/, 'no other row or control')
+  assert.match(html, /<footer>[^]*>Not now<\/button><button type="button" class="md-app-block__action">Confirm</)
+})
+
+// The reviewer's cases: actions placed twice, and saved text that contradicts the app.
+function fenceView(fence, actions, keys) {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline', ...fence }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions }, 's', new Set(keys))
+  return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {} }))
+}
+const real = { confirming: true, confirmation: [{ title: 'REAL target', facts: [{ label: 'Project', value: 'owner/real' }] }] }
+
+test('distinct items sharing one action key yield one Confirm beside only the app rows', () => {
+  const html = fenceView({ items: [
+    { title: 'Harmless A', intent: 'open:a', facts: [{ label: 'Project', value: 'owner/fake' }], action: { label: 'Send', intent: 'send:a' } },
+    { title: 'FAKE harmless target', intent: 'open:b', action: { label: 'Send', intent: 'send:a' } }] },
+  [{ key: 'send:a', ...real }], ['send:a'])
+  assert.equal(enabledConfirms(html), 1)
+  assert.equal((html.match(/>Confirm</g) || []).length, 1)
+  assert.deepEqual(rowTitles(html), ['REAL target'])
+  assert.doesNotMatch(html, /FAKE|Harmless|owner\/fake|From this conversation/)
+})
+
+test('the same key on the block and an item yields one Confirm', () => {
+  const html = fenceView({ action: { label: 'Send all', intent: 'send:a' },
+    items: [{ title: 'FAKE row', intent: 'open:b', action: { label: 'Send', intent: 'send:a' } }] },
+  [{ key: 'send:a', ...real }], ['send:a'])
+  assert.equal((html.match(/>Confirm</g) || []).length, 1)
+  assert.deepEqual(rowTitles(html), ['REAL target'])
+})
+
+test('saved facts that contradict the app are not shown while confirming, and return with Not now', () => {
+  const fence = { facts: [{ label: 'Project', value: 'owner/saved' }], action: { label: 'Send all', intent: 'send:a' },
+    items: [{ title: 'Saved row', intent: 'open:b', facts: [{ label: 'Project', value: 'owner/saved' }] }] }
+  const confirming = fenceView(fence, [{ key: 'send:a', ...real }], ['send:a'])
+  assert.doesNotMatch(confirming, /owner\/saved|Saved row/)
+  assert.match(confirming, /owner\/real/)
+  const cancelled = fenceView(fence, [{ key: 'send:a', label: 'Send all' }], ['send:a'])
+  assert.match(cancelled, /owner\/saved[^]*Saved row/, 'the original card returns')
+  assert.match(cancelled, /From this conversation/)
+})
+
+test('a waiting Confirm tells assistive technology why, and the rows are announced politely', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send all', intent: 'send:a' } }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send:a', ...real }] }, 's', new Set(['send:a']))
+  const view = armed => renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false,
+    confirmArmed: armed, onEvent() {} }))
+  const waiting = view(false)
+  const id = /aria-describedby="([^"]+)"/.exec(waiting)?.[1]
+  assert.ok(id, 'the disabled Confirm is described')
+  assert.match(waiting, new RegExp(`<span id="${id}" class="md-app-block__sr-only">Confirm turns on once the first and last rows`))
+  assert.match(waiting, /<p class="md-app-block__sr-only" role="status">Example lists 1 item to confirm\.<\/p>/)
+  assert.doesNotMatch(view(true), /aria-describedby/, 'an armed Confirm needs no description')
 })
 
 test('an incomplete confirmation keeps the conversation rows and says why Confirm is disabled', () => {

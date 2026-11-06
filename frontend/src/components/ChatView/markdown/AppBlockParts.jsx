@@ -102,7 +102,7 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
         Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>
     </header>
     {/* While the rows are the app's confirmation, nothing is added around them. */}
-    {block.items.some(item => item.confirmation) ? null : <p className="md-app-block__source">From this conversation</p>}
+    {block.confirmation ? null : <p className="md-app-block__source">From this conversation</p>}
     {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
     <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} />

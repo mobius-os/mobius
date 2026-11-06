@@ -249,6 +249,26 @@ test('a list replaced after Confirm armed must have its own ends seen (no borrow
   await expect(confirm).toBeEnabled()
 })
 
+test('at 390 px, a 512-character confirmation label and value wrap inside the block', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:long',
+    title: 'Long fact', interaction: 'inline', action: { label: 'Send', intent: 'long:one' } }) })
+  const block = chat.locator('.md-app-block')
+  await block.locator('footer .md-app-block__action').click()
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Confirm')
+  const fact = block.locator('.md-app-block__items .md-app-block__facts > div').first()
+  const boxes = await fact.evaluate(div => {
+    const box = node => node.getBoundingClientRect().toJSON()
+    return { block: box(div.closest('.md-app-block')), label: box(div.querySelector('dt')), value: box(div.querySelector('dd')) }
+  })
+  for (const cell of ['label', 'value']) {
+    expect(boxes[cell].left, JSON.stringify(boxes)).toBeGreaterThanOrEqual(boxes.block.left)
+    expect(boxes[cell].right, JSON.stringify(boxes)).toBeLessThanOrEqual(boxes.block.right)
+  }
+  await expect(fact.locator('dd')).toContainText('ACTUAL TARGET')
+})
+
 test('a document reload discards idle controls until the new document reports', async ({ page, request }) => {
   await installFixtures(page, request)
   const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:one',

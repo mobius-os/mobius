@@ -134,27 +134,23 @@ export function sessionStateUpdate(previous, safe) {
   return { ...safe, retain: safe.retain || Boolean(safe.checkpoint), recoveryPending: false, recoveryError: null }
 }
 
-/** The snapshot to show beside live state. While the app asks for
- *  confirmation, only badges the app itself supplies are shown, and the
- *  app's list becomes the rows it acts on: every row for the block's own
- *  action, or the confirming item's row. Those rows are marked `confirmation`
- *  and carry no link; the first one of an item keeps that item's action and
- *  live badges. */
+/** The snapshot to show beside live state. While one action is confirming
+ *  with a complete list, that confirmation owns the whole block: the app's
+ *  items are the only rows (marked `confirmation`, linking nowhere), the
+ *  saved facts and every other control are gone, and the confirming action
+ *  is drawn once, as the block's own action. Otherwise, while anything is
+ *  confirming, only badges the app itself supplies are shown. */
 export function sessionSnapshot(block, state) {
   const confirming = state?.actions.find(action => action.confirming)
   const live = key => state?.actions.find(action => action.key === key)?.badges
-  const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
-  let items = block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) }))
   if (confirming?.confirmation) {
-    const rows = (owner = null) => confirming.confirmation.map((item, i) => ({ title: item.title, facts: item.facts,
-      badges: i === 0 && owner ? owner.badges : [], action: i === 0 ? owner?.action ?? null : null, confirmation: true }))
-    if (block.action?.intent === confirming.key) items = rows()
-    else {
-      const at = items.findIndex(item => item.action?.intent === confirming.key)
-      if (at >= 0) items = [...items.slice(0, at), ...rows(items[at]), ...items.slice(at + 1)]
-    }
+    const target = [block.action, ...block.items.map(item => item.action)].find(action => action?.intent === confirming.key)
+    return { ...block, badges: live(confirming.key) ?? [], facts: [], action: target || null, confirmation: true,
+      items: confirming.confirmation.map(item => ({ title: item.title, facts: item.facts, badges: [], action: null, confirmation: true })) }
   }
-  return { ...block, badges: badges(block.badges, block.action?.intent), items }
+  const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
+  return { ...block, badges: badges(block.badges, block.action?.intent),
+    items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) })) }
 }
 
 /** Passive execution needs the owner's accepted grant and the server's

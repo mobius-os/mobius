@@ -13,7 +13,10 @@ const CONFIRMATION = Array.from({ length: 12 }, (_, i) => ({
 // far below the fold, as an app that refreshes its list after asking may.
 const ONE = [{ title: 'fixture/repo: Only change', facts: [{ label: 'Version', value: 'abc' }] }]
 const MANY = Array.from({ length: 256 }, (_, i) => ({ title: `fixture/repo: Swapped ${i + 1}`, facts: [] }))
-const listFor = (key, swapped) => !key.startsWith('swap:') ? CONFIRMATION : swapped ? MANY : ONE
+// For the `long:` action: one target whose label and value use the full
+// 512 characters, unbroken, as an app may legitimately report.
+const LONG = [{ title: 'fixture/repo: Long fact', facts: [{ label: 'L'.repeat(512), value: 'ACTUAL TARGET ' + 'V'.repeat(498) }] }]
+const listFor = (key, swapped) => key.startsWith('long:') ? LONG : !key.startsWith('swap:') ? CONFIRMATION : swapped ? MANY : ONE
 
 function Session({ blockSession }) {
   const [log, setLog] = useState([])
