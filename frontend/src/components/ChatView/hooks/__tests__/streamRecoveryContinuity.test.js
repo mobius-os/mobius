@@ -329,6 +329,7 @@ test('unmount during Resume acknowledgement does not reconnect a dead view', asy
 
 for (const [targetName, target, wireTarget] of [
   ['Run', { resumeRunId: 'interrupted-a' }, { resume_run_id: 'interrupted-a' }],
+  ['Storage override', { resumeRunId: 'interrupted-a', allowLowStorage: true }, { resume_run_id: 'interrupted-a', allow_low_storage: true }],
   ['Goal', { resumeGoalId: 'held-goal', resumeGoalRevision: 7 }, { resume_goal_id: 'held-goal', resume_goal_revision: 7 }],
 ]) {
   test(`${targetName} chat switches during durable intent registration keep POST and retirement bound to the original chat`, async () => {

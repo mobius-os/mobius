@@ -164,13 +164,13 @@
 }
 
 .settings__subtext a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
 }
 
 .settings__btn {
   align-self: flex-start;
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg);
   border: none;
   border-radius: 8px;
@@ -190,7 +190,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .settings__btn:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--accent-fill-hover, var(--accent-hover));
   }
 }
 

@@ -74,7 +74,7 @@ def _storage_deferral(status: dict[str, Any]) -> str | None:
   )
 
 
-def _deferral(status: dict[str, Any]) -> AgentTurnDeferred | None:
+def _deferral(status: dict[str, Any], *, allow_low_storage: bool = False) -> AgentTurnDeferred | None:
   """One attempt: the owner-facing deferral for measured critical memory or
   storage, or ``None`` when the turn may start. Unknown telemetry fails open."""
   memory_reason = _memory_deferral(status)
@@ -85,7 +85,7 @@ def _deferral(status: dict[str, Any]) -> AgentTurnDeferred | None:
       "automatically when memory settles.",
       resource="memory",
     )
-  storage_reason = _storage_deferral(status)
+  storage_reason = None if allow_low_storage else _storage_deferral(status)
   if storage_reason is not None:
     return AgentTurnDeferred(
       f"This turn is waiting because Möbius has {storage_reason}. It will "
@@ -100,10 +100,12 @@ async def require_agent_turn_admission(
   *,
   status_reader: Callable[[str | Path], dict[str, Any]] = resource_status,
   scratch_sweeper: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+  allow_low_storage: bool = False,
 ) -> None:
   """Admit a turn or raise its owner-facing :class:`AgentTurnDeferred`."""
   deferral = await agent_turn_deferral(
     data_dir, status_reader=status_reader, scratch_sweeper=scratch_sweeper,
+    allow_low_storage=allow_low_storage,
   )
   if deferral is not None:
     raise deferral
@@ -114,6 +116,7 @@ async def agent_turn_deferral(
   *,
   status_reader: Callable[[str | Path], dict[str, Any]] = resource_status,
   scratch_sweeper: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+  allow_low_storage: bool = False,
 ) -> AgentTurnDeferred | None:
   """Why a new turn must wait now, reclaiming idle scratch once first.
 
@@ -126,7 +129,9 @@ async def agent_turn_deferral(
   unusual self-hosted runtimes.
   """
   status = status_reader(data_dir)
-  deferral = _deferral(status)
+  # One warned owner continuation may start below the disk floor.
+  # Memory admission still applies; this is not a global resource bypass.
+  deferral = _deferral(status, allow_low_storage=allow_low_storage)
   if deferral is None:
     return None
   if _storage_deferral(status) is None:
@@ -146,4 +151,4 @@ async def agent_turn_deferral(
     # wait into an unrelated setup failure; the fresh measurement below still
     # owns whether the turn may start.
     pass
-  return _deferral(status_reader(data_dir))
+  return _deferral(status_reader(data_dir), allow_low_storage=allow_low_storage)

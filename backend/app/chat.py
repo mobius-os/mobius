@@ -2850,22 +2850,14 @@ async def _clear_pending(chat_id: str) -> list[str]:
   Awaits the ack so a clear-then-bail caller sees the queue emptied
   before it returns. Best-effort on a failed ack: logged + swallowed (a
   stranded queue is reconciled on the next interaction), so a clear
-  failure never blocks Stop or a terminal-error bail.
+  failure never blocks a terminal-error bail. Callers that must know
+  whether the queue really emptied use `_clear_pending_strict`.
 
   Returns the stable `cid`s it actually cleared (empty on a no-op, a missing
-  chat_id, or a failed/swallowed ack). Stop uses this to resend ONLY the
-  queued messages it truly removed — a message the turn-end drain already
-  promoted into a continuation is gone from the queue, so it isn't in this
-  list and won't be double-sent.
+  chat_id, or a failed/swallowed ack).
   """
-  if not chat_id:
-    return []
   try:
-    ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
-    result = await _await_ack(ack)
-    if isinstance(result, dict):
-      return [c for c in result.get("cleared_cids", []) if c is not None]
-    return []
+    return await _clear_pending_strict(chat_id)
   except Exception:
     _get_logger().warning(
       "ClearPending did not persist chat_id=%s", chat_id, exc_info=True,
@@ -2873,25 +2865,29 @@ async def _clear_pending(chat_id: str) -> list[str]:
     return []
 
 
-async def _clear_pending_strict(chat_id: str) -> None:
-  """Strict terminal variant of `_clear_pending`: surfaces a failed ack.
+async def _clear_pending_strict(chat_id: str) -> list[str]:
+  """Strict variant of `_clear_pending`: surfaces a failed ack.
 
-  The best-effort `_clear_pending` above swallows a failed ack because a
-  stranded queue is self-correcting on the next interaction — fine for
-  Stop and a cancel-then-bail. But a TERMINAL cleanup path (no-owner /
-  auth-error / unsupported-provider) records its outcome as a
-  `TerminalDisposition`: if the queue clear didn't durably land, the path
-  must be able to OBSERVE that and leave the durable run marker set so
-  reconciliation recovers the incomplete turn — exactly what swallowing
-  would hide. So this re-raises on a failed ack (or a lock/ack timeout the
-  bounded caller imposes) rather than logging-and-continuing.
+  A TERMINAL cleanup path (no-owner / auth-error / unsupported-provider)
+  records its outcome as a `TerminalDisposition`: if the queue clear didn't
+  durably land, the path must be able to OBSERVE that and leave the durable
+  run marker set so reconciliation recovers the incomplete turn. Stop needs
+  the same certainty before it issues a receipt, which reports the queued
+  turns it cleared. So this re-raises on a failed ack rather than
+  logging-and-continuing.
 
-  No-op (no raise) when there's no chat_id — nothing to clear.
+  Returns the stable `cid`s it cleared. Stop uses them to resend ONLY the
+  queued messages it truly removed — a message the turn-end drain already
+  promoted into a continuation is gone from the queue, so it isn't in this
+  list and won't be double-sent. No-op (no raise) when there's no chat_id.
   """
   if not chat_id:
-    return
+    return []
   ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
-  await _await_ack(ack)
+  result = await _await_ack(ack)
+  if isinstance(result, dict):
+    return [c for c in result.get("cleared_cids", []) if c is not None]
+  return []
 
 
 def _finalize_broadcast_if_running(chat_id: str) -> None:
@@ -3051,12 +3047,13 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
 async def stop_chat(
   chat_id: str | None = None, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
+) -> "ChatStopOutcome":
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
   after Stop. Session_id is preserved so the next message resumes.
 
-  Returns `(stopped, cleared_pending_cids)`. `cleared_pending_cids` is the
+  Returns a `ChatStopOutcome` (`(stopped, cleared_pending_cids)`; the
+  global sweep carries no receipt). `cleared_pending_cids` is the
   stable `cid` of the queued messages this Stop actually removed — the
   frontend resends ONLY those, so a message the turn-end drain already
   promoted into a continuation (gone from the queue, hence not in this list)
@@ -3076,7 +3073,7 @@ async def stop_chat(
     stopped_cid, _ = await stop_chat_for(cid, db=db, actor=actor, actor_id=actor_id)
     if stopped_cid:
       stopped_any = True
-  return stopped_any, []
+  return ChatStopOutcome(stopped_any, [])
 
 
 def browser_grant_active_chat_ids(db, grant_id: str) -> list[str]:
@@ -3156,7 +3153,7 @@ async def stop_browser_grant_runs(grant_id: str, db: Session = None) -> dict:
 async def stop_chat_for(
   chat_id: str, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
+) -> "ChatStopOutcome":
   """Kills the agent subprocess for a specific chat.
 
   Bumps the generation counter so the dying run_chat's finally
@@ -3168,7 +3165,8 @@ async def stop_chat_for(
   gets sent. Backend Stop is purely the interrupt; the frontend owns
   the "collapse + resend" UX. See CLAUDE.md "Stop-chat contract".
 
-  Returns `(stopped, cleared_pending_cids)` — `stopped` is whether every live
+  Returns a `ChatStopOutcome` that unpacks as `(stopped,
+  cleared_pending_cids)` — `stopped` is whether every live
   handle stopped within the bound, `cleared_pending_cids` is the stable `cid`
   this Stop actually removed from the queue (empty if the clear timed out, or
   if the turn-end drain had already promoted the queued message into a
@@ -3256,11 +3254,36 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
     )))
 
 
+class ChatStopOutcome(tuple):
+  """One per-chat Stop: the `(stopped, cleared_pending_cids)` pair internal
+  callers use, plus `receipt`, which the Stop route returns.
+
+  `receipt` is `{chat_id, run_id}` when Stop ended run `run_id` (every handle
+  stopped, or with no process the run was durably closed) and cleared the
+  queued turns it reports. With no running run, `run_id` is the chat's latest
+  idle run (`None` if it never ran). That is all it certifies: work that runs
+  afterwards (a Wait firing, a helper result, an owner resume) runs under a
+  different run id, so a caller binds its cancellation to `run_id` and treats
+  any later run as newer work. A Stop that kept the queue (a restart drain,
+  a preserving caller, or a failed clear) or could not close the run issues
+  none. `run_id` comes from the writer's Stop boundary (`ChatStopPrepared`),
+  never from a read after the interrupt.
+  """
+
+  def __new__(cls, stopped: bool, cleared_pending_cids: list[str], receipt: dict | None = None):
+    outcome = super().__new__(cls, (stopped, cleared_pending_cids))
+    outcome.receipt = receipt
+    return outcome
+
+  stopped = property(lambda self: self[0])
+  cleared_pending_cids = property(lambda self: self[1])
+
+
 async def _stop_chat_for_locked(
   chat_id: str, db: Session = None, *,
   preserve_pending: bool = False,
   actor: str | None = None, actor_id: str | None = None,
-) -> tuple[bool, list[str]]:
+) -> ChatStopOutcome:
   """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
   # Stop owns the lifecycle fence for linked activation waits too. Unlike a
@@ -3274,7 +3297,7 @@ async def _stop_chat_for_locked(
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "stopped"
   from app.chat_writer import PrepareChatStop
-  await _await_ack(get_writer().submit(PrepareChatStop(
+  prepared = await _await_ack(get_writer().submit(PrepareChatStop(
     chat_id=chat_id, actor=actor, actor_id=actor_id,
   )))
   # The queue-lock window guards the clear's COMPOUND decision against a
@@ -3285,9 +3308,10 @@ async def _stop_chat_for_locked(
   # TERMINAL_LOCK_TIMEOUT_SECS so a wedged lock holder can't hang Stop; on a
   # timeout the queue is left for reconciliation (the clear is best-effort
   # here by design — Stop's job is the interrupt, and a stranded queue
-  # self-heals on the next interaction).
+  # self-heals on the next interaction — but then Stop issues no receipt).
   log = _get_logger()
   cleared_pending_cids: list[str] = []
+  queue_cleared = False
   # Restart-drain invariant (design §2.2): the pending queue must survive the
   # restart untouched. A Stop landing inside the drain window would durably
   # delete queued messages here and hand them to the frontend to re-send — but
@@ -3300,10 +3324,13 @@ async def _stop_chat_for_locked(
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          cleared_pending_cids = await _clear_pending(chat_id)
+          # Strict: a swallowed failure would let Stop receipt a chat whose
+          # queued turns can still run.
+          cleared_pending_cids = await _clear_pending_strict(chat_id)
+      queue_cleared = True
     except (Exception, asyncio.TimeoutError):
       log.warning(
-        "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
+        "stop_chat_for: queue clear failed or timed out chat_id=%s — leaving "
         "queue for reconciliation", chat_id, exc_info=True,
       )
   questions.cancel(chat_id)
@@ -3351,7 +3378,7 @@ async def _stop_chat_for_locked(
   if not all_stopped:
     # At least one runner is still alive — leave run-status + broadcast for it.
     registry.discard_starting(chat_id)
-    return all_stopped, cleared_pending_cids
+    return ChatStopOutcome(False, cleared_pending_cids)
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's FinishRun). This is the
   # path that resolves the orphaned-run-after-restart case (a ChatRun left
@@ -3361,11 +3388,26 @@ async def _stop_chat_for_locked(
   # and a SQLite-blocked commit can exceed Stop's 2s timeout. If the process
   # dies first, the retained marker lets crash recovery reconcile the
   # interrupted turn.
+  run_closed = True
   if not handles:
-    await _finish_run(chat_id, terminal_status="stopped")
+    # Strict so Stop knows whether the run really closed: a receipt names a
+    # run Stop ended, so a finish that did not land issues none (the open run
+    # is still left for reconciliation, as before).
+    try:
+      await _finish_run_strict(chat_id, terminal_status="stopped")
+    except Exception:
+      run_closed = False
+      log.warning(
+        "stop_chat_for: FinishRun did not persist chat_id=%s "
+        "(reconciliation will repair)", chat_id, exc_info=True,
+      )
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  return all_stopped, cleared_pending_cids
+  receipt = (
+    {"chat_id": chat_id, "run_id": prepared.run_id}
+    if queue_cleared and run_closed else None
+  )
+  return ChatStopOutcome(True, cleared_pending_cids, receipt)
 
 
 def _schedule_continuation(
@@ -4887,6 +4929,26 @@ async def _complete_turn(
   return disposition
 
 
+def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
+  """Whether this exact run is the owner's warned low-storage Continue anyway.
+
+  An unreadable control means no permission: the turn keeps normal admission.
+  """
+  from app.database import SessionLocal
+  try:
+    with SessionLocal() as db:
+      control = db.query(models.ChatRun.continuation_json).filter(
+        models.ChatRun.id == run_token, models.ChatRun.chat_id == chat_id,
+      ).scalar() or {}
+    return control.get("reason") == "manual" and control.get("allow_low_storage") is True
+  except Exception:
+    _get_logger().warning(
+      "could not read Continue anyway permission chat_id=%s", chat_id,
+      exc_info=True,
+    )
+    return False
+
+
 async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -4933,9 +4995,26 @@ async def run_chat(
   runtime_settled = False
   setup_failure_settled = False
   try:
-    await require_agent_turn_admission(
-      get_settings().data_dir,
-    )
+    try:
+      await require_agent_turn_admission(get_settings().data_dir)
+    except AgentTurnDeferred as deferred:
+      # Only a storage wait consults the committed Continue anyway control,
+      # which belongs to this physical run alone, never its later retries,
+      # helpers, queued follow-ups or other chats.
+      if deferred.resource != "storage" or not (
+        chat_id and run_token
+        and await asyncio.to_thread(_run_allows_low_storage, chat_id, run_token)
+      ):
+        raise
+      await require_agent_turn_admission(
+        get_settings().data_dir, allow_low_storage=True,
+      )
+      # Only a turn the override actually admitted is told storage is low.
+      from app.continuations import LOW_STORAGE_NOTICE
+      if messages:
+        messages = [*messages[:-1], messages[-1].model_copy(update={
+          "content": f"{messages[-1].content}\n\n{LOW_STORAGE_NOTICE}",
+        })]
     # A prior turn may still be releasing this chat's browser resources.
     async with _browser_lifecycle_lock(chat_id):
       pass

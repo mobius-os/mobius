@@ -6516,7 +6516,9 @@ def _cp(stdout="", stderr="", returncode=0):
 _UPSTREAM_SHA = "d" * 40
 
 
-def _submit_preflight_response(args, *, merge_conflict: bool = False):
+def _submit_preflight_response(
+  args, *, merge_conflict: bool = False, merge_base: str | None = "b" * 40,
+):
   if (
     len(args) >= 3 and
     args[:2] == ("rev-parse", "--verify") and
@@ -6533,6 +6535,10 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
     return _cp(_UPSTREAM_SHA + "\n")
   if args[:1] == ("merge-tree",):
     return _cp(returncode=1 if merge_conflict else 0)
+  if args[:2] == ("merge-base", "--all") and merge_base is not None:
+    # A new standalone PR proves its reviewed base is still the sole merge
+    # base with upstream, so GitHub shows exactly the reviewed diff.
+    return _cp(merge_base + "\n")
   return None
 
 
@@ -8001,6 +8007,13 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     },
   )
   monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
     "app.github_contributions._ensure_owner_fork_remote",
     lambda *_args, **_kwargs: "octocat/app-demo-1",
   )
@@ -9152,6 +9165,10 @@ def test_submit_contribution_stack_publishes_uninstalled_layers(
     "app.github_contribution_git._assert_merges_with_upstream",
     lambda *_args: {},
   )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args: {},
+  )
   submitted = []
 
   def submit(candidate, _diff_path, **_kwargs):
@@ -9197,6 +9214,10 @@ def test_submit_contribution_stack_publishes_a_child_absent_from_source(
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args: {},
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args: {},
   )
   submitted = []
@@ -9600,6 +9621,13 @@ def test_push_permission_uses_same_repo_branch_without_fork(
       "last_submit_upstream_sha": base,
     },
   )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
   pushes = []
   monkeypatch.setattr(
     "app.github_contributions._push_branch",
@@ -9815,6 +9843,13 @@ def _existing_fork_submission(tmp_path, monkeypatch):
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: {
       "last_submit_upstream_branch": "main",
       "last_submit_upstream_sha": base,
@@ -10416,6 +10451,12 @@ def test_exact_existing_pr_retry_reconciles_before_duplicate_branch_guard(
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: pytest.fail(
+      "an already-public exact PR must reconcile before current upstream fetch"
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: pytest.fail(
       "an already-public exact PR must reconcile before current upstream fetch"
     ),
@@ -11631,9 +11672,12 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
   assert not any(call[:1] == ("push",) for call in git_calls)
 
 
-def test_submit_contribution_rejects_unmergeable_branch_before_push(
+def test_submit_contribution_rejects_overlap_when_reviewed_base_left_upstream(
   client, owner_token, monkeypatch,
 ):
+  """A new PR may open over an upstream overlap only when GitHub would show
+  exactly the reviewed diff; a reviewed base that is no longer on upstream
+  still refuses before anything is pushed."""
   _write_token(login="octocat")
   _allow_synthetic_source_provenance(monkeypatch)
   app_id, _ = _app_token(client, owner_token, github_access=True)
@@ -11668,8 +11712,12 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
 
   def fake_git(repo_path, *args, check=True):
     git_calls.append(args)
-    if (preflight := _submit_preflight_response(args, merge_conflict=True)) is not None:
+    if (preflight := _submit_preflight_response(
+      args, merge_conflict=True, merge_base=None,
+    )) is not None:
       return preflight
+    if args[:2] == ("merge-base", "--all"):
+      return _cp("c" * 40 + "\n")
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):
@@ -11712,6 +11760,7 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
   assert r.status_code == 409
   detail = r.json()["detail"]
   assert "no longer merges cleanly" in detail["message"]
+  assert detail["code"] == "upstream_conflict"
   assert detail["record"]["status"] == "prepared"
   assert detail["record"]["last_submit_upstream_branch"] == "main"
   assert detail["record"]["last_submit_upstream_sha"] == _UPSTREAM_SHA
@@ -14234,6 +14283,18 @@ def _record_upstream(app_id, record_id, sha):
   path.write_text(json.dumps(stored))
 
 
+def _as_existing_pr_update(app_id, record_id):
+  """An update to an open PR keeps the clean-merge gate; a new standalone PR
+  may open over an overlap (see test_contribution_upstream_conflict_publication)."""
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  stored = json.loads(path.read_text())
+  stored["plan"]["action"] = "pr_update"
+  path.write_text(json.dumps(stored))
+
+
 def test_review_status_reports_a_branch_that_no_longer_merges(
   client, owner_token,
 ):
@@ -14245,6 +14306,7 @@ def test_review_status_reports_a_branch_that_no_longer_merges(
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   repo, _record, _diff = _prepared_real_review(app_id, "conflicted")
+  _as_existing_pr_update(app_id, "conflicted")
   headers = {"Authorization": f"Bearer {app_token}"}
 
   assert client.get(
@@ -14278,6 +14340,7 @@ def test_refreshing_the_branch_clears_the_conflict_with_nothing_to_reset(
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   repo, _record, _diff = _prepared_real_review(app_id, "healing")
+  _as_existing_pr_update(app_id, "healing")
   headers = {"Authorization": f"Bearer {app_token}"}
   upstream = _conflicting_upstream_commit(repo, "export default 9\n")
   _record_upstream(app_id, "healing", upstream)
@@ -14453,6 +14516,13 @@ def _successor_submission(tmp_path, monkeypatch, *, stack=None):
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "last_submit_upstream_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: {
       "last_submit_upstream_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
       "last_submit_upstream_sha": _SUCCESSOR_TARGET_BASE_SHA,
@@ -16183,3 +16253,111 @@ def test_single_claim_rechecks_the_confirmed_proposal_before_writing(
   assert raised.value.detail["not_attempted"] is True
   assert armed == []
   assert _record_bytes(app_id, [record_id]) == before
+
+
+@pytest.mark.parametrize("failure", ["read", "diff", "ancestry"])
+def test_review_status_unavailable_is_not_evidence_of_source_drift(
+  client, owner_token, monkeypatch, failure,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, f"unavailable-source-{failure}")
+  if failure == "diff":
+    monkeypatch.setattr(app_git, "_canonical_diff", lambda *a, **kw: None)
+  else:
+    original = app_git._run
+    def fail_read(repo, *args, **kwargs):
+      if failure == "read" and args[0] == "status":
+        raise OSError("temporary read failure")
+      if failure == "ancestry" and args[:2] == ("merge-base", "--is-ancestor"):
+        return subprocess.CompletedProcess(args, 128, "", "read failed")
+      return original(repo, *args, **kwargs)
+    monkeypatch.setattr(app_git, "_run", fail_read)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200
+  data = response.json()
+  assert data["needs_refresh"] == data["ready"] == 0
+  assert data["unavailable"] == 1
+  assert data["records"][0] == {
+    "id": f"unavailable-source-{failure}", "state": "unavailable",
+    "code": "review_unavailable",
+    "message": "This review could not be verified locally.",
+    "publication": {
+      "state": "unavailable", "code": "publication_unavailable",
+      "message": "GitHub freshness could not be checked right now.",
+    },
+  }
+
+
+@pytest.mark.parametrize("failure,code", [
+  ("missing", "missing_checkout"), ("invalid", "invalid_checkout"),
+  ("dirty", "working_changes"), ("missing_diff", "missing_diff"),
+  ("invalid_branch", "invalid_plan"), ("missing_commits", "missing_commits"),
+  ("deleted_branch", "missing_branch"),
+])
+def test_review_status_permanent_and_proven_drift_are_not_transient(
+  client, owner_token, failure, code,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  repo, record, _diff = _prepared_real_review(app_id, f"specific-source-{failure}")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  if failure == "missing":
+    shutil.rmtree(repo / ".git")
+  elif failure == "invalid":
+    record["plan"]["repo_path"] = "/outside-durable-roots"
+  elif failure == "missing_diff":
+    diff_path.unlink()
+  elif failure == "invalid_branch":
+    record["plan"]["branch"] = "not a valid branch"
+  elif failure == "missing_commits":
+    record["plan"]["head_sha"] = "f" * 40
+  elif failure == "deleted_branch":
+    branch = record["plan"]["branch"]
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "-q", "-D", branch], check=True)
+  else:
+    (repo / "index.jsx").write_text("owner changed this\n")
+  verdict = asyncio.run(
+    github_routes._inspect_prepared_review_locked(record, diff_path, {}),
+  )
+  assert verdict["state"] == "needs_refresh"
+  assert verdict["code"] == code
+  assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES[code]
+
+
+def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "reconnect-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "octocat", "user_id": "not-a-number"},
+  )
+  assert verdict == {
+    "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
+    "message": "Reconnect GitHub before sending this PR stack.",
+  }
+
+
+def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  # The staged commits are octocat's; the connected account is now hubot.
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "hubot", "user_id": 7},
+  )
+  assert verdict == {
+    "id": "identity-source", "state": "needs_refresh",
+    "code": "commit_identity_mismatch",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
+  }

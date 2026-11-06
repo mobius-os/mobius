@@ -276,6 +276,16 @@ def undelivered_input(db, chat, superseded_run) -> list[str]:
   return carried
 
 
+# Added by the runtime only when admission actually used Continue anyway, so a
+# turn admitted after space recovered is not told the disk is low. The floor is
+# shared by every chat: say so without licensing cleanup of other data.
+LOW_STORAGE_NOTICE = (
+  "The owner let this turn start below the shared disk safety floor;"
+  " avoid large writes. Delete only files this chat created; ask the"
+  " owner before deleting anything else."
+)
+
+
 def continuation_protocol_source(
   *, reason: str, control_id: str, run_token: str,
   source_work_id: str | None = None, goal_id: str | None = None,
@@ -342,6 +352,7 @@ def continuation_control_envelope(
   source_work_id: str | None = None, goal_id: str | None = None,
   supersedes_run_token: str | None = None,
   goal_revision: int | None = None,
+  allow_low_storage: bool = False,
 ) -> dict:
   """Return the bounded durable half of a provider-only continuation."""
   envelope = {
@@ -356,13 +367,17 @@ def continuation_control_envelope(
     envelope["supersedes_run_token"] = supersedes_run_token
   if goal_revision is not None:
     envelope["goal_revision"] = goal_revision
+  if allow_low_storage:
+    envelope["allow_low_storage"] = True
   return envelope
 
 
 def manual_resume_matches(control, *, control_id, run_id=None,
-                          goal_id=None, goal_revision=None):
+                          goal_id=None, goal_revision=None, allow_low_storage=False):
   """A lost Resume receipt can acknowledge only the original exact target."""
   if control.get("control_id") != control_id or control.get("reason") != "manual":
+    return False
+  if bool(control.get("allow_low_storage")) != allow_low_storage:
     return False
   if goal_id is not None or "goal_revision" in control:
     return (goal_id == control.get("goal_id")
