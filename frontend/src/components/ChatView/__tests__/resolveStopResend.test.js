@@ -134,17 +134,37 @@ test('empty cleared set returns no attachments even if the snapshot had some', (
   assert.deepEqual(got.attachments, [], 'nothing cleared → no attachments to resend')
 })
 
-// -- stopResendTarget: a Stop on a failed activation keeps its queued work ----
+// -- stopResendTarget: where the resolved resend goes ------------------------
+const accepted = activationSettled => ({ stopAccepted: true, activationSettled })
+
 test('stopResendTarget sends once activation has settled', () => {
-  assert.equal(stopResendTarget(combined('queued'), true), 'send')
+  assert.equal(stopResendTarget(combined('queued'), accepted(true)), 'send')
 })
 
 test('stopResendTarget returns unsettled work to the composer, files included', () => {
-  assert.equal(stopResendTarget(combined('queued'), false), 'composer')
-  assert.equal(stopResendTarget(combined('', [{ name: 'q.png' }]), false), 'composer')
+  assert.equal(stopResendTarget(combined('queued'), accepted(false)), 'composer')
+  assert.equal(stopResendTarget(combined('', [{ name: 'q.png' }]), accepted(false)), 'composer')
 })
 
 test('stopResendTarget has nothing to do for an empty resend', () => {
-  assert.equal(stopResendTarget(combined(''), true), 'none')
-  assert.equal(stopResendTarget(combined('  ', []), false), 'none')
+  assert.equal(stopResendTarget(combined(''), accepted(true)), 'none')
+  assert.equal(stopResendTarget(combined('  ', []), accepted(false)), 'none')
+})
+
+test('a stop the server never accepted keeps the queue instead of resending it', () => {
+  // A failed /chat/stop sends no cleared list, like an old backend, so the
+  // resolver falls back to the whole snapshot. The server still holds that
+  // queue: resending or returning it would duplicate it.
+  const snapshot = [snap({ ts: 11, content: 'queued', attachments: [{ name: 'q.png' }] })]
+  const resend = resolveStopResend(snapshot, null, combined('queued', [{ name: 'q.png' }]))
+  assert.equal(resend.text, 'queued')
+  for (const activationSettled of [true, false]) {
+    assert.equal(
+      stopResendTarget(resend, { stopAccepted: false, activationSettled }),
+      'keep',
+    )
+  }
+  // The same missing list from an old backend that did accept the stop
+  // still resends everything.
+  assert.equal(stopResendTarget(resend, accepted(true)), 'send')
 })

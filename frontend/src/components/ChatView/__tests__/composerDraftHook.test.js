@@ -511,3 +511,31 @@ test('text returned while history shows another message joins the set-aside draf
     else globalThis.sessionStorage = previousStorage
   }
 })
+
+test('a returned file is not mistaken for a failed chip with the same local name', async t => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  // The upload never gets a server name: its limit check fails.
+  t.mock.method(globalThis, 'fetch', () => Promise.resolve({ ok: false }))
+  try {
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-failed-chip',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    await hook.result.current.handleComposerAddFiles([
+      { name: 'q.png', size: 9, type: 'text/plain' },
+    ])
+    assert.deepEqual(hook.result.current.pendingFiles.map(file => file.status), ['error'])
+    hook.result.current.appendToComposer('', [
+      { name: 'q.png', size: 9, mime_type: 'image/png' },
+    ])
+    assert.deepEqual(hook.result.current.pendingFiles.map(file => [file.name, file.status]), [
+      ['q.png', 'error'], ['q.png', 'done'],
+    ])
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})

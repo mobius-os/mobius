@@ -241,7 +241,11 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
    * shows another message, the text joins the draft set aside, not the box. */
   const appendToComposer = useCallback((text, attachments = []) => {
     const files = draftAttachmentsRef.current
-    const names = new Set(files.map(file => file?.name))
+    // Only a finished upload carries its server name; an uploading or failed
+    // chip's local name may differ, so it cannot stand in for a returned file.
+    const names = new Set(files
+      .filter(file => (file?.status ?? 'done') === 'done')
+      .map(file => file.name))
     const added = attachments.filter(file => file?.name && !names.has(file.name))
     if (!text && added.length === 0) return
     clearFailedAttempt()

@@ -34,6 +34,9 @@ export function ownerQueuedSnapshot(snapshot) {
  * had already consumed (and risked a duplicate follow-up run). Sharing
  * one pure function is what keeps the two paths from drifting again.
  *
+ * Only meaningful once a stop request reached the server; stopResendTarget
+ * keeps the queue when none did.
+ *
  * Contract, by what the backend cleared:
  *   - null / undefined (legacy backend without the field): fall back to
  *     the full combined snapshot — preserve back-compat over precision.
@@ -92,17 +95,23 @@ export function resolveStopResend(queuedSnapshot, clearedPendingCids, combined) 
 }
 
 /**
- * Where Stop's resolved resend goes: 'none' when there is nothing to send,
- * 'send' once activation has settled, otherwise 'composer'. Stop stays
- * available on a failed activation, but no turn starts before activation
- * settles, and Stop has already cleared the queue, so the work waits in the
- * composer for the owner to send again instead of being refused and lost.
+ * Where Stop's resolved resend goes. 'keep' when no stop request reached the
+ * server (a network error or a non-OK reply): the server still holds the
+ * queue, so the tray shows it again, and resending or returning it would
+ * duplicate it. Otherwise 'none' when there is nothing to send, 'send' once
+ * activation has settled, and 'composer' before then. Stop stays available on
+ * a failed activation, but no turn starts before activation settles, and Stop
+ * has already cleared the queue, so the work waits in the composer for the
+ * owner to send again instead of being refused and lost.
  *
  * @param {{text: string, attachments: Array}} resend from resolveStopResend
- * @param {boolean} activationSettled
- * @returns {'none'|'send'|'composer'}
+ * @param {{stopAccepted: boolean, activationSettled: boolean}} state
+ *   stopAccepted: some /chat/stop request got an OK reply, so the server
+ *   cleared its queue (even when the interrupt itself timed out).
+ * @returns {'keep'|'none'|'send'|'composer'}
  */
-export function stopResendTarget({ text, attachments }, activationSettled) {
+export function stopResendTarget({ text, attachments }, { stopAccepted, activationSettled }) {
+  if (!stopAccepted) return 'keep'
   if (!hasSendablePayload(text, attachments)) return 'none'
   return activationSettled ? 'send' : 'composer'
 }

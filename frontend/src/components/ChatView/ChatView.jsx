@@ -4649,9 +4649,8 @@ export default function ChatView({
       // "collapse queued text into one fresh follow-up turn" contract is for
       // what the owner typed; re-sending a hidden carrier as owner text was
       // the phantom-queued-message bug. See resolveStopResend.js.
-      const queuedSnapshot = ownerQueuedSnapshot(
-        pendingQueue.pendingMessagesRef.current,
-      )
+      const trayBeforeStop = pendingQueue.pendingMessagesRef.current
+      const queuedSnapshot = ownerQueuedSnapshot(trayBeforeStop)
       const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
@@ -4685,6 +4684,9 @@ export default function ChatView({
       pendingQueue.clear()
 
       let stoppedCleanly = false
+      // Whether any stop request got an OK reply, so the server cleared its
+      // queue. Without one, the server still holds the queue (stopResendTarget).
+      let stopAccepted = false
       // The backend reports which queued cids it actually removed. null = an
       // older backend without the field (→ fall back to resending all); an
       // array is the authoritative cleared set.
@@ -4697,6 +4699,7 @@ export default function ChatView({
         })
         let data = null
         if (stopRes.ok) {
+          stopAccepted = true
           // stop_chat returns {stopped: false} when the SDK interrupt
           // timed out — the runner is still alive. We must NOT tear
           // down local state or re-send the collapsed queue, because
@@ -4769,11 +4772,17 @@ export default function ChatView({
         { text: combined, attachments: combinedAttachments },
       )
       // Before activation settles the work goes back to the composer instead
-      // of a send doSend would refuse (stopResendTarget).
+      // of a send doSend would refuse; a stop the server never accepted puts
+      // the tray back instead (stopResendTarget).
       const resendQueued = (resend) => {
         const { text, attachments } = resend
-        const target = stopResendTarget(resend, activationSettledRef.current)
-        if (target === 'composer') appendToComposer(text, attachments)
+        const target = stopResendTarget(resend, {
+          stopAccepted,
+          activationSettled: activationSettledRef.current,
+        })
+        if (target === 'keep') {
+          trayBeforeStop.forEach((row, index) => pendingQueue.restoreByCid(row, index))
+        } else if (target === 'composer') appendToComposer(text, attachments)
         else if (target === 'send') {
           doSend(text, {
             pin: false,
@@ -4783,12 +4792,14 @@ export default function ChatView({
       }
 
       if (!stoppedCleanly) {
-        // The SDK interrupt timed out (handle.stop()'s 2s bound — see
-        // claude_sdk_runner.stop): the runner is still alive and the
-        // backend left the registry entry + broadcast intact for the
-        // runner's own teardown. We must NOT disconnect or start a
-        // second concurrent run. The backend ALREADY cleared persisted
-        // chat.pending_messages, so a refetch returns [] and re-queueing
+        // The stop request failed, or the SDK interrupt timed out
+        // (handle.stop()'s 2s bound — see claude_sdk_runner.stop): the
+        // runner is still alive. We must NOT disconnect or start a second
+        // concurrent run. A failed request cleared nothing, so the server
+        // still holds the queue and resendQueued only puts the tray back.
+        // After a timeout the backend left the registry entry + broadcast
+        // intact for the runner's own teardown, and it ALREADY cleared
+        // persisted chat.pending_messages, so a refetch returns [] and re-queueing
         // from authoritative server state would silently drop the queued
         // text (the "Stop ate my message" bug). Restore from the LOCAL
         // snapshot instead, via the shared resendQueued (above) — and
