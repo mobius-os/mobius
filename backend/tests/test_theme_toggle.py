@@ -219,6 +219,20 @@ def test_the_owners_other_root_declarations_survive():
     assert persisted.count("color-scheme") == 1 and f"color-scheme: {mode};" in persisted
 
 
+def test_a_colour_set_outside_the_plain_root_is_left_to_its_rule():
+  layered = "@layer owner { :root { --accent: #00ffff; } }\n"
+  persisted, painted = toggle_once(CUSTOM_DARK.replace("  --accent: #ff00ff;\n", "") + layered, "dark")
+  assert root_var(persisted.split("@layer owner")[0], "--accent") is None, "no plain :root accent overrides the layer"
+  assert root_var(persisted, "--bg") == LIGHT["--bg"], "structural colours still switch"
+  assert layered.strip() in persisted
+
+
+def test_the_root_rule_is_rebuilt_where_it_stood():
+  early = "@media (min-width: 1px) { :root { --surface: #123456; } }"
+  persisted, _ = toggle_once(f"{early}\n{CUSTOM_DARK}", "dark")
+  assert persisted.index(early) < persisted.index(":root {\n  /* Colors")
+
+
 def test_a_winning_important_declaration_keeps_its_importance():
   persisted, _ = toggle_once(":root { --bg: #0d0d0d; --accent: #00ffff !important; --accent: #ff0000; }\n", "dark")
   assert "--accent: #00ffff !important;" in persisted

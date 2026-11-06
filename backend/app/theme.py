@@ -1057,7 +1057,9 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   prelude, rest = owner[:prelude_end].strip(), owner[prelude_end:]
   rule = _first_root_rule(rest)
   declared = rule[2] if rule else {}
-  extras = (rest[:rule[0]] + rest[rule[1]:] if rule else rest).strip()
+  # The rule is rebuilt where it stood, so the rules around it keep their
+  # order of precedence; with none, the new one goes first.
+  before, after = (rest[:rule[0]].strip(), rest[rule[1]:].strip()) if rule else ("", rest.strip())
 
   root = scan_root_declarations(css) or {}
   derived = theme_role_vars({k: v for k, v in root.items() if k not in _DERIVED_KEYS}, old_mode)
@@ -1068,8 +1070,13 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
             or (key in _DERIVED_KEYS and derived.get(key) == value))
 
   # The full base palette first, so a token an older toggle stripped is
-  # restored; then the owner's own values over it.
-  colors = _base_colors(new_mode)
+  # restored; then the owner's own values over it. A non-structural colour the
+  # theme sets in another rule (a layer, an `html {}`) is left to that rule:
+  # a plain :root would override it.
+  scanned = _scan_theme_css(owner)
+  elsewhere = scanned[1] if scanned else set()
+  colors = {key: value for key, value in _base_colors(new_mode).items()
+            if key in _STRUCTURAL_KEYS or key not in elsewhere}
   for key, value in declared.items():
     if key.startswith("--") and key not in _TYPOGRAPHY_KEYS and not mode_owned(key, value):
       colors[key] = value
@@ -1081,13 +1088,12 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   others = "".join(f"  {key}: {value};\n" for key, value in declared.items()
                    if not key.startswith("--") and key not in ("font-size", "color-scheme"))
   lines = "\n".join(f"  {key}: {value};" for key, value in colors.items())
-  return (
-    (prelude + "\n\n" if prelude else "")
-    + f":root {{\n  /* Colors - {new_mode} theme */\n{lines}\n\n  /* Typography */\n"
+  rebuilt = (
+    f":root {{\n  /* Colors - {new_mode} theme */\n{lines}\n\n  /* Typography */\n"
     + f"  --font: {font};\n  --mono: {mono};\n"
-    + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n{others}}}\n"
-    + (f"\n{extras}\n" if extras else "")
+    + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n{others}}}"
   )
+  return "\n\n".join(part for part in (prelude, before, rebuilt, after) if part) + "\n"
 
 
 def _other_mode(mode: str) -> str:
