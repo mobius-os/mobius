@@ -4070,7 +4070,7 @@ var init_speech = __esmMin((() => {
 	init_speechDocument();
 	init_speechWorkerAsset();
 	LOAD_TIMEOUT_MS = 18e4;
-	IDLE_RELEASE_MS = 3e4;
+	IDLE_RELEASE_MS = 6e4;
 	idleEngine = null;
 	idleTimer = null;
 	retainIdleEngine = true;

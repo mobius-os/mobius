@@ -145,19 +145,19 @@ test('a different model or a re-recorded voice replaces the idle engine', async 
   assert.equal(workers[2].terminated, true)
 })
 
-test('a parked engine is released after a short idle delay unless reused', async (t) => {
+test('a parked engine is released after an idle delay unless reused', async (t) => {
   mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => mock.timers.reset())
 
   await speak({ text: 'One.', modelId: 'alba' }).session.result
-  mock.timers.tick(29_000)
+  mock.timers.tick(59_000)
   assert.equal(workers[0].terminated, false)
   await speak({ text: 'Two.', modelId: 'alba' }).session.result
   assert.equal(workers.length, 1, 'a request within the delay reuses the engine')
 
   // Reuse restarted the delay: the first park's deadline has passed, the
   // second's has not.
-  mock.timers.tick(29_000)
+  mock.timers.tick(59_000)
   assert.equal(workers[0].terminated, false)
   mock.timers.tick(1_000)
   assert.equal(workers[0].terminated, true, 'an idle engine gives its memory back')
@@ -191,10 +191,15 @@ test('cancelling keeps the loaded engine and its late audio stays out of the nex
   assert.equal(workers[0].messages.at(-1).type, 'cancel-generate')
   assert.equal(workers[0].terminated, false)
 
-  const second = speak({ text: 'Next.', modelId: 'alba' })
-  await until(() => second.streams[0]?.cancelled)
+  // The next session is still generating when the cancelled request's last
+  // replies arrive.
+  const second = speak({ text: 'hold', modelId: 'alba' })
+  await until(() => workers[0].held !== cancelledRequest)
   workers[0].reply({ type: 'audio', requestId: cancelledRequest, samples: new Float32Array([0.9]) })
   workers[0].reply({ type: 'generate-complete', requestId: cancelledRequest })
+  await tick()
+  await tick()
+  workers[0].reply({ type: 'generate-complete', requestId: workers[0].held })
   await second.session.result
 
   assert.equal(workers.length, 1)
@@ -375,6 +380,17 @@ test('the app runtime keeps the engine only while the app is on screen and attac
 
   host.capabilities._destroy()
   assert.equal(workers[1].terminated, true, 'detaching the runtime releases the engine')
+})
+
+test('detaching the runtime stops a session that is still speaking', async () => {
+  const host = fakeHost()
+  const speaking = host.start('hold')
+  await until(() => workers[0]?.held)
+  host.capabilities._destroy()
+
+  await assert.rejects(speaking.result, { name: 'AbortError' })
+  assert.equal(workers[0].messages.at(-1).type, 'cancel-generate')
+  assert.equal(workers[0].terminated, true)
 })
 
 test('an app that stops declaring speech keeps no engine, even one still speaking', async () => {

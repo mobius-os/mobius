@@ -22,15 +22,18 @@ const LOAD_TIMEOUT_MS = 180_000
 // exact model and voice it holds, and only while the app is on screen: a
 // hidden app that is not speaking gives the model's memory back.
 //
-// A visible app that has stopped speaking gives it back too, after a short
-// idle delay. Nothing tells the frame that an app will not speak again, and
+// A visible app that has stopped speaking gives it back too, after an idle
+// delay. Nothing tells the frame that an app will not speak again, and
 // visibility and detach only cover the ends of its life, so a timer owns the
 // release of a parked engine: started when it parks, cleared when a session
-// reuses it or it is released another way. Follow-up requests (the next
-// chunk of a reading, a seek, a resume) arrive within seconds; past half a
-// minute the model's memory, well over 100 MB on a phone, matters more than
-// one cold start.
-const IDLE_RELEASE_MS = 30_000
+// reuses it or it is released another way. The delay has to outlast the gap
+// a reader leaves between requests: one that paces generation to stay a
+// little ahead of playback asks again only once its buffered audio, often
+// tens of seconds, has nearly played out, so a minute covers that gap without
+// holding the model's memory, well over 100 MB on a phone, much past the
+// reading. Hiding the app still releases at once; the delay only applies
+// while it is on screen.
+const IDLE_RELEASE_MS = 60_000
 let idleEngine = null
 let idleTimer = null
 let retainIdleEngine = true
