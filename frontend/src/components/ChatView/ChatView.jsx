@@ -4284,7 +4284,7 @@ export default function ChatView({
   }
 
   const branchFromReply = useCallback(
-    through => onBranchChat(chatId, through),
+    throughId => onBranchChat(chatId, throughId),
     [onBranchChat, chatId],
   )
 
@@ -6137,7 +6137,8 @@ export default function ChatView({
       // A queued message is already the next turn; Try again would only queue behind it.
       onTryAgain={last && liveControls.act && !turnActive && !hasPendingQuestion
         && pendingQueue.pendingMessages.length === 0 ? handleTryAgain : undefined}
-      onBranch={onBranchChat ? branchFromReply : undefined}
+      // An app's chat is the app's, not the owner's to continue elsewhere.
+      onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
       sealedSteerAssistant={active ? sealedSteerAssistant : sealedAssistantBeforeSteer(messages, group.start)}
     />

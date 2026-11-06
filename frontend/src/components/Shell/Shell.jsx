@@ -1100,7 +1100,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   )
   const branchChatRef = useRef(null)
   const handleBranchChat = useCallback(
-    (chatId, through) => branchChatRef.current?.(chatId, through) ?? Promise.resolve(false),
+    (chatId, throughId) => branchChatRef.current?.(chatId, throughId) ?? Promise.resolve(false),
     [],
   )
   // Latest-materialize ref so the deferred-New-Chat watcher (stable deps) runs this
@@ -1871,10 +1871,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // A reply's Branch action: the server copies the conversation through that
   // reply into a new chat (same project and model), which then opens with
   // history, so Back returns to the source. Resolves false when it failed.
-  async function branchChat(sourceChatId, through) {
+  async function branchChat(sourceChatId, throughId) {
     try {
       const chat = await jsonOrThrow(
-        await api.chats.branch(sourceChatId, through), 'Branching failed:',
+        await api.chats.branch(sourceChatId, throughId), 'Branching failed:',
       )
       const project = chat.project?.id != null
         ? projectsRef.current.find(row => String(row.id) === String(chat.project.id))

@@ -1208,37 +1208,31 @@ async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
   return response.goal
 
 
-async def _fork_codex_thread(codex, source_thread_id: str, last_turn_id: str, thread_options: dict):
-  """Fork ``source_thread_id`` through ``last_turn_id`` with this turn's options.
+async def _fork_codex_thread(codex, fork_from: dict, thread_options: dict):
+  """A new thread holding ``fork_from["session_id"]`` through its turn ``fork_from["at"]``.
 
-  The SDK's ``thread_fork`` cannot name a last turn yet, so this builds the
-  same request with ``last_turn_id`` set. Personality is the thread's own,
-  inherited from the source.
+  The SDK's ``thread_fork`` cannot name a last turn yet, so this sends the
+  app-server request itself, as backend/scripts/fork_session.py does. Only an
+  ordinary owner chat is branched, so approval and sandbox are the wire forms
+  of its ``auto_review`` and ``full_access`` thread options; personality is
+  inherited from the source thread.
   """
   from openai_codex import AsyncThread
-  from openai_codex.api import (
-    ThreadForkParams,
-    _approval_mode_override_settings,
-    _sandbox_mode,
-  )
 
-  await codex._ensure_initialized()
-  approval_policy, approvals_reviewer = _approval_mode_override_settings(
-    thread_options.get("approval_mode"),
+  params = {
+    "lastTurnId": fork_from["at"],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "auto_review",
+    "sandbox": "danger-full-access",
+    "baseInstructions": thread_options.get("base_instructions"),
+    "developerInstructions": thread_options.get("developer_instructions"),
+    "config": thread_options.get("config"),
+    "cwd": thread_options.get("cwd"),
+    "model": thread_options.get("model"),
+  }
+  forked = await control_client(codex).thread_fork(
+    fork_from["session_id"], {k: v for k, v in params.items() if v is not None},
   )
-  params = ThreadForkParams(
-    thread_id=source_thread_id,
-    last_turn_id=last_turn_id,
-    approval_policy=approval_policy,
-    approvals_reviewer=approvals_reviewer,
-    base_instructions=thread_options.get("base_instructions"),
-    config=thread_options.get("config"),
-    cwd=thread_options.get("cwd"),
-    developer_instructions=thread_options.get("developer_instructions"),
-    model=thread_options.get("model"),
-    sandbox=_sandbox_mode(thread_options.get("sandbox")),
-  )
-  forked = await codex._client.thread_fork(source_thread_id, params)
   return AsyncThread(codex, forked.thread.id)
 
 
@@ -2176,10 +2170,8 @@ async def _run_codex_sdk_turn(
         # A branch's first turn: continue from an exact copy of the source
         # thread through the chosen reply's turn (chat_branches.codex_fork_point).
         try:
-          thread = await _fork_codex_thread(
-            codex, fork_from["session_id"], fork_from["at"], thread_options,
-          )
-        except sdk["InvalidRequestError"] as exc:
+          thread = await _fork_codex_thread(codex, fork_from, thread_options)
+        except Exception as exc:
           log.warning(
             "Codex branch fork of %s failed for chat %s (%s); starting fresh "
             "with the copied history", fork_from["session_id"], chat_id, exc,

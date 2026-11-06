@@ -81,6 +81,7 @@ function AssistantReply({
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
+  const branchThroughId = rows[rows.length - 1].message.id
   const metaKey = presentationRows[0].key
   // An error card that owns recovery already offers Try now or Resume. Any
   // other failure (a plain provider error) leaves Try again as the way on.
@@ -160,8 +161,10 @@ function AssistantReply({
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}
       onTryAgain={tryAgain}
-      // Branching continues from the whole settled reply: its last row.
-      branch={outcome && onBranch ? () => onBranch(rows[rows.length - 1].key) : undefined}
+      // Branching continues from the whole settled reply: its last row, named
+      // by the id the server stored it under.
+      branch={outcome && onBranch && branchThroughId != null
+        ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
       visible={metaVisible}
     />

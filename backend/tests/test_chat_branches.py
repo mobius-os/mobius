@@ -38,7 +38,7 @@ def test_branch_copies_rows_through_the_reply_and_leaves_source_unchanged(client
                     agent_settings_json={"model": "claude-opus-4-8", "effort": "high",
                                          "system_prompt": "app only"})
 
-  response = client.post(f"/api/chats/{source_id}/branch", json={"through": "a1"}, headers=auth)
+  response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth)
 
   assert response.status_code == 200, response.text
   branch_id = response.json()["id"]
@@ -58,7 +58,7 @@ def test_branch_copies_rows_through_the_reply_and_leaves_source_unchanged(client
 def test_branch_refuses_an_owner_message_or_unknown_key(client, auth, db):
   source_id = _chat(client, auth, db, CONVERSATION)
   for key in ("u1", "missing"):
-    response = client.post(f"/api/chats/{source_id}/branch", json={"through": key}, headers=auth)
+    response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": key}, headers=auth)
     assert response.status_code == 409
   assert db.query(models.Chat).count() == 1
 
@@ -89,7 +89,7 @@ def test_branch_brings_attached_files_and_full_tool_outputs(client, auth, db):
   db.commit()
 
   branch_id = client.post(
-    f"/api/chats/{source_id}/branch", json={"through": "a1"}, headers=auth,
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
   ).json()["id"]
 
   assert (data_dir / "chats" / branch_id / "uploads" / "notes.txt").read_text() == "hello"
@@ -101,7 +101,7 @@ def test_branch_brings_attached_files_and_full_tool_outputs(client, auth, db):
   assert branch.uploads == [{"name": "notes.txt", "claimed": True}]
 
 
-def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text):
+def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text, *, runner=None):
   monkeypatch.setattr("app.providers.ClaudeProvider.check_auth", lambda self, _d: None)
   monkeypatch.setattr("app.providers.ClaudeProvider.ensure_auth", lambda self, _d: asyncio.sleep(0))
   captured = {}
@@ -110,7 +110,7 @@ def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text):
     captured.update(kwargs)
     return {"session_id": "new-session", "cost_usd": 0.0, "error": None}
 
-  monkeypatch.setattr("app.claude_sdk_runner.run_claude_sdk_turn", _runner)
+  monkeypatch.setattr("app.claude_sdk_runner.run_claude_sdk_turn", runner or _runner)
   db.query(models.Chat).filter(models.Chat.id == chat_id).one().provider = "claude"
   db.commit()
   create_broadcast(chat_id)
@@ -131,7 +131,7 @@ def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text):
 def test_branch_first_turn_is_seeded_with_the_copied_conversation(client, auth, db, monkeypatch):
   source_id = _chat(client, auth, db, CONVERSATION)
   branch_id = client.post(
-    f"/api/chats/{source_id}/branch", json={"through": "a1"}, headers=auth,
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
   ).json()["id"]
 
   captured = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")
@@ -142,8 +142,6 @@ def test_branch_first_turn_is_seeded_with_the_copied_conversation(client, auth, 
   assert prompt.index("Plan a trip") < prompt.index("Rome or Paris?") < prompt.index("Paris instead")
   # Only the branch's own turns: nothing after the branch point leaks in.
   assert "Rome it is." not in prompt
-  # The current request is the turn itself, not part of the seeded history.
-  assert prompt.count("Paris instead") == 1
 
 
 def test_first_turn_of_a_new_chat_gets_no_seeded_history(client, auth, db, monkeypatch):
@@ -152,6 +150,18 @@ def test_first_turn_of_a_new_chat_gets_no_seeded_history(client, auth, db, monke
   captured = _first_turn_prompt(client, auth, db, monkeypatch, chat_id, "Hello")
 
   assert "<resumed_context>" not in captured["user_message"]
+
+
+def test_sessionless_chat_that_is_not_a_branch_gets_no_seeded_history(client, auth, db, monkeypatch):
+  # Earlier replies without a session (an imported or provider-less history)
+  # are not a branch: only `branch_origin` makes a first turn replay them.
+  chat_id = _chat(client, auth, db, CONVERSATION)
+
+  captured = _first_turn_prompt(client, auth, db, monkeypatch, chat_id, "And then?")
+
+  assert captured["fork_from"] is None
+  assert "<resumed_context>" not in captured["user_message"]
+  assert "Rome or Paris?" not in captured["user_message"]
 
 
 # ── Branch origin and exact provider forks ───────────────────────────────
@@ -229,7 +239,7 @@ def _forkable_source(client, auth, db, *, transcript=True):
 def test_branch_records_its_origin_and_the_exact_fork_point(client, auth, db):
   source_id, sid = _forkable_source(client, auth, db)
 
-  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through": "run-a1"}, headers=auth).json()["id"]
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
 
   db.expire_all()
   origin = db.query(models.Chat).filter(models.Chat.id == branch_id).one().branch_origin
@@ -243,7 +253,7 @@ def test_branch_records_its_origin_and_the_exact_fork_point(client, auth, db):
 
 def test_branch_first_turn_forks_the_source_session_instead_of_replaying_text(client, auth, db, monkeypatch):
   source_id, sid = _forkable_source(client, auth, db)
-  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through": "run-a1"}, headers=auth).json()["id"]
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
 
   captured = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")
 
@@ -254,7 +264,7 @@ def test_branch_first_turn_forks_the_source_session_instead_of_replaying_text(cl
 
 def test_branch_without_a_forkable_session_falls_back_to_text_history(client, auth, db, monkeypatch):
   source_id, _sid = _forkable_source(client, auth, db, transcript=False)
-  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through": "run-a1"}, headers=auth).json()["id"]
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
 
   captured = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")
 
@@ -262,24 +272,134 @@ def test_branch_without_a_forkable_session_falls_back_to_text_history(client, au
   assert "Rome or Paris?" in captured["user_message"]
 
 
-def test_text_history_notes_the_tools_a_reply_used():
-  from app.chat_context import _with_tool_activity
+def test_failed_claude_fork_is_dropped_so_the_next_turn_reseeds_as_text(client, auth, db, monkeypatch):
+  source_id, sid = _forkable_source(client, auth, db)
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
+  calls = []
 
-  row = {"role": "assistant", "content": "Done", "blocks": [
-    {"type": "text", "content": "Checking."},
-    {"type": "tool", "tool": "WebSearch", "input": {"query": "rome weather"}},
-    {"type": "text", "content": "Sunny."},
-  ]}
-  assert _with_tool_activity(row)["content"] == 'Checking.\n\n[used WebSearch: {"query": "rome weather"}]\n\nSunny.'
+  async def _runner(**kwargs):
+    calls.append(kwargs)
+    return {"session_id": None, "cost_usd": 0.0, "error": "No message found with uuid cut-here"}
+
+  _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead", runner=_runner)
+
+  assert calls[0]["fork_from"] == {"session_id": sid, "at": "cut-here"}
+  db.expire_all()
+  branch = db.get(models.Chat, branch_id)
+  # With no fork, the next first turn is the text reseed
+  # (test_branch_without_a_forkable_session_falls_back_to_text_history).
+  assert branch.branch_origin["fork"] is None
+  assert branch.session_id is None
+  assert chat_branches.first_turn_fork(branch, "claude", get_settings().data_dir) is None
 
 
-def test_text_history_keeps_the_answer_of_a_reply_with_only_tool_blocks():
-  from app.chat_context import _with_tool_activity
+def _source_with_runs(client, auth, db, messages, run_ids, **fields):
+  sid = str(uuid.uuid4())
+  source_id = _chat(client, auth, db, messages, provider="claude", session_id=sid, **fields)
+  for run_id in run_ids:
+    db.add(models.ChatRun(id=run_id, root_run_id=run_id, chat_id=source_id, status="completed",
+                          provider="claude", provider_session_id=sid, started_at=T0, ended_at=T1))
+  db.commit()
+  _claude_transcript(get_settings().data_dir, sid, [_assistant("cut-here", 10)])
+  return source_id
 
-  row = {"role": "assistant", "content": "Done", "blocks": [
-    {"type": "tool", "tool": "Read", "input": "notes.txt"},
-  ]}
-  assert _with_tool_activity(row)["content"] == "[used Read: notes.txt]\n\nDone"
+
+def _branch_origin(client, auth, db, source_id, through_id):
+  response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": through_id}, headers=auth)
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  return db.get(models.Chat, response.json()["id"]).branch_origin
+
+
+def test_reply_cut_by_a_mid_turn_message_branches_as_text_not_a_fork(client, auth, db):
+  # A steered run keeps its token on the pre-steer reply and continues in
+  # `<token>:assistant:1`; its provider session ended after the continuation,
+  # so a fork would carry text the branch never showed.
+  steered = [
+    {"role": "user", "content": "Plan a trip", "cid": "u1", "ts": 1},
+    {"id": "run-a1", "role": "assistant", "content": "Looking at Rome", "ts": 2},
+    {"role": "user", "content": "Actually Paris", "cid": "u2", "ts": 3},
+    {"id": "run-a1:assistant:1", "role": "assistant", "content": "Paris it is.", "ts": 4},
+  ]
+  source_id = _source_with_runs(client, auth, db, steered, ["run-a1"])
+
+  assert _branch_origin(client, auth, db, source_id, "run-a1")["fork"] is None
+  assert _branch_origin(client, auth, db, source_id, "run-a1:assistant:1")["fork"] is None
+
+
+def test_branch_refuses_every_row_of_the_run_still_writing(client, auth, db):
+  steered = [
+    {"role": "user", "content": "Plan a trip", "cid": "u1", "ts": 1},
+    {"id": "run-a1", "role": "assistant", "content": "Rome or Paris?", "ts": 2},
+    {"role": "user", "content": "Rome", "cid": "u2", "ts": 3},
+    {"id": "run-a2", "role": "assistant", "content": "Looking", "ts": 4},
+    {"role": "user", "content": "Cheap please", "cid": "u3", "ts": 5},
+    {"id": "run-a2:assistant:1", "role": "assistant", "content": "Still looking", "ts": 6},
+  ]
+  source_id = _chat(client, auth, db, steered, active_assistant_message_id="run-a2")
+
+  for through_id in ("run-a2", "run-a2:assistant:1"):
+    response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": through_id}, headers=auth)
+    assert response.status_code == 409
+    assert "still being written" in response.json()["detail"]
+  assert client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"},
+                     headers=auth).status_code == 200
+
+
+def test_branch_names_a_reply_only_by_its_stored_id(client, auth, db):
+  unsaved = [
+    {"role": "user", "content": "Plan a trip", "cid": "u1", "ts": 1},
+    {"role": "assistant", "content": "Rome or Paris?", "cid": "a1", "ts": 2},
+  ]
+  source_id = _chat(client, auth, db, unsaved)
+  for through_id in ("a1", "assistant-2"):
+    response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": through_id}, headers=auth)
+    assert response.status_code == 409
+
+
+def test_app_and_helper_chats_cannot_be_branched(client, auth, db):
+  app = models.App(name="Trips", slug="trips", source_dir="/data/apps/trips")
+  db.add(app)
+  db.commit()
+  app_chat = _chat(client, auth, db, CONVERSATION, created_by_app_id=app.id)
+  helper_chat = _chat(client, auth, db, CONVERSATION)
+  db.add(models.Delegation(
+    id="branch-helper", parent_chat_id=app_chat, parent_root_run_id="parent-run",
+    task_key="helper", child_chat_id=helper_chat, provider="claude", scope="write",
+    cwd="/data", prompt_sha256="0" * 64,
+  ))
+  db.commit()
+  chats_before = db.query(models.Chat).count()
+
+  for source_id in (app_chat, helper_chat):
+    response = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only your own chats can be branched."
+  assert db.query(models.Chat).count() == chats_before
+
+
+def test_branch_copies_only_bare_upload_file_names(client, auth, db):
+  data_dir = Path(get_settings().data_dir)
+  outside = data_dir / "chats" / "secret.txt"
+  outside.parent.mkdir(parents=True, exist_ok=True)
+  outside.write_text("not an upload")
+  messages = [
+    {"role": "user", "content": "Read these", "cid": "u1", "ts": 1,
+     "attachments": [{"name": "../secret.txt"}, {"name": "ok.txt"}]},
+    {"id": "a1", "role": "assistant", "content": "Done", "ts": 2},
+  ]
+  source_id = _chat(client, auth, db, messages, uploads=[
+    {"name": "../secret.txt", "claimed": True}, {"name": "ok.txt", "claimed": True},
+  ])
+  uploads = data_dir / "chats" / source_id / "uploads"
+  uploads.mkdir(parents=True, exist_ok=True)
+  (uploads / "ok.txt").write_text("ok")
+
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth).json()["id"]
+
+  db.expire_all()
+  assert db.get(models.Chat, branch_id).uploads == [{"name": "ok.txt", "claimed": True}]
+  assert sorted(p.name for p in (data_dir / "chats" / branch_id / "uploads").iterdir()) == ["ok.txt"]
 
 
 def test_failed_upload_copy_leaves_no_branch_folder(client, auth, db, monkeypatch):
@@ -306,6 +426,91 @@ def test_failed_upload_copy_leaves_no_branch_folder(client, auth, db, monkeypatc
   monkeypatch.setattr(chat_branches, "_link_or_copy", _fail_second)
   before = set((data_dir / "chats").iterdir())
   with pytest.raises(OSError):
-    client.post(f"/api/chats/{source_id}/branch", json={"through": "a1"}, headers=auth)
+    client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth)
   assert set((data_dir / "chats").iterdir()) == before
   assert db.query(models.Chat).count() == 1
+
+
+# ── Codex: the branch fork and its fallback ──────────────────────────────
+
+def _codex_turn(monkeypatch, thread_fork):
+  """Run one Codex branch first turn whose app-server answers ``thread/fork`` with ``thread_fork``."""
+  from types import SimpleNamespace
+
+  from app import codex_sdk_runner
+  from tests.test_codex_sdk_runner import (
+    _FakeBroadcast, _FakeThread, _FakeTurnCompletedNotification, _FakeTurnHandle, _fake_sdk,
+  )
+
+  def _thread(thread_id):
+    return _FakeThread(thread_id, _FakeTurnHandle([SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(SimpleNamespace(id="turn-x", usage=None, error=None)),
+    )]))
+
+  threads = {"fresh": _thread("fresh-thread"), "forked": _thread("forked-thread")}
+  fork_calls = []
+
+  class FakeClient:
+    async def thread_fork(self, thread_id, params):
+      fork_calls.append((thread_id, params))
+      return thread_fork()
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self._client = FakeClient()
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_a):
+      return None
+
+    async def thread_start(self, *_a, **_k):
+      return threads["fresh"]
+
+  async def _no_platform_hooks(_codex, _sdk, _cwd, config, *_a, **_k):
+    return config
+
+  import openai_codex
+  monkeypatch.setattr(codex_sdk_runner, "_codex_platform_hook_thread_config", _no_platform_hooks)
+  monkeypatch.setattr(openai_codex, "AsyncThread", lambda _codex, thread_id: threads["forked"])
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex))
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="Paris instead", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="branch-chat", bc=_FakeBroadcast(), pending_questions={}, db=None,
+    resumed_context="<resumed_context>Rome or Paris?</resumed_context>",
+    fork_from={"session_id": "source-thread", "at": "turn-7"},
+  ))
+  return result, threads, fork_calls
+
+
+def test_codex_branch_turn_runs_on_the_source_thread_forked_through_the_reply(monkeypatch):
+  from types import SimpleNamespace
+
+  result, threads, fork_calls = _codex_turn(
+    monkeypatch, lambda: SimpleNamespace(thread=SimpleNamespace(id="forked-thread")),
+  )
+
+  assert result["error"] is None
+  assert result["session_id"] == "forked-thread"
+  [(thread_id, params)] = fork_calls
+  assert thread_id == "source-thread"
+  assert params["lastTurnId"] == "turn-7"
+  assert params["cwd"] == "/tmp"
+  # The fork already holds the conversation: no text replay.
+  assert threads["forked"].turn_args[0].endswith("Paris instead")
+  assert "<resumed_context>" not in threads["forked"].turn_args[0]
+  assert threads["fresh"].turn_args is None
+
+
+def test_codex_branch_fork_failure_of_any_kind_starts_fresh_with_text_history(monkeypatch):
+  def _fails():
+    raise RuntimeError("app-server: unknown turn turn-7")
+
+  result, threads, _ = _codex_turn(monkeypatch, _fails)
+
+  assert result["error"] is None
+  assert result["session_id"] == "fresh-thread"
+  assert "<resumed_context>Rome or Paris?</resumed_context>" in threads["fresh"].turn_args[0]
+  assert threads["forked"].turn_args is None

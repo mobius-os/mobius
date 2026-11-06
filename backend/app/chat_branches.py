@@ -6,8 +6,8 @@ changed. ``Chat.branch_origin`` records where it came from. When the chosen
 reply's provider session still exists, its ``fork`` names that session and the
 point where the reply ended, and the branch's first turn starts as an exact
 provider fork cut there (``claude_fork_point``/``codex_fork_point``); otherwise
-that turn is seeded with the copied turns as text
-(``chat_context._build_branch_history``).
+that turn is reseeded from the copied rows exactly like a chat whose provider
+session was lost (``chat_context._build_resumed_context``).
 
 What the copied rows need to keep working in their new chat is copied with
 them: attached upload files (``/api/chats/{id}/uploads/{name}``) and full tool
@@ -41,29 +41,20 @@ class BranchPointError(ValueError):
   """The requested reply cannot start a branch."""
 
 
-def message_key(message: dict, index: int) -> str:
-  """A row's display key; mirrors ``messageKey`` in frontend chatDetailCache.js."""
-  if message.get("id") is not None:
-    return str(message["id"])
-  if message.get("cid") is not None:
-    return str(message["cid"])
-  ts = message.get("ts")
-  return f"{message.get('role')}-{ts if ts is not None else index}"
-
-
-def branch_rows(source: models.Chat, messages: list, through_key: str) -> list:
-  """The source rows a branch through ``through_key`` starts with."""
+def branch_rows(source: models.Chat, messages: list, through_id: str) -> list:
+  """The source rows a branch through the reply with stored id ``through_id`` starts with."""
   for index in range(len(messages) - 1, -1, -1):
     row = messages[index]
-    if isinstance(row, dict) and message_key(row, index) == through_key:
+    if isinstance(row, dict) and row.get("id") is not None and str(row["id"]) == through_id:
       break
   else:
     raise BranchPointError("That reply is no longer in this chat.")
   if row.get("role") != "assistant":
     raise BranchPointError("Only a reply can start a branch.")
-  if source.active_assistant_message_id is not None and str(
-    source.active_assistant_message_id
-  ) == str(row.get("id")):
+  # A run's rows are its token and, after a mid-turn owner message, its
+  # `<token>:assistant:<n>` continuations (chat_event_sink); none is final yet.
+  active = source.active_assistant_message_id
+  if active is not None and (through_id == str(active) or through_id.startswith(f"{active}:")):
     raise BranchPointError("That reply is still being written.")
   return copy.deepcopy(messages[: index + 1])
 
@@ -145,15 +136,22 @@ def codex_fork_point(
   return last if isinstance(last, str) and last else None
 
 
-def reply_fork(db: Session, source: models.Chat, reply_id, *, data_dir: str, cwd: str) -> dict | None:
+def reply_fork(
+  db: Session, source: models.Chat, messages: list, reply_id: str, *, data_dir: str, cwd: str,
+) -> dict | None:
   """The provider fork a branch through ``reply_id`` can start from, if any.
 
   A reply's id is its run's token, and the run records the provider session
-  it ended in plus when it ran. Anything missing or unreadable (an older or
-  failed run, an expired session, another provider) means no fork, and the
-  branch falls back to text history.
+  it ended in plus when it ran. The fork point is where the run ended, so it
+  is exact only for the run's last row: a reply that a mid-turn owner message
+  cut short is continued in a ``<token>:assistant:<n>`` row (chat_event_sink)
+  the fork would wrongly include. Anything missing or unreadable (a
+  continuation, an older or failed run, an expired session, another provider)
+  means no fork, and the branch is reseeded as text.
   """
-  run = db.get(models.ChatRun, str(reply_id)) if reply_id is not None else None
+  if any(isinstance(row, dict) and str(row.get("id")).startswith(f"{reply_id}:") for row in messages):
+    return None
+  run = db.get(models.ChatRun, reply_id)
   if (
     run is None or run.chat_id != source.id or run.provider != source.provider
     or not run.provider_session_id or run.started_at is None or run.ended_at is None
@@ -174,6 +172,40 @@ def reply_fork(db: Session, source: models.Chat, reply_id, *, data_dir: str, cwd
   if at is None:
     return None
   return {"provider": run.provider, "session_id": run.provider_session_id, "at": at}
+
+
+def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict | None:
+  """The exact provider fork a branch's first turn starts from, if still possible.
+
+  ``Chat.branch_origin["fork"]`` (``reply_fork``) names the source session and
+  the point the chosen reply ended. Only the same provider can fork it, and a
+  Claude transcript must still exist; a Codex fork that fails falls back to
+  the text reseed inside its runner.
+  """
+  origin = chat.branch_origin
+  fork = origin.get("fork") if isinstance(origin, dict) else None
+  if not isinstance(fork, dict) or fork.get("provider") != provider_id:
+    return None
+  if not isinstance(fork.get("session_id"), str) or not isinstance(fork.get("at"), str):
+    return None
+  if provider_id == "claude":
+    from app.claude_sdk_runner import _resumable
+    if not _resumable(fork["session_id"], str(data_dir), str(Path(data_dir) / "cli-auth" / "claude")):
+      return None
+  return {"session_id": fork["session_id"], "at": fork["at"]}
+
+
+def forget_fork(db: Session, chat_id: str) -> None:
+  """Drop a branch's fork after a turn that used it failed.
+
+  A fork the provider refused would fail every retry the same way; without
+  it the next turn is reseeded as text. A turn that did start a session no
+  longer needs the fork anyway.
+  """
+  chat = db.get(models.Chat, chat_id)
+  if chat is not None and isinstance(chat.branch_origin, dict) and chat.branch_origin.get("fork"):
+    chat.branch_origin = {**chat.branch_origin, "fork": None}
+    db.commit()
 
 
 def _tool_use_ids(value, found: set[str]) -> set[str]:
@@ -209,7 +241,7 @@ def _link_or_copy(source: Path, target: Path) -> None:
 
 
 def branch_chat(
-  db: Session, source: models.Chat, through_key: str, *, data_dir: str,
+  db: Session, source: models.Chat, through_id: str, *, data_dir: str,
 ) -> models.Chat:
   """Create and commit the branch of ``source`` through one reply.
 
@@ -217,10 +249,17 @@ def branch_chat(
   folder is removed if copying or the commit fails, so a failed branch leaves
   nothing.
   """
-  rows = branch_rows(source, transcript_rows.read_all(db, source), through_key)
+  if source.created_by_app_id is not None or db.query(models.Delegation.id).filter(
+    models.Delegation.child_chat_id == source.id,
+  ).first() is not None:
+    # App and helper chats run under their app's or task's own settings and
+    # policy, which an owner chat copied from them would silently drop.
+    raise BranchPointError("Only your own chats can be branched.")
+  messages = transcript_rows.read_all(db, source)
+  rows = branch_rows(source, messages, through_id)
   # Top-level chats run in the data directory (chat.py), which is also where
   # Claude keeps the session transcripts a fork resumes from.
-  fork = reply_fork(db, source, rows[-1].get("id"), data_dir=data_dir, cwd=str(Path(data_dir)))
+  fork = reply_fork(db, source, messages, through_id, data_dir=data_dir, cwd=str(Path(data_dir)))
   settings = source.agent_settings_json if isinstance(source.agent_settings_json, dict) else {}
   branched_settings = {k: copy.deepcopy(settings[k]) for k in _BRANCHED_SETTINGS if k in settings}
   title = f"{BRANCH_TITLE_PREFIX}{source.title or 'New chat'}"[:256]
@@ -249,7 +288,11 @@ def branch_chat(
     uploads = []
     for entry in source.uploads or []:
       name = entry.get("name") if isinstance(entry, dict) else None
-      if name not in names or not (source_uploads / name).is_file():
+      # Only a bare file name may become a path under the uploads folders.
+      if (
+        not isinstance(name, str) or name in ("", "..") or Path(name).name != name
+        or name not in names or not (source_uploads / name).is_file()
+      ):
         continue
       branch_uploads.mkdir(parents=True, exist_ok=True)
       _link_or_copy(source_uploads / name, branch_uploads / name)

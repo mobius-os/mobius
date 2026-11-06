@@ -368,3 +368,9 @@ test('no Branch while the reply is still being written or without a branch actio
     /Branch in new chat/)
   assert.doesNotMatch(renderReply([turn]), /Branch in new chat/)
 })
+
+test('no Branch on a reply the server has not stored under an id yet', () => {
+  const { id: _id, ...unsaved } = turn
+  assert.doesNotMatch(renderReply([unsaved], { metaVisible: true, onBranch: () => {} }),
+    /Branch in new chat/)
+})

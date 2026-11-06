@@ -65,12 +65,11 @@ from app.chat_event_sink import (
   steered_into_turn_event,
   unregister_active_sink,
 )
+from app.chat_branches import first_turn_fork, forget_fork
 from app.chat_context import (
   _RESUME_CONTEXT_CHAR_BUDGET,
   _build_app_context,
   _build_app_report_block,
-  _branch_fork,
-  _build_branch_history,
   _build_resumed_context,
   _build_time_context,
   _chat_has_goal_intent,
@@ -6031,20 +6030,7 @@ async def _run_chat_impl_with_db(
     if activity_delivery.text:
       user_message = f"{activity_delivery.text}\n\n{user_message}"
 
-  branch_fork = None
-  branch_history = None
   if starts_fresh and run_policy is None:
-    # Prepended newest-first so the request reads oldest-first: the brief,
-    # then any turns after it, then this turn. A retired session is reseeded
-    # from its whole transcript below; only a chat that never had a session
-    # (a branch) can start with turns no session has seen.
-    if not session_id:
-      branch_history = _build_branch_history(chat_row)
-      branch_fork = _branch_fork(chat_row, provider_id, settings.data_dir)
-      # An exact provider fork already holds those turns; the text is then
-      # only the runner's fallback if the fork itself cannot be made.
-      if branch_history and branch_fork is None:
-        user_message = f"{branch_history}\n\n{user_message}"
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
       block = (
@@ -6408,16 +6394,27 @@ async def _run_chat_impl_with_db(
   # A close() below detaches chat_row. Precompute the only provider-time value
   # that still reads it (the bounded fallback for a session that cannot be
   # resumed) while the Session can refresh attributes expired by the
-  # prompt/settings snapshot commits.
+  # prompt/settings snapshot commits. A branch's first turn has no session of
+  # its own: it starts as an exact fork of its source session when one is
+  # still possible, and is otherwise reseeded like a lost session.
+  branch_first_turn = (
+    not session_id and run_policy is None and chat_row is not None
+    and chat_row.branch_origin is not None
+  )
+  branch_fork = (
+    first_turn_fork(chat_row, provider_id, settings.data_dir) if branch_first_turn else None
+  )
   resumed_context_fallback = (
     _build_resumed_context(chat_row, keep_task=run_policy is not None)
     if (
-      (session_id or fresh_delegated_session)
+      (session_id or fresh_delegated_session or branch_first_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and run_policy is None
     )
     else None
   )
+  if branch_first_turn and branch_fork is None and resumed_context_fallback:
+    user_message = f"{resumed_context_fallback}\n\n{user_message}"
 
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
@@ -6577,7 +6574,7 @@ async def _run_chat_impl_with_db(
         db=db,
         agent_settings=runner_agent_settings,
         system_prompt=system_prompt,
-        resumed_context=resumed_context_fallback or (branch_history if branch_fork else None),
+        resumed_context=resumed_context_fallback,
         fork_from=branch_fork,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
         retire_native_goal=historical_goal_mode,
@@ -6820,6 +6817,8 @@ async def _run_chat_impl_with_db(
         if chat_obj:
           chat_obj.session_id = new_session_id
           _safe_commit(db)
+      if err and branch_fork is not None:
+        forget_fork(db, chat_id)
       if err:
         log.error("claude SDK error chat_id=%s: %s", chat_id, err)
       else:

@@ -1954,8 +1954,8 @@ def unarchive_owner_chat(
 
 
 class ChatBranchRequest(BaseModel):
-  # The reply's display key (chat_branches.message_key).
-  through: str = Field(min_length=1, max_length=256)
+  # The chosen reply's stored message id.
+  through_id: str = Field(min_length=1, max_length=256)
 
 
 @router.post("/{chat_id}/branch", dependencies=[Depends(reject_cross_site)])
@@ -1983,7 +1983,7 @@ async def branch_owner_chat(
       # Finding the fork point reads the source's provider session file,
       # which can be large; keep that off the event loop.
       branch = await run_in_threadpool(
-        branch_chat, db, source, body.through, data_dir=get_settings().data_dir,
+        branch_chat, db, source, body.through_id, data_dir=get_settings().data_dir,
       )
     except BranchPointError as exc:
       raise HTTPException(409, str(exc)) from exc
