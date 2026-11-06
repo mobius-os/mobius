@@ -1267,9 +1267,11 @@ Stop again later.
 
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.
-It reports nothing back, and what happens when the chat no longer exists
-depends on the host. When the app needs to know the chat exists, or to return
-the owner to one exact conversation with no fallback, post
+When a message there still awaits resolution, or the draft cannot be saved
+there, the draft opens in a new chat instead. It reports nothing back, and what
+happens when the chat no longer exists depends on the host. When the app needs
+to know the chat exists, or to return the owner to one exact conversation with
+no fallback, post
 `moebius:open-existing-chat` with a `requestId` of the form
 `open-chat:<a>:<b>` and wait for the matching reply. Older hosts ignore this
 request, so stop waiting after a few seconds without a reply and keep the
