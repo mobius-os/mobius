@@ -40,6 +40,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
 
@@ -261,13 +262,17 @@ class HelperTurn:
   summary: str | None = None
   # Provider report, distinct from task lifecycle summaries and closing text.
   report: HelperReport = dataclasses.field(default_factory=HelperReport)
-  usage: dict | None = None
+  # Per-call usage of this turn's own model calls, by Claude message id.
+  call_usage: dict = dataclasses.field(default_factory=dict)
   dispatch_error: str | None = None
   dispatch_tool_error: bool = False
   dispatch_consumed: bool = False
   dispatch_cancelled: bool = False
   # The helper's last API error from its provider, as (kind, message text).
   api_error: tuple[str, str] | None = None
+  # The helper's last provider call ended in a safety refusal (its own
+  # stop reason); a later successful call clears it.
+  refused: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   # goals.CompactionBriefRefresh for a helper with a Goal assignment.
@@ -276,10 +281,10 @@ class HelperTurn:
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
 
-  def finish(self, status: str, summary: str | None = None, usage=None) -> None:
+  def finish(self, status: str, summary: str | None = None) -> None:
     if self.done.is_set():
       return
-    self.status, self.summary, self.usage = status, summary, usage
+    self.status, self.summary = status, summary
     self.started.set()
     self.done.set()
 
@@ -554,6 +559,9 @@ class ClaudeHelperHost(Host):
       turn.dispatch_tool_error = True
       if not turn.done.is_set() and turn.dispatch_id in self._turn_by_dispatch:
         self._specs[turn.dispatch_id] = turn.spec
+        # Nothing was consumed, so a Stop during the re-ask must not stop the
+        # (resumable) agent this turn addresses.
+        turn.dispatch_consumed = False
       log.warning("helper dispatch tool error kind=%s id=%s", turn.kind, turn.dispatch_id)
 
   async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
@@ -647,6 +655,11 @@ class ClaudeHelperHost(Host):
         if turn is None or turn.done.is_set():
           continue
         if isinstance(message, AssistantMessage):
+          # Claude repeats one model call's message per content block; the
+          # latest copy carries that call's most complete usage.
+          if message.message_id and isinstance(message.usage, dict):
+            turn.call_usage[message.message_id] = message.usage
+          turn.refused = message.stop_reason == "refusal"
           if error:
             turn.api_error = (str(error), _message_text(message))
           else:
@@ -731,7 +744,9 @@ class ClaudeHelperHost(Host):
     if identity is not None and not identity.done():
       identity.set_result(turn)
 
-  def _on_task_end(self, task_id, status, summary, usage) -> None:
+  def _on_task_end(self, task_id, status, summary, _task_usage=None) -> None:
+    # Claude's task counters are not this turn's usage: a task notification's
+    # total is its last model call only. The turn sums its own calls instead.
     turn = self._turn_by_agent.get(task_id)
     # A follow-up turn is mapped to its agent before the agent resumes, and
     # each run reports its end more than once; a late report of the previous
@@ -742,7 +757,7 @@ class ClaudeHelperHost(Host):
     report = turn.report.final()
     if report is not None:
       turn.sink.publish({"type": "assistant_result", "content": report})
-    turn.finish(normalized, summary, dict(usage) if usage else None)
+    turn.finish(normalized, summary)
 
   # ------------------------------------------------------------------ work
 
@@ -1245,12 +1260,14 @@ async def run_claude_host_turn(
         )
         if kind == "rate_limit":
           result["api_error_status"] = 429
-      if turn.usage:
-        result["usage_metrics"] = {
-          "total_tokens": turn.usage.get("total_tokens"),
-          "duration_ms": turn.usage.get("duration_ms")
-          or int((time.monotonic() - started_at) * 1000),
-        }
+        if turn.refused:
+          result["provider_refusal"] = True
+      usage = normalize_claude_helper_usage(
+        list(turn.call_usage.values()),
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+      )
+      if usage is not None:
+        result["usage_metrics"] = usage
       return result
   finally:
     if handle is not None:

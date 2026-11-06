@@ -2106,6 +2106,9 @@ def _mark_submit_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # Only the Send that opened this PR over an overlap may say it conflicts.
+  if not (record_patch or {}).get("last_submit_upstream_conflict"):
+    next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2146,6 +2149,8 @@ def _mark_existing_pr_update_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # An update publishes only after it merges cleanly with upstream.
+  next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2401,6 +2406,33 @@ def _find_existing_pr(
     if attempt + 1 < _PR_VISIBILITY_RETRIES:
       time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
   return None
+
+
+def _recovered_upstream_overlap(
+  repo: Path, record: dict, branch: str, head_sha: str,
+) -> dict:
+  """The upstream overlap a recovered new PR opened over, as Send records it.
+
+  A retry that completes an earlier attempt's PR returns before the merge
+  preflight. The flag describes what that PR opened over, so this rechecks the
+  exact upstream tip the earlier attempt preflighted and recorded with its
+  pushed branch, not today's upstream. The check is advisory: an unknown
+  answer (that tip no longer available locally, or git refusing, timing out
+  or failing to start) records no flag, and the already-public PR's recovery
+  never fails on it.
+  """
+  upstream_branch = str(record.get("last_submit_upstream_branch") or "")
+  upstream_sha = str(record.get("last_submit_upstream_sha") or "").lower()
+  if (
+    not _BRANCH_NAME.fullmatch(upstream_branch)
+    or not _GIT_SHA.fullmatch(upstream_sha)
+  ):
+    return {}
+  try:
+    merge = _git_ops.merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+    return {}
+  return _git_ops.upstream_overlap_patch(merge, head_sha)
 
 
 def _authoritative_public_reconciliation(
@@ -3746,6 +3778,10 @@ def _submit_prepared_pr(
         else None
       )
     )
+    new_standalone_pr = _git_ops.opens_new_standalone_pr(
+      plan, existing_pr_number=expected_existing_pr_number,
+      direct_base=direct_base,
+    )
     recovery = _authoritative_public_reconciliation(
       record,
       base_branch=str(recorded_base or "") or None,
@@ -3758,10 +3794,11 @@ def _submit_prepared_pr(
       expected_head_repository=existing_head_repository,
     )
     if recovery is not None and recovery.pr_url is not None:
+      pushed_head = str(plan.get("head_sha") or "").lower()
       pushed_patch = _git_ops._record_patch_with(record_patch, {
         "head_repository": recovery.head_repository,
         "last_submit_stage": "pushed",
-        "last_submit_push_sha": str(plan.get("head_sha") or "").lower(),
+        "last_submit_push_sha": pushed_head,
         "last_submit_base_branch": str(recorded_base or ""),
         "last_pushed_branch": (
           branch if same_repo_submission else f"{login}:{branch}"
@@ -3779,7 +3816,7 @@ def _submit_prepared_pr(
         "url": recovery.pr_url,
         "head_repository": recovery.head_repository,
         "branch": branch,
-        "head_sha": str(plan.get("head_sha") or "").lower(),
+        "head_sha": pushed_head,
         "base_branch": str(recorded_base or ""),
         "labels": _reviewed_pr_labels(plan),
       }
@@ -3789,7 +3826,13 @@ def _submit_prepared_pr(
         recovery.pr_number,
         _reviewed_pr_labels(plan),
       )
-      completed_patch = _git_ops._record_patch_with(pushed_patch, label_patch)
+      overlap_patch = (
+        _recovered_upstream_overlap(repo, record, branch, pushed_head)
+        if new_standalone_pr else {}
+      )
+      completed_patch = _git_ops._record_patch_with(
+        _git_ops._record_patch_with(pushed_patch, overlap_patch), label_patch,
+      )
       if attempt_event is not None:
         attempt_event(
           "complete", reconcile_request, completed_patch,
@@ -3815,7 +3858,17 @@ def _submit_prepared_pr(
       )
 
     try:
-      merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      merge_patch = (
+        _git_ops.upstream_merge_for_new_pr(
+          repo, upstream_repo, branch, expected_base,
+          str(record_patch.get("head_sha") or expected_head),
+        )
+        if new_standalone_pr else
+        _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      )
+      # A conflict is true of the PR only once it opens, so a failed later step
+      # never leaves it on the still-prepared record.
+      upstream_conflict = merge_patch.pop("last_submit_upstream_conflict", None)
       record_patch = _git_ops._record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _git_ops._merge_error_patch(exc, record_patch) from exc
@@ -4389,10 +4442,10 @@ def _submit_prepared_pr(
               _reviewed_pr_labels(plan),
             )
             completed_patch = _git_ops._record_patch_with(
-              _git_ops._record_patch_with(
-                pushed_patch,
-                {"publication_stage": confirmed_existing[1]},
-              ),
+              _git_ops._record_patch_with(pushed_patch, {
+                "publication_stage": confirmed_existing[1],
+                "last_submit_upstream_conflict": upstream_conflict,
+              }),
               label_patch,
             )
             if attempt_event is not None:
@@ -4464,9 +4517,10 @@ def _submit_prepared_pr(
       _reviewed_pr_labels(plan),
     )
     completed_patch = _git_ops._record_patch_with(
-      _git_ops._record_patch_with(
-        pushed_patch, {"publication_stage": confirmed_stage},
-      ),
+      _git_ops._record_patch_with(pushed_patch, {
+        "publication_stage": confirmed_stage,
+        "last_submit_upstream_conflict": upstream_conflict,
+      }),
       label_patch,
     )
     if attempt_event is not None:

@@ -6987,6 +6987,32 @@ def _add_run_end_reason(eng) -> None:
       conn.execute(text("ALTER TABLE chat_runs ADD COLUMN end_reason VARCHAR(32)"))
 
 
+def _add_app_chat_scope_starts(eng) -> None:
+  """Give each app's scoped first turn a durable identity outside its chat.
+
+  Scoped chats created before this table are bound lazily by the next start or
+  cancel of their scope, as ``POST /api/app-chats`` grouped chats are.
+  """
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS app_chat_scope_starts ("
+      "app_id INTEGER NOT NULL REFERENCES apps(id), "
+      "scope VARCHAR(160) NOT NULL, "
+      "chat_id VARCHAR(64), "
+      "cancelled_at TIMESTAMP, "
+      "admitted_at TIMESTAMP, "
+      "created_at TIMESTAMP NOT NULL, "
+      "PRIMARY KEY (app_id, scope), "
+      "CONSTRAINT ck_app_chat_scope_starts_outcome "
+      "CHECK (chat_id IS NOT NULL OR cancelled_at IS NOT NULL), "
+      "CONSTRAINT ck_app_chat_scope_starts_admitted "
+      "CHECK (admitted_at IS NULL OR "
+      "(chat_id IS NOT NULL AND cancelled_at IS NULL)))"
+    ))
+
+
 def _add_chat_branch_origin(eng) -> None:
   """Where a branched chat came from (``chat_branches``); NULL for every other chat."""
   from sqlalchemy import inspect as sa_inspect
@@ -7120,7 +7146,8 @@ _SCHEMA_MIGRATIONS = (
   ("0096_app_accepted_consent", _add_app_accepted_consent),
   ("0097_core_contribution_review_runs", _allow_core_contribution_review_runs),
   ("0098_run_end_reason", _add_run_end_reason),
-  ("0099_chat_branch_origin", _add_chat_branch_origin),
+  ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
+  ("0100_chat_branch_origin", _add_chat_branch_origin),
 )
 
 

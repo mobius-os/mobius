@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { advanceChatRunSignal, chatRunSignalDelta, EMPTY_CHAT_RUN_SIGNAL } from '../../../lib/chatRunSignal.js'
+import { chatDetailCacheValue, shouldRefetchTranscriptForRuntime } from '../../../lib/chatDetailCache.js'
 import {
   canResumeGoal, goalStatusLabel, compactGoalObjective, draftGoalObjective,
   goalMessageObjectiveFromText, goalPresentationFromRuntime, goalTaskDisplayStatus,
@@ -394,6 +395,101 @@ test('idle invalidation reads runtime and its embedded plan without a turn or re
   assert.equal(owner.state.fetchGenRef.current, 1, 'pre-invalidation reads are fenced out')
   assert.equal(displayed.plan.summary.completed, 2)
   assert.equal(displayed.plan.tasks[0].status, 'completed')
+})
+
+test('idle invalidation re-downloads the transcript only when the runtime read could not prove it current', async () => {
+  // Every reconnect and wait/Goal change signals each visible chat. The
+  // runtime read owns the durable-version check (and its own detail reread
+  // when that version moved); only its proof lets the drain skip the page.
+  const owner = invalidationHarness()
+  let detailReads = 0
+  owner.state.readDetail = async () => { detailReads++ }
+  const drainWith = async runtime => {
+    owner.state.readRuntime = async () => runtime
+    owner.invalidate()
+    await owner.drain()
+  }
+  await drainWith({ running: false, transcriptCurrent: true })
+  assert.equal(detailReads, 0, 'a proven-current transcript is not fetched again')
+  await drainWith({ running: false, transcriptCurrent: false })
+  assert.equal(detailReads, 1, 'an adopted read without proof still falls back')
+  await drainWith(null)
+  assert.equal(detailReads, 2, 'a failed, superseded, or unadopted read still falls back')
+})
+
+// Runs the real refreshRuntimeState against a fake server, so the drain sees
+// the same transcript proof the mounted chat would.
+function runtimeRefreshHarness(owner, server) {
+  const callback = chatView.match(/const refreshRuntimeState = useCallback\((async \(\{ shared = false \} = \{\}\) => \{[\s\S]*?\n  \}), \[/)[1]
+  const noop = () => {}
+  const harness = { cache: chatDetailCacheValue(server.detail()), detailReads: 0 }
+  const scope = {
+    provisionalNewChatRef: { current: false }, chatIdStaleRef: { current: false },
+    activationSettledRef: { current: true }, resumeRequestRef: { current: null },
+    handlingStopRef: { current: false }, messagesRef: { current: [] },
+    parkedQuestionHydrationRef: { current: null }, fetchGenRef: owner.state.fetchGenRef,
+    localStartRequestRef: owner.state.localStartRequestRef, isStreamingRef: owner.state.isStreamingRef,
+    sendingRef: owner.state.sendingRef, chatId: owner.state.chatId, CHAT_FETCH_TIMEOUT_MS: 1,
+    apiFetch: async () => ({ json: async () => server.runtime() }), jsonOrThrow: res => res.json(),
+    sharedRuntimeRead: (_chatId, read) => read(), inspectRuntimeSnapshot: () => ({ adopt: true, settled: null }),
+    shouldAdoptRuntimeAssistantOwner: () => false, shouldRecoverSettledRuntime: () => false,
+    shouldRetireSettledRunMarker: () => false, shouldRefetchTranscriptForRuntime,
+    queryClient: { getQueryData: () => harness.cache }, chatMessagesQueryKey: chatId => ['chat', chatId],
+    goalPresentationFromRuntime, normalizeBackgroundHelpers: value => value,
+    hasPendingQuestionMessage: () => true, pendingQueue: { hydrate: noop },
+    fetchMessages: (...args) => owner.state.fetchMessages(...args),
+    commitRuntimeSnapshot: noop, updateChatRuntimeCache: noop, onRuntimeSettledIdle: noop,
+    setActiveAssistantMessageId: noop, setRecoveryRunId: noop, setContinuationWait: noop,
+    setSending: noop, setServerRunningLocalState: noop, setGoalPresentationLocalState: noop,
+    setLiveQuestionId: noop, setArmedWaits: noop, setServerHandoff: noop,
+    setChatCompacting: noop, setBackgroundHelpers: noop,
+  }
+  harness.refreshRuntimeState = new Function(...Object.keys(scope), `return ${callback}`)(...Object.values(scope))
+  owner.state.readRuntime = harness.refreshRuntimeState
+  owner.state.readDetail = async () => {
+    harness.detailReads++
+    // fetchMessages commits a composite page, which drops the version proof.
+    harness.cache = { ...chatDetailCacheValue(server.detail()), updated_at: null }
+    return { running: false }
+  }
+  return harness
+}
+
+test('an idle Wait cancelled with an unchanged transcript still refreshes its card', async () => {
+  const owner = invalidationHarness()
+  const server = {
+    lifecycleKey: 'armed', waitSummaries: [],
+    detail() {
+      return {
+        ...this.runtime(), offset: 0, total: 1,
+        messages: [{ role: 'assistant', id: 'answer', content: 'Waiting on CI.',
+          ...(this.waitSummaries.length ? { wait_summaries: this.waitSummaries } : {}) }],
+      }
+    },
+    runtime() {
+      return { running: false, updated_at: '2026-11-04T10:00:00',
+        lifecycle_projection_key: this.lifecycleKey, pending_messages: [] }
+    },
+  }
+  const harness = runtimeRefreshHarness(owner, server)
+  assert.equal((await harness.refreshRuntimeState())?.transcriptCurrent, true)
+  owner.state.isStreamingRef.current = true
+  assert.equal((await harness.refreshRuntimeState())?.transcriptCurrent, false,
+    'a locally owned stream proves nothing about the durable page')
+  owner.state.isStreamingRef.current = false
+
+  // A reconnect signals every visible chat; nothing changed for this one.
+  owner.state.externalSignalRef.current = advanceChatRunSignal(owner.state.externalSignalRef.current, 'chat_run_reconcile')
+  await owner.drain()
+  assert.equal(harness.detailReads, 0, 'a proven-current page is not downloaded again')
+
+  // POST /api/chat-waits/{id}/cancel leaves Chat.updated_at alone.
+  server.lifecycleKey = 'cancelled'
+  server.waitSummaries = [{ id: 'ci-wait', status: 'cancelled' }]
+  owner.invalidate()
+  await owner.drain()
+  assert.equal(harness.detailReads, 1, 'the runtime proof reads the page once, and the drain trusts it')
+  assert.deepEqual(harness.cache.messages[0].wait_summaries, [{ id: 'ci-wait', status: 'cancelled' }])
 })
 
 test('nested live invalidations arriving during a read drain again and keep the same Goal attached', async () => {

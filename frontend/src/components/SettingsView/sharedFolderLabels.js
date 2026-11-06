@@ -17,11 +17,11 @@ export function needsYouCount(folders) {
 }
 
 const OTHER_FOLDER_STATUS = {
-  ready: { color: '--green', label: 'Ready', usable: true },
+  ready: { color: '--green-text', label: 'Ready', usable: true },
   paused: { color: '--muted', label: 'Paused' },
   offline: { color: '--muted', label: 'Offline' },
-  needs_permission: { color: '--accent', label: 'Needs reconnect there' },
-  needs_pick: { color: '--accent', label: 'Pick again there' },
+  needs_permission: { color: '--accent-text', label: 'Needs reconnect there' },
+  needs_pick: { color: '--accent-text', label: 'Pick again there' },
 }
 
 /**

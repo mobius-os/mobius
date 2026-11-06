@@ -15,7 +15,7 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
-import { foldAppActivityOperations } from './activityGrouping.js'
+import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -226,6 +226,13 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  // A provider refusal changes the request instead of retrying it: open the
+  // model picker, or compact into a fresh provider session. Stable references.
+  onRefusalModelChoice,
+  onRefusalFreshSession,
+  // Only the installation owner may bypass the storage floor; the server
+  // refuses Continue anyway from anyone else, who keeps the plain Resume.
+  canOverrideStorage = false,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -344,10 +351,13 @@ function MsgContentInner({
       activitySourceBlocks || displayBlocks,
       chatId,
     )
+    const coalescedEntries = coalesceThinkingEntries(
+      mergeAdjacentPeerActivityEntries(positionedEntries),
+    )
+    // A live turn keeps stream order; a settled reply folds its routine saves
+    // into its earlier activity line (joinRoutineToActivity).
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      coalesceThinkingEntries(
-        mergeAdjacentPeerActivityEntries(positionedEntries),
-      ),
+      isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
@@ -601,16 +611,21 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
+        const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
-        // A resource wait owns its automatic retry. Offering Resume while the
-        // same measured pressure remains only launches a turn admission will
-        // re-park. Once the scheduler reports manual recovery, expose the
-        // existing recovery action instead of leaving the owner at a dead end.
+        // Resource waits retain automatic retry. A warned storage-only action
+        // can admit one cleanup turn even while that measured pressure remains.
+        // Not while an update restores edits or awaits a restart: the server
+        // reports those for a storage wait as the handoff's reason.
+        const storageOverrideAvailable = recoveryOwner && canOverrideStorage
+          && block.pause?.kind === 'storage'
+          && ['automatic', 'recovery'].includes(handoff?.kind)
+          && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
+          && !storageOverrideAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
         return (
           <ErrorCard
@@ -621,6 +636,10 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
+            refusalActions={recoveryOwner && providerRefusal ? {
+              switchModel: !!onRefusalModelChoice,
+              freshSession: !!onRefusalFreshSession,
+            } : null}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -646,11 +665,41 @@ function MsgContentInner({
                 )}
               </div>
             )}
-            {manualResumeAvailable && (
+            {recoveryOwner && providerRefusal && (onRefusalModelChoice || onRefusalFreshSession) && (
+              <div className="chat__recovery-actions">
+                {onRefusalModelChoice && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalModelChoice}
+                    disabled={submissionBlocked}
+                  >
+                    Switch model
+                  </button>
+                )}
+                {onRefusalFreshSession && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalFreshSession}
+                    disabled={submissionBlocked}
+                  >
+                    Start fresh session
+                  </button>
+                )}
+              </div>
+            )}
+            {storageOverrideAvailable && (
+              <span className="chat__recovery-copy">
+                Continue this turn despite low storage—for example, to free space.
+                If the disk fills completely, saving may fail.
+              </span>
+            )}
+            {(manualResumeAvailable || storageOverrideAvailable) && (
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={onResume}
+                onClick={() => onResume({ allowLowStorage: storageOverrideAvailable })}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -659,7 +708,11 @@ function MsgContentInner({
                     ? 'Möbius is reconnecting this paused turn.'
                   : undefined}
               >
-                {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
+                {resumeState?.pending
+                  ? storageOverrideAvailable ? 'Continuing…' : 'Resuming…'
+                  : resumeState?.unavailable ? 'Reconnecting…'
+                  : storageOverrideAvailable ? 'Continue anyway'
+                  : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
@@ -834,6 +887,9 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.onRefusalModelChoice === next.onRefusalModelChoice
+    && prev.onRefusalFreshSession === next.onRefusalFreshSession
+    && prev.canOverrideStorage === next.canOverrideStorage
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

@@ -704,6 +704,17 @@ export default function ChatInputBar({
     requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
   }
 
+  // A restored draft starts with its caret at the end, where typing left it,
+  // so keyboard focus continues the draft. Once per chat rather than on every
+  // focus: later native focus keeps the owner's own selection.
+  const caretPlacedForChatRef = useRef(null)
+  useLayoutEffect(() => {
+    const el = inputRef?.current
+    if (!el || !input || caretPlacedForChatRef.current === chatId) return
+    caretPlacedForChatRef.current = chatId
+    if (el.ownerDocument?.activeElement !== el) placeCaretAtTextEnd(el)
+  }, [chatId, input, inputRef])
+
   const canSubmit = !submissionBlocked && !questionBlocked
 
   function handleKeyDown(e) {
@@ -922,16 +933,18 @@ export default function ChatInputBar({
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               onKeyUp={() => { pasteAsPlainTextRef.current = false }}
-              onFocus={(event) => {
-                placeCaretAtTextEnd(event.currentTarget)
-                setSlashInputFocused(true)
-              }}
+              // Native editing owns selection; explicit app-driven focus
+              // still places the caret through focusComposerElement.
+              onFocus={() => setSlashInputFocused(true)}
               onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
               aria-describedby={historyKeyHint ? historyKeyHintId : undefined}
               name="message"
               autoComplete="off"
+              // A touch keyboard corrects words itself; the browser's own
+              // spelling popup only competes with it. Desktop keeps underlines.
+              spellCheck={!touchPrimary}
               rows={1}
               // Combobox semantics apply only while the menu is open. Left on
               // permanently they would announce this plain prose textarea as a

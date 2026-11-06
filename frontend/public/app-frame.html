@@ -240,11 +240,29 @@
            exactly what was paused or held resumes, never what the app paused
            itself. backgroundPlayback marks a document with an open media
            session: its deliberate playback continues (the drawer controls
-           it), though the page still honestly reads as hidden. Child frames
-           are separate documents and keep their own lifecycle. -->
+           it), though the page still honestly reads as hidden.
+
+           A game's frame loop is the heaviest work a phone runs, and same-
+           process frames keep receiving animation frames behind a hidden
+           ancestor. So a held document's requestAnimationFrame callbacks wait
+           for its return too, which is what a really hidden page gets.
+
+           covered:true means the owner opened the modal drawer over this app:
+           it is still painted, and honestly not hidden, but holding it now
+           gives the drawer the whole device and silences the app before the
+           owner picks a destination.
+
+           Child frames are separate documents, so this same script installs
+           itself first in every srcdoc the app sets, and each verdict is
+           forwarded to every child frame. A child loaded from a URL has no
+           script of ours; it can listen for the forwarded message. -->
       <script data-mobius-background-pause>(function () {
+  // A document reached twice (an app copying a page that already carries this
+  // script) keeps the first install.
+  if (window.__mobiusNativeFrame) return;
   var shellHidden = false;
   var holding = false;
+  var verdict = null;
   var heldContexts = new Set();
   // element -> wasConnected at the time it was held. release() resumes each
   // held element except one that was in the page when held and the app has
@@ -352,6 +370,81 @@
     return nativePause.apply(this, arguments);
   };
 
+  // Animation frames: held callbacks use negative ids, which the browser never
+  // issues. Platform code that must keep painting uses the native function.
+  var nativeFrame = window.requestAnimationFrame;
+  var nativeCancelFrame = window.cancelAnimationFrame;
+  var heldFrames = new Map();
+  var lastHeldFrame = 0;
+  window.__mobiusNativeFrame = function (callback) {
+    return nativeFrame.call(window, callback);
+  };
+  window.requestAnimationFrame = function (callback) {
+    if (!holding) return nativeFrame.call(window, callback);
+    lastHeldFrame -= 1;
+    heldFrames.set(lastHeldFrame, callback);
+    return lastHeldFrame;
+  };
+  // A held id stays cancellable after release(), until its callback runs.
+  var resumedFrames = new Map();
+  window.cancelAnimationFrame = function (id) {
+    heldFrames.delete(id);
+    nativeCancelFrame.call(window, resumedFrames.has(id) ? resumedFrames.get(id) : id);
+    resumedFrames.delete(id);
+  };
+
+  // Nested documents. The tag is assembled so this inline script never contains
+  // a literal opening comment or script tag: the HTML parser would read that as
+  // escaped script text and miss the real end of this element.
+  var pauseTag = '<scr' + 'ipt data-mobius-background-pause>'
+    + document.currentScript.textContent + '</scr' + 'ipt>';
+  // A comment body never crosses its own end, so a run of comments with no
+  // doctype after it fails in linear time instead of backtracking.
+  var documentLead = new RegExp('^(?:\\s|<!' + '--(?:(?!--' + '>)[\\s\\S])*--' + '>)*<!doctype[^>]*>', 'i');
+  // After the doctype, so the nested page keeps its rendering mode.
+  function withPause(html) {
+    var text = String(html);
+    var lead = documentLead.exec(text);
+    var at = lead ? lead[0].length : 0;
+    return text.slice(0, at) + pauseTag + text.slice(at);
+  }
+  // The app reads back the srcdoc it set (the injected tag removed), so
+  // comparing or re-setting it neither reloads the child nor nests the script.
+  function readSrcdoc(value) {
+    var text = value == null ? value : String(value);
+    var at = text ? text.indexOf(pauseTag) : -1;
+    return at < 0 ? value : text.slice(0, at) + text.slice(at + pauseTag.length);
+  }
+  function isSrcdoc(element, name) {
+    return element instanceof HTMLIFrameElement && String(name).toLowerCase() === 'srcdoc';
+  }
+  var srcdocProperty = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc');
+  Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+    configurable: true,
+    enumerable: srcdocProperty.enumerable,
+    get: function () { return readSrcdoc(srcdocProperty.get.call(this)); },
+    set: function (html) { srcdocProperty.set.call(this, withPause(html)); }
+  });
+  // React and most authored code reach srcdoc through this path.
+  var nativeSetAttribute = Element.prototype.setAttribute;
+  var nativeGetAttribute = Element.prototype.getAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (!isSrcdoc(this, name)) return nativeSetAttribute.apply(this, arguments);
+    return nativeSetAttribute.call(this, name, withPause(value));
+  };
+  Element.prototype.getAttribute = function (name) {
+    var value = nativeGetAttribute.apply(this, arguments);
+    return isSrcdoc(this, name) ? readSrcdoc(value) : value;
+  };
+  function tellChild(frame) {
+    var child = frame.contentWindow;
+    if (child) child.postMessage(verdict, '*');
+  }
+  // A child that loads after a verdict has not heard it yet.
+  document.addEventListener('load', function (event) {
+    if (verdict && event.target instanceof HTMLIFrameElement) tellChild(event.target);
+  }, true);
+
   function eachLive(refs, callback) {
     refs.forEach(function (ref) {
       var value = ref.deref();
@@ -396,8 +489,20 @@
   function release() {
     var contexts = Array.from(heldContexts);
     var media = Array.from(heldMedia);
+    var frames = Array.from(heldFrames);
     heldContexts.clear();
     heldMedia.clear();
+    heldFrames.clear();
+    frames.forEach(function (entry) {
+      var id = entry[0];
+      var callback = entry[1];
+      resumedFrames.set(id, nativeFrame.call(window, function (time) {
+        resumedFrames.delete(id);
+        // A plain call, as the browser makes it, so the callback sees the same
+        // receiver whether or not it was held.
+        callback(time);
+      }));
+    });
     contexts.forEach(function (context) {
       if (context.state !== 'closed') contextApi(context).resume.call(context).catch(ignore);
     });
@@ -411,18 +516,65 @@
     });
   }
 
+  // The shell hides a parked app with visibility:hidden on an ancestor. When
+  // it shows the app again, Chrome (seen on macOS, where a sandboxed nested
+  // page runs in its own process) can leave a nested document's root scroller
+  // stuck: wheel events still reach the page, but it no longer scrolls until
+  // the owner clicks inside it. Rebuilding that document's own scroller fixes
+  // it; nudging it from the embedding document does not. So each document
+  // (this script runs in every nested srcdoc too, and the verdict is forwarded
+  // down) briefly switches its root scroller's overflow off and back on when
+  // it becomes visible again: immediately, and again once the shown state has
+  // painted. The toggle is synchronous, keeps the scroll offset, and restores
+  // the page's own inline overflow. That is saved per axis: the shorthand reads
+  // empty when only one axis is set inline or the axes differ in priority, so
+  // restoring it would erase a page's one-axis scroll lock.
+  var OVERFLOW_AXES = ['overflow-x', 'overflow-y'];
+  function refreshOwnScrolling() {
+    var root = document.scrollingElement || document.documentElement;
+    var own = OVERFLOW_AXES.map(function (axis) {
+      return [axis, root.style.getPropertyValue(axis), root.style.getPropertyPriority(axis)];
+    });
+    root.style.setProperty('overflow', 'hidden', 'important');
+    void root.offsetHeight;
+    root.style.removeProperty('overflow');
+    own.forEach(function (axis) {
+      if (axis[1]) root.style.setProperty(axis[0], axis[1], axis[2]);
+    });
+  }
+  function refreshOwnScrollingWhenShown() {
+    refreshOwnScrolling();
+    nativeFrame.call(window, function () {
+      nativeFrame.call(window, refreshOwnScrolling);
+    });
+  }
+
+  // The app frame's sandbox makes its window.origin opaque, but its URL names
+  // the shell's origin, which must have sent the verdict. A nested srcdoc
+  // document's URL has no origin ("null"), so it trusts only its embedder.
   window.addEventListener('message', function (event) {
-    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    if (event.source !== window.parent) return;
+    var expected = window.location.origin;
+    if (expected !== 'null' && event.origin !== expected) return;
     var msg = event.data;
     if (!msg || msg.type !== 'moebius:frame-visibility') return;
     var wasHidden = document.hidden;
+    var wasShellHidden = shellHidden;
     shellHidden = msg.visible === false;
-    var shouldHold = shellHidden && msg.backgroundPlayback !== true;
+    if (wasShellHidden && !shellHidden) refreshOwnScrollingWhenShown();
+    var shouldHold = (shellHidden || msg.covered === true) && msg.backgroundPlayback !== true;
     if (shouldHold && !holding) { holding = true; hold(); }
     else if (!shouldHold && holding) { holding = false; release(); }
     if (document.hidden !== wasHidden) {
       document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
     }
+    verdict = {
+      type: 'moebius:frame-visibility',
+      visible: msg.visible !== false,
+      covered: msg.covered === true,
+      backgroundPlayback: msg.backgroundPlayback === true
+    };
+    document.querySelectorAll('iframe').forEach(tellChild);
   });
 })();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
@@ -483,9 +635,9 @@
       // here because this is a template literal — the evaluated string carries
       // single backslashes (see applyTheme.prepaint.test.js byte-equality).
       css = css.replace(
-        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|((?:[^"'()\s\\]|\\[\s\S])+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
         function (m, u1, u2, u3, q1, q2) {
-          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3.replace(/\\([^0-9a-fA-F\n])/g, '$1') : q1 !== undefined ? q1 : q2);
           return '';
         }
       );
@@ -506,7 +658,10 @@
       }
       el.textContent = css;
     }
-    root.style.setProperty('--bg', bg);
+    // The bg is a pre-style HINT. Once theme css is installed the stylesheet
+    // owns --bg; an inline value would outrank an owner background set in
+    // any rule (html, a condition, a layer), so only hint without css.
+    if (!css) root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
     root.style.colorScheme = mode;
     var themeColorMeta = document.querySelector('meta[name="theme-color"]');
@@ -556,37 +711,56 @@
        changes the background" bug). Server injection is the real fix; this
        is defense in depth so a light-preference device never paints the dark
        fallback if injection is bypassed. The injected theme still overrides
-       both blocks. */
-    :root {
+       both blocks.
+
+       Both blocks live in the `mobius-defaults` cascade layer, the same layer
+       as the served theme's generated defaults (backend/app/theme.py
+       DEFAULTS_LAYER). It is the first layer declared, so any owner rule --
+       unlayered or in an owner layer -- beats it, and within it the theme
+       style applied after this one replaces these values by source order. */
+    @layer mobius-defaults {
+    :where(:root) {
       --bg: #0d0d0d; --surface: #171717; --surface-2: #212121;
       --border: #2a2a2a; --border-light: #1f1f1f;
       --text: #ececec; --muted: #a8a8a8;
       --accent: #8b6cf7; --accent-hover: #7c5ce6;
       --accent-dim: rgba(139, 108, 247, 0.14);
       --accent-fg: #ffffff;
-      --danger: #f87171; --green: #10b981;
+      --danger: #f87171; --green: #10b981; --warning: #d8922f;
+      /* Text-safe roles (>= 4.5:1 on every surface) and button/badge fills
+         that carry --accent-fg at >= 4.5:1. */
+      --accent-text: #957cf8; --danger-text: #f87171;
+      --green-text: #10b981; --warning-text: #d8922f;
+      --accent-fill: #7c5ce6; --accent-fill-hover: #7053cf;
+      --danger-fill: #dc2626; --green-fill: #047857;
       --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
       --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
-      /* Immersive safe-area insets, forwarded from the shell via
-         moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
-         sandboxed iframe). Default 0 so apps can reference them before the
-         first message and while windowed; non-zero only while immersive. */
-      --mobius-safe-top: 0px; --mobius-safe-right: 0px;
-      --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
-    /* Mode-aware fallback (defense in depth). Gated on data-theme="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
+    /* Mode-aware fallback (defense in depth). Gated on data-theme="light" (zero specificity, inside the same defaults layer, so the served theme still wins),
        set by the pre-paint <head> script (shared IIFE) from the owner's persisted
        localStorage['mobius-theme'] — NOT on OS prefers-color-scheme. A
        dark-shell owner on a light-OS device therefore keeps the dark :root
        default; light only appears from a positive owner signal (this attribute)
        or from the server-filled __mobius-theme__ slot. No signal => dark
-       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. */
-    :root:where([data-theme="light"]) {
+       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS /
+       LIGHT_ROLES (backend/tests/test_theme_roles.py enforces the parity). */
+    :where(:root[data-theme="light"]) {
       --bg: #f0eeeb; --surface: #ffffff; --surface-2: #e8e6e2;
       --border: #d4d1cc; --border-light: #e2dfdb;
       --text: #1c1b1a; --muted: #6b6864;
       --accent-dim: rgba(139, 108, 247, 0.08);
-      --danger: #ef4444; --green: #059669;
+      --danger: #ef4444; --green: #059669; --warning: #8f5a00;
+      --accent-text: #6548d4; --danger-text: #b91c1c;
+      --green-text: #046c4e; --warning-text: #8f5a00;
+    }
+    }
+    /* Immersive safe-area insets, forwarded from the shell via
+       moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
+       sandboxed iframe). Default 0 so apps can reference them before the
+       first message and while windowed; non-zero only while immersive. */
+    :where(:root) {
+      --mobius-safe-top: 0px; --mobius-safe-right: 0px;
+      --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -1309,7 +1483,7 @@
         element.scrollLeft = offset.left;
         element.scrollTop = offset.top;
       }
-      suspendedScrollFrame = requestAnimationFrame(holdSuspendedScroll);
+      suspendedScrollFrame = window.__mobiusNativeFrame(holdSuspendedScroll);
     }
 
     function setFrameInteractivity(interactive, suspendScrolling) {
@@ -1532,14 +1706,18 @@
     // logic is inlined; the pre-paint IIFE in <head> (PREPAINT_SRC) is the
     // shared first-paint half, and this is the postMessage live-swap half.
     //
-    // Mode: from the bg's --bg luminance (bg arg first, then parsed out of
-    // the CSS). Mirrors applyTheme.js inferMode. Returns null if no hex
-    // resolves, so a css-only swap with no bg keeps the current mode.
-    function inferMode(css, bg) {
+    // Mode: from the bg hint's luminance, else the --bg the applied
+    // stylesheet resolves to. Returns null if no hex resolves, so a css-only
+    // swap with no bg keeps the current mode.
+    function inferMode(bg) {
       var hex = (typeof bg === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(bg)) ? bg : null;
-      if (!hex && typeof css === 'string') {
-        var m = css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/);
-        if (m) hex = m[1];
+      if (!hex) {
+        // No hint: read the background the applied stylesheet resolves to,
+        // never the first --bg in its text (the generated defaults lead it).
+        try {
+          var v = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+          if (/^#[0-9a-fA-F]{3,8}$/.test(v)) hex = v;
+        } catch (e) {}
       }
       if (!hex) return null;
       var raw = hex.slice(1);
@@ -1573,9 +1751,9 @@
         // by a syntax the quoted-url-only regex didn't see — same broadened
         // pattern as applyTheme.js + the pre-paint IIFE.
         css = css.replace(
-          /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+          /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|((?:[^"'()\s\\]|\\[\s\S])+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
           function (m, u1, u2, u3, q1, q2) {
-            fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+            fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3.replace(/\\([^0-9a-fA-F\n])/g, '$1') : q1 !== undefined ? q1 : q2);
             return '';
           }
         );
@@ -1600,7 +1778,13 @@
         }
         el.textContent = css;
       }
-      if (typeof bg === 'string' && HEX.test(bg)) {
+      if (typeof css === 'string' && css.length) {
+        // The stylesheet now owns --bg. Drop any inline hint (the pre-paint
+        // one included): it would outrank an owner background set in an
+        // html rule, a condition or a layer.
+        document.documentElement.style.removeProperty('--bg');
+        document.body.style.background = 'var(--bg)';
+      } else if (typeof bg === 'string' && HEX.test(bg)) {
         document.body.style.background = bg;
         document.documentElement.style.setProperty('--bg', bg);
       }
@@ -1610,7 +1794,7 @@
       // app mounted dark that receives a light swap keeps the wrong-mode SDK
       // tokens. color-scheme drives UA-native widgets (scrollbars, form
       // controls) — both mirror applyTheme.js.
-      var mode = inferMode(css, bg);
+      var mode = inferMode(bg);
       if (mode) {
         document.documentElement.setAttribute('data-theme', mode);
         document.documentElement.style.colorScheme = mode;

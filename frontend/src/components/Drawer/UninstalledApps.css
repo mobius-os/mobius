@@ -47,9 +47,11 @@
   flex: 1 1 0; min-width: 0; min-height: 38px; padding: 7px 10px; border: 1px solid var(--border-light); border-radius: 11px;
   background: transparent; color: var(--text); font: inherit; font-size: 13px; font-weight: 650; white-space: nowrap; cursor: pointer;
 }
-.uninstalled-popover__btn--primary { border-color: var(--accent); background: var(--accent); color: var(--accent-fg, #fff); }
-.uninstalled-popover__btn--danger { border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent); color: var(--danger, #f87171); }
+.uninstalled-popover__btn--primary { border-color: var(--accent-fill, var(--accent)); background: var(--accent-fill, var(--accent)); color: var(--accent-fg, #fff); }
+.uninstalled-popover__btn--danger { border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent); color: var(--danger-text, var(--danger, #f87171)); }
 .uninstalled-popover__btn:hover:not(:disabled) { filter: brightness(1.1); }
+/* Brightening the fill would drop its label below 4.5:1; deepen it instead. */
+.uninstalled-popover__btn--primary:hover:not(:disabled) { filter: none; background: var(--accent-fill-hover, var(--accent-hover, var(--accent))); }
 .uninstalled-popover__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .uninstalled-popover__btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 @keyframes uninstalled-popover-in { from { opacity: 0; } to { opacity: 1; } }

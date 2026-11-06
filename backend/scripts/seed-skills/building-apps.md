@@ -325,11 +325,17 @@ manifest, layered by how always-on they are:
 - **Agent tools (callable by every agent run, while installed).** `"tools"`:
   up to 16 entries requiring `name` (`^[a-z][a-z0-9_]{0,39}$`),
   `description`, and `input_schema` (a JSON Schema `object`). Optional boolean
-  `always_load` controls eager tool discovery. Requires a
+  `always_load` controls eager tool discovery. Optional boolean `routine`
+  marks bookkeeping whose successful result the owner never needs to act on
+  (a save or a log): the chat folds such a call into the surrounding activity
+  instead of giving it its own row, and a failed call still shows. Requires a
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
   app's own authority (`backend/app/app_tools.py`). Only the platform reaches
-  `tools/`: HTTP calls to the service there get 404, so `call` is trustworthy. Helpers get the tools too:
+  `tools/`: HTTP calls to the service there get 404, so `call` is trustworthy.
+  A non-public service also gets `limited_providers`, the provider ids (e.g.
+  `["claude"]`) whose runs recently hit a usage or rate limit; a tool that runs
+  a provider CLI itself can skip those instead of failing first. Helpers get the tools too:
   the request's `actor` has `delegated: true` for a helper. Current helpers
   use one trusted mode and report `access: "write"`; `"read"` remains only as
   a defensive value for a retired or orphaned delegated identity, not a
@@ -1180,13 +1186,40 @@ send({ event: 'close' })                            // playback ended
 // { type: 'moebius:media-control', sessionId, action: 'play' | 'pause' | 'stop' }.
 ```
 
-The page still reads as hidden while such playback continues. Documents the
-app embeds in its own child iframes are separate pages: forward the visibility
-to them yourself. For the same reason, `<audio>`/`<video>` inside an open
-shadow root isn't reached — the frame's scan doesn't cross shadow boundaries
-and `play` events don't escape them — so pause shadow-DOM media yourself from
-`onVisibilityChange` as well. Plain (light-DOM) elements and `new Audio()` are
-handled for you.
+The page still reads as hidden while such playback continues.
+
+Hidden documents get no animation frames: `requestAnimationFrame` callbacks wait
+for the app's return, as they do on a really hidden page. The same hold covers
+sound and frame loops from the moment the owner opens the mobile drawer over the
+app, so a heavy game cannot starve the drawer and its sound stops before they
+pick a destination. The app stays painted beneath the drawer and does not read
+as hidden, and closing the drawer picks it back up. Because a covered app gets
+no `visibilitychange`, a loop that advances by elapsed time should cap its step,
+so the first frame after the drawer closes does not jump the game forward.
+
+A document you nest by setting an iframe's `srcdoc` (through the property or
+`setAttribute`) gets all of this with no code. The drawer hold applies to the
+shell's main app pane; app views shown elsewhere are held only while hidden.
+Nothing else is reached: iframes inserted through `innerHTML`, documents
+written with `document.write`, workers, and documents loaded from a URL (such
+as a packaged `/app-embeds/` game). Each
+child frame of a reached document is still forwarded the verdict as a
+`moebius:frame-visibility` message, so a nested document the frame cannot reach
+only has to listen:
+
+```js
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return
+  const { type, visible, covered, backgroundPlayback } = event.data || {}
+  if (type !== 'moebius:frame-visibility') return
+  setGamePaused((!visible || covered) && !backgroundPlayback)
+})
+```
+
+`<audio>`/`<video>` inside an open shadow root isn't reached either — the
+frame's scan doesn't cross shadow boundaries and `play` events don't escape
+them — so pause shadow-DOM media yourself from `onVisibilityChange` as well.
+Plain (light-DOM) elements and `new Audio()` are handled for you.
 
 ---
 
@@ -1211,6 +1244,52 @@ what approves app-chosen text, so the shell ignores any `autoSend` field.
 visible app-owned chat, waits for the first message to be accepted, then
 returns its id for navigation. Catch errors and preserve the source UI so the
 owner can retry without losing work.
+
+Pass `scope: '<one exact job id>'` when a retry, reload, or second pane must
+never start the same job twice. Möbius admits at most one first turn per app
+and scope while that scope's chat exists: repeating the call after a lost
+response returns `{ chatId, outcome: 'reused' }`, even if the owner has since
+stopped that turn or removed it from the queue. If the owner deletes the chat,
+the scope is released and the next `chat.start` creates a fresh chat. Before
+releasing anything the app reserved for an unconfirmed start, call
+`await window.mobius.chat.cancelStart({ scope })`. It resolves
+`{ outcome: 'cancelled' }` when no turn of that scope will be admitted any
+more, or `'started'` with the existing `chatId`. After a cancellation,
+`chat.start` for the scope rejects with `error.code` `'scope_cancelled'`;
+treat it as final. A new attempt needs a new scope.
+
+To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
+When Stop ended the chat's run and cleared its queue, the result carries
+`stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
+idle run (`run_id: null` if it never ran). It certifies only that run. Later
+work in the chat, such as an owner resume, a Wait firing, or a helper result,
+runs under a different `run_id`. Bind the cancellation to the receipt's
+`run_id`, never to a later `chat.status(chatId)`: a status with another
+`run_id`, or with `running: true`, is newer work and is not cancelled. Without
+a receipt (`stop_receipt: null`) nothing was certified, even with
+`stopped: true`: during a Möbius restart, for example, Stop keeps queued turns
+so they survive it, and they run afterwards. Keep any reservation and call
+Stop again later.
+
+`moebius:open-chat` with a `draft` adds that text after the owner's unsent
+draft in that chat, keeping their attachments; it never replaces or sends it.
+When a message there still awaits resolution, or the draft cannot be saved
+there, the draft opens in a new chat instead. It reports nothing back, and what
+happens when the chat no longer exists depends on the host. When the app needs
+to know the chat exists, or to return the owner to one exact conversation with
+no fallback, post
+`moebius:open-existing-chat` with a `requestId` of the form
+`open-chat:<a>:<b>` and wait for the matching reply. Older hosts ignore this
+request, so stop waiting after a few seconds without a reply and keep the
+source UI usable:
+
+```jsx
+const requestId = `open-chat:${Date.now()}:${Math.random().toString(36).slice(2)}`
+window.parent.postMessage({ type: 'moebius:open-existing-chat', requestId, chatId, draft }, '*')
+// -> { type: 'moebius:open-chat-result', requestId, ok, result: { outcome } }
+// outcome: 'opened' | 'target_missing' (deleted) | 'unavailable' (not reachable
+// now, or the chat holds a failed message the owner must resolve first)
+```
 
 The opaque app document cannot name the shell as a target origin, so raw
 app-to-shell messages use `'*'`. For reply protocols, require
