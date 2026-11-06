@@ -207,6 +207,16 @@ def test_css_the_lexer_cannot_follow_is_kept_verbatim():
   assert css.strip() in persisted
 
 
+def test_the_owners_other_root_declarations_survive():
+  css = CUSTOM_DARK.replace("  color-scheme: dark;\n", "  color-scheme: dark;\n  line-height: 1.5 !important;\n  background: var(--bg);\n")
+  there, _ = toggle_once(css, "dark")
+  back, _ = toggle_once(there, "light")
+  for persisted, mode in ((there, "light"), (back, "dark")):
+    assert "line-height: 1.5 !important;" in persisted
+    assert "background: var(--bg);" in persisted
+    assert persisted.count("color-scheme") == 1 and f"color-scheme: {mode};" in persisted
+
+
 def test_a_winning_important_declaration_keeps_its_importance():
   persisted, _ = toggle_once(":root { --bg: #0d0d0d; --accent: #00ffff !important; --accent: #ff0000; }\n", "dark")
   assert "--accent: #00ffff !important;" in persisted

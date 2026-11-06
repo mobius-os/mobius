@@ -1026,7 +1026,8 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
 
   Only the first top-level plain `:root` rule is rebuilt; every other byte
   of the owner's CSS is kept, and CSS the lexer cannot follow is kept whole
-  with a new leading `:root`.  Comments inside that rule are dropped.
+  with a new leading `:root`.  Inside that rule the owner's other
+  declarations are kept; its comments and nested rules are dropped.
 
   A declared colour is MODE-OWNED, and replaced by the new mode's value,
   when it is a structural key, a shipped value of either mode (the shipped
@@ -1065,12 +1066,16 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
 
   font = declared.get("--font") or "'Inter', system-ui, sans-serif"
   mono = declared.get("--mono") or "'JetBrains Mono', ui-monospace, monospace"
+  # Every other declaration in the rule (a `background`, a `line-height`) is
+  # the owner's; `font-size` and `color-scheme` are written below.
+  others = "".join(f"  {key}: {value};\n" for key, value in declared.items()
+                   if not key.startswith("--") and key not in ("font-size", "color-scheme"))
   lines = "\n".join(f"  {key}: {value};" for key, value in colors.items())
   return (
     (prelude + "\n\n" if prelude else "")
     + f":root {{\n  /* Colors - {new_mode} theme */\n{lines}\n\n  /* Typography */\n"
     + f"  --font: {font};\n  --mono: {mono};\n"
-    + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n}}\n"
+    + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n{others}}}\n"
     + (f"\n{extras}\n" if extras else "")
   )
 
