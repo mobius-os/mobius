@@ -81,14 +81,16 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 log = logging.getLogger(__name__)
 
 
-async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
+async def start_queued_owner_continuation(
+  chat_id: str, db: Session, *, owner_send: bool = False, restore_archived: bool = False,
+) -> dict | None:
   """Start an already-committed owner response through the ordinary queue.
 
   Caller holds the queue lock (saved input also holds the transition gate).
   A still-finishing publishing turn
   owns its terminal drain; otherwise this is the one immediate admission path
   shared by saved questions, sealed consumer outcomes and the owner's empty
-  send.
+  send (`owner_send`, which releases the held queue in the starting commit).
   """
   if is_chat_running(chat_id):
     return None
@@ -102,8 +104,11 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
     drain_token = alloc_run_token()
     messages, next_user, session_id = await chat_queue.promote_pending_messages_locked(
       db, chat_id, drain_token,
+      owner_send=owner_send, restore_archived=restore_archived,
     )
     if not next_user:
+      if owner_send:
+        raise HTTPException(409, detail="Nothing is queued to send.")
       raise HTTPException(503, detail="Could not resume the question; please try again.")
     get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
     _schedule_continuation(
@@ -124,20 +129,16 @@ async def _send_queue(
   The held rows rejoin the ordinary queue as owner input of this moment, so
   they take exactly the admission an ordinary owner message would: while
   other work owns the chat (a running turn, a restart drain, an activation,
-  an auto-resuming provider-limit park) they drain after it; otherwise the
-  queue starts now, as the same turn it would normally drain into. A shared
-  browser guest cannot send the owner's queue: it would run as the owner's
-  work, outside the guest's revocable grant.
+  an auto-resuming provider-limit park) they rejoin the queue and drain after
+  it (`ReleaseHeld`); otherwise they start now as the same turn the queue
+  would drain into, released in the commit that starts it, so a refusal
+  leaves them held. A shared browser guest cannot send the owner's queue: it
+  would run as the owner's work, outside the guest's revocable grant.
   """
   if not is_owner_input_principal(principal) or principal.browser is not None:
     raise HTTPException(403, detail="Only the owner can send queued messages.")
-  from app.chat_writer import ReleaseHeld
-  await await_ack(get_writer().submit(ReleaseHeld(
-    chat_id=chat_id, restore_archived=restore_archived,
-  )))
-  db.expire_all()
   chat = db.get(models.Chat, chat_id)
-  if not has_runnable_pending(chat.pending_messages):
+  if not chat.pending_messages:
     raise HTTPException(409, detail="Nothing is queued to send.")
   from app.platform_restart import activation_barrier_wait_id
   if (
@@ -145,11 +146,17 @@ async def _send_queue(
     or activation_barrier_wait_id(db, chat_id) is not None
     or _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
   ):
+    from app.chat_writer import ReleaseHeld
+    await await_ack(get_writer().submit(ReleaseHeld(
+      chat_id=chat_id, restore_archived=restore_archived,
+    )))
     return JSONResponse(status_code=202, content={
       "status": "queued", "running": is_chat_running(chat_id),
     })
   try:
-    started = await start_queued_owner_continuation(chat_id, db)
+    started = await start_queued_owner_continuation(
+      chat_id, db, owner_send=True, restore_archived=restore_archived,
+    )
   except chat_queue.PendingAdmissionBlocksPromotion as exc:
     if exc.reason == "activation":
       raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
@@ -1644,6 +1651,8 @@ async def _send_message_locked(
       and (
         body.force_steer
         or body.direct_steer
+        # Held rows count here on purpose: steering past them would never
+        # release them, while a queued owner message releases them at its turn.
         or not chat.pending_messages
       )
       and has_live_steerable_turn(chat_id, provider)

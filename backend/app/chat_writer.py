@@ -1079,6 +1079,11 @@ class PromotePending(_Command):
   # Only the actual terminal drain may recover an unhanded Goal. Queue
   # sweeps and ordinary promotions carry no finishing-attempt authority.
   ending_run_token: str = ""
+  # The owner's empty Send: release the rows a Stop held as owner input of
+  # this moment (and restore an archived chat) in the SAME commit that starts
+  # the turn, so a refused or empty promotion leaves the queue as it was.
+  owner_send: bool = False
+  restore_archived: bool = False
 
 
 @dataclass
@@ -4228,19 +4233,23 @@ class ChatWriterActor:
       if cmd.initiated_by_app_id is not None:
         source["_initiated_by_app_id"] = cmd.initiated_by_app_id
 
-    remaining_pending: list[dict] = pending if activation_wait is not None else []
+    # Rows a Stop held wait for the owner, not for this continuation: they
+    # neither block it nor are consumed by it.
+    held = [row for row in pending if isinstance(row, dict) and row.get("held")]
+    free = [row for row in pending if not (isinstance(row, dict) and row.get("held"))]
+    remaining_pending: list[dict] = pending if activation_wait is not None else held
     if cmd.supersedes_run_token is not None:
       # A physical recovery continues the interrupted input. Later owner or
       # product rows keep their original queue boundary and attribution.
       remaining_pending = pending
-    elif pending and activation_wait is None:
+    elif free and activation_wait is None:
       # Recover only the exact row the retired AppendPending -> PromotePending
       # sequence could have stranded.  Never consume a real owner queue or an
       # app-attributed row in order to make coordinator progress.
-      if len(pending) != 1:
+      if len(free) != 1:
         db.rollback()
         return StartContinuationBlocked("foreign_pending")
-      queued = pending[0]
+      queued = free[0]
       expected = (
         queued.get("role") == "user"
         and cid_of(queued) == cmd.cid
@@ -5403,7 +5412,10 @@ class ChatWriterActor:
     if retired_control or rejected_changed:
       chat.pending_messages = rejected + runnable
     # Rows a Stop held wait for the owner (`HoldPending`, `ReleaseHeld`):
-    # only unheld rows run.
+    # only unheld rows run, unless this is the owner's empty Send.
+    if cmd.owner_send:
+      from app.continuations import release_holds
+      runnable = release_holds(runnable, datetime.now(UTC).isoformat())
     pool = [row for row in runnable if not row.get("held")]
     if not pool:
       settlement = self._settle_unhanded_goal(db, chat, cmd)
@@ -5500,6 +5512,7 @@ class ChatWriterActor:
       raise _PersistFailed("PromotePending: malformed queue head") from exc
     transcript_rows.append_many(db, chat, stored_messages)
     chat.pending_messages = rejected + remaining_pending
+    chat_archive.restore_on_accepted_input(chat, cmd.owner_send and cmd.restore_archived)
     assistant_ts = next_message_ts(
       existing + stored_messages + list(chat.pending_messages or [])
     )

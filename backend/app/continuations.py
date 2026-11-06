@@ -125,16 +125,18 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
 
 def is_owner_typed(message: object) -> bool:
-  """Whether a queued row is the owner's own typed message: owner input, not
-  a hidden carrier, an app request or a browser guest's message. Stop holds
-  only these rows for the owner's next send; a promotion that starts one
-  releases the rest (`HoldPending`, `PromotePending`)."""
+  """Whether a queued row is the owner's own message: a visible row not
+  positively identified as another sender's (an app's request, a browser
+  guest's message, a helper's answer). Rows queued before owner input was
+  stamped count as the owner's. Stop holds only these rows for the owner's
+  next send; a promotion that starts one releases the rest (`HoldPending`,
+  `PromotePending`)."""
   return bool(
     isinstance(message, Mapping)
-    and message.get("_owner_input_at")
     and not message.get("hidden")
     and message.get("_initiated_by_app_id") is None
     and message.get("_browser_grant_id") is None
+    and helper_answer_question_id(message) is None
   )
 
 

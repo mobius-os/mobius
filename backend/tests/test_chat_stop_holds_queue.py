@@ -213,3 +213,16 @@ def test_an_empty_send_restores_an_archived_chat_like_a_typed_one(client, auth, 
 
   db.expire_all()
   assert db.get(models.Chat, chat.id).archived_at is None
+
+
+def test_a_refused_empty_send_leaves_the_queue_held(client, auth, db, chat, scheduled, monkeypatch):
+  from app.routes import chats_stream
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+  monkeypatch.setattr(chats_stream, "mark_starting", lambda chat_id: False)
+
+  response = send(client, auth, chat, content="", continuation="queue")
+
+  assert response.status_code == 409, response.text
+  assert scheduled == []
+  assert pending(db, chat) == [("a", True)]

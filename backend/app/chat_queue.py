@@ -226,6 +226,8 @@ async def promote_pending_messages_locked(
   run_token: str,
   ending_status: str = "completed",
   ending_run_token: str = "",
+  owner_send: bool = False,
+  restore_archived: bool = False,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -269,6 +271,8 @@ async def promote_pending_messages_locked(
       run_token=run_token,
       ending_status=ending_status,
       ending_run_token=ending_run_token,
+      owner_send=owner_send,
+      restore_archived=restore_archived,
     )
   )
   result = await await_ack(ack)

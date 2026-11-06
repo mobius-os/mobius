@@ -1788,6 +1788,17 @@ def test_hold_pending_keeps_owner_rows_and_drops_app_and_guest_rows(actor):
   ]
 
 
+def test_hold_pending_keeps_a_legacy_owner_row_without_an_input_stamp(actor):
+  """Rows queued before owner input was stamped are the owner's: nothing
+  positively marks them as another sender's, so Stop keeps them."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "older owner row", "ts": 10, "cid": "legacy"}],
+  )
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1"))) == {"held": 1}
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("legacy", True)]
+
+
 def test_hold_pending_empty_queue_is_noop(actor):
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
   assert _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1"))) == {"held": 0}
@@ -2091,10 +2102,7 @@ def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
       {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
     ],
   )
-  assert _await(actor.submit(ReleaseHeld(chat_id="c1"))) == {"released": 2}
-  released = _load_chat()["pending_messages"]
-  assert all(row["_owner_input_at"] > OWNER["_owner_input_at"] for row in released)
-  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1", owner_send=True)))
   assert result["promoted"]["content"] == "first\nsecond"
   assert result["promoted"]["_consumed_cids"] == ["a", "b"]
   chat = _load_chat()
@@ -2165,6 +2173,17 @@ def test_a_released_queue_keeps_its_order_behind_a_queued_machine_row(actor):
   assert second["promoted"]["content"] == "first\nsecond"
 
 
+def test_only_the_owners_own_rows_count_as_owner_typed():
+  from app.continuations import is_owner_typed
+  assert is_owner_typed({"role": "user", "content": "legacy owner row"}) is True
+  assert is_owner_typed({"role": "user", "content": "x", "_initiated_by_app_id": 3}) is False
+  assert is_owner_typed({"role": "user", "content": "x", "hidden": True}) is False
+  assert is_owner_typed({
+    "role": "user", "content": "answer", "kind": "continuation",
+    "continuation_reason": "helper_answer", "cid": "helper-answer:q1",
+  }) is False
+
+
 def test_a_guest_message_does_not_release_the_owners_held_rows():
   from app.continuations import is_owner_typed
   guest = {"role": "user", "content": "guest", "_browser_grant_id": "grant", **OWNER}
@@ -2178,6 +2197,23 @@ def test_a_steered_held_row_reaches_the_transcript_without_its_hold(actor):
     [{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}], [],
   )
   assert "held" not in stored
+
+
+def test_a_refused_empty_send_leaves_the_queue_held(actor):
+  """The release commits with the turn it starts: a question that opened in
+  the meantime refuses the promotion and the rows stay exactly as they were."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}],
+  )
+  from app.models import Chat
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    db.get(Chat, "c1").pending_question_id = "q-raced"
+    db.commit()
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1", owner_send=True)))
+  assert isinstance(result, PromotePendingBlocked)
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]
 
 
 def test_release_held_rejoins_the_ordinary_queue(actor):
