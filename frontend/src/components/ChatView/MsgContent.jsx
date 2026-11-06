@@ -15,7 +15,7 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
-import { foldAppActivityOperations } from './activityGrouping.js'
+import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -351,10 +351,13 @@ function MsgContentInner({
       activitySourceBlocks || displayBlocks,
       chatId,
     )
+    const coalescedEntries = coalesceThinkingEntries(
+      mergeAdjacentPeerActivityEntries(positionedEntries),
+    )
+    // A live turn keeps stream order; a settled reply folds its routine saves
+    // into its earlier activity line (joinRoutineToActivity).
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      coalesceThinkingEntries(
-        mergeAdjacentPeerActivityEntries(positionedEntries),
-      ),
+      isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means

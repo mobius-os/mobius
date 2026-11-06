@@ -325,7 +325,10 @@ manifest, layered by how always-on they are:
 - **Agent tools (callable by every agent run, while installed).** `"tools"`:
   up to 16 entries requiring `name` (`^[a-z][a-z0-9_]{0,39}$`),
   `description`, and `input_schema` (a JSON Schema `object`). Optional boolean
-  `always_load` controls eager tool discovery. Requires a
+  `always_load` controls eager tool discovery. Optional boolean `routine`
+  marks bookkeeping whose successful result the owner never needs to act on
+  (a save or a log): the chat folds such a call into the surrounding activity
+  instead of giving it its own row, and a failed call still shows. Requires a
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
   app's own authority (`backend/app/app_tools.py`). Only the platform reaches

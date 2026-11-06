@@ -796,6 +796,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if event.get("routine") is True:
+      block["routine"] = True
     if isinstance(event.get("app_activity"), dict):
       block["app_activity"] = event["app_activity"]
     if isinstance(event.get("peer_message"), dict):

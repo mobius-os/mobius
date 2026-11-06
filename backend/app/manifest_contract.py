@@ -594,14 +594,18 @@ def validate_agent_tools(tools, *, has_service: bool) -> None:
     field = f"tools[{index}]"
     if not isinstance(tool, Mapping) or not (
       {"name", "description", "input_schema"} <= set(tool)
-      <= {"name", "description", "input_schema", "always_load", "result_independent"}
+      <= {
+        "name", "description", "input_schema", "always_load", "routine",
+        "result_independent",
+      }
     ):
       _fail(
         f"Manifest `{field}` must contain `name`, `description`, and "
-        "`input_schema`, and optionally `always_load`."
+        "`input_schema`, and optionally `always_load` and `routine`."
       )
-    if not isinstance(tool.get("always_load", False), bool):
-      _fail(f"Manifest `{field}.always_load` must be true or false.")
+    for flag in ("always_load", "routine"):
+      if not isinstance(tool.get(flag, False), bool):
+        _fail(f"Manifest `{field}.{flag}` must be true or false.")
     # Retired: `result_independent` once routed calls through a hidden reply
     # channel. Published manifests may still carry it, so it stays valid and
     # has no effect; every tool call is an ordinary result-bearing call.

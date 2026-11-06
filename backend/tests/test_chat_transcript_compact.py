@@ -1018,3 +1018,34 @@ def test_parked_question_exposes_its_tail_owner_without_live_json(
   assert detail.json()["active_assistant_message_id"] == "assistant-current"
   assert runtime.json()["active_assistant_message_id"] == "assistant-current"
   assert runtime.json()["pending_question_id"] == "question-current"
+
+
+def test_a_routine_app_activity_folds_into_the_compact_run_unless_it_failed():
+  capture = {
+    "type": "tool", "tool": "mcp__mobius_control__notes_remember",
+    "status": "done", "routine": True, "tool_use_id": "save",
+    "app_activity": {"status": "succeeded", "app_slug": "notes", "label": "Saved"},
+  }
+
+  def project(save):
+    blocks = [
+      {"type": "tool", "tool": "Bash", "status": "done", "tool_use_id": "a"},
+      save,
+      {"type": "tool", "tool": "Bash", "status": "done", "tool_use_id": "b"},
+    ]
+    return compact_messages_for_detail(
+      [{"role": "assistant", "blocks": blocks}],
+      message_offset=0, binding=EMPTY_RECALL_BINDING,
+    )[0]["blocks"]
+
+  # The shell treats a routine call as ordinary activity; history agrees.
+  folded = project(capture)
+  assert [block["type"] for block in folded] == ["activity"]
+  assert folded[0]["tool_count"] == 3
+  # A failed routine call keeps its own distinctive beat.
+  failed = {**capture, "app_activity": {**capture["app_activity"], "status": "failed"}}
+  # (one-step runs stay inline, so the split reads as three separate steps).
+  assert [block.get("tool_use_id") for block in project(failed)] == ["a", "save", "b"]
+  # So does an app activity that is not routine.
+  plain = {key: value for key, value in capture.items() if key != "routine"}
+  assert [block.get("tool_use_id") for block in project(plain)] == ["a", "save", "b"]
