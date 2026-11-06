@@ -1,16 +1,14 @@
 /* MessageMetaRow keeps a message's time and actions in one revealable row:
-   beside an owner message's bubble, or on its own line at a reply's start
-   edge (`side="start"`), where the latest reply can also offer Try again.
+   beside an owner message's bubble, or beneath a reply (`side="start"`),
+   with Copy immediately after its time, aligned with the reply's prose.
    `copy(button)` returns the clipboard payload (see MessageCopyButton). */
 import MessageCopyButton from './MessageCopyButton.jsx'
-import MessageRetryButton from './MessageRetryButton.jsx'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
 
 export default function MessageMetaRow({
   timestamp,
   copy,
-  onTryAgain,
   side = 'end',
   visible,
 }) {
@@ -19,7 +17,7 @@ export default function MessageMetaRow({
   if (side !== 'start' && !timestamp && !copy) return null
 
   // CSS visibility owns hiding: a hidden row leaves the focus order and the
-  // accessibility tree, and a hover-revealed one rejoins both.
+  // accessibility tree, and a revealed one rejoins both.
   return (
     <div
       className={`chat__msg-meta chat__msg-meta--${side}${visible ? ' chat__msg-meta--visible' : ''}`}
@@ -30,7 +28,6 @@ export default function MessageMetaRow({
         </time>
       )}
       {copy && <MessageCopyButton read={copy} />}
-      {onTryAgain && <MessageRetryButton onTryAgain={onTryAgain} />}
     </div>
   )
 }
