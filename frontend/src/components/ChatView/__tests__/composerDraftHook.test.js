@@ -539,3 +539,28 @@ test('a returned file is not mistaken for a failed chip with the same local name
     else globalThis.sessionStorage = previousStorage
   }
 })
+
+test('a recovered handoff or failed send is restored once, not over later edits', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    stageComposerHandoff('recovered-handoff', 'Handed-off text', { autoSend: false })
+    saveFailedSendAttempt('recovered-failed', {
+      cid: 'cid-failed', draftIdentity: 'draft-failed', text: 'Failed text', attachments: [],
+    })
+    for (const chatId of ['recovered-handoff', 'recovered-failed']) {
+      let hidden = false
+      const hook = renderHook(() => useComposerDraftState({ chatId, hidden, inputRef: { current: null } }))
+      hook.result.current.handleComposerInputChange('Newer owner text')
+      hidden = true
+      hook.rerender()
+      hidden = false
+      hook.rerender()
+      assert.equal(readComposerDraft(chatId).input, 'Newer owner text', chatId)
+      hook.unmount()
+    }
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
