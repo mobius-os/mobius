@@ -101,11 +101,14 @@ export function synthesizeSpeech({
           signal: controller.signal,
           onChunk: onAudio,
         })
-        onBoundary?.({
-          segmentIndex: index,
-          kind: segment.kind,
-          pauseAfterMs: segment.pauseAfterMs,
-        })
+        // One boundary per segment the caller sent, after its last piece.
+        if (normalizedDocument.segments[index + 1]?.sourceIndex !== segment.sourceIndex) {
+          onBoundary?.({
+            segmentIndex: segment.sourceIndex,
+            kind: segment.kind,
+            pauseAfterMs: segment.pauseAfterMs,
+          })
+        }
       }
       onLoading?.({ stage: 'generating', percent: 100 })
       return metadata

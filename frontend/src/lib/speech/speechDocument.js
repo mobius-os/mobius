@@ -157,7 +157,7 @@ export function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHAR
       locale: '',
       hints: [],
       segments: splitSpeakable(text).map((piece) => ({
-        text: piece, kind: 'paragraph', pauseAfterMs: 0,
+        text: piece, kind: 'paragraph', pauseAfterMs: 0, sourceIndex: 0,
       })),
     }
   }
@@ -229,7 +229,7 @@ export function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHAR
   const hints = sanitizeSpeechHints(document.hints)
   const segments = []
   let total = 0
-  for (const raw of document.segments) {
+  for (const [sourceIndex, raw] of document.segments.entries()) {
     const text = applySpeechHints(raw.text, hints, maxTextChars)
     if (!text) continue
     total += text.length
@@ -242,12 +242,14 @@ export function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHAR
     // A long block becomes several sentence-sized generations. The block's
     // editorial pause belongs only after its final piece; the pieces before it
     // run back-to-back, separated by their own natural sentence-final silence.
+    // `sourceIndex` names the caller's segment, which is what boundaries report.
     const pieces = splitSpeakable(text)
     pieces.forEach((piece, index) => {
       segments.push({
         text: piece,
         kind,
         pauseAfterMs: index === pieces.length - 1 ? pauseAfterMs : 0,
+        sourceIndex,
       })
     })
   }
