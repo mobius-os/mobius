@@ -42,6 +42,7 @@ from app.chat_logging import (
 )
 from app.config import get_settings
 from app.database import (
+  CHECKOUT_WARN_SECONDS,
   Base,
   IntegerOutOfRange,
   SessionLocal,
@@ -76,7 +77,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models, tracing
+from app import activity, models, stall_recorder, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -779,16 +780,14 @@ class _DatabaseRequestContextMiddleware:
   async def __call__(self, scope, receive, send):
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
-    label = f'{scope.get("method", "?")} {scope.get("path", "/")}'
-    token = set_database_request_label(label)
+    # Resolved when a hold turns out long, after routing matched a template.
+    token = set_database_request_label(
+      lambda: f'{scope.get("method", "?")} {activity.route_template(scope)}',
+    )
     try:
       return await self.app(scope, receive, send)
     finally:
       reset_database_request_label(token)
-
-
-def _matched_route(scope) -> str:
-  return getattr(scope.get("route"), "path", None) or "<unmatched>"
 
 
 class _RequestErrorTelemetryMiddleware:
@@ -797,8 +796,8 @@ class _RequestErrorTelemetryMiddleware:
   Successful requests do no logging or aggregation. For failures, the activity
   module keeps bounded in-memory minute counters and writes compact summaries,
   so a retry loop remains observable without amplifying its CPU or disk cost.
-  FastAPI leaves the matched route template and path params in the ASGI scope;
-  those templates contain no user paths or query values.
+  The route template (``activity.route_template``) carries no user paths or
+  query values.
 
   Unhandled exceptions also leave their traceback in the chat log (uvicorn's
   own report reaches only the container's stdout), once per route and
@@ -841,12 +840,12 @@ class _RequestErrorTelemetryMiddleware:
     except Exception as exc:
       status = status or 500
       self._log_traceback(
-        f"{scope.get('method', '?')} {_matched_route(scope)}", exc,
+        f"{scope.get('method', '?')} {activity.route_template(scope)}", exc,
       )
       raise
     finally:
       if status is not None and status >= 400:
-        route = _matched_route(scope)
+        route = activity.route_template(scope)
         raw_app_id = (scope.get("path_params") or {}).get("app_id")
         try:
           app_id = int(raw_app_id) if raw_app_id is not None else None
@@ -1032,6 +1031,10 @@ app.add_middleware(_DatabaseServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
+# Opt-in like tracing (tracing.json "stall_log"); outermost when on, so a
+# request's time to its response start includes every layer. A request is
+# late on the same measure as a long database hold.
+stall_recorder.install(app, request_seconds=CHECKOUT_WARN_SECONDS)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)

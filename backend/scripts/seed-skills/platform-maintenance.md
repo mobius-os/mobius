@@ -151,6 +151,19 @@ When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and
 stacks. It occupies one worker for the window, and one profile runs at a time.
 
+Slowness is often bursty and gone before a profile starts. For that, turn on
+the stall log: add `"stall_log": true` to `/data/tracing.json` (the opt-in
+tracing file; it needs no collector or extra packages and works without
+`"enabled"`) and restart. It then writes `/data/logs/stalls.jsonl` (one
+rotation to `.jsonl.1`): requests slower to start responding than a long
+database hold (`DB_CHECKOUT_WARN_SECONDS`, 2 s by default), event-loop stalls
+past asyncio's slow-callback threshold (0.1 s), and long database holds. Each
+event links by `snapshot` to a line showing what every busy thread was doing
+at that moment; `server_idle: true` marks a request that was only waiting on
+something external. Records name route templates and code locations, never
+concrete paths or query strings. Read it before reproducing a reported
+slowdown.
+
 Exercising owner-input cards programmatically (for a test, never to answer for
 the owner): while a card is open, posting a chat message returns 409
 `pending_question_open` — that is the designed gate, not a bug. The two-step is

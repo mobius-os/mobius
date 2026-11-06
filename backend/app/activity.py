@@ -374,6 +374,15 @@ def _request_error_event(
   return "request_error", fields
 
 
+def route_template(scope) -> str:
+  """The matched route template of an HTTP request, never its concrete path.
+
+  FastAPI leaves the matched route in the ASGI scope once routing ran; the
+  template carries no ids, file names or query values.
+  """
+  return getattr(scope.get("route"), "path", None) or "<unmatched>"
+
+
 def record_request_error(
   method: str,
   route: str,
