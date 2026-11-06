@@ -1,4 +1,4 @@
-import { normalizeSpeechInput } from '../lib/speech/speechDocument.js'
+import { normalizeSpeechInput, speechBoundaryAfter } from '../lib/speech/speechDocument.js'
 import { SPEECH_WORKER_URL, SPEECH_WASM_URL } from '../lib/speech/speechWorkerAsset.js'
 
 // Speech runs in the frame that asked for it, not in the shell.
@@ -21,7 +21,18 @@ const LOAD_TIMEOUT_MS = 180_000
 // that cold start every time. The frame keeps at most one idle engine, for the
 // exact model and voice it holds, and only while the app is on screen: a
 // hidden app that is not speaking gives the model's memory back.
+//
+// A visible app that has stopped speaking gives it back too, after a short
+// idle delay. Nothing tells the frame that an app will not speak again, and
+// visibility and detach only cover the ends of its life, so a timer owns the
+// release of a parked engine: started when it parks, cleared when a session
+// reuses it or it is released another way. Follow-up requests (the next
+// chunk of a reading, a seek, a resume) arrive within seconds; past half a
+// minute the model's memory, well over 100 MB on a phone, matters more than
+// one cold start.
+const IDLE_RELEASE_MS = 30_000
 let idleEngine = null
+let idleTimer = null
 let retainIdleEngine = true
 let nextRequestId = 1
 
@@ -33,10 +44,17 @@ function retireEngine(engine) {
   if (engine.blobUrl) URL.revokeObjectURL(engine.blobUrl)
 }
 
-export function releaseSpeechEngine() {
+// Take the parked engine out of the frame, stopping its idle release.
+function unparkEngine() {
   const engine = idleEngine
   idleEngine = null
-  retireEngine(engine)
+  clearTimeout(idleTimer)
+  idleTimer = null
+  return engine
+}
+
+export function releaseSpeechEngine() {
+  retireEngine(unparkEngine())
 }
 
 export function retainSpeechEngine(retain) {
@@ -52,6 +70,7 @@ function parkEngine(engine) {
   engine.worker.onmessage = null
   engine.worker.onerror = () => { if (idleEngine === engine) releaseSpeechEngine() }
   idleEngine = engine
+  idleTimer = setTimeout(releaseSpeechEngine, IDLE_RELEASE_MS)
 }
 
 function sameVoice(left, right) {
@@ -79,8 +98,7 @@ function engineKey(input, manifest) {
 function takeIdleEngine(key) {
   const engine = idleEngine
   if (engine && engine.key.model === key.model && sameVoice(engine.key.voice, key.voice)) {
-    idleEngine = null
-    return engine
+    return unparkEngine()
   }
   // A different model: free the old one before the new one is allocated.
   releaseSpeechEngine()
@@ -185,6 +203,8 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
     queue.catch(() => {})
   }
 
+  // Progress counts generation pieces; boundaries count the caller's
+  // segments (see speechBoundaryAfter).
   let segmentIndex = 0
   const generateNext = () => {
     if (segmentIndex >= document.segments.length) {
@@ -238,17 +258,9 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
       return
     }
     if (data.type === 'generate-complete') {
-      const segment = document.segments[segmentIndex]
+      const boundary = speechBoundaryAfter(document.segments, segmentIndex)
+      if (boundary) channel.event('boundary', boundary)
       segmentIndex += 1
-      // One boundary per segment the caller sent. A long segment is generated
-      // in several pieces, but the caller only knows its own segments.
-      if (document.segments[segmentIndex]?.sourceIndex !== segment.sourceIndex) {
-        channel.event('boundary', {
-          segmentIndex: segment.sourceIndex,
-          kind: segment.kind,
-          pauseAfterMs: segment.pauseAfterMs,
-        })
-      }
       generateNext()
       return
     }

@@ -5,7 +5,7 @@ import {
 import {
   DEFAULT_SPEECH_MODEL_ID, speechEngineLoadSnapshot, speechModelLoadSnapshot,
 } from './speechModels.js'
-import { normalizeSpeechInput } from './speechDocument.js'
+import { normalizeSpeechInput, speechBoundaryAfter } from './speechDocument.js'
 
 let activeSynthesis = null
 let synthesisTail = Promise.resolve()
@@ -78,6 +78,8 @@ export function synthesizeSpeech({
         onProgress: onLoading,
       })
       if (controller.signal.aborted) throw controller.signal.reason || abortError()
+      // `segmentCount` here and on progress counts generation pieces, not the
+      // caller's segments; see speechBoundaryAfter.
       const metadata = {
         modelId: model.id,
         sampleRate: model.sampleRate,
@@ -101,14 +103,8 @@ export function synthesizeSpeech({
           signal: controller.signal,
           onChunk: onAudio,
         })
-        // One boundary per segment the caller sent, after its last piece.
-        if (normalizedDocument.segments[index + 1]?.sourceIndex !== segment.sourceIndex) {
-          onBoundary?.({
-            segmentIndex: segment.sourceIndex,
-            kind: segment.kind,
-            pauseAfterMs: segment.pauseAfterMs,
-          })
-        }
+        const boundary = speechBoundaryAfter(normalizedDocument.segments, index)
+        if (boundary) onBoundary?.(boundary)
       }
       onLoading?.({ stage: 'generating', percent: 100 })
       return metadata

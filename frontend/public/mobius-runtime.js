@@ -3676,6 +3676,15 @@ function applySpeechHints(value, hints, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 	}
 	return text;
 }
+function speechBoundaryAfter(segments, index) {
+	const segment = segments[index];
+	if (segments[index + 1]?.sourceIndex === segment.sourceIndex) return null;
+	return {
+		segmentIndex: segment.sourceIndex,
+		kind: segment.kind,
+		pauseAfterMs: segment.pauseAfterMs
+	};
+}
 function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 	if (!input || typeof input !== "object") throw invalid("Speech input is required.");
 	if (input.document == null) {
@@ -3786,10 +3795,15 @@ function retireEngine(engine) {
 	} catch {}
 	if (engine.blobUrl) URL.revokeObjectURL(engine.blobUrl);
 }
-function releaseSpeechEngine() {
+function unparkEngine() {
 	const engine = idleEngine;
 	idleEngine = null;
-	retireEngine(engine);
+	clearTimeout(idleTimer);
+	idleTimer = null;
+	return engine;
+}
+function releaseSpeechEngine() {
+	retireEngine(unparkEngine());
 }
 function retainSpeechEngine(retain) {
 	retainIdleEngine = retain !== false;
@@ -3805,6 +3819,7 @@ function parkEngine(engine) {
 		if (idleEngine === engine) releaseSpeechEngine();
 	};
 	idleEngine = engine;
+	idleTimer = setTimeout(releaseSpeechEngine, IDLE_RELEASE_MS);
 }
 function sameVoice(left, right) {
 	if (left === right) return true;
@@ -3826,10 +3841,7 @@ function engineKey(input, manifest) {
 }
 function takeIdleEngine(key) {
 	const engine = idleEngine;
-	if (engine && engine.key.model === key.model && sameVoice(engine.key.voice, key.voice)) {
-		idleEngine = null;
-		return engine;
-	}
+	if (engine && engine.key.model === key.model && sameVoice(engine.key.voice, key.voice)) return unparkEngine();
 	releaseSpeechEngine();
 	return null;
 }
@@ -3963,13 +3975,9 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			return;
 		}
 		if (data.type === "generate-complete") {
-			const segment = document.segments[segmentIndex];
+			const boundary = speechBoundaryAfter(document.segments, segmentIndex);
+			if (boundary) channel.event("boundary", boundary);
 			segmentIndex += 1;
-			if (document.segments[segmentIndex]?.sourceIndex !== segment.sourceIndex) channel.event("boundary", {
-				segmentIndex: segment.sourceIndex,
-				kind: segment.kind,
-				pauseAfterMs: segment.pauseAfterMs
-			});
 			generateNext();
 			return;
 		}
@@ -4057,12 +4065,14 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		}
 	};
 }
-var LOAD_TIMEOUT_MS, idleEngine, retainIdleEngine, nextRequestId;
+var LOAD_TIMEOUT_MS, IDLE_RELEASE_MS, idleEngine, idleTimer, retainIdleEngine, nextRequestId;
 var init_speech = __esmMin((() => {
 	init_speechDocument();
 	init_speechWorkerAsset();
 	LOAD_TIMEOUT_MS = 18e4;
+	IDLE_RELEASE_MS = 3e4;
 	idleEngine = null;
+	idleTimer = null;
 	retainIdleEngine = true;
 	nextRequestId = 1;
 }));

@@ -1,9 +1,14 @@
-import { test, beforeEach, afterEach } from 'node:test'
+import { test, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   releaseSpeechEngine, retainSpeechEngine, synthesizeInFrame,
 } from '../../runtime/speech.js'
 import { makeCapabilities } from '../../runtime/capabilities.js'
+import { synthesizeSpeech } from '../speech/speechProviderRuntime.js'
+import { browserSpeechEngine, releaseBrowserSpeechEngine } from '../speech/pocketTtsEngine.js'
+import {
+  DEFAULT_SPEECH_MODEL_ID, speechModel, speechModelPackages,
+} from '../speech/speechModels.js'
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 const MANIFEST = Object.freeze({
@@ -140,6 +145,27 @@ test('a different model or a re-recorded voice replaces the idle engine', async 
   assert.equal(workers[2].terminated, true)
 })
 
+test('a parked engine is released after a short idle delay unless reused', async (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => mock.timers.reset())
+
+  await speak({ text: 'One.', modelId: 'alba' }).session.result
+  mock.timers.tick(29_000)
+  assert.equal(workers[0].terminated, false)
+  await speak({ text: 'Two.', modelId: 'alba' }).session.result
+  assert.equal(workers.length, 1, 'a request within the delay reuses the engine')
+
+  // Reuse restarted the delay: the first park's deadline has passed, the
+  // second's has not.
+  mock.timers.tick(29_000)
+  assert.equal(workers[0].terminated, false)
+  mock.timers.tick(1_000)
+  assert.equal(workers[0].terminated, true, 'an idle engine gives its memory back')
+
+  await speak({ text: 'Three.', modelId: 'alba' }).session.result
+  assert.equal(workers.length, 2, 'the next request starts a fresh engine')
+})
+
 test('a hidden app keeps no idle engine', async () => {
   await speak({ text: 'One.', modelId: 'alba' }).session.result
   retainSpeechEngine(false)
@@ -217,6 +243,68 @@ test('a long block reports one boundary with the caller segment index', async ()
     { segmentIndex: 1, kind: 'paragraph', pauseAfterMs: 700 },
     { segmentIndex: 2, kind: 'paragraph', pauseAfterMs: 0 },
   ])
+})
+
+// Every chunk of the default voice, as the shell's device-asset cache holds it
+// once the voice is downloaded.
+function downloadedDefaultVoice() {
+  const chunks = new Map()
+  for (const pkg of speechModelPackages(speechModel(DEFAULT_SPEECH_MODEL_ID))) {
+    for (const asset of pkg.assets) {
+      asset.chunks.forEach((chunk, index) => chunks.set(`${pkg.key}/${asset.id}/${index}`, chunk))
+    }
+  }
+  const cache = {
+    async match(value) {
+      const path = new URL(typeof value === 'string' ? value : value.url).pathname.split('/')
+      const chunk = chunks.get(`${path.at(-4)}/${path.at(-2)}/${path.at(-1)}`)
+      return chunk && new Response('', {
+        headers: { 'Content-Length': String(chunk.bytes), 'X-Mobius-SHA256': chunk.sha256 },
+      })
+    },
+  }
+  return { async keys() { return ['mobius-device-assets-v1-speech-v2'] }, async open() { return cache } }
+}
+
+test('the shell engine path reports one boundary per caller segment too', async (t) => {
+  const values = new Map()
+  const globals = ['caches', 'localStorage'].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)])
+  const define = (name, value) => Object.defineProperty(globalThis, name, { value, configurable: true, writable: true })
+  define('caches', downloadedDefaultVoice())
+  define('localStorage', {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  })
+  globalThis.location = { href: 'https://mobius.test/', origin: 'https://mobius.test' }
+  releaseBrowserSpeechEngine()
+  t.after(() => {
+    releaseBrowserSpeechEngine()
+    for (const [name, descriptor] of globals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+      else delete globalThis[name]
+    }
+  })
+  const engine = browserSpeechEngine()
+  const generated = []
+  engine.load = async () => {}
+  engine.generate = async (text, { onChunk }) => {
+    generated.push(text)
+    onChunk(new Float32Array([0.1]))
+  }
+
+  const long = Array.from({ length: 12 }, (_, i) => `Sentence number ${i} carries some words.`).join(' ')
+  assert.ok(long.length > 200)
+  const boundaries = []
+  const metadata = await synthesizeSpeech({
+    document: { version: 1, segments: [{ text: long, kind: 'paragraph', pauseAfterMs: 700 }] },
+    onAudio() {},
+    onBoundary: (value) => boundaries.push(value),
+  }).result
+
+  assert.ok(generated.length > 1, 'the long block was generated in pieces')
+  assert.equal(metadata.segmentCount, generated.length)
+  assert.deepEqual(boundaries, [{ segmentIndex: 0, kind: 'paragraph', pauseAfterMs: 700 }])
 })
 
 // The frame host: answers each `model-stream` request the way the shell does,

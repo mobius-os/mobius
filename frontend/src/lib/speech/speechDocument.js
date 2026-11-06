@@ -143,6 +143,22 @@ export function applySpeechHints(value, hints, maxTextChars = DEFAULT_MAX_TEXT_C
   return text
 }
 
+// Normalized segments are generation pieces: a long caller segment is split
+// into several. A caller knows only its own segments, so a boundary is reported
+// once per caller segment, after its last piece, with the caller's index.
+// Progress is different: the `segmentIndex`/`segmentCount` on `generating`
+// loading events and the result's `segmentCount` count pieces, the unit of
+// generation work, so their percentages advance within a long block.
+export function speechBoundaryAfter(segments, index) {
+  const segment = segments[index]
+  if (segments[index + 1]?.sourceIndex === segment.sourceIndex) return null
+  return {
+    segmentIndex: segment.sourceIndex,
+    kind: segment.kind,
+    pauseAfterMs: segment.pauseAfterMs,
+  }
+}
+
 export function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
   if (!input || typeof input !== 'object') throw invalid('Speech input is required.')
   if (input.document == null) {
@@ -242,7 +258,7 @@ export function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHAR
     // A long block becomes several sentence-sized generations. The block's
     // editorial pause belongs only after its final piece; the pieces before it
     // run back-to-back, separated by their own natural sentence-final silence.
-    // `sourceIndex` names the caller's segment, which is what boundaries report.
+    // `sourceIndex` names the caller's segment; see speechBoundaryAfter.
     const pieces = splitSpeakable(text)
     pieces.forEach((piece, index) => {
       segments.push({
