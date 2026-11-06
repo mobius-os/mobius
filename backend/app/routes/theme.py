@@ -14,14 +14,16 @@ The frontend's `useTheme` hook fetches this rather than reading
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app import models
 from app.config import Settings, get_settings
 from app.deps import get_current_owner, reject_cross_site
 from app.routes.notify import publish_system_event
-from app.theme import reset_theme_override, set_theme_mode, theme_with_toggle
+from app.theme import (
+  UnreadableThemeCss, reset_theme_override, set_theme_mode, theme_with_toggle,
+)
 
 
 router = APIRouter(prefix="/api/theme", tags=["theme"])
@@ -56,7 +58,11 @@ def save_theme_mode(
   """The light/dark switch: rewrites theme.css for `mode` from what is on
   disk now (so an edit the shell has not loaded yet is kept), saves the
   mode, tells open views, and returns the new theme as `GET` does."""
-  if set_theme_mode(settings.data_dir, body.mode):
+  try:
+    changed = set_theme_mode(settings.data_dir, body.mode)
+  except UnreadableThemeCss as exc:
+    raise HTTPException(409, detail=str(exc)) from None
+  if changed:
     publish_system_event({"type": "theme_updated"})
   return theme_with_toggle(settings.data_dir)
 

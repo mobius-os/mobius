@@ -287,6 +287,13 @@ test('a failed save restores the previous paint and cache, and throws', async ()
   assert.equal(qc.invalidated.length, 0, 'nothing is marked stale after a failed save')
 })
 
+test('a refused save carries the server reason for the owner', async () => {
+  const reason = 'theme.css has an unclosed string, comment or url(), so the light/dark switch cannot rewrite it.'
+  const api = { theme: { setMode: async () => ({ ok: false, status: 409, json: async () => ({ detail: reason }) }) } }
+  await assert.rejects(themeService.toggleTheme(makeQueryClient(), 'dark', api),
+    (err) => err.detail === reason)
+})
+
 test('the Settings toggle never uses a View Transition or the per-element fallback', async () => {
   themeService.applyThemeToDom(DARK.css, DARK.bg, DARK.mode)
   let viewTransitionCalled = false

@@ -201,10 +201,12 @@ def test_the_root_rule_is_read_lexically():
   assert persisted.count(":root") == 1
 
 
-def test_css_the_lexer_cannot_follow_is_kept_verbatim():
-  css = ':root { --bg: #0d0d0d; --accent: #00ffff; }\n.broken { content: "open;\n}\n'
-  persisted, _ = toggle_once(css, "dark")
-  assert css.strip() in persisted
+UNREADABLE = ':root { --bg: #0d0d0d; --accent: #00ffff; }\n.broken { content: "open;\n}\n'
+
+
+def test_css_the_lexer_cannot_follow_is_refused_not_stacked():
+  with pytest.raises(theme.UnreadableThemeCss):
+    toggle_once(UNREADABLE, "dark")
 
 
 def test_the_owners_other_root_declarations_survive():
@@ -344,6 +346,16 @@ def test_a_failing_preview_never_stops_the_theme_loading(client, auth, shared, e
   served = client.get("/api/theme", headers=auth)
   assert served.status_code == 200
   assert "toggle" not in served.json() and served.json()["mode"] == "dark"
+
+
+def test_an_unreadable_theme_is_left_alone_with_a_reason(client, auth, shared, events):
+  (shared / "theme.css").write_text(UNREADABLE)
+  assert "toggle" not in client.get("/api/theme", headers=auth).json()
+  refused = client.post("/api/theme/mode", headers=auth, json={"mode": "light"})
+  assert refused.status_code == 409 and "unclosed" in refused.json()["detail"]
+  assert (shared / "theme.css").read_text() == UNREADABLE
+  assert not (shared / "theme-mode").exists()
+  assert events == []
 
 
 def test_saving_the_current_mode_changes_nothing(client, auth, shared, events):

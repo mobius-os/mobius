@@ -1020,14 +1020,20 @@ def _first_root_rule(css: str) -> tuple[int, int, dict[str, str]] | None:
   return None
 
 
+class UnreadableThemeCss(ValueError):
+  """theme.css cannot be rewritten for the other mode (`toggled_theme_css`)."""
+
+
 def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   """theme.css for `new_mode`, rewritten from `css`, the theme as it stands
   in `old_mode` (a previously generated block in it is ignored).
 
   Only the first top-level plain `:root` rule is rebuilt; every other byte
-  of the owner's CSS is kept, and CSS the lexer cannot follow is kept whole
-  with a new leading `:root`.  Inside that rule the owner's other
-  declarations are kept; its comments and nested rules are dropped.
+  of the owner's CSS is kept.  Inside that rule the owner's other
+  declarations are kept; its comments and nested rules are dropped.  CSS the
+  lexer cannot follow (an unclosed string, comment or url()) raises
+  `UnreadableThemeCss`: its rules cannot be found, so no rewrite could
+  change the colours it sets without stacking another rule on every switch.
 
   A declared colour is MODE-OWNED, and replaced by the new mode's value,
   when it is a structural key, a shipped value of either mode (the shipped
@@ -1043,6 +1049,10 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   # rule, so they stay first, verbatim. The lexer reads them, so an @import
   # inside a comment or a string is never taken for one.
   owner = _GENERATED_BLOCK_RE.sub("", css)
+  if not _lex_theme_css(owner)[2]:
+    raise UnreadableThemeCss(
+      "theme.css has an unclosed string, comment or url(), so the light/dark "
+      "switch cannot rewrite it. Fix the file, then switch again.")
   _, prelude_end = _prelude_bounds(owner)
   prelude, rest = owner[:prelude_end].strip(), owner[prelude_end:]
   rule = _first_root_rule(rest)
@@ -1102,6 +1112,8 @@ def theme_with_toggle(data_dir: str) -> dict:
   data = theme_data(data_dir, bundle)
   try:
     css, bg, mode = _toggle_preview(bundle.css, bundle.mode)
+  except UnreadableThemeCss:
+    return data  # the switch will refuse with its reason
   except Exception:
     # The preview only makes the tap instant; without it the switch waits for
     # the save. It must never stop the theme itself from loading.

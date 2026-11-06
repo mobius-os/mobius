@@ -298,7 +298,13 @@ function _paint(theme) {
 
 async function _saveThemeMode(mode, api) {
   const res = await api.theme.setMode(mode)
-  if (!res.ok) throw new Error(`theme save failed: ${res.status}`)
+  if (!res.ok) {
+    // A refusal carries the server's reason for the owner (`detail`).
+    const body = await res.json().catch(() => null)
+    const error = new Error(`theme save failed: ${res.status}`)
+    error.detail = typeof body?.detail === 'string' ? body.detail : null
+    throw error
+  }
   return res.json()
 }
 
