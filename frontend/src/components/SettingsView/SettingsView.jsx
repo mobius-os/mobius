@@ -879,7 +879,7 @@ export default function SettingsView({
   const showMobiusAccount = !isSharedBrowserAuth()
   const mobiusAccountMark = mobiusAccount.avatarUrl
     ? <img src={mobiusAccount.avatarUrl} alt="" />
-    : MobiusLogo && <MobiusLogo />
+    : mobiusAccount.avatarPending ? null : MobiusLogo && <MobiusLogo />
   const mobiusAccountLine = mobiusAccount.handle
     ? `@${mobiusAccount.handle}`
     : mobiusAccount.status === 'signed_out'
@@ -1027,7 +1027,7 @@ export default function SettingsView({
           </div>
           <div className="settings-list">
             {showMobiusAccount && <button type="button" className="settings-item" onClick={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} aria-label={`Möbius account: ${mobiusAccountLine}`}>
-              <span className={`settings-item__icon${mobiusAccount.avatarUrl ? ' settings-item__icon--round' : ''}`} aria-hidden="true">{mobiusAccountMark}</span>
+              <span className={`settings-item__icon${mobiusAccount.avatarUrl || mobiusAccount.avatarPending ? ' settings-item__icon--round' : ''}`} aria-hidden="true">{mobiusAccountMark}</span>
               <span className="settings-item__body">
                 <span className="settings-item__title">Möbius</span>
                 <span className="settings-item__sub">{mobiusAccountLine}</span>

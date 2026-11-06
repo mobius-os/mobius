@@ -1,7 +1,7 @@
 /* Cached Möbius account reads (identity, avatar, model access, picker visibility, Railway inventory) and the cheap summary Settings shows on its Accounts row. */
-import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../api/client.js'
+import { objectUrlFor } from './useAuthedImageUrl.js'
 import { accountState, mobiusAccessRequest } from '../lib/mobiusAccount.js'
 
 // Kept in memory only: ['identity', …] is not in queryClient.js's persisted
@@ -50,6 +50,9 @@ function useAvatarQuery(avatarUrl) {
     queryFn: fetchAvatar,
     enabled: Boolean(avatarUrl),
     staleTime: Infinity,
+    // Kept for the page's life between Settings visits, so the photo never
+    // re-downloads (and blinks) just because Settings was closed for a while.
+    gcTime: 60 * 60_000,
     retry: 0,
   })
 }
@@ -84,16 +87,9 @@ export const mobiusAccountQueries = {
   invalidate: queryClient => queryClient.invalidateQueries({ queryKey: rootKey }),
 }
 
-/** A same-document object URL for a cached avatar blob, revoked when it changes or unmounts. */
+/** The stable object URL for a cached avatar blob (see useAuthedImageUrl.js), available on first render. */
 export function useObjectUrl(blob) {
-  const [url, setUrl] = useState(null)
-  useEffect(() => {
-    if (!blob) { setUrl(null); return undefined }
-    const next = URL.createObjectURL(blob)
-    setUrl(next)
-    return () => URL.revokeObjectURL(next)
-  }, [blob])
-  return url
+  return objectUrlFor(blob)
 }
 
 /**
@@ -113,5 +109,8 @@ export function useMobiusAccountSummary() {
     mode: data?.account_mode || null,
     handle: data?.profile?.handle || null,
     avatarUrl,
+    // True while a photo is expected but not yet shown, so the row can hold a
+    // quiet placeholder instead of swapping the Möbius mark for the photo.
+    avatarPending: status === 'loading' || (Boolean(data?.profile?.avatar_url) && !avatarUrl && avatar.isPending),
   }
 }

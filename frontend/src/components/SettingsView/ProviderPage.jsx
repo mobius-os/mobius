@@ -159,6 +159,7 @@ export default function ProviderPage({
           />
         </div>
       </section>
+      {connectionSection}
       <section className="settings-group" aria-labelledby={`settings-${provider}-chat-models`}>
         <div className="settings-group__head">
           <div className="settings-group__heading">
@@ -170,7 +171,6 @@ export default function ProviderPage({
           <ChatModelsList provider={provider} configured={configured} />
         </div>
       </section>
-      {connectionSection}
     </>
   )
 }

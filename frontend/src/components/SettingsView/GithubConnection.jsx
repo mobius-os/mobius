@@ -1,7 +1,7 @@
 /* The instance's GitHub account row in Settings › Accounts: avatar and login, then connect with a device code, add or remove private-repo access, or disconnect. */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowUpRight, ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
-import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
+import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
 import {
   cancelGithubSignIn,
   disconnectGithub,
@@ -42,8 +42,13 @@ function SignInCode({ attempt, retrying, cancelling, unconfirmed, message, onCan
   )
 }
 
+// The last confirmed connection for this page load. Reopening Settings paints
+// it (and its cached avatar) at once while a fresh status read confirms it; a
+// sign-in attempt is never carried over, only the settled account state.
+let lastConfirmed = null
+
 export default function GithubConnection({ active = true, focusRef, attention = false, expanded, onToggle, onExpand }) {
-  const [conn, setConn] = useState({ state: 'checking' })
+  const [conn, setConn] = useState(() => lastConfirmed || { state: 'checking' })
   // null, 'starting', or the attempt being waited on.
   const [signIn, setSignIn] = useState(null)
   const [retrying, setRetrying] = useState(false)
@@ -57,6 +62,9 @@ export default function GithubConnection({ active = true, focusRef, attention = 
 
   const refresh = useCallback(async (options = {}) => {
     const next = await fetchGithubStatus(options)
+    if (next.state === 'connected' || next.state === 'disconnected') {
+      lastConfirmed = { ...next, attempt: null }
+    }
     if (!options.signal?.aborted) setConn(next)
     return next
   }, [])
@@ -153,6 +161,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     setMessage('')
     try {
       await disconnectGithub()
+      forgetAuthedImage('/github/avatar')
     } catch (error) {
       setMessage(error.message)
     }
@@ -232,7 +241,10 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     )
   }
 
-  const avatarUrl = useAuthedImageUrl(connected ? '/github/avatar' : null, connected ? conn.login : '')
+  // The avatar is cached for the page by login, so reopening Settings shows it
+  // at once; until the first read settles, a quiet placeholder stands in.
+  const avatar = useAuthedImageUrl(connected ? '/github/avatar' : null, connected ? conn.login : '')
+  const avatarPending = conn.state === 'checking' || avatar.status === 'loading'
   const profileUrl = connected && conn.login ? `https://github.com/${encodeURIComponent(conn.login)}` : null
   const exception = connected && needsReconnect
     ? <span className="settings-badge settings-badge--warning">Reconnect needed</span>
@@ -254,7 +266,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     >
       <button type="button" className="settings-item" aria-expanded={expanded} aria-controls="settings-github-detail" onClick={onToggle}>
         <span className="settings-item__icon settings-item__icon--round settings-github__mark" aria-hidden="true">
-          {avatarUrl ? <img src={avatarUrl} alt="" /> : <GithubMark />}
+          {avatar.url ? <img src={avatar.url} alt="" /> : avatarPending ? null : <GithubMark />}
         </span>
         <span className="settings-item__body">
           <span className="settings-item__title">GitHub</span>
