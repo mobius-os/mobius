@@ -427,6 +427,16 @@ def test_full_access_lifts_installation_controls_for_that_person_only_while_on(h
   # So do the owner's own decisions, such as accepting an app's requested access.
   assert https.post("/api/apps/1/consent", json={"digest": "x"}, headers=guest).status_code == 403
   assert https.delete("/api/apps/1/consent", headers=guest).status_code == 403
+  # Minting a credential would outlive this grant's revocation, so it stays
+  # with the installation owner.
+  for route, body in [
+    ("/api/auth/install-pass", {}),
+    ("/api/auth/shell-install-pass", None),
+    ("/api/auth/app-job-token", {"app_id": 1}),
+  ]:
+    minted = https.post(route, json=body, headers=guest)
+    assert minted.status_code == 403, (route, minted.text)
+    assert "installation owner" in minted.json()["detail"]
   assert https.patch(ROOT + "/" + grant, json={"full_access": False}, headers=auth).status_code == 200
   assert https.get(ROOT, headers=guest).status_code == 403
   https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)

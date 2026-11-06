@@ -809,6 +809,19 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
+def get_installation_owner_for_credential_minting(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Resolve the installation owner for routes that mint a new credential.
+
+  Full access lifts lifecycle controls for one grant, but a minted credential
+  carries no browser lineage, so it would outlive that grant's revocation and
+  clear the owner-only gates. Minting stays with the installation owner."""
+  owner = _owner_principal_or_403(principal)
+  require_installation_owner(principal)
+  return owner
+
+
 def browser_guest_without_full_access(principal: Principal) -> bool:
   """A shared-browser guest, or their work, that the owner has not given Full
   access. Full access lifts installation-owner controls only; the owner's own
