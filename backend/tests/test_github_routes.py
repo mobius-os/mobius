@@ -16296,6 +16296,7 @@ def test_review_status_unavailable_is_not_evidence_of_source_drift(
   ("missing", "missing_checkout"), ("invalid", "invalid_checkout"),
   ("dirty", "working_changes"), ("missing_diff", "missing_diff"),
   ("invalid_branch", "invalid_plan"), ("missing_commits", "missing_commits"),
+  ("deleted_branch", "missing_branch"),
 ])
 def test_review_status_permanent_and_proven_drift_are_not_transient(
   client, owner_token, failure, code,
@@ -16314,6 +16315,10 @@ def test_review_status_permanent_and_proven_drift_are_not_transient(
     record["plan"]["branch"] = "not a valid branch"
   elif failure == "missing_commits":
     record["plan"]["head_sha"] = "f" * 40
+  elif failure == "deleted_branch":
+    branch = record["plan"]["branch"]
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "-q", "-D", branch], check=True)
   else:
     (repo / "index.jsx").write_text("owner changed this\n")
   verdict = asyncio.run(
