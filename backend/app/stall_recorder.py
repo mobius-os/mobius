@@ -141,9 +141,17 @@ class StallRecorder:
     """The response started (or the request ended without one)."""
     with self._lock:
       entry = self._inflight.pop(token, None)
-    if entry is None:
-      return
-    elapsed = time.monotonic() - entry["start"]
+      if entry is None:
+        return
+      elapsed = time.monotonic() - entry["start"]
+      if entry.get("capturing"):
+        # The watchdog is snapshotting this request: it writes the line once
+        # the snapshot exists, so the record and its evidence stay linked.
+        entry["finished"] = (status, elapsed)
+        return
+    self._emit_slow(entry, status, elapsed)
+
+  def _emit_slow(self, entry: dict, status: int | None, elapsed: float) -> None:
     if elapsed >= self.request_seconds:
       scope = entry["scope"]
       self.emit({
@@ -174,6 +182,8 @@ class StallRecorder:
           entry for entry in self._inflight.values()
           if not entry["checked"] and now - entry["start"] >= self.request_seconds
         ]
+        for entry in late:
+          entry["capturing"] = True
         # One heartbeat sleep plus the stall threshold without a tick.
         stall = None
         if self._stall is None and now - self._last_tick >= 2 * threshold:
@@ -196,6 +206,7 @@ class StallRecorder:
             entry["checked"] = True
             entry["snapshot"] = snapshot_id
             entry["unknown"] = failed
+            entry["capturing"] = False
           if stall is not None:
             stall["snapshot"] = snapshot_id
             stall["taken"] = True
@@ -205,6 +216,10 @@ class StallRecorder:
           self.emit({
             "kind": "loop_stall", "ms": done["ms"], "snapshot": done["snapshot"],
           })
+        # Requests that finished while their snapshot was being taken.
+        for entry in late:
+          if "finished" in entry:
+            self._emit_slow(entry, *entry["finished"])
 
   def _snapshot(self, own: int, now: float, *, keep_idle: bool) -> str | None:
     """Record what the server is doing; nothing busy is no evidence.

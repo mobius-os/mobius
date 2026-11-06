@@ -217,6 +217,41 @@ def test_stall_seen_while_the_snapshot_runs_keeps_its_snapshot(tmp_path):
   assert {stalls[0]["snapshot"]} == snapshot_ids
 
 
+def test_request_finishing_during_its_snapshot_keeps_the_link(tmp_path):
+  """A late request can respond while the watchdog is still snapshotting it;
+  its slow_request line must name that snapshot, and none is orphaned."""
+  capturing, release = threading.Event(), threading.Event()
+
+  def held_snapshot(exclude):
+    capturing.set()
+    release.wait(2)
+    return {"busy": [{"thread": "t", "stack": ["f"]}], "waiting": []}
+
+  async def scenario():
+    asyncio.get_running_loop().slow_callback_duration = 0.05
+    recorder = stall_recorder.StallRecorder(
+      request_seconds=0.05, snapshot_threads=held_snapshot,
+    )
+    task = asyncio.create_task(recorder.run(tmp_path / "stalls.jsonl"))
+    token = recorder.request_started({"type": "http", "method": "GET"})
+    await asyncio.to_thread(capturing.wait, 2)
+    recorder.request_responded(token, 200)  # responds mid-capture
+    release.set()
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+  events = [
+    json.loads(line) for line in (tmp_path / "stalls.jsonl").read_text().splitlines()
+  ]
+  (late,) = [e for e in events if e["kind"] == "slow_request"]
+  snapshot_ids = {e["snapshot_id"] for e in events if e["kind"] == "snapshot"}
+  assert late["snapshot"] is not None and {late["snapshot"]} == snapshot_ids
+  assert late["status"] == 200 and late["no_busy_threads"] is False
+
+
 def test_short_database_hold_never_resolves_its_label(monkeypatch, records):
   monkeypatch.setattr(stall_recorder, "_recorder", stall_recorder.StallRecorder(
     request_seconds=2,
