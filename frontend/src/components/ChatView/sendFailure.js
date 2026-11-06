@@ -101,5 +101,10 @@ export function queueSendFailureMessage(error) {
   if (isModelSelectionRequiredFailure(error)) {
     return 'Choose a model before sending. Your queued messages are unchanged.'
   }
+  // A refusal says why; retrying would not change it.
+  const status = Number(error?.status)
+  if (status >= 400 && status < 500 && error?.detail) {
+    return `${error.detail} Your queued messages are unchanged.`
+  }
   return 'Möbius couldn’t send the queued messages. They’re still queued—try again.'
 }

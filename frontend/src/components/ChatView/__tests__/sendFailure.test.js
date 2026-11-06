@@ -205,7 +205,6 @@ test('a refused empty Send says the queue is unchanged, never that a draft came 
   for (const error of [
     new ChatHttpError(409, { code: 'pending_question_open' }),
     new ChatHttpError(409, { code: 'model_selection_required' }),
-    new ChatHttpError(409, { detail: 'Nothing is queued to send.' }),
     new ChatTransportError(new Error('offline')),
   ]) {
     const message = queueSendFailureMessage(error)
@@ -216,4 +215,14 @@ test('a refused empty Send says the queue is unchanged, never that a draft came 
     queueSendFailureMessage(new ChatHttpError(409, { code: 'pending_question_open' })),
     /pending question/,
   )
+})
+
+test('a refused empty Send shows the server\'s reason instead of inviting a retry', () => {
+  const message = queueSendFailureMessage(new ChatHttpError(409, {
+    code: 'delegation_managed',
+    detail: 'This evaluator chat is managed by its parent workflow.',
+  }))
+  assert.match(message, /managed by its parent workflow/)
+  assert.match(message, /unchanged/)
+  assert.doesNotMatch(message, /try again/i)
 })
