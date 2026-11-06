@@ -341,21 +341,23 @@ def _helper_blockers(db, run, goal) -> list[str]:
   what reaches the coordinator, so blocking would be uncleared forever.
   """
   from app.delegations import _self_resuming_helper_rows
-  from app.goal_plans import _delegation_tree, active_goal_helpers
+  from app.goal_plans import _active_helper_nodes, _delegation_tree, _helper_key
 
-  tree_ids, owners, frontier = set(), {goal.chat_id}, _delegation_tree(
-    db, run, goal, all_attempts=True,
-  )
+  tree = _delegation_tree(db, run, goal, all_attempts=True)
+  tree_ids, owners, frontier = set(), {goal.chat_id}, list(tree)
   while frontier:
     node = frontier.pop()
     tree_ids.add(node["id"])
     frontier.extend(node.get("children") or [])
   owners |= {row.child_chat_id for row in db.query(models.Delegation.child_chat_id)
              .filter(models.Delegation.id.in_(tree_ids))} if tree_ids else set()
-  return active_goal_helpers(db, run, goal) + [
+  # A still-working helper is already named by its task; list it only once.
+  active = _active_helper_nodes(tree)
+  active_ids = {node["id"] for node in active}
+  return [_helper_key(node) for node in active] + [
     "helper:" + row.id
     for row, _status in _self_resuming_helper_rows(db, owners)
-    if row.app_id is None and (
+    if row.app_id is None and row.id not in active_ids and (
       row.id in tree_ids
       or (row.parent_chat_id == goal.chat_id and row.goal_id == goal.id)
     )
