@@ -6,6 +6,7 @@ import {
   isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
+  returnedSendFailureMessage,
   sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from '../sendFailure.js'
@@ -198,4 +199,24 @@ test('a send that never took the composer draft never says its message is in the
     outboxRetained: true,
   })
   assert.equal(detachedSendFailureMessage(retained), sendFailureMessage(retained))
+})
+
+test('work returned after the owner draft never promises a confirmation it cannot make', () => {
+  const ambiguous = [
+    new ChatTransportError(new TypeError('Failed to fetch')),
+    Object.assign(new Error('aborted'), { name: 'AbortError' }),
+  ]
+  for (const failure of ambiguous) {
+    const message = returnedSendFailureMessage(failure)
+    assert.doesNotMatch(message, /Checking|retrying won/)
+    assert.match(message, /check the chat before sending it again/)
+  }
+  // A definite failure, an offline send, or a durable outbox write reads
+  // exactly as a composer send's does.
+  const retained = Object.assign(new ChatTransportError(new TypeError('Failed to fetch')), {
+    outboxRetained: true,
+  })
+  for (const [failure, online] of [[{ status: 503 }, true], [ambiguous[0], false], [retained, true]]) {
+    assert.equal(returnedSendFailureMessage(failure, { online }), sendFailureMessage(failure, { online }))
+  }
 })

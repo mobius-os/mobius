@@ -243,20 +243,34 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
    * that could not be sent, so it waits in the composer instead of vanishing.
    * Like any owner edit, it retires an older ambiguous send, whose late
    * confirmation would otherwise clear the returned work with it. While history
-   * shows another message, the text joins the draft set aside, not the box. */
-  const appendToComposer = useCallback((text, attachments = []) => {
+   * shows another message, the text joins the draft set aside, not the box.
+   *
+   * A failed send's `attempt` (its cid and draft identity) stays linked when
+   * the composer holds no draft: the work then is the whole draft, exactly as
+   * after a composer send, so the existing check clears it once the send
+   * proves durable and an unchanged retry reuses its cid. Returns the attempt
+   * when linked, else null. */
+  const appendToComposer = useCallback((text, attachments = [], attempt = null) => {
     const files = draftAttachmentsRef.current
+    if (attempt && files.length === 0 && draftAsideRef.current == null
+        && !(inputValueRef.current || '').trim()) {
+      rememberFailedAttempt(attempt)
+      setSendFailure(null)
+      restoreFiles(attachments)
+      setComposerInput(text)
+      return attempt
+    }
     // Only a finished upload carries its server name; an uploading or failed
     // chip's local name may differ, so it cannot stand in for a returned file.
     const names = new Set(files
       .filter(file => (file?.status ?? 'done') === 'done')
       .map(file => file.name))
     const added = attachments.filter(file => file?.name && !names.has(file.name))
-    if (!text && added.length === 0) return
+    if (!text && added.length === 0) return null
     clearFailedAttempt()
     setSendFailure(null)
     if (added.length > 0) restoreFiles([...files, ...added])
-    if (!text) return
+    if (!text) return null
     const join = current => (current.trim() ? `${current.trimEnd()}\n${text}` : text)
     if (draftAsideRef.current != null) {
       draftAsideRef.current = join(draftAsideRef.current)
@@ -264,7 +278,8 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     } else {
       setComposerInput(join(inputValueRef.current || ''))
     }
-  }, [clearFailedAttempt, persistDraft, restoreFiles, setComposerInput])
+    return null
+  }, [clearFailedAttempt, persistDraft, rememberFailedAttempt, restoreFiles, setComposerInput])
 
   const restoreDurableDraft = useCallback(() => {
     const saved = readComposerDraft(chatId)

@@ -337,10 +337,10 @@ test('clear resets state and ref synchronously', () => {
 })
 
 test('stop-timeout: restoring the local snapshot preserves the queue a refetch would drop', () => {
-  // handleStop snapshots the queue, clear()s it, then POSTs /chat/stop. On an
-  // SDK interrupt TIMEOUT the backend has already cleared persisted pending, so
-  // hydrating the empty server response WIPES the queue while re-adding the
-  // snapshot KEEPS it.
+  // handleStop snapshots the queue, POSTs /chat/stop, and clear()s it once
+  // the server accepts. On an SDK interrupt TIMEOUT the backend has already
+  // cleared persisted pending, so hydrating the empty server response WIPES
+  // the queue while re-adding the snapshot KEEPS it.
   const { result } = renderHook(usePendingQueue)
   const snapshot = [
     fixtureMsg({ cid: 'q1', ts: 11, content: 'first queued' }),

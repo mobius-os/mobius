@@ -13,10 +13,10 @@
  * tray regardless of POST-vs-fetch ordering.
  *
  * Sequence modelled (timeout branch of handleStop):
- *   1. snapshot the queue, then clear() it (Stop's pre-await clear).
- *   2. /chat/stop returns {stopped:false, cleared_pending_cids:[<cid>]} —
- *      the runner timed out; the backend cleared persisted pending.
- *   3. resolveStopResend → text to re-send (NOT empty, since the set is
+ *   1. snapshot the queue; /chat/stop returns {stopped:false,
+ *      cleared_pending_cids:[<cid>]} — the runner timed out; the backend
+ *      cleared persisted pending — and Stop, now accepted, clear()s the tray.
+ *   2-3. resolveStopResend → text to re-send (NOT empty, since the set is
  *      non-empty and matches the snapshot).
  *   4. doSend's queue path: add() the combined entry (marks it
  *      in-flight) and fire the queueOnly POST (modelled by a later
@@ -43,7 +43,8 @@ test('stop-timeout resend survives onStreamEnd hydrate([]) when the FETCH wins t
   const { result } = renderHook(usePendingQueue)
   const q = usePendingQueueOps(result)
 
-  // 1. user had a queued message; handleStop snapshots then clears.
+  // 1. user had a queued message; handleStop snapshots, and clears once
+  // the server accepts the Stop.
   const snapshot = [queued({ cid: 'q1', ts: 11, content: 'finish the task' })]
   for (const m of snapshot) q.add(m)
   q.clear()
@@ -51,8 +52,7 @@ test('stop-timeout resend survives onStreamEnd hydrate([]) when the FETCH wins t
 
   // 2-3. /chat/stop timed out and reports it cleared cid q1. The shared
   // resolver says to resend (non-empty cleared set, full match).
-  const combined = { text: 'finish the task', attachments: [] }
-  const resend = resolveStopResend(snapshot, ['q1'], combined)
+  const resend = resolveStopResend(snapshot, ['q1'])
   assert.equal(resend.text, 'finish the task', 'timeout branch resends the cleared message')
 
   // 4. doSend's queue path: optimistic add (POST now in flight).
@@ -81,7 +81,7 @@ test('stop-timeout resend survives when the POST commits BEFORE the reconcile fe
   for (const m of snapshot) q.add(m)
   q.clear()
 
-  const resend = resolveStopResend(snapshot, ['q1'], { text: 'finish the task', attachments: [] })
+  const resend = resolveStopResend(snapshot, ['q1'])
   const optimistic = queued({ cid: 'resend-cid', ts: 5000, content: resend.text })
   q.add(optimistic, { inFlight: true })
 
@@ -105,7 +105,7 @@ test('stop-timeout with an ALREADY-DRAINED queue resends NOTHING (no duplicate)'
   for (const m of snapshot) q.add(m)
   q.clear()
 
-  const resend = resolveStopResend(snapshot, [], { text: 'already drained', attachments: [] })
+  const resend = resolveStopResend(snapshot, [])
   assert.equal(resend.text, '', 'nothing to resend')
   // handleStop's `if (resendText)` guard means doSend is NOT called, so
   // nothing is added to the tray.

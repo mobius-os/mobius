@@ -34,12 +34,10 @@ import { cidOf } from '../messageIdentity.js'
  *   - attachments?: array
  *
  * Critical contract: pendingMessagesRef.current MUST update
- * SYNCHRONOUSLY on every mutation. handleStop's
- * fetchGenRef.current++ / pendingMessagesRef.current = [] sequence
- * runs BEFORE the await on /chat/stop; if any mutation here only
- * scheduled a render, the natural onStreamEnd handler could read
- * stale ref contents and re-fire fetchMessages({force:true}),
- * overwriting the just-promoted partial.
+ * SYNCHRONOUSLY on every mutation. Once the server accepts a Stop,
+ * handleStop clears the queue and resends from its snapshot in the same
+ * task; if any mutation here only scheduled a render, doSend and the
+ * natural onStreamEnd handler would read stale ref contents.
  *
  * Reconcile contract: hydrate() is a MERGE, not a wholesale replace.
  * It must never drop an optimistic-only entry whose own persistence

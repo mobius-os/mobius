@@ -420,6 +420,66 @@ test('work returned to the composer follows the owner draft and keeps its files'
   }
 })
 
+test('a failed send returned to an empty composer stays linked to its attempt', () => {
+  // Stop's resend failed ambiguously. With no owner draft in the way it is the
+  // whole draft, so the existing check clears it once the send proves durable
+  // and an unchanged retry reuses its cid instead of sending it twice.
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-linked',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const file = { name: 'queued.png', size: 9, mime_type: 'image/png' }
+    const attempt = {
+      cid: 'cid-resend', draftIdentity: 'draft-resend', text: 'Queued follow-up',
+      transportContent: 'Queued follow-up', attachments: [file],
+    }
+    const linked = hook.result.current.appendToComposer('Queued follow-up', [file], attempt)
+    assert.equal(linked, attempt)
+    assert.equal(hook.result.current.failedSendAttemptRef.current, attempt)
+    assert.equal(hook.result.current.input, 'Queued follow-up')
+    assert.deepEqual(hook.result.current.pendingFiles.map(chip => chip.name), ['queued.png'])
+
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [{ role: 'user', cid: 'cid-resend', content: 'Queued follow-up' }], [],
+      { expectedAttempt: attempt },
+    ), 'durable')
+    assert.equal(hook.result.current.input, '')
+    assert.deepEqual(hook.result.current.pendingFiles, [])
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('a failed send returned after an owner draft is not linked, so it cannot clear that draft', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    persistComposerDraft('returned-unlinked', 'Owner draft', [])
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'returned-unlinked',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const attempt = {
+      cid: 'cid-resend', draftIdentity: 'draft-resend', text: 'Queued follow-up',
+      transportContent: 'Queued follow-up', attachments: [],
+    }
+    assert.equal(hook.result.current.appendToComposer('Queued follow-up', [], attempt), null)
+    assert.equal(hook.result.current.failedSendAttemptRef.current, null)
+    assert.equal(hook.result.current.input, 'Owner draft\nQueued follow-up')
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
 test('returned files get their own chip ids, so removing one keeps the rest', t => {
   const previousStorage = globalThis.sessionStorage
   globalThis.sessionStorage = storageStub()

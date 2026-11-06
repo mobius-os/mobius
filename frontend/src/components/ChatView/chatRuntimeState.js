@@ -684,3 +684,56 @@ export function shouldRetryStopAfterConfirm({
 }) {
   return !!requestSucceeded && !confirmFailed && confirmRunning === true
 }
+
+/** Ask the server to Stop one chat. A stop the runtime still shows running is
+ * sent again, and so is a request with no reply (a dropped connection or a
+ * 5xx): it may still be running on the server, which runs one Stop per chat
+ * at a time, so the retry is answered only after it. A 4xx is a refusal.
+ * Changes no local state; the caller does that only once `accepted`.
+ * `unanswered` says an earlier request may have cleared queued rows that
+ * `clearedPendingCids` (from the first accepted reply) cannot name, and
+ * `serverPending` is the server's queue after the stop, or null if unread. */
+export async function requestChatStop({
+  postStop,
+  readRuntime,
+  delays = [0, 250, 700, 1200],
+  wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
+}) {
+  const outcome = {
+    accepted: false,
+    stoppedCleanly: false,
+    clearedPendingCids: null,
+    unanswered: false,
+    serverPending: null,
+  }
+  for (const retryDelayMs of delays) {
+    if (retryDelayMs > 0) await wait(retryDelayMs)
+    let res = null
+    try { res = await postStop() } catch { /* no reply */ }
+    if (!res?.ok) {
+      if (res && res.status < 500) break
+      outcome.unanswered = true
+      continue
+    }
+    outcome.accepted = true
+    let data = null
+    try { data = await res.json() } catch { /* legacy success without a body */ }
+    if (outcome.clearedPendingCids === null && Array.isArray(data?.cleared_pending_cids)) {
+      outcome.clearedPendingCids = data.cleared_pending_cids
+    }
+    // {stopped: false}: the interrupt timed out and the runner is still alive.
+    if (!stopRequestSucceeded({ responseOk: true, data })) break
+    const runtime = await readRuntime()
+    const confirm = {
+      confirmRunning: runtime ? runtime.running : null,
+      confirmFailed: runtime == null,
+    }
+    outcome.serverPending = Array.isArray(runtime?.pending_messages)
+      ? runtime.pending_messages
+      : null
+    outcome.stoppedCleanly = stopConfirmedIdle({ stopSucceeded: true, ...confirm })
+    if (outcome.stoppedCleanly
+        || !shouldRetryStopAfterConfirm({ requestSucceeded: true, ...confirm })) break
+  }
+  return outcome
+}

@@ -33,8 +33,8 @@ export function ownerQueuedSnapshot(snapshot) {
  * had already consumed (and risked a duplicate follow-up run). Sharing
  * one pure function is what keeps the two paths from drifting again.
  *
- * Only meaningful once a stop request reached the server; when none did,
- * splitTrayAfterUnacceptedStop decides from the server's own queue instead.
+ * Only meaningful once the server accepted a Stop: before that, nothing is
+ * cleared locally and nothing is resent.
  *
  * Contract, by what the backend cleared:
  *   - null / undefined (legacy backend without the field): fall back to
@@ -54,29 +54,22 @@ export function ownerQueuedSnapshot(snapshot) {
  *   the pending-queue entries handleStop snapshotted before clearing.
  * @param {string[]|null|undefined} clearedPendingCids
  *   the backend's authoritative cleared set (or null for a legacy backend).
- * @param {{text: string, attachments: Array}} combined
- *   the precomputed full-snapshot fallback (text joined, attachments
- *   de-duped) — passed in so the caller and this function agree exactly
- *   on the join/de-dup rules.
  * @returns {{text: string, attachments: Array}} what to resend; empty
  *   text means "do not resend".
  */
-export function resolveStopResend(queuedSnapshot, clearedPendingCids, combined) {
-  if (!Array.isArray(clearedPendingCids)) {
-    return { text: combined.text, attachments: combined.attachments }
-  }
+export function resolveStopResend(queuedSnapshot, clearedPendingCids) {
+  return collapseQueued(stopResendRows(queuedSnapshot, clearedPendingCids))
+}
+
+function stopResendRows(queuedSnapshot, clearedPendingCids) {
+  const rows = queuedSnapshot || []
+  if (!Array.isArray(clearedPendingCids)) return rows
   const clearedSet = new Set(clearedPendingCids)
-  const toResend = (queuedSnapshot || []).filter(
-    m => clearedSet.has(cidOf(m)),
-  )
-  if (toResend.length !== clearedPendingCids.length) {
-    // A cleared cid didn't match a snapshot entry. Resend everything rather
-    // than drop it.
-    return { text: combined.text, attachments: combined.attachments }
-  }
-  // Exact match — including the empty-set drain case, where toResend is
-  // [] and text becomes '' so nothing is re-sent.
-  return collapseQueued(toResend)
+  const toResend = rows.filter(m => clearedSet.has(cidOf(m)))
+  // Exact match — including the empty-set drain case, where nothing is
+  // re-sent. A cleared cid without a snapshot entry resends everything
+  // rather than drop it.
+  return toResend.length === clearedPendingCids.length ? toResend : rows
 }
 
 /**
@@ -105,44 +98,27 @@ export function collapseQueued(rows) {
 }
 
 /**
- * After a Stop the server never acknowledged (a network error or a non-OK
- * reply), the server's own queue says what it still holds: the request may
- * have cleared it before the reply was lost. Stop already emptied the tray.
+ * Queued owner rows an unanswered stop request may have cleared. When a stop
+ * request gets no reply and a retry is accepted, the server ran them one after
+ * the other: the first may have cleared rows the accepted reply cannot name.
+ * A row that reply did not clear, the server no longer holds (`serverPending`,
+ * null when unread) and the transcript does not show was most likely cleared
+ * that way. It goes back to the composer rather than being resent, because a
+ * turn-end drain whose rows have not reached this view yet looks the same.
  *
- * - A row the server still holds goes back to the tray, as the server's copy.
- * - A row the server never confirmed (its queue POST is still in flight, or
- *   the durable outbox owns its replay) goes back to the tray too: that send
- *   still owns it, and returning it to the composer would duplicate it.
- * - A confirmed owner row the server no longer holds, and which has not
- *   already reached the transcript, returns to the composer: the server
- *   cleared it, so restoring it to the tray would only let the next refresh
- *   drop it silently.
- * - A hidden machine carrier the server no longer holds is gone; it is never
- *   owner text.
- *
- * When the server's queue could not be read (`serverPending` null), no
- * confirmed row is known to be held, so confirmed owner rows return to the
- * composer: at worst the owner sees a copy there beside the tray row the next
- * refresh restores, never a silent loss.
- *
- * @param {Array} tray the queue rows Stop cleared, in order
- * @param {Array|null} serverPending the server's pending_messages, or null
- * @param {Set<string>} deliveredCids cids already in the transcript
- * @returns {{restore: Array, returned: {text: string, attachments: Array}}}
+ * @param {Array} queuedSnapshot the owner rows Stop snapshotted
+ * @param {{clearedPendingCids: string[]|null, serverPending: Array|null, deliveredCids: Set<string>}} evidence
+ * @returns {Array} the rows to return to the composer
  */
-export function splitTrayAfterUnacceptedStop(tray, serverPending, deliveredCids = new Set()) {
-  const held = new Map((serverPending || []).map(row => [cidOf(row), row]))
-  const restore = []
-  const returned = []
-  for (const row of tray || []) {
-    const cid = cidOf(row)
-    if (held.has(cid)) {
-      restore.push({ ...row, ...held.get(cid), cid, queued: true, serverTs: true, localOnly: false })
-    } else if (row.serverTs !== true) {
-      restore.push(row)
-    } else if (!row.hidden && !deliveredCids.has(cid)) {
-      returned.push(row)
-    }
-  }
-  return { restore, returned: collapseQueued(returned) }
+export function rowsLostToUnansweredStop(queuedSnapshot, {
+  clearedPendingCids,
+  serverPending,
+  deliveredCids,
+}) {
+  const accounted = new Set([
+    ...stopResendRows(queuedSnapshot, clearedPendingCids).map(cidOf),
+    ...(serverPending || []).map(cidOf),
+    ...deliveredCids,
+  ])
+  return (queuedSnapshot || []).filter(row => !accounted.has(cidOf(row)))
 }
