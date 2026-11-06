@@ -14,7 +14,7 @@ from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
   Principal, get_current_owner, get_current_owner_for_owner_input, get_principal,
-  reject_cross_site, require_installation_owner_control,
+  reject_cross_site, require_installation_owner,
 )
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ async def accept_consent(
   Agent runs, delegated helpers, shared-browser guests and apps are refused by
   the owner-input dependency, so an agent can declare access but never approve.
   """
-  require_installation_owner_control(principal)
+  require_installation_owner(principal)
   app = _live_app(db, app_id)
   if not app_consent.gated(app):
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")
@@ -105,7 +105,7 @@ async def revoke_consent(
   db: Session = Depends(get_db),
 ):
   """Take back an app's acceptance: it is dormant again until accepted anew."""
-  require_installation_owner_control(principal)
+  require_installation_owner(principal)
   app = _live_app(db, app_id)
   if not app_consent.gated(app):
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")

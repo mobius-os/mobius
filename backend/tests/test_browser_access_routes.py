@@ -330,7 +330,20 @@ def test_revoke_reports_unconfirmed_work_without_claiming_stop(https, auth, monk
   monkeypatch.setattr(app.chat, "stop_browser_grant_runs", incomplete)
   response = https.delete(ROOT + "/" + grant, headers=auth)
   assert response.status_code == 202
-  assert response.json() == {"revoked": True, "pending_commands": pending, "pending_chat_ids": ["still-stopping"]}
+  assert response.json() == {"revoked": True, "pending_commands": pending, "pending_chat_ids": ["still-stopping"], "stop_incomplete": False}
+  assert https.get("/api/chats", headers={"Authorization": "Bearer " + token}).status_code == 401
+
+
+def test_revoke_with_a_failed_stop_step_reports_revoked_not_failure(https, auth, monkeypatch):
+  from app.routes import connect
+  grant, token, _ = invite(https)
+  def broken(_grant):
+    raise OSError("runner unreachable")
+  monkeypatch.setattr(connect, "cancel_browser_grant_commands", broken)
+  response = https.delete(ROOT + "/" + grant, headers=auth)
+  assert response.status_code == 202, response.text
+  assert response.json()["revoked"] is True
+  assert response.json()["stop_incomplete"] is True
   assert https.get("/api/chats", headers={"Authorization": "Bearer " + token}).status_code == 401
 
 
@@ -391,3 +404,41 @@ def test_guest_cannot_launch_clean_owner_conflict_resolver(https, auth, route, b
                         headers={"Authorization": "Bearer " + token})
   assert response.status_code == 403
   assert "installation owner" in response.json()["detail"]
+
+
+def test_full_access_lifts_installation_controls_for_that_person_only_while_on(https, auth):
+  other, other_token, _ = invite(https, label="Bob")
+  # A second person signs in from their own browser.
+  https.cookies.clear()
+  grant, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  assert https.get(ROOT, headers=guest).status_code == 403
+  turned_on = https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)
+  assert turned_on.status_code == 200, turned_on.text
+  assert turned_on.json()["grant"]["full_access"] is True
+  # Applies at once to the bearer the guest already holds.
+  listed = https.get(ROOT, headers=guest)
+  assert listed.status_code == 200, listed.text
+  assert {g["id"]: g["full_access"] for g in listed.json()["grants"]} == {grant: True, other: False}
+  # Only that person: everyone else keeps the guest boundary.
+  assert https.get(ROOT, headers={"Authorization": "Bearer " + other_token}).status_code == 403
+  # The owner's own screen stays the owner's, as it does for a connected Möbius.
+  assert https.get("/api/screen-control/sessions/fake/events", headers=guest).status_code == 403
+  # So do the owner's own decisions, such as accepting an app's requested access.
+  assert https.post("/api/apps/1/consent", json={"digest": "x"}, headers=guest).status_code == 403
+  assert https.delete("/api/apps/1/consent", headers=guest).status_code == 403
+  assert https.patch(ROOT + "/" + grant, json={"full_access": False}, headers=auth).status_code == 200
+  assert https.get(ROOT, headers=guest).status_code == 403
+  https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)
+  assert https.delete(ROOT + "/" + grant, headers=auth).status_code in (202, 204)
+  assert https.get(ROOT, headers=guest).status_code == 401
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth).status_code == 409
+
+
+def test_full_access_toggle_is_owner_managed_and_strict(https, auth):
+  grant, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=guest).status_code == 403
+  assert https.patch(ROOT + "/missing-grant", json={"full_access": True}, headers=auth).status_code == 404
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True, "extra": 1}, headers=auth).status_code == 422
+  assert https.get(ROOT, headers=auth).json()["grants"][0]["full_access"] is False

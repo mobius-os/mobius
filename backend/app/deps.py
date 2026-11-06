@@ -809,10 +809,30 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
-def require_installation_owner_control(principal: Principal) -> None:
-  """Shared collaborators may use the workspace, not mint installation authority."""
+def browser_guest_without_full_access(principal: Principal) -> bool:
+  """A shared-browser guest, or their work, that the owner has not given Full
+  access. Full access lifts installation-owner controls only; the owner's own
+  device (shared folders, screen) and owner decisions such as app consent keep
+  their gates."""
+  if principal.browser is None:
+    return False
+  with SessionLocal() as db:
+    return not browser_access.has_full_access(db, principal.browser, principal.owner.id)
+
+
+def require_installation_owner(principal: Principal) -> None:
+  """The installation owner's own decision: never a guest, even with Full
+  access, since a connected Möbius with Full access cannot make it either."""
   require_nondelegated_owner_control(principal)
   if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can decide this.")
+
+
+def require_installation_owner_control(principal: Principal) -> None:
+  """Shared collaborators may use the workspace, not mint installation
+  authority, unless the owner gave that person Full access."""
+  require_nondelegated_owner_control(principal)
+  if browser_guest_without_full_access(principal):
     raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
