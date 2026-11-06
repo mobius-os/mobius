@@ -78,8 +78,8 @@ export function chatEntryFrame({
  * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
  * activation to settle. Stop (`stop`) waits too, and stays available on a
  * failed activation, where the frame may show a turn that is still running and
- * Stop is the only way to end it; its queued resend then returns to the
- * composer (stopResendTarget). */
+ * Stop is the only way to end it; doSend refuses its queued resend then and
+ * returns it to the composer. */
 export function liveControlsReady(activationPhase, activationSettled) {
   return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
 }

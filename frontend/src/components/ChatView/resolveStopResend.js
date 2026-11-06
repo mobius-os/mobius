@@ -1,4 +1,3 @@
-import { hasSendablePayload } from './composerSubmission.js'
 import { cidOf } from './messageIdentity.js'
 
 /**
@@ -34,8 +33,8 @@ export function ownerQueuedSnapshot(snapshot) {
  * had already consumed (and risked a duplicate follow-up run). Sharing
  * one pure function is what keeps the two paths from drifting again.
  *
- * Only meaningful once a stop request reached the server; stopResendTarget
- * keeps the queue when none did.
+ * Only meaningful once a stop request reached the server; when none did,
+ * splitTrayAfterUnacceptedStop decides from the server's own queue instead.
  *
  * Contract, by what the backend cleared:
  *   - null / undefined (legacy backend without the field): fall back to
@@ -77,13 +76,24 @@ export function resolveStopResend(queuedSnapshot, clearedPendingCids, combined) 
   }
   // Exact match — including the empty-set drain case, where toResend is
   // [] and text becomes '' so nothing is re-sent.
-  const text = toResend
+  return collapseQueued(toResend)
+}
+
+/**
+ * Queued rows as one message: their text joined by line, their files
+ * de-duplicated by name.
+ *
+ * @param {Array<{content?: string, attachments?: Array}>} rows
+ * @returns {{text: string, attachments: Array}}
+ */
+export function collapseQueued(rows) {
+  const text = (rows || [])
     .map(m => (m.content || '').trim())
     .filter(Boolean)
     .join('\n')
   const seen = new Set()
   const attachments = []
-  for (const m of toResend) {
+  for (const m of rows || []) {
     for (const a of (m.attachments || [])) {
       if (a && a.name && !seen.has(a.name)) {
         seen.add(a.name)
@@ -95,23 +105,44 @@ export function resolveStopResend(queuedSnapshot, clearedPendingCids, combined) 
 }
 
 /**
- * Where Stop's resolved resend goes. 'keep' when no stop request reached the
- * server (a network error or a non-OK reply): the server still holds the
- * queue, so the tray shows it again, and resending or returning it would
- * duplicate it. Otherwise 'none' when there is nothing to send, 'send' once
- * activation has settled, and 'composer' before then. Stop stays available on
- * a failed activation, but no turn starts before activation settles, and Stop
- * has already cleared the queue, so the work waits in the composer for the
- * owner to send again instead of being refused and lost.
+ * After a Stop the server never acknowledged (a network error or a non-OK
+ * reply), the server's own queue says what it still holds: the request may
+ * have cleared it before the reply was lost. Stop already emptied the tray.
  *
- * @param {{text: string, attachments: Array}} resend from resolveStopResend
- * @param {{stopAccepted: boolean, activationSettled: boolean}} state
- *   stopAccepted: some /chat/stop request got an OK reply, so the server
- *   cleared its queue (even when the interrupt itself timed out).
- * @returns {'keep'|'none'|'send'|'composer'}
+ * - A row the server still holds goes back to the tray, as the server's copy.
+ * - A row the server never confirmed (its queue POST is still in flight, or
+ *   the durable outbox owns its replay) goes back to the tray too: that send
+ *   still owns it, and returning it to the composer would duplicate it.
+ * - A confirmed owner row the server no longer holds, and which has not
+ *   already reached the transcript, returns to the composer: the server
+ *   cleared it, so restoring it to the tray would only let the next refresh
+ *   drop it silently.
+ * - A hidden machine carrier the server no longer holds is gone; it is never
+ *   owner text.
+ *
+ * When the server's queue could not be read (`serverPending` null), no
+ * confirmed row is known to be held, so confirmed owner rows return to the
+ * composer: at worst the owner sees a copy there beside the tray row the next
+ * refresh restores, never a silent loss.
+ *
+ * @param {Array} tray the queue rows Stop cleared, in order
+ * @param {Array|null} serverPending the server's pending_messages, or null
+ * @param {Set<string>} deliveredCids cids already in the transcript
+ * @returns {{restore: Array, returned: {text: string, attachments: Array}}}
  */
-export function stopResendTarget({ text, attachments }, { stopAccepted, activationSettled }) {
-  if (!stopAccepted) return 'keep'
-  if (!hasSendablePayload(text, attachments)) return 'none'
-  return activationSettled ? 'send' : 'composer'
+export function splitTrayAfterUnacceptedStop(tray, serverPending, deliveredCids = new Set()) {
+  const held = new Map((serverPending || []).map(row => [cidOf(row), row]))
+  const restore = []
+  const returned = []
+  for (const row of tray || []) {
+    const cid = cidOf(row)
+    if (held.has(cid)) {
+      restore.push({ ...row, ...held.get(cid), cid, queued: true, serverTs: true, localOnly: false })
+    } else if (row.serverTs !== true) {
+      restore.push(row)
+    } else if (!row.hidden && !deliveredCids.has(cid)) {
+      returned.push(row)
+    }
+  }
+  return { restore, returned: collapseQueued(returned) }
 }

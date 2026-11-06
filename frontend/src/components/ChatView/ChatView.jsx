@@ -135,7 +135,12 @@ import {
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
-import { resolveStopResend, ownerQueuedSnapshot, stopResendTarget } from './resolveStopResend.js'
+import {
+  collapseQueued,
+  ownerQueuedSnapshot,
+  resolveStopResend,
+  splitTrayAfterUnacceptedStop,
+} from './resolveStopResend.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -3210,12 +3215,19 @@ export default function ChatView({
   const [queuedEditOrder] = useState(createQueuedEditOrder)
 
   const doSend = useCallback(async (text, opts = {}) => {
-    if (isProviderSwitchBlocking(chatId)) return false
+    // Work handed over from elsewhere (Stop's queued resend) is not the
+    // composer's draft, but when it is refused or rejected it waits there
+    // instead of vanishing. Work the durable outbox keeps is not returned:
+    // the outbox replays it.
+    const returnsToComposer = opts.returnToComposer === true
     // Every submit path funnels through doSend, including queued resend and
     // shell-owned composer requests. An early composer reveal is intentionally
     // editable, but no turn may start until this exact chat's runtime snapshot
     // has settled.
-    if (!activationSettledRef.current) return false
+    if (isProviderSwitchBlocking(chatId) || !activationSettledRef.current) {
+      if (returnsToComposer) appendToComposer(text, opts.attachments)
+      return false
+    }
 
     // Callers can pre-supply attachments (e.g. handleStop collapsing
     // a queue that had files attached to queued items). When provided,
@@ -3306,13 +3318,14 @@ export default function ChatView({
     function restoreComposerAfterFailedSend() {
       if (takesComposerDraft) restoreComposerText(text, { preserveFailedAttempt: true })
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
+      if (returnsToComposer) appendToComposer(text, attachments)
     }
     function clearComposerFailedAttempt() {
       if (takesComposerDraft) clearFailedAttempt()
     }
     function failureMessage(err) {
       const online = getOnlineSnapshot()
-      return takesComposerDraft
+      return takesComposerDraft || returnsToComposer
         ? sendFailureMessage(err, { online })
         : detachedSendFailureMessage(err, { online })
     }
@@ -3898,6 +3911,7 @@ export default function ChatView({
     clearFiles,
     restoreFiles,
     releaseFiles,
+    appendToComposer,
     acknowledgeFirstMessageAccepted,
   ])
 
@@ -4651,20 +4665,16 @@ export default function ChatView({
       // the phantom-queued-message bug. See resolveStopResend.js.
       const trayBeforeStop = pendingQueue.pendingMessagesRef.current
       const queuedSnapshot = ownerQueuedSnapshot(trayBeforeStop)
-      const queuedTexts = queuedSnapshot
-        .map(m => (m.content || '').trim())
-        .filter(Boolean)
-      const combined = queuedTexts.join('\n')
-      const seenNames = new Set()
-      const combinedAttachments = []
-      for (const m of queuedSnapshot) {
-        for (const a of (m.attachments || [])) {
-          if (a && a.name && !seenNames.has(a.name)) {
-            seenNames.add(a.name)
-            combinedAttachments.push(a)
-          }
-        }
-      }
+      const combined = collapseQueued(queuedSnapshot)
+      // What Stop wipes beside the tray, for a Stop the server never accepts:
+      // the rows reserved for an in-flight steer, the send intents that pin a
+      // row when it lands, and a queued continuation's envelope.
+      const steerCandidates = new Set(pendingQueue.getSteerCandidates().map(cidOf))
+      const steerReservedBeforeStop = trayBeforeStop
+        .filter(row => !row.hidden && !row.recoveryAvailable && !steerCandidates.has(cidOf(row)))
+        .map(cidOf)
+      const sendIntentsBeforeStop = new Map(sendIntentByCidRef.current)
+      const continuationBeforeStop = queuedContinuationRef.current
 
       // Invalidate any in-flight refetch + clear pending BEFORE the
       // /chat/stop await. During that await, the SSE stream closes
@@ -4685,7 +4695,7 @@ export default function ChatView({
 
       let stoppedCleanly = false
       // Whether any stop request got an OK reply, so the server cleared its
-      // queue. Without one, the server still holds the queue (stopResendTarget).
+      // queue. Without one, only the server's queue says what it still holds.
       let stopAccepted = false
       // The backend reports which queued cids it actually removed. null = an
       // older backend without the field (→ fall back to resending all); an
@@ -4721,15 +4731,18 @@ export default function ChatView({
         }
         return stopRequestSucceeded({ responseOk: stopRes.ok, data })
       }
-      const confirmStopIdle = async () => {
+      // The server's runtime, or null when it could not be read.
+      const readRuntime = async () => {
         try {
           const res = await apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: 5000 })
-          if (!res.ok) return { failed: true, running: null }
-          const data = await res.json()
-          return { failed: false, running: data?.running }
+          return res.ok ? await res.json() : null
         } catch {
-          return { failed: true, running: null }
+          return null
         }
+      }
+      const confirmStopIdle = async () => {
+        const data = await readRuntime()
+        return { failed: data == null, running: data == null ? null : data.running }
       }
       for (const retryDelayMs of STOP_RETRY_DELAYS_MS) {
         if (retryDelayMs > 0) await delay(retryDelayMs)
@@ -4767,44 +4780,58 @@ export default function ChatView({
       // unconditionally, which double-sent a message the natural turn-end
       // drain had already consumed (cleared set []). The full contract +
       // its tests live in resolveStopResend.js.
-      const resolveResend = (cleared) => resolveStopResend(
-        queuedSnapshot, cleared,
-        { text: combined, attachments: combinedAttachments },
-      )
-      // Before activation settles the work goes back to the composer instead
-      // of a send doSend would refuse; a stop the server never accepted puts
-      // the tray back instead (stopResendTarget).
-      const resendQueued = (resend) => {
-        const { text, attachments } = resend
-        const target = stopResendTarget(resend, {
-          stopAccepted,
-          activationSettled: activationSettledRef.current,
-        })
-        if (target === 'keep') {
-          trayBeforeStop.forEach((row, index) => pendingQueue.restoreByCid(row, index))
-        } else if (target === 'composer') appendToComposer(text, attachments)
-        else if (target === 'send') {
-          doSend(text, {
-            pin: false,
-            attachments: attachments.length > 0 ? attachments : undefined,
-          })
+      // The resend carries its own files and never takes the owner's draft.
+      // Work doSend refuses (activation has not settled) or the server
+      // rejects returns to the composer; work the outbox keeps does not.
+      const resendQueued = () => {
+        const { text, attachments } = resolveStopResend(
+          queuedSnapshot, clearedPendingCids, combined,
+        )
+        doSend(text, { pin: false, attachments, fromComposer: false, returnToComposer: true })
+      }
+
+      if (!stopAccepted) {
+        // No stop request was acknowledged, so the runner may still be live
+        // and this cannot start a second run. The request may still have
+        // cleared the queue before its reply was lost: the server's queue
+        // decides what goes back to the tray, and owner work it no longer
+        // holds returns to the composer (splitTrayAfterUnacceptedStop).
+        const runtime = await readRuntime()
+        const deliveredCids = new Set(messagesRef.current
+          .filter(message => message?.role === 'user')
+          .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])]))
+        const { restore, returned } = splitTrayAfterUnacceptedStop(
+          trayBeforeStop,
+          Array.isArray(runtime?.pending_messages) ? runtime.pending_messages : null,
+          deliveredCids,
+        )
+        restore.forEach((row, index) => pendingQueue.restoreByCid(row, index))
+        const restored = new Set(restore.map(cidOf))
+        pendingQueue.reserveForSteer(steerReservedBeforeStop.filter(cid => restored.has(cid)))
+        for (const [cid, intent] of sendIntentsBeforeStop) {
+          if (restored.has(cid) && !sendIntentByCidRef.current.has(cid)) {
+            rememberSendIntent(cid, intent)
+          }
         }
+        if (queuedContinuationRef.current == null) {
+          queuedContinuationRef.current = continuationBeforeStop
+        }
+        appendToComposer(returned.text, returned.attachments)
+        return
       }
 
       if (!stoppedCleanly) {
-        // The stop request failed, or the SDK interrupt timed out
-        // (handle.stop()'s 2s bound — see claude_sdk_runner.stop): the
-        // runner is still alive. We must NOT disconnect or start a second
-        // concurrent run. A failed request cleared nothing, so the server
-        // still holds the queue and resendQueued only puts the tray back.
-        // After a timeout the backend left the registry entry + broadcast
-        // intact for the runner's own teardown, and it ALREADY cleared
-        // persisted chat.pending_messages, so a refetch returns [] and re-queueing
+        // The SDK interrupt timed out (handle.stop()'s 2s bound — see
+        // claude_sdk_runner.stop): the runner is still alive. We must NOT
+        // disconnect or start a second concurrent run. The backend left the
+        // registry entry + broadcast intact for the runner's own teardown,
+        // and it ALREADY cleared persisted chat.pending_messages, so a
+        // refetch returns [] and re-queueing
         // from authoritative server state would silently drop the queued
         // text (the "Stop ate my message" bug). Restore from the LOCAL
         // snapshot instead, via the shared resendQueued (above) — and
-        // narrowed by clearedPendingCids through the SHARED resolveResend
-        // (above) so a queued message the natural turn-end drain already
+        // narrowed by clearedPendingCids through the SHARED
+        // resolveStopResend so a queued message the natural turn-end drain already
         // consumed (cleared set []) is NOT re-sent here: re-sending it
         // would duplicate the message and risk a duplicate follow-up run.
         // Because the stream is still attached (isStreamingRef true),
@@ -4825,7 +4852,7 @@ export default function ChatView({
         //
         // The 2s timeout is NOT surfaced as a user-facing error; only a
         // genuine re-queue POST failure (doSend's catch) shows a block.
-        resendQueued(resolveResend(clearedPendingCids))
+        resendQueued()
         return
       }
       dispatchQuestionFollowHandoff({ type: 'cancelled' })
@@ -4865,7 +4892,7 @@ export default function ChatView({
       onStreamEnd?.({ continues: false })
 
       // Resend the queued work as ONE fresh turn — but ONLY the messages
-      // the backend confirms it cleared. Same SHARED resolveResend the
+      // the backend confirms it cleared. Same SHARED resendQueued the
       // timeout branch uses, so the two paths can't drift: empty cleared
       // set → nothing re-sent (the natural-finish-races-Stop double-send),
       // exact match → that subset, partial/legacy → full combined.
@@ -4875,7 +4902,7 @@ export default function ChatView({
       // the user just stopped (and the original turn-1 user msg) above the
       // viewport. Mode stays whatever the user had — they were reading the
       // partial, the new turn streams in continuing from there.
-      resendQueued(resolveResend(clearedPendingCids))
+      resendQueued()
     } finally {
       handlingStopRef.current = false
     }

@@ -11,7 +11,12 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveStopResend, ownerQueuedSnapshot, stopResendTarget } from '../resolveStopResend.js'
+import {
+  collapseQueued,
+  ownerQueuedSnapshot,
+  resolveStopResend,
+  splitTrayAfterUnacceptedStop,
+} from '../resolveStopResend.js'
 
 function snap(overrides = {}) {
   const ts = overrides.ts ?? 100
@@ -134,37 +139,72 @@ test('empty cleared set returns no attachments even if the snapshot had some', (
   assert.deepEqual(got.attachments, [], 'nothing cleared → no attachments to resend')
 })
 
-// -- stopResendTarget: where the resolved resend goes ------------------------
-const accepted = activationSettled => ({ stopAccepted: true, activationSettled })
-
-test('stopResendTarget sends once activation has settled', () => {
-  assert.equal(stopResendTarget(combined('queued'), accepted(true)), 'send')
+// -- collapseQueued: one message from the queued rows -------------------------
+test('collapseQueued joins text by line and de-duplicates files by name', () => {
+  const got = collapseQueued([
+    snap({ ts: 1, content: ' first ', attachments: [{ name: 'a.png' }] }),
+    snap({ ts: 2, content: '', attachments: [{ name: 'a.png' }, { name: 'b.pdf' }] }),
+    snap({ ts: 3, content: 'second' }),
+  ])
+  assert.equal(got.text, 'first\nsecond')
+  assert.deepEqual(got.attachments.map(a => a.name), ['a.png', 'b.pdf'])
 })
 
-test('stopResendTarget returns unsettled work to the composer, files included', () => {
-  assert.equal(stopResendTarget(combined('queued'), accepted(false)), 'composer')
-  assert.equal(stopResendTarget(combined('', [{ name: 'q.png' }]), accepted(false)), 'composer')
+// -- splitTrayAfterUnacceptedStop: the server's queue decides -----------------
+const confirmed = (ts, extra = {}) => snap({ ts, content: `q${ts}`, serverTs: true, ...extra })
+
+test('rows the server still holds go back to the tray as its copy', () => {
+  const tray = [confirmed(1), confirmed(2)]
+  const server = [{ cid: 'c-1', ts: 501, content: 'q1 (server)' }, { cid: 'c-2', ts: 502, content: 'q2' }]
+  const { restore, returned } = splitTrayAfterUnacceptedStop(tray, server)
+  assert.deepEqual(restore.map(row => [row.cid, row.ts, row.serverTs]), [
+    ['c-1', 501, true], ['c-2', 502, true],
+  ])
+  assert.equal(restore[0].content, 'q1 (server)')
+  assert.deepEqual(returned, { text: '', attachments: [] })
 })
 
-test('stopResendTarget has nothing to do for an empty resend', () => {
-  assert.equal(stopResendTarget(combined(''), accepted(true)), 'none')
-  assert.equal(stopResendTarget(combined('  ', []), accepted(false)), 'none')
+test('confirmed owner rows the server cleared return to the composer, files included', () => {
+  // The stop reply was lost, or a 5xx came after the server cleared the
+  // queue: restoring these to the tray would let the next refresh drop them.
+  const tray = [confirmed(1, { attachments: [{ name: 'f.png' }] }), confirmed(2)]
+  const { restore, returned } = splitTrayAfterUnacceptedStop(tray, [{ cid: 'c-2', ts: 2 }])
+  assert.deepEqual(restore.map(row => row.cid), ['c-2'])
+  assert.equal(returned.text, 'q1')
+  assert.deepEqual(returned.attachments, [{ name: 'f.png' }])
 })
 
-test('a stop the server never accepted keeps the queue instead of resending it', () => {
-  // A failed /chat/stop sends no cleared list, like an old backend, so the
-  // resolver falls back to the whole snapshot. The server still holds that
-  // queue: resending or returning it would duplicate it.
-  const snapshot = [snap({ ts: 11, content: 'queued', attachments: [{ name: 'q.png' }] })]
-  const resend = resolveStopResend(snapshot, null, combined('queued', [{ name: 'q.png' }]))
-  assert.equal(resend.text, 'queued')
-  for (const activationSettled of [true, false]) {
-    assert.equal(
-      stopResendTarget(resend, { stopAccepted: false, activationSettled }),
-      'keep',
-    )
-  }
-  // The same missing list from an old backend that did accept the stop
-  // still resends everything.
-  assert.equal(stopResendTarget(resend, accepted(true)), 'send')
+test('rows the server never confirmed stay in the tray with the send that owns them', () => {
+  // An in-flight queue POST or the durable outbox still owns these;
+  // returning them to the composer as well would duplicate them.
+  const tray = [
+    snap({ ts: 1, content: 'posting', serverTs: false }),
+    snap({ ts: 2, content: 'outbox', localOnly: true, serverTs: false }),
+  ]
+  const { restore, returned } = splitTrayAfterUnacceptedStop(tray, [])
+  assert.deepEqual(restore, tray)
+  assert.equal(returned.text, '')
+})
+
+test('a cleared row already in the transcript is not returned again', () => {
+  const tray = [confirmed(1), confirmed(2)]
+  const { restore, returned } = splitTrayAfterUnacceptedStop(tray, [], new Set(['c-1']))
+  assert.deepEqual(restore, [])
+  assert.equal(returned.text, 'q2')
+})
+
+test('a hidden carrier the server no longer holds is dropped, never owner text', () => {
+  const carrier = confirmed(1, { hidden: true, content: '<wait_result/>' })
+  const { restore, returned } = splitTrayAfterUnacceptedStop([carrier], [])
+  assert.deepEqual(restore, [])
+  assert.equal(returned.text, '')
+  const held = splitTrayAfterUnacceptedStop([carrier], [{ cid: 'c-1', hidden: true }])
+  assert.deepEqual(held.restore.map(row => row.cid), ['c-1'])
+})
+
+test('an unreadable server queue returns confirmed owner rows rather than risk losing them', () => {
+  const tray = [confirmed(1), snap({ ts: 2, content: 'posting', serverTs: false })]
+  const { restore, returned } = splitTrayAfterUnacceptedStop(tray, null)
+  assert.deepEqual(restore.map(row => row.cid), ['c-2'])
+  assert.equal(returned.text, 'q1')
 })
