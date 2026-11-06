@@ -862,12 +862,15 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
+  # One run snapshot and one settled-wait read serve both the runtime fields
+  # and the lifecycle key; the other wait read lists the armed waits.
+  assert sum("from chat_run_updates" in statement for statement in statements) == 1
+  assert sum("from chat_waits" in statement for statement in statements) == 2
   body = runtime.json()
   assert isinstance(body.pop("lifecycle_projection_key"), str)
   assert body == {
     "running": True,
     "compacting": None,
-    "restart_observation_key": "[[],null]",
     "run_id": None,
     "run_status": None,
     "runtime_revision": 0,
@@ -922,6 +925,9 @@ def test_runtime_projection_orders_run_transitions_with_the_lifecycle_cursor(
   assert completed["run_id"] == "revision-run"
   assert completed["run_status"] == "completed"
   assert completed["runtime_revision"] > running["runtime_revision"]
+  # Wait and Goal cards read this chat's run rows, so a settled run alone must
+  # disprove a retained detail page.
+  assert completed["lifecycle_projection_key"] != running["lifecycle_projection_key"]
 
 
 def test_detail_and_runtime_expose_the_durable_assistant_owner(

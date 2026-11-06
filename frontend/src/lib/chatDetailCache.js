@@ -124,12 +124,9 @@ export function chatSnapshotMatchesRuntime(cached, runtime) {
     && typeof runtime?.updated_at === 'string'
     && cached.updated_at === runtime.updated_at
   if (!sameVersion) return false
-  // Restart receipts and resume holds can change without a transcript write.
-  // Compare their owning projection before reusing a pre-restart cached card.
-  if (typeof runtime.restart_observation_key === 'string'
-    && cached.restartObservationKey !== runtime.restart_observation_key) return false
-  // So can the settled Wait, terminal Goal and dependency cards projected
-  // beside the transcript (a Wait cancelled while the chat is idle, say).
+  // Cards projected beside the transcript can change without a transcript
+  // write: settled Wait, terminal Goal and dependency cards, and restart
+  // receipts with their resume hold (a Wait cancelled while idle, say).
   if (typeof runtime.lifecycle_projection_key === 'string'
     && cached.lifecycleProjectionKey !== runtime.lifecycle_projection_key) return false
   // A live snapshot can rotate assistant segments without advancing the
@@ -188,8 +185,6 @@ export function chatDetailCacheValue(data = {}) {
     restorationWindowComplete: sourceWindowValid
       && data.offset + messages.length === data.total,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
-    restartObservationKey: typeof data.restart_observation_key === 'string'
-      ? data.restart_observation_key : null,
     lifecycleProjectionKey: typeof data.lifecycle_projection_key === 'string'
       ? data.lifecycle_projection_key : null,
     activeAssistantMessageId: data.active_assistant_message_id || null,

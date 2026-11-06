@@ -243,6 +243,19 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
   )
 
 
+def _nothing_published(
+  exc: ContributionSubmitError, record_patch: dict,
+) -> ContributionSubmitError:
+  """Send's wording for a shared check that refused before any public step."""
+  return ContributionSubmitError(
+    f"{exc.message} Nothing was published.",
+    exc.status_code,
+    record_patch=record_patch,
+    code=exc.code,
+    detail=exc.detail,
+  )
+
+
 def _record_patch_with(base: dict, extra: dict) -> dict:
   if not extra:
     return base
@@ -788,34 +801,63 @@ def inspect_upstream_merge(
       code=exc.code,
       detail=exc.detail,
     ) from None
-  merged = _git(
-    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
-  )
+  try:
+    return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except ContributionSubmitError as exc:
+    raise _nothing_published(exc, exc.record_patch) from None
+
+
+def merge_with_upstream(
+  repo: Path, upstream_branch: str, upstream_sha: str, branch: str,
+) -> UpstreamMerge:
+  """Report whether ``branch`` merges with one exact, already-local upstream tip.
+
+  Raises ``upstream_merge_unavailable`` when the merge cannot be judged, for
+  example when either commit is not available locally. Callers that refuse to
+  publish on that say so themselves.
+  """
+  def unknown(detail: str) -> ContributionSubmitError:
+    return ContributionSubmitError(
+      f"Contribute could not check whether this PR merges with upstream "
+      f"{upstream_branch}. Leave feedback so your agent can inspect it.",
+      record_patch=UpstreamMerge(upstream_branch, upstream_sha, False).record_patch,
+      code="upstream_merge_unavailable",
+      detail=readable_output(detail),
+    )
+
+  # ``merge-tree`` exits 1 both for a conflict and for a commit it cannot
+  # find, so both commits must exist before its exit code means anything.
+  for rev in (upstream_sha, branch):
+    if _git(
+      repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}",
+      check=False,
+    ).returncode != 0:
+      raise unknown(f"Commit {rev} is not available locally.")
+  # ``--no-messages`` leaves only the tree id and the conflicted-file list,
+  # whose paths git quotes by default. A repository that turns
+  # ``core.quotePath`` off can still print a path that is not UTF-8, which
+  # leaves the verdict unknown rather than crashing.
+  try:
+    merged = _git(
+      repo, "merge-tree", "--write-tree", "--no-messages", upstream_sha, branch,
+      check=False,
+    )
+  except UnicodeDecodeError:
+    raise unknown("git merge-tree printed a path that is not UTF-8.") from None
   # ``merge-tree --write-tree`` exits 0 when clean and 1 when conflicted.
   # Histories with no common ancestor cannot merge at all (git refuses them
   # fatally), which is a deterministic fact about the two commits, proven
   # structurally rather than from localized stderr. Anything else (a fatal
-  # 128, a usage error, missing objects) is an unknown merge verdict, not a
+  # 128, a usage error, unreadable objects) is an unknown merge verdict, not a
   # conflict, and never a licence to publish.
-  unrelated = merged.returncode not in (0, 1) and _git(
-    repo, "merge-base", upstream_sha, branch, check=False,
-  ).returncode == 1
-  merge = UpstreamMerge(
-    upstream_branch, upstream_sha, merged.returncode == 1 or unrelated,
+  if merged.returncode in (0, 1):
+    return UpstreamMerge(upstream_branch, upstream_sha, merged.returncode == 1)
+  if _git(repo, "merge-base", upstream_sha, branch, check=False).returncode == 1:
+    return UpstreamMerge(upstream_branch, upstream_sha, True)
+  raise unknown(
+    merged.stderr or merged.stdout or
+    f"git merge-tree exited {merged.returncode} without diagnostic output."
   )
-  if merged.returncode not in (0, 1) and not unrelated:
-    raise ContributionSubmitError(
-      f"Contribute could not check whether this PR merges with upstream "
-      f"{upstream_branch}. Nothing was published. Leave feedback so your "
-      "agent can inspect it.",
-      record_patch=merge.record_patch,
-      code="upstream_merge_unavailable",
-      detail=readable_output(
-        merged.stderr or merged.stdout or
-        f"git merge-tree exited {merged.returncode} without diagnostic output."
-      ),
-    )
-  return merge
 
 
 def _upstream_conflict_error(merge: UpstreamMerge) -> ContributionSubmitError:
@@ -875,8 +917,7 @@ def reviewed_base_is_sole_merge_base(
   bases = run("merge-base", "--all", upstream_sha, head)
   if bases.returncode not in (0, 1):
     raise ContributionSubmitError(
-      "Could not compare this PR's reviewed base with upstream. "
-      "Nothing was published.",
+      "Could not compare this PR's reviewed base with upstream.",
       code="upstream_merge_unavailable",
       detail=readable_output(bases.stderr or bases.stdout or ""),
     )
@@ -895,9 +936,8 @@ def upstream_merge_for_new_pr(
   update. The returned patch then carries ``last_submit_upstream_conflict``,
   which Send records only once the PR is open, so Contribute and agents see
   that it needs upstream merged in (GitHub runs no PR workflows while it
-  conflicts). Clean or not, a reviewed base that is no longer the sole merge
-  base refuses. Stacks and existing-PR
-  updates keep ``_assert_merges_with_upstream``.
+  conflicts). Clean or not, a reviewed base that is not the sole merge base
+  refuses. Stacks and existing-PR updates keep ``_assert_merges_with_upstream``.
   """
   merge = inspect_upstream_merge(repo, upstream_repo, branch)
   try:
@@ -905,22 +945,26 @@ def upstream_merge_for_new_pr(
       lambda *args: _git(repo, *args, check=False), merge.sha, branch, base_sha,
     )
   except ContributionSubmitError as exc:
-    raise _merge_error_patch(exc, merge.record_patch) from None
+    raise _nothing_published(exc, merge.record_patch) from None
   if not exact:
     raise _upstream_conflict_error(merge) if merge.conflicts else (
       ContributionSubmitError(
-        f"This PR's reviewed base is no longer its only merge base with "
-        f"upstream {merge.branch}, so GitHub would not show the reviewed "
-        "diff. Nothing was published. Leave feedback so your agent can "
-        "refresh the branch before it is pushed.",
+        f"This PR's reviewed base is not its only merge base with upstream "
+        f"{merge.branch}, so GitHub would not show the reviewed diff. Nothing "
+        "was published. Leave feedback so your agent can refresh the branch "
+        "before it is pushed.",
         record_patch=merge.record_patch,
         code="upstream_base_moved",
       )
     )
+  return {**merge.record_patch, **upstream_overlap_patch(merge, head_sha)}
+
+
+def upstream_overlap_patch(merge: UpstreamMerge, head_sha: str) -> dict:
+  """The ``last_submit_upstream_conflict`` a new PR opened over ``merge`` records."""
   if not merge.conflicts:
-    return merge.record_patch
+    return {}
   return {
-    **merge.record_patch,
     "last_submit_upstream_conflict": {
       "upstream_branch": merge.branch,
       "upstream_sha": merge.sha,

@@ -467,7 +467,7 @@ test('an idle Wait cancelled with an unchanged transcript still refreshes its ca
       }
     },
     runtime() {
-      return { running: false, updated_at: '2026-11-04T10:00:00', restart_observation_key: '[[],null]',
+      return { running: false, updated_at: '2026-11-04T10:00:00',
         lifecycle_projection_key: this.lifecycleKey, pending_messages: [] }
     },
   }

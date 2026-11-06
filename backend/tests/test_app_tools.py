@@ -7,10 +7,11 @@ from datetime import timedelta
 
 import pytest
 
-from app import app_tools, auth as auth_mod, models
+from app import app_tools, auth as auth_mod, models, provider_availability as pa
 from app.app_capabilities import contract_from_app_state, contract_from_manifest
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.platform_tools import codex_turn_mcp_config
+from app.timeutil import now_naive_utc
 
 
 LOG_TOOL = {
@@ -222,6 +223,7 @@ def test_call_runs_the_apps_service_with_arguments_and_moment(
       "chat_id": "chat-1", "run_id": "run-1",
       "provider": "claude", "call_id": "toolu_9",
     },
+    "limited_providers": [],
   }
   assert envelope["actor"] == {
     "scope": "owner", "app_id": None, "app_slug": None,
@@ -385,3 +387,30 @@ def test_retired_result_independent_declaration_stays_valid_without_effect(db):
   _app(db, contract=_contract([tool]))
   listed = app_tools.live_app_tools(db)[0]
   assert listed.listing()["_meta"] == {"anthropic/alwaysLoad": True}
+
+
+@pytest.mark.parametrize("access,expected", [("self", ["claude"]), ("public", None)])
+def test_only_a_service_that_may_run_provider_clis_learns_limited_providers(
+  client, auth, db, monkeypatch, access, expected,
+):
+  contract = _contract()
+  contract["service"]["access"] = access
+  _app(db, contract=contract)
+  _run(db)
+  pa.mark_provider_limited(db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit")
+  pa.mark_provider_limited(db, "codex", now_naive_utc() - timedelta(minutes=1), "usage_limit")
+  db.commit()
+  bodies = []
+
+  async def invoke(_app, _owner, envelope, **_kwargs):
+    bodies.append(envelope["body"])
+    return 200, "ok", {}, None
+
+  monkeypatch.setattr(app_tools.app_services, "invoke_service", invoke)
+  response = client.post("/api/agent/app-tools/call", headers=_agent_auth(db), json={
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "example", "limited_providers": ["forged"]},
+  })
+  assert response.status_code == 200, response.text
+  assert bodies[0].get("limited_providers") == expected
+  assert bodies[0]["arguments"]["limited_providers"] == ["forged"]

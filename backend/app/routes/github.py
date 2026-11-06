@@ -1156,7 +1156,7 @@ _REVIEW_STATUS_MESSAGES = {
     "be refreshed before it can be sent."
   ),
   "upstream_base_moved": (
-    "The branch it targets no longer has this review's base as its only merge "
+    "The branch it targets does not have this review's base as its only merge "
     "base, so GitHub would not show the reviewed diff. It has to be refreshed "
     "before it can be sent."
   ),

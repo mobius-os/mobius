@@ -785,10 +785,14 @@ def test_a_waiting_helper_blocks_goal_settlement_until_answered_or_stopped(
   _ask(client, db, row, "ask-goal")
   _settle(db, row.child_chat_id, "ask-goal")
   goal = db.get(models.ChatGoal, "goal-root")
-  assert goal_plans.active_goal_helpers(db, physical, goal) == ["task-goal"]
+
+  def working():
+    return list(goal_plans.active_goal_helpers(goal_plans.goal_helper_tree(db, physical, goal)).values())
+
+  assert working() == ["task-goal"]
   assert asyncio.run(delegations.cancel_delegation_execution(row.id)) is True
   db.expire_all()
-  assert goal_plans.active_goal_helpers(db, physical, goal) == []
+  assert working() == []
 
 
 # --- Escalation ----------------------------------------------------------------------
