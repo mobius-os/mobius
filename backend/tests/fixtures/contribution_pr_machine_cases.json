@@ -1292,6 +1292,640 @@
     "review",
     "close"
    ]
+  },
+  {
+   "name": "Approved on an older commit, and the PR’s own work is the same (your PR)",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved",
+   "next": "merge",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved on an older commit, and the PR’s own work changed (your PR)",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approval_stale",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved on an older commit, and the two versions could not be compared (your PR)",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": null
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approval_stale",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved on an older commit with the same work, but a change request still stands",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     },
+     {
+      "by": "kim",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved on an older commit with the same work, but checks fail",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "fail",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.blocked",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Approved on an older commit with the same work, but a draft",
+   "rule": "carry-over",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "draft",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.draft",
+   "next": "check_my_pr",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "open_for_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Their PR, someone else’s approval carries over, your own review is older",
+   "rule": "carry-over",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "kim",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.re_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "A change request of an older version, and the reviewer commented on this one",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.looked_again",
+   "next": "ask_approval",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "close"
+   ]
+  },
+  {
+   "name": "A change request of an older version, the reviewer commented on this one, an unreadable PR",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": false,
+    "role": "author"
+   },
+   "state": "unknown",
+   "next": "retry",
+   "enabled": [
+    "retry"
+   ]
+  },
+  {
+   "name": "A change request of an older version, and the reviewer’s comment is also of an older one",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "A change request of an older version, and someone else commented on this one",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "kim",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "A change request of an older version, and a bot commented on this one",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "qa-bot",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_rereview",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "close"
+   ]
+  },
+  {
+   "name": "A comment on this version and nothing standing",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Looked again without approving, and another approval is of an older version",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     },
+     {
+      "by": "kim",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.looked_again",
+   "next": "ask_approval",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_rereview",
+    "ask_approval",
+    "close"
+   ]
+  },
+  {
+   "name": "Looked again without approving, and the change request is also of this version",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h2",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.feedback",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "close"
+   ]
+  },
+  {
+   "name": "Looked again without approving, and the PR is closed",
+   "rule": "looked again",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "closed",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "closed",
+   "next": "",
+   "enabled": []
   }
  ]
 }

@@ -48,7 +48,7 @@ REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "pr_machine": True}
+                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -1210,15 +1210,35 @@ class PullStatusChange(PullIdentity):
   model_config = ConfigDict(extra="forbid")
 
 
+def _github_logins(value: list[str]) -> list[str]:
+  if any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) for login in value):
+    raise ValueError("Name each reviewer by their GitHub login.")
+  return list(dict.fromkeys(value))
+
+
 class ReviewerRequest(PullStatusChange):
   reviewers: list[str] = Field(min_length=1, max_length=15)
 
   @field_validator("reviewers")
   @classmethod
   def github_logins(cls, value):
-    if any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) for login in value):
-      raise ValueError("Name each reviewer by their GitHub login.")
-    return list(dict.fromkeys(value))
+    return _github_logins(value)
+
+
+class ApprovalRequest(PullStatusChange):
+  people: list[str] = Field(min_length=1, max_length=15)
+  note: str = Field(min_length=1, max_length=1000)
+
+  @field_validator("people")
+  @classmethod
+  def github_logins(cls, value):
+    return _github_logins(value)
+
+  @field_validator("note", mode="before")
+  @classmethod
+  def trimmed(cls, value):
+    # The note posted is exactly what was validated: whitespace around it is never part of the length.
+    return value.strip() if isinstance(value, str) else value
 
 
 async def _owner_status_change(app_id, name, body, db, principal):
@@ -1226,7 +1246,7 @@ async def _owner_status_change(app_id, name, body, db, principal):
 
   200 {state, observed_head_sha, repo, number, head_sha}; 409 with the plain
   reason (the machine's own words when it refuses); 404 when GitHub cannot be
-  read; 502 {code: <ready|draft|close|reviewers>_unconfirmed, message} when the
+  read; 502 {code: <ready|draft|close|reviewers|approval>_unconfirmed, message} when the
   write's outcome is unknown. See contribution_pull_status.
   """
   _require_owner_hands(principal, "Only you can change a pull request's status from here. An agent cannot press it.")
@@ -1266,6 +1286,14 @@ async def request_rereview_now(app_id: int, body: ReviewerRequest, db: Session =
                                principal: Principal = Depends(get_principal)):
   """The owner's own Ask for re-review (ask_rereview), only of people whose review is of an older version."""
   return await _owner_status_change(app_id, "request-reviewers", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/ask-approval",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def ask_approval_now(app_id: int, body: ApprovalRequest, db: Session = Depends(get_db),
+                           principal: Principal = Depends(get_principal)):
+  """The owner's own Ask for approval (ask_approval): one short note on the PR, only to people who looked again."""
+  return await _owner_status_change(app_id, "ask-approval", body, db, principal)
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",

@@ -3,8 +3,14 @@
 The app builds the same facts from its own batched GraphQL read (pr-facts.js);
 the server builds them from the REST pull request and repository it already
 reads and its GraphQL check and merge read, which also carries the writers'
-standing opinions (latestOpinionatedReviews, writers only, as in the app) and
-the connected account's own latest review.
+standing opinions (latestOpinionatedReviews, writers only, as in the app), each
+person's newest review (latestReviews, which GitHub cannot limit to writers)
+of which only the plain comments are kept: evidence that they looked, never an
+opinion, and harmless for a non-writer because the machine uses a comment only
+for someone who holds a writers-only change request. The read also carries the
+connected account's own latest review.
+An approval of an older commit is asked about once more, in read_facts: whether
+the PR's own change is the same at the head (contribution_same_work).
 A read that failed is never a guess: its fact is 'unknown' and readComplete
 is False, which the machine never lets enable anything that needs it.
 
@@ -21,6 +27,7 @@ import subprocess
 from fastapi import HTTPException
 
 from app import contribution_pr_machine as machine, contribution_review_runs as reviews
+from app import contribution_same_work as same_work
 from app.contribution_errors import ContributionSubmitError
 
 _log = logging.getLogger(__name__)
@@ -56,12 +63,30 @@ def _opinion(node: dict) -> dict:
           "commit": (node.get("commit") or {}).get("oid") or "", "bot": author.get("__typename") == "Bot"}
 
 
+def _review_nodes(checks: dict | None, field: str) -> list | None:
+  connection = checks.get(field) if isinstance(checks, dict) else None
+  nodes = connection.get("nodes") if isinstance(connection, dict) else None
+  return nodes if isinstance(nodes, list) else None
+
+
 def opinions(checks: dict | None) -> list[dict] | None:
   """Each writer's standing opinion, as GitHub keeps it; None when it was not read."""
-  nodes = ((checks or {}).get("latestOpinionatedReviews") or {}).get("nodes") if isinstance(checks, dict) else None
-  if not isinstance(nodes, list):
+  nodes = _review_nodes(checks, "latestOpinionatedReviews")
+  if nodes is None:
     return None
   return [_opinion(node) for node in nodes if isinstance(node, dict) and node.get("state")]
+
+
+def comments(checks: dict | None) -> list[dict]:
+  """Each person's newest review when it was a plain comment: proof they looked at that version.
+
+  GitHub's opinions skip comments, so a reviewer who comments after asking for
+  changes keeps their request, and this is the only place that says they came
+  back. Not reading them only leaves that unsaid, so a missing answer is no
+  comments, never a reason to call the PR unread.
+  """
+  return [_opinion(node) for node in _review_nodes(checks, "latestReviews") or []
+          if isinstance(node, dict) and node.get("state") == "COMMENTED"]
 
 
 def my_review(checks: dict | None, review_list: list[dict], login: str) -> dict | None:
@@ -134,7 +159,7 @@ def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks:
     "role": "author" if own else "reviewer", "author": _login(pull.get("user") or {}), "head": head,
     "lifecycle": lifecycle_of(pull), "checks": checks_of(checks, head),
     "mergeable": mergeable_of(checks, head), "permission": permission_of(repo),
-    "reviews": review_list or [],
+    "reviews": [*(review_list or []), *comments(checks)],
     "myReview": None if own else my_review(checks, review_list or [], actor_login),
     "openThreads": 0, "job": job, "result": None, "outbox": None,
     "readComplete": review_list is not None,
@@ -148,6 +173,38 @@ def require_allowed(facts: dict, action_id: str) -> None:
     raise HTTPException(409, blocker)
 
 
+def _base_tip(gh, cwd, target: dict, pull: dict) -> str | None:
+  """The base branch's current tip: the caller's own read when it holds one, else GitHub's answer now."""
+  if target.get("base_sha"):
+    return target["base_sha"]
+  base_ref = (pull.get("base") or {}).get("ref")
+  if not isinstance(base_ref, str):
+    return None
+  try:
+    return reviews.base_head(gh, cwd, target["repo"], base_ref)
+  except READ_FAILURES as exc:
+    _log.info("PR machine facts: base branch read failed for %s#%s (%s)",
+              target.get("repo"), target.get("number"), type(exc).__name__)
+    return None
+
+
+def _mark_carried_approvals(gh, cwd, target: dict, pull: dict, facts: dict) -> None:
+  """Prove, for an approval of an older commit, whether the PR's own change is the same (sameWork).
+
+  Costs nothing unless such an approval could decide a merge: an open PR that the
+  connected account can merge and nobody has approved at the head. A read that fails
+  leaves the approval unproved, which the machine treats as an approval of an older version.
+  """
+  review_list, head, author = facts["reviews"], facts["head"], facts["author"]
+  if facts["lifecycle"] != "open" or not machine.may_write(facts["permission"]):
+    return
+  if not same_work.carried_candidates(review_list, head, author):
+    return
+  base_sha = _base_tip(gh, cwd, target, pull)
+  if base_sha:
+    same_work.mark_carried_approvals(gh, cwd, target.get("repo"), base_sha, head, review_list, author=author)
+
+
 def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, actor_login: str = "",
                job: dict | None, checks: dict | None = None) -> dict:
   """Facts for a pull request the caller just read, adding its checks and reviews.
@@ -155,7 +212,10 @@ def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, actor
   ``target`` names it as the review machinery does (repo, number, pr_id).
   Pass ``checks`` when the caller already read them, so GitHub is asked once.
   ``actor_login`` finds the account's own standing opinion; without it only
-  its latest review counts.
+  its latest review counts. An approval of an older commit comes back marked
+  with ``sameWork`` when the PR's own change is the same at the head.
   """
   checks = checks if checks is not None else read_checks(gh, cwd, target)
-  return pr_facts(actor_id=actor_id, actor_login=actor_login, repo=repo, pull=pull, checks=checks, job=job)
+  facts = pr_facts(actor_id=actor_id, actor_login=actor_login, repo=repo, pull=pull, checks=checks, job=job)
+  _mark_carried_approvals(gh, cwd, target, pull, facts)
+  return facts

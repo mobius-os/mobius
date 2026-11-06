@@ -1,0 +1,533 @@
+{
+ "about": "Shared by same-work.js (the app) and contribution_same_work.py (the platform): two GitHub comparisons of a PR's version against the base's tip, and whether the PR's own change is the same. A file with no patch is compared by its content id (sha), a file with a patch by its added and removed lines. The 300-file limit is tested separately in each language.",
+ "version": 1,
+ "cases": [
+  {
+   "name": "Only the base moved: hunk positions and context shift, the PR's own lines are equal",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -40,3 +41,4 @@ fn\n ctx-new-after-base-change\n+const added = 1\n more-new"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "A line of the PR's own changed",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 2\n more-old"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A file the PR changes only at the head",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     },
+     {
+      "filename": "b.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n-x\n+y"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A file the PR changed only at the approved version",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     },
+     {
+      "filename": "b.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n-x\n+y"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A changed file GitHub gave no lines for (binary or too large) cannot be compared",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1
+     }
+    ]
+   },
+   "expect": null
+  },
+  {
+   "name": "A renamed file with the same lines",
+   "approved": {
+    "files": [
+     {
+      "filename": "new.js",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old",
+      "previous_filename": "old.js"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "new.js",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -40,3 +41,4 @@ fn\n ctx-new-after-base-change\n+const added = 1\n more-new",
+      "previous_filename": "old.js"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "The same lines in a file with another name",
+   "approved": {
+    "files": [
+     {
+      "filename": "new.js",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old",
+      "previous_filename": "old.js"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "other.js",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old",
+      "previous_filename": "old.js"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A renamed file with no lines (a pure rename)",
+   "approved": {
+    "files": [
+     {
+      "filename": "new.js",
+      "status": "renamed",
+      "additions": 0,
+      "deletions": 0,
+      "previous_filename": "old.js",
+      "sha": "r1"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "new.js",
+      "status": "renamed",
+      "additions": 0,
+      "deletions": 0,
+      "previous_filename": "old.js",
+      "sha": "r1"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "No change at either version",
+   "approved": {
+    "files": []
+   },
+   "head": {
+    "files": []
+   },
+   "expect": true
+  },
+  {
+   "name": "One comparison could not be read",
+   "approved": null,
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "expect": null
+  },
+  {
+   "name": "GitHub's answer carries no file list",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     }
+    ]
+   },
+   "head": {
+    "message": "Not Found"
+   },
+   "expect": null
+  },
+  {
+   "name": "A removed line that begins with dashes is still a removed line",
+   "approved": {
+    "files": [
+     {
+      "filename": "q.sql",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n--- old comment\n+-- new comment"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "q.sql",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -5 +5 @@\n--- old comment\n+-- new comment"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "A removed line that begins with dashes, changed",
+   "approved": {
+    "files": [
+     {
+      "filename": "q.sql",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n--- old comment\n+-- new comment"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "q.sql",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n--- older comment\n+-- new comment"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "The same lines in another order",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0,
+      "patch": "@@ -1 +1,2 @@\n+one\n+two"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0,
+      "patch": "@@ -1 +1,2 @@\n+two\n+one"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "The order of the file list does not matter",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -10,3 +10,4 @@ fn\n ctx-old\n+const added = 1\n more-old"
+     },
+     {
+      "filename": "b.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n-x\n+y"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "b.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -9 +9 @@\n-x\n+y"
+     },
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -40,3 +41,4 @@ fn\n ctx-new-after-base-change\n+const added = 1\n more-new"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "GitHub's no-newline marker is not a changed line",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n-x\n\\ No newline at end of file\n+y"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -1 +1 @@\n-x\n+y"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "A file added at one version and modified at the other, with the same lines",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -0,0 +1 @@\n+one"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "patch": "@@ -1 +1 @@\n+one"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A binary file with the same content id at both versions",
+   "approved": {
+    "files": [
+     {
+      "filename": "logo.png",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0,
+      "sha": "aaa"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "logo.png",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0,
+      "sha": "aaa"
+     }
+    ]
+   },
+   "expect": true
+  },
+  {
+   "name": "A binary file replaced by another between the two versions",
+   "approved": {
+    "files": [
+     {
+      "filename": "logo.png",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0,
+      "sha": "aaa"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "logo.png",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0,
+      "sha": "bbb"
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "A file with lines ignores its content id, which moves whenever the base changes other lines",
+   "approved": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "sha": "x1",
+      "patch": "@@ -1 +1 @@\n+one"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "sha": "x2",
+      "patch": "@@ -9 +9 @@\n+one"
+     }
+    ]
+   },
+   "expect": true
+  }
+ ]
+}

@@ -23,7 +23,12 @@ SPACE = {
   "reviews": [[], [{"by": "sam", "state": "APPROVED", "commit": "h2"}],
               [{"by": "sam", "state": "APPROVED", "commit": "h1"}],
               [{"by": "sam", "state": "CHANGES_REQUESTED", "commit": "h1"}],
-              [{"by": "qa-bot", "state": "APPROVED", "commit": "h2", "bot": True}]],
+              [{"by": "qa-bot", "state": "APPROVED", "commit": "h2", "bot": True}],
+              [{"by": "sam", "state": "APPROVED", "commit": "h1", "sameWork": True}],
+              [{"by": "sam", "state": "APPROVED", "commit": "h1", "sameWork": False}],
+              [{"by": "sam", "state": "CHANGES_REQUESTED", "commit": "h1"},
+               {"by": "sam", "state": "COMMENTED", "commit": "h2"}],
+              [{"by": "qa-bot", "state": "COMMENTED", "commit": "h2", "bot": True}]],
   "myReview": [None, {"state": "APPROVED", "commit": "h2"}, {"state": "CHANGES_REQUESTED", "commit": "h1"}],
   "job": [None, {"state": "running"}, {"state": "stalled"}],
   "outbox": [None, {"head": "h2", "state": "drafted"}, {"head": "h2", "state": "unconfirmed"}],
@@ -51,8 +56,8 @@ def merge_enabled(decision):
 
 
 def other_approved_this_version(facts):
-  return any(review["state"] == "APPROVED" and review["commit"] == facts["head"] and not review.get("bot")
-             and review["by"] != facts["author"] for review in facts["reviews"])
+  return any(review["state"] == "APPROVED" and (review["commit"] == facts["head"] or review.get("sameWork") is True)
+             and not review.get("bot") and review["by"] != facts["author"] for review in facts["reviews"])
 
 
 def merge_needs_approval_green_and_no_conflicts(decision, facts):
@@ -88,7 +93,7 @@ def unknown_facts_never_enable_merge(decision, facts):
 INVARIANTS = {
   "an author never gets a public review action": lambda decision, facts: decision["role"] != "author" or not any(
     item["id"] in ("draft_verdict", "review", "take_over") for item in decision["actions"]),
-  "merge needs someone else's approval of this version, green or no checks, no conflicts":
+  "merge needs someone else's approval of this version (or of the same work), green or no checks, no conflicts":
     merge_needs_approval_green_and_no_conflicts,
   "merge waits while anyone (but a bot) still asks for changes": merge_waits_for_every_change_request,
   "no agent job starts while one is running on the PR": no_second_agent_job,
@@ -128,6 +133,7 @@ def test_every_invariant_holds_across_the_whole_sweep_and_every_state_is_reachab
       if name not in broken and not holds(decision, facts):
         broken[name] = facts
   assert broken == {}
+  assert {"author.looked_again", "author.approved"} <= reached
   never_reached_here = {"merged", "closed", "needs_answer", "sending", "author.approved_no_rights"}
   assert set(machine.STATES) - reached <= never_reached_here
   action_ids = {item.id for item in machine.ACTIONS}
