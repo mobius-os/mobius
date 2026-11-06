@@ -1108,6 +1108,16 @@ def service_python_env(app, entry: Path) -> Path | None:
     raise ServiceBoundaryError("python_env_unavailable", 503, str(exc)) from exc
 
 
+def runs_provider_clis(service: dict) -> bool:
+  """Whether an accepted service may run the owner's provider CLIs.
+
+  A service reached only through an authenticated caller may (Memory's recall
+  navigator does), so it receives the same credential locations as its
+  scheduled job, and its tool calls learn which providers are out of quota.
+  """
+  return service.get("access", "self") != "public"
+
+
 def service_environment(app, owner, service: dict, *, public: bool, browser: BrowserLineage | None = None) -> dict[str, str]:
   """The environment of one invocation; its APP_TOKEN's authority follows the caller.
 
@@ -1117,10 +1127,7 @@ def service_environment(app, owner, service: dict, *, public: bool, browser: Bro
   file access: a service is owner-installed reviewed code.
   """
   allowed = {"PATH", "LANG", "LC_ALL", "TZ", "HOME"}
-  if service.get("access", "self") != "public":
-    # A service reached only through an authenticated caller may run a provider
-    # CLI (Memory's recall navigator does), so it receives the same credential
-    # locations as its scheduled job.
+  if runs_provider_clis(service):
     allowed |= {"DATA_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
   env = {key: value for key, value in os.environ.items() if key in allowed}
   settings = get_settings()
