@@ -33,7 +33,7 @@ from app.chat_writer import (
   Barrier,
   CancelPending,
   ChatWriterActor,
-  ClearPending,
+  HoldPending,
   create_chat,
   FinishRun,
   Finalize,
@@ -1761,11 +1761,9 @@ def test_reconciliation_works_independent_of_actor():
 # These commands were imported but never actually dispatched against the real
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
-def test_clear_pending_empties_queue_and_returns_count(actor):
-  """ClearPending empties pending_messages and returns the count + the cids it
-  removed (cleared_cids) — the Stop / terminal-setup-error path. cleared_cids
-  is what handleStop resends by, closing the natural-finish-races-Stop
-  double-send (PM 115)."""
+def test_hold_pending_keeps_owner_rows_queued_and_held(actor):
+  """HoldPending (Stop / terminal-setup-error) deletes no owner text: each
+  queued row stays, marked held for the owner's next send."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -1773,25 +1771,18 @@ def test_clear_pending_empties_queue_and_returns_count(actor):
       {"role": "user", "content": "q2", "ts": 11, "cid": "c-q2"},
     ],
   )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {
-    "cleared": 2, "cleared_cids": ["c-q1", "c-q2"],
-  }
+  result = _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1")))
+  assert result == {"held": 2}
   chat = _load_chat()
-  assert chat["pending_messages"] == []
+  assert [(m["cid"], m["content"], m.get("held")) for m in chat["pending_messages"]] == [
+    ("c-q1", "q1", True), ("c-q2", "q2", True),
+  ]
 
 
-def test_clear_pending_empty_queue_is_noop(actor):
-  """ClearPending on an already-empty queue returns cleared=0 / cleared_cids=[]
-  and commits nothing (the production helper skips the commit when nothing
-  changed). The empty cleared_cids is exactly the natural-finish case: the
-  turn-end drain already promoted the queued message, so Stop reports nothing
-  and handleStop resends nothing (PM 115)."""
+def test_hold_pending_empty_queue_is_noop(actor):
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 0, "cleared_cids": []}
-  chat = _load_chat()
-  assert chat["pending_messages"] == []
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1"))) == {"held": 0}
+  assert _load_chat()["pending_messages"] == []
 
 
 def test_finish_run_closes_durable_run_and_retires_assistant_owner(actor):
@@ -2037,54 +2028,99 @@ def test_persist_error_writes_error_snapshot_to_row(actor):
   )
 
 
-# -- ClearPending preserves machine-owned hidden carriers -----------------
-def test_clear_pending_preserves_hidden_carrier_clears_owner_text(actor):
-  """Stop's clear removes owner-typed queued text but leaves a hidden
-  machine carrier (e.g. a wait result parked behind an open question card)
-  queued, and never reports its cid for re-send.
-
-  This is the phantom-queued-message fix: a wait result that fired while a
-  question card was open must deliver when the owner answers the card, not
-  get re-sent as if the owner typed it the moment they hit Stop.
-  """
+# -- HoldPending leaves machine-owned hidden carriers as they were -------
+def test_hold_pending_leaves_hidden_carriers_unheld_and_drops_helper_results(actor):
+  """A hidden carrier (e.g. a wait result parked behind an open question card)
+  keeps its own delivery semantics and is never turned into held owner text;
+  a queued helper result goes with Stop as before."""
   _seed_chat(
     pending=[
-      {
-        "role": "user", "content": "owner typed this", "ts": 1,
-        "cid": "owner-1",
-      },
+      {"role": "user", "content": "owner typed this", "ts": 1, "cid": "owner-1"},
       {
         "role": "user", "content": "<wait_result>...</wait_result>",
         "ts": 2, "cid": "wait-result-abc", "hidden": True,
         "kind": "wait_result",
       },
-    ],
-  )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
-  assert result["cleared"] == 1
-  assert result["cleared_cids"] == ["owner-1"]
-  chat = _load_chat()
-  remaining = chat["pending_messages"]
-  assert [m.get("cid") for m in remaining] == ["wait-result-abc"]
-
-
-def test_clear_pending_hidden_only_queue_is_noop(actor):
-  """A queue holding only hidden carriers is a no-op clear: nothing is
-  cleared, nothing is reported, and the carriers survive untouched."""
-  _seed_chat(
-    pending=[
       {
-        "role": "user", "content": "<wait_result>...</wait_result>",
-        "ts": 1, "cid": "wait-result-xyz", "hidden": True,
-        "kind": "wait_result",
+        "role": "user", "content": "<helper result>", "ts": 3,
+        "cid": "delegation-result-1", "hidden": True, "kind": "delegation_result",
       },
     ],
   )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
-  assert result["cleared"] == 0
-  assert result["cleared_cids"] == []
+  result = _await(actor.submit(HoldPending(chat_id="c1", run_token="")))
+  assert result == {"held": 1}
+  remaining = _load_chat()["pending_messages"]
+  assert [(m["cid"], m.get("held")) for m in remaining] == [
+    ("owner-1", True), ("wait-result-abc", None),
+  ]
+
+
+def test_promote_pending_skips_held_rows_until_the_owner_releases_them(actor):
+  """No automatic promotion (turn-end drain, idle sweep, machine wake) starts
+  rows a Stop held; the queue stays exactly as it was."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"] is None
   chat = _load_chat()
-  assert [m.get("cid") for m in chat["pending_messages"]] == ["wait-result-xyz"]
+  assert [m["cid"] for m in chat["pending_messages"]] == ["a", "b"]
+  assert [m["content"] for m in chat["messages"]] == ["hi"]
+
+
+def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
+  """The owner's empty send: the held rows become the same combined turn the
+  queue would normally drain into."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(
+    chat_id="c1", run_token="rt1", release_held=True,
+  )))
+  assert result["promoted"]["content"] == "first\nsecond"
+  assert result["promoted"]["_consumed_cids"] == ["a", "b"]
+  chat = _load_chat()
+  assert chat["pending_messages"] == []
+  assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
+  assert not any("held" in m for m in chat["messages"])
+
+
+def test_an_owner_message_runs_before_the_held_queue_which_follows_it(actor):
+  """The owner's new message (appended after the held rows) runs alone; the
+  held rows are released in the same commit, so the turn-end drain then runs
+  them without merging them into the new message."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
+      {"role": "user", "content": "new", "ts": 12, "cid": "n"},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(
+    chat_id="c1", run_token="rt1", release_held=True,
+  )))
+  assert result["promoted"]["content"] == "new"
+  chat = _load_chat()
+  assert [(m["cid"], m.get("held")) for m in chat["pending_messages"]] == [
+    ("a", None), ("b", None),
+  ]
+  drained = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt2")))
+  assert drained["promoted"]["content"] == "first\nsecond"
+  messages = _load_chat()["messages"]
+  assert [m["content"] for m in messages if m.get("role") == "user"][-3:] == [
+    "new", "first", "second",
+  ]
+  timestamps = [m["ts"] for m in messages]
+  assert timestamps == sorted(timestamps), "released rows display after the new message"
 
 
 def test_provider_batch_marks_only_visible_owner_rows():

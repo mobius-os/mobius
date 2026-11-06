@@ -656,7 +656,7 @@ class ReconcileStartupChat(_Command):
 # `pending_messages` blobs: initial-send (`StartTurn`, from
 # routes/chats_stream.py), append (`AppendPending`), cancel
 # (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
-# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
+# hold / run markers (`HoldPending`, from chat.py).  The routes/queue
 # submit these instead of mutating the row directly, so every mutation is
 # serialized on the actor thread.  Each is must-persist (commit-before-ack,
 # non-coalescing) and fences any pending coalescible snapshot for its
@@ -1077,6 +1077,10 @@ class PromotePending(_Command):
   # Only the actual terminal drain may recover an unhanded Goal. Queue
   # sweeps and ordinary promotions carry no finishing-attempt authority.
   ending_run_token: str = ""
+  # The owner's send releases rows a Stop held (`HoldPending`). Unheld rows
+  # still go first, so a new message runs before the held ones; with none,
+  # the held rows themselves start the turn.
+  release_held: bool = False
 
 
 @dataclass
@@ -1120,12 +1124,12 @@ class UpdatePending(_Command):
 
 
 @dataclass
-class ClearPending(_Command):
-  """Clear owner-typed pending rows (Stop / terminal-setup-error paths).
+class HoldPending(_Command):
+  """Hold owner-typed pending rows until the owner sends (Stop and the
+  terminal-setup-error path).
 
-  Hidden machine carriers stay queued behind their owner-input barrier.
-  Commits only when an owner row was removed and returns both its count and
-  stable cids as `{"cleared", "cleared_cids"}`.
+  Hidden machine carriers keep their own delivery semantics. Returns
+  `{"held"}`, the number of owner rows now held.
   """
 
   chat_id: str = ""
@@ -1489,7 +1493,7 @@ _FENCE_COMMANDS = (
   RejectBrowserPending,
   CancelPending,
   UpdatePending,
-  ClearPending,
+  HoldPending,
   ReplaceTranscript,
   FinishRun,
   RecoverWedgedRun,
@@ -2344,8 +2348,8 @@ class ChatWriterActor:
       return self._cancel_pending(db, cmd)
     if isinstance(cmd, UpdatePending):
       return self._update_pending(db, cmd)
-    if isinstance(cmd, ClearPending):
-      return self._clear_pending(db, cmd)
+    if isinstance(cmd, HoldPending):
+      return self._hold_pending(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ConvertNextTranscript):
@@ -5382,8 +5386,15 @@ class ChatWriterActor:
     retired_control = len(runnable) + len(rejected) != len(pending)
     if retired_control or rejected_changed:
       chat.pending_messages = rejected + runnable
-    pending = runnable
-    if not pending:
+    # Rows a Stop held wait for the owner's send, which releases them all.
+    pending = [
+      {k: v for k, v in row.items() if k != "held"} if cmd.release_held else row
+      for row in runnable
+    ]
+    pool = [
+      row for row, original in zip(pending, runnable) if not original.get("held")
+    ] or (pending if cmd.release_held else [])
+    if not pool:
       settlement = self._settle_unhanded_goal(db, chat, cmd)
       if settlement is not None:
         return settlement
@@ -5395,16 +5406,17 @@ class ChatWriterActor:
       pending_message_group_key,
       product_result_run_token,
     )
-    head_group = pending_message_group_key(pending[0])
-    head_grant = pending[0].get("_browser_grant_id")
+    head_group = pending_message_group_key(pool[0])
+    head_grant = pool[0].get("_browser_grant_id")
     promote_count = 0
-    for msg in pending:
+    for msg in pool:
       if (pending_message_group_key(msg) != head_group
           or msg.get("_browser_grant_id") != head_grant):
         break
       promote_count += 1
-    promoted_group = pending[:promote_count]
-    remaining_pending = pending[promote_count:]
+    promoted_group = pool[:promote_count]
+    promoted_ids = {id(row) for row in promoted_group}
+    remaining_pending = [row for row in pending if id(row) not in promoted_ids]
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
@@ -5748,37 +5760,26 @@ class ChatWriterActor:
         raise _PersistFailed("UpdatePending did not persist")
     return {"updated": updated, "pending": next_pending}
 
-  def _clear_pending(self, db, cmd: ClearPending) -> dict:
-    """Clear owner-typed queued messages; preserve machine-owned carriers.
+  def _hold_pending(self, db, cmd: HoldPending) -> dict:
+    """Hold owner-typed queued messages; preserve machine-owned carriers.
 
-    Commits only when something was actually removed — clearing an
-    already-empty (or hidden-only) queue is a no-op and skips the commit.
-    `cleared_cids` is the stable `cid` of every message actually removed
-    (empty when nothing owner-typed was queued), which is how Stop tells apart
-    a message it truly cleared from one the turn-end drain already promoted
-    into a continuation — see stop_chat_for and the natural-finish-races-Stop
-    guard in ChatView.handleStop.
+    A held row stays queued and visible but is never promoted by itself: only
+    the owner's next send releases it (`PromotePending.release_held`). So a
+    Stop neither loses what the owner queued nor starts it behind their back.
 
     A ``hidden`` queued row is never owner speech: it is usually a machine-owned
     carrier (wait/activation result, a peer-message wake, or a secure-input
-    answer continuation) parked behind the owner-input barrier, each with its
-    own idempotent delivery latch. The Stop "collapse queued text into one
-    fresh follow-up turn" contract — and the terminal setup-error cleanup that
-    shares this command — must leave those carriers queued so they deliver at
-    their legitimate boundary (the owner answering the open card), and must
-    never report their cids for re-send. Re-sending one as owner text was the
-    phantom-queued-message bug: a wait result that fired while a question card
-    was open got re-sent as if the owner typed it the moment they hit Stop.
-
-    A queued helper-result carrier is the exception: it only transports a
-    result its Delegation row still owes. Stop drops it silently, so stopped
-    work stays quiet and the owner's next turn carries the result instead.
+    answer continuation) with its own idempotent delivery latch, and keeps its
+    own delivery semantics here. Two kinds go with a Stop: a queued helper-result
+    carrier only transports a result its Delegation row still owes, so stopped
+    work stays quiet and the owner's next turn carries the result instead, and
+    a retired Goal control is never runnable.
     """
     from app.models import Chat
 
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is None:
-      raise _PersistFailed("ClearPending: chat not found")
+      raise _PersistFailed("HoldPending: chat not found")
     pending = list(chat.pending_messages or [])
     from app.continuations import (
       DELEGATION_RESULT_MESSAGE_KIND,
@@ -5786,30 +5787,24 @@ class ChatWriterActor:
       is_retired_goal_handoff,
     )
 
-    def preserved_carrier(message: object) -> bool:
-      if isinstance(message, dict) and helper_answer_question_id(message):
-        return True
-      return bool(
-        isinstance(message, dict)
-        and message.get("hidden")
-        and message.get("kind") != DELEGATION_RESULT_MESSAGE_KIND
-        and not is_retired_goal_handoff(message)
-      )
-
-    preserved = [m for m in pending if preserved_carrier(m)]
-    removed = [m for m in pending if not preserved_carrier(m)]
-    # A retired Goal control goes with Stop but is never owner text to re-send.
-    cleared_cids = [
-      cid_of(m) for m in removed
-      if not (isinstance(m, dict) and m.get("hidden"))
-      and cid_of(m) is not None
-    ]
-    cleared = len(removed)
-    if cleared:
-      chat.pending_messages = preserved
+    kept = []
+    for message in pending:
+      if not isinstance(message, dict):
+        continue
+      if helper_answer_question_id(message):
+        kept.append(message)
+      elif message.get("hidden"):
+        if (message.get("kind") != DELEGATION_RESULT_MESSAGE_KIND
+            and not is_retired_goal_handoff(message)):
+          kept.append(message)
+      else:
+        kept.append({**message, "held": True})
+    held = sum(1 for message in kept if message.get("held"))
+    if kept != pending:
+      chat.pending_messages = kept
       if not _commit_or_rollback(db):
-        raise _PersistFailed("ClearPending did not persist")
-    return {"cleared": cleared, "cleared_cids": cleared_cids}
+        raise _PersistFailed("HoldPending did not persist")
+    return {"held": held}
 
   def _convert_transcript(self, db, chat_id: str) -> bool:
     """Convert one chat for the background run; a failure leaves the legacy

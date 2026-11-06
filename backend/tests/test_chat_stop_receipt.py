@@ -5,7 +5,7 @@ addressed. Reading status after the response can observe a successor (an
 owner resume, a Wait firing, a helper result); releasing that successor would
 let the app start duplicate work. The receipt is therefore fixed at the
 writer's Stop boundary, inside the per-chat transition lock, and only a Stop
-that ended the run and cleared the queue issues one. It certifies only that
+that ended the run and held the queue issues one. It certifies only that
 run: any later work runs under a different run id.
 """
 from datetime import UTC, datetime, timedelta
@@ -80,7 +80,7 @@ def test_receipt_keeps_the_revoked_run_when_the_owner_resumes_before_the_respons
   assert response.status_code == 200, response.text
   body = response.json()
   assert body["stopped"] is True
-  assert body["cleared_pending_cids"] == ["queued-cid"]
+  assert body["cleared_pending_cids"] == []
   assert body["cancelled_delegations"] == []
   assert body["stop_receipt"] == {"chat_id": chat.id, "run_id": "stopped-run"}
   # Status now names the successor: binding Cancel to it would release it.
@@ -171,11 +171,11 @@ def test_unconfirmed_stop_issues_no_receipt_and_keeps_the_run(
   assert run.status == "running"
 
 
-def test_stop_during_a_restart_drain_keeps_the_queue_and_issues_no_receipt(
+def test_stop_during_a_restart_drain_holds_the_queue_and_issues_a_receipt(
   client, auth, db, chat, monkeypatch,
 ):
-  """The drain keeps queued turns so they run after the restart; a receipt
-  would certify a revocation that has not happened."""
+  """Holding deletes nothing, so a Stop inside the drain holds the queue like
+  any other Stop: it survives the restart and runs only when the owner sends."""
   from app import chat as runtime
   seed_run(db, chat, "drained-run", status="running")
   chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid"}]
@@ -188,9 +188,11 @@ def test_stop_during_a_restart_drain_keeps_the_queue_and_issues_no_receipt(
   body = response.json()
   assert body["stopped"] is True
   assert body["cleared_pending_cids"] == []
-  assert body["stop_receipt"] is None
+  assert body["stop_receipt"] == {"chat_id": chat.id, "run_id": "drained-run"}
   db.expire_all()
-  assert [row["cid"] for row in db.get(models.Chat, chat.id).pending_messages] == ["queued-cid"]
+  assert [(row["cid"], row.get("held")) for row in db.get(models.Chat, chat.id).pending_messages] == [
+    ("queued-cid", True),
+  ]
 
 
 def test_global_stop_sweep_issues_no_per_chat_receipt(client, auth, db, chat):
@@ -259,20 +261,20 @@ def test_resume_contending_for_the_stop_gate_is_admitted_after_the_receipt(
   assert db.get(models.ChatRun, "resumed-run").status == "running"
 
 
-def test_failed_queue_clear_issues_no_receipt_and_keeps_the_queue(
+def test_failed_queue_hold_issues_no_receipt_and_keeps_the_queue(
   client, auth, db, chat, monkeypatch,
 ):
-  """A receipt promises no queued turn can still run; a clear the writer
-  failed to persist leaves them queued, so Stop must not issue one."""
+  """A receipt promises no queued turn starts by itself; a hold the writer
+  failed to persist leaves them runnable, so Stop must not issue one."""
   from app.chat_writer import ChatWriterActor
   seed_run(db, chat, "stopped-run", status="running")
   chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid"}]
   db.commit()
 
-  def clear_fails(self, db, cmd):
+  def hold_fails(self, db, cmd):
     raise RuntimeError("database is locked")
 
-  monkeypatch.setattr(ChatWriterActor, "_clear_pending", clear_fails)
+  monkeypatch.setattr(ChatWriterActor, "_hold_pending", hold_fails)
 
   response = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
 

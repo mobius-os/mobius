@@ -438,16 +438,16 @@ def test_owner_stop_of_a_queued_first_turn_never_lets_a_replay_admit_it_again(
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert stop.status_code == 200, stop.text
-  assert stop.json()["cleared_pending_cids"] == ["first-cid"]
   assert stop.json()["stop_receipt"] == {"chat_id": chat_id, "run_id": None}
-  assert _pending_cids(db, chat_id) == []
+  # Stop holds the queued first turn for the owner; it is never a second one.
+  assert _pending_cids(db, chat_id) == ["first-cid"]
   chat_queue.reset_for_tests()  # A restart forgets every in-memory lock.
 
   replay = _start(client, token, "cycle:queued-stop", cid="replay-cid")
   cancelled = _cancel(client, token, "cycle:queued-stop")
 
   assert replay.json() == {"chat_id": chat_id, "outcome": "reused", "response": None}
-  assert _pending_cids(db, chat_id) == []
+  assert _pending_cids(db, chat_id) == ["first-cid"]
   assert cancelled.json() == {
     "scope": "cycle:queued-stop", "outcome": "started", "chat_id": chat_id,
   }
@@ -537,12 +537,13 @@ def test_process_death_after_acceptance_before_the_route_returns_never_admits_tw
 
   owner = {"Authorization": f"Bearer {owner_token}"}
   if owner_action == "stop":
-    cleared = client.post("/api/chat/stop", json={"chat_id": chat_id}, headers=owner)
-    assert cleared.json()["cleared_pending_cids"] == ["first-cid"]
+    acted = client.post("/api/chat/stop", json={"chat_id": chat_id}, headers=owner)
+    remaining = ["first-cid"]  # held for the owner's next send
   else:
-    cleared = client.delete(f"/api/chats/{chat_id}/pending/first-cid", headers=owner)
-    assert cleared.status_code < 300, cleared.text
-  assert _pending_cids(db, chat_id) == []
+    acted = client.delete(f"/api/chats/{chat_id}/pending/first-cid", headers=owner)
+    remaining = []
+  assert acted.status_code < 300, acted.text
+  assert _pending_cids(db, chat_id) == remaining
   chat_queue.reset_for_tests()
 
   replay = _start(client, token, "cycle:crash-accepted", cid="replay-cid")
@@ -550,7 +551,7 @@ def test_process_death_after_acceptance_before_the_route_returns_never_admits_tw
 
   assert replay.json() == {"chat_id": chat_id, "outcome": "reused", "response": None}
   assert cancelled.json()["outcome"] == "started"
-  assert _pending_cids(db, chat_id) == []
+  assert _pending_cids(db, chat_id) == remaining
   assert [chat.id for chat in _app_chats(db, app_id)] == [chat_id]
 
 

@@ -80,13 +80,16 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 log = logging.getLogger(__name__)
 
 
-async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
+async def start_queued_owner_continuation(
+  chat_id: str, db: Session, *, release_held: bool = False,
+) -> dict | None:
   """Start an already-committed owner response through the ordinary queue.
 
   Caller holds the queue lock (saved input also holds the transition gate).
   A still-finishing publishing turn
   owns its terminal drain; otherwise this is the one immediate admission path
-  shared by saved questions and sealed consumer outcomes.
+  shared by saved questions, sealed consumer outcomes and the owner's empty
+  send (`release_held`).
   """
   if is_chat_running(chat_id):
     return None
@@ -99,9 +102,11 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
   try:
     drain_token = alloc_run_token()
     messages, next_user, session_id = await chat_queue.promote_pending_messages_locked(
-      db, chat_id, drain_token,
+      db, chat_id, drain_token, release_held=release_held,
     )
     if not next_user:
+      if release_held:
+        raise HTTPException(409, detail="Nothing is queued to send.")
       raise HTTPException(503, detail="Could not resume the question; please try again.")
     get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
     _schedule_continuation(
@@ -112,6 +117,29 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
   except Exception:
     discard_starting(chat_id)
     raise
+
+
+async def _send_queue(chat_id: str, db: Session, principal: Principal):
+  """The owner's empty send: start the next turn from the queued messages.
+
+  After a Stop holds the queue, nothing runs it until the owner sends; an
+  empty send releases it into the same combined turn it would normally drain
+  into. A retry that finds the turn already running is acknowledged as a
+  duplicate rather than starting another.
+  """
+  if not is_owner_input_principal(principal):
+    raise HTTPException(403, detail="Only the owner can send queued messages.")
+  if is_chat_running(chat_id):
+    return JSONResponse(content={"status": "duplicate", "running": True})
+  if is_draining():
+    raise HTTPException(409, detail="Möbius is restarting. Send again when it reconnects.")
+  try:
+    started = await start_queued_owner_continuation(chat_id, db, release_held=True)
+  except chat_queue.PendingAdmissionBlocksPromotion as exc:
+    if exc.reason == "activation":
+      raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
+    raise _pending_question_open_conflict()
+  return JSONResponse(status_code=202, content={"status": "started", "message": started})
 
 
 def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
@@ -1427,6 +1455,8 @@ async def _send_message_locked(
     chat, provider=next_execution_provider,
   ) is None:
     raise _model_selection_required_conflict()
+  if body.continuation == "queue":
+    return await _send_queue(chat_id, db, principal)
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,
@@ -1689,11 +1719,14 @@ async def _send_message_locked(
           # The drained turn gets its own run_token: PromotePending sets
           # its run marker under it, and the spawned runner reuses it.
           drain_token = alloc_run_token()
+          # An owner's send releases a queue a Stop held; its own message
+          # runs first and the held ones follow at the turn's end.
           next_messages, next_user, next_session_id = (
             await chat_queue.promote_pending_messages_locked(
               db,
               chat_id,
               drain_token,
+              release_held=is_owner_input_principal(principal),
             )
           )
           if next_user:

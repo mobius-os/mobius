@@ -290,9 +290,9 @@ def test_drain_finalizes_running_tool_before_clearing_reconcile_marker():
   assert state["running_status"] is None
 
 
-# -- (a) DrainForRestart preserves the queue; stop_chat_for clears it ---------
+# -- (a) DrainForRestart preserves the queue; stop_chat_for holds it ----------
 
-def test_drain_preserves_pending_while_stop_clears_it():
+def test_drain_preserves_pending_while_stop_holds_it():
   queued = [{"role": "user", "content": "queued", "ts": 2}]
   _live_turn("drain-keep", pending=list(queued))
   _live_turn("stop-clear", pending=list(queued))
@@ -306,9 +306,8 @@ def test_drain_preserves_pending_while_stop_clears_it():
   assert _run("drain-keep")["status"] == "parked"
   assert _run("drain-keep")["park_reason"] == "restart"
 
-  # Stop: queue collapsed (frontend resends; backend clears). The drain above
-  # left the process-wide gate set (in production only the restart ends it), so
-  # reset it here — Stop-during-drain deliberately preserves the queue, and
+  # Stop: the queue stays, held for the owner's next send. The drain above
+  # left the process-wide gate set (in production only the restart ends it);
   # this half of the contrast is about a NORMAL worker's Stop.
   chat_mod.draining = False
   db = SessionLocal()
@@ -317,7 +316,7 @@ def test_drain_preserves_pending_while_stop_clears_it():
   finally:
     db.close()
   _drain_writer()
-  assert _chat("stop-clear")["pending"] == []
+  assert _chat("stop-clear")["pending"] == [{**queued[0], "held": True}]
 
 
 def test_drain_does_not_promote_the_queue():
@@ -1009,11 +1008,9 @@ def test_force_steer_while_draining_queues_too(client, auth):
 
 
 def test_stop_during_drain_preserves_pending():
-  """A Stop landing inside the drain window must not clear the queue: the
-  worker is about to die, so handing the cleared messages to the frontend to
-  re-send races the SIGTERM and can lose them. With the drain gate up, Stop
-  still interrupts but reports an empty cleared list (the PM-115 contract:
-  the frontend re-sends only what the backend confirms it cleared)."""
+  """A Stop landing inside the drain window keeps the queue: holding deletes
+  nothing and nothing is resent, so the queued text survives the restart and
+  waits for the owner's next send."""
   queued = [{"role": "user", "content": "queued", "ts": 2}]
   _live_turn("stop-in-drain", pending=list(queued))
 
@@ -1021,15 +1018,14 @@ def test_stop_during_drain_preserves_pending():
   try:
     db = SessionLocal()
     try:
-      _, cleared = asyncio.run(chat_mod.stop_chat_for("stop-in-drain", db=db))
+      asyncio.run(chat_mod.stop_chat_for("stop-in-drain", db=db))
     finally:
       db.close()
   finally:
     chat_mod.draining = False
   _drain_writer()
 
-  assert cleared == []
-  assert _chat("stop-in-drain")["pending"] == queued
+  assert _chat("stop-in-drain")["pending"] == [{**queued[0], "held": True}]
 
 
 def test_wedged_sweep_stands_down_while_draining():

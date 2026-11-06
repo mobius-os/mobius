@@ -567,8 +567,8 @@ def test_a_legacy_goal_handoff_behind_owner_input_never_runs(db, chat):
   )
 
 
-def test_stop_retires_a_legacy_goal_handoff_without_resending_it(db, chat):
-  from app.chat_writer import ClearPending
+def test_stop_retires_a_legacy_goal_handoff_and_holds_owner_text(db, chat):
+  from app.chat_writer import HoldPending
 
   wait_result = {
     "role": "user", "content": "A wait you declared has completed.",
@@ -581,13 +581,16 @@ def test_stop_retires_a_legacy_goal_handoff_without_resending_it(db, chat):
   ]
   db.commit()
 
-  cleared = get_writer().submit(ClearPending(
+  held = get_writer().submit(HoldPending(
     chat_id=chat.id, run_token="",
   )).result(timeout=5)
 
-  assert cleared == {"cleared": 2, "cleared_cids": ["owner-1"]}
+  assert held == {"held": 1}
   db.expire_all()
-  assert db.get(models.Chat, chat.id).pending_messages == [wait_result]
+  assert db.get(models.Chat, chat.id).pending_messages == [
+    {"role": "user", "content": "Owner text", "cid": "owner-1", "ts": 4, "held": True},
+    wait_result,
+  ]
 
 
 def test_successor_goal_gets_its_own_settlement_after_prior_goal_settled_in_same_turn(db, chat):

@@ -970,11 +970,11 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   )
 
 
-# -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
+# -- 7. unsupported runtime cleanup: marker cleared, pending held --------
 @pytest.mark.parametrize("superseded", [None, "before_close", "during_close"])
-def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, superseded):
+def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatch, superseded):
   """An unsupported provider hits the setup-error terminal cleanup: the
-  pending queue is cleared durably, the marker is cleared before the
+  pending queue is held durably, the marker is cleared before the
   registry release, and no continuation is scheduled."""
   _seed_owner_and_creds()
   _seed_chat(
@@ -1056,7 +1056,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, sup
     "browser cleanup must hold the lifecycle gate before terminal ownership is released"
   )
   assert state["running"] is False, "unsupported cleanup must clear marker"
-  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}], "pending is held for the owner"
   assert state["messages"][-1]["blocks"] == [{
     "type": "error",
     "message": "Provider 'Bogus' has no supported runtime.",
@@ -1363,10 +1363,10 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   assert "done" in published
 
 
-# -- 11. no-owner setup cleanup: marker cleared, pending dropped ------------
+# -- 11. no-owner setup cleanup: marker cleared, pending held ---------------
 def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   """The no-owner setup-error early return routes through the bounded
-  terminal cleanup: the pending queue is cleared durably, the marker is
+  terminal cleanup: the pending queue is held durably, the marker is
   cleared, the registry is released, and no continuation is scheduled."""
   # Seed creds but NO owner so run_chat bails at the no-owner guard (which
   # is checked before the auth guard).
@@ -1400,7 +1400,9 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert scheduled == []
   state = _load("t11")
   assert state["running"] is False, "no-owner cleanup must clear the marker"
-  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}], (
+    "pending is held for the owner"
+  )
   assert not chat_mod.registry.is_alive("t11"), "registry released"
 
 
@@ -1660,7 +1662,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   assert "text" not in published
   state = _load("t12-auth-error")
   assert state["running"] is False
-  assert state["pending_messages"] == []
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}]
   assert state["messages"][-1]["blocks"]
   assert state["messages"][-1]["blocks"][-1]["type"] == "error"
   assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
@@ -1713,8 +1715,8 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
 
 
 def test_setup_error_cleanup_owned_gen_clears_and_forgets():
-  """When this run still owns the generation, the cleanup clears the pending
-  queue + the marker and forgets the chat (EMPTY_TERMINAL_CLEARED) — the gate
+  """When this run still owns the generation, the cleanup holds the pending
+  queue, clears the marker and forgets the chat (EMPTY_TERMINAL_CLEARED) — the gate
   is transparent on the common, uncontended path."""
   _seed_chat(
     "se-own",
@@ -1736,7 +1738,9 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
   state = _load("se-own")
   assert state["running"] is False, "owned cleanup clears the marker"
-  assert state["pending_messages"] == [], "owned cleanup clears pending"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 2, "held": True}], (
+    "owned cleanup holds pending for the owner"
+  )
   assert state["messages"][-1]["blocks"] == [
     {"type": "error", "message": "setup failed"}
   ], "owned cleanup persists the setup error before clearing the marker"

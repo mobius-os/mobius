@@ -4100,9 +4100,11 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
       db.get(models.Chat, chat_id).pending_question_id = "resolver-owner-question"
     db.commit()
   if running_check == "queued_owner":
-    from app.chat_writer import AppendPending, ClearPending, get_writer
+    from app.chat_writer import AppendPending, CancelPending, get_writer
     get_writer().submit(AppendPending(
-      chat_id=chat_id, user_msg={"role": "user", "content": "Please continue", "ts": 1},
+      chat_id=chat_id, user_msg={
+        "role": "user", "content": "Please continue", "ts": 1, "cid": "queued-owner",
+      },
     )).result(timeout=5)
   monkeypatch.setattr(
     "app.questions.is_waiting",
@@ -4163,7 +4165,7 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
 
   running = False
   if running_check == "queued_owner":
-    get_writer().submit(ClearPending(chat_id=chat_id)).result(timeout=5)
+    get_writer().submit(CancelPending(chat_id=chat_id, cid="queued-owner")).result(timeout=5)
   with SessionLocal() as db:
     db.query(models.ChatRun).filter_by(chat_id=chat_id).one().status = "completed"
     db.get(models.Chat, chat_id).pending_question_id = None

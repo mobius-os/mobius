@@ -730,8 +730,6 @@ class ChatRequest(BaseModel):
 
 class ChatStopRequest(BaseModel):
   chat_id: str = ""
-  # Stable across a client's retries of one Stop; see chat.stop_chat_for.
-  request_id: str = Field(default="", max_length=128)
 
 
 # One effort vocabulary for owner and app-attributed chat configuration.
@@ -924,8 +922,9 @@ class SendMessage(BaseModel):
   # The shell's one-tap Resume is a product action, not owner-authored prose.
   # The provider still needs a short prompt to open a new turn after the old
   # process has gone away, but persistence/rendering attribute that prompt as
-  # a continuation marker rather than a user bubble.
-  continuation: Literal["manual"] | None = None
+  # a continuation marker rather than a user bubble. "queue" is an empty send:
+  # it starts the next turn from the queued messages a Stop held.
+  continuation: Literal["manual", "queue"] | None = None
   # (app_id, scope) when POST /api/app-chats/start sends this first turn. A
   # private attribute, so request JSON can never set it; the send carries it
   # onto the writer command that accepts the message (app_chat_scopes).
@@ -949,6 +948,8 @@ class SendMessage(BaseModel):
       and self.content.strip().lower() != "continue"
     ):
       raise ValueError("manual continuation does not accept message content")
+    if self.continuation == "queue" and (self.content.strip() or self.attachments):
+      raise ValueError("sending the queue does not accept message content")
     return self
 
 
