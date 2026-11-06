@@ -470,7 +470,7 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
   .settings-subhead { gap: 12px; margin-bottom: 22px; }
   .settings-subhead__mark { width: 36px; height: 36px; }
   .settings-subhead__title { font-size: 20px; }
-  .settings-meter--compact { width: 72px; }
+  .settings-meter--compact { width: 80px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
