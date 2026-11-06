@@ -29,7 +29,8 @@ router = APIRouter(prefix="/api/chats", tags=["owner-approvals"])
 
 # The turn's closing message travels with the card that ends the turn, so it
 # reaches the owner as reliably as the card itself. It is not card identity:
-# an identical retry with reworded prose addresses the same saved card.
+# an identical retry with reworded prose addresses the same saved card, and the
+# first saved message is kept, so a retry can never revise what the owner read.
 CLOSING_MESSAGE_MAX_CHARS = 20_000
 ClosingMessage = Annotated[str | None, Field(max_length=CLOSING_MESSAGE_MAX_CHARS)]
 

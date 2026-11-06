@@ -39,6 +39,19 @@ def test_redact_keeps_a_cards_closing_message_but_not_its_prompts():
   }
 
 
+def test_redact_scrubs_a_secret_shaped_value_in_a_cards_closing_message():
+  key = "sk-ant-api03-ABCDEFGHIJKLMNOP"
+  out = r.redact_message({
+    "role": "assistant",
+    "content": f"Saved the key {key}.",
+    "blocks": [{"type": "question", "message": f"Saved the key {key}.",
+                "questions": [{"question": "Use it?"}]}],
+  })
+  assert out["role"] == "assistant"
+  assert "Saved the key" in out["text"]
+  assert "sk-ant-" not in out["text"]
+
+
 def test_redact_separates_distinct_assistant_text_blocks():
   msg = {
     "role": "assistant",

@@ -10,14 +10,22 @@ import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mj
 globalThis.location = { origin: 'http://localhost' }
 globalThis.window = { location: globalThis.location, innerHeight: 800 }
 
+// Node has no DOM for DOMPurify, so this double records every value the
+// renderer hands it and passes it through unchanged. The hostile-input test
+// below therefore proves the renderer's own guards (raw HTML dropped, link
+// protocol allowlist) and that each href still reaches the sanitizer; it does
+// not re-test DOMPurify's own parsing.
 const vite = await createSsrRenderServer({
   noExternal: ['dompurify'],
   plugins: [{
-    name: 'dompurify-ssr-stub', enforce: 'pre',
-    resolveId: id => id === 'dompurify' ? '\0dompurify-stub' : null,
-    load: id => id === '\0dompurify-stub' ? 'export default { sanitize: value => String(value) }' : null,
+    name: 'dompurify-ssr-recorder', enforce: 'pre',
+    resolveId: id => id === 'dompurify' ? '\0dompurify-recorder' : null,
+    load: id => id === '\0dompurify-recorder'
+      ? 'export const sanitized = []; export default { sanitize: value => { sanitized.push(String(value)); return String(value) } }'
+      : null,
   }],
 })
+const { sanitized } = await vite.ssrLoadModule('\0dompurify-recorder')
 after(() => vite.close())
 const { default: MsgContent } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
 const { renderedBlockEntries, upsertQuestionItem } = await vite.ssrLoadModule(
@@ -84,4 +92,34 @@ test('the live surface keeps the message and owns it while it shows the card', (
 
 test('Copy reads the closing message as the reply answer', () => {
   assert.equal(replyOutcome([message]).answer, card.message)
+})
+
+test('a hostile closing message gets the same guards as any reply prose', () => {
+  sanitized.length = 0
+  const hostile = {
+    ...message,
+    blocks: [{
+      ...card,
+      question_id: 'card-hostile',
+      message: [
+        'Before <img src=x onerror="alert(1)"> after.',
+        '',
+        '<script>alert(2)</script>',
+        '',
+        '[run](javascript:alert(3)) [data](data:text/html,<b>x</b>) [docs](https://example.com/docs)',
+        '',
+        '![pixel](javascript:alert(4))',
+      ].join('\n'),
+    }],
+  }
+  const html = render(hostile, { liveQuestionId: 'card-hostile' })
+  assert.doesNotMatch(html, /<script|onerror|<img src="x"/i)
+  assert.doesNotMatch(html, /href="(?:javascript|data):/i)
+  assert.doesNotMatch(html, /src="javascript:/i)
+  assert.match(html, /href="https:\/\/example\.com\/docs"/)
+  assert.ok(html.indexOf('Before') < html.indexOf('Ship it today?'))
+  // Every link and image target went through the sanitizer.
+  for (const target of ['javascript:alert(3)', 'https://example.com/docs', 'javascript:alert(4)']) {
+    assert.ok(sanitized.includes(target), target)
+  }
 })
