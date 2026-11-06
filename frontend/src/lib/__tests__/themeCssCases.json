@@ -521,5 +521,13 @@
     "ownerWhenConditionsMatch": {},
     "bg": "#1a1a2e",
     "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n/* :root { --bg: #ffffff; } */\nhtml { --bg: #1a1a2e; }\n"
+  },
+  {
+    "name": "mode-keyed backgrounds follow data-theme",
+    "css": ":root[data-theme=\"dark\"] { --bg: #000000; }\n:root[data-theme=\"light\"] { --bg: #ffffff; }\n",
+    "owner": {},
+    "ownerWhenConditionsMatch": {},
+    "bg": "#000000",
+    "expected": "@layer mobius-defaults;\n/* Möbius: injected defaults for variables the theme omitted */\n@layer mobius-defaults {\n:where(:root) {\n  --accent: #8b6cf7;\n  --accent-dim: rgba(139, 108, 247, 0.14);\n  --accent-fg: #ffffff;\n  --accent-fill: #7c5ce6;\n  --accent-fill-hover: #7053cf;\n  --accent-hover: #7c5ce6;\n  --accent-text: #957cf8;\n  --bg: #0d0d0d;\n  --border: #2a2a2a;\n  --border-light: #1f1f1f;\n  --danger: #f87171;\n  --danger-fill: #dc2626;\n  --danger-text: #f87171;\n  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;\n  --green: #10b981;\n  --green-fill: #047857;\n  --green-text: #10b981;\n  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;\n  --muted: #a8a8a8;\n  --surface: #171717;\n  --surface-2: #212121;\n  --text: #ececec;\n  --warning: #d8922f;\n  --warning-text: #d8922f;\n}\n}\n:root[data-theme=\"dark\"] { --bg: #000000; }\n:root[data-theme=\"light\"] { --bg: #ffffff; }\n"
   }
 ]
