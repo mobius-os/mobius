@@ -72,7 +72,7 @@ test('an open queued message can be saved while a question waits or the draft up
 test('a held queue is sent from its tray while the empty composer keeps the mic', () => {
   const sendHeld = /<button[^>]*aria-label="Send queued messages"[^>]*>/
   const html = renderToStaticMarkup(createElement(QueuedMessages, {
-    items: items.map(row => ({ ...row, held: true })), held: true, onSendHeld() {},
+    items: items.map(row => ({ ...row, held: true })), onSendHeld() {},
   }))
   assert.match(html, sendHeld)
   assert.match(html, /Waiting for you — sends when you send/)
@@ -84,7 +84,7 @@ test('a held queue is sent from its tray while the empty composer keeps the mic'
 
 test('held rows never claim to send after a running turn', () => {
   const html = renderToStaticMarkup(createElement(QueuedMessages, {
-    items: items.map(row => ({ ...row, held: true })), held: true, turnActive: true,
+    items: items.map(row => ({ ...row, held: true })), turnActive: true,
   }))
   assert.match(html, /Waiting for you — sends when you send/)
   assert.doesNotMatch(html, /after the current turn/)
@@ -171,4 +171,11 @@ test('a queued message without files shows no file label', async () => {
     renderToStaticMarkup(createElement(QueuedMessages, { items })),
     /queued__files/,
   )
+})
+
+test('a message queued during a turn is not captioned as waiting for the owner', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: [{ ...items[0], held: true }, items[1]], turnActive: true,
+  }))
+  assert.match(html, /1 waiting for you; the rest send after this turn/)
 })

@@ -38,7 +38,7 @@ import {
 export default function QueuedMessages({
   items, onCancel, onEditInComposer, inComposerCid = null, onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
-  restarting = false, held = false, onSendHeld,
+  restarting = false, onSendHeld,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -48,7 +48,10 @@ export default function QueuedMessages({
 
   // The caption states the real reason these are waiting (see queuedHint).
   const rejectedCount = items.filter(msg => msg.recoveryAvailable).length
-  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({ turnActive, online, restarting, held })
+  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({
+    turnActive, online, restarting,
+    held: items.filter(msg => msg.held).length, total: items.length,
+  })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
   // derivation for pre-cid rows). cid is minted once at compose time and

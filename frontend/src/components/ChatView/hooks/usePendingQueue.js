@@ -77,12 +77,15 @@ import { cidOf } from '../messageIdentity.js'
  * }}
  */
 
-// Mirrors the server: starting the owner's own typed message releases the
-// rows a Stop held, so they follow it (continuations.is_owner_typed). An app's
-// or a browser guest's row, or a hidden carrier, leaves them held.
-function _releasesHolds(row) {
+// Mirrors the server: starting a message with positive owner proof releases
+// the rows a Stop held, so they follow it (continuations.releases_holds). The
+// server stamps that proof (`_owner_input_at`) on the owner's send; a row this
+// device just typed is the owner's own send too. An app's, a guest's or an
+// agent's row, or a hidden carrier, leaves them held.
+function _releasesHolds(row, typedHere) {
   return !!row && !row.hidden && !row.held
     && row._initiated_by_app_id == null && row._browser_grant_id == null
+    && (row._owner_input_at != null || typedHere)
 }
 
 function _fromServerList(serverList) {
@@ -330,7 +333,8 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const promotedGroup = current.filter(m => wanted.has(cidOf(m)))
     if (promotedGroup.length === 0) return null
     const remaining = current.filter(m => !wanted.has(cidOf(m)))
-    const kept = promotedGroup.some(_releasesHolds)
+    const typedHere = m => inFlightCidsRef.current.has(m.cid) || localMessageCidsRef.current.has(m.cid)
+    const kept = promotedGroup.some(m => _releasesHolds(m, typedHere(m)))
       ? remaining.map(m => (m.held ? { ...m, held: false } : m))
       : remaining
     for (const m of promotedGroup) {
@@ -447,7 +451,9 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const next = [...reconciled, ...preservedInFlight, ...preservedMissing]
     pendingMessagesRef.current = next
     setPendingMessages(next)
-    const nextCidSet = new Set(next.map(m => cidOf(m)))
+    // A held row is in flight to no turn (a Stop ended the steer it was
+    // reserved for), so it shows in the tray again.
+    const nextCidSet = new Set(next.filter(m => !m.held).map(m => cidOf(m)))
     applySteerReservations(prev => {
       const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
       return kept.size === prev.size ? prev : kept

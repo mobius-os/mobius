@@ -891,7 +891,7 @@ test('starting the owner\'s own message releases the held rows locally, as the s
     fixtureMsg({ cid: 'held-a', ts: 1, held: true }),
     fixtureMsg({ cid: 'held-b', ts: 2, held: true }),
   ])
-  result.current.add(fixtureMsg({ cid: 'typed', ts: 3 }))
+  result.current.add(fixtureMsg({ cid: 'typed', ts: 3 }), { inFlight: true })
   result.current.promoteManyByCid(['typed'])
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(row => [row.cid, row.held]),
@@ -925,4 +925,27 @@ test('an accepted empty Send clears every local hold, also on rows it did not st
     result.current.pendingMessagesRef.current.map(row => [row.cid, !!row.held]),
     [['wake', false], ['held-a', false]],
   )
+})
+
+
+test('only a row with owner proof releases the held rows', () => {
+  for (const [row, releases] of [
+    [fixtureMsg({ cid: 'owner', ts: 3, _owner_input_at: '2026-11-06T10:00:00+00:00' }), true],
+    [fixtureMsg({ cid: 'agent', ts: 3, _agent_input: true }), false],
+    [fixtureMsg({ cid: 'legacy', ts: 3 }), false],
+  ]) {
+    const { result } = renderHook(usePendingQueue)
+    result.current.hydrate([fixtureMsg({ cid: 'held-a', ts: 1, held: true }), row])
+    result.current.promoteManyByCid([row.cid])
+    assert.equal(result.current.pendingMessagesRef.current[0].held, !releases, row.cid)
+  }
+})
+
+test('a held row is shown in the tray again even if a Stop ended its steer', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([fixtureMsg({ cid: 'steering', ts: 1 })])
+  result.current.reserveForSteer(['steering'])
+  assert.equal(result.current.visiblePendingMessages.length, 0)
+  result.current.hydrate([fixtureMsg({ cid: 'steering', ts: 1, held: true })])
+  assert.deepEqual(result.current.visiblePendingMessages.map(row => row.cid), ['steering'])
 })

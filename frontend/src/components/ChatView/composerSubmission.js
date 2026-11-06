@@ -20,6 +20,7 @@ export function hasSendablePayload(text, attachments = []) {
  * an empty Send that runs the whole queue, instead of a Stop with nothing left
  * to stop.
  */
-export function queueAwaitsOwnerSend({ turnActive, pendingMessages }) {
-  return !turnActive && (pendingMessages || []).some(row => row?.held === true)
+export function queueAwaitsOwnerSend({ turnActive, pendingMessages, sharedGuest = false }) {
+  // A shared-browser guest cannot send the owner's queue (the server refuses).
+  return !turnActive && !sharedGuest && (pendingMessages || []).some(row => row?.held === true)
 }

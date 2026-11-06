@@ -27,7 +27,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
-import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
+import { api, apiFetch, getAuthHeaders, getToken, isSharedBrowserAuth, jsonOrThrow, BASE } from '../../api/client.js'
 import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
@@ -5018,6 +5018,7 @@ export default function ChatView({
   // visible in the tray but do not expose an inert fast-forward button.
   const queueHeld = queueAwaitsOwnerSend({
     turnActive, pendingMessages: pendingQueue.pendingMessages,
+    sharedGuest: isSharedBrowserAuth(),
   })
   const composerBusy = turnActive || (pendingQueue.pendingMessages.length > 0 && !queueHeld)
   // A connection failure owns the action slot until Retry succeeds. Keep both
@@ -6387,7 +6388,6 @@ export default function ChatView({
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
-            held={pendingQueue.pendingMessages.some(row => row?.held === true)}
             onSendHeld={queueHeld ? handleSendQueue : undefined}
           />
         <CompactionProgress
