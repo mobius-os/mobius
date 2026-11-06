@@ -42,7 +42,8 @@ a.md-app-block__item-title:hover { text-decoration:underline; text-underline-off
 a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
 /* Row facts read as one metadata line: values joined by a dot, labels kept for
    assistive technology only. */
-.md-app-block__item-main .md-app-block__facts { flex-basis:100%; gap:0; padding:0 0 4px; color:var(--muted); }
+.md-app-block__item-main .md-app-block__facts { flex-basis:100%; align-items:baseline; gap:0; padding:0 0 4px; color:var(--muted); font-size:13px; line-height:18px; }
+.md-app-block__item-main .md-app-block__facts > div { gap:0; }
 .md-app-block__item-main .md-app-block__facts > div + div::before { content:'·'; margin:0 6px; color:var(--muted); }
 .md-app-block__item-main .md-app-block__facts dt { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; }
 .md-app-block__item-main .md-app-block__facts dd { color:var(--muted); font-size:13px; }

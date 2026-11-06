@@ -371,3 +371,9 @@ test('while the app\'s list is confirming, saved rows and their live state are n
   assert.doesNotMatch(html, /md-app-block__item-state|#12|is-secondary/)
   assert.match(html, />Not now<\/button><button type="button" class="md-app-block__action">Confirm</)
 })
+
+test('a hidden action leaves no empty footer', () => {
+  const html = rowView({ title: '2 pull requests opened', actions: [{ key: 'send-batch:sel-1', hidden: true }] })
+  assert.doesNotMatch(html, /<footer>/)
+  assert.match(html, /<strong>2 pull requests opened<\/strong>/)
+})

@@ -93,7 +93,8 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
   sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
-  const actionFor = target => target
+  // A hidden action leaves no control, so its footer is not drawn either.
+  const actionFor = target => target && !actionState(target.intent)?.hidden
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
       confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} openHref={block.href} onInternalNav={onInternalNav} />
     : null
