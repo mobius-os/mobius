@@ -979,7 +979,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatc
   _seed_owner_and_creds()
   _seed_chat(
     "t7", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
 
@@ -1056,7 +1056,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatc
     "browser cleanup must hold the lifecycle gate before terminal ownership is released"
   )
   assert state["running"] is False, "unsupported cleanup must clear marker"
-  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}], "pending is held for the owner"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], "pending is held for the owner"
   assert state["messages"][-1]["blocks"] == [{
     "type": "error",
     "message": "Provider 'Bogus' has no supported runtime.",
@@ -1378,7 +1378,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   creds.write_text("{}", encoding="utf-8")
   _seed_chat(
     "t11", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
 
@@ -1400,7 +1400,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert scheduled == []
   state = _load("t11")
   assert state["running"] is False, "no-owner cleanup must clear the marker"
-  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}], (
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], (
     "pending is held for the owner"
   )
   assert not chat_mod.registry.is_alive("t11"), "registry released"
@@ -1641,7 +1641,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   _seed_chat(
     "t12-auth-error",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
   _seed_run("rt-12-auth", "t12-auth-error")
@@ -1662,7 +1662,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   assert "text" not in published
   state = _load("t12-auth-error")
   assert state["running"] is False
-  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "held": True}]
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}]
   assert state["messages"][-1]["blocks"]
   assert state["messages"][-1]["blocks"][-1]["type"] == "error"
   assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
@@ -1721,7 +1721,7 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   _seed_chat(
     "se-own",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 2}],
+    pending=[{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
     run_token="rt-own",
   )
@@ -1738,7 +1738,7 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
   state = _load("se-own")
   assert state["running"] is False, "owned cleanup clears the marker"
-  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 2, "held": True}], (
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], (
     "owned cleanup holds pending for the owner"
   )
   assert state["messages"][-1]["blocks"] == [

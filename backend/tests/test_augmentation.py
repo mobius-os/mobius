@@ -745,7 +745,7 @@ def test_stop_holds_pending_queue(db):
     id="stop-clears",
     title="t",
     messages=[],
-    pending_messages=[{"role": "user", "content": "queued", "ts": 1}],
+    pending_messages=[{"role": "user", "content": "queued", "ts": 1, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
   )
   db.add(chat)
   db.commit()
@@ -775,7 +775,7 @@ def test_chat_stop_route_keeps_the_queue_and_reports_nothing_to_resend(client, d
     title="t",
     messages=[],
     pending_messages=[
-      {"role": "user", "content": "queued", "ts": 7, "cid": "c-queued"},
+      {"role": "user", "content": "queued", "ts": 7, "cid": "c-queued", "_owner_input_at": "2026-11-06T10:00:00+00:00"},
     ],
   )
   db.add(chat)

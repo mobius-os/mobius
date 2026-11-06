@@ -178,7 +178,7 @@ def test_stop_during_a_restart_drain_holds_the_queue_and_issues_a_receipt(
   any other Stop: it survives the restart and runs only when the owner sends."""
   from app import chat as runtime
   seed_run(db, chat, "drained-run", status="running")
-  chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid"}]
+  chat.pending_messages = [{"role": "user", "content": "queued", "cid": "queued-cid", "_owner_input_at": "2026-11-06T10:00:00+00:00"}]
   db.commit()
   monkeypatch.setattr(runtime, "draining", True)
 

@@ -34,6 +34,7 @@ from app.chat_writer import (
   CancelPending,
   ChatWriterActor,
   HoldPending,
+  ReleaseHeld,
   create_chat,
   FinishRun,
   Finalize,
@@ -1761,14 +1762,22 @@ def test_reconciliation_works_independent_of_actor():
 # These commands were imported but never actually dispatched against the real
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
-def test_hold_pending_keeps_owner_rows_queued_and_held(actor):
+OWNER = {"_owner_input_at": "2026-11-06T10:00:00+00:00"}
+
+
+def test_hold_pending_keeps_owner_rows_and_drops_app_and_guest_rows(actor):
   """HoldPending (Stop / terminal-setup-error) deletes no owner text: each
-  queued row stays, marked held for the owner's next send."""
+  owner-typed row stays, held for the owner's next send. A row an app or a
+  browser guest queued goes with the Stop, as that app or guest expects."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "q1", "ts": 10, "cid": "c-q1"},
-      {"role": "user", "content": "q2", "ts": 11, "cid": "c-q2"},
+      {"role": "user", "content": "q1", "ts": 10, "cid": "c-q1", **OWNER},
+      {"role": "user", "content": "app job", "ts": 11, "cid": "c-app",
+       "_initiated_by_app_id": 7},
+      {"role": "user", "content": "guest", "ts": 12, "cid": "c-guest",
+       "_browser_grant_id": "grant-1", **OWNER},
+      {"role": "user", "content": "q2", "ts": 13, "cid": "c-q2", **OWNER},
     ],
   )
   result = _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1")))
@@ -2035,7 +2044,7 @@ def test_hold_pending_leaves_hidden_carriers_unheld_and_drops_helper_results(act
   a queued helper result goes with Stop as before."""
   _seed_chat(
     pending=[
-      {"role": "user", "content": "owner typed this", "ts": 1, "cid": "owner-1"},
+      {"role": "user", "content": "owner typed this", "ts": 1, "cid": "owner-1", **OWNER},
       {
         "role": "user", "content": "<wait_result>...</wait_result>",
         "ts": 2, "cid": "wait-result-abc", "hidden": True,
@@ -2061,8 +2070,8 @@ def test_promote_pending_skips_held_rows_until_the_owner_releases_them(actor):
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
-      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
     ],
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
@@ -2078,8 +2087,8 @@ def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
-      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
     ],
   )
   result = _await(actor.submit(PromotePending(
@@ -2094,20 +2103,18 @@ def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
 
 
 def test_an_owner_message_runs_before_the_held_queue_which_follows_it(actor):
-  """The owner's new message (appended after the held rows) runs alone; the
-  held rows are released in the same commit, so the turn-end drain then runs
-  them without merging them into the new message."""
+  """Whether the chat was idle or a later turn was running, the owner's next
+  message runs alone; starting it releases the held rows in the same commit,
+  so the following drain runs them without merging them into it."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True},
-      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True},
-      {"role": "user", "content": "new", "ts": 12, "cid": "n"},
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+      {"role": "user", "content": "new", "ts": 12, "cid": "n", **OWNER},
     ],
   )
-  result = _await(actor.submit(PromotePending(
-    chat_id="c1", run_token="rt1", release_held=True,
-  )))
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
   assert result["promoted"]["content"] == "new"
   chat = _load_chat()
   assert [(m["cid"], m.get("held")) for m in chat["pending_messages"]] == [
@@ -2121,6 +2128,49 @@ def test_an_owner_message_runs_before_the_held_queue_which_follows_it(actor):
   ]
   timestamps = [m["ts"] for m in messages]
   assert timestamps == sorted(timestamps), "released rows display after the new message"
+
+
+def test_a_machine_turn_leaves_the_held_queue_held(actor):
+  """A Wait or helper result that runs after Stop is not the owner's send."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "<wait_result>", "ts": 11, "cid": "w",
+       "hidden": True, "kind": "peer_message"},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["_consumed_cids"] == ["w"]
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]
+
+
+def test_an_empty_send_runs_the_held_rows_before_a_queued_machine_row(actor):
+  """The held rows are the one combined turn an empty Send starts; a hidden
+  machine row queued ahead of them keeps its place behind that turn."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "<wake>", "ts": 9, "cid": "w",
+       "hidden": True, "kind": "peer_message"},
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(
+    chat_id="c1", run_token="rt1", release_held=True,
+  )))
+  assert result["promoted"]["content"] == "first\nsecond"
+  assert [m["cid"] for m in _load_chat()["pending_messages"]] == ["w"]
+
+
+def test_release_held_rejoins_the_ordinary_queue(actor):
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}],
+  )
+  assert _await(actor.submit(ReleaseHeld(chat_id="c1"))) == {"released": 1}
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", None)]
 
 
 def test_provider_batch_marks_only_visible_owner_rows():

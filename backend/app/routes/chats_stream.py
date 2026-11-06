@@ -46,6 +46,7 @@ from app.chat_writer import (
   RestartCardStateChanged,
 )
 from app.app_chat_scopes import ScopedStartRefused
+from app.continuations import has_runnable_pending
 from app.chat_steering import (
   has_live_steerable_turn,
   steer_into_active_turn,
@@ -122,17 +123,26 @@ async def start_queued_owner_continuation(
 async def _send_queue(chat_id: str, db: Session, principal: Principal):
   """The owner's empty send: start the next turn from the queued messages.
 
-  After a Stop holds the queue, nothing runs it until the owner sends; an
-  empty send releases it into the same combined turn it would normally drain
-  into. A retry that finds the turn already running is acknowledged as a
-  duplicate rather than starting another.
+  After a Stop holds the queue, nothing runs it until the owner sends. It
+  takes exactly the admission an ordinary owner message would: while other
+  work owns the chat (a running turn, a restart drain, an activation, an
+  auto-resuming provider-limit park) the held rows rejoin the ordinary queue
+  and drain after that work; otherwise they start now as one turn.
   """
   if not is_owner_input_principal(principal):
     raise HTTPException(403, detail="Only the owner can send queued messages.")
-  if is_chat_running(chat_id):
-    return JSONResponse(content={"status": "duplicate", "running": True})
-  if is_draining():
-    raise HTTPException(409, detail="Möbius is restarting. Send again when it reconnects.")
+  from app.platform_restart import activation_barrier_wait_id
+  if (
+    is_chat_running(chat_id) or is_draining()
+    or activation_barrier_wait_id(db, chat_id) is not None
+    or _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
+  ):
+    from app.chat_writer import ReleaseHeld
+    await await_ack(get_writer().submit(ReleaseHeld(chat_id=chat_id)))
+    db.expire_all()
+    return JSONResponse(status_code=202, content={
+      "status": "queued", "running": is_chat_running(chat_id),
+    })
   try:
     started = await start_queued_owner_continuation(chat_id, db, release_held=True)
   except chat_queue.PendingAdmissionBlocksPromotion as exc:
@@ -1180,7 +1190,8 @@ async def _send_message_impl(
         # terminal drain), never append a synthetic answer continuation.
         from app.run_state import latest_run
         current = latest_run(db, chat_id)
-        if (chat.pending_messages and not chat.pending_question_id and not is_chat_running(chat_id)
+        if (has_runnable_pending(chat.pending_messages) and not chat.pending_question_id
+            and not is_chat_running(chat_id)
             and (current is None or current.status != "stopped")):
           await start_queued_owner_continuation(chat_id, db)
         publish_owner_input_changed(chat_id,
@@ -1719,14 +1730,11 @@ async def _send_message_locked(
           # The drained turn gets its own run_token: PromotePending sets
           # its run marker under it, and the spawned runner reuses it.
           drain_token = alloc_run_token()
-          # An owner's send releases a queue a Stop held; its own message
-          # runs first and the held ones follow at the turn's end.
           next_messages, next_user, next_session_id = (
             await chat_queue.promote_pending_messages_locked(
               db,
               chat_id,
               drain_token,
-              release_held=is_owner_input_principal(principal),
             )
           )
           if next_user:

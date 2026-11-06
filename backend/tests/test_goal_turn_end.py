@@ -575,7 +575,7 @@ def test_stop_retires_a_legacy_goal_handoff_and_holds_owner_text(db, chat):
     "kind": "wait_result", "hidden": True, "cid": "wait-result-1", "ts": 6,
   }
   chat.pending_messages = [
-    {"role": "user", "content": "Owner text", "cid": "owner-1", "ts": 4},
+    {"role": "user", "content": "Owner text", "cid": "owner-1", "ts": 4, "_owner_input_at": "2026-11-06T10:00:00+00:00"},
     _legacy_goal_handoff(),
     wait_result,
   ]
@@ -588,7 +588,7 @@ def test_stop_retires_a_legacy_goal_handoff_and_holds_owner_text(db, chat):
   assert held == {"held": 1}
   db.expire_all()
   assert db.get(models.Chat, chat.id).pending_messages == [
-    {"role": "user", "content": "Owner text", "cid": "owner-1", "ts": 4, "held": True},
+    {"role": "user", "content": "Owner text", "cid": "owner-1", "ts": 4, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True},
     wait_result,
   ]
 

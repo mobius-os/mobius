@@ -881,9 +881,9 @@ class SendMessage(BaseModel):
   # never an auth boundary — a duplicate cid is treated as a duplicate
   # POST retry, not a security event.
   cid: str | None = None
-  # Internal UI hint: Stop can collapse already-queued messages and ask
-  # the backend to steer them into the live turn even when the chat's
-  # normal send-while-running behavior is queueing.
+  # Internal UI hint: the queue's Steer control asks the backend to steer
+  # already-queued messages into the live turn even when the chat's normal
+  # send-while-running behavior is queueing.
   force_steer: bool = False
   # A new composer message that should be durably reserved and steered in one
   # request. Unlike force_steer, this does not name an existing queued row:

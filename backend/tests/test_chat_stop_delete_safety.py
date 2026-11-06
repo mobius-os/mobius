@@ -177,7 +177,7 @@ def test_stop_clears_idle_question_barrier_and_holds_queued_followup(client, aut
     }],
     pending_messages=[{
       "role": "user", "content": "queued behind the card", "ts": 2,
-      "cid": "idle-card-followup",
+      "cid": "idle-card-followup", "_owner_input_at": "2026-11-06T10:00:00+00:00",
     }],
     pending_question_id=question_id,
   ))

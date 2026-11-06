@@ -92,6 +92,7 @@ from app.provider_errors import (
   classify_provider_error,
   is_workspace_credits_exhausted,
 )
+from app.continuations import has_runnable_pending
 from app.chat_writer import (
   AcknowledgeProviderSuccess,
   AdmitProviderExecution,
@@ -1230,7 +1231,7 @@ def reconcile_startup_chats(
     )
     from app.run_state import has_nonterminal_run
     for chat_id, pending_messages in candidates:
-      if pending_messages and not has_nonterminal_run(db, chat_id):
+      if has_runnable_pending(pending_messages) and not has_nonterminal_run(db, chat_id):
         log.warning(
           "reconcile_startup_chats: idle pending queue chat_id=%s "
           "count=%d; left intact for the age-gated pending sweep",
@@ -1642,8 +1643,8 @@ async def drain_all_for_restart(
   """Interrupt every live turn for a graceful restart, preserving queues.
 
   This is the DrainForRestart path from design §2.2 — distinct from
-  `stop_chat_for`, which intentionally COLLAPSES the pending queue. A restart
-  must NEVER touch `pending_messages`: every queued send waits while the exact
+  `stop_chat_for`, which holds the owner's queued messages until their next
+  send. A restart must NEVER touch `pending_messages`: every queued send waits while the exact
   interrupted input resumes, then runs at the ordinary turn boundary.
 
   Sets the `draining` gate first (idempotent) so a send arriving mid-drain
@@ -2040,7 +2041,9 @@ def _auto_resume_recovery(
   )
   if not park_reasons:
     return None
-  if reason == "compaction" and (chat.pending_messages or _has_unanswered_question(chat)):
+  if reason == "compaction" and (
+    has_runnable_pending(chat.pending_messages) or _has_unanswered_question(chat)
+  ):
     return None
   park = db.query(models.ChatRun).filter(
     models.ChatRun.id == recorded_park,
@@ -2887,7 +2890,7 @@ def is_chat_busy(
   """Work remains queued, running, or resumable for this chat."""
   return bool(
     is_chat_running(chat.id)
-    or chat.pending_messages
+    or has_runnable_pending(chat.pending_messages)
     or run_state.has_run_in(db, chat.id, run_statuses)
   )
 
@@ -3007,7 +3010,8 @@ async def stop_chat(
   actor: str | None = None, actor_id: str | None = None,
 ) -> "ChatStopOutcome":
   """Kills the active subprocess for a chat, bumps its generation, and
-  holds its queued messages so none auto-starts after Stop (`HoldPending`).
+  holds the owner's queued messages so none auto-starts after Stop
+  (`HoldPending`; app and browser-guest rows go with the Stop).
   Session_id is preserved so the next message resumes.
 
   Returns a `ChatStopOutcome`; the global sweep carries no receipt."""
@@ -3110,9 +3114,10 @@ async def stop_chat_for(
 
   Bumps the generation counter so the dying run_chat's finally
   skips _promote_pending_messages / _schedule_continuation. Holds the
-  owner's queued messages: they stay queued and visible, and start only when
-  the owner sends (an empty send runs them; a new message runs first and
-  they follow). Nothing is resent from the client. See ARCHITECTURE.md
+  owner's typed messages: they stay queued and visible, and start only when
+  the owner sends (an empty send runs them as one turn; a new message runs
+  first and they follow). Rows an app or a browser guest queued go with the
+  Stop. Nothing is resent from the client. See ARCHITECTURE.md
   "Stop-chat contract".
 
   Returns a `ChatStopOutcome` that unpacks as `(stopped, receipt)` —
@@ -3203,8 +3208,8 @@ class ChatStopOutcome(NamedTuple):
   route returns.
 
   `receipt` is `{chat_id, run_id}` when Stop ended run `run_id` (every handle
-  stopped, or with no process the run was durably closed) and held the queued
-  turns behind it. With no running run, `run_id` is the chat's latest
+  stopped, or with no process the run was durably closed) and settled the
+  queue behind it (owner rows held, other rows dropped). With no running run, `run_id` is the chat's latest
   idle run (`None` if it never ran). That is all it certifies: work that runs
   afterwards (a Wait firing, a helper result, an owner send) runs under a
   different run id, so a caller binds its cancellation to `run_id` and treats
@@ -4039,7 +4044,7 @@ def _park_continues_automatically(chat, park) -> bool:
   if reason == "restart":
     return bool(chat.auto_resume_on_restart)
   if reason == "compaction":
-    return not chat.pending_messages and not chat.pending_question_id
+    return not has_runnable_pending(chat.pending_messages) and not chat.pending_question_id
   if reason in AUTO_RETRY_PARK_REASONS:
     return True
   return bool(chat.auto_resume_on_limit)
@@ -4514,7 +4519,7 @@ async def _complete_turn(
     - `stop_handoff_successor` — this run was Stop-bumped (Stop registered
       `_clear_after_terminal_generation[chat_id] == run_gen` and bumped the
       generation to `run_gen + 1`) and NO newer owner has reclaimed the
-      chat (`not registry.is_alive`). A Stopped-with-no-resend turn MUST
+      chat (`not registry.is_alive`). A Stopped turn MUST
       still finalize its interrupted output before `run_chat`'s finally
       clears the marker — this is the case-6 Stop handoff.
 

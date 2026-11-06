@@ -293,7 +293,7 @@ def test_drain_finalizes_running_tool_before_clearing_reconcile_marker():
 # -- (a) DrainForRestart preserves the queue; stop_chat_for holds it ----------
 
 def test_drain_preserves_pending_while_stop_holds_it():
-  queued = [{"role": "user", "content": "queued", "ts": 2}]
+  queued = [{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00"}]
   _live_turn("drain-keep", pending=list(queued))
   _live_turn("stop-clear", pending=list(queued))
 
@@ -1011,7 +1011,7 @@ def test_stop_during_drain_preserves_pending():
   """A Stop landing inside the drain window keeps the queue: holding deletes
   nothing and nothing is resent, so the queued text survives the restart and
   waits for the owner's next send."""
-  queued = [{"role": "user", "content": "queued", "ts": 2}]
+  queued = [{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00"}]
   _live_turn("stop-in-drain", pending=list(queued))
 
   chat_mod.draining = True

@@ -13,9 +13,12 @@ from app import chat as chat_mod
 from app import chat_queue, models
 
 
+OWNER = {"_owner_input_at": "2026-11-06T10:00:00+00:00"}
+
+
 def queue(db, chat, *rows):
   chat.pending_messages = [
-    {"role": "user", "content": content, "cid": cid, "ts": index + 1}
+    {"role": "user", "content": content, "cid": cid, "ts": index + 1, **OWNER}
     for index, (cid, content) in enumerate(rows)
   ]
   db.commit()
@@ -111,3 +114,47 @@ def test_the_idle_sweep_does_not_even_claim_a_held_queue():
   held = [{"role": "user", "content": "first", "cid": "a", "ts": 1, "held": True}]
   assert chat_mod._pending_head_is_stale(held, now_ms=10**12) is False
   assert chat_mod._pending_head_is_stale([{**held[0], "held": None}], now_ms=10**12) is True
+
+
+def test_stop_drops_what_an_app_or_a_browser_guest_queued(client, auth, db, chat):
+  chat.pending_messages = [
+    {"role": "user", "content": "mine", "cid": "a", "ts": 1, **OWNER},
+    {"role": "user", "content": "app job", "cid": "app", "ts": 2, "_initiated_by_app_id": 3},
+    {"role": "user", "content": "guest", "cid": "guest", "ts": 3,
+     "_browser_grant_id": "grant", **OWNER},
+  ]
+  db.commit()
+
+  stop(client, auth, chat)
+
+  assert pending(db, chat) == [("a", True)]
+
+
+def test_an_empty_send_while_a_turn_runs_queues_the_held_rows_behind_it(
+  client, auth, db, chat, scheduled, monkeypatch,
+):
+  from app.routes import chats_stream
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+  monkeypatch.setattr(chats_stream, "is_chat_running", lambda chat_id: True)
+
+  response = send(client, auth, chat, content="", continuation="queue")
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert pending(db, chat) == [("a", None)], "they drain after the running turn"
+
+
+def test_held_rows_are_not_runnable_work(db, chat):
+  """Checks that mean "something is queued to run" (busy chats, compaction,
+  a compaction pause continuing) ignore rows that wait for the owner."""
+  from app.continuations import has_runnable_pending
+  held = [{"role": "user", "content": "first", "cid": "a", "ts": 1, "held": True}]
+  assert has_runnable_pending(held) is False
+  assert has_runnable_pending([{**held[0], "held": None}]) is True
+  chat.pending_messages = held
+  db.commit()
+  assert chat_mod.is_chat_busy(db, chat) is False
+  park = models.ChatRun(id="p", chat_id=chat.id, status="parked", park_reason="compaction")
+  assert chat_mod._park_continues_automatically(chat, park) is True

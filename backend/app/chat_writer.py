@@ -64,7 +64,9 @@ from app import chat_archive, models, schemas, transcript_rows
 from app.app_chat_scopes import ScopedStartRefused, admit_scoped_first_turn
 from app.goals import admit_goal
 from app.chat_titles import apply_generated_title, first_message_title
-from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND, SIDE_QUESTION_MESSAGE_KIND
+from app.continuations import (
+  DEPENDENCY_RESULT_MESSAGE_KIND, SIDE_QUESTION_MESSAGE_KIND, has_runnable_pending,
+)
 from app.json_safety import json_safe
 from app.upload_lifecycle import claim_uploads, release_uploads
 from app.events import (
@@ -1077,9 +1079,10 @@ class PromotePending(_Command):
   # Only the actual terminal drain may recover an unhanded Goal. Queue
   # sweeps and ordinary promotions carry no finishing-attempt authority.
   ending_run_token: str = ""
-  # The owner's send releases rows a Stop held (`HoldPending`). Unheld rows
-  # still go first, so a new message runs before the held ones; with none,
-  # the held rows themselves start the turn.
+  # The owner's empty Send: the rows a Stop held (`HoldPending`) start as
+  # one turn and every hold is released. Without it, held rows never start
+  # by themselves; a promotion that starts an owner-typed row releases them
+  # so they follow it.
   release_held: bool = False
 
 
@@ -1124,11 +1127,23 @@ class UpdatePending(_Command):
 
 
 @dataclass
+class ReleaseHeld(_Command):
+  """The owner's empty Send while other work owns the chat (a running turn,
+  a restart, an activation or a provider-limit park): the held rows rejoin
+  the ordinary queue and drain after that work, exactly as a message the
+  owner typed then would. Returns `{"released"}`."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
 class HoldPending(_Command):
   """Hold owner-typed pending rows until the owner sends (Stop and the
   terminal-setup-error path).
 
-  Hidden machine carriers keep their own delivery semantics. Returns
+  Hidden machine carriers keep their own delivery semantics; an app's
+  request or a browser guest's message goes with the Stop. Returns
   `{"held"}`, the number of owner rows now held.
   """
 
@@ -1494,6 +1509,7 @@ _FENCE_COMMANDS = (
   CancelPending,
   UpdatePending,
   HoldPending,
+  ReleaseHeld,
   ReplaceTranscript,
   FinishRun,
   RecoverWedgedRun,
@@ -2350,6 +2366,8 @@ class ChatWriterActor:
       return self._update_pending(db, cmd)
     if isinstance(cmd, HoldPending):
       return self._hold_pending(db, cmd)
+    if isinstance(cmd, ReleaseHeld):
+      return self._release_held(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ConvertNextTranscript):
@@ -2920,7 +2938,7 @@ class ChatWriterActor:
       raise _PersistFailed("AdmitProviderExecution: run is not eligible")
     _require_browser_grant(db, run.browser_grant_id)
     if (run.continuation_json or {}).get("reason") == "compaction" and (
-      chat.pending_messages or chat.pending_question_id
+      has_runnable_pending(chat.pending_messages) or chat.pending_question_id
     ):
       raise _PersistFailed("AdmitProviderExecution: owner input superseded compaction recovery")
     from app.chat_waits import _receivable_wait_results, wait_delivery_blocker
@@ -4160,7 +4178,7 @@ class ChatWriterActor:
 
     if cmd.reason == "compaction" and (
       superseded is None or superseded.park_reason != "compaction"
-      or chat.pending_messages or chat.pending_question_id
+      or has_runnable_pending(chat.pending_messages) or chat.pending_question_id
       or chat.session_id is not None
     ):
       db.rollback()
@@ -4461,7 +4479,7 @@ class ChatWriterActor:
     if chat.pending_question_id is not None:
       db.rollback()
       return StartContinuationBlocked("pending_question")
-    if chat.pending_messages:
+    if has_runnable_pending(chat.pending_messages):
       db.rollback()
       return StartContinuationBlocked("pending_input")
     if db.query(ChatRun.id).filter(
@@ -5029,7 +5047,7 @@ class ChatWriterActor:
       return {"status": "conflict", "reason": "provider_pinned"}
 
     from app.run_state import has_running_run
-    if chat.pending_messages or has_running_run(db, cmd.chat_id):
+    if has_runnable_pending(chat.pending_messages) or has_running_run(db, cmd.chat_id):
       return {"status": "conflict", "reason": "busy"}
     if (chat.provider or "claude") != cmd.expected_provider:
       return {"status": "conflict", "reason": "provider_changed"}
@@ -5250,7 +5268,7 @@ class ChatWriterActor:
         return {"status": "conflict", "reason": "recovery_changed"}
     messages = transcript_rows.read_all(db, chat)
     from app.run_state import has_nonterminal_run
-    if chat.pending_messages or has_nonterminal_run(db, cmd.chat_id):
+    if has_runnable_pending(chat.pending_messages) or has_nonterminal_run(db, cmd.chat_id):
       return {"status": "conflict", "reason": "busy"}
     if (chat.provider or "claude") != cmd.expected_provider:
       return {"status": "conflict", "reason": "provider_changed"}
@@ -5386,14 +5404,11 @@ class ChatWriterActor:
     retired_control = len(runnable) + len(rejected) != len(pending)
     if retired_control or rejected_changed:
       chat.pending_messages = rejected + runnable
-    # Rows a Stop held wait for the owner's send, which releases them all.
-    pending = [
-      {k: v for k, v in row.items() if k != "held"} if cmd.release_held else row
-      for row in runnable
-    ]
-    pool = [
-      row for row, original in zip(pending, runnable) if not original.get("held")
-    ] or (pending if cmd.release_held else [])
+    # Rows a Stop held wait for the owner. An empty Send (`release_held`)
+    # starts them as one turn; otherwise only unheld rows run.
+    held = [row for row in runnable if row.get("held")]
+    free = [row for row in runnable if not row.get("held")]
+    pool = (held or free) if cmd.release_held else free
     if not pool:
       settlement = self._settle_unhanded_goal(db, chat, cmd)
       if settlement is not None:
@@ -5414,9 +5429,20 @@ class ChatWriterActor:
           or msg.get("_browser_grant_id") != head_grant):
         break
       promote_count += 1
-    promoted_group = pool[:promote_count]
-    promoted_ids = {id(row) for row in promoted_group}
-    remaining_pending = [row for row in pending if id(row) not in promoted_ids]
+    from app.continuations import is_owner_typed
+    promoted_ids = {id(row) for row in pool[:promote_count]}
+    # The owner's next message runs first and the held queue follows it.
+    release = cmd.release_held or any(
+      is_owner_typed(row) for row in pool[:promote_count]
+    )
+
+    def settled(row: dict) -> dict:
+      return {k: v for k, v in row.items() if k != "held"} if release else row
+
+    promoted_group = [settled(row) for row in pool[:promote_count]]
+    remaining_pending = [
+      settled(row) for row in runnable if id(row) not in promoted_ids
+    ]
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
@@ -5763,9 +5789,11 @@ class ChatWriterActor:
   def _hold_pending(self, db, cmd: HoldPending) -> dict:
     """Hold owner-typed queued messages; preserve machine-owned carriers.
 
-    A held row stays queued and visible but is never promoted by itself: only
-    the owner's next send releases it (`PromotePending.release_held`). So a
-    Stop neither loses what the owner queued nor starts it behind their back.
+    A held row stays queued and visible but is never promoted by itself: the
+    owner's next send releases it (`PromotePending`). So a Stop neither loses
+    what the owner typed nor starts it behind their back. A row an app or a
+    browser guest queued (`is_owner_typed` is false) goes with the Stop, as
+    the app or guest that stops expects.
 
     A ``hidden`` queued row is never owner speech: it is usually a machine-owned
     carrier (wait/activation result, a peer-message wake, or a secure-input
@@ -5784,6 +5812,7 @@ class ChatWriterActor:
     from app.continuations import (
       DELEGATION_RESULT_MESSAGE_KIND,
       helper_answer_question_id,
+      is_owner_typed,
       is_retired_goal_handoff,
     )
 
@@ -5797,14 +5826,30 @@ class ChatWriterActor:
         if (message.get("kind") != DELEGATION_RESULT_MESSAGE_KIND
             and not is_retired_goal_handoff(message)):
           kept.append(message)
-      else:
+      elif is_owner_typed(message):
         kept.append({**message, "held": True})
+      # An app's request or a browser guest's message goes with the Stop.
     held = sum(1 for message in kept if message.get("held"))
     if kept != pending:
       chat.pending_messages = kept
       if not _commit_or_rollback(db):
         raise _PersistFailed("HoldPending did not persist")
     return {"held": held}
+
+  def _release_held(self, db, cmd: ReleaseHeld) -> dict:
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("ReleaseHeld: chat not found or deleted")
+    pending = list(chat.pending_messages or [])
+    released = sum(1 for row in pending if isinstance(row, dict) and row.get("held"))
+    if released:
+      chat.pending_messages = [
+        {k: v for k, v in row.items() if k != "held"} if isinstance(row, dict) else row
+        for row in pending
+      ]
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ReleaseHeld did not persist")
+    return {"released": released}
 
   def _convert_transcript(self, db, chat_id: str) -> bool:
     """Convert one chat for the background run; a failure leaves the legacy

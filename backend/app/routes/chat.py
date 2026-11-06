@@ -21,13 +21,14 @@ async def chat_stop(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
 ):
-  """Stops the agent subprocess and holds the chat's queued messages.
+  """Stops the agent subprocess and settles the chat's queue.
 
-  Queued messages stay queued until the owner sends (`stop_chat_for`).
+  The owner's typed messages stay queued until the owner sends; rows an app or
+  a browser guest queued go with the Stop (`HoldPending`).
   `cleared_pending_cids` is always `[]`: an older cached client resends only
   what it lists, so the queue is never sent twice during a rolling upgrade.
 
-  A per-chat Stop that ended the chat's run and held its queue also
+  A per-chat Stop that ended the chat's run and settled its queue also
   returns `stop_receipt: {chat_id, run_id}`, the chat's latest run at Stop's
   serialized boundary (`None` if it never ran). It certifies only that run:
   later work (an owner send, a Wait firing, a helper result) runs under

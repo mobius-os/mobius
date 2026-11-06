@@ -1259,9 +1259,9 @@ more, or `'started'` with the existing `chatId`. After a cancellation,
 treat it as final. A new attempt needs a new scope.
 
 To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
-Stop ends the running turn and holds the chat's queued messages: they stay
-queued and start only when the owner sends. When Stop ended the chat's run and
-held its queue, the result carries
+Stop ends the running turn. Messages your app queued in that chat go with the
+Stop; messages the owner typed stay queued until the owner sends. When Stop
+ended the chat's run and settled its queue, the result carries
 `stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
 idle run (`run_id: null` if it never ran). It certifies only that run. Later
 work in the chat, such as an owner send, a Wait firing, or a helper result,

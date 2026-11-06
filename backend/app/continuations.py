@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import hashlib
 from typing import Any
 
@@ -123,6 +123,27 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
   if not isinstance(cid, str) or not cid.startswith(HELPER_ANSWER_CID_PREFIX):
     return None
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
+
+def is_owner_typed(message: object) -> bool:
+  """Whether a queued row is the owner's own typed message: owner input, not
+  a hidden carrier, an app request or a browser guest's message. Stop holds
+  only these rows for the owner's next send; a promotion that starts one
+  releases the rest (`HoldPending`, `PromotePending`)."""
+  return bool(
+    isinstance(message, Mapping)
+    and message.get("_owner_input_at")
+    and not message.get("hidden")
+    and message.get("_initiated_by_app_id") is None
+    and message.get("_browser_grant_id") is None
+  )
+
+
+def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
+  """Whether the queue holds work that can run without the owner: any row a
+  Stop did not hold. Held rows are not runnable work, so checks that mean
+  "something is queued to run" use this rather than a non-empty queue."""
+  return any(isinstance(row, Mapping) and not row.get("held") for row in pending or ())
+
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""
