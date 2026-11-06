@@ -349,14 +349,17 @@ function fakeHost() {
     removeEventListener(type, listener) { if (type === 'message') listeners.delete(listener) },
   }
   const capabilities = makeCapabilities({
-    declarations: { 'media.speech': { version: 1, limits: { max_text_chars: 1000 } } },
+    declarations: SPEECH_DECLARED,
     hostWindow: parent,
     selfWindow: self,
     visibility,
   })
-  const speakHere = (text) => capabilities.open('media.speech', { operation: 'synthesize', text, modelId: 'alba' }).result
-  return { capabilities, visibility, speakHere }
+  const start = (text) => capabilities.open('media.speech', { operation: 'synthesize', text, modelId: 'alba' })
+  const speakHere = (text) => start(text).result
+  return { capabilities, visibility, start, speakHere }
 }
+
+const SPEECH_DECLARED = Object.freeze({ 'media.speech': { version: 1, limits: { max_text_chars: 1000 } } })
 
 test('the app runtime keeps the engine only while the app is on screen and attached', async () => {
   const host = fakeHost()
@@ -372,4 +375,44 @@ test('the app runtime keeps the engine only while the app is on screen and attac
 
   host.capabilities._destroy()
   assert.equal(workers[1].terminated, true, 'detaching the runtime releases the engine')
+})
+
+test('an app that stops declaring speech keeps no engine, even one still speaking', async () => {
+  const host = fakeHost()
+
+  // Removed while generating, then the request completes.
+  const completing = host.start('hold')
+  await until(() => workers[0]?.held)
+  host.capabilities._updateDeclarations({})
+  workers[0].reply({ type: 'generate-complete', requestId: workers[0].held })
+  await completing.result
+  assert.equal(workers[0].terminated, true, 'a completed request does not park its engine')
+
+  // Removed while generating, then the request is cancelled.
+  host.capabilities._updateDeclarations(SPEECH_DECLARED)
+  const cancelled = host.start('hold')
+  await until(() => workers[1]?.held)
+  host.capabilities._updateDeclarations({})
+  cancelled.cancel()
+  await assert.rejects(cancelled.result, { name: 'AbortError' })
+  assert.equal(workers[1].terminated, true, 'a cancelled request does not park its engine')
+
+  // Showing the frame again does not bring retention back while undeclared.
+  host.capabilities._updateDeclarations(SPEECH_DECLARED)
+  const shown = host.start('hold')
+  await until(() => workers[2]?.held)
+  host.capabilities._updateDeclarations({})
+  host.visibility.set(false)
+  host.visibility.set(true)
+  workers[2].reply({ type: 'generate-complete', requestId: workers[2].held })
+  await shown.result
+  assert.equal(workers[2].terminated, true, 'visibility alone does not keep an undeclared engine')
+
+  // Declaring speech again restores reuse.
+  host.capabilities._updateDeclarations(SPEECH_DECLARED)
+  await host.speakHere('One.')
+  await host.speakHere('Two.')
+  assert.equal(workers.length, 4)
+  assert.equal(workers[3].terminated, false)
+  host.capabilities._destroy()
 })

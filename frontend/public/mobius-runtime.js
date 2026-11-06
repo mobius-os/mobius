@@ -4104,7 +4104,12 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow, visibilit
 	const sessions = /* @__PURE__ */ new Map();
 	let currentDeclarations = declarations && typeof declarations === "object" ? declarations : {};
 	let speech = null;
-	const stopWatchingVisibility = visibility?.onVisibilityChange?.((visible) => speech?.retainSpeechEngine(visible));
+	let visible = visibility?.visible ?? true;
+	const syncSpeechRetention = () => speech?.retainSpeechEngine(visible && !!currentDeclarations[SPEECH_CAPABILITY]);
+	const stopWatchingVisibility = visibility?.onVisibilityChange?.((next) => {
+		visible = next;
+		syncSpeechRetention();
+	});
 	function describe(name) {
 		const value = currentDeclarations?.[name];
 		return value && typeof value === "object" ? value : null;
@@ -4276,7 +4281,7 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow, visibilit
 		Promise.resolve().then(() => (init_speech(), speech_exports)).then((module) => {
 			if (!speech) {
 				speech = module;
-				speech.retainSpeechEngine(visibility?.visible ?? true);
+				syncSpeechRetention();
 			}
 			if (internal.settled) return;
 			const engine = speech.synthesizeInFrame({
@@ -4324,7 +4329,7 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow, visibilit
 		},
 		_updateDeclarations(next) {
 			currentDeclarations = next && typeof next === "object" ? next : {};
-			if (!currentDeclarations[SPEECH_CAPABILITY]) speech?.releaseSpeechEngine();
+			syncSpeechRetention();
 		},
 		_destroy() {
 			ownWindow?.removeEventListener?.("message", onMessage);

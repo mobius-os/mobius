@@ -29,11 +29,16 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow, vi
   const sessions = new Map()
   let currentDeclarations = declarations && typeof declarations === 'object' ? declarations : {}
   // The in-frame speech engine stays loaded between sessions only while this
-  // app is on screen; see speech.js.
+  // app is on screen and still declares speech; see speech.js.
   let speech = null
-  const stopWatchingVisibility = visibility?.onVisibilityChange?.(
-    (visible) => speech?.retainSpeechEngine(visible),
+  let visible = visibility?.visible ?? true
+  const syncSpeechRetention = () => speech?.retainSpeechEngine(
+    visible && !!currentDeclarations[SPEECH_CAPABILITY],
   )
+  const stopWatchingVisibility = visibility?.onVisibilityChange?.((next) => {
+    visible = next
+    syncSpeechRetention()
+  })
 
   function describe(name) {
     const value = currentDeclarations?.[name]
@@ -200,7 +205,7 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow, vi
     import('./speech.js').then((module) => {
       if (!speech) {
         speech = module
-        speech.retainSpeechEngine(visibility?.visible ?? true)
+        syncSpeechRetention()
       }
       if (internal.settled) return
       const engine = speech.synthesizeInFrame({
@@ -246,7 +251,7 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow, vi
     },
     _updateDeclarations(next) {
       currentDeclarations = next && typeof next === 'object' ? next : {}
-      if (!currentDeclarations[SPEECH_CAPABILITY]) speech?.releaseSpeechEngine()
+      syncSpeechRetention()
     },
     _destroy() {
       ownWindow?.removeEventListener?.('message', onMessage)
