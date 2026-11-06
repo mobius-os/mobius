@@ -355,3 +355,28 @@ def test_routine_is_declared_by_the_tool_owner_and_survives_history():
     for entry in (block.get("entries") or [{"item": block}])
   ]
   assert routine.count(True) == 2
+
+
+def test_a_routine_lookup_failure_keeps_every_activity_card(db, tmp_path, monkeypatch):
+  root = tmp_path / "night-brain"
+  root.mkdir()
+  (root / "mobius.json").write_text(json.dumps({
+    "id": "night-brain", "name": "Night Brain", "version": "1.0.0",
+    "description": "test", "entry": "index.jsx", "source_files": ["service.py"],
+    "service": {"entry": "service.py"},
+    "tools": [{"name": "search", "description": "Search.",
+               "input_schema": {"type": "object"}}],
+    "agent_activities": {"lookup": {"tool": "search", "running_label": "Searching"}},
+  }))
+  _app(db, root, "night-brain", "Night Brain")
+  monkeypatch.setattr("app.agent_activity_provider.runtime_root", lambda row: root)
+
+  def unavailable(db):
+    raise RuntimeError("contract store unavailable")
+
+  monkeypatch.setattr("app.agent_activity_provider.live_app_tools", unavailable)
+
+  binding = resolve_agent_activity_binding(db)
+
+  assert set(binding.by_app_tool) == {"night_brain_search"}
+  assert binding.routine_app_tools == frozenset()

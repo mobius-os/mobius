@@ -84,15 +84,25 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         except OSError:
           pass
         pairs.extend((str(path), command) for path in forms)
-    # Routine marks come from the tools agents are actually served (reviewed
-    # contract, live apps, duplicate names resolved). An app tool never takes
-    # a platform tool's name: the control server serves the platform's.
-    platform = {*CONTROL_TOOL_NAMES, *DELEGATED_CONTROL_TOOL_NAMES}
-    routine_tools = [
-      tool.exposed_name for tool in live_app_tools(db)
-      if tool.routine and tool.exposed_name not in platform
-    ]
-    return AgentActivityBinding.of(pairs, tool_pairs, routine_tools)
+    return AgentActivityBinding.of(pairs, tool_pairs, _routine_app_tools(db))
   except Exception:
     log.exception("app activity binding unavailable; activity cards disabled")
     return EMPTY_AGENT_ACTIVITY_BINDING
+
+
+def _routine_app_tools(db: Session) -> list[str]:
+  """App tools whose reviewed declaration marks them routine.
+
+  Taken from the tools agents are actually served (live apps, duplicate names
+  resolved). An app tool never takes a platform tool's name: the control
+  server serves the platform's. A lookup failure only drops routine marks.
+  """
+  platform = {*CONTROL_TOOL_NAMES, *DELEGATED_CONTROL_TOOL_NAMES}
+  try:
+    return [
+      tool.exposed_name for tool in live_app_tools(db)
+      if tool.routine and tool.exposed_name not in platform
+    ]
+  except Exception:
+    log.exception("app tool routine marks unavailable; routine calls show as usual")
+    return []
