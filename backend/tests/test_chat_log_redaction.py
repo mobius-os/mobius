@@ -24,6 +24,21 @@ def test_redact_keeps_only_role_and_text_dropping_all_block_types():
   assert out == {"role": "assistant", "text": "visible answer"}
 
 
+def test_redact_keeps_a_cards_closing_message_but_not_its_prompts():
+  msg = {
+    "role": "assistant",
+    "content": "Done.\n\nThe fix is ready.",
+    "blocks": [
+      {"type": "text", "content": "Done."},
+      {"type": "question", "message": "The fix is ready.",
+       "questions": [{"question": "pick?", "options": [{"label": "secret"}]}]},
+    ],
+  }
+  assert r.redact_message(msg) == {
+    "role": "assistant", "text": "Done.\n\nThe fix is ready.",
+  }
+
+
 def test_redact_separates_distinct_assistant_text_blocks():
   msg = {
     "role": "assistant",

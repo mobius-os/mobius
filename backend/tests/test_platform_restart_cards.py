@@ -697,7 +697,8 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
   )
   try:
     saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
+      f"/api/chats/{chat.id}/restart-request",
+      json={"message": "The fix is committed and tested."},
       headers={"Authorization": f"Bearer {token}"},
     )
     assert saved.status_code == 200, saved.text
@@ -705,6 +706,7 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
       block = list(transcript_rows.history(row))[-1]["blocks"][-1]
+      assert block["message"] == "The fix is committed and tested."
       prompt = block["questions"][0]["question"]
       wait_id = block["platform_action"]["wait_id"]
     response = client.post(

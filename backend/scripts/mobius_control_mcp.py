@@ -46,11 +46,25 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
-SAVED_CARD_TERMINAL_INSTRUCTION = (
+_CARD_ENDS_TURN = (
   "This tool call ends the turn: nothing after the card reaches the owner "
-  "until they reply. Just before this call, write your closing message: "
+  "until they reply."
+)
+SAVED_CARD_TERMINAL_INSTRUCTION = (
+  f"{_CARD_ENDS_TURN} Put your closing message in `message`: what you did, "
+  "where things stand, what it decides."
+)
+SECRET_CARD_TERMINAL_INSTRUCTION = (
+  f"{_CARD_ENDS_TURN} Just before this call, write your closing message: "
   "what you did, where things stand, what it decides."
 )
+CARD_MESSAGE_PROPERTY = {
+  "type": "string", "maxLength": 20000,
+  "description": (
+    "Markdown closing message of the turn, shown to the owner above the "
+    "card. Any text before this call is at most a one-sentence lead-in."
+  ),
+}
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
@@ -627,9 +641,11 @@ def _call_read_goal(arguments: dict[str, Any]) -> dict:
 
 def _call_request_approval(arguments: dict[str, Any]) -> dict:
   if not {"question", "options", "work_key"}.issubset(arguments) or not set(arguments).issubset(
-    {"question", "options", "work_key"}
+    {"question", "options", "work_key", "message"}
   ):
-    raise ValueError("request_approval needs question, options, and work_key")
+    raise ValueError(
+      "request_approval needs question, options, and work_key, and may take message"
+    )
   try:
     return _APPROVALS.request_approval(**arguments)
   except SystemExit as exc:
@@ -637,8 +653,8 @@ def _call_request_approval(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_question(arguments: dict[str, Any]) -> dict:
-  if set(arguments) != {"questions"}:
-    raise ValueError("request_question needs questions")
+  if "questions" not in arguments or not set(arguments).issubset({"questions", "message"}):
+    raise ValueError("request_question needs questions and may take message")
   try:
     return _APPROVALS.request_question(**arguments)
   except SystemExit as exc:
@@ -646,10 +662,10 @@ def _call_request_question(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_restart(arguments: dict[str, Any]) -> dict:
-  if arguments:
-    raise ValueError("request_restart takes no arguments")
+  if not set(arguments).issubset({"message"}):
+    raise ValueError("request_restart takes only message")
   try:
-    return _APPROVALS.request_restart()
+    return _APPROVALS.request_restart(**arguments)
   except SystemExit as exc:
     raise RuntimeError(str(exc)) from exc
 
@@ -1535,6 +1551,7 @@ _TOOL_DEFINITIONS = {
             "required": ["label", "description"], "additionalProperties": False,
           },
         },
+        "message": CARD_MESSAGE_PROPERTY,
       },
       "required": ["question", "options", "work_key"], "additionalProperties": False,
     },
@@ -1556,7 +1573,8 @@ _TOOL_DEFINITIONS = {
       "handled by the platform without waking an agent to issue the command."
     ),
     "inputSchema": {
-      "type": "object", "properties": {}, "additionalProperties": False,
+      "type": "object", "properties": {"message": CARD_MESSAGE_PROPERTY},
+      "additionalProperties": False,
     },
   },
   REQUEST_QUESTION_TOOL: {
@@ -1604,7 +1622,7 @@ _TOOL_DEFINITIONS = {
             }},
           },
         },
-      }},
+      }, "message": CARD_MESSAGE_PROPERTY},
     },
   },
   SCREENSHOT_TOOL: {
@@ -1702,7 +1720,7 @@ _TOOL_DEFINITIONS = {
       "and no agent credentials, must not log or persist the values, and its "
       "output is discarded. preset owner_credentials asks for the owner's "
       "sign-in change instead. Returns a receipt, NOT the values. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      f"{SECRET_CARD_TERMINAL_INSTRUCTION} "
       "Never in background work."
     ),
     "inputSchema": {
