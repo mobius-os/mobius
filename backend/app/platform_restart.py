@@ -318,25 +318,19 @@ def _restart_continuation_hold() -> str:
   return "restart_required" if update and update["replayed"] else "restoring_edits"
 
 
-def restart_observation_key(db: Session, chat_id: str) -> str:
-  """Version the mutable receipt projection without loading transcript JSON.
+def continuation_hold(waits) -> str | None:
+  """Return the continuation hold an undelivered restart receipt shows, if any.
 
-  A cached card can miss the wait event during a restart. Only undelivered
-  observations remain mutable independently of the transcript; once a reply
-  or continuation settles one, the ordinary chat version owns its history.
+  A met activation wait stays mutable until a reply or continuation settles
+  it, and its card then reads the update state on disk rather than a row.
   """
-  rows = db.query(models.ChatWait.id, models.ChatWait.met_at).filter(
-    models.ChatWait.chat_id == chat_id,
-    models.ChatWait.kind == ACTIVATION_WAIT_KIND,
-    models.ChatWait.status == "met",
-    models.ChatWait.met_at.isnot(None),
-    models.ChatWait.resume_delivered_at.is_(None),
-    models.ChatWait.result_disposition.is_(None),
-  ).order_by(models.ChatWait.id).all()
-  return json.dumps([
-    [[row.id, row.met_at.isoformat()] for row in rows],
-    _restart_continuation_hold() if rows else None,
-  ], separators=(",", ":"))
+  if any(
+    row.kind == ACTIVATION_WAIT_KIND and row.status == "met" and row.met_at is not None
+    and row.resume_delivered_at is None and row.result_disposition is None
+    for row in waits
+  ):
+    return _restart_continuation_hold()
+  return None
 
 
 def project_restart_observations(
@@ -370,11 +364,7 @@ def project_restart_observations(
   if not waits:
     return messages
 
-  hold = (
-    _restart_continuation_hold()
-    if any(row.status == "met" and row.resume_delivered_at is None and row.result_disposition is None
-           for row in waits.values()) else "pending"
-  )
+  hold = continuation_hold(waits.values()) or "pending"
 
   observations = {}
   for card in cards:

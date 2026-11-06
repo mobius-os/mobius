@@ -102,7 +102,7 @@ from app.run_state import (
 )
 from app.schemas import ChatCompactRequest, ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
-from app.platform_restart import restart_observation_key
+from app.platform_restart import continuation_hold
 from app.tool_output_storage import (
   TOOL_OUTPUT_STORAGE_PREFIX,
   decode_tool_output,
@@ -159,23 +159,24 @@ def _latest_run_snapshot(
 
 
 def _lifecycle_projection_key(
-  db: Session, chat_id: str, *, include_foreign_context: bool,
+  db: Session, chat_id: str, runtime_revision: int, *, include_foreign_context: bool,
 ) -> str:
   """Version the detail cards projected from lifecycle rows, not Chat.messages.
 
-  Settled Wait, terminal Goal and dependency cards, and "needed by" backlinks
-  on this chat's question cards change without a transcript write, so
-  ``updated_at`` alone cannot prove a retained detail page current. Their
-  anchors come from the transcript, which ``updated_at`` already versions.
-  Armed waits and open Goals are left out: runtime carries them itself, and a
-  routine check or plan revision must not invalidate the page. Keep this in
-  step with the read-side projections in ``_chat_detail_response``.
+  Settled Wait, terminal Goal and dependency cards, restart receipts and their
+  continuation hold, and "needed by" backlinks on this chat's question cards
+  change without a transcript write, so ``updated_at`` alone cannot prove a
+  retained detail page current. Their anchors come from the transcript, which
+  ``updated_at`` already versions. Armed waits and open Goals are left out:
+  runtime carries them itself, and a routine check or plan revision must not
+  invalidate the page. Keep this in step with the read-side projections in
+  ``_chat_detail_response``.
   """
   from app.goal_dependencies import outstanding_dependencies
 
   wait, goal, dependency = models.ChatWait, models.ChatGoal, models.GoalDependency
   waits = db.query(
-    wait.id, wait.status, wait.checks_count, wait.met_at, wait.cancelled_at,
+    wait.id, wait.kind, wait.status, wait.checks_count, wait.met_at, wait.cancelled_at,
     wait.last_checked_at, wait.resume_delivered_at, wait.received_run_id,
     wait.result_disposition, wait.result_disposed_at,
   ).filter(
@@ -201,9 +202,11 @@ def _lifecycle_projection_key(
   ).scalar() if helpers else None
   parts = [
     # Wait and Goal cards also read this chat's run rows (receipts, goal links).
-    _latest_run_snapshot(db, chat_id)[2],
+    runtime_revision,
     *([list(row) for row in rows] for rows in (waits, goals, dependencies, helpers)),
     helper_runs,
+    # A restart receipt shows update state that lives on disk, not in a row.
+    continuation_hold(waits),
   ]
   if include_foreign_context:
     # Dependency cards name their source chat, and question cards name the
@@ -925,9 +928,8 @@ def _chat_detail_response(
     # already fetches them from their durable sidecar on demand. Live turns
     # retain excerpts so the in-progress surface remains self-contained.
     "messages": page,
-    "restart_observation_key": restart_observation_key(db, chat.id),
     "lifecycle_projection_key": _lifecycle_projection_key(
-      db, chat.id, include_foreign_context=expose_session,
+      db, chat.id, runtime_revision, include_foreign_context=expose_session,
     ),
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
@@ -2018,9 +2020,9 @@ def get_chat_runtime(
   response = {
     "running": running,
     "compacting": compaction_kind(chat.id),
-    "restart_observation_key": restart_observation_key(db, chat.id),
     "lifecycle_projection_key": _lifecycle_projection_key(
-      db, chat.id, include_foreign_context=principal.scope != "chat_embed",
+      db, chat.id, runtime_revision,
+      include_foreign_context=principal.scope != "chat_embed",
     ),
     "run_id": run_id,
     "run_status": "running" if running and run_id else run_status,
