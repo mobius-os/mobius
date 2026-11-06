@@ -80,7 +80,7 @@ export function sendFailureMessage(error, { online = true } = {}) {
   return 'Möbius couldn’t send the message. It’s back in the composer—try again.'
 }
 
-// A send that never took the composer draft (a reply's Try again) put nothing
+// A send that never took the composer draft put nothing
 // back in the composer, so its failure must not point there. Tapping it again
 // reuses the unconfirmed send's identity, so a retry cannot send it twice.
 export function detachedSendFailureMessage(error, { online = true } = {}) {
