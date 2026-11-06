@@ -475,7 +475,7 @@ def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
       else block.get("status") or "done"
     ),
   }
-  for key in ("tool_use_id", "output_exit_code"):
+  for key in ("tool_use_id", "output_exit_code", "routine"):
     if key in block:
       tool[key] = block[key]
   if isinstance(block.get("subagent"), dict):

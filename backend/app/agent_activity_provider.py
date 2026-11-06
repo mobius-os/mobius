@@ -30,6 +30,7 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
   try:
     pairs: list[tuple[str, ActivityCommand]] = []
     tool_pairs: list[tuple[str, ActivityCommand]] = []
+    routine_tools: list[str] = []
     rows = db.query(models.App).filter(
       models.App.deleted_at.is_(None),
     ).order_by(models.App.id.asc()).all()
@@ -44,6 +45,10 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         validate_manifest_contract(manifest)
       except (AppliedRuntimeUnavailable, OSError, UnicodeError, ValueError):
         continue
+      routine_tools.extend(
+        exposed_tool_name(app.slug, tool["name"])
+        for tool in manifest.get("tools") or [] if tool.get("routine") is True
+      )
       declarations = manifest.get("agent_activities")
       if not isinstance(declarations, dict):
         continue
@@ -83,7 +88,7 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         except OSError:
           pass
         pairs.extend((str(path), command) for path in forms)
-    return AgentActivityBinding.of(pairs, tool_pairs)
+    return AgentActivityBinding.of(pairs, tool_pairs, routine_tools)
   except Exception:
     log.exception("app activity binding unavailable; activity cards disabled")
     return EMPTY_AGENT_ACTIVITY_BINDING

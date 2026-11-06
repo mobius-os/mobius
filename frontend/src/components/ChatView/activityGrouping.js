@@ -1,4 +1,4 @@
-import { isDistinctiveActivityTool } from './toolActivityLabel.js'
+import { isDistinctiveActivityTool, isRoutineTool } from './toolActivityLabel.js'
 
 /** The one display rule for agent work. Everything the agent does or receives
  * while working (tools, including peer messages; thinking; compact activity;
@@ -19,6 +19,37 @@ export function isAgentWorkBlock(item) {
 export function isActivityRunEntry(entry) {
   const item = entry?.item
   return isAgentWorkBlock(item) && item.type !== 'activity' && !isDistinctiveActivityTool(item)
+}
+
+// A settled routine call, alone or as a saved reply's compact block whose every
+// counted step is visible here and routine.
+function isRoutineEntry(entry) {
+  const item = entry?.item
+  if (item?.type === 'tool') return isRoutineTool(item)
+  if (item?.type !== 'activity' || !item.entries?.length) return false
+  return (!Number.isInteger(item.tool_count) || item.tool_count === item.entries.length)
+    && item.entries.every(inner => isRoutineTool(inner?.item))
+}
+
+// Routine saves usually land after a reply's prose, where on their own they add
+// a row below the answer that only says what was saved. In a settled reply, move
+// each one to just after the reply's latest earlier activity so the ordinary
+// grouping folds it into that line, where it stays inspectable. A routine call
+// with no earlier activity keeps its place. Entries keep their idx (and so their
+// keys). Render-only (MsgContent); pure, inputs are not mutated.
+export function joinRoutineToActivity(entries) {
+  const out = []
+  let anchor = -1
+  for (const entry of entries) {
+    if (anchor >= 0 && anchor < out.length - 1 && isRoutineEntry(entry)) {
+      anchor += 1
+      out.splice(anchor, 0, entry)
+      continue
+    }
+    out.push(entry)
+    if (entry?.item?.type === 'activity' || isActivityRunEntry(entry)) anchor = out.length - 1
+  }
+  return out
 }
 
 const MAX_OPERATION_RESOURCES = 128

@@ -16,6 +16,7 @@ from app.agent_activity import (
   defer_activity,
 )
 from app.agent_activity_provider import resolve_agent_activity_binding
+from app.chat_transcript import compact_messages_for_detail
 from app.chat_event_sink import ChatEventSink
 from app.events import process_event
 
@@ -304,7 +305,9 @@ def test_tool_triggered_activities_bind_from_the_applied_manifest(
     "description": "test", "entry": "index.jsx", "source_files": ["service.py"],
     "service": {"entry": "service.py"},
     "tools": [{"name": "search", "description": "Search.",
-               "input_schema": {"type": "object"}}],
+               "input_schema": {"type": "object"}},
+              {"name": "remember", "description": "Remember.",
+               "input_schema": {"type": "object"}, "routine": True}],
     "agent_activities": {"lookup": {"tool": "search", "running_label": " Searching "}},
   }))
   app = _app(db, root, "night-brain", "Night Brain")
@@ -318,4 +321,40 @@ def test_tool_triggered_activities_bind_from_the_applied_manifest(
     app_slug="night-brain", app_name="Night Brain", activity_id="lookup",
     argument_count=0, running_label="Searching",
   )}
+  assert binding.routine_app_tools == {"night_brain_remember"}
   assert app.id
+
+
+def test_routine_is_declared_by_the_tool_owner_and_survives_history():
+  binding = AgentActivityBinding.of(
+    [], [("brain_search", TOOL_COMMAND)], routine_app_tools=["brain_note"],
+  )
+  sink = ChatEventSink.__new__(ChatEventSink)
+  sink.assistant_blocks = []
+  sink._agent_activity_binding = binding
+  tools = [
+    "mcp__mobius_control__checkpoint_chat",  # declared by the platform
+    "mobius_control:brain_note",  # declared by the app's manifest
+    "mcp__mobius_control__brain_search",  # an app tool not declared routine
+    "mcp__mobius_control__claim_agent_work",  # a platform tool not declared
+    "mcp__elsewhere__checkpoint_chat",  # same name on another server
+  ]
+  for index, tool in enumerate(tools):
+    event = {"type": "tool_start", "tool": tool, "input": "", "tool_use_id": f"t{index}"}
+    sink._stamp_app_activity(event)
+    process_event(event, sink.assistant_blocks)
+  assert [block.get("routine") for block in sink.assistant_blocks] == [
+    True, True, None, None, None,
+  ]
+
+  settled = [{**block, "status": "done"} for block in sink.assistant_blocks]
+  projected = compact_messages_for_detail(
+    [{"role": "assistant", "blocks": settled}],
+    message_offset=0, binding=binding,
+  )[0]["blocks"]
+  routine = [
+    entry["item"].get("routine")
+    for block in projected
+    for entry in (block.get("entries") or [{"item": block}])
+  ]
+  assert routine.count(True) == 2

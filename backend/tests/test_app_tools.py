@@ -376,6 +376,12 @@ def test_an_app_may_load_one_tool_up_front(db):
   assert "_meta" not in listings["memory_search"]
 
 
+def test_an_app_may_declare_a_tool_routine():
+  validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": True}]))
+  with pytest.raises(ManifestContractError, match="routine"):
+    validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": "yes"}]))
+
+
 def test_retired_result_independent_declaration_stays_valid_without_effect(db):
   # Published manifests may still declare it; it no longer changes delivery.
   tool = {**LOG_TOOL, "always_load": True, "result_independent": True}

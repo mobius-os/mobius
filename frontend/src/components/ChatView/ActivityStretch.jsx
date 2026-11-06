@@ -7,6 +7,7 @@ import {
   activityDisplayState,
   activityMemoSig,
   activityCollapsedLabel,
+  activityHeadlineTools,
   activitySummaryTools,
   thoughtDurationLabel,
 } from './groupBlocks.js'
@@ -237,7 +238,7 @@ function GroupedActivityStretch({
   // The line's glyph matches its LEADING label word: the currently-running
   // tool's activity while one runs (toolGroupSummary leads with it), else the
   // first-seen activity (the past-tense sentence leads with that).
-  const summaryTools = activitySummaryTools(entries)
+  const summaryTools = activityHeadlineTools(entries)
   const leadTool = [...summaryTools].reverse().find(tool => tool.status === 'running')
     || summaryTools[0]
   const leadToolIcon = toolActivityIcon(effectiveToolName(leadTool))
@@ -290,7 +291,8 @@ function GroupedActivityStretch({
       toolCount: Number.isInteger(summaryToolCount)
         ? summaryToolCount
         : tools.length,
-      thinkingOnly: tools.length === 0,
+      // Reasoning that a routine save joined still reads as reasoning.
+      thinkingOnly: activityHeadlineTools(entries).length === 0,
     }
   }, [sig, summaryToolCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
