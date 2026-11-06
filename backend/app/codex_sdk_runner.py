@@ -48,6 +48,7 @@ from typing import Any, Callable
 from PIL import Image
 
 from app import generated_files, settled, viewed_images
+from app.chat_branches import with_resumed_context
 from app.codex_sdk_contract import (
   app_server_exit_code,
   app_server_pid,
@@ -128,11 +129,6 @@ _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
 # owner-facing "currently doing" line. The read is a small tail of one file.
 HELPER_PROGRESS_INTERVAL_S = 3.0
 MAX_GENERATED_IMAGE_PIXELS = 32_000_000
-
-
-def _with_resumed_context(user_message: str, resumed_context: str | None) -> str:
-  """A fresh session's request, behind the chat's reseeded history when it has one."""
-  return f"{resumed_context}\n\n{user_message}" if resumed_context else user_message
 
 
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
@@ -1213,22 +1209,26 @@ async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
   return response.goal
 
 
-async def _fork_codex_thread(codex, fork_from: dict, thread_options: dict):
+async def _fork_codex_thread(codex, sdk, fork_from: dict, thread_options: dict):
   """A new thread holding ``fork_from["session_id"]`` through its turn ``fork_from["at"]``.
 
   The SDK's ``thread_fork`` cannot name a last turn yet, so this sends the
-  app-server request itself, as backend/scripts/fork_session.py does. Only an
-  ordinary owner chat is branched, so approval and sandbox are the wire forms
-  of its ``auto_review`` and ``full_access`` thread options; personality is
-  inherited from the source thread.
+  app-server request itself, as backend/scripts/fork_session.py does, with the
+  wire forms of the same ``thread_options`` a new thread starts with. An
+  option it has no wire form for raises, and the caller starts fresh instead.
+  Personality is inherited from the source thread.
   """
   from openai_codex import AsyncThread
 
+  approval = {
+    sdk["ApprovalMode"].auto_review: {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
+    sdk["ApprovalMode"].deny_all: {"approvalPolicy": "never"},
+  }[thread_options["approval_mode"]]
+  sandbox = {sdk["Sandbox"].full_access: "danger-full-access"}[thread_options["sandbox"]]
   params = {
     "lastTurnId": fork_from["at"],
-    "approvalPolicy": "on-request",
-    "approvalsReviewer": "auto_review",
-    "sandbox": "danger-full-access",
+    **approval,
+    "sandbox": sandbox,
     "baseInstructions": thread_options.get("base_instructions"),
     "developerInstructions": thread_options.get("developer_instructions"),
     "config": thread_options.get("config"),
@@ -2175,13 +2175,13 @@ async def _run_codex_sdk_turn(
         # A branch's first turn: continue from an exact copy of the source
         # thread through the chosen reply's turn (chat_branches.codex_fork_point).
         try:
-          thread = await _fork_codex_thread(codex, fork_from, thread_options)
+          thread = await _fork_codex_thread(codex, sdk, fork_from, thread_options)
         except Exception as exc:
           log.warning(
             "Codex branch fork of %s failed for chat %s (%s); starting fresh "
             "with the copied history", fork_from["session_id"], chat_id, exc,
           )
-          user_message = _with_resumed_context(user_message, resumed_context)
+          user_message = with_resumed_context(user_message, resumed_context)
       if thread is None:
         thread = await codex.thread_start(**thread_options)
       record_memory_checkpoint_once(
@@ -2240,7 +2240,7 @@ async def _run_codex_sdk_turn(
             "codex session reseed activity log failed chat_id=%s",
             chat_id, exc_info=True,
           )
-        user_message = _with_resumed_context(user_message, resumed_context)
+        user_message = with_resumed_context(user_message, resumed_context)
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,

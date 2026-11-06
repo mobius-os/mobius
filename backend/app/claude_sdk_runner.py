@@ -470,16 +470,21 @@ def _resumable(
   """
   if not session_id:
     return False
+  path = claude_session_path(config_dir, cwd, session_id)
+  return path is not None and path.is_file()
+
+
+def claude_session_path(config_dir: str | os.PathLike | None, cwd: str, session_id: str) -> Path | None:
+  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``.
+
+  ``config_dir`` is the turn's ``CLAUDE_CONFIG_DIR`` (``ClaudeProvider.build_env``);
+  without one the CLI uses this process's own. None when neither is set.
+  """
   base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
   if not base:
-    return False
-  return claude_session_path(base, cwd, session_id).is_file()
-
-
-def claude_session_path(config_dir: str | os.PathLike, cwd: str, session_id: str) -> Path:
-  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``."""
+    return None
   proj = "-" + cwd.strip("/").replace("/", "-")
-  return Path(config_dir) / "projects" / proj / f"{session_id}.jsonl"
+  return Path(base) / "projects" / proj / f"{session_id}.jsonl"
 
 
 # The CLI's refusals of a resume target. It prints them and exits before any

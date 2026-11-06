@@ -57,7 +57,22 @@ def branch_rows(source: models.Chat, messages: list, through_id: str) -> list:
   active = source.active_assistant_message_id
   if active is not None and (through_id == str(active) or through_id.startswith(f"{active}:")):
     raise BranchPointError("That reply is still being written.")
-  return copy.deepcopy(messages[: index + 1])
+  return [_inert_copy(row) for row in messages[: index + 1]]
+
+
+def _inert_copy(row):
+  """A copied row that offers nothing live in the branch.
+
+  Questions, secure inputs and Goal cards are answerable or live only through
+  the chat's own durable state (``pending_question_id``, its runs and Goals),
+  none of which a branch copies. A paused turn's note is the one row-level
+  action: its Resume would continue a run the branch does not have.
+  """
+  row = copy.deepcopy(row)
+  for block in (row.get("blocks") or []) if isinstance(row, dict) else []:
+    if isinstance(block, dict) and block.get("type") == "error":
+      block.pop("resumable", None)
+  return row
 
 
 def _naive_utc(value) -> datetime | None:
@@ -89,7 +104,7 @@ def _within(entry: dict, started_at: datetime, ended_at: datetime) -> bool:
 
 
 def claude_fork_point(
-  config_dir: Path, cwd: str, session_id: str,
+  config_dir: str | os.PathLike | None, cwd: str, session_id: str,
   started_at: datetime, ended_at: datetime,
 ) -> str | None:
   """The uuid of the run's last main-conversation assistant entry.
@@ -102,7 +117,7 @@ def claude_fork_point(
   from app.claude_sdk_runner import claude_session_path
 
   path = claude_session_path(config_dir, cwd, str(uuid.UUID(session_id)))
-  if not path.is_file():
+  if path is None or not path.is_file():
     return None
   last = None
   for entry in _jsonl(path):
@@ -136,8 +151,20 @@ def codex_fork_point(
   return last if isinstance(last, str) and last else None
 
 
+def top_level_chat_cwd(data_dir: str) -> str:
+  """The working directory an owner's (non-delegated) chat turn runs in."""
+  return str(data_dir) if Path(data_dir).exists() else str(Path.cwd())
+
+
+def _top_level_claude_config_dir(data_dir: str) -> str | None:
+  """The ``CLAUDE_CONFIG_DIR`` an owner's Claude turn runs with (None: the CLI default)."""
+  from app.providers import registered_provider
+
+  return registered_provider("claude").build_env({}, data_dir).get("CLAUDE_CONFIG_DIR")
+
+
 def reply_fork(
-  db: Session, source: models.Chat, messages: list, reply_id: str, *, data_dir: str, cwd: str,
+  db: Session, source: models.Chat, messages: list, reply_id: str, *, data_dir: str,
 ) -> dict | None:
   """The provider fork a branch through ``reply_id`` can start from, if any.
 
@@ -159,12 +186,16 @@ def reply_fork(
     return None
   started_at = run.started_at.replace(tzinfo=None) if run.started_at.tzinfo else run.started_at
   ended_at = run.ended_at.replace(tzinfo=None) if run.ended_at.tzinfo else run.ended_at
-  auth = Path(data_dir) / "cli-auth"
   try:
     if run.provider == "claude":
-      at = claude_fork_point(auth / "claude", cwd, run.provider_session_id, started_at, ended_at)
+      at = claude_fork_point(
+        _top_level_claude_config_dir(data_dir), top_level_chat_cwd(data_dir),
+        run.provider_session_id, started_at, ended_at,
+      )
     elif run.provider == "codex":
-      at = codex_fork_point(auth / "codex", run.provider_session_id, started_at, ended_at)
+      at = codex_fork_point(
+        Path(data_dir) / "cli-auth" / "codex", run.provider_session_id, started_at, ended_at,
+      )
     else:
       return None
   except (OSError, ValueError):
@@ -174,13 +205,33 @@ def reply_fork(
   return {"provider": run.provider, "session_id": run.provider_session_id, "at": at}
 
 
+def branch_first_turn(db: Session, chat: models.Chat) -> bool:
+  """Whether this turn of ``chat`` is a branch's first: it has never had a session.
+
+  Derived from the append-only records of the chat's own sessions, never from
+  ``Chat.session_id``, which compaction and a provider switch clear: after
+  those, the branch's own turns live on in its transcript and compaction
+  brief, and neither the source fork nor the copied rows may come back.
+  """
+  if not isinstance(chat.branch_origin, dict) or chat.session_id:
+    return False
+  return (
+    db.query(models.ChatSessionLink.session_id).filter(
+      models.ChatSessionLink.chat_id == chat.id,
+    ).first() is None
+    and db.query(models.ChatRun.id).filter(
+      models.ChatRun.chat_id == chat.id, models.ChatRun.provider_session_id.isnot(None),
+    ).first() is None
+  )
+
+
 def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict | None:
   """The exact provider fork a branch's first turn starts from, if still possible.
 
   ``Chat.branch_origin["fork"]`` (``reply_fork``) names the source session and
   the point the chosen reply ended. Only the same provider can fork it, and a
-  Claude transcript must still exist; a Codex fork that fails falls back to
-  the text reseed inside its runner.
+  Claude transcript must still exist where an owner's Claude turn looks for
+  it; a Codex fork that fails falls back to the text reseed inside its runner.
   """
   origin = chat.branch_origin
   fork = origin.get("fork") if isinstance(origin, dict) else None
@@ -189,23 +240,37 @@ def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict 
   if not isinstance(fork.get("session_id"), str) or not isinstance(fork.get("at"), str):
     return None
   if provider_id == "claude":
-    from app.claude_sdk_runner import claude_session_path
-    if not claude_session_path(Path(data_dir) / "cli-auth" / "claude", str(data_dir), fork["session_id"]).is_file():
+    from app.claude_sdk_runner import _resumable
+
+    if not _resumable(
+      fork["session_id"], top_level_chat_cwd(data_dir), _top_level_claude_config_dir(data_dir),
+    ):
       return None
   return {"session_id": fork["session_id"], "at": fork["at"]}
 
 
-def forget_fork(db: Session, chat_id: str) -> None:
-  """Drop a branch's fork after a turn that used it failed.
+def forget_fork(chat_id: str) -> None:
+  """Drop a branch's fork once Claude refused it, so no later attempt retries it.
 
-  A fork the provider refused would fail every retry the same way; without
-  it the next turn is reseeded as text. A turn that did start a session no
-  longer needs the fork anyway.
+  Runs on its own session in a worker thread (``run_settled``) and touches only
+  ``branch_origin``, a column no chat writer command owns.
   """
-  chat = db.get(models.Chat, chat_id)
-  if chat is not None and isinstance(chat.branch_origin, dict) and chat.branch_origin.get("fork"):
-    chat.branch_origin = {**chat.branch_origin, "fork": None}
-    db.commit()
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, chat_id)
+    if chat is not None and isinstance(chat.branch_origin, dict) and chat.branch_origin.get("fork"):
+      chat.branch_origin = {**chat.branch_origin, "fork": None}
+      db.commit()
+
+
+def with_resumed_context(user_message: str, resumed_context: str | None) -> str:
+  """A fresh session's request, behind the chat's reseeded history when it has one.
+
+  The one place a ``chat_context._build_resumed_context`` block joins a
+  request: a lost or retired session, a branch's first turn, a refused fork.
+  """
+  return f"{resumed_context}\n\n{user_message}" if resumed_context else user_message
 
 
 def _tool_use_ids(value, found: set[str]) -> set[str]:
@@ -257,9 +322,7 @@ def branch_chat(
     raise BranchPointError("Only your own chats can be branched.")
   messages = transcript_rows.read_all(db, source)
   rows = branch_rows(source, messages, through_id)
-  # Top-level chats run in the data directory (chat.py), which is also where
-  # Claude keeps the session transcripts a fork resumes from.
-  fork = reply_fork(db, source, messages, through_id, data_dir=data_dir, cwd=str(Path(data_dir)))
+  fork = reply_fork(db, source, messages, through_id, data_dir=data_dir)
   settings = source.agent_settings_json if isinstance(source.agent_settings_json, dict) else {}
   branched_settings = {k: copy.deepcopy(settings[k]) for k in _BRANCHED_SETTINGS if k in settings}
   title = f"{BRANCH_TITLE_PREFIX}{source.title or 'New chat'}"[:256]

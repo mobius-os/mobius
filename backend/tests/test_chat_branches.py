@@ -174,8 +174,17 @@ def _iso(seconds):
   return f"2026-11-05T01:00:{seconds:02d}.000Z"
 
 
-def _claude_transcript(data_dir, session_id, entries):
-  folder = Path(data_dir) / "cli-auth" / "claude" / "projects" / ("-" + str(data_dir).strip("/").replace("/", "-"))
+def _claude_transcript(data_dir, session_id, entries, *, config_dir=None):
+  """Write a Claude session transcript where an owner's Claude turn keeps it.
+
+  By default that is the signed-in config dir (``cli-auth/claude``, which a
+  credentials file selects); ``config_dir`` is another one (API-key setups).
+  """
+  if config_dir is None:
+    config_dir = Path(data_dir) / "cli-auth" / "claude"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / ".credentials.json").write_text("{}")
+  folder = Path(config_dir) / "projects" / ("-" + str(data_dir).strip("/").replace("/", "-"))
   folder.mkdir(parents=True, exist_ok=True)
   (folder / f"{session_id}.jsonl").write_text("\n".join(json.dumps(e) for e in entries) + "\n")
 
@@ -526,6 +535,10 @@ def test_codex_branch_turn_runs_on_the_source_thread_forked_through_the_reply(mo
   assert thread_id == "source-thread"
   assert params["lastTurnId"] == "turn-7"
   assert params["cwd"] == "/tmp"
+  # The owner thread's own options, in their wire forms.
+  assert params["approvalPolicy"] == "on-request"
+  assert params["approvalsReviewer"] == "auto_review"
+  assert params["sandbox"] == "danger-full-access"
   # The fork already holds the conversation: no text replay.
   assert threads["forked"].turn_args[0].endswith("Paris instead")
   assert "<resumed_context>" not in threads["forked"].turn_args[0]
@@ -542,3 +555,97 @@ def test_codex_branch_fork_failure_of_any_kind_starts_fresh_with_text_history(mo
   assert result["session_id"] == "fresh-thread"
   assert "<resumed_context>Rome or Paris?</resumed_context>" in threads["fresh"].turn_args[0]
   assert threads["forked"].turn_args is None
+
+
+# ── A branch's first turn is durable, and copied rows are inert ──────────
+
+def _branch_after_its_first_turn(client, auth, db, *, evidence):
+  source_id, _sid = _forkable_source(client, auth, db)
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
+  db.add(models.ChatRun(id=f"first-{branch_id}", root_run_id=f"first-{branch_id}", chat_id=branch_id,
+                        status="completed", provider="claude",
+                        provider_session_id="branch-session" if evidence == "run" else None))
+  if evidence == "session-link":
+    db.add(models.ChatSessionLink(provider="claude", session_id="branch-session", chat_id=branch_id))
+  # Compaction and a provider switch both clear the live session pointer.
+  db.get(models.Chat, branch_id).session_id = None
+  db.commit()
+  return branch_id
+
+
+@pytest.mark.parametrize("evidence", ["run", "session-link"])
+def test_cleared_session_after_the_first_turn_neither_reforks_nor_reseeds(client, auth, db, monkeypatch, evidence):
+  # `run`: the first turn's run recorded its session, then a compaction
+  # cleared `session_id`. `session-link`: the chat's append-only session map,
+  # which survives a provider switch.
+  branch_id = _branch_after_its_first_turn(client, auth, db, evidence=evidence)
+
+  captured = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "And then?")
+
+  assert captured["fork_from"] is None
+  assert "<resumed_context>" not in captured["user_message"]
+  assert "Rome or Paris?" not in captured["user_message"]
+
+
+def test_stop_between_fork_attempts_ends_the_turn_without_a_retry(client, auth, db, monkeypatch):
+  source_id, _sid = _forkable_source(client, auth, db)
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
+  calls = []
+  stopped = {"now": False}
+  real_superseded = chat_mod._run_generation_superseded
+  monkeypatch.setattr(chat_mod, "_run_generation_superseded",
+                      lambda chat_id, gen: stopped["now"] or real_superseded(chat_id, gen))
+
+  async def _runner(**kwargs):
+    calls.append(kwargs)
+    stopped["now"] = True  # The owner presses Stop while the refused fork ends.
+    return {"session_id": None, "cost_usd": 0.0,
+            "error": "No message found with message.uuid of: cut-here"}
+
+  _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead", runner=_runner)
+
+  assert len(calls) == 1
+  db.expire_all()
+  assert db.get(models.Chat, branch_id).branch_origin["fork"] is None
+
+
+def test_branch_fork_finds_a_claude_session_in_the_configured_config_dir(client, auth, db, monkeypatch, tmp_path):
+  # An API-key setup has no signed-in config dir; the CLI then uses the
+  # process's own CLAUDE_CONFIG_DIR, and so must the fork point.
+  monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+  sid = str(uuid.uuid4())
+  source_id = _chat(client, auth, db, CONVERSATION[:2], provider="claude", session_id=sid)
+  db.add(models.ChatRun(id="a1", root_run_id="a1", chat_id=source_id, status="completed",
+                        provider="claude", provider_session_id=sid, started_at=T0, ended_at=T1))
+  db.commit()
+  _claude_transcript(get_settings().data_dir, sid, [_assistant("cut-here", 10)],
+                     config_dir=tmp_path / "claude-home")
+
+  origin = _branch_origin(client, auth, db, source_id, "a1")
+
+  assert origin["fork"] == {"provider": "claude", "session_id": sid, "at": "cut-here"}
+
+
+def test_copied_question_and_paused_turn_cards_are_inert_in_the_branch(client, auth, db):
+  question = {"type": "question", "question_id": "q-1",
+              "questions": [{"question": "Rome or Paris?", "options": []}]}
+  paused = {"type": "error", "message": "The turn was stopped.", "resumable": True}
+  messages = [
+    {"role": "user", "content": "Plan a trip", "cid": "u1", "ts": 1},
+    {"id": "a1", "role": "assistant", "content": "", "ts": 2, "blocks": [question, paused]},
+  ]
+  # A still-open question owns its reply, which cannot be branched yet; this
+  # one went unanswered when its turn ended.
+  source_id = _chat(client, auth, db, messages, pending_question_id=None, active_assistant_message_id=None)
+
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth).json()["id"]
+
+  detail = client.get(f"/api/chats/{branch_id}", headers=auth).json()
+  assert detail["pending_question_id"] is None
+  assert detail["goal"] is None
+  copied = detail["messages"][-1]["blocks"]
+  assert copied[0]["question_id"] == "q-1" and not copied[0].get("answers")
+  assert "resumable" not in copied[1]
+  db.expire_all()
+  source = db.get(models.Chat, source_id)
+  assert transcript_rows.read_all(db, source)[-1]["blocks"][1]["resumable"] is True
