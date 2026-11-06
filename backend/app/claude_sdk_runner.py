@@ -81,7 +81,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity, generated_files, settled, tracing
+from app import activity, answer_check, generated_files, settled, tracing
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
 from app.claude_events import (
   NativeContinuationTracker,
@@ -107,6 +107,7 @@ from app.process_groups import (
 )
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
+from app.viewed_images import chat_media_dir
 
 log = logging.getLogger(__name__)
 
@@ -265,6 +266,15 @@ _CLAUDE_TURN_END_TOOLS = (
   f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
   "Bash",
 )
+# Owner cards whose save hands the turn to the owner; the visible-answer check
+# runs just before one is saved (see `answer_check.reason`).
+_ANSWER_CHECK_CARD_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
+)
+# The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
+# of exact tool names, so only these calls pay the PreToolUse round trip.
+_ANSWER_CHECK_CARD_MATCHER = "|".join(sorted(_ANSWER_CHECK_CARD_TOOLS))
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -1103,60 +1113,6 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
-# The owner reads only a turn's text blocks; thinking is folded away. A turn
-# that ends with a short visible reply after long reasoning is the shape in
-# which the agent composed its answer in thinking and closed with a line such
-# as "Nothing has been changed." — the owner then sees no answer at all. The
-# shape is rare (under 1% of stored replies on one instance), so the check
-# below rarely costs an extra model call, and the agent itself judges whether
-# its reply is complete.
-_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
-_ANSWER_CHECK_THINKING_MIN_CHARS = 600
-_ANSWER_CHECK_REASON = (
-  "Möbius end-of-turn check. The owner sees only your visible reply; your "
-  "thinking is hidden from them. This turn's reasoning is long but its "
-  "visible reply is short, so your answer may exist only in your thinking. "
-  "Re-read the owner's latest message. If your visible reply does not "
-  "already answer it or report the result, write that answer now as visible "
-  "text, without mentioning this check. If it already does, end your turn "
-  "without writing anything more."
-)
-
-
-def _answer_may_be_only_in_thinking(
-  blocks: object, last_assistant_message: object = None,
-) -> bool:
-  """Whether this reply's reasoning dwarfs what the owner can actually read.
-
-  ``blocks`` is the sink's current assistant segment. The Stop hook can run
-  before the stream reader has dispatched the final text, so the CLI's own
-  ``last_assistant_message`` is counted when the blocks do not contain it yet.
-  """
-  if not isinstance(blocks, list):
-    return False
-  visible = "".join(
-    block["content"] for block in blocks
-    if isinstance(block, dict) and block.get("type") == "text"
-    and isinstance(block.get("content"), str)
-  )
-  visible_chars = len(visible.strip())
-  if isinstance(last_assistant_message, str):
-    tail = last_assistant_message.strip()
-    if tail and tail not in visible:
-      visible_chars += len(tail)
-  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
-    return False
-  longest_thinking = max(
-    (
-      len(block["content"].strip()) for block in blocks
-      if isinstance(block, dict) and block.get("type") == "thinking"
-      and isinstance(block.get("content"), str)
-    ),
-    default=0,
-  )
-  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
-
-
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1400,35 +1356,126 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-  # Fires when the root agent is about to end its turn. At most once per turn,
-  # when the visible reply is short beside long reasoning, it returns the turn
-  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
-  # thinking gets written where the owner can read it. A Stop or a saved owner
-  # card owns the turn's end, so neither is ever reopened here.
-  answer_check_sent = False
+  # The visible-answer check (see `answer_check.reason`) runs at each
+  # hand-back: just before the root agent saves an owner card, and when it
+  # ends its turn. Before a card it declines that one tool call, so the agent
+  # can write what is missing and call the card again; at the end it returns
+  # the turn. After it speaks, it considers only blocks that arrived since (plus
+  # all visible text), so an unchanged retry or continuation passes and a
+  # second swallowed answer is caught, before a card or at the end, up to
+  # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
+  # `stop_hook_active`, bounds how often a Stop is returned. Before a card,
+  # long new reasoning with no new reply text since the reminder also counts
+  # as still unanswered. A steer starts a fresh block list, which the identity
+  # check below treats as new. A Stop or a saved owner card owns the turn's
+  # end, so neither is reopened.
+  answer_check_reminders = 0
+  # (block list, blocks reviewed, visible reply) as of the last reminder.
+  answer_check_reviewed: tuple[object, int, str | None] = (None, 0, None)
+  answer_check_media_dir = os.path.normpath(
+    str(chat_media_dir(get_settings().data_dir, chat_id))
+  )
+
+  def _answer_check_since_last_reminder(
+    *, before_card: bool, last_assistant_message: object = None,
+  ) -> str | None:
+    nonlocal answer_check_reminders, answer_check_reviewed
+    if (
+      answer_check_reminders >= answer_check.MAX_REMINDERS
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return None
+    blocks = getattr(bc, "assistant_blocks", None)
+    reviewed_list, reviewed_through, seen_at_reminder = answer_check_reviewed
+    if blocks is not reviewed_list:
+      reviewed_through, seen_at_reminder = 0, None
+    reason = answer_check.reason(
+      answer_check.unreviewed_evidence(blocks, reviewed_through),
+      chat_id=chat_id,
+      media_dir=answer_check_media_dir,
+      before_card=before_card,
+      reminded=answer_check_reminders > 0,
+      seen_at_reminder=seen_at_reminder,
+      last_assistant_message=last_assistant_message,
+    )
+    if reason is None:
+      return None
+    answer_check_reminders += 1
+    answer_check_reviewed = (
+      blocks,
+      len(blocks) if isinstance(blocks, list) else 0,
+      answer_check.visible_reply(blocks, last_assistant_message),
+    )
+    log.info(
+      "Claude visible-answer check spoke chat_id=%s before_card=%s reminder=%d",
+      chat_id, before_card, answer_check_reminders,
+    )
+    return reason
 
   async def visible_answer_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    nonlocal answer_check_sent
+    del tool_use_id, context
+    reason = _answer_check_since_last_reminder(
+      before_card=False,
+      last_assistant_message=hook_input.get("last_assistant_message"),
+    )
+    if reason is None:
+      return {"continue_": True}
+    return {"decision": "block", "reason": reason}
+
+  async def visible_answer_before_card_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    # Registered for _ANSWER_CHECK_CARD_MATCHER only. A delegated child's card
+    # goes to its parent agent, not the owner.
+    if hook_input.get("agent_id"):
+      return {"continue_": True}
+    reason = _answer_check_since_last_reminder(before_card=True)
+    if reason is None:
+      return {"continue_": True}
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": reason,
+    }}
+
+  # Each work step is checked once, for words the model wrote as thinking just
+  # before it; the note rides on the step's result instead of blocking it.
+  answer_check_stepped: tuple[object, int] = (None, 0)
+
+  async def visible_answer_after_step_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    nonlocal answer_check_stepped
     del tool_use_id, context
     if (
-      answer_check_sent
-      or hook_input.get("stop_hook_active")
+      hook_input.get("agent_id")
+      or hook_input.get("tool_name") in _ANSWER_CHECK_CARD_TOOLS
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
       return {"continue_": True}
-    if not _answer_may_be_only_in_thinking(
-      getattr(bc, "assistant_blocks", None),
-      hook_input.get("last_assistant_message"),
-    ):
+    blocks = getattr(bc, "assistant_blocks", None)
+    stepped_list, stepped_through = answer_check_stepped
+    answer_check_stepped = (blocks, len(blocks) if isinstance(blocks, list) else 0)
+    note = answer_check.after_step_reason(answer_check.unreviewed_evidence(
+      blocks, stepped_through if blocks is stepped_list else 0,
+    ))
+    if note is None:
       return {"continue_": True}
-    answer_check_sent = True
-    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
-    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+    log.info("Claude visible-answer check spoke after a step chat_id=%s", chat_id)
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PostToolUse", "additionalContext": note,
+    }}
 
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
@@ -1507,10 +1554,17 @@ async def run_claude_sdk_turn(
       "stderr": _capture_stderr,
       "hooks": {
         "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        "PreToolUse": [
+          HookMatcher(
+            matcher=_ANSWER_CHECK_CARD_MATCHER,
+            hooks=[visible_answer_before_card_hook],
+          ),
+        ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
           HookMatcher(matcher=None, hooks=[turn_end_hook]),
+          HookMatcher(matcher=None, hooks=[visible_answer_after_step_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
