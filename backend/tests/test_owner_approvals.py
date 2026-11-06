@@ -869,6 +869,14 @@ def test_question_helper_leaves_canonicalization_to_server(monkeypatch):
     "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
   }]})]
 
+  captured.clear()
+  helper.request_question([{"question": "Ship it?"}], message="Tests pass.")
+  helper.request_restart(message="The fix is committed.")
+  assert captured == [
+    ("question", {"questions": [{"question": "Ship it?"}], "message": "Tests pass."}),
+    ("restart-request", {"message": "The fix is committed."}),
+  ]
+
 
 def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypatch):
   import io
@@ -986,6 +994,52 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
                         json={"content": "Skip past the card"})
   assert blocked.status_code == 409
   assert _row(chat.id)[0] == receipt["question_id"]
+
+
+@pytest.mark.parametrize("route", ["question", "approval"])
+def test_card_carries_the_turns_closing_message_outside_its_identity(
+  client, chat, approval_run, route,
+):
+  payload = PROMPT if route == "approval" else {"questions": [QUESTION_PROMPT]}
+  message = "I tested the change.\n\n- It **passes** locally."
+  first = client.post(f"/api/chats/{chat.id}/{route}",
+                      json={**payload, "message": f"  {message}\n"}, headers=approval_run[1])
+  assert first.status_code == 200, first.text
+  # Rewording the prose on a retry addresses the same saved card, and the
+  # first saved message is kept.
+  again = client.post(f"/api/chats/{chat.id}/{route}",
+                      json={**payload, "message": "Reworded."}, headers=approval_run[1])
+  assert again.json() == first.json()
+  saved = _row(chat.id)[1][-1]
+  cards = [block for block in saved["blocks"] if block["type"] == "question"]
+  assert [card["message"] for card in cards] == [message]
+  assert "message" not in cards[0]["questions"][0]
+  assert saved["content"].endswith(message)
+
+
+def test_blank_card_message_is_ignored_and_an_over_long_one_refused(client, chat, approval_run):
+  response = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": "   ",
+  }, headers=approval_run[1])
+  assert response.status_code == 200, response.text
+  assert "message" not in _row(chat.id)[1][-1]["blocks"][-1]
+  too_long = client.post(f"/api/chats/{chat.id}/approval", json={
+    **PROMPT, "message": "x" * 20_001,
+  }, headers=approval_run[1])
+  assert too_long.status_code == 422
+
+
+def test_card_message_limit_is_exactly_twenty_thousand_characters(client, chat, approval_run):
+  over = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": "x" * 20_001,
+  }, headers=approval_run[1])
+  assert over.status_code == 422
+  at_limit = "y" * 20_000
+  saved = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": at_limit,
+  }, headers=approval_run[1])
+  assert saved.status_code == 200, saved.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["message"] == at_limit
 
 
 def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, approval_run):

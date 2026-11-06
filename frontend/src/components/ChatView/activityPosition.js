@@ -2,7 +2,7 @@
 import { assistantBlockKey } from './streamPromotion.js'
 import { marked } from 'marked'
 import { peerRecordTool, peerTime, storedBlockRange } from './peerTimeline.js'
-import { suppressedQuestionToolIndices } from './streamReducers.js'
+import { cardMessageBlock, suppressedQuestionToolIndices } from './streamReducers.js'
 import { isActivityRunEntry } from './activityGrouping.js'
 import { sliceMarkdownRange } from './markdown/steerMarkdownRange.js'
 
@@ -284,7 +284,8 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
       ? reference
         ? reference.idx + position.block_distance
         : projectedEntries.length + 1
-      : position.block_index - [...skipped].filter(i => i < position.block_index).length)
+      : position.block_index - [...skipped].filter(i => i < position.block_index).length
+        + sourceBlocks.slice(0, position.block_index).filter(cardMessageBlock).length)
     const list = boundaries.get(index) || []
     list.push(note)
     boundaries.set(index, list)
