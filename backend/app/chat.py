@@ -6408,7 +6408,7 @@ async def _run_chat_impl_with_db(
     and branch_first_turn(db, chat_row)
   )
   branch_fork = (
-    first_turn_fork(chat_row, provider_id, settings.data_dir) if first_branch_turn else None
+    first_turn_fork(db, chat_row, provider_id, settings.data_dir) if first_branch_turn else None
   )
   resumed_context_fallback = (
     _build_resumed_context(chat_row, keep_task=run_policy is not None)

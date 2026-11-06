@@ -12,8 +12,10 @@ session was lost (``chat_context._build_resumed_context``).
 What the copied rows need to keep working in their new chat is copied with
 them, all addressed by the viewing chat's id: attached upload files
 (``/api/chats/{id}/uploads/{name}``), agent deliverables
-(``/api/chats/{id}/generated-files/{name}``), full tool outputs, and full edit
-diffs, whose sidecar keys embed the chat and are re-keyed for the branch.
+(``/api/chats/{id}/generated-files/{name}``), screenshot and viewed-image media
+(``/api/chats/{id}/media/{name}``), full tool outputs and long thinking, and
+full edit diffs, whose sidecar keys embed the chat and are re-keyed for the
+branch. Agent scratch is not copied: it expires with its chat by design.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app import chat_writer, generated_files, models, transcript_rows
 from app.codex_rollouts import rollout_paths
+from app.session_links import resume_retired
 from app.tool_edit_preview import edit_diff_sidecar_id
 from app.upload_lifecycle import attachment_names
 
@@ -189,6 +192,9 @@ def reply_fork(
   if (
     run is None or run.chat_id != source.id or run.provider != source.provider
     or not run.provider_session_id or run.started_at is None or run.ended_at is None
+    # A retired session's history teaches withdrawn instructions (chat.py
+    # never resumes one), so it is never forked either.
+    or resume_retired(db, run.provider_session_id)
   ):
     return None
   started_at = run.started_at.replace(tzinfo=None) if run.started_at.tzinfo else run.started_at
@@ -233,19 +239,22 @@ def branch_first_turn(db: Session, chat: models.Chat) -> bool:
   )
 
 
-def first_turn_fork(chat: models.Chat, provider_id: str, data_dir: str) -> dict | None:
+def first_turn_fork(db: Session, chat: models.Chat, provider_id: str, data_dir: str) -> dict | None:
   """The exact provider fork a branch's first turn starts from, if still possible.
 
   ``Chat.branch_origin["fork"]`` (``reply_fork``) names the source session and
-  the point the chosen reply ended. Only the same provider can fork it, and a
-  Claude transcript must still exist where an owner's Claude turn looks for
-  it; a Codex fork that fails falls back to the text reseed inside its runner.
+  the point the chosen reply ended. Only the same provider can fork it, the
+  session must not have been retired since the branch was made, and a Claude
+  transcript must still exist where an owner's Claude turn looks for it; a
+  Codex fork that fails falls back to the text reseed inside its runner.
   """
   origin = chat.branch_origin
   fork = origin.get("fork") if isinstance(origin, dict) else None
   if not isinstance(fork, dict) or fork.get("provider") != provider_id:
     return None
   if not isinstance(fork.get("session_id"), str) or not isinstance(fork.get("at"), str):
+    return None
+  if resume_retired(db, fork["session_id"]):
     return None
   if provider_id == "claude":
     from app.claude_sdk_runner import _resumable
@@ -281,17 +290,37 @@ def with_resumed_context(user_message: str, resumed_context: str | None) -> str:
   return f"{resumed_context}\n\n{user_message}" if resumed_context else user_message
 
 
-def _tool_use_ids(value, found: set[str]) -> set[str]:
+def _named_values(value, key: str, found: set[str]) -> set[str]:
+  """Every non-empty string stored under ``key`` anywhere in ``value``."""
   if isinstance(value, dict):
-    tool_use_id = value.get("tool_use_id")
-    if isinstance(tool_use_id, str) and tool_use_id:
-      found.add(tool_use_id)
+    named = value.get(key)
+    if isinstance(named, str) and named:
+      found.add(named)
     for child in value.values():
-      _tool_use_ids(child, found)
+      _named_values(child, key, found)
   elif isinstance(value, list):
     for child in value:
-      _tool_use_ids(child, found)
+      _named_values(child, key, found)
   return found
+
+
+def _copy_bare_files(source_dir: Path, target_dir: Path, names) -> set[str]:
+  """Plain-copy each bare-named file of ``names`` that exists; returns those copied.
+
+  Only a bare name may become a path, and a copy (never a link) means editing
+  a file in the branch cannot change the source's.
+  """
+  copied = set()
+  for name in names:
+    if (
+      not isinstance(name, str) or name in ("", "..") or Path(name).name != name
+      or not (source_dir / name).is_file()
+    ):
+      continue
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_dir / name, target_dir / name)
+    copied.add(name)
+  return copied
 
 
 def _attachment_names(rows: list) -> set[str]:
@@ -391,23 +420,23 @@ def branch_chat(
     },
   )
 
-  names = _attachment_names(rows)
-  source_uploads = Path(data_dir) / "chats" / source.id / "uploads"
-  branch_uploads = Path(data_dir) / "chats" / branch.id / "uploads"
+  source_folder = Path(data_dir) / "chats" / source.id
+  branch_folder = Path(data_dir) / "chats" / branch.id
   try:
-    uploads = []
-    for entry in source.uploads or []:
-      name = entry.get("name") if isinstance(entry, dict) else None
-      # Only a bare file name may become a path under the uploads folders.
-      if (
-        not isinstance(name, str) or name in ("", "..") or Path(name).name != name
-        or name not in names or not (source_uploads / name).is_file()
-      ):
-        continue
-      branch_uploads.mkdir(parents=True, exist_ok=True)
-      shutil.copy2(source_uploads / name, branch_uploads / name)
-      uploads.append(copy.deepcopy(entry))
-    branch.uploads = uploads
+    attached = _attachment_names(rows)
+    entries = [
+      entry for entry in source.uploads or []
+      if isinstance(entry, dict) and entry.get("name") in attached
+    ]
+    copied = _copy_bare_files(
+      source_folder / "uploads", branch_folder / "uploads", [entry["name"] for entry in entries],
+    )
+    branch.uploads = [copy.deepcopy(entry) for entry in entries if entry["name"] in copied]
+    # Screenshots and viewed-image snapshots a step shows (chat media).
+    _copy_bare_files(
+      source_folder / "media", branch_folder / "media",
+      _named_values(rows, "saved_image", set()) | _named_values(rows, "viewed_image_media", set()),
+    )
     db.add(branch)
     deliverables = _generated_file_names(rows)
     for record in db.query(models.GeneratedFile).filter(
@@ -430,11 +459,21 @@ def branch_chat(
         chat_id=branch.id, name=record.name, path=record.path,
         size=record.size, mime_type=record.mime_type,
       ))
-    tool_ids = _tool_use_ids(rows, set())
+    tool_ids = _named_values(rows, "tool_use_id", set())
     _copy_tool_outputs(db, source.id, branch.id, {key: key for key in tool_ids} | edit_diffs)
+    thinking_ids = sorted(_named_values(rows, "thinking_id", set()))
+    for start in range(0, len(thinking_ids), 500):
+      for trace in db.query(models.ThinkingTrace).filter(
+        models.ThinkingTrace.chat_id == source.id,
+        models.ThinkingTrace.thinking_id.in_(thinking_ids[start:start + 500]),
+      ).all():
+        db.add(models.ThinkingTrace(
+          chat_id=branch.id, thinking_id=trace.thinking_id, content=trace.content,
+          revision=trace.revision, complete=trace.complete,
+        ))
     db.commit()
   except Exception:
     db.rollback()
-    shutil.rmtree(Path(data_dir) / "chats" / branch.id, ignore_errors=True)
+    shutil.rmtree(branch_folder, ignore_errors=True)
     raise
   return branch

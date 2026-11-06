@@ -1214,8 +1214,10 @@ async def _fork_codex_thread(codex, sdk, fork_from: dict, thread_options: dict):
 
   The SDK's ``thread_fork`` cannot name a last turn yet, so this sends the
   app-server request itself, as backend/scripts/fork_session.py does, with the
-  wire forms of the same ``thread_options`` a new thread starts with. An
-  option it has no wire form for raises, and the caller starts fresh instead.
+  wire forms of the same ``thread_options`` a new thread starts with. The
+  SDK's own option-to-wire mapping (``_approval_mode``, ``_sandbox``) is
+  private, so the few modes an owner thread uses are spelled out here; an
+  option without a wire form raises, and the caller starts fresh instead.
   Personality is inherited from the source thread; a native goal the source
   thread saved is the source's, so it is cleared before any turn can start it,
   as the resume path clears a retired one.

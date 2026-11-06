@@ -754,3 +754,66 @@ def test_codex_branch_fork_point_reads_sessions_where_codex_keeps_them(client, a
   origin = _branch_origin(client, auth, db, source_id, "a1")
 
   assert origin["fork"] == {"provider": "codex", "session_id": tid, "at": "this-run"}
+
+
+# ── Retired sessions and the remaining per-chat files ────────────────────
+
+def _retire(db, source_id, sid):
+  db.add(models.ChatSessionLink(provider="claude", session_id=sid, chat_id=source_id,
+                                resume_retired_at=datetime(2026, 11, 6)))
+  db.commit()
+
+
+def test_a_retired_source_session_is_never_forked_at_branch_time(client, auth, db, monkeypatch):
+  source_id, sid = _forkable_source(client, auth, db)
+  _retire(db, source_id, sid)
+
+  assert _branch_origin(client, auth, db, source_id, "run-a1")["fork"] is None
+
+
+def test_a_session_retired_after_branching_is_not_forked_and_reseeds_as_text(client, auth, db, monkeypatch):
+  source_id, sid = _forkable_source(client, auth, db)
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "run-a1"}, headers=auth).json()["id"]
+  _retire(db, source_id, sid)
+
+  captured = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")
+
+  assert captured["fork_from"] is None
+  assert "<resumed_context>" in captured["user_message"]
+  assert "Rome or Paris?" in captured["user_message"]
+
+
+def test_branch_brings_screenshots_viewed_images_and_long_thinking(client, auth, db):
+  data_dir = Path(get_settings().data_dir)
+  messages = [
+    {"role": "user", "content": "Show me", "cid": "u1", "ts": 1},
+    {"id": "a1", "role": "assistant", "content": "Here", "ts": 2, "blocks": [
+      {"type": "thinking", "thinking_id": "think-1", "thinking_deferred": True},
+      {"type": "tool", "tool": "screenshot", "tool_use_id": "t1", "saved_image": "shot.png"},
+      {"type": "tool", "tool": "view_image", "tool_use_id": "t2", "viewed_image_media": "viewed.png"},
+      {"type": "tool", "tool": "screenshot", "tool_use_id": "t3", "saved_image": "../escape.png"},
+    ]},
+    {"role": "user", "content": "Again", "cid": "u2", "ts": 3},
+    {"id": "a2", "role": "assistant", "content": "Later", "ts": 4, "blocks": [
+      {"type": "tool", "tool": "screenshot", "tool_use_id": "t4", "saved_image": "later.png"},
+    ]},
+  ]
+  source_id = _chat(client, auth, db, messages)
+  media = data_dir / "chats" / source_id / "media"
+  media.mkdir(parents=True, exist_ok=True)
+  for name in ("shot.png", "viewed.png", "later.png"):
+    (media / name).write_bytes(b"png " + name.encode())
+  (data_dir / "chats" / "escape.png").write_bytes(b"outside")
+  db.add(models.ThinkingTrace(chat_id=source_id, thinking_id="think-1", content="long thought",
+                              revision=12, complete=True))
+  db.commit()
+
+  branch_id = client.post(f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth).json()["id"]
+
+  branch_media = data_dir / "chats" / branch_id / "media"
+  assert sorted(p.name for p in branch_media.iterdir()) == ["shot.png", "viewed.png"]
+  served = client.get(f"/api/chats/{branch_id}/media/shot.png", headers=auth)
+  assert served.status_code == 200 and served.content == b"png shot.png"
+  (branch_media / "shot.png").write_bytes(b"edited")
+  assert (media / "shot.png").read_bytes() == b"png shot.png"
+  assert client.get(f"/api/chats/{branch_id}/thinking-trace/think-1", headers=auth).text == "long thought"
