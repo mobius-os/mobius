@@ -1,40 +1,9 @@
 /* Shared folders reuse Settings rows, provider rows and buttons; only their own pieces live here. */
 
-/* The Settings row: titled like AI providers, one › row that opens the page. */
-.settings__section.shared-folders-summary {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.shared-folders-summary > .settings__section-title { margin: 0 0 5px; }
+/* The Settings row: titled like AI providers; the row opens the page. */
 .shared-folders-summary .shared-folders-summary__row {
-  margin-top: 12px;
   /* The loaded row is two text lines plus padding; the placeholder is held to the same height so nothing below moves. */
-  box-sizing: border-box;
-  min-height: 70px;
-}
-
-.shared-folders-summary__icon {
-  width: 34px;
-  height: 34px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.shared-folders-summary__attention {
-  flex: none;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent-text, var(--accent));
-  font-size: 12px;
-  white-space: nowrap;
+  min-height: 64px;
 }
 
 .shared-folders__intro {

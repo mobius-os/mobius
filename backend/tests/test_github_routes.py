@@ -16356,3 +16356,59 @@ def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_toke
     "code": "commit_identity_mismatch",
     "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
   }
+
+
+# ── Connected-account avatar ────────────────────────────────────────────────
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+@pytest.fixture
+def _fresh_avatar_cache():
+  from app.routes import github_access
+  github_access._avatar_cache.clear()
+  yield
+  github_access._avatar_cache.clear()
+
+
+def test_avatar_serves_only_the_connected_login_same_origin(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  _write_token(login="octocat")
+  requests = []
+
+  def handler(request):
+    requests.append(request)
+    return httpx.Response(200, headers={"content-type": "image/png"}, content=_PNG)
+
+  _install_mock_transport(monkeypatch, handler)
+  response = client.get("/api/github/avatar", headers=auth)
+  assert response.status_code == 200
+  assert response.headers["content-type"] == "image/png"
+  assert response.content == _PNG
+  assert [str(r.url) for r in requests] == [
+    "https://avatars.githubusercontent.com/octocat?s=96",
+  ]
+  # The image request is anonymous: the GitHub token never leaves for it.
+  assert "authorization" not in {k.lower() for k in requests[0].headers}
+  # A second read is served from the short hold, not refetched.
+  assert client.get("/api/github/avatar", headers=auth).status_code == 200
+  assert len(requests) == 1
+
+
+def test_avatar_is_absent_without_a_connection(client, auth, monkeypatch, _fresh_avatar_cache):
+  _install_mock_transport(monkeypatch, lambda request: pytest.fail("no fetch without a login"))
+  assert client.get("/api/github/avatar", headers=auth).status_code == 404
+
+
+@pytest.mark.parametrize("upstream", [
+  httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>"),
+  httpx.Response(302, headers={"location": "https://example.com/x.png"}),
+  httpx.Response(200, headers={"content-type": "image/png"}, content=b"x" * (512 * 1024 + 1)),
+])
+def test_avatar_refuses_non_images_redirects_and_oversize(
+  client, auth, monkeypatch, _fresh_avatar_cache, upstream,
+):
+  _write_token(login="octocat")
+  _install_mock_transport(monkeypatch, lambda request: upstream)
+  assert client.get("/api/github/avatar", headers=auth).status_code == 502

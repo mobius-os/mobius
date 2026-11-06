@@ -638,18 +638,23 @@ class ModelConnectionPatch(BaseModel):
   enabled: bool
 
 
-def _app_model_connection(provider_id: str, principal: Principal):
-  """The reviewed app connection this caller may switch, never a CLI provider."""
+def _app_model_connection(provider_id: str, principal: Principal, db: Session):
+  """The switchable model connection this caller may use, never a CLI provider.
+
+  The Möbius subscription is platform-owned: the owner switches it in
+  Settings, and an app with the reviewed identity-management grant (installed
+  Möbius · You copies) may too. An app connection belongs to its declaring app.
+  """
+  from app.deps import get_owner_or_app_with_identity_manage
   from app.providers import AppModelProvider, MobiusProvider, PROVIDERS, sync_app_model_providers
   sync_app_model_providers(get_settings().data_dir)
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    app_id = provider.app_id
-  elif isinstance(provider, AppModelProvider):
-    app_id = provider.app_id
-  else:
+  if isinstance(provider, MobiusProvider):
+    get_owner_or_app_with_identity_manage(principal, db)
+    return provider
+  if not isinstance(provider, AppModelProvider):
     raise HTTPException(404, "This app model connection is not installed.")
-  if principal.app_id is not None and principal.app_id != app_id:
+  if principal.app_id is not None and principal.app_id != provider.app_id:
     raise HTTPException(403, "Only the declaring app can change this model connection.")
   return provider
 
@@ -658,9 +663,10 @@ def _app_model_connection(provider_id: str, principal: Principal):
 def model_connection_enabled(
   provider_id: str,
   principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   from app.providers import provider_enabled
-  _app_model_connection(provider_id, principal)
+  _app_model_connection(provider_id, principal, db)
   return {"enabled": provider_enabled(get_settings().data_dir, provider_id)}
 
 
@@ -669,10 +675,11 @@ def set_model_connection_enabled(
   provider_id: str,
   body: ModelConnectionPatch,
   principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   from app.providers import update_agent_settings
   require_installation_owner_control(principal)
-  _app_model_connection(provider_id, principal)
+  _app_model_connection(provider_id, principal, db)
   data_dir = get_settings().data_dir
   if not update_agent_settings(data_dir, lambda current: {
     **current,

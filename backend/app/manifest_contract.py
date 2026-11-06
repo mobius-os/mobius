@@ -660,6 +660,10 @@ def validate_manifest_contract(manifest) -> None:
   if model_provider is not None:
     if not isinstance(model_provider, Mapping):
       _fail("Manifest `model_provider` must be an object.")
+    # The identity_broker transport is inert: the platform owns the Möbius
+    # catalogue (mobius_models.json) and the registry skips this declaration.
+    # It stays valid, and reserved to the reviewed `identity` app, so
+    # installed copies and the published Möbius · You package keep applying.
     broker = model_provider.get("transport") == "identity_broker"
     expected = {"name", "base_url", "models", "default_model"}
     expected |= {"transport"} if broker else {"secret_name"}

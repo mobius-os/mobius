@@ -431,7 +431,7 @@ def test_set_background_agents_persists_only_current_provider_rows(client, auth)
   rows = [
     {"provider": "claude", "model": "claude-sonnet-4-6", "effort": "high", "enabled": True},
     {"provider": "codex", "model": "gpt-5.4", "effort": "medium", "enabled": True},
-    {"provider": "mobius", "model": "inkling", "effort": "medium", "enabled": False},
+    {"provider": "mobius", "model": "evolve", "effort": "medium", "enabled": False},
   ]
   response = client.post(
     "/api/settings",
@@ -444,9 +444,8 @@ def test_set_background_agents_persists_only_current_provider_rows(client, auth)
   assert merged["skills_enabled"] is True
   assert merged["background_agents"] == {"providers": rows}
   resolved = client.get("/api/settings", headers=auth).json()["background_agents"]
-  # Saved choices survive removal, but a connector without an accepted app
-  # declaration is not offered to background agents.
-  assert resolved["providers"] == rows[:2]
+  # The platform-owned Möbius row is offered with no app installed.
+  assert resolved["providers"] == rows
   assert resolved["primary"]["provider"] == "claude"
   assert resolved["fallback"]["provider"] == "codex"
 
@@ -733,7 +732,9 @@ def test_model_registry_returns_known_models_on_discovery_failure(
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
   body = res.json()
-  assert set(body["providers"]) == {"claude", "codex"}
+  # Möbius stays listed while not linked; its catalogue is local data.
+  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  assert [m["id"] for m in body["providers"]["mobius"]] == providers.known_model_ids("mobius")
   claude_ids = [m["id"] for m in body["providers"]["claude"]]
   assert claude_ids == KNOWN_MODELS["claude"]
   codex_ids = [m["id"] for m in body["providers"]["codex"]]

@@ -55,8 +55,6 @@ def test_existing_providers_remain_valid(provider):
   ("mobius", {"minimal", "low", "medium", "high", "max"}),
 ])
 def test_existing_switch_effort_contract_is_unchanged(provider, allowed):
-  if provider == "mobius":
-    providers.PROVIDERS["mobius"].set_declaration(None, None)
   for effort in get_args(AgentEffort):
     if effort in allowed:
       assert _switch(provider, effort=effort).agent_settings_json.effort == effort

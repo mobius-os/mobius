@@ -311,6 +311,57 @@ async def github_status(
   }
 
 
+_GITHUB_LOGIN_SHAPE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_AVATAR_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_AVATAR_MAX_BYTES = 512 * 1024
+_AVATAR_HOLD_SECONDS = 6 * 60 * 60
+# login -> (fetched_at, media_type, bytes). One connected account at a time, so
+# this never holds more than a handful of small images.
+_avatar_cache: dict[str, tuple[float, str, bytes]] = {}
+
+
+@router.get("/avatar")
+@_limiter.limit("30/minute")
+async def github_avatar(
+  request: Request,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
+):
+  """The connected account's public GitHub avatar, served same-origin.
+
+  The shell's image policy allows only same-origin images, so Settings shows
+  the avatar through this narrow read instead of widening ``img-src`` to a
+  third-party host. Only the connected login is ever fetched; the request
+  carries no token, and the bytes are bounded and type-checked.
+  """
+  state = github_auth.read_state() or {}
+  login = state.get("login") if state.get("token") else None
+  if not isinstance(login, str) or not _GITHUB_LOGIN_SHAPE.fullmatch(login):
+    raise HTTPException(status_code=404, detail="No GitHub account is connected.")
+  cached = _avatar_cache.get(login)
+  if cached is None or time.monotonic() - cached[0] > _AVATAR_HOLD_SECONDS:
+    try:
+      async with httpx.AsyncClient(follow_redirects=False, timeout=10) as client:
+        response = await client.get(
+          f"https://avatars.githubusercontent.com/{login}",
+          params={"s": "96"},
+          headers={"User-Agent": "mobius"},
+        )
+    except httpx.HTTPError:
+      raise HTTPException(status_code=502, detail="GitHub avatar is unavailable.")
+    media_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    if (response.status_code != 200 or media_type not in _AVATAR_TYPES
+        or len(response.content) > _AVATAR_MAX_BYTES):
+      raise HTTPException(status_code=502, detail="GitHub avatar is unavailable.")
+    _avatar_cache.clear()
+    cached = (time.monotonic(), media_type, response.content)
+    _avatar_cache[login] = cached
+  return Response(
+    content=cached[2],
+    media_type=cached[1],
+    headers={"Cache-Control": "private, max-age=3600"},
+  )
+
+
 @router.get("/source-status")
 async def github_source_status(
   _: models.Owner = Depends(get_owner_or_app_with_github_access),
