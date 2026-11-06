@@ -286,6 +286,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never

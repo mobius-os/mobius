@@ -7013,6 +7013,19 @@ def _add_app_chat_scope_starts(eng) -> None:
     ))
 
 
+def _add_chat_branch_origin(eng) -> None:
+  """Where a branched chat came from (``chat_branches``); NULL for every other chat."""
+  from sqlalchemy import inspect as sa_inspect
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  if "branch_origin" in {c["name"] for c in inspector.get_columns("chats")}:
+    return
+  with eng.begin() as connection:
+    connection.exec_driver_sql("ALTER TABLE chats ADD COLUMN branch_origin JSON")
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7134,6 +7147,7 @@ _SCHEMA_MIGRATIONS = (
   ("0097_core_contribution_review_runs", _allow_core_contribution_review_runs),
   ("0098_run_end_reason", _add_run_end_reason),
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
+  ("0100_chat_branch_origin", _add_chat_branch_origin),
 )
 
 

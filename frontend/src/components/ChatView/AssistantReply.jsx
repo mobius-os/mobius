@@ -41,6 +41,7 @@ function AssistantReply({
   endsStretch = true,
   metaVisible = false,
   onRevealMeta,
+  onBranch,
   pendingQuestionRef,
   resumeCardRef,
   ...messageProps
@@ -90,6 +91,7 @@ function AssistantReply({
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
+  const branchThroughId = rows[rows.length - 1].message.id
   const metaKey = presentationRows[0].key
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
@@ -156,6 +158,10 @@ function AssistantReply({
       copy={answerText ? button => renderedReplyClipboard(
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}
+      // Branching continues from the whole settled reply: its last row, named
+      // by the id the server stored it under.
+      branch={outcome && onBranch && branchThroughId != null
+        ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
       visible={metaVisible}
     />

@@ -987,6 +987,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    // A new chat continuing this one through the reply stored as
+    // `throughId`; answers the same shape as `create`.
+    branch: (chatId, throughId) => listAffectingMutation(
+      'chats', `/chats/${encodeURIComponent(chatId)}/branch`, {
+        method: 'POST',
+        body: JSON.stringify({ through_id: throughId }),
+      },
+    ),
     send: (chatId, payload, options = {}) => apiFetch(`/chats/${encodeURIComponent(chatId)}/messages`, {
       ...options,
       method: 'POST',
