@@ -218,7 +218,20 @@ test('frame live applier writes a valid hex bg when no css arrives', () => {
 // layer-aware cascade oracle, then checks no inline --bg overrides it.
 
 const { default: themeCssCases } = await import('./themeCssCases.json', { with: { type: 'json' } })
-const { DARK_ROLES, LIGHT_ROLES, contrastRatio } = await import('../../theme.js')
+// The shipped accent text roles (backend/app/theme.py DEFAULT_THEME and
+// _LIGHT_DEFAULTS; test_theme_roles.py pins the frame's copy to them).
+const DARK_ACCENT_TEXT = '#957cf8'
+const LIGHT_ACCENT_TEXT = '#6548d4'
+
+function contrastRatio(a, b) {
+  const luminance = (hex) => {
+    const [r, g, b2] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b2
+  }
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
 
 function frameStaticCss() {
   return FRAME_HTML.match(/<style>(\s*\/\* Fallback defaults[\s\S]*?)<\/style>/)[1]
@@ -284,7 +297,7 @@ test('frame: the static fallbacks sit in the defaults layer, declared first', ()
   const css = frameStaticCss().replace(/\/\*[\s\S]*?\*\//g, '')
   assert.match(css, /^\s*@layer mobius-defaults \{/)
   const root = resolveRoot(css, 'dark')
-  assert.equal(root['--accent-text'], DARK_ROLES['--accent-text'])
+  assert.equal(root['--accent-text'], DARK_ACCENT_TEXT)
 })
 
 test('frame: owner rules win over generated and static defaults, initially and live', () => {
@@ -312,7 +325,7 @@ test('frame: owner rules win over generated and static defaults, initially and l
   applyTheme(served('duplicate declarations in one root'), '#f0eeeb')
   root = frameRoot(dom, 'light')
   assert.equal(root['--accent'], '#0ea5e9')
-  assert.notEqual(root['--accent-text'], LIGHT_ROLES['--accent-text'])
+  assert.notEqual(root['--accent-text'], LIGHT_ACCENT_TEXT)
   assert.ok(contrastRatio(root['--accent-text'], root['--surface-2']) >= 4.5)
   assert.equal(root['--surface-2'], '#e8e6e2', 'the light default, not the static dark one')
 })

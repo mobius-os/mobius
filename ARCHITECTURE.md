@@ -387,7 +387,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `notify.py` | System-event notifications to active broadcasts |
 | `notifications.py` | Push notification sending + history |
 | `push.py` | Web Push subscriptions and native push devices |
-| `theme.py` | `GET /api/theme` — effective theme CSS + bg with default fallback |
+| `theme.py` | `GET /api/theme` — effective theme CSS + bg with default fallback, plus the light/dark switch preview; `POST /api/theme/mode` — the switch |
 | `settings.py` | Owner-level configuration |
 | `github.py` | GitHub connect status + read-only REST/GraphQL passthrough for in-product upstream contributions (pairs with `github_auth.py` + the `contributing.md` skill) |
 | `self_reminders.py` | Agent self-scheduling endpoints |
