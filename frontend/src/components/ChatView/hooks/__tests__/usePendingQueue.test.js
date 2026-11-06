@@ -913,3 +913,16 @@ test('a machine or app row starting leaves the held rows held', () => {
     [['held-a', true]],
   )
 })
+
+test('an accepted empty Send clears every local hold, also on rows it did not start', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'wake', ts: 1, hidden: true }),
+    fixtureMsg({ cid: 'held-a', ts: 2, held: true }),
+  ])
+  result.current.releaseHolds()
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, !!row.held]),
+    [['wake', false], ['held-a', false]],
+  )
+})

@@ -71,6 +71,7 @@ import { cidOf } from '../messageIdentity.js'
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
  *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
+ *   releaseHolds: () => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
  * }}
@@ -347,6 +348,13 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     return promoted
   }, [acknowledgeServerIntent, releaseSteerReservation])
 
+  // The owner's empty Send released every hold on the server.
+  const releaseHolds = useCallback(() => {
+    apply(prev => (prev.some(m => m.held)
+      ? prev.map(m => (m.held ? { ...m, held: false } : m))
+      : prev))
+  }, [apply])
+
   const cancelByCid = useCallback((cid) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
     // cannot resurrect on the next hydrate.
@@ -607,6 +615,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     restoreByCid,
     hydrate,
     hydrateFromTranscript,
+    releaseHolds,
     markInFlight,
     clearInFlight,
   }

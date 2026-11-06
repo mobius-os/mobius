@@ -141,6 +141,11 @@ test('a held queue turns the idle primary action into one empty Send of the queu
   )
   assert.match(
     chatView,
+    /continuation: 'queue' \}\)[\s\S]{0,240}result\?\.status === 'queued'\) \{\s*pendingQueue\.releaseHolds\(\)/,
+    'an accepted empty Send clears the local holds the server released',
+  )
+  assert.match(
+    chatView,
     /pendingQueue\.pendingMessagesRef\.current\.length > 0\s*&& !handlingStopRef\.current/,
     'the stream-end refetch waits while Stop promotes the partial',
   )

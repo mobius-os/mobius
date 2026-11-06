@@ -75,7 +75,7 @@ test('a held queue is sent from its tray while the empty composer keeps the mic'
     items: items.map(row => ({ ...row, held: true })), held: true, onSendHeld() {},
   }))
   assert.match(html, sendHeld)
-  assert.match(html, /Stopped — sends when you send/)
+  assert.match(html, /Waiting for you — sends when you send/)
   assert.doesNotMatch(renderToStaticMarkup(createElement(QueuedMessages, { items })), sendHeld,
     'an ordinary queue has no send-all control')
   assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/,
@@ -86,7 +86,7 @@ test('held rows never claim to send after a running turn', () => {
   const html = renderToStaticMarkup(createElement(QueuedMessages, {
     items: items.map(row => ({ ...row, held: true })), held: true, turnActive: true,
   }))
-  assert.match(html, /Stopped — sends when you send/)
+  assert.match(html, /Waiting for you — sends when you send/)
   assert.doesNotMatch(html, /after the current turn/)
   assert.doesNotMatch(html, /aria-label="Send queued messages"/)
 })

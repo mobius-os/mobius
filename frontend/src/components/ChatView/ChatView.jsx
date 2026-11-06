@@ -4682,6 +4682,11 @@ export default function ChatView({
     setSendFailure(null)
     try {
       const result = await sendAfterSettingsSaved('', undefined, { continuation: 'queue' })
+      // Accepted (started or queued behind other work): the server released
+      // every hold, including rows this turn did not start.
+      if (result?.status === 'started' || result?.status === 'queued') {
+        pendingQueue.releaseHolds()
+      }
       if (result?.status !== 'started') {
         fetchMessages({ force: true, authoritative: true })
         return
