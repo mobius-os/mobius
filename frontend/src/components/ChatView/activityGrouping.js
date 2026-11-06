@@ -33,10 +33,11 @@ function isRoutineEntry(entry) {
 
 // Routine saves usually land after a reply's prose, where on their own they add
 // a row below the answer that only says what was saved. In a settled reply, move
-// each one to just after the reply's latest earlier activity so the ordinary
-// grouping folds it into that line, where it stays inspectable. A routine call
-// with no earlier activity keeps its place. Entries keep their idx (and so their
-// keys). Render-only (MsgContent); pure, inputs are not mutated.
+// each one back across that prose to just after the activity line before it, so
+// the ordinary grouping folds it in, where it stays inspectable. Only prose is
+// crossed: a card, image or any other block keeps the save after it, and a save
+// with no activity before the prose keeps its place. Entries keep their idx (and
+// so their keys). Render-only (MsgContent); pure, inputs are not mutated.
 export function joinRoutineToActivity(entries) {
   const out = []
   let anchor = -1
@@ -48,6 +49,7 @@ export function joinRoutineToActivity(entries) {
     }
     out.push(entry)
     if (entry?.item?.type === 'activity' || isActivityRunEntry(entry)) anchor = out.length - 1
+    else if (entry?.item?.type !== 'text') anchor = -1
   }
   return out
 }

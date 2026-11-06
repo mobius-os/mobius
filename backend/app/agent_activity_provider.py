@@ -14,9 +14,10 @@ from app.agent_activity import (
   ActivityCommand,
   AgentActivityBinding,
 )
-from app.app_tools import exposed_tool_name
+from app.app_tools import exposed_tool_name, live_app_tools
 from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
 from app.manifest_contract import validate_manifest_contract
+from app.platform_tools import CONTROL_TOOL_NAMES, DELEGATED_CONTROL_TOOL_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
   try:
     pairs: list[tuple[str, ActivityCommand]] = []
     tool_pairs: list[tuple[str, ActivityCommand]] = []
-    routine_tools: list[str] = []
     rows = db.query(models.App).filter(
       models.App.deleted_at.is_(None),
     ).order_by(models.App.id.asc()).all()
@@ -45,10 +45,6 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         validate_manifest_contract(manifest)
       except (AppliedRuntimeUnavailable, OSError, UnicodeError, ValueError):
         continue
-      routine_tools.extend(
-        exposed_tool_name(app.slug, tool["name"])
-        for tool in manifest.get("tools") or [] if tool.get("routine") is True
-      )
       declarations = manifest.get("agent_activities")
       if not isinstance(declarations, dict):
         continue
@@ -88,6 +84,14 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         except OSError:
           pass
         pairs.extend((str(path), command) for path in forms)
+    # Routine marks come from the tools agents are actually served (reviewed
+    # contract, live apps, duplicate names resolved). An app tool never takes
+    # a platform tool's name: the control server serves the platform's.
+    platform = {*CONTROL_TOOL_NAMES, *DELEGATED_CONTROL_TOOL_NAMES}
+    routine_tools = [
+      tool.exposed_name for tool in live_app_tools(db)
+      if tool.routine and tool.exposed_name not in platform
+    ]
     return AgentActivityBinding.of(pairs, tool_pairs, routine_tools)
   except Exception:
     log.exception("app activity binding unavailable; activity cards disabled")

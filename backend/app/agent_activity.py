@@ -177,15 +177,20 @@ def _running(command: ActivityCommand) -> dict:
   }
 
 
+def _control_tool_name(tool: object) -> str | None:
+  """The bare name of a call to the Möbius control server, else None."""
+  if isinstance(tool, str):
+    for prefix in _CONTROL_TOOL_PREFIXES:
+      if tool.startswith(prefix):
+        return tool[len(prefix):]
+  return None
+
+
 def _declared_app_tool(
   tool: object, binding: AgentActivityBinding,
 ) -> ActivityCommand | None:
-  if not isinstance(tool, str):
-    return None
-  for prefix in _CONTROL_TOOL_PREFIXES:
-    if tool.startswith(prefix):
-      return binding.by_app_tool.get(tool[len(prefix):])
-  return None
+  name = _control_tool_name(tool)
+  return binding.by_app_tool.get(name) if name else None
 
 
 def activity_from_app_tool(
@@ -203,13 +208,8 @@ def is_routine_tool(tool: object, binding: AgentActivityBinding) -> bool:
   tools in its manifest. The chat shows a successful routine call inside the
   surrounding activity rather than as its own beat; a failed one stays visible.
   """
-  if not isinstance(tool, str):
-    return False
-  for prefix in _CONTROL_TOOL_PREFIXES:
-    if tool.startswith(prefix):
-      name = tool[len(prefix):]
-      return name in ROUTINE_CONTROL_TOOL_NAMES or name in binding.routine_app_tools
-  return False
+  name = _control_tool_name(tool)
+  return name in ROUTINE_CONTROL_TOOL_NAMES or name in binding.routine_app_tools
 
 
 def is_app_tool_call(tool: object, binding: AgentActivityBinding) -> bool:

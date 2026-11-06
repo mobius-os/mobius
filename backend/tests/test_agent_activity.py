@@ -305,9 +305,7 @@ def test_tool_triggered_activities_bind_from_the_applied_manifest(
     "description": "test", "entry": "index.jsx", "source_files": ["service.py"],
     "service": {"entry": "service.py"},
     "tools": [{"name": "search", "description": "Search.",
-               "input_schema": {"type": "object"}},
-              {"name": "remember", "description": "Remember.",
-               "input_schema": {"type": "object"}, "routine": True}],
+               "input_schema": {"type": "object"}}],
     "agent_activities": {"lookup": {"tool": "search", "running_label": " Searching "}},
   }))
   app = _app(db, root, "night-brain", "Night Brain")
@@ -321,7 +319,6 @@ def test_tool_triggered_activities_bind_from_the_applied_manifest(
     app_slug="night-brain", app_name="Night Brain", activity_id="lookup",
     argument_count=0, running_label="Searching",
   )}
-  assert binding.routine_app_tools == {"night_brain_remember"}
   assert app.id
 
 

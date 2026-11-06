@@ -169,10 +169,36 @@ test('a routine save never names reasoning or a distinctive line', () => {
   })
   assert.deepEqual(groupActivityRuns([thought, capture]), [{ group: [thought, capture] }])
   assert.equal(activityCollapsedLabel([thought, capture]), 'Thought for 3 seconds')
-  // A save still running beside work does not take over the live line either.
-  const command = entry('tool', { tool: 'Bash', status: 'done' })
+  // A save still running says so on the live line, even after reasoning.
   const saving = routineSave({ status: 'running' })
-  assert.deepEqual(groupActivityRuns([command, saving]), [{ group: [command, saving] }])
-  assert.equal(activityCollapsedLabel([command, saving], { live: true }), 'Running a command')
+  assert.deepEqual(groupActivityRuns([thought, saving]), [{ group: [thought, saving] }])
+  assert.equal(activityCollapsedLabel([thought, saving], { live: true }), 'Saving notes')
   assert.equal(activityCollapsedLabel([saving], { live: true }), 'Saving notes')
+})
+
+test('a routine save moves back only across the reply\'s prose', () => {
+  const command = entry('tool', { tool: 'Bash', status: 'done' })
+  const question = entry('question', { id: 'q' })
+  const image = entry('tool', { tool: 'Read', input: '/tmp/preview.png', status: 'done' })
+  const answer = entry('text', { content: 'Done.' })
+  const save = routineSave()
+  // A save made after a card or image never appears before it.
+  assert.deepEqual(
+    joinRoutineToActivity([command, question, image, answer, save]),
+    [command, question, image, answer, save],
+  )
+  assert.deepEqual(
+    joinRoutineToActivity([command, question, answer, save]),
+    [command, question, answer, save],
+  )
+  assert.deepEqual(
+    joinRoutineToActivity([command, image, answer, save]),
+    [command, image, answer, save],
+  )
+  // Across prose alone it still joins the activity line before that prose.
+  const more = entry('text', { content: 'And more.' })
+  assert.deepEqual(
+    joinRoutineToActivity([question, command, answer, more, save]),
+    [question, command, save, answer, more],
+  )
 })

@@ -292,7 +292,7 @@ function GroupedActivityStretch({
         ? summaryToolCount
         : tools.length,
       // Reasoning that a routine save joined still reads as reasoning.
-      thinkingOnly: activityHeadlineTools(entries).length === 0,
+      thinkingOnly: summaryTools.length === 0,
     }
   }, [sig, summaryToolCount]) // eslint-disable-line react-hooks/exhaustive-deps
 

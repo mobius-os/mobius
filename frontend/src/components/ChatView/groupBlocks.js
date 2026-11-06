@@ -194,12 +194,13 @@ export function activitySummaryTools(entries) {
   })
 }
 
-// The tools that name a stretch's collapsed line. Routine calls (isRoutineTool)
-// stay inside the stretch but never name it beside other work or reasoning; a
-// stretch of nothing else still says what it is doing or did.
+// The tools that name a stretch's collapsed line. Settled routine calls
+// (isRoutineTool) stay inside the stretch but never name it beside other work
+// or reasoning; a running one still says what is happening now, and a stretch
+// of nothing else still says what it did.
 export function activityHeadlineTools(entries) {
   const tools = activitySummaryTools(entries)
-  const work = tools.filter(tool => !isRoutineTool(tool))
+  const work = tools.filter(tool => tool.status === 'running' || !isRoutineTool(tool))
   const reasoned = entries.some(entry => entry?.item?.type === 'thinking')
   return work.length || reasoned ? work : tools
 }

@@ -55,6 +55,9 @@ class AppTool:
   # A tool the app's prompt fragment tells every agent to use is loaded up front
   # like the platform's own controls; other app tools stay deferrable.
   always_load: bool = False
+  # Owner-declared routine bookkeeping: the chat folds a successful call into
+  # the surrounding activity (agent_activity.is_routine_tool).
+  routine: bool = False
 
   def listing(self) -> dict[str, Any]:
     listing = {
@@ -106,6 +109,7 @@ def live_app_tools(db: Session) -> list[AppTool]:
         description=declaration["description"],
         input_schema=declaration["input_schema"],
         always_load=declaration.get("always_load") is True,
+        routine=declaration.get("routine") is True,
       ))
   return tools
 
