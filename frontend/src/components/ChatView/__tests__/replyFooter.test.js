@@ -20,7 +20,7 @@ const vite = await createSsrRenderServer({
       ? 'export default { sanitize: value => String(value) }' : null }],
 })
 after(() => vite.close())
-const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
+const { default: Reply, endsAgentStretch } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { replyOutcome } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
@@ -76,15 +76,33 @@ test('a revealed action row retains its accessible semantics', () => {
   assert.doesNotMatch(row, /aria-hidden/)
 })
 
-test('only the reply that ends the agent’s stretch fills its row; earlier ones keep it empty', () => {
+test('only the reply that ends the agent’s stretch shows its time; earlier ones keep Copy', () => {
   // A reply that ended on a question card, wait or helper hand-off is
-  // followed by more agent replies before the owner speaks again: one time
-  // and Copy belong at the end of that stretch, not after each card.
-  const html = renderReply([turn], { endsStretch: false, metaVisible: true })
-  assert.equal(metaRows(html).length, 1, 'the row still reserves its line')
-  assert.match(html, /<div class="chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"><\/div>/)
-  assert.doesNotMatch(html, /<time|aria-label="Copy message"/)
+  // followed by more agent replies before the owner speaks again: the time
+  // belongs at the end of that stretch, not after each card.
+  const earlier = renderReply([turn], { endsStretch: false, metaVisible: true })
+  assert.equal(metaRows(earlier).length, 1)
+  assert.doesNotMatch(earlier, /<time/)
+  assert.match(earlier, /aria-label="Copy message"/, 'an earlier answer can still be copied')
   assert.match(renderReply([turn], { endsStretch: true }), /<time class="chat__ts">/)
+})
+
+test('a stretch runs past hidden carriers and ends where the owner speaks', () => {
+  const reply = (id, extra = {}) => ({ role: 'assistant', id, ts: turn.ts, blocks: [{ type: 'text', content: id }], ...extra })
+  const owner = { role: 'user', content: 'Next', ts: turn.ts }
+  const answered = { role: 'user', content: 'Answer', hidden: true, kind: 'continuation', ts: turn.ts }
+  const ends = messages => {
+    const groups = assistantReplyGroups(messages)
+    return [...new Set(groups.values())].map(group => endsAgentStretch(messages, groups, group))
+  }
+  assert.deepEqual(ends([reply('a'), answered, reply('b')]), [false, true],
+    'an answered card is not the owner speaking: only the reply after it keeps the time')
+  assert.deepEqual(ends([reply('a'), answered, reply('b'), owner, reply('c')]), [false, true, true])
+  assert.deepEqual(ends([reply('a'), owner]), [true])
+  assert.deepEqual(ends([reply('a'), answered]), [true], 'nothing follows yet')
+  // ChatView appends the live reply as a placeholder group, so the earlier
+  // reply hands its time over the moment the next one starts.
+  assert.deepEqual(ends([reply('a'), answered, { role: 'assistant', id: 'live', blocks: [] }]), [false, true])
 })
 
 test('a streaming reply already reserves its action row, empty until it settles', () => {

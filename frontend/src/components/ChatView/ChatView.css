@@ -466,15 +466,15 @@
   margin: 6px 0 0;
   padding: 0 8px;
 }
+/* Older replies reveal actions only on tap/click; hovering must not expose
+   another reply's Copy above the current answer. ChatView keeps the latest
+   reply's row visible. */
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
 }
-/* Older replies reveal actions only on tap/click; hovering must not expose
-   another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. */
 .chat__ts {
   font-size: 11px;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */

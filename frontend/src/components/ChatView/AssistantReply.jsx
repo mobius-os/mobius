@@ -1,7 +1,6 @@
 /* One reply owns live/saved source rows, continuous prose, its final References,
-   and the one action row at its end: its time and Copy of its answer. Only
-   the reply that ends the agent's stretch (before the owner next speaks)
-   fills that row; earlier replies keep it empty. */
+   and the one action row at its end: Copy of its answer and, on the reply
+   that ends the agent's stretch (before the owner next speaks), its time. */
 import { Fragment, memo, useMemo, useContext } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
@@ -13,6 +12,16 @@ import { mergeProjectedActivity } from './peerTimeline.js'
 import { presentAssistantReply, presentAssistantActivity, replyQuestionSuppression } from './assistantReplies.js'
 import { PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
+
+/** Whether a reply ends the agent's stretch: no other reply follows before
+ * the owner visibly speaks. Answered cards, waits and helper results are
+ * hidden carriers, not a break, and the live reply's placeholder is a group,
+ * so an earlier reply hands its time over as soon as the next one starts. */
+export function endsAgentStretch(messages, replyGroups, group) {
+  let next = group.end + 1
+  while (messages[next]?.hidden) next += 1
+  return !replyGroups.has(next)
+}
 
 // Both the component and payload stay memoized: a composer edit must not
 // recreate the expensive answer tree or its live-to-saved disclosure identities.
@@ -72,10 +81,10 @@ function AssistantReply({
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
   const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
-  // A stretch gets its actions once, at its end, only after it has settled.
+  // A reply gets its actions once, at its end, only after it has settled.
   const outcome = useMemo(() => (
-    isStreaming || !endsStretch ? null : replyOutcome(rows.map(row => row.message))
-  ), [rows, isStreaming, endsStretch])
+    isStreaming ? null : replyOutcome(rows.map(row => row.message))
+  ), [rows, isStreaming])
   const answerText = outcome?.answer || ''
   if (!msg) return null
 
@@ -142,7 +151,7 @@ function AssistantReply({
     {/* Mounted while streaming too, empty: settling fills the reserved line
         instead of adding one under a followed transcript. */}
     <MessageMetaRow
-      timestamp={outcome ? presentationRows[0].message.ts : null}
+      timestamp={outcome && endsStretch ? presentationRows[0].message.ts : null}
       copy={answerText ? button => renderedReplyClipboard(
         button.closest('.chat__reply'), rows.map(row => row.key), outcome.parts,
       ) : undefined}

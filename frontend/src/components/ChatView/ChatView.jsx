@@ -105,7 +105,7 @@ import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
-import AssistantReply from './AssistantReply.jsx'
+import AssistantReply, { endsAgentStretch } from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
@@ -6035,15 +6035,6 @@ export default function ChatView({
     pendingQueue.steerReservedMessages,
   )
 
-  // The agent's stretch runs until the owner visibly speaks: answered cards,
-  // waits and helper results are hidden carriers, not a break. Only the reply
-  // that ends the stretch carries its time and Copy. The live reply's
-  // placeholder is a group too, so an earlier reply hands over immediately.
-  const endsAgentStretch = group => {
-    let next = group.end + 1
-    while (peerTimeline.messages[next]?.hidden) next += 1
-    return !replyGroups.has(next)
-  }
   // A DB refresh may commit the steer before its cut reaches this socket.
   // Keep the identity-owned active row in its transcript slot through that
   // handoff; moving it to the tail would paint the owner message above it.
@@ -6092,7 +6083,7 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      endsStretch={endsAgentStretch(group)}
+      endsStretch={endsAgentStretch(peerTimeline.messages, replyGroups, group)}
       // Only an idle latest reply pins its actions. A live reply may not yet
       // have a stored row; that must not leave the previous reply pinned too.
       metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
