@@ -466,6 +466,9 @@
   margin: 6px 0 0;
   padding: 0 8px;
 }
+/* An earlier reply in a stretch has no time: pull Copy back by its own
+   padding so its glyph still lines up with the reply's prose. */
+.chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
 /* Older replies reveal actions only on tap/click; hovering must not expose
    another reply's Copy above the current answer. ChatView keeps the latest
    reply's row visible. */

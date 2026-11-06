@@ -14,9 +14,10 @@ import { PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 
 /** Whether a reply ends the agent's stretch: no other reply follows before
- * the owner visibly speaks. Answered cards, waits and helper results are
- * hidden carriers, not a break, and the live reply's placeholder is a group,
- * so an earlier reply hands its time over as soon as the next one starts. */
+ * the next visible row (an owner message or a visible marker). Answered
+ * cards, waits and helper results are hidden carriers, not a break, and the
+ * live reply's placeholder is a group, so an earlier reply hands its time
+ * over as soon as the next one starts. */
 export function endsAgentStretch(messages, replyGroups, group) {
   let next = group.end + 1
   while (messages[next]?.hidden) next += 1

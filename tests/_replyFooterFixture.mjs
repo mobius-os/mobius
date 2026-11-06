@@ -45,11 +45,6 @@ export async function mountReplyFooter(page, base, {
       } }), { headers: { 'Content-Type': 'text/event-stream' } }))
     }
   }, chat.id)
-  await page.route(`**${path}/upload-limits`, route => route.fulfill({ json: { max_bytes: 1024 * 1024 } }))
-  await page.route(`**${path}/uploads`, route => route.fulfill({ json: [{
-    name: 'draft-note.txt', filename: 'draft-note.txt', size: 16,
-    mime_type: 'text/plain', url: `${path}/uploads/draft-note.txt`,
-  }] }))
   // Footer interactions must never start a provider turn.
   await page.route(`**${path}/messages`, route => route.abort())
   await page.goto(`${base}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
