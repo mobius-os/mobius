@@ -126,3 +126,32 @@ test('touch steer dismisses the keyboard only after its committed row is positio
     'blur must wait for the committed row and preserve newer focus/draft intent',
   )
 })
+
+test('a held queue turns the idle primary action into one empty Send of the queue', () => {
+  assert.match(
+    chatView,
+    /const composerBusy = turnActive \|\| \(pendingQueue\.pendingMessages\.length > 0 && !queueHeld\)/,
+    'a held queue no longer shows Stop when nothing runs',
+  )
+  assert.match(chatView, /onSendQueue=\{queueHeld \? handleSendQueue : undefined\}/)
+  assert.match(
+    chatView,
+    /async function handleSendQueue\(\) \{[\s\S]*?sendAfterSettingsSaved\('', undefined, \{ continuation: 'queue' \}\)/,
+    'the empty Send asks the server to run its queue; the client sends no copy',
+  )
+  assert.match(
+    chatView,
+    /continuation: 'queue' \}\)[\s\S]{0,240}result\?\.status === 'queued'\) \{\s*pendingQueue\.releaseHolds\(\)/,
+    'an accepted empty Send clears the local holds the server released',
+  )
+  assert.match(
+    chatView,
+    /pendingQueue\.pendingMessagesRef\.current\.length > 0\s*&& !handlingStopRef\.current/,
+    'the stream-end refetch waits while Stop promotes the partial',
+  )
+  assert.match(
+    chatView,
+    /if \(!stoppedCleanly\) return\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(Array\.isArray\(heldQueue\)\) pendingQueue\.hydrate\(heldQueue\)/,
+    'an accepted Stop shows the held queue from the idle runtime read',
+  )
+})

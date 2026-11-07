@@ -26,8 +26,10 @@ import asyncio
 import base64
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import logging
+import math
 import os
 import shutil
 import stat
@@ -767,23 +769,18 @@ class ClaudeProvider(BaseProvider):
     if isinstance(oauth, dict):
       access_token = oauth.get("accessToken")
       refresh_token = oauth.get("refreshToken")
-      expires_at = oauth.get("expiresAt")
-      refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+      expires_at = _finite_number(oauth.get("expiresAt"))
+      refresh_expires_at = _finite_number(oauth.get("refreshTokenExpiresAt"))
       now_ms = time.time() * 1000
       access_is_current = (
         isinstance(access_token, str)
         and bool(access_token.strip())
-        and isinstance(expires_at, (int, float))
-        and not isinstance(expires_at, bool)
+        and expires_at is not None
         and expires_at - now_ms >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
       )
       refresh_expiry_is_current = (
         "refreshTokenExpiresAt" not in oauth
-        or (
-          isinstance(refresh_expires_at, (int, float))
-          and not isinstance(refresh_expires_at, bool)
-          and refresh_expires_at > now_ms
-        )
+        or (refresh_expires_at is not None and refresh_expires_at > now_ms)
       )
       can_refresh = (
         isinstance(refresh_token, str)
@@ -1709,6 +1706,42 @@ _CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 # token that expires mid-flight doesn't 401. 60s comfortably covers the
 # 10s request timeout plus clock skew.
 _CLAUDE_TOKEN_REFRESH_MARGIN_MS = 60_000
+# The CLI accepts a stored sign-in end only between 2025-01-01 and ten years
+# from now; anything else it treats as no end.
+_CLAUDE_LOGIN_END_EARLIEST_MS = 1_735_689_600_000
+_CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
+# The CLI treats a stored sign-in end more than this far before the access
+# token's own expiry as stale and reports no end at all.
+_CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
+
+
+def _finite_number(value: Any) -> float | None:
+  """A stored time or duration, or None unless it is a finite non-bool number."""
+  if isinstance(value, (int, float)) and not isinstance(value, bool):
+    return value if math.isfinite(value) else None
+  return None
+
+
+def _claude_login_end_ms(value: Any) -> float | None:
+  """A sign-in end the CLI would accept, or None."""
+  end = _finite_number(value)
+  if end is None or not (
+    _CLAUDE_LOGIN_END_EARLIEST_MS <= end
+    <= time.time() * 1000 + _CLAUDE_LOGIN_END_HORIZON_MS
+  ):
+    return None
+  return end
+
+
+def claude_login_end_after(now_ms: int, lifetime_s: Any) -> int | None:
+  """The sign-in end `lifetime_s` seconds after `now_ms`, or None unless the
+  lifetime is a positive finite number and the end is one the CLI accepts."""
+  lifetime = _finite_number(lifetime_s)
+  if lifetime is None or lifetime <= 0:
+    return None
+  end = _claude_login_end_ms(now_ms + lifetime * 1000)
+  return None if end is None else int(end)
+
 
 # Serializes Claude OAuth refreshes within this process. Anthropic rotates
 # the single-use refresh token on every grant, so two concurrent refreshes
@@ -1727,7 +1760,7 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   if not creds_path.exists():
     raise RuntimeError("claude credentials missing")
   raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth")
+  oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
   if not isinstance(oauth, dict):
     raise RuntimeError("claude credentials malformed")
   return creds_path, oauth
@@ -1805,7 +1838,10 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
 
   Anthropic's OAuth refresh-token grant rotates the refresh token, so we
   persist whatever the endpoint returns (a stale refresh token would fail
-  the NEXT refresh)."""
+  the NEXT refresh). Like the CLI, a refresh never adds or extends the
+  stored sign-in end: it drops a stored end the CLI would reject and keeps
+  the earlier of a valid one and the response's `refresh_token_expires_in`
+  from now."""
   import httpx  # local import — only the registry path needs it
 
   refresh_token = oauth.get("refreshToken")
@@ -1829,7 +1865,14 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
   refreshed = dict(oauth)
   refreshed["accessToken"] = data["access_token"]
   refreshed["refreshToken"] = data["refresh_token"]
-  refreshed["expiresAt"] = int(time.time() * 1000) + data["expires_in"] * 1000
+  now_ms = int(time.time() * 1000)
+  refreshed["expiresAt"] = now_ms + data["expires_in"] * 1000
+  stored_end = _claude_login_end_ms(refreshed.pop("refreshTokenExpiresAt", None))
+  if stored_end is not None:
+    new_end = claude_login_end_after(now_ms, data.get("refresh_token_expires_in"))
+    refreshed["refreshTokenExpiresAt"] = (
+      stored_end if new_end is None else min(stored_end, new_end)
+    )
   if data.get("scope"):
     refreshed["scopes"] = data["scope"].split()
   return refreshed
@@ -1849,10 +1892,10 @@ async def claude_access_token(data_dir: str) -> str:
   single source of truth."""
   def _token_if_fresh(oauth: dict) -> str | None:
     token = oauth.get("accessToken")
-    expires_at = oauth.get("expiresAt")
+    expires_at = _finite_number(oauth.get("expiresAt"))
     if (
       token
-      and isinstance(expires_at, (int, float))
+      and expires_at is not None
       and expires_at - time.time() * 1000 >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
     ):
       return token
@@ -1890,6 +1933,34 @@ def claude_subscription_type(data_dir: str) -> str | None:
     return None
   value = oauth.get("subscriptionType")
   return value if isinstance(value, str) and value.strip() else None
+
+
+def claude_login_expires_at(data_dir: str) -> str | None:
+  """When the stored Claude sign-in ends (ISO 8601 UTC), or None if unknown.
+
+  This is the `refreshTokenExpiresAt` the CLI reports as `loginExpiresAt`,
+  under the CLI's three rules: only a sign-in with a refresh token has an
+  end, the end must be a time between 2025-01-01 and ten years from now, and
+  an end more than three days before the access token's expiry is stale.
+  A refresh never moves the date later; only a new sign-in does. check_auth
+  already refuses credentials past it, so this lets the owner reconnect
+  beforehand.
+
+  The date is an upper bound, not an exact end: the CLI treats it as a
+  window, so the sign-in can end up to three days before it.
+  """
+  try:
+    _, oauth = _read_claude_oauth(data_dir)
+  except (OSError, RuntimeError, ValueError):
+    return None
+  end = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
+  access = _finite_number(oauth.get("expiresAt"))
+  if not oauth.get("refreshToken") or end is None:
+    return None
+  if access is not None and access - end > _CLAUDE_LOGIN_END_STALE_MS:
+    return None
+  ended = datetime.fromtimestamp(end / 1000, timezone.utc)
+  return ended.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def claude_organization_uuid(data_dir: str) -> str:

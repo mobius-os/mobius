@@ -329,6 +329,22 @@ def notify(
     if body.activation is not None:
       event["activation"] = body.activation
 
+  publish_system_event(event)
+
+  # Agent affordance from design §1.5: the event still reaches clients through
+  # the normal broadcast path above, and the watcher also publishes any dirty
+  # warm staging immediately instead of waiting for the settle timer.
+  if body.type == "shell_apply_now":
+    try:
+      from app.frontend_watcher import publish_now
+      publish_now("shell_apply_now")
+    except Exception:
+      log.exception("shell_apply_now publish hook failed")
+
+
+def publish_system_event(event: dict) -> None:
+  """Deliver a system event to the Shell, and to running chats when its
+  replay is safe."""
   # ALWAYS publish to the system broadcast — Shell subscribes to it
   # for system events regardless of which view the user is on.
   # Without this, an app_updated emitted after the chat finished
@@ -345,7 +361,7 @@ def notify(
   # just landed and triggers a spurious apply. They ride the system broadcast
   # alone (no replay), so single-bus delivery is exactly one hit and the
   # frontend needs no dedup.
-  if body.type not in _SYSTEM_BUS_ONLY_EVENTS:
+  if event["type"] not in _SYSTEM_BUS_ONLY_EVENTS:
     targets = get_all_active_broadcasts()
     if not targets:
       bc = get_active_broadcast()
@@ -353,16 +369,6 @@ def notify(
         targets = [bc]
     for bc in targets:
       bc.publish(event)
-
-  # Agent affordance from design §1.5: the event still reaches clients through
-  # the normal broadcast path above, and the watcher also publishes any dirty
-  # warm staging immediately instead of waiting for the settle timer.
-  if body.type == "shell_apply_now":
-    try:
-      from app.frontend_watcher import publish_now
-      publish_now("shell_apply_now")
-    except Exception:
-      log.exception("shell_apply_now publish hook failed")
 
 
 @router.get("/api/events/system")

@@ -994,6 +994,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    // A new chat continuing this one through the reply stored as
+    // `throughId`; answers the same shape as `create`.
+    branch: (chatId, throughId) => listAffectingMutation(
+      'chats', `/chats/${encodeURIComponent(chatId)}/branch`, {
+        method: 'POST',
+        body: JSON.stringify({ through_id: throughId }),
+      },
+    ),
     send: (chatId, payload, options = {}) => apiFetch(`/chats/${encodeURIComponent(chatId)}/messages`, {
       ...options,
       method: 'POST',
@@ -1650,19 +1658,16 @@ export const api = {
     // as theme.css.reset-bak-<unix-ts> for rollback. Used by the
     // `?reset-theme=1` URL-parameter recovery flow in useTheme.
     reset: () => apiFetch('/theme/reset', { method: 'POST' }),
+    // The light/dark switch: the server rewrites theme.css for `mode` and
+    // returns the theme it now serves, shaped like `get`.
+    setMode: (mode) => apiFetch('/theme/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
   },
   storage: {
     shared: {
-      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
-      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
       getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
-      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
-        method: 'PUT',
-        body: JSON.stringify({ content: JSON.stringify(mode) }),
-      }),
     },
   },
   notify: {

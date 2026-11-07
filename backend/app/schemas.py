@@ -881,9 +881,9 @@ class SendMessage(BaseModel):
   # never an auth boundary — a duplicate cid is treated as a duplicate
   # POST retry, not a security event.
   cid: str | None = None
-  # Internal UI hint: Stop can collapse already-queued messages and ask
-  # the backend to steer them into the live turn even when the chat's
-  # normal send-while-running behavior is queueing.
+  # Internal UI hint: the queue's Steer control asks the backend to steer
+  # already-queued messages into the live turn even when the chat's normal
+  # send-while-running behavior is queueing.
   force_steer: bool = False
   # A new composer message that should be durably reserved and steered in one
   # request. Unlike force_steer, this does not name an existing queued row:
@@ -922,8 +922,9 @@ class SendMessage(BaseModel):
   # The shell's one-tap Resume is a product action, not owner-authored prose.
   # The provider still needs a short prompt to open a new turn after the old
   # process has gone away, but persistence/rendering attribute that prompt as
-  # a continuation marker rather than a user bubble.
-  continuation: Literal["manual"] | None = None
+  # a continuation marker rather than a user bubble. "queue" is an empty send:
+  # it starts the next turn from the queued messages a Stop held.
+  continuation: Literal["manual", "queue"] | None = None
   # (app_id, scope) when POST /api/app-chats/start sends this first turn. A
   # private attribute, so request JSON can never set it; the send carries it
   # onto the writer command that accepts the message (app_chat_scopes).
@@ -947,6 +948,8 @@ class SendMessage(BaseModel):
       and self.content.strip().lower() != "continue"
     ):
       raise ValueError("manual continuation does not accept message content")
+    if self.continuation == "queue" and (self.content.strip() or self.attachments):
+      raise ValueError("sending the queue does not accept message content")
     return self
 
 

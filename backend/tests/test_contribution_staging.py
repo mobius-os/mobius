@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.routes import github as github_routes
 from app.routes.github import _limiter as _github_limiter
 from tests.test_app_git import bump_ctime_without_changing_bytes
-from tests.test_github_routes import _agent_run_headers, _app_token
+from tests.test_github_routes import _agent_run_headers, _app_token, _write_token
 
 _github_limiter.enabled = False
 
@@ -468,3 +468,286 @@ def test_autopilot_round_restages_its_open_pr_in_place(staging, monkeypatch):
   # The published revision reaches the live copy, as for any restage.
   assert response.json()["source_sync"]["state"] == "adopted"
   assert (staging["source"] / "greet.py").read_text() == REVISED
+
+
+# --- Review/Send share one commit-identity and publication preflight --------
+
+
+@pytest.fixture(autouse=True)
+def _disconnect_after():
+  from app import github_auth
+  yield
+  shutil.rmtree(github_auth.GH_AUTH_DIR, ignore_errors=True)
+
+
+def _push_permission(monkeypatch, answer):
+  """Fake the one GitHub read review may make, recording each call."""
+  calls = []
+
+  def permission(_repo, upstream_repo):
+    calls.append(upstream_repo)
+    return answer
+  monkeypatch.setattr(github_routes, "upstream_push_permission", permission)
+  return calls
+
+
+def _review_status(client, staging, owner_token):
+  response = client.get(
+    f"/api/github/contributions/{staging['app_id']}/review-status",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200, response.text
+  return response.json()["records"][0]
+
+
+def test_a_direct_standalone_commit_with_another_identity_is_never_all_clear(
+  staging, client, owner_token, monkeypatch,
+):
+  # The commit is octocat's; the connected account can push to the target.
+  _write_token(login="hubot", user_id=7)
+  calls = _push_permission(monkeypatch, True)
+  staged = staging["new_record"]()
+  assert staged.status_code == 200, staged.text
+  # Staging tells the preparing agent at once, without refusing private work.
+  assert staged.json()["review_status"]["code"] == "commit_identity_mismatch"
+  record = staged.json()["record"]
+  assert "stack" not in record["plan"]
+
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "commit_identity_mismatch"
+  assert "stack" not in refused.json()["detail"]["message"].lower()
+  assert staging["review"](record, "changes_needed").status_code == 200
+  status = _review_status(client, staging, owner_token)
+  assert (status["state"], status["code"]) == (
+    "needs_refresh", "commit_identity_mismatch",
+  )
+  assert set(calls) == {"octo/project"}
+
+
+def test_an_owned_target_needs_the_identity_without_asking_github(
+  staging, monkeypatch,
+):
+  _write_token(login="octo", user_id=9)
+  monkeypatch.setattr(
+    github_routes, "upstream_push_permission",
+    lambda *_: pytest.fail("the target owner always publishes directly"),
+  )
+  record = staging["new_record"]().json()["record"]
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "commit_identity_mismatch"
+
+
+def test_a_fork_publication_keeps_normalizing_another_identity(
+  staging, client, owner_token, monkeypatch,
+):
+  _write_token(login="hubot", user_id=7)
+  _push_permission(monkeypatch, False)
+  staged = staging["new_record"]()
+  assert staged.json()["review_status"]["state"] == "ready"
+  assert staging["review"](staged.json()["record"]).status_code == 200
+  assert _review_status(client, staging, owner_token)["state"] == "ready"
+
+
+def test_a_matching_identity_needs_no_destination_read(staging, monkeypatch):
+  _write_token(login="octocat", user_id=42)
+  monkeypatch.setattr(
+    github_routes, "upstream_push_permission",
+    lambda *_: pytest.fail("a matching commit needs no permission read"),
+  )
+  record = staging["new_record"]().json()["record"]
+  assert staging["review"](record).status_code == 200
+
+
+def test_an_unreadable_destination_does_not_become_all_clear(
+  staging, client, owner_token, monkeypatch,
+):
+  _write_token(login="hubot", user_id=7)
+  _push_permission(monkeypatch, None)
+  record = staging["new_record"]().json()["record"]
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "publication_destination_unavailable"
+  status = _review_status(client, staging, owner_token)
+  assert (status["state"], status["code"]) == (
+    "unavailable", "publication_destination_unavailable",
+  )
+
+
+def test_review_preflight_reads_github_outside_every_lock_and_never_publishes(
+  staging, client, owner_token, monkeypatch,
+):
+  from app import fs_locks
+  from app import github_contribution_git as git_ops
+  from app import github_contributions
+
+  _write_token(login="hubot", user_id=7)
+  gh_calls = []
+
+  def gh(_repo, *args, **_kwargs):
+    assert not fs_locks.app_storage_lock(staging["app_id"]).locked()
+    assert not fs_locks.source_dir_lock(str(staging["worktree"])).locked()
+    assert not fs_locks.source_dir_lock(str(staging["source"])).locked()
+    gh_calls.append(args)
+    return subprocess.CompletedProcess(args, 0, "true\n", "")
+
+  monkeypatch.setattr(git_ops, "_gh", gh)
+  for name in ("_ensure_owner_fork_remote", "_push_branch", "_push_topic_branch"):
+    monkeypatch.setattr(
+      github_contributions, name,
+      lambda *_a, **_k: pytest.fail("review preflight must not publish"),
+    )
+  monkeypatch.setattr(
+    github_contributions.contribution_screenshots, "publish",
+    lambda *_a, **_k: pytest.fail("review preflight must not upload"),
+  )
+  record = staging["new_record"]().json()["record"]
+  assert staging["review"](record).status_code == 409
+  _review_status(client, staging, owner_token)
+  assert gh_calls and set(gh_calls) == {
+    ("api", "repos/octo/project", "--jq", ".permissions.push"),
+  }
+
+
+def test_a_destination_resolved_for_another_target_is_not_reused(
+  staging, monkeypatch,
+):
+  _write_token(login="hubot", user_id=7)
+  _push_permission(monkeypatch, False)
+  record = staging["new_record"]().json()["record"]
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(staging["app_id"])
+    / "contributions" / f"{record['id']}.json"
+  )
+  resolve = github_routes._resolve_review_destinations
+
+  def retarget_while_resolving(records, state):
+    resolved = resolve(records, state)
+    # An app-writable edit lands between the unlocked read and the verdict.
+    stored = json.loads(path.read_text())
+    stored["plan"]["repo"] = stored["repo"] = "octo/other"
+    path.write_text(json.dumps(stored))
+    return resolved
+
+  monkeypatch.setattr(
+    github_routes, "_resolve_review_destinations", retarget_while_resolving,
+  )
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "publication_destination_unavailable"
+
+
+def test_all_clear_rechecks_text_the_app_can_edit_after_staging(staging):
+  record = staging["new_record"]().json()["record"]
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(staging["app_id"])
+    / "contributions" / f"{record['id']}.json"
+  )
+  stored = json.loads(path.read_text())
+  stored["plan"]["title"] = " Add a greeting"
+  path.write_text(json.dumps(stored))
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "invalid_pr_text"
+
+
+def test_all_clear_rechecks_the_coauthor_trailer_and_a_moved_branch(staging):
+  record = staging["new_record"]().json()["record"]
+  worktree = staging["worktree"]
+  _git(worktree, "commit", "-q", "--amend", "-m", "Add greeting")
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "branch_moved"
+  restaged = staging["stage"](record["id"])
+  assert restaged.status_code != 200
+  assert "co-author" in restaged.text
+
+
+def _failing_gh(failure):
+  def gh(_repo, *args, **_kwargs):
+    if failure == "timeout":
+      raise subprocess.TimeoutExpired(["gh", *args], 90)
+    if failure == "missing_gh":
+      raise FileNotFoundError("gh")
+    if failure == "error_exit":
+      return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
+    return subprocess.CompletedProcess(args, 0, "maybe\n", "")
+  return gh
+
+
+@pytest.mark.parametrize(
+  "failure", ["timeout", "missing_gh", "error_exit", "malformed"],
+)
+def test_every_failed_destination_read_is_unavailable_and_staging_still_succeeds(
+  staging, client, owner_token, monkeypatch, failure,
+):
+  from app import github_contribution_git as git_ops
+
+  _write_token(login="hubot", user_id=7)
+  monkeypatch.setattr(git_ops, "_gh", _failing_gh(failure))
+  staged = staging["new_record"]()
+  assert staged.status_code == 200, staged.text
+  assert staged.json()["review_status"]["code"] == (
+    "publication_destination_unavailable"
+  )
+  record = staged.json()["record"]
+  stored = json.loads((
+    Path(get_settings().data_dir) / "apps" / str(staging["app_id"])
+    / "contributions" / f"{record['id']}.json"
+  ).read_text())
+  assert stored["plan"]["head_sha"] == record["plan"]["head_sha"]
+  refused = staging["review"](record)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "publication_destination_unavailable"
+  status = _review_status(client, staging, owner_token)
+  assert (status["state"], status["code"]) == (
+    "unavailable", "publication_destination_unavailable",
+  )
+
+
+def test_missing_pr_scopes_skip_the_destination_read(staging, monkeypatch):
+  _write_token(login="hubot", user_id=7, scopes=("public_repo",))
+  monkeypatch.setattr(
+    github_routes, "upstream_push_permission",
+    lambda *_: pytest.fail("reconnecting comes before the destination"),
+  )
+  staged = staging["new_record"]()
+  assert staged.json()["review_status"]["code"] == "github_reconnect"
+
+
+def test_an_account_only_verdict_still_stops_send_before_any_public_step(
+  staging, monkeypatch,
+):
+  """An all_clear recorded while reconnect is pending grants Send nothing."""
+  from app import github_contributions
+  from app.contribution_errors import ContributionSubmitError
+
+  _write_token(login="octocat", user_id="not-a-number")
+  record = staging["new_record"]().json()["record"]
+  assert staging["review"](record).status_code == 200
+  for name in (
+    "_ensure_owner_fork_remote", "_push_branch", "_push_topic_branch",
+    "_authoritative_public_reconciliation",
+  ):
+    monkeypatch.setattr(
+      github_contributions, name,
+      lambda *_a, **_k: pytest.fail("nothing may be published"),
+    )
+  monkeypatch.setattr(
+    github_contributions._git_ops, "_gh",
+    lambda *_a, **_k: pytest.fail("no GitHub read before the account check"),
+  )
+  _, diff_path = github_routes._record_paths(staging["app_id"], record["id"])
+  with pytest.raises(ContributionSubmitError) as single:
+    github_contributions._submit_prepared_pr(record, diff_path)
+  assert single.value.status_code == 401
+  layer = {**record, "status": "submitting", "plan": {
+    **record["plan"],
+    "stack": {"id": "s", "position": 1, "total": 1, "base_branch": "main"},
+  }}
+  with pytest.raises(ContributionSubmitError) as stack:
+    github_contributions._preflight_prepared_stack(
+      [{"record": layer, "diff_path": diff_path, "stack": layer["plan"]["stack"]}],
+    )
+  assert stack.value.status_code == 401

@@ -33,7 +33,8 @@ from app.chat_writer import (
   Barrier,
   CancelPending,
   ChatWriterActor,
-  ClearPending,
+  HoldPending,
+  ReleaseHeld,
   create_chat,
   FinishRun,
   Finalize,
@@ -1761,37 +1762,47 @@ def test_reconciliation_works_independent_of_actor():
 # These commands were imported but never actually dispatched against the real
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
-def test_clear_pending_empties_queue_and_returns_count(actor):
-  """ClearPending empties pending_messages and returns the count + the cids it
-  removed (cleared_cids) — the Stop / terminal-setup-error path. cleared_cids
-  is what handleStop resends by, closing the natural-finish-races-Stop
-  double-send (PM 115)."""
+OWNER = {"_owner_input_at": "2020-01-01T10:00:00+00:00"}
+
+
+def test_hold_pending_keeps_owner_rows_and_drops_app_and_guest_rows(actor):
+  """HoldPending (Stop / terminal-setup-error) deletes no owner text: each
+  owner-typed row stays, held for the owner's next send. A row an app or a
+  browser guest queued goes with the Stop, as that app or guest expects."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "q1", "ts": 10, "cid": "c-q1"},
-      {"role": "user", "content": "q2", "ts": 11, "cid": "c-q2"},
+      {"role": "user", "content": "q1", "ts": 10, "cid": "c-q1", **OWNER},
+      {"role": "user", "content": "app job", "ts": 11, "cid": "c-app",
+       "_initiated_by_app_id": 7},
+      {"role": "user", "content": "guest", "ts": 12, "cid": "c-guest",
+       "_browser_grant_id": "grant-1", **OWNER},
+      {"role": "user", "content": "q2", "ts": 13, "cid": "c-q2", **OWNER},
     ],
   )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {
-    "cleared": 2, "cleared_cids": ["c-q1", "c-q2"],
-  }
+  result = _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1")))
+  assert result == {"held": 2}
   chat = _load_chat()
-  assert chat["pending_messages"] == []
+  assert [(m["cid"], m["content"], m.get("held")) for m in chat["pending_messages"]] == [
+    ("c-q1", "q1", True), ("c-q2", "q2", True),
+  ]
 
 
-def test_clear_pending_empty_queue_is_noop(actor):
-  """ClearPending on an already-empty queue returns cleared=0 / cleared_cids=[]
-  and commits nothing (the production helper skips the commit when nothing
-  changed). The empty cleared_cids is exactly the natural-finish case: the
-  turn-end drain already promoted the queued message, so Stop reports nothing
-  and handleStop resends nothing (PM 115)."""
+def test_hold_pending_keeps_a_legacy_owner_row_without_an_input_stamp(actor):
+  """Rows queued before owner input was stamped are the owner's: nothing
+  positively marks them as another sender's, so Stop keeps them."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "older owner row", "ts": 10, "cid": "legacy"}],
+  )
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1"))) == {"held": 1}
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("legacy", True)]
+
+
+def test_hold_pending_empty_queue_is_noop(actor):
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 0, "cleared_cids": []}
-  chat = _load_chat()
-  assert chat["pending_messages"] == []
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token="rt1"))) == {"held": 0}
+  assert _load_chat()["pending_messages"] == []
 
 
 def test_finish_run_closes_durable_run_and_retires_assistant_owner(actor):
@@ -2037,54 +2048,181 @@ def test_persist_error_writes_error_snapshot_to_row(actor):
   )
 
 
-# -- ClearPending preserves machine-owned hidden carriers -----------------
-def test_clear_pending_preserves_hidden_carrier_clears_owner_text(actor):
-  """Stop's clear removes owner-typed queued text but leaves a hidden
-  machine carrier (e.g. a wait result parked behind an open question card)
-  queued, and never reports its cid for re-send.
-
-  This is the phantom-queued-message fix: a wait result that fired while a
-  question card was open must deliver when the owner answers the card, not
-  get re-sent as if the owner typed it the moment they hit Stop.
-  """
+# -- HoldPending leaves machine-owned hidden carriers as they were -------
+def test_hold_pending_leaves_hidden_carriers_unheld_and_drops_helper_results(actor):
+  """A hidden carrier (e.g. a wait result parked behind an open question card)
+  keeps its own delivery semantics and is never turned into held owner text;
+  a queued helper result goes with Stop as before."""
   _seed_chat(
     pending=[
-      {
-        "role": "user", "content": "owner typed this", "ts": 1,
-        "cid": "owner-1",
-      },
+      {"role": "user", "content": "owner typed this", "ts": 1, "cid": "owner-1", **OWNER},
       {
         "role": "user", "content": "<wait_result>...</wait_result>",
         "ts": 2, "cid": "wait-result-abc", "hidden": True,
         "kind": "wait_result",
       },
-    ],
-  )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
-  assert result["cleared"] == 1
-  assert result["cleared_cids"] == ["owner-1"]
-  chat = _load_chat()
-  remaining = chat["pending_messages"]
-  assert [m.get("cid") for m in remaining] == ["wait-result-abc"]
-
-
-def test_clear_pending_hidden_only_queue_is_noop(actor):
-  """A queue holding only hidden carriers is a no-op clear: nothing is
-  cleared, nothing is reported, and the carriers survive untouched."""
-  _seed_chat(
-    pending=[
       {
-        "role": "user", "content": "<wait_result>...</wait_result>",
-        "ts": 1, "cid": "wait-result-xyz", "hidden": True,
-        "kind": "wait_result",
+        "role": "user", "content": "<helper result>", "ts": 3,
+        "cid": "delegation-result-1", "hidden": True, "kind": "delegation_result",
       },
     ],
   )
-  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
-  assert result["cleared"] == 0
-  assert result["cleared_cids"] == []
+  result = _await(actor.submit(HoldPending(chat_id="c1", run_token="")))
+  assert result == {"held": 1}
+  remaining = _load_chat()["pending_messages"]
+  assert [(m["cid"], m.get("held")) for m in remaining] == [
+    ("owner-1", True), ("wait-result-abc", None),
+  ]
+
+
+def test_promote_pending_skips_held_rows_until_the_owner_releases_them(actor):
+  """No automatic promotion (turn-end drain, idle sweep, machine wake) starts
+  rows a Stop held; the queue stays exactly as it was."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"] is None
   chat = _load_chat()
-  assert [m.get("cid") for m in chat["pending_messages"]] == ["wait-result-xyz"]
+  assert [m["cid"] for m in chat["pending_messages"]] == ["a", "b"]
+  assert [m["content"] for m in chat["messages"]] == ["hi"]
+
+
+def test_releasing_a_held_queue_starts_it_as_one_combined_turn(actor):
+  """The owner's empty send: released, the held rows become the same combined
+  turn the queue would normally drain into, as owner input of that moment."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1", owner_send=True)))
+  assert result["promoted"]["content"] == "first\nsecond"
+  assert result["promoted"]["_consumed_cids"] == ["a", "b"]
+  chat = _load_chat()
+  assert chat["pending_messages"] == []
+  assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
+  assert not any("held" in m for m in chat["messages"])
+
+
+def test_an_owner_message_runs_before_the_held_queue_which_follows_it(actor):
+  """Whether the chat was idle or a later turn was running, the owner's next
+  message runs alone; starting it releases the held rows in the same commit,
+  so the following drain runs them without merging them into it."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+      {"role": "user", "content": "new", "ts": 12, "cid": "n", **OWNER},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["content"] == "new"
+  chat = _load_chat()
+  assert [(m["cid"], m.get("held")) for m in chat["pending_messages"]] == [
+    ("a", None), ("b", None),
+  ]
+  drained = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt2")))
+  assert drained["promoted"]["content"] == "first\nsecond"
+  messages = _load_chat()["messages"]
+  assert [m["content"] for m in messages if m.get("role") == "user"][-3:] == [
+    "new", "first", "second",
+  ]
+  timestamps = [m["ts"] for m in messages]
+  assert timestamps == sorted(timestamps), "released rows display after the new message"
+
+
+def test_a_machine_turn_leaves_the_held_queue_held(actor):
+  """A Wait or helper result that runs after Stop is not the owner's send."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "<wait_result>", "ts": 11, "cid": "w",
+       "hidden": True, "kind": "peer_message"},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["_consumed_cids"] == ["w"]
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]
+
+
+def test_a_released_queue_keeps_its_order_behind_a_queued_machine_row(actor):
+  """Released rows are ordinary queue rows again: a hidden machine row queued
+  ahead of them runs first, and the owner's rows follow as their own turn."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "<wake>", "ts": 9, "cid": "w",
+       "hidden": True, "kind": "peer_message"},
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "second", "ts": 11, "cid": "b", "held": True, **OWNER},
+    ],
+  )
+  _await(actor.submit(ReleaseHeld(chat_id="c1")))
+  first = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert first["promoted"]["_consumed_cids"] == ["w"]
+  second = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt2")))
+  assert second["promoted"]["content"] == "first\nsecond"
+
+
+def test_only_the_owners_own_rows_count_as_owner_typed():
+  from app.continuations import is_owner_typed
+  assert is_owner_typed({"role": "user", "content": "legacy owner row"}) is True
+  assert is_owner_typed({"role": "user", "content": "x", "_initiated_by_app_id": 3}) is False
+  assert is_owner_typed({"role": "user", "content": "x", "hidden": True}) is False
+  assert is_owner_typed({
+    "role": "user", "content": "answer", "kind": "continuation",
+    "continuation_reason": "helper_answer", "cid": "helper-answer:q1",
+  }) is False
+
+
+def test_a_guest_message_does_not_release_the_owners_held_rows():
+  from app.continuations import is_owner_typed
+  guest = {"role": "user", "content": "guest", "_browser_grant_id": "grant", **OWNER}
+  assert is_owner_typed(guest) is False
+  assert is_owner_typed({**guest, "_browser_grant_id": None}) is True
+
+
+def test_a_steered_held_row_reaches_the_transcript_without_its_hold(actor):
+  from app.chat_writer import _pending_messages_for_transcript
+  [stored] = _pending_messages_for_transcript(
+    [{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}], [],
+  )
+  assert "held" not in stored
+
+
+def test_a_refused_empty_send_leaves_the_queue_held(actor):
+  """The release commits with the turn it starts: a question that opened in
+  the meantime refuses the promotion and the rows stay exactly as they were."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}],
+  )
+  from app.models import Chat
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    db.get(Chat, "c1").pending_question_id = "q-raced"
+    db.commit()
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1", owner_send=True)))
+  assert isinstance(result, PromotePendingBlocked)
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]
+
+
+def test_release_held_rejoins_the_ordinary_queue(actor):
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER}],
+  )
+  assert _await(actor.submit(ReleaseHeld(chat_id="c1"))) == {"released": 1}
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", None)]
 
 
 def test_provider_batch_marks_only_visible_owner_rows():
@@ -2144,3 +2282,28 @@ def test_wedged_recovery_writes_only_the_recovery_row_without_reading_history(ac
   messages = _load_chat()["messages"]
   assert len(messages) == 52
   assert messages[-1]["blocks"][-1]["message"] == "interrupted"
+
+
+def test_a_visible_row_neither_owner_app_nor_guest_queued_is_marked_as_an_agents(actor):
+  from app.chat_writer import AppendPending
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
+  _await(actor.submit(AppendPending(chat_id="c1", user_msg={"role": "user", "content": "x", "cid": "ag"})))
+  _await(actor.submit(AppendPending(chat_id="c1", owner_input=True,
+    user_msg={"role": "user", "content": "y", "cid": "own"})))
+  rows = {row["cid"]: row for row in _load_chat()["pending_messages"]}
+  assert rows["ag"].get("_agent_input") is True and "_owner_input_at" not in rows["ag"]
+  assert "_agent_input" not in rows["own"] and rows["own"]["_owner_input_at"]
+
+
+def test_a_row_without_owner_proof_never_releases_held_rows(actor):
+  """A legacy unstamped row is kept by Stop but proves no owner send now."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "first", "ts": 10, "cid": "a", "held": True, **OWNER},
+      {"role": "user", "content": "legacy", "ts": 11, "cid": "old"},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["_consumed_cids"] == ["old"]
+  assert [(m["cid"], m.get("held")) for m in _load_chat()["pending_messages"]] == [("a", True)]

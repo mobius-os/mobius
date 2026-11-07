@@ -134,6 +134,28 @@ async def test_errored_dispatch_reasks_then_starts_helper(tmp_path, failure_chan
 
 
 @pytest.mark.asyncio
+async def test_cancelling_reask_does_not_stop_idle_resumable_helper(tmp_path):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  turn.kind = 'message'
+  turn.agent_id = 'idle-agent'
+  host._turn_by_dispatch[turn.dispatch_id] = turn
+  host._specs[turn.dispatch_id] = turn.spec
+  host._dispatcher_call('SendMessage', {'to': turn.dispatch_id}, 'send')
+  host._fail_dispatch('send', 'SendMessage')
+  assert turn.dispatch_id in host._specs
+  assert not turn.dispatch_consumed
+  stopped = []
+  class Client:
+    async def stop_task(self, agent_id):
+      stopped.append(agent_id)
+  host._client = Client()
+  await host.stop(turn)
+  assert stopped == []
+  await host.close()
+
+
+@pytest.mark.asyncio
 async def test_errored_dispatch_exhausts_same_reask_budget(tmp_path):
   from claude_agent_sdk.types import UserMessage, ToolResultBlock
   host = _claude_host(tmp_path)

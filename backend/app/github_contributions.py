@@ -102,7 +102,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     raise ContributionSubmitError(
       "This prepared PR has a title GitHub cannot publish exactly. Ask the "
       "agent to prepare a nonblank single-line title without surrounding "
-      "whitespace."
+      "whitespace.",
+      code="invalid_pr_text",
     )
   if (
     not isinstance(body, str)
@@ -112,7 +113,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "
-      "agent to prepare a nonblank body within GitHub's size limit."
+      "agent to prepare a nonblank body within GitHub's size limit.",
+      code="invalid_pr_text",
     )
   return title, body
 
@@ -2408,6 +2410,33 @@ def _find_existing_pr(
   return None
 
 
+def _recovered_upstream_overlap(
+  repo: Path, record: dict, branch: str, head_sha: str,
+) -> dict:
+  """The upstream overlap a recovered new PR opened over, as Send records it.
+
+  A retry that completes an earlier attempt's PR returns before the merge
+  preflight. The flag describes what that PR opened over, so this rechecks the
+  exact upstream tip the earlier attempt preflighted and recorded with its
+  pushed branch, not today's upstream. The check is advisory: an unknown
+  answer (that tip no longer available locally, or git refusing, timing out
+  or failing to start) records no flag, and the already-public PR's recovery
+  never fails on it.
+  """
+  upstream_branch = str(record.get("last_submit_upstream_branch") or "")
+  upstream_sha = str(record.get("last_submit_upstream_sha") or "").lower()
+  if (
+    not _BRANCH_NAME.fullmatch(upstream_branch)
+    or not _GIT_SHA.fullmatch(upstream_sha)
+  ):
+    return {}
+  try:
+    merge = _git_ops.merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+    return {}
+  return _git_ops.upstream_overlap_patch(merge, head_sha)
+
+
 def _authoritative_public_reconciliation(
   record: dict,
   *,
@@ -3453,6 +3482,44 @@ def _check_screenshot_body(
     )
 
 
+def assert_publishable_review_text(
+  record: dict, diff_path: Path, *, login: str | None,
+) -> None:
+  """Local review-time proof that Send can publish this record's text exactly.
+
+  Read-only and offline: the same validators Send runs on the title, body,
+  existing-PR witness and attached screenshots, so a review that passes them
+  is not refused for its text at Send. ``login`` is the connected account, if
+  any; without one the screenshot links' length cannot be bounded yet.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  _title, body = _exact_reviewed_pr_text(record)
+  is_update = plan.get("action") == "pr_update"
+  if is_update:
+    _reviewed_existing_pr_metadata(record)
+  screenshots = contribution_screenshots.plan_entries(plan)
+  if not screenshots:
+    return
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here.",
+      code="screenshot_update_unsupported",
+    )
+  contribution_screenshots.check_references(screenshots, body)
+  contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  if login:
+    _check_screenshot_body(
+      body, screenshots,
+      upstream_repo=_git_ops._validate_repo_slug(
+        plan.get("repo") or record.get("repo")
+      ),
+      login=login,
+      branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+      record_patch={},
+    )
+
+
 def _publish_reviewed_screenshots(
   record: dict,
   diff_path: Path,
@@ -3675,19 +3742,15 @@ def _submit_prepared_pr(
       record, diff_path, repo, branch,
     )
     _git_ops._assert_coauthor_trailer(repo, branch, record)
-    if existing_head_repository is not None:
-      # Updating a known PR is not the same routing decision as creating a new
-      # one. Its live identity fixes the destination repository regardless of
-      # generic upstream permission discovered for the connected account.
-      same_repo_submission = (
-        existing_head_repository.casefold() == upstream_repo.casefold()
-      )
-    else:
-      same_repo_submission = bool(
-        direct_base
-        or upstream_repo.split("/", 1)[0].casefold() == login.casefold()
-        or _git_ops._has_upstream_push_permission(repo, upstream_repo)
-      )
+    same_repo_submission = bool(_git_ops.publishes_to_target_repository(
+      upstream_repo,
+      login,
+      direct_base=bool(direct_base),
+      existing_head_repository=existing_head_repository,
+      push_permission=lambda: _git_ops._has_upstream_push_permission(
+        repo, upstream_repo,
+      ),
+    ))
     if same_repo_submission:
       _git_ops._assert_head_attribution(
         repo,
@@ -3751,6 +3814,10 @@ def _submit_prepared_pr(
         else None
       )
     )
+    new_standalone_pr = _git_ops.opens_new_standalone_pr(
+      plan, existing_pr_number=expected_existing_pr_number,
+      direct_base=direct_base,
+    )
     recovery = _authoritative_public_reconciliation(
       record,
       base_branch=str(recorded_base or "") or None,
@@ -3763,10 +3830,11 @@ def _submit_prepared_pr(
       expected_head_repository=existing_head_repository,
     )
     if recovery is not None and recovery.pr_url is not None:
+      pushed_head = str(plan.get("head_sha") or "").lower()
       pushed_patch = _git_ops._record_patch_with(record_patch, {
         "head_repository": recovery.head_repository,
         "last_submit_stage": "pushed",
-        "last_submit_push_sha": str(plan.get("head_sha") or "").lower(),
+        "last_submit_push_sha": pushed_head,
         "last_submit_base_branch": str(recorded_base or ""),
         "last_pushed_branch": (
           branch if same_repo_submission else f"{login}:{branch}"
@@ -3784,7 +3852,7 @@ def _submit_prepared_pr(
         "url": recovery.pr_url,
         "head_repository": recovery.head_repository,
         "branch": branch,
-        "head_sha": str(plan.get("head_sha") or "").lower(),
+        "head_sha": pushed_head,
         "base_branch": str(recorded_base or ""),
         "labels": _reviewed_pr_labels(plan),
       }
@@ -3794,7 +3862,13 @@ def _submit_prepared_pr(
         recovery.pr_number,
         _reviewed_pr_labels(plan),
       )
-      completed_patch = _git_ops._record_patch_with(pushed_patch, label_patch)
+      overlap_patch = (
+        _recovered_upstream_overlap(repo, record, branch, pushed_head)
+        if new_standalone_pr else {}
+      )
+      completed_patch = _git_ops._record_patch_with(
+        _git_ops._record_patch_with(pushed_patch, overlap_patch), label_patch,
+      )
       if attempt_event is not None:
         attempt_event(
           "complete", reconcile_request, completed_patch,
@@ -3825,10 +3899,7 @@ def _submit_prepared_pr(
           repo, upstream_repo, branch, expected_base,
           str(record_patch.get("head_sha") or expected_head),
         )
-        if _git_ops.opens_new_standalone_pr(
-          plan, existing_pr_number=expected_existing_pr_number,
-          direct_base=direct_base,
-        ) else
+        if new_standalone_pr else
         _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
       )
       # A conflict is true of the PR only once it opens, so a failed later step

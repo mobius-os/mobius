@@ -11,6 +11,10 @@ export function createSsrRenderServer({
 } = {}) {
   return createServer({
     configFile,
+    // The default loader bundles vite.config.js to a temporary file in the
+    // nearest node_modules, which may be a read-only borrowed tree. The
+    // runner evaluates it in memory, as the production build already does.
+    configLoader: 'runner',
     appType: 'custom',
     logLevel: 'error',
     server: {

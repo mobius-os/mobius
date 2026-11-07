@@ -766,15 +766,23 @@ def _write_credentials(token_data: dict) -> None:
   account = token_data.get("account") or {}
   email = account.get("email_address", "")
 
-  creds = {
-    "claudeAiOauth": {
-      "accessToken": token_data["access_token"],
-      "refreshToken": token_data["refresh_token"],
-      "expiresAt": int(time.time() * 1000) + token_data["expires_in"] * 1000,
-      "scopes": token_data.get("scope", "").split(),
-      "email": email,
-    }
+  now_ms = int(time.time() * 1000)
+  oauth = {
+    "accessToken": token_data["access_token"],
+    "refreshToken": token_data["refresh_token"],
+    "expiresAt": now_ms + token_data["expires_in"] * 1000,
+    "scopes": token_data.get("scope", "").split(),
+    "email": email,
   }
+  # The sign-in's hard end, in the field the CLI reports as `loginExpiresAt`
+  # and check_auth honors; refreshes keep it. When the response has no
+  # usable refresh_token_expires_in, Möbius leaves it absent (unknown) rather
+  # than assuming the CLI's 30-day default.
+  from app.providers import claude_login_end_after
+  login_end = claude_login_end_after(now_ms, token_data.get("refresh_token_expires_in"))
+  if login_end is not None:
+    oauth["refreshTokenExpiresAt"] = login_end
+  creds = {"claudeAiOauth": oauth}
   path = os.path.join(cli_home, ".credentials.json")
   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
   with os.fdopen(fd, "w") as f:
@@ -905,9 +913,12 @@ async def providers_status(
   model pickers can disable disconnected providers instead of guessing.
 
   Availability is safe to share across the app/embed boundary; the owner's
-  Möbius trial balance is not. `trial` is therefore attached only for a true
-  owner caller, so an app or chat-embed principal sees the same availability
-  fields without the owner's credit units and grant expiries.
+  Möbius trial balance and Claude sign-in expiry are not. `trial` (mobius)
+  and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
+  read failed) are therefore attached only for a true owner caller, so an app
+  or chat-embed principal sees the same availability fields without them.
+  `login_expires_at` is an upper bound: the CLI treats the stored end as a
+  window, so the sign-in can end up to three days before it.
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
@@ -934,6 +945,11 @@ async def providers_status(
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
       except Exception:
         out[pid]["trial"] = None
+    if pid == "claude" and error is None and is_owner_caller:
+      from app.providers import claude_login_expires_at
+      out[pid]["login_expires_at"] = await run_in_threadpool(
+        claude_login_expires_at, data_dir,
+      )
   return out
 
 
