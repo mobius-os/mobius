@@ -4057,6 +4057,34 @@ def test_boot_retires_compatible_host_paths_but_preserves_required_migrations(
       assert marker is None
 
 
+def test_host_certified_helper_retires_the_helper_migration_from_status(
+  clone_env, monkeypatch,
+):
+  """Boot keeps the helper migration owed because the container cannot do
+  host work, but the host's certified helper protocol is the proof that it
+  was done: status then stops asking for host maintenance."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  _, platform = clone_env
+  pu._write_activation_marker(
+    _served_sha(platform), ["deployment/self-hosted-helper.required"],
+  )
+  certified = []
+  monkeypatch.setattr(
+    deployment_control, "host_helper_meets_release",
+    lambda release=None: bool(certified),
+  )
+  assert pu.platform_status(platform)["activation"]["level"] == "host_maintenance"
+
+  certified.append(True)
+  status = pu.platform_status(platform)
+  assert status["activation"]["level"] == "live"
+  assert status["state"] != pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  # The marker keeps the requirement: a later helper downgrade owes it again.
+  assert pu._read_activation_marker()["paths"] == ["deployment/self-hosted-helper.required"]
+
+
 def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   clone_env, monkeypatch,
 ):

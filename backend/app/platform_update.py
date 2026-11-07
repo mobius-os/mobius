@@ -2115,6 +2115,28 @@ def _without_python_inputs_installed_for(
   return [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
 
 
+_HOST_HELPER_REQUIREMENT = "deployment/self-hosted-helper.required"
+
+
+def _without_certified_host_helper(
+  paths: list[str], release: str | None,
+) -> list[str]:
+  """Drop the helper migration marker once the host has done that work.
+
+  Reinstalling the helper is host work the container cannot perform, but the
+  host's root-owned status certifies the protocol its last completed install
+  provides, the same evidence that gates replacement dispatch. Status or a
+  requirement that cannot be read keeps the work owed.
+  """
+  if _HOST_HELPER_REQUIREMENT not in paths:
+    return paths
+  from app import deployment_control  # it imports this module
+
+  if not deployment_control.host_helper_meets_release(release):
+    return paths
+  return [path for path in paths if path != _HOST_HELPER_REQUIREMENT]
+
+
 def _incoming_activation_impact(
   repo: Path,
   before: str | None,
@@ -2122,8 +2144,11 @@ def _incoming_activation_impact(
 ) -> PlatformActivationImpact:
   """Classify target work that is not already proven active in this image."""
   return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(
-      repo, _activation_paths_between(repo, before, target_sha), target_sha,
+    _without_certified_host_helper(
+      _without_python_inputs_installed_for(
+        repo, _activation_paths_between(repo, before, target_sha), target_sha,
+      ),
+      target_sha,
     ),
   )
 
@@ -2262,11 +2287,14 @@ def _pending_activation_work(
   served_paths = [*(served_to_head or []), *additional_served_paths]
   paths.extend(served_paths)
   paths.extend(image_input_drift(repo) or [])
+  release = release or _contained_official_source(repo)
   owed = _image_work_owed(
-    repo, [str(path) for path in paths if str(path)],
-    release or _contained_official_source(repo),
+    repo, [str(path) for path in paths if str(path)], release,
   )
-  return sorted({*owed, *damaged}), _served_boot_restart(served_paths, owed)
+  return (
+    _without_certified_host_helper(sorted({*owed, *damaged}), release),
+    _served_boot_restart(served_paths, owed),
+  )
 
 
 def _served_boot_restart(served_paths: list[str], image_owed: list[str]) -> list[str]:

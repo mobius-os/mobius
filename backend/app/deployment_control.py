@@ -472,6 +472,9 @@ def _read_host_status() -> dict[str, Any]:
         # handoff version. Preserve their retired capability through this
         # synthesized state so a pending request cannot make them look current.
         "runtime_overlay": value.get("runtime_overlay"),
+        # The certified protocol belongs to the installed helper, not to the
+        # request, so a queued request must not hide it.
+        "helper_protocol": value.get("helper_protocol"),
       }
       unclaimed_for = (datetime.now(timezone.utc) - queued_at).total_seconds()
       if unclaimed_for >= _UNCLAIMED_REQUEST_BOUND_S:
@@ -530,6 +533,25 @@ def _current_host_controller(raw: dict[str, Any]) -> bool:
   )
 
 
+def _helper_protocol_meets(installed: Any, required: int | None) -> bool:
+  return (
+    required is not None
+    and isinstance(installed, int) and not isinstance(installed, bool)
+    and installed >= required
+  )
+
+
+def host_helper_meets_release(target_sha: str | None = None) -> bool:
+  """Whether the host's last completed helper install certified a protocol
+  that the served source and ``target_sha`` accept. The root-owned status is
+  the only evidence; unreadable status or requirement is never proof."""
+  try:
+    installed = _read_host_status().get("helper_protocol")
+  except DeploymentControlError:
+    return False
+  return _helper_protocol_meets(installed, _required_helper_protocol(target_sha))
+
+
 def _ensure_host_helper_meets_release(target_sha: str) -> None:
   """Dispatch-only: status of an older helper stays readable for recovery."""
   required = _required_helper_protocol(target_sha)
@@ -540,9 +562,7 @@ def _ensure_host_helper_meets_release(target_sha: str) -> None:
       "the update review and try again.",
       status_code=409,
     )
-  installed = _read_host_status().get("helper_protocol")
-  if not (isinstance(installed, int) and not isinstance(installed, bool)
-          and installed >= required):
+  if not _helper_protocol_meets(_read_host_status().get("helper_protocol"), required):
     raise DeploymentControlError(
       "controller_upgrade_required", _HELPER_PROTOCOL_MESSAGE, status_code=409,
     )
