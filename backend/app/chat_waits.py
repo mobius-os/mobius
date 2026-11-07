@@ -37,6 +37,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
@@ -360,17 +361,60 @@ def declare_wait(
   return row
 
 
-def cancel_wait(db: Session, row: models.ChatWait) -> models.ChatWait:
-  if row.status == "armed":
-    row.status = "cancelled"
-    row.cancelled_at = now_naive_utc()
-    row.result_disposition = "withdrawn"
-    row.result_disposed_at = row.cancelled_at
-    db.commit()
-    db.refresh(row)
-    _cancel_active_check(row.id)
-    _broadcast_changed(row.chat_id)
-  return row
+def cancel_wait(db: Session, row: models.ChatWait) -> dict:
+  """Withdraw through the same writer that owns provider entry and receipt."""
+  from app.chat_writer import WithdrawWait, get_writer, wait_ack
+  result = wait_ack(get_writer().submit(WithdrawWait(chat_id=row.chat_id, wait_id=row.id)))
+  db.expire(row)
+  return result
+
+
+def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
+  """Stop an ordinary check/owed follow-up, never undo admitted execution.
+
+  The writer orders this with AdmitProviderExecution and provider receipt.
+  The conditional update also tolerates a check firing outside the writer.
+  A fired condition keeps its outcome; withdrawal is a separate disposition.
+  """
+  if row.kind == "platform_activation":
+    return {"disposition": "not_withdrawable", "detail": "Use the Restart card or Stop the chat instead."}
+  if row.resume_delivered_at is not None or row.result_disposition == "delivered":
+    return {"disposition": "already_delivered"}
+  if row.status == "cancelled" or row.result_disposition == "withdrawn":
+    return {"disposition": "withdrawn"}
+  if row.result_disposition is not None or row.status not in ("armed", *_OUTCOMES):
+    return {"disposition": "not_withdrawable", "detail": "This Wait is already settled."}
+
+  # Selection is reversible; provider entry is not. Include dedicated carriers
+  # even if their prompt snapshot is missing (legacy/ambiguous execution).
+  carriers = {"wait-resume-" + row.id, "wait-resume-" + row.id + _RESUME_RETRY}
+  admitted = db.query(models.ChatRun.id, models.ChatRun.admitted_wait_results_json).filter(
+    models.ChatRun.chat_id == row.chat_id,
+    models.ChatRun.provider_execution_admitted.is_not(False),
+  )
+  if any(token in carriers or row.id in (ids or ()) for token, ids in admitted):
+    return {"disposition": "not_withdrawable", "detail": (
+      "This follow-up may already have entered a provider. Stopping a Wait cannot undo "
+      "input already sent or tools already executed. Use Stop to interrupt a current turn."
+    )}
+  now = now_naive_utc()
+  db.query(models.ChatWait).filter(
+    models.ChatWait.id == row.id,
+    models.ChatWait.kind != "platform_activation",
+    (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
+  ).update({
+    models.ChatWait.status: case((models.ChatWait.status == "armed", "cancelled"),
+      else_=models.ChatWait.status),
+    models.ChatWait.cancelled_at: now,
+    models.ChatWait.result_disposition: "withdrawn",
+    models.ChatWait.result_disposed_at: now,
+  }, synchronize_session=False)
+  db.refresh(row)
+  if row.result_disposition == "withdrawn":
+    return {"disposition": "withdrawn"}
+  if row.resume_delivered_at is not None:
+    return {"disposition": "already_delivered"}
+  return {"disposition": "not_withdrawable", "detail": "This Wait is already settled."}
 
 
 def stage_cancel_waits_for_chat(db: Session, chat_id: str) -> int:

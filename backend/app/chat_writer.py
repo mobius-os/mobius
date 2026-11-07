@@ -1421,6 +1421,14 @@ class PrepareAutoResume(_Command):
 
 
 @dataclass
+class WithdrawWait(_Command):
+  """Withdraw one ordinary Wait before its follow-up crosses provider entry."""
+  chat_id: str = ""
+  run_token: str = ""
+  wait_id: str = ""
+
+
+@dataclass
 class WithdrawGoalDependency(_Command):
   """Owner withdrawal of one exact pending/owed edge, not its Goal or source."""
   chat_id: str = ""
@@ -2168,6 +2176,8 @@ class ChatWriterActor:
       # graph edge or decision disposition, so need no owner-wide lock.
       from app.decision_cards import fence_decisions
       fence_decisions(db)
+    if isinstance(cmd, WithdrawWait):
+      return self._withdraw_wait(db, cmd)
     if isinstance(cmd, WithdrawGoalDependency):
       return self._withdraw_goal_dependency(db, cmd)
     if isinstance(cmd, ReconcileClaimSources):
@@ -2886,6 +2896,25 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistSessionId did not persist")
     return True
+
+  def _withdraw_wait(self, db, cmd: WithdrawWait) -> dict:
+    from app.chat_waits import (
+      _broadcast_changed, _cancel_active_check, serialize_wait, stage_withdraw_wait,
+    )
+    row = db.get(models.ChatWait, cmd.wait_id)
+    if row is None or row.chat_id != cmd.chat_id:
+      return {"id": cmd.wait_id, "disposition": "not_withdrawable",
+        "detail": "This Wait is no longer available."}
+    outcome = stage_withdraw_wait(db, row)
+    # Capture the response in this transaction, not a route-side read that
+    # could mix an earlier disposition with a later provider receipt.
+    result = {**serialize_wait(row, db=db), **outcome}
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("WithdrawWait did not persist")
+    if outcome["disposition"] == "withdrawn":
+      _cancel_active_check(cmd.wait_id)
+      _broadcast_changed(cmd.chat_id)
+    return result
 
   def _withdraw_goal_dependency(self, db, cmd: WithdrawGoalDependency) -> str:
     from app.decision_cards import fence_decisions

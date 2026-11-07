@@ -239,3 +239,36 @@ test('normal delivery wakes an answer; legacy and activation receipts keep their
   assert.equal(waitWokeItsAnswer({ ...base, result_disposition: 'legacy_consumed', delivery_pending: true }), false)
   assert.equal(waitWokeItsAnswer({ ...base, status: 'cancelled', result_disposition: null }), false)
 })
+
+test('owed ordinary results expose Stop follow-up even behind a recovery hold', () => {
+  for (const status of ['met', 'expired', 'failed']) {
+    for (const resume_blocker of [null, 'owner_input', 'manual_resume', 'resume_failed', 'restart']) {
+      for (const expanded of [false, true]) {
+        const html = renderToStaticMarkup(createElement(WaitCard, {
+          wait: { id: 'owed-result', kind: 'timer', status, delivery_pending: true, resume_blocker },
+          expanded, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
+        }))
+        assert.match(html, /Stop follow-up/, `${status}: ${resume_blocker}`)
+        assert.doesNotMatch(html, /Stop waiting/)
+        if (['manual_resume', 'resume_failed', 'restart'].includes(resume_blocker)) {
+          assert.match(html, /View recovery/, 'withdrawal must not replace recovery access')
+        }
+      }
+    }
+  }
+})
+
+test('delivered, withdrawn and activation waits never expose a generic Stop control', () => {
+  for (const wait of [
+    { kind: 'timer', status: 'met', delivery_pending: false, result_disposition: 'delivered' },
+    { kind: 'timer', status: 'met', delivery_pending: false, result_disposition: 'withdrawn' },
+    { kind: 'timer', status: 'cancelled', delivery_pending: false },
+    { kind: 'platform_activation', status: 'armed' },
+    { kind: 'platform_activation', status: 'met', delivery_pending: true },
+  ]) {
+    const html = renderToStaticMarkup(createElement(WaitCard, {
+      wait: { id: 'settled', ...wait }, expanded: true, onToggle: () => {}, onCancel: () => {},
+    }))
+    assert.doesNotMatch(html, /Stop follow-up|Stop waiting/)
+  }
+})
