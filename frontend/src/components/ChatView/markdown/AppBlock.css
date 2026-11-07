@@ -2,18 +2,22 @@
 .md-app-block { border:1px solid var(--border); border-radius:12px; margin:16px 0; overflow:hidden; background:var(--bg); }
 /* Assistant replies shrink to their prose (.chat__msg--assistant aligns
    flex-start). A reply with a block takes the column's width instead, so the
-   block never resizes to what it currently shows: the in-place confirmation
-   list cannot widen it and move Confirm out of the action's place. */
+   block never resizes to what it currently shows: the app's confirmation
+   rows cannot widen it and move Confirm out of the action's place. */
 .chat__text--assistant:has(.md-app-block) { align-self:stretch; width:100%; }
 .md-app-block > header { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; padding:12px 16px 8px; }
 .md-app-block > header strong { flex:1 1 12rem; min-width:0; overflow-wrap:anywhere; font-size:16px; }
 .md-app-block__open { display:inline-flex; align-items:center; min-height:44px; margin-left:auto; font-size:14px; }
 .md-app-block__source { margin:-4px 0 0; padding:0 16px 8px; color:var(--muted); font-size:12px; }
 .md-app-block__facts { display:flex; flex-wrap:wrap; gap:6px 20px; padding:0 16px 12px; margin:0; }
-.md-app-block__facts > div { display:flex; gap:4px; align-items:baseline; min-width:0; }
-.md-app-block__facts dt { color:var(--muted); font-size:14px; }
+/* A fact never overflows the block: the label takes at most 40% of its line
+   (all of it on a phone, where the value then wraps below), and both cells
+   wrap anywhere, so a long label cannot push the value out of view. App
+   confirmation facts may be 512 characters each. */
+.md-app-block__facts > div { display:flex; gap:4px; align-items:baseline; min-width:0; max-width:100%; }
+.md-app-block__facts dt { flex:0 1 auto; max-width:40%; min-width:0; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
 .md-app-block__facts dt::after { content:':'; }
-.md-app-block__facts dd { margin:0; font-size:14px; overflow-wrap:anywhere; }
+.md-app-block__facts dd { flex:0 1 auto; min-width:0; margin:0; font-size:14px; overflow-wrap:anywhere; }
 .md-app-block__facts dd a { color:var(--accent-text, var(--accent)); text-underline-offset:2px; }
 .md-app-block__badges { display:inline-flex; flex-wrap:wrap; gap:4px; }
 .md-app-block__badge { display:inline-flex; align-items:center; padding:0 8px; border-radius:2em; font-size:13px; font-weight:600; line-height:20px; white-space:nowrap;
@@ -23,7 +27,7 @@
 .md-app-block__badge.is-danger { background:color-mix(in srgb, var(--danger) 18%, transparent); color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:color-mix(in srgb, var(--accent) 65%, var(--text)); }
 .md-app-block__items { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); }
-.md-app-block__items > li { display:flex; align-items:center; gap:12px; padding:8px 16px; }
+.md-app-block__items > li { position:relative; display:flex; align-items:center; gap:12px; padding:8px 16px; }
 .md-app-block__items > li + li { border-top:1px solid var(--border); }
 .md-app-block__item-main { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; flex:1; min-width:0; }
 .md-app-block__item-title { display:inline-flex; align-items:center; min-height:44px; font-weight:600; overflow-wrap:anywhere; }
@@ -43,7 +47,8 @@
 .md-app-block__notice { margin:0; padding:4px 16px 12px; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
 .md-app-block__view { border-top:1px solid var(--border); }
 .md-app-block__view > p { padding:12px 16px; margin:0; color:var(--muted); }
-@media (max-width:480px) { .md-app-block__items > li { flex-wrap:wrap; } .md-app-block__items > li > .md-app-block__action { margin-left:auto; } }
+@media (max-width:480px) { .md-app-block__items > li { flex-wrap:wrap; } .md-app-block__items > li > .md-app-block__action { margin-left:auto; }
+  .md-app-block__facts > div { flex-wrap:wrap; } .md-app-block__facts dt { max-width:100%; } }
 
 /* Passive sessions: host-drawn controls in the action's fixed-size place. */
 .md-app-block__summary { margin:0; padding:0 16px 8px; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
@@ -66,18 +71,9 @@
 .md-app-block__note.is-danger { color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__note.is-attention { color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__note.is-success { color:color-mix(in srgb, var(--green) 65%, var(--text)); }
-.md-app-block__confirmation { display:grid; gap:10px; padding:12px 16px; border-top:1px solid var(--border); font-size:14px; }
-.md-app-block__confirmation > ul { display:grid; gap:12px; list-style:none; margin:0; padding:0; }
-.md-app-block__confirmation li { display:grid; gap:4px; min-width:0; overflow-wrap:anywhere; }
-.md-app-block__confirmation li > span { font-weight:600; }
-.md-app-block__confirmation dl { display:grid; gap:2px; margin:0; }
-/* The label column fits its content but never past 40%, and both cells wrap
-   anywhere, so a long label cannot squeeze the value to nothing. */
-.md-app-block__confirmation dl > div { display:grid; grid-template-columns:fit-content(40%) minmax(0, 1fr); gap:12px; }
-.md-app-block__confirmation dt, .md-app-block__confirmation dd { min-width:0; overflow-wrap:anywhere; }
-.md-app-block__confirmation dt { color:var(--muted); }
-.md-app-block__confirmation dt, .md-app-block__confirmation dd, .md-app-block__confirmation p { margin:0; font-size:13px; }
-.md-app-block__provenance { color:var(--muted); }
 .md-app-block__session-host { position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; clip-path:inset(50%); }
-.md-app-block__list-end { display:block; height:1px; }
-@media (max-width:480px) { .md-app-block__confirmation dl > div { grid-template-columns:minmax(0, 1fr); gap:0; } }
+.md-app-block__sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
+/* The two ends of the app's confirmation rows, observed for arming Confirm. */
+.md-app-block__list-edge { position:absolute; left:0; width:1px; height:1px; pointer-events:none; }
+.md-app-block__list-edge.is-start { top:0; }
+.md-app-block__list-edge.is-end { bottom:0; }

@@ -472,7 +472,8 @@ most 16384.
   else, and never restores or overwrites the app's saved place in the shell.
   If the app is not installed, the block keeps its snapshot and says so.
 - Every block is captioned "From this conversation": its title, facts and
-  badges are the agent's words, not status the app verified.
+  badges are the agent's words, not status the app verified. The caption is
+  hidden only while a passive session shows the app's own confirmation rows.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -581,27 +582,32 @@ Confirm will do, `[{title, facts: [{label, value}]}]` with 1-256 items, at most
 8 facts each and every text 1-512 characters. Only one action may be
 confirming at a time, and a `hidden` action never is: if two or more report
 `confirming: true`, the host enables no Confirm, shows no list, and asks the
-reader to open the app. Describe the exact targets and
-versions your app will act on now, from your own data, not the block's saved
-snapshot. The host shows every item, hides the block's saved badges unless you
-supply `badges`, and says the saved title and details come from the
-conversation. It never shortens the list: a missing, empty, oversized or
-malformed `confirmation` keeps Confirm disabled and shows "Open the app to
-review this action. Its full current identity is unavailable here." Confirm
-replaces the action's button in place, with "Not now" beside it. It stays
-disabled until, during this showing of that exact confirmation (the action
-and its list), the end of the list has been on screen at least once (as
-observed after this showing's own layout; a position under an earlier list
-never counts), and
-then Confirm itself has been on screen in a visible page for about 500 ms
-without interruption. The list is drawn below Confirm, so its end having been
-on screen means the whole list has passed through the viewport; a long list
-just needs scrolling to its end and back. A showing ends, and the next one
-starts from nothing, when the list changes or disappears, when Confirm or "Not
-now" is pressed, or on reload; Confirm leaving the screen or the page being
-hidden restarts the delay. So a double-click on the action, a list swapped
-just before a click, or a list that was never on screen never sends
-`confirm`. Treat
+reader to open the app. Describe the exact targets your app will act on now,
+from your own data, not the block's saved snapshot. While it is open, your
+list owns the block: its items are the block's only rows, in the same layout
+(title, then facts, linking nowhere), and the saved facts, rows, other
+controls and "From this conversation" caption are hidden. The confirming
+action is drawn once, in the block's footer, as "Not now" and Confirm, even
+when it is an item's action or several placements share its key. No heading
+or explanation is added: give each item the facts the card's own rows show,
+and the rows look the same before and after the press unless something
+changed. "Not now" brings the saved card back. The block's saved badges are
+hidden unless you supply `badges`. Facts of up to 512 characters wrap inside
+the block. The host never shortens the list: a missing, empty, oversized or
+malformed `confirmation` keeps the saved card and Confirm disabled, and shows
+"Open the app to review this action. Its full current identity is unavailable
+here." Confirm stays disabled until, during this showing of that exact
+confirmation (the action and its list), both the first and the last of your
+rows have been on screen at least once (as observed after this showing's own
+layout; a position under an earlier list never counts), and then Confirm
+itself has been on screen in a visible page for about 500 ms without
+interruption. The rows are drawn above Confirm, so reaching the first row
+means scrolling up through the list; a jump past the middle is not detected.
+A showing ends, and the next one starts from nothing, when the list changes or
+disappears, when Confirm or "Not now" is pressed, or on reload; Confirm
+leaving the screen or the page being hidden restarts the delay. So a
+double-click on the action, a list swapped just before a click, or a list
+whose first row was never on screen never sends `confirm`. Treat
 `confirm` as a request: check it again in the app before acting, and report
 `busy` and then the result.
 

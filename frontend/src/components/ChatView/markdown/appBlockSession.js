@@ -134,11 +134,20 @@ export function sessionStateUpdate(previous, safe) {
   return { ...safe, retain: safe.retain || Boolean(safe.checkpoint), recoveryPending: false, recoveryError: null }
 }
 
-/** The snapshot to show beside live state. While the app asks for
- *  confirmation, only badges the app itself supplies are shown. */
+/** The snapshot to show beside live state. While one action is confirming
+ *  with a complete list, that confirmation owns the whole block: the app's
+ *  items are the only rows (marked `confirmation`, linking nowhere), the
+ *  saved facts and every other control are gone, and the confirming action
+ *  is drawn once, as the block's own action. Otherwise, while anything is
+ *  confirming, only badges the app itself supplies are shown. */
 export function sessionSnapshot(block, state) {
-  const confirming = Boolean(state?.actions.some(action => action.confirming))
+  const confirming = state?.actions.find(action => action.confirming)
   const live = key => state?.actions.find(action => action.key === key)?.badges
+  if (confirming?.confirmation) {
+    const target = [block.action, ...block.items.map(item => item.action)].find(action => action?.intent === confirming.key)
+    return { ...block, badges: live(confirming.key) ?? [], facts: [], action: target || null, confirmation: true,
+      items: confirming.confirmation.map(item => ({ title: item.title, facts: item.facts, badges: [], action: null, confirmation: true })) }
+  }
   const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
   return { ...block, badges: badges(block.badges, block.action?.intent),
     items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) })) }

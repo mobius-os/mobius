@@ -52,15 +52,24 @@ export function UnavailableNotice({ slug, loading }) {
     {loading ? 'Checking installed apps…' : `${slug} is not installed. The saved snapshot remains here.`}</p>
 }
 
-export function BlockItems({ items, onInternalNav, actionFor }) {
+/** The block's rows. A passive session's confirmation rows (sessionSnapshot)
+ *  come from the app and link nowhere; `listEdgeRefs` marks their first and
+ *  last row so Confirm can require both ends to have been on screen. */
+export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = null }) {
   if (!items.length) return null
+  const first = items.findIndex(item => item.confirmation)
+  const last = items.findLastIndex(item => item.confirmation)
   return <ul className="md-app-block__items">{items.map((item, i) => <li key={i}>
+    {i === first ? <span ref={listEdgeRefs?.start} className="md-app-block__list-edge is-start" aria-hidden="true" /> : null}
     <div className="md-app-block__item-main">
-      <AppLink className="md-app-block__item-title" href={item.href} onInternalNav={onInternalNav}>{item.title}</AppLink>
+      {item.confirmation
+        ? <span className="md-app-block__item-title">{item.title}</span>
+        : <AppLink className="md-app-block__item-title" href={item.href} onInternalNav={onInternalNav}>{item.title}</AppLink>}
       <Badges badges={item.badges} />
       <Facts facts={item.facts} />
     </div>
     {actionFor(item.action)}
+    {i === last ? <span ref={listEdgeRefs?.end} className="md-app-block__list-edge is-end" aria-hidden="true" /> : null}
   </li>)}</ul>
 }
 
@@ -83,7 +92,7 @@ export function AppBlockView({ app, intent, height, onHostRequest }) {
 /** Shared block chrome. `actionFor` renders the control for one app action;
  *  `summary` is optional app-reported text shown under the saved title. */
 export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionFor, toggle = null,
-  summary = '', sectionRef = null, children = null }) {
+  summary = '', sectionRef = null, listEdgeRefs = null, children = null }) {
   const action = actionFor(block.action)
   return <section ref={sectionRef} className="md-app-block" aria-label={block.title}>
     <header>
@@ -92,10 +101,11 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
       <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
         Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>
     </header>
-    <p className="md-app-block__source">From this conversation</p>
+    {/* While the rows are the app's confirmation, nothing is added around them. */}
+    {block.confirmation ? null : <p className="md-app-block__source">From this conversation</p>}
     {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
-    <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} />
+    <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} />
     {action || toggle ? <footer>{toggle}{action}</footer> : null}
     {app ? null : <UnavailableNotice slug={block.app} loading={appsLoading} />}
     {children}

@@ -18,8 +18,8 @@ import {
 const UNNEGOTIATED = Object.freeze({ generation: null, supported: null })
 export { CONFIRM_ARM_MS } from './useConfirmArming.js'
 
-export default function useAppBlockSession({ block, near, revision = null, confirmView = null, listEndView = null,
-  admitted = true }) {
+export default function useAppBlockSession({ block, near, revision = null, confirmView = null, listStartView = null,
+  listEndView = null, admitted = true }) {
   const [sessionId] = useState(() => crypto.randomUUID())
   const [state, setState] = useState(null)
   const [event, setEvent] = useState(null)
@@ -31,7 +31,7 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const items = useMemo(() => blockItems(block), [block])
   const keys = useMemo(() => new Set(actions.map(action => action.key)), [actions])
   const arming = useConfirmArming({ state, generation: negotiation.generation, supported: negotiation.supported,
-    confirmView, listEndView })
+    confirmView, listStartView, listEndView })
   const { disarm, noteReport, mayConfirm } = arming
   const retained = sessionRetained(state, event)
   const frameWanted = near || retained
