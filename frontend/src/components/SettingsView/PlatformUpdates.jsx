@@ -151,7 +151,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
       </div>
       {newerBehind && !stall && !repairReason && !busy && !recoveryRequired && (
         <div className="platform-updates__description">
-          <p role="status">A newer version is available than the update in progress.{newerBehind.cancellable
+          <p role="status">A version newer than the update in progress is available.{newerBehind.cancellable
             ? ' You can finish this one, or cancel it and update straight to the latest instead.'
             : ' It will be offered once this update finishes.'}</p>
           {newerBehind.cancellable && (

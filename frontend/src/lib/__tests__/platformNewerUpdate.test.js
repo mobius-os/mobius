@@ -28,7 +28,7 @@ test('a cancellable in-flight update suggests the newer release and offers to ju
     activation: { level: 'image_rebuild', required_actions: ['image_rebuild'] },
     unfinished_update: { stage: 'finish', action: 'replace', cancellable: true },
   })
-  assert.match(html, /A newer version is available than the update in progress\./)
+  assert.match(html, /A version newer than the update in progress is available\./)
   assert.match(html, /<button[^>]*>Cancel and update to latest<\/button>/)
   // Only a suggestion: the primary action still finishes this update.
   assert.match(html, /<button[^>]*>Finish update<\/button>/)

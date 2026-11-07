@@ -112,7 +112,7 @@ _HELPER_PROTOCOL_MESSAGE = (
 # meets both the served source's and the target release's requirement, so a
 # helper fix that was merged but never installed on this host blocks
 # replacement instead of running the old cutover path.
-_HELPER_REQUIREMENT_PATH = "deployment/self-hosted-helper.required"
+_HELPER_REQUIREMENT_PATH = platform_activation.HOST_HELPER_REQUIREMENT_PATH
 _REQUIRED_HELPER_PROTOCOL = Path(__file__).resolve().parents[2] / _HELPER_REQUIREMENT_PATH
 
 
@@ -499,7 +499,9 @@ def _read_host_status() -> dict[str, Any]:
   return value
 
 
-def _required_helper_protocol(target_sha: str | None = None) -> int | None:
+def _required_helper_protocol(
+  target_sha: str | None = None, repo: Path | None = None,
+) -> int | None:
   """The larger of the served and target requirements; None if unreadable."""
   try:
     required = int(_REQUIRED_HELPER_PROTOCOL.read_text(encoding="ascii").strip())
@@ -507,7 +509,7 @@ def _required_helper_protocol(target_sha: str | None = None) -> int | None:
     return None
   if target_sha is None:
     return required
-  repo = platform_update.PLATFORM_REPO
+  repo = repo or platform_update.PLATFORM_REPO
   try:
     if platform_update._rev(repo, target_sha) != target_sha:
       return None
@@ -541,7 +543,9 @@ def _helper_protocol_meets(installed: Any, required: int | None) -> bool:
   )
 
 
-def host_helper_meets_release(target_sha: str | None = None) -> bool:
+def host_helper_meets_release(
+  target_sha: str | None = None, repo: Path | None = None,
+) -> bool:
   """Whether the host's last completed helper install certified a protocol
   that the served source and ``target_sha`` accept. The root-owned status is
   the only evidence; unreadable status or requirement is never proof."""
@@ -549,7 +553,7 @@ def host_helper_meets_release(target_sha: str | None = None) -> bool:
     installed = _read_host_status().get("helper_protocol")
   except DeploymentControlError:
     return False
-  return _helper_protocol_meets(installed, _required_helper_protocol(target_sha))
+  return _helper_protocol_meets(installed, _required_helper_protocol(target_sha, repo))
 
 
 def _ensure_host_helper_meets_release(target_sha: str) -> None:

@@ -4073,7 +4073,7 @@ def test_host_certified_helper_retires_the_helper_migration_from_status(
   certified = []
   monkeypatch.setattr(
     deployment_control, "host_helper_meets_release",
-    lambda release=None: bool(certified),
+    lambda release=None, repo=None: bool(certified),
   )
   assert pu.platform_status(platform)["activation"]["level"] == "host_maintenance"
 
@@ -4083,6 +4083,38 @@ def test_host_certified_helper_retires_the_helper_migration_from_status(
   assert status["state"] != pu.PlatformUpdateState.ACTIVATION_NEEDED.value
   # The marker keeps the requirement: a later helper downgrade owes it again.
   assert pu._read_activation_marker()["paths"] == ["deployment/self-hosted-helper.required"]
+
+
+def test_review_asks_the_host_about_the_exact_incoming_release(
+  clone_env, monkeypatch,
+):
+  """The review of a release that raises the helper requirement keeps host
+  maintenance unless the host certified a helper for that exact release."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  _advance_origin(
+    origin, edits={"deployment/self-hosted-helper.required": "99\n"},
+    msg="raise the helper protocol",
+  )
+  _git(platform, "fetch", "-q", "origin")
+  target = _git(platform, "rev-parse", "origin/main").stdout.strip()
+  asked = []
+  certified_for = set()
+
+  def meets(release=None, repo=None):
+    asked.append((release, repo))
+    return release in certified_for
+
+  monkeypatch.setattr(deployment_control, "host_helper_meets_release", meets)
+  impact = pu._incoming_activation_impact(platform, before, target)
+  assert impact["level"] == "host_maintenance"
+  assert asked == [(target, platform)]
+
+  certified_for.add(target)
+  assert pu._incoming_activation_impact(platform, before, target)["level"] != "host_maintenance"
 
 
 def test_boot_rebuild_retires_only_upstream_covered_image_paths(

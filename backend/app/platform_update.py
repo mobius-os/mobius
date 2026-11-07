@@ -2115,11 +2115,8 @@ def _without_python_inputs_installed_for(
   return [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
 
 
-_HOST_HELPER_REQUIREMENT = "deployment/self-hosted-helper.required"
-
-
 def _without_certified_host_helper(
-  paths: list[str], release: str | None,
+  repo: Path, paths: list[str], release: str | None,
 ) -> list[str]:
   """Drop the helper migration marker once the host has done that work.
 
@@ -2128,13 +2125,14 @@ def _without_certified_host_helper(
   provides, the same evidence that gates replacement dispatch. Status or a
   requirement that cannot be read keeps the work owed.
   """
-  if _HOST_HELPER_REQUIREMENT not in paths:
+  marker = platform_activation.HOST_HELPER_REQUIREMENT_PATH
+  if marker not in paths:
     return paths
   from app import deployment_control  # it imports this module
 
-  if not deployment_control.host_helper_meets_release(release):
+  if not deployment_control.host_helper_meets_release(release, repo):
     return paths
-  return [path for path in paths if path != _HOST_HELPER_REQUIREMENT]
+  return [path for path in paths if path != marker]
 
 
 def _incoming_activation_impact(
@@ -2145,6 +2143,7 @@ def _incoming_activation_impact(
   """Classify target work that is not already proven active in this image."""
   return platform_activation.classify_activation(
     _without_certified_host_helper(
+      repo,
       _without_python_inputs_installed_for(
         repo, _activation_paths_between(repo, before, target_sha), target_sha,
       ),
@@ -2292,7 +2291,7 @@ def _pending_activation_work(
     repo, [str(path) for path in paths if str(path)], release,
   )
   return (
-    _without_certified_host_helper(sorted({*owed, *damaged}), release),
+    _without_certified_host_helper(repo, sorted({*owed, *damaged}), release),
     _served_boot_restart(served_paths, owed),
   )
 

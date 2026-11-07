@@ -26,7 +26,7 @@ def served_helper_requirement(monkeypatch):
   """Synthetic targets are not commits here, and most tests stub the status
   read for other contracts. The helper-protocol gate tests below opt in."""
   monkeypatch.setattr(dc, "_required_helper_protocol",
-                      lambda target_sha=None: _REQUIRED_HELPER_PROTOCOL())
+                      lambda target_sha=None, repo=None: _REQUIRED_HELPER_PROTOCOL())
   monkeypatch.setattr(dc, "_ensure_host_helper_meets_release", lambda _target: None)
 
 
