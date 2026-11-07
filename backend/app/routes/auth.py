@@ -40,7 +40,7 @@ from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
-  get_owner_or_delegated_owner_for_app_token, is_account_owner, reject_cross_site,
+  acts_for_guest, get_owner_or_delegated_owner_for_app_token, reject_cross_site,
   require_chat_embed_operation,
   require_installation_owner_control,
 )
@@ -906,7 +906,7 @@ async def providers_status(
   # A shared-browser guest uses the owner's models, not the owner's account.
   is_owner_caller = (
     principal.app_id is None and principal.scope == "owner"
-    and is_account_owner(principal)
+    and not acts_for_guest(principal)
   )
   from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir

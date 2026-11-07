@@ -33,7 +33,7 @@ from app.deps import (
   get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
-  get_principal,
+  get_owner_principal,
   reject_cross_site,
   require_account_owner,
 )
@@ -232,8 +232,7 @@ def get_settings_view(
 @settings_router.get("/provider-usage/{provider_id}")
 async def get_provider_usage(
   provider_id: str,
-  _: models.Owner = Depends(get_current_owner),
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_owner_principal),
 ) -> dict:
   """Returns one connected provider's current plan allowance windows.
 

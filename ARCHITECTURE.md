@@ -2085,9 +2085,10 @@ forwarded to a remote service cannot be recalled.
 Installation identity, credential, access administration and lifecycle controls
 remain separately gated; ordinary readable owner-input cards retain their
 existing participant-answer contract. The owner's Möbius account (profile,
-sign-in email, deployments and credit) stays owner-only for reads as well as
-changes (`deps.require_account_owner`); the public handle directory stays
-open to the apps a guest uses.
+sign-in email, deployments and credit) and GitHub connection are never
+readable or changeable by a guest or work it started
+(`deps.require_account_owner`, `get_owner_or_app_with_github_connect`); the
+public handle directory stays open to the apps a guest uses.
 
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input

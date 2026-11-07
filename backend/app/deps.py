@@ -800,6 +800,13 @@ def _owner_principal_or_403(principal: Principal) -> models.Owner:
   return principal.owner
 
 
+def get_owner_principal(principal: Principal = Depends(get_principal)) -> Principal:
+  """``get_current_owner``'s caller, for owner-only routes that also need its
+  lineage."""
+  _owner_principal_or_403(principal)
+  return principal
+
+
 def get_current_owner_for_lifecycle_control(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
@@ -809,10 +816,16 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
+def acts_for_guest(principal: Principal) -> bool:
+  """Whether this bearer acts for a shared-browser guest: the guest's own
+  session, or an app, service, agent or helper working for one."""
+  return principal.browser is not None
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
   require_nondelegated_owner_control(principal)
-  if principal.browser is not None:
+  if acts_for_guest(principal):
     raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
@@ -1253,17 +1266,12 @@ def get_owner_or_app_with_connect_manage(
   )
 
 
-def is_account_owner(principal: Principal) -> bool:
-  """Whether the caller may use the owner's own Möbius account: its profile,
-  sign-in email, deployments and credit. These are the owner's alone, like
-  their own device: a shared-browser guest, or an app or agent working for
-  one, may neither read nor change them, whatever workspace access the guest
-  holds."""
-  return principal.browser is None
-
-
 def require_account_owner(principal: Principal) -> None:
-  if not is_account_owner(principal):
+  """The owner's own Möbius account (profile, sign-in email, deployments and
+  credit) is theirs alone, like their own device: never readable or
+  changeable by a shared-browser guest or work it started, whatever
+  workspace access the guest holds."""
+  if acts_for_guest(principal):
     raise HTTPException(403, "Only the installation owner can use this Möbius account.")
 
 
@@ -1379,8 +1387,11 @@ def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app token with live GitHub credential authority."""
-  require_nondelegated_owner_control(principal)
+  """Owner JWT, or an app token with live GitHub credential authority.
+
+  The connection is the owner's credential: neither a delegated helper nor a
+  shared-browser guest, or work it started, may read or change it."""
+  require_installation_owner_control(principal)
   owner = principal.owner
   if principal.app_id is None:
     db.close()

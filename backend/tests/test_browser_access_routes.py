@@ -117,6 +117,19 @@ def test_guest_and_apps_working_for_them_cannot_use_the_owners_mobius_account(ht
     assert guest_answer.json() == owner_answer.json(), path
 
 
+def test_guest_cannot_read_or_change_the_owners_github_connection(https, auth):
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  for method, path in (
+    ("get", "/api/github/status"), ("post", "/api/github/connect/start"),
+    ("post", "/api/github/connect/poll"), ("post", "/api/github/connect/cancel"),
+    ("delete", "/api/github/connect"),
+  ):
+    response = getattr(https, method)(path, headers=guest)
+    assert response.status_code == 403, (path, response.text)
+  assert https.get("/api/github/status", headers=auth).status_code == 200
+
+
 def test_logout_ends_only_that_browser_not_other_recipient_or_owner(https, auth):
   grant_a, token_a, _ = invite(https, "Alice")
   assert https.post(ROOT + "/session/logout", json={"grant_id": grant_a}).status_code == 204
