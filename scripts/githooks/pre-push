@@ -132,15 +132,26 @@ resolve_frontend_node_modules() {
 # worktrees cannot accidentally pair a new hook with an old main checkout.
 # Direct/manual invocation falls back to this checkout's scripts directory.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DEPS_HELPER="$HOOK_DIR/frontend-deps.sh"
-if [ ! -r "$FRONTEND_DEPS_HELPER" ]; then
-  if [ "$HOOK_DIR" = "$ROOT/scripts/githooks" ]; then
-    FRONTEND_DEPS_HELPER="$ROOT/scripts/frontend-deps.sh"
-  elif changed_match '^frontend/'; then
-    err "installed frontend dependency checker is missing"
-    err "  repair with: scripts/install-hooks.sh"
-    fail_check frontend-deps-support
+hook_support() {
+  if [ -r "$HOOK_DIR/$1" ]; then
+    printf '%s\n' "$HOOK_DIR/$1"
+  elif [ "$HOOK_DIR" = "$ROOT/scripts/githooks" ] \
+      && [ -r "$ROOT/scripts/$1" ]; then
+    printf '%s\n' "$ROOT/scripts/$1"
+  else
+    return 1
   fi
+}
+# wt-npm.sh is the one frontend command runner: it gives the suite private
+# scratch and caches, so a borrowed exact-lock dependency tree (including the
+# image's read-only one) is used without being written through.
+FRONTEND_DEPS_HELPER="$(hook_support frontend-deps.sh || true)"
+FRONTEND_RUNNER="$(hook_support wt-npm.sh || true)"
+if { [ -z "$FRONTEND_DEPS_HELPER" ] || [ -z "$FRONTEND_RUNNER" ]; } \
+    && changed_match '^frontend/'; then
+  err "installed frontend dependency support is missing"
+  err "  repair with: scripts/install-hooks.sh"
+  fail_check frontend-deps-support
 fi
 # shellcheck source=../../scripts/frontend-deps.sh
 if [ -r "$FRONTEND_DEPS_HELPER" ]; then
@@ -284,9 +295,11 @@ fi
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
 #    frontend-unit job, so a logic regression is caught here in seconds.
 if changed_match '^frontend/'; then
-  if [ "$MOBIUS_FRONTEND_STATUS" = "ready" ]; then
+  if [ -z "$FRONTEND_RUNNER" ]; then
+    : # The missing-support failure above already owns the diagnostic.
+  elif [ "$MOBIUS_FRONTEND_STATUS" = "ready" ]; then
     warn "running frontend-unit…"
-    if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
+    if bash "$FRONTEND_RUNNER" test >"$PP_TMP/fe" 2>&1; then
       ok "frontend-unit passed"
     else
       err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; fail_check frontend-unit

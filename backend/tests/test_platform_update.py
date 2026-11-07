@@ -2652,6 +2652,7 @@ def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
   (scripts / "check-frontend-deps.mjs").write_text(
     "#!/usr/bin/env node\n// committed helper\n"
   )
+  (scripts / "wt-npm.sh").write_text("#!/bin/sh\n# committed runner\n")
   if complete:
     (scripts / "githooks" / "pre-push").write_text(
       "#!/bin/sh\necho committed-pre-push\n"
@@ -2686,6 +2687,8 @@ def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
   assert (hooks / "check-frontend-deps.mjs").read_text() == (
     "#!/usr/bin/env node\n// committed helper\n"
   )
+  assert (hooks / "wt-npm.sh").read_text() == "#!/bin/sh\n# committed runner\n"
+  assert (hooks / "wt-npm.sh").stat().st_mode & 0o777 == 0o755
   assert not (hooks / "post-checkout").exists()
   assert (hooks / "pre-commit").stat().st_mode & 0o777 == 0o755
   assert (hooks / "pre-push").stat().st_mode & 0o777 == 0o755

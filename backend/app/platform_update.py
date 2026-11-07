@@ -210,6 +210,7 @@ _HOOK_SOURCES = (
   ("scripts/githooks/pre-push", "pre-push"),
   ("scripts/frontend-deps.sh", "frontend-deps.sh"),
   ("scripts/check-frontend-deps.mjs", "check-frontend-deps.mjs"),
+  ("scripts/wt-npm.sh", "wt-npm.sh"),
 )
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
