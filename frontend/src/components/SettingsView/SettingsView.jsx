@@ -27,6 +27,8 @@ import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
+import WalletSection from './WalletSection.jsx'
+import { useWallet } from './useWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -244,6 +246,7 @@ export default function SettingsView({
   // The owner's own accounts (Möbius with its model credit, and GitHub) are
   // never shown to a shared-browser guest, and their reads never run.
   const showOwnerAccounts = !isSharedBrowserAuth()
+  const wallet = useWallet({ active: active && showOwnerAccounts })
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -1144,6 +1147,18 @@ export default function SettingsView({
         </section>
 
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
+
+        {showOwnerAccounts && wallet.summary?.mode === 'customer' && (
+          <WalletSection
+            summary={wallet.summary}
+            terms={wallet.terms}
+            activity={wallet.activity}
+            busy={wallet.busy}
+            notice={wallet.notice}
+            refusal={wallet.refusal}
+            onBuy={wallet.buy}
+          />
+        )}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

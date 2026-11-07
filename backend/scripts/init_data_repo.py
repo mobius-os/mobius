@@ -23,6 +23,7 @@ from pathlib import Path
 DATA_GITIGNORE = """\
 cli-auth/
 app-secrets/
+credits-client/
 push/*.pem
 push/*.json
 push/*.txt

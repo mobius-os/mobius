@@ -1068,6 +1068,46 @@ rather than showing it off. Tracking keeps running after the owner
 leaves your app, until it is stopped, the phone app is closed, or the owner
 signs out; signing out also erases positions the phone had not uploaded yet.
 
+## Priced calls paid with credits
+
+The owner pairs this Möbius with a credits service using the owner-only
+`POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
+control is planned.
+
+An app can charge for one of its actions. The creator publishes the price
+once from their own Möbius with
+`PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
+1,000,000 micro. Another owner's copy pays for each call from its **own
+service**, never its frame. Its manifest lists every `"<seller>/<app>"` it pays
+for, which the owner sees at install, and a charge to anything else is refused
+with `seller_not_allowed`: `"permissions": { "spend_credits": ["ana/prompts"] }`.
+
+```js
+const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charges`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${process.env.APP_TOKEN}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ seller: 'ana', app: 'prompts', action: 'run',
+    idempotency_key: runId, max_price_micro: shownPrice }),
+})
+```
+
+Read the price first (`GET /api/identity/credits/prices/<seller>?app_slug=<app>`;
+`spend_credits` covers this read), show it to the owner, and send it as
+`max_price_micro`; a higher current price refuses with `price_changed`. Reuse
+one `idempotency_key` per call so a retry never pays twice. A 503 (the credits
+service was unreachable or slow) may still have charged: retry with the same
+key, never a new one. Do the paid work
+only after a 200, and explain each refusal by its `detail.code`: `not_paired`
+(the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
+`price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
+(the credits service refused the key; the owner needs to pair again).
+The key is scoped to your app, so another app's identical key never replays
+your charge.
+
+Showing the owner's balance or history, buying credits, publishing prices or
+moving earnings is a separate critical grant, `"credits_manage": true`.
+`identity_manage` does not include it.
+
 ## Managed-app update events
 
 Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update, uninstall or permanent erase, and recovery synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
