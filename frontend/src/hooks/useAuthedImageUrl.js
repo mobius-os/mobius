@@ -1,5 +1,5 @@
 /* Owner-authenticated images (avatars): fetched once per page load, kept in memory, and shown through one stable object URL so reopening Settings never blinks. */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/client.js'
 
 // One object URL per blob for the life of the page. Remounts, and every
@@ -8,8 +8,7 @@ import { apiFetch } from '../api/client.js'
 // URL left behind when one changes costs nothing worth revoking it for.
 const objectUrls = new WeakMap()
 
-/** The stable object URL for a blob, or null. */
-export function objectUrlFor(blob) {
+function objectUrlFor(blob) {
   if (!blob) return null
   let url = objectUrls.get(blob)
   if (!url) {
@@ -24,6 +23,9 @@ export function objectUrlFor(blob) {
 // A failed read settles as { blob: null, failed: true }: the caller shows its
 // own artwork now, and the next mount tries again.
 const images = new Map()
+// Paths whose next read must skip the browser's HTTP cache, because the image
+// behind them just changed (see forgetAuthedImage).
+const changedPaths = new Set()
 
 function cacheKeyFor(path, key) {
   return path && key ? `${path}\n${key}` : ''
@@ -32,7 +34,8 @@ function cacheKeyFor(path, key) {
 function load(cacheKey, path) {
   const entry = images.get(cacheKey)
   if (entry && !entry.failed) return entry.pending || Promise.resolve()
-  const pending = apiFetch(path, { timeoutMs: 15_000 })
+  const cache = changedPaths.delete(path) ? 'no-cache' : 'default'
+  const pending = apiFetch(path, { timeoutMs: 15_000, cache })
     .then(async (response) => {
       const blob = response.ok ? await response.blob() : null
       images.set(cacheKey, { blob: blob?.type?.startsWith('image/') ? blob : null })
@@ -42,16 +45,22 @@ function load(cacheKey, path) {
   return pending
 }
 
-/** Drop a cached image, e.g. after the account behind it changed. */
+/**
+ * Drop every cached image read from `path`, e.g. after uploading a new photo
+ * that may keep the same address. Mounted readers fetch it again, past the
+ * browser's HTTP cache, on their next render.
+ */
 export function forgetAuthedImage(path) {
   for (const cacheKey of images.keys()) {
     if (cacheKey.startsWith(`${path}\n`)) images.delete(cacheKey)
   }
+  changedPaths.add(path)
 }
 
 /**
  * `{ url, status }` for an owner-authenticated image route (relative to /api,
- * e.g. '/github/avatar'). `key` names what the image belongs to (an account);
+ * e.g. '/identity/avatar'). `key` names what the image is (an account or its
+ * avatar address);
  * an empty key or path means no image. `status` is 'loading' until the first
  * read settles, then 'ready' with a url or 'none' when there is no image, so
  * callers can show a quiet placeholder rather than swapping artwork in.
@@ -59,16 +68,22 @@ export function forgetAuthedImage(path) {
 export default function useAuthedImageUrl(path, key) {
   const cacheKey = cacheKeyFor(path, key)
   const [, setSettled] = useState(0)
+  // The image this mount already tried, so a failed read retries on the next
+  // mount rather than in a loop.
+  const tried = useRef('')
   const entry = cacheKey ? images.get(cacheKey) : null
+  // A forgotten image is read again on the next render, not only on remount.
+  const missing = Boolean(cacheKey) && !entry
 
   useEffect(() => {
     if (!cacheKey) return undefined
-    let active = true
     const current = images.get(cacheKey)
-    if (current && !current.pending && !current.failed) return undefined
+    if (current && !current.pending && (!current.failed || tried.current === cacheKey)) return undefined
+    tried.current = cacheKey
+    let active = true
     load(cacheKey, path).then(() => { if (active) setSettled(n => n + 1) })
     return () => { active = false }
-  }, [cacheKey, path])
+  }, [cacheKey, path, missing])
 
   if (!cacheKey) return { url: null, status: 'none' }
   if (!entry || entry.pending) return { url: null, status: 'loading' }

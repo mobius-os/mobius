@@ -1,21 +1,14 @@
 /* Pure display helpers for compact provider-plan usage snapshots. */
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
-export function formatPlanStatus(label) {
-  const value = typeof label === 'string' ? label.trim() : ''
-  const name = value.replace(/\s+plan$/i, '').trim()
-  // Codex's account protocol exposes this internal tier name rather than a
-  // customer-facing plan label. Keep the verified Business family, not the
-  // implementation suffix.
-  if (/^Self Serve Business Prolite$/i.test(name)) return 'Plan: Business'
-  return `Plan: ${name || 'Unknown'}`
-}
-
 /** A plan label as a page subtitle: "Max plan" → "Max plan", "Pro" → "Pro plan"; empty stays empty. */
 export function formatPlanName(label) {
   const value = typeof label === 'string' ? label.trim() : ''
   const name = value.replace(/\s+plan$/i, '').trim()
   if (!name) return ''
+  // Codex's account protocol exposes this internal tier name rather than a
+  // customer-facing plan label. Keep the verified Business family, not the
+  // implementation suffix.
   if (/^Self Serve Business Prolite$/i.test(name)) return 'Business plan'
   return `${name} plan`
 }

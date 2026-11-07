@@ -1,4 +1,4 @@
-/* Picker-visibility saves: a failed save never leaves the switches disagreeing with the server, and later toggles never overwrite earlier ones. */
+/* Picker-visibility saves: a failed save never leaves the switches disagreeing with the server, and neither later toggles nor a refresh mid-queue overwrite earlier ones. */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createLatestSaveQueue } from '../modelPrefsSaveQueue.js'
@@ -22,7 +22,9 @@ function harness(responses) {
     await new Promise(r => setImmediate(r))
   }
   const hide = id => queue.change(list => [...new Set([...list, id])])
-  return { hide, settleNext, state: () => ({ shown, server, sent }) }
+  // A background refresh replacing the shown list with what the server held when it was read.
+  const refreshShows = list => { shown = [...list] }
+  return { hide, settleNext, refreshShows, state: () => ({ shown, server, sent }) }
 }
 
 test('a failed first save followed by a successful queued save leaves the switches matching the server', async () => {
@@ -64,4 +66,17 @@ test('saves never overlap and the last one always carries every pending toggle',
   await first
   assert.deepEqual(h.state().sent, [['A'], ['A', 'B', 'C']])
   assert.deepEqual(h.state().server, ['A', 'B', 'C'])
+})
+
+test('a refresh landing mid-queue cannot make the next save drop or revert a toggle', async () => {
+  const h = harness([true, true])
+  const first = h.hide('A')
+  h.hide('B')
+  h.refreshShows([]) // a read that started before either toggle lands now
+  await h.settleNext()
+  await h.settleNext()
+  await first
+  assert.deepEqual(h.state().sent, [['A'], ['A', 'B']])
+  assert.deepEqual(h.state().server, ['A', 'B'])
+  assert.deepEqual(h.state().shown, ['A', 'B'])
 })

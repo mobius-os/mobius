@@ -57,40 +57,10 @@
     0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
-/* Section titles: sentence-case, no tracking, no uppercase. The
-   previous uppercase-tracked treatment read as ornament. */
-.settings__section-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  text-transform: none;
-  letter-spacing: 0;
-  margin-bottom: 12px;
-}
-
-.settings__label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* "Configured" indicator now uses the shared <StatusDot> component
-   (frontend/src/components/ui/StatusDot.jsx) — both this badge
-   AND the provider-row "Connected" / "Not connected" status pull
-   from the same source so the dot size + gap + typography never
-   drift across surfaces. */
-
 .settings__subtext {
   font-size: 13px;
   color: var(--muted);
   line-height: 1.5;
-}
-
-.settings__subtext--tight {
-  margin: 4px 0 0;
 }
 
 .settings__notice {
@@ -102,12 +72,6 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
-}
-
-.settings__notice--stacked {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
 }
 
 .settings__subtext a {
@@ -227,10 +191,6 @@
 .settings__appearance-toggle:disabled {
   cursor: wait;
 }
-
-/* Provider rows + .settings__providers wrapper styles live in
-   ../ProviderAuth/ProviderAuth.css since the component is shared
-   between SettingsView and SetupWizard. */
 
 .settings__section:focus,
 .settings-group:focus,
@@ -467,9 +427,22 @@
   .settings-group__aside { flex: 1 1 100%; justify-content: space-between; }
 }
 
-@container settings (max-width: 400px) {
-  .settings-provider-summary { gap: 10px; padding-right: 14px; }
-  .settings-provider-summary__icon { width: 32px; height: 32px; }
+/* Phones and narrow panes: the usage meter moves under the provider's name so
+   the background model it runs gets the full width instead of being cut off. */
+@container settings (max-width: 480px) {
+  .settings-provider-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "icon copy trail" ". meter meter";
+    column-gap: 10px;
+    row-gap: 8px;
+    padding-right: 14px;
+  }
+  .settings-provider-summary__icon { grid-area: icon; width: 32px; height: 32px; }
+  .settings-provider-summary__copy { grid-area: copy; }
+  .settings-provider-summary > .settings-badge { grid-area: trail; }
+  .settings-provider-summary > .settings-meter--compact { grid-area: meter; width: 100%; }
+  .settings-provider-summary > .settings-meter--compact .settings-meter__label { justify-content: space-between; }
 }
 
 /* At the 280px pane minimum the outer/section padding eats too much of the

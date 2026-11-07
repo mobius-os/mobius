@@ -1,7 +1,7 @@
 /* The instance's GitHub account row in Settings › Accounts: avatar and login, then connect with a device code, add or remove private-repo access, or disconnect. */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowUpRight, ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
-import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
 import {
   cancelGithubSignIn,
   disconnectGithub,
@@ -161,7 +161,6 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     setMessage('')
     try {
       await disconnectGithub()
-      forgetAuthedImage('/github/avatar')
     } catch (error) {
       setMessage(error.message)
     }
@@ -241,9 +240,13 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     )
   }
 
-  // The avatar is cached for the page by login, so reopening Settings shows it
-  // at once; until the first read settles, a quiet placeholder stands in.
-  const avatar = useAuthedImageUrl(connected ? '/github/avatar' : null, connected ? conn.login : '')
+  // The avatar's address names the login, so it and its cached copies follow
+  // the connected account; reopening Settings shows it at once, and until the
+  // first read settles a quiet placeholder stands in.
+  const avatar = useAuthedImageUrl(
+    connected && conn.login ? `/github/avatar/${encodeURIComponent(conn.login)}` : null,
+    connected ? conn.login : '',
+  )
   const avatarPending = conn.state === 'checking' || avatar.status === 'loading'
   const profileUrl = connected && conn.login ? `https://github.com/${encodeURIComponent(conn.login)}` : null
   const exception = connected && needsReconnect

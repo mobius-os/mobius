@@ -10,7 +10,7 @@ import { settingsQueries } from '../../hooks/queries.js'
 import ProviderUsage from '../../components/SettingsView/ProviderUsage.jsx'
 import {
   clampUsagePercent,
-  formatPlanStatus,
+  formatPlanName,
   formatUsagePercent,
   formatTrialTimeLeft,
   formatUsageReset,
@@ -103,12 +103,11 @@ for (const provider of ['codex', 'claude']) {
   })
 }
 
-test('connected plan status uses the compact green-disclosure copy', () => {
-  assert.equal(formatPlanStatus('Max plan'), 'Plan: Max')
-  assert.equal(formatPlanStatus('Pro plan'), 'Plan: Pro')
-  assert.equal(formatPlanStatus('API billing'), 'Plan: API billing')
-  assert.equal(formatPlanStatus(''), 'Plan: Unknown')
-  assert.equal(formatPlanStatus('Self Serve Business Prolite plan'), 'Plan: Business')
+test('a provider page names its plan once, and an unknown plan says nothing', () => {
+  assert.equal(formatPlanName('Max plan'), 'Max plan')
+  assert.equal(formatPlanName('Pro'), 'Pro plan')
+  assert.equal(formatPlanName(''), '')
+  assert.equal(formatPlanName('Self Serve Business Prolite plan'), 'Business plan')
 })
 
 test('usage freshness renders a verified reading time, stale state, and refresh action', () => {

@@ -9,8 +9,10 @@ import { createLatestSaveQueue } from '../../lib/modelPrefsSaveQueue.js'
 /**
  * Picker visibility is one owner-wide list of hidden model ids
  * (PATCH /api/owner/model-prefs). Toggles show at once; createLatestSaveQueue
- * sends them one save at a time with the latest list, and restores the
- * server's confirmed list when a save fails with nothing newer pending.
+ * owns the intended list, sends it one save at a time, and restores the
+ * server's confirmed list when a save fails with nothing newer pending. A
+ * prefs read already in flight is cancelled first so it cannot land over the
+ * toggle with the list from before it.
  */
 export default function ChatModelsList({ provider, configured }) {
   const queryClient = useQueryClient()
@@ -29,7 +31,8 @@ export default function ChatModelsList({ provider, configured }) {
   const models = Array.isArray(registryQuery.data?.[provider]) ? registryQuery.data[provider] : []
   const hidden = new Set(prefsQuery.data?.hidden_ids || [])
 
-  const setVisible = (modelId, visible) => {
+  const setVisible = async (modelId, visible) => {
+    await queryClient.cancelQueries({ queryKey: modelQueries.prefs.key })
     void queueRef.current.change((hiddenIds) => {
       const next = new Set(hiddenIds)
       if (visible) next.delete(modelId)
@@ -59,7 +62,7 @@ export default function ChatModelsList({ provider, configured }) {
         const label = model.label || model.id
         const switchId = `chat-model-${provider}-${model.id}`.replace(/[^A-Za-z0-9_-]/g, '-')
         return (
-          <div className={`settings-item chat-model-row${visible ? '' : ' chat-model-row--hidden'}`} key={model.id}>
+          <div className="settings-item" key={model.id}>
             <span className="settings-item__body">
               <label className="settings-item__title" htmlFor={switchId}>{label}</label>
               {provider !== 'mobius' && label !== model.id && <span className="settings-item__sub">{model.id}</span>}

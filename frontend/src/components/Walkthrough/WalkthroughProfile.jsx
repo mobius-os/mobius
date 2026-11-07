@@ -6,7 +6,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
-import { mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
+import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
 import { CheckIcon } from './WalkthroughIcons.jsx'
 import { returningHandle } from './returningOwner.js'
@@ -19,24 +20,6 @@ function avatarProblem(file) {
   if (!AVATAR_TYPES.includes(file.type)) return 'Choose a JPEG, PNG, or WebP image.'
   if (file.size > AVATAR_MAX_BYTES) return 'Choose an image under 5 MB.'
   return ''
-}
-
-/* The avatar image is served by the owner's own backend and needs auth, so it
-   is fetched into a blob URL (the same way Möbius · You shows it). */
-function useAvatarUrl(avatarKey) {
-  const [url, setUrl] = useState(null)
-  useEffect(() => {
-    if (!avatarKey) { setUrl(null); return undefined }
-    const controller = new AbortController()
-    let objectUrl = null
-    apiFetch('/identity/avatar', { signal: controller.signal, timeoutMs: 15_000 }).then(async response => {
-      if (!response.ok) return
-      objectUrl = URL.createObjectURL(await response.blob())
-      setUrl(objectUrl)
-    }).catch(() => { /* Initials stay as the fallback artwork. */ })
-    return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl) }
-  }, [avatarKey])
-  return url
 }
 
 /* The owner's profile: { loading, error, identity, avatarUrl, editing, returning, claim, uploadAvatar, signedIn }.
@@ -62,7 +45,8 @@ export function useAccountProfile() {
     })
     return () => controller.abort()
   }, [])
-  const avatarUrl = useAvatarUrl(state.identity?.profile?.avatar_url)
+  // The same cached photo Settings shows; initials stand in until it loads.
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, state.identity?.profile?.avatar_url || '').url
   // Settings › Möbius reads the same account; drop its cached copy whenever the guide changes it.
   const setIdentity = identity => {
     setState(current => ({ ...current, identity }))
@@ -83,6 +67,8 @@ export function useAccountProfile() {
     const response = await fetch(`${BASE}/api/identity/avatar`, { method: 'POST', headers: getAuthHeaders(), body })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(detailToMessage(data.detail, 'Could not update your avatar.'))
+    // The account may keep the same avatar address for new bytes.
+    forgetAuthedImage(AVATAR_PATH)
     setIdentity(data)
   }
   const returning = returningHandle({ handle: state.identity?.profile?.handle, claimedHere, editing })

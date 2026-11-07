@@ -17,7 +17,8 @@ import {
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
-import { mobiusAccountQueries, useObjectUrl } from '../../hooks/mobiusAccountQueries.js'
+import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
+import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_MAX_BYTES,
   AVATAR_TYPES,
@@ -311,10 +312,8 @@ function ClaimHandle({ onSave }) {
 }
 
 function ProfileSection({ identity, onIdentity }) {
-  const queryClient = useQueryClient()
   const profile = identity.profile
-  const avatar = mobiusAccountQueries.avatar.useQuery(profile.avatar_url)
-  const avatarUrl = useObjectUrl(avatar.data || null)
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, profile.avatar_url || '').url
   const [editing, setEditing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -338,7 +337,7 @@ function ProfileSection({ identity, onIdentity }) {
       body.append('avatar', file)
       const next = await mobiusAccessRequest('/api/identity/avatar', { method: 'POST', body })
       // The account may keep the same avatar address for new bytes.
-      queryClient.removeQueries({ queryKey: [...mobiusAccountQueries.key, 'avatar'] })
+      forgetAuthedImage(AVATAR_PATH)
       onIdentity(next)
     } catch (uploadError) {
       setError(uploadError.message)
@@ -452,7 +451,7 @@ function ModelVisibilityRow() {
   )
 }
 
-/* `account` is 'signed_out', 'outage' (signed in, account service unreachable) or 'ready'. */
+/* `account` is 'loading', 'signed_out', 'outage' (signed in, account service unreachable) or 'ready'. */
 function ModelAccessSection({ account, onSignIn = null }) {
   const queryClient = useQueryClient()
   const agent = mobiusAccountQueries.agent.useQuery({ enabled: account === 'ready' })
@@ -479,8 +478,11 @@ function ModelAccessSection({ account, onSignIn = null }) {
     }
   }
 
+  const loadingRow = <div className="settings-item" aria-busy="true"><span className="settings-item__body"><span className="mobius-account__skeleton mobius-account__skeleton--line" /></span></div>
   let accessRows = null
-  if (account === 'signed_out' || (account === 'ready' && access?.agent_access === 'signed_out')) {
+  if (account === 'loading') {
+    accessRows = loadingRow
+  } else if (account === 'signed_out' || (account === 'ready' && access?.agent_access === 'signed_out')) {
     accessRows = (
       <div className="settings-item">
         <span className="settings-item__icon"><Sparkle width={18} height={18} aria-hidden="true" /></span>
@@ -507,7 +509,7 @@ function ModelAccessSection({ account, onSignIn = null }) {
     )
   } else if (!access) {
     accessRows = agent.isPending
-      ? <div className="settings-item" aria-busy="true"><span className="settings-item__body"><span className="mobius-account__skeleton mobius-account__skeleton--line" /></span></div>
+      ? loadingRow
       : (
         <div className="settings-item">
           <span className="settings-item__body">
@@ -597,15 +599,15 @@ function ModelAccessSection({ account, onSignIn = null }) {
  * provider page. `onSignIn` opens the account page when the owner is signed out.
  */
 export function MobiusModelAccess({ onSignIn = null }) {
-  const identity = mobiusAccountQueries.identity.useQuery().data
+  const identityQuery = mobiusAccountQueries.identity.useQuery()
+  const identity = identityQuery.data
   const mode = identity?.account_mode
-  const signedIn = mode === 'linked' || mode === 'managed'
-  return (
-    <ModelAccessSection
-      account={!signedIn ? 'signed_out' : identity.account_unavailable ? 'outage' : 'ready'}
-      onSignIn={onSignIn}
-    />
-  )
+  // Until the account is known the section waits quietly instead of asking a
+  // signed-in owner to sign in; a failed first read is an outage, not sign-out.
+  const account = !identity
+    ? identityQuery.isPending ? 'loading' : 'outage'
+    : mode === 'signed_out' ? 'signed_out' : identity.account_unavailable ? 'outage' : 'ready'
+  return <ModelAccessSection account={account} onSignIn={onSignIn} />
 }
 
 /* The account page points to model credit on the Möbius provider page rather than repeating it. */

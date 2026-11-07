@@ -461,7 +461,6 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
   line-height: 1.45;
 }
 .settings-message--error { color: var(--danger-text, var(--danger)); }
-.settings-message--success { color: var(--green-text, var(--green)); }
 
 @container settings (max-width: 400px) {
   .settings-item { padding: 12px 14px; }
@@ -470,7 +469,6 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
   .settings-subhead { gap: 12px; margin-bottom: 22px; }
   .settings-subhead__mark { width: 36px; height: 36px; }
   .settings-subhead__title { font-size: 20px; }
-  .settings-meter--compact { width: 80px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

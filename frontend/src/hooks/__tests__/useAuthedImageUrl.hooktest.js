@@ -80,3 +80,23 @@ test('no account means no request and no placeholder wait', t => {
   assert.deepEqual(view.result.current, { url: null, status: 'none' })
   assert.equal(requests.length, 0)
 })
+
+test('a changed photo is read again where it is shown, past the browser cache', async t => {
+  const reads = []
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    reads.push(init.cache)
+    return new Response(new Blob([`png${reads.length}`], { type: 'image/png' }), { status: 200 })
+  })
+  const view = renderHook(() => useAuthedImageUrl('/test/changed', 'https://account.example/avatar'))
+  t.after(() => view.unmount())
+  await settle(view)
+  const before = view.result.current.url
+  assert.ok(before)
+
+  forgetAuthedImage('/test/changed') // e.g. a new upload kept the same address
+  view.rerender()
+  await settle(view)
+  assert.equal(view.result.current.status, 'ready')
+  assert.notEqual(view.result.current.url, before)
+  assert.deepEqual(reads, ['default', 'no-cache'])
+})

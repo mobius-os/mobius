@@ -105,8 +105,17 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
   return rows
 }
 
+// Why a provider that cannot run is unavailable: the owner turned it off (its
+// status reports `available: false`, whatever its sign-in state), or it still
+// needs connecting or, for Möbius, signing in.
+function providerOffLabel(provider, status) {
+  if (status?.available === false) return 'Turned off'
+  return provider === 'mobius' ? 'Not signed in' : 'Not connected'
+}
+
 function BackgroundProviderRow({
   row,
+  status,
   providerInfo,
   index,
   models,
@@ -124,6 +133,7 @@ function BackgroundProviderRow({
   const Logo = info?.Logo
   const label = info?.label || row.provider
   const configured = configuredProviders.has(row.provider)
+  const offLabel = configured ? '' : providerOffLabel(row.provider, status)
   const enabled = configured && row.enabled !== false
   const selectedModel = enabled
     ? (row.model || defaultBackgroundModel(row.provider))
@@ -143,7 +153,7 @@ function BackgroundProviderRow({
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
       }
       style={dragStyle}
-      aria-label={configured ? `${label} background priority ${index + 1}` : `${label}, not connected`}
+      aria-label={configured ? `${label} background priority ${index + 1}` : `${label}, ${offLabel.toLowerCase()}`}
     >
       {configured ? (
         <button
@@ -187,11 +197,11 @@ function BackgroundProviderRow({
           <span className="settings-provider-summary__icon">{Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}</span>
           <span className="settings-provider-summary__copy">
             <span>{label}</span>
-            <small>{configured ? `Background: ${modelLabel}` : row.provider === 'mobius' ? 'Not signed in' : 'Not connected'}</small>
+            <small>{configured ? `Background: ${modelLabel}` : offLabel}</small>
           </span>
           {configured
             ? <UsageMeter usage={usage} />
-            : <span className="settings-badge settings-badge--accent settings-badge--plain">{row.provider === 'mobius' ? 'Sign in' : 'Connect'}</span>}
+            : status?.available !== false && <span className="settings-badge settings-badge--accent settings-badge--plain">{row.provider === 'mobius' ? 'Sign in' : 'Connect'}</span>}
         </button>
       </div>
     </div>
@@ -228,6 +238,9 @@ export default function SettingsView({
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const mobiusAccount = useMobiusAccountSummary()
+  // The Möbius account and its model credit are the owner's own; a
+  // shared-browser guest never sees or opens them (the queries never run).
+  const showMobiusAccount = !isSharedBrowserAuth()
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -406,13 +419,14 @@ export default function SettingsView({
   }, [settingsQuery.data])
 
   const openDetailPage = useCallback((page) => {
+    if (page === MOBIUS_ACCOUNT_PAGE && !showMobiusAccount) return
     // Remember who was connected when the page opened, so a provider that
     // connects from its page gets the curated first-connection defaults.
     authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
     setDetailPage(page)
     openDetailHistory()
     settingsBoundaryRef.current?.scrollTo({ top: 0 })
-  }, [openDetailHistory])
+  }, [openDetailHistory, showMobiusAccount])
   const closeDetailPage = closeDetailHistory
   // Settings requests (deep links, focus) arrive as a page id or null.
   const navigateDetail = useCallback((page) => {
@@ -876,7 +890,6 @@ export default function SettingsView({
     claude: claudeUsageQuery.data?.plan_label || settingsQuery.data?.provider_plans?.claude || '',
     mobius: mobiusUsageQuery.data?.plan_label || '',
   }
-  const showMobiusAccount = !isSharedBrowserAuth()
   const mobiusAccountMark = mobiusAccount.avatarUrl
     ? <img src={mobiusAccount.avatarUrl} alt="" />
     : mobiusAccount.avatarPending ? null : MobiusLogo && <MobiusLogo />
@@ -922,7 +935,7 @@ export default function SettingsView({
         mark={Logo ? <Logo /> : (selectedProvider[0] || '?').toUpperCase()}
         subtitle={configured
           ? (planName ? <span>{planName}</span> : null)
-          : <span className="settings-badge">{selectedProvider === 'mobius' ? 'Not signed in' : 'Not connected'}</span>}
+          : <span className="settings-badge">{providerOffLabel(selectedProvider, providerStatusQuery.data?.[selectedProvider])}</span>}
         onBack={closeDetailPage}
       />
     )
@@ -978,7 +991,7 @@ export default function SettingsView({
               {...usageExtras}
             />
           ) : null}
-          access={selectedProvider === 'mobius' ? (
+          access={selectedProvider === 'mobius' && showMobiusAccount ? (
             <MobiusModelAccess onSignIn={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} />
           ) : null}
           connection={connection}
@@ -1068,6 +1081,7 @@ export default function SettingsView({
             >
               {effectiveBackgroundDraft.map((row, index) => (
                 <BackgroundProviderRow
+                  status={providerStatusQuery.data?.[row.provider]}
                   key={row.provider}
                   row={row}
                   providerInfo={modelProviderInfo[row.provider]}

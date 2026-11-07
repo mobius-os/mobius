@@ -16382,9 +16382,10 @@ def test_avatar_serves_only_the_connected_login_same_origin(
     return httpx.Response(200, headers={"content-type": "image/png"}, content=_PNG)
 
   _install_mock_transport(monkeypatch, handler)
-  response = client.get("/api/github/avatar", headers=auth)
+  response = client.get("/api/github/avatar/octocat", headers=auth)
   assert response.status_code == 200
   assert response.headers["content-type"] == "image/png"
+  assert response.headers["x-content-type-options"] == "nosniff"
   assert response.content == _PNG
   assert [str(r.url) for r in requests] == [
     "https://avatars.githubusercontent.com/octocat?s=96",
@@ -16392,13 +16393,24 @@ def test_avatar_serves_only_the_connected_login_same_origin(
   # The image request is anonymous: the GitHub token never leaves for it.
   assert "authorization" not in {k.lower() for k in requests[0].headers}
   # A second read is served from the short hold, not refetched.
-  assert client.get("/api/github/avatar", headers=auth).status_code == 200
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 200
   assert len(requests) == 1
+
+
+def test_avatar_address_follows_the_connected_account(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  # The browser caches the image by its address, so another account's address
+  # must never answer with this one's photo (or fetch that account's).
+  _write_token(login="octocat")
+  _install_mock_transport(monkeypatch, lambda request: pytest.fail("only the connected login is fetched"))
+  assert client.get("/api/github/avatar/hubot", headers=auth).status_code == 404
+  assert client.get("/api/github/avatar/Octocat", headers=auth).status_code == 404
 
 
 def test_avatar_is_absent_without_a_connection(client, auth, monkeypatch, _fresh_avatar_cache):
   _install_mock_transport(monkeypatch, lambda request: pytest.fail("no fetch without a login"))
-  assert client.get("/api/github/avatar", headers=auth).status_code == 404
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 404
 
 
 @pytest.mark.parametrize("upstream", [
@@ -16411,4 +16423,25 @@ def test_avatar_refuses_non_images_redirects_and_oversize(
 ):
   _write_token(login="octocat")
   _install_mock_transport(monkeypatch, lambda request: upstream)
-  assert client.get("/api/github/avatar", headers=auth).status_code == 502
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 502
+
+
+def test_avatar_stops_reading_an_oversize_image_at_the_cap(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  # An endless body is refused once it passes the cap, never read to the end.
+  sent = 0
+
+  async def endless():
+    nonlocal sent
+    while True:
+      sent += 64 * 1024
+      yield b"x" * (64 * 1024)
+
+  _write_token(login="octocat")
+  _install_mock_transport(
+    monkeypatch,
+    lambda request: httpx.Response(200, headers={"content-type": "image/png"}, content=endless()),
+  )
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 502
+  assert sent <= 512 * 1024 + 64 * 1024

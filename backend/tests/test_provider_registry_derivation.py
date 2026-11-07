@@ -116,7 +116,9 @@ def test_new_provider_uses_runtime_identity_scope(registered_provider):
 def test_model_only_patch_selects_its_provider_not_a_two_provider_flip(
   client, auth, chat, db, monkeypatch, registered_provider, target, model,
 ):
-  monkeypatch.setattr(providers.PROVIDERS["mobius"], "check_auth", lambda _: None)
+  # Patch the class: an instance patch is restored as an instance attribute
+  # that would shadow later tests' class-level patches of check_auth.
+  monkeypatch.setattr(providers.MobiusProvider, "check_auth", lambda _self, _data_dir: None)
   if target == "mobius":
     monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
     monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", {

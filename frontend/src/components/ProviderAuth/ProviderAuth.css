@@ -269,12 +269,6 @@
 
 /* ── Unified provider rows (shared by Settings + Setup) ──── */
 
-.settings__providers {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
 .provider-row {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -378,14 +372,6 @@
   line-height: 1.4;
 }
 
-/* The provider detail shows usage directly; its plan stays a quiet status. */
-.provider-plan-label {
-  color: var(--green-text, var(--green));
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.4;
-}
-
 /* Detail owns a full-width row beneath the provider header. Keeping it outside
    the name/status stack gives compact usage lines enough room in narrow panes
    without forcing the Reconnect action to wrap. */
@@ -393,12 +379,6 @@
   grid-column: 1 / -1;
   min-width: 0;
 }
-
-/* Provider connected / disconnected indicator now renders via
-   the shared <StatusDot> component
-   (frontend/src/components/ui/StatusDot.jsx) — the bespoke
-   .provider-row__status* rules used to live here. Single source
-   of truth for the dot-plus-label pattern. */
 
 /* Action button — solid surface fill so it reads as a tappable
    pill against the surface-colored provider row. Earlier outline
@@ -453,4 +433,3 @@
 .provider-connection p { margin: 0; }
 .provider-connection__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .provider-connection__actions .pa__btn { min-height: 36px; }
-.provider-connection__disconnect { color: var(--danger-text, var(--danger)); }

@@ -1,18 +1,22 @@
-/* Saves a shown list one request at a time, always sending the latest shown value; a failure with nothing newer pending restores the last confirmed value. */
+/* Saves a shown list one request at a time, always sending the owner's latest intended value; a failure with nothing newer pending restores the last confirmed value. */
 
 /**
  * `read()` returns the list currently shown, `show(list)` replaces it, and
  * `save(list)` resolves true when the server accepted that exact list.
- * `change(update)` applies `update` to the shown list at once and queues a
- * save. Changes made while a save is in flight are folded into the next one,
- * so no toggle is lost and nothing sends a stale list. When a save fails and
- * nothing newer is waiting, the shown list returns to what the server last
- * confirmed; newer intent instead goes out with the next save.
+ * `change(update)` applies `update` to the intended list, shows it at once
+ * and queues a save. The queue owns the intended list while saves are in
+ * flight: it reads the shown list only when idle, to start from what the
+ * server last confirmed, so a refresh that replaces the shown list mid-queue
+ * can never make the next save send a stale list. Changes made while a save is
+ * in flight are folded into the next one. When the last save settles, the
+ * shown list becomes what the server confirmed: the intended list on success,
+ * or the previous confirmed list after a failure.
  */
 export function createLatestSaveQueue({ read, show, save, onResult = () => {} }) {
   let saving = false
   let dirty = false
   let confirmed = null
+  let intended = null
 
   async function flush() {
     if (saving) {
@@ -23,7 +27,7 @@ export function createLatestSaveQueue({ read, show, save, onResult = () => {} })
     try {
       for (;;) {
         dirty = false
-        const sending = read()
+        const sending = intended
         let ok = false
         try {
           ok = await save(sending)
@@ -33,7 +37,8 @@ export function createLatestSaveQueue({ read, show, save, onResult = () => {} })
         if (ok) confirmed = sending
         onResult(ok)
         if (dirty) continue
-        if (!ok) show(confirmed)
+        intended = confirmed
+        show(confirmed)
         return
       }
     } finally {
@@ -44,8 +49,12 @@ export function createLatestSaveQueue({ read, show, save, onResult = () => {} })
   return {
     change(update) {
       // While idle the shown list is exactly what the server last accepted.
-      if (!saving) confirmed = read()
-      show(update(read()))
+      if (!saving) {
+        confirmed = read()
+        intended = confirmed
+      }
+      intended = update(intended)
+      show(intended)
       return flush()
     },
   }

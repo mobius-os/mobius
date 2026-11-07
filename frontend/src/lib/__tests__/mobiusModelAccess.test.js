@@ -1,4 +1,4 @@
-/* Möbius model access (credit, trial, rates) on the Möbius provider page: strict parsing and a confirmed trial activation. */
+/* Möbius model access on Settings: strict parsing, a confirmed trial activation, an honest provider state, and account reads only for the owner. */
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { createElement } from 'react'
@@ -11,6 +11,8 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 const vite = await createSsrRenderServer()
 const { MobiusModelAccess } = await vite.ssrLoadModule('/src/components/SettingsView/MobiusAccountPage.jsx')
 const { mobiusAccountQueries } = await vite.ssrLoadModule('/src/hooks/mobiusAccountQueries.js')
+const { beginSharedBrowserAuth } = await vite.ssrLoadModule('/src/api/client.js')
+const { default: SettingsView } = await vite.ssrLoadModule('/src/components/SettingsView/SettingsView.jsx')
 after(() => vite.close())
 const signedOut = { agent_access: 'signed_out', models: [], balance: {}, trial: {}, retention: {} }
 const available = {
@@ -56,16 +58,28 @@ test('fields the page renders are still validated', () => {
   assert.throws(() => parseAgentAccess({ ...available, retention: { policy: 'x' } }), /retention/)
 })
 
-function render(seed, props = {}) {
+function render(seed, props = {}, component = MobiusModelAccess) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   try {
     for (const [key, data] of seed) client.setQueryData(key, data)
     return renderToStaticMarkup(createElement(QueryClientProvider, { client },
-      createElement(MobiusModelAccess, props)))
+      createElement(component, props)))
   } finally {
     client.clear()
   }
 }
+
+// Whether each account read would start on mount ('fetching') or never runs ('idle').
+function AccountReads() {
+  const reads = {
+    identity: mobiusAccountQueries.identity.useQuery(),
+    agent: mobiusAccountQueries.agent.useQuery(),
+    visibility: mobiusAccountQueries.visibility.useQuery(),
+    railway: mobiusAccountQueries.railway.useQuery(),
+  }
+  return JSON.stringify(Object.fromEntries(Object.entries(reads).map(([name, read]) => [name, read.fetchStatus])))
+}
+const accountReads = () => JSON.parse(render([], {}, AccountReads).replaceAll('&quot;', '"'))
 const linked = { account_mode: 'linked', account_unavailable: false, profile: { handle: 'owner' }, deployments: [] }
 
 test('a ready trial is offered behind a confirmation, never activated on sight', () => {
@@ -95,4 +109,38 @@ test('used-up credit is called out instead of showing a zero balance', () => {
     [mobiusAccountQueries.visibility.key, true],
   ])
   assert.match(html, /No credit/)
+})
+
+test('while the account is still loading the section waits quietly instead of asking to sign in', () => {
+  const html = render([[mobiusAccountQueries.visibility.key, true]], { onSignIn: () => {} })
+  assert.match(html, /aria-busy="true"/)
+  assert.doesNotMatch(html, /Sign in/)
+})
+
+// The Möbius row of Settings › Background agents for one provider status.
+function mobiusProviderRow(mobiusStatus) {
+  const html = render([
+    [['settings'], { background_agents: [{ provider: 'mobius', enabled: true }] }],
+    [['auth', 'providers', 'status'], { mobius: { name: 'Möbius', ...mobiusStatus } }],
+    [['models', 'registry'], { mobius: [] }],
+  ], {}, SettingsView)
+  const row = html.split('class="settings-bg-row ').find(part => part.includes('Möbius provider settings'))
+  assert.ok(row, 'the Möbius row is rendered')
+  return row.slice(0, row.indexOf('</button>'))
+}
+
+test('Möbius models turned off read as turned off, not as a signed-out account', () => {
+  const off = mobiusProviderRow({ configured: false, available: false, error: 'Möbius models are turned off in Settings.' })
+  assert.match(off, /Turned off/)
+  assert.doesNotMatch(off, /Not signed in|Sign in/)
+  const signedOut = mobiusProviderRow({ configured: false, available: true, error: 'Sign in to your Möbius account in Settings to use Möbius models.' })
+  assert.match(signedOut, /Not signed in/)
+  assert.match(signedOut, />Sign in</)
+})
+
+// Keep last: a shared-browser session cannot be ended within this process.
+test('a shared-browser guest never reads the owner’s Möbius account', () => {
+  assert.deepEqual(accountReads(), { identity: 'fetching', agent: 'fetching', visibility: 'fetching', railway: 'fetching' })
+  beginSharedBrowserAuth()
+  assert.deepEqual(accountReads(), { identity: 'idle', agent: 'idle', visibility: 'idle', railway: 'idle' })
 })
