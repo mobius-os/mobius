@@ -101,7 +101,7 @@ async function fetchProviderUsage(provider) {
 
 // The Möbius credit meter is the owner's account balance, so no surface
 // (Settings, the composer meter, a limit card) asks for it in a shared-browser
-// guest session. (The matching server-side refusal lands separately, in #2075.)
+// guest session.
 const ownerOnlyUsage = provider => provider === 'mobius' && isSharedBrowserAuth()
 
 function useProviderUsageQuery(provider, { enabled = true } = {}) {
