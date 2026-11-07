@@ -182,6 +182,7 @@ from app.github_contributions import (
   _reviewed_pr_labels,
   _apply_reviewed_pr_labels,
   _authoritative_public_reconciliation,
+  observe_publication_effect,
   _exact_reviewed_pr_text,
   assert_publishable_review_text,
   _find_existing_pr,
@@ -204,6 +205,7 @@ from app.deps import (
   get_agent_run_principal,
   get_principal,
   require_installation_owner_control,
+  require_account_owner_control,
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
@@ -239,7 +241,9 @@ def _read_personal_attempt(
     return None
   if not isinstance(raw, dict):
     return None
-  signature = str(raw.get("hmac_sha256") or "")
+  signature = raw.get("hmac_sha256")
+  if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+    return None
   expected = _signed_personal_attempt(raw).get("hmac_sha256")
   if (
     raw.get("version") != 1
@@ -267,7 +271,7 @@ def _cleanup_durable_complete_attempt(
   receipt = _read_personal_attempt(
     record_path, app_id=app_id, record_id=record_id,
   )
-  if not receipt or receipt.get("phase") != "complete":
+  if not receipt or receipt.get("observation_settlement") is not None or receipt.get("phase") != "complete":
     return False
   patch = receipt.get("record_patch")
   if not isinstance(patch, dict):
@@ -485,6 +489,11 @@ class _PersonalAttemptOwner:
       self.app_id, self.record_id,
     )
     receipt = self.receipt()
+    if receipt is not None and receipt.get("observation_settlement") is not None:
+      raise ContributionSubmitError(
+        "An observed outcome is awaiting local settlement. Refresh Contribute; do not repeat its public action.",
+        status_code=409, code="observation_settlement_pending",
+      )
     if receipt is not None:
       return
     # A matching complete receipt remains this exact action's durable public
@@ -838,6 +847,7 @@ def _superseded_attempt(
   record = _read_record(record_path)
   if (
     record.get("status") != "prepared"
+    or receipt.get("observation_settlement") is not None
     or receipt.get("phase")
     not in _NO_EFFECT_ATTEMPT_PHASES | _UNSETTLED_PUSH_STAGES
     or _receipt_claims_prepared(receipt, record)
@@ -1112,7 +1122,7 @@ _ready_action_locks: "WeakValueDictionary[str, asyncio.Lock]" = (
 
 
 def _ready_action_lock(app_id: int, record_id: str) -> asyncio.Lock:
-  """Serialize one record's Ready/recovery lifecycle in this worker.
+  """Serialize one record's public action and observation in this worker.
 
   Möbius serves one uvicorn worker, so this closes the only live overlap: a
   second request must not observe the saved claim while the first request is
@@ -1128,11 +1138,43 @@ def _ready_action_lock(app_id: int, record_id: str) -> asyncio.Lock:
   return lock
 
 
+def _release_publication_auth_session(db: Session = Depends(get_db)):
+  # Auth dependencies run before action admission. A queued action must not
+  # reserve their database connection while another sender is on the network.
+  db.close()
+
+
 async def _serialize_ready_action(app_id: int, record_id: str):
   async with _ready_action_lock(app_id, record_id):
     yield
 
 
+@asynccontextmanager
+async def _publication_action_locks(app_id: int, record_ids: list[str]):
+  # Every public owner and the observer use this same order, before storage or
+  # source locks. CAS alone cannot see a sender between its effect and write.
+  async with AsyncExitStack() as locks:
+    for record_id in sorted(set(record_ids)):
+      await locks.enter_async_context(_ready_action_lock(app_id, record_id))
+    yield
+
+
+async def _serialize_stack_action(app_id: int, request: Request):
+  # Read only the lock keys here; the owning route retains all admission and
+  # exact confirmation validation. Never acquire a partial or duplicate set.
+  try:
+    payload = await request.json()
+    record_ids = payload.get("record_ids") if isinstance(payload, dict) else None
+  except ValueError:
+    record_ids = None
+  if (
+    not isinstance(record_ids, list) or not 2 <= len(record_ids) <= 12
+    or any(not isinstance(value, str) or not _CONTRIBUTION_ID.fullmatch(value)
+           for value in record_ids)
+  ):
+    raise HTTPException(status_code=400, detail="Choose a complete PR stack.")
+  async with _publication_action_locks(app_id, record_ids):
+    yield
 
 
 _REVIEW_STATUS_MESSAGES = {
@@ -2971,11 +3013,246 @@ async def retired_chat_contribution_route(
   })
 
 
+def _observation_digest(value: object) -> str:
+  return hashlib.sha256(json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+  ).encode("utf-8")).hexdigest()
+
+
+def _assert_no_observation_settlement(app_id: int, record_ids: list[str]) -> None:
+  """A saved observed outcome is applied before any new public action."""
+  for record_id in record_ids:
+    path, _ = _record_paths(app_id, record_id)
+    receipt = _read_personal_attempt(path, app_id=app_id, record_id=record_id)
+    if receipt is not None and receipt.get("observation_settlement") is not None:
+      raise HTTPException(
+        status_code=409,
+        detail="An observed outcome is awaiting local settlement. Refresh Contribute before a new public action.",
+      )
+
+
+def _observation_claim_matches(record: dict, attempt: dict) -> bool:
+  claim = attempt.get("claim_input")
+  patch = attempt.get("record_patch")
+  action = attempt.get("action_input")
+  if (
+    not isinstance(claim, dict) or not isinstance(patch, dict)
+    or not isinstance(action, dict)
+    or attempt.get("claim_sha256") != _personal_publication_input_sha256(claim)
+    or record.get("status") not in {"prepared", "submitting", "open", "draft", "merged", "closed"}
+  ):
+    return False
+  plan = claim.get("plan")
+  plan_action = plan.get("action") if isinstance(plan, dict) else None
+  if action.get("action") not in {
+    "pr": {"submit", "submit_stack"},
+    "pr_update": {"update_existing", "update_stack"},
+  }.get(plan_action, set()):
+    return False
+  # Failure marking returns submitting -> prepared. Successful owner writes
+  # may have completed before receipt retirement. No other reviewed field may
+  # drift: compare both the exact claim and its signed normalization patch.
+  current = _personal_publication_input(record)
+  current["status"] = claim.get("status")
+  candidates = [claim, {**claim, **patch}]
+  request = attempt.get("effective_request")
+  if (attempt.get("phase") == "complete" and isinstance(request, dict)
+      and request.get("url") and request.get("number")):
+    # The owner may have saved its successful ledger row and crashed before
+    # retiring the receipt. Its exact signed response names these two derived
+    # fields even when record_patch does not; remote proof is still required.
+    candidates.append({**claim, **patch, "url": request["url"], "number": request["number"]})
+  return any(current == _personal_publication_input(candidate) for candidate in candidates)
+
+
+def _observed_pr_record(record: dict, attempt: dict, result: dict) -> dict:
+  patch = attempt.get("record_patch") or {}
+  allowed = {
+    "plan", "head_sha", "head_repository", "last_submit_stage",
+    "last_submit_push_sha", "last_submit_base_branch", "last_submit_upstream_branch",
+    "last_submit_upstream_sha", "last_pushed_branch", "last_successor_base_branch",
+    "last_submit_screenshots",
+  }
+  now = _now_iso()
+  submitted = (attempt.get("action_input") or {}).get("action") in {"submit", "submit_stack"}
+  settled = {
+    **record, **{key: value for key, value in patch.items() if key in allowed},
+    "url": result["url"], "number": result["number"],
+    "status": result["status"], "publication_stage": result["publication_stage"],
+    "head_repository": result["head_repository"],
+    "last_submit_push_sha": result["head_sha"], "last_submit_stage": "pushed",
+    "last_submit_base_branch": result["base_branch"], "updated_at": now,
+  }
+  if result.get("labels_requested"):
+    settled["last_submit_labels_requested"] = result["labels_requested"]
+    settled["last_submit_labels_applied"] = result["labels_applied"]
+    settled.pop("last_submit_labels_note", None)
+  if submitted:
+    settled["submitted_at"] = record.get("submitted_at") or now
+  else:
+    settled["last_updated_pr_at"] = now
+  if result["status"] in {"merged", "closed"}:
+    settled.setdefault(f"{result['status']}_at", now)
+  for key in ("last_submit_error", "last_submit_error_detail", "last_submit_error_code"):
+    settled.pop(key, None)
+  if submitted and "last_submit_upstream_conflict" in patch:
+    settled["last_submit_upstream_conflict"] = patch["last_submit_upstream_conflict"]
+  else:
+    settled.pop("last_submit_upstream_conflict", None)
+  return settled
+
+
+def _observation_journal(attempt: dict) -> tuple[dict, dict] | None:
+  journal = attempt.get("observation_settlement")
+  if not isinstance(journal, dict):
+    return None
+  before, after = journal.get("before"), journal.get("after")
+  if (not isinstance(before, dict) or not isinstance(after, dict)
+      or before.get("id") != attempt.get("record_id")
+      or after.get("id") != attempt.get("record_id")):
+    return None
+  return before, after
+
+
+def _observation_unapplied(record: dict, attempt: dict) -> bool:
+  """Allow fresh proof, not journal deletion, after a benign local edit.
+
+  Every effect-bearing field must still equal its pre-write value. A partial
+  write or reviewed-input change remains a conflict. The old signed journal
+  stays on disk throughout the fresh remote read.
+  """
+  journal = _observation_journal(attempt)
+  if journal is None:
+    return False
+  before, after = journal
+  missing = object()
+  effects = {key for key in before.keys() | after.keys()
+             if key != "updated_at" and before.get(key, missing) != after.get(key, missing)}
+  return (
+    all(record.get(key, missing) == before.get(key, missing) for key in effects)
+    and _personal_publication_input(record) == _personal_publication_input(before)
+  )
+
+
+def _finish_observation_settlement(
+  app_id: int, record_id: str, attempt: dict,
+) -> dict | None:
+  """Replay only a server-signed local write, never a public operation.
+
+  The journal is saved in the receipt before the ledger write, so a crash
+  between them resumes here. A replaced receipt or an unrelated ledger edit
+  is never retired or overwritten. Caller holds the action and storage locks.
+  """
+  journal = _observation_journal(attempt)
+  record_path, _ = _record_paths(app_id, record_id)
+  if journal is None or _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  ) != attempt:
+    return None
+  before, after = journal
+  current = _read_record(record_path)
+  if current != before and current != after:
+    return None
+  if current != after:
+    _write_record(record_path, after)
+  _remove_personal_attempt(app_id, record_id)
+  return after
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/observe",
+  dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)],
+)
+async def observe_contribution_publication(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Observe an existing signed effect, and persist only its exact outcome.
+
+  No request supplies a plan, target, action or approval. An absent/partial
+  proof is not proof of no effect and never reopens public admission.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  record_path, _ = _record_paths(app_id, record_id)
+  if (await request.body()).strip() not in {b"", b"{}"}:
+    raise HTTPException(status_code=400, detail="Observation takes no action inputs.")
+
+  def response(outcome: str, record: dict, message: str) -> dict:
+    return {"outcome": outcome, "records": [record], "message": message}
+
+  # Every sender of this record holds its action lock from admission to its
+  # ledger write, and it alone spans the remote reads below: no database,
+  # source-dir or app-storage lease is retained during GitHub I/O.
+  async with _ready_action_lock(app_id, record_id):
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      record = _read_record(record_path)
+      if record.get("type") != "pr" or record.get("submission_mode") == "mobius-bot":
+        return response("not_eligible", record, "This record is not a personal publication attempt. No no-effect conclusion was made.")
+      attempt = _read_personal_attempt(record_path, app_id=app_id, record_id=record_id)
+      if attempt is None:
+        return response("unavailable", record, "No valid signed publication attempt is available. This does not prove nothing was sent.")
+      if (attempt.get("action_input") or {}).get("action") == "autopilot_update":
+        # Autopilot's round recovery owns this receipt: its retry records the
+        # pushed head in the grant, and the receipt is its only witness.
+        return response("not_eligible", record, "Autopilot recovers its own update; checking never settles or retires it.")
+      if attempt.get("observation_settlement") is not None:
+        settled = _finish_observation_settlement(app_id, record_id, attempt)
+        if settled is not None:
+          return response("settled", settled, "The observed outcome is saved.")
+        if not _observation_unapplied(record, attempt):
+          return response("changed", record, "The saved settlement no longer matches the ledger.")
+      if not _observation_claim_matches(record, attempt):
+        return response("changed", record, "The signed publication claim no longer matches this review.")
+      snapshot = _observation_digest([record, attempt])
+    actor = _observation_digest(github_auth.read_state())
+    try:
+      proof = await asyncio.to_thread(  # unsettled: read-only (GitHub publication observation)
+        observe_publication_effect, record, attempt,
+      )
+    except (ContributionSubmitError, OSError, subprocess.SubprocessError, ValueError, TypeError):
+      proof = {"outcome": "unavailable", "message": "GitHub could not confirm this publication. Its attempt remains locked."}
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      current = _read_record(record_path)
+      if (
+        _observation_digest([current, _read_personal_attempt(
+          record_path, app_id=app_id, record_id=record_id,
+        )]) != snapshot
+        or _observation_digest(github_auth.read_state()) != actor
+      ):
+        return response("changed", current, "The publication or GitHub connection changed during observation; no result was saved.")
+      if proof["outcome"] != "settled":
+        return response(proof["outcome"], current, proof["message"])
+      settled_attempt = _signed_personal_attempt({
+        **attempt, "observation_settlement": {
+          "before": current,
+          "after": _observed_pr_record(current, attempt, proof["result"]),
+        },
+      })
+      atomic_write(
+        contribution_runtime.personal_attempt_path(app_id, record_id),
+        json.dumps(settled_attempt, ensure_ascii=False, separators=(",", ":")),
+      )
+      saved = _finish_observation_settlement(app_id, record_id, settled_attempt)
+      if saved is None:
+        return response("changed", current, "The settlement changed before its ledger write.")
+      return response("settled", saved, "The exact publication outcome is saved.")
+
+
 @router.post(
   "/contributions/{app_id}/{record_id}/submit",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -3017,6 +3294,7 @@ async def submit_contribution(
   )
   await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit",
@@ -3225,7 +3503,8 @@ async def submit_contribution(
   "/contributions/{app_id}/{record_id}/ready",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
 )
@@ -3247,6 +3526,7 @@ async def mark_contribution_ready(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _claimed, record_path, target, mode = _claim_personal_pr_ready(
       app_id=app_id,
       record_id=record_id,
@@ -3422,7 +3702,9 @@ def _prepared_existing_pr_target(record: dict) -> tuple[str, int, str, str]:
   "/contributions/{app_id}/{record_id}/update-existing",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -3474,6 +3756,7 @@ async def update_existing_contribution(
   )
   await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_existing"}
     existing_record_path, _ = _record_paths(app_id, record_id)
@@ -3858,7 +4141,7 @@ async def contribution_assignees(
 
 @router.post(
   "/contributions/{app_id}/assign-review",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("10/minute")
 async def assign_contribution_review(
@@ -3912,7 +4195,9 @@ async def assign_contribution_review(
   "/contributions/{app_id}/update-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -3978,6 +4263,7 @@ async def update_contribution_stack(
   )
   await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, body.record_ids)
     _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_stack", "record_ids": body.record_ids}
     for cleanup_id in body.record_ids:
@@ -4254,7 +4540,9 @@ async def update_contribution_stack(
   "/contributions/{app_id}/submit-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -4292,6 +4580,7 @@ async def submit_contribution_stack(
   )
   await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, body.record_ids)
     _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit_stack", "record_ids": body.record_ids,
@@ -4481,7 +4770,9 @@ async def submit_contribution_stack(
   "/contributions/{app_id}/land-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -4502,6 +4793,7 @@ async def land_contribution_stack(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, body.record_ids)
     rows, landing_mode = _claim_stack_landing(
       app_id=app_id,
       record_ids=body.record_ids,
@@ -5372,7 +5664,7 @@ async def _autopilot_escalate_and_notify(
   "/contributions/{app_id}/{record_id}/respond",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("10/minute")
@@ -5571,7 +5863,7 @@ def _autopilot_round_brief(
   "/contributions/{app_id}/{record_id}/reply",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("30/minute")
@@ -5929,7 +6221,7 @@ async def autopilot_escalate(
   "/contributions/{app_id}/{record_id}/autopilot",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("20/minute")
@@ -6044,7 +6336,9 @@ def _completed_autopilot_update_result(
   "/contributions/{app_id}/{record_id}/update",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -6081,6 +6375,7 @@ async def autopilot_update(
   action_input = _autopilot_update_action_input(row, body)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
     record = _read_record(record_path)

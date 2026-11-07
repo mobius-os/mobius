@@ -24,7 +24,8 @@ from app.deps import (
   Principal,
   get_principal,
   reject_cross_site,
-  require_installation_owner_control,
+  require_account_owner,
+  require_account_owner_control,
 )
 from app.github_contribution_git import _gh
 from app.github_contributions import _recheck_submit_app, _validate_submit_app
@@ -62,7 +63,7 @@ def _require_reviewer_owner_action(principal: Principal) -> None:
   intentionally app-writable, so an opaque-frame click alone is not evidence
   of owner confirmation for a GitHub write.
   """
-  require_installation_owner_control(principal)
+  require_account_owner_control(principal)
   if principal.scope != "owner" or principal.app_id is not None:
     raise HTTPException(
       403,
@@ -340,7 +341,7 @@ async def reviewer_grant_toggle(
 
 @router.post(
   "/reviewer/{app_id}/comment",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner)],
 )
 @_limiter.limit("20/minute")
 async def reviewer_comment(

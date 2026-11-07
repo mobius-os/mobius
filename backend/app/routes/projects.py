@@ -49,7 +49,8 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
-  get_project_principal, reject_cross_site, resolve_project_principal,
+  get_project_principal, reject_cross_site, require_account_owner_control,
+  resolve_project_principal,
 )
 from app.path_utils import validate_path_within_base
 from app.storage_io import make_parent_folders, require_parent_folders
@@ -2519,7 +2520,8 @@ async def pull_project_git_remote(
 
 
 @router.post(
-  "/{project_id}/git/push", dependencies=[Depends(reject_cross_site)],
+  "/{project_id}/git/push",
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 def push_project_git_remote(
   project_id: str,

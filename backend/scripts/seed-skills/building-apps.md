@@ -547,7 +547,8 @@ window messages; read them with `subscribe` or a `message` listener that checks
   action as an ordinary button), so keep your older presentation there.
   `"rows-v2"` means `rows`, `titleTone`, `titleBusy`, `context` and
   `app-block-refresh` below; a host without it sends no `context` and ignores
-  those fields.
+  those fields. `"ask-v1"` means `ask` below; it is listed only when the owner
+  has also granted your app `chat.blocks.ask`.
 - `{type:'moebius:app-block-refresh', sessionId, generation, reason}`, a hint
   to re-read your own state: `reason` is `turn` (a turn in this chat
   settled) or `visible` (the tab became visible again). It is sent only to a
@@ -631,6 +632,42 @@ included.
   URLs, opened outside Möbius. Row state is decoration only: it adds no
   control, is hidden while a confirmation owns the block, and is dropped while
   the block is held for recovery.
+- `ask` (`ask-v1`): `{refs: [{id, code, rev}]}`, 1 to 12 references to things
+  in your app that the chat's agent should fix ("Fix in chat"). Each `id` is
+  1-128 of `A-Za-z0-9._-` starting with a letter or digit, each `code` a
+  lower-case `snake_case` word of 2 to 48 characters (`^[a-z][a-z0-9_]{1,47}$`),
+  and each `rev` a lower-case hex token of 7 to 64 characters naming the state
+  you report (for example the item's current version hash, or a digest of its
+  last failure). Any other ref drops the whole ask. You supply no words: the
+  host draws its own **Fix in chat** button as the block's one action, in
+  place of yours (while it is shown none of your controls are drawn), and on
+  the owner's tap it sends this owner message in the chat, which starts (or
+  queues behind) a turn:
+
+  ```
+  Please fix what the <app slug> card in this chat flagged:
+
+  `<app slug> · <id> · <code>`
+  ```
+
+  with one line per ref (`rev` is not shown). Your document gets no event, and
+  the ask causes no effect in your app: only `confirm` can. Document what your
+  codes mean in your app's skill, so the agent knows what to do. The host
+  ignores `ask` while any action is confirming or busy, during recovery,
+  without admission, outside a chat transcript and on any block that is not
+  that chat's newest of its app and intent. The message's client id is a hash
+  of the chat, the block's saved content (app, intent, title and the intents
+  it lists and acts on) and the refs with their `rev`, so the server posts one
+  ask about one state once, however often it is tapped, retried or reloaded,
+  on any device; after a duplicate the button says "Already asked". Change
+  `rev` when the state changes (the agent restaged, a new failure) and the
+  owner can ask again. The block identity is its content, not its position:
+  two identical blocks in one chat share their asks, by design. After a tap
+  the button reads "Asked" until a turn in the chat settles. Omit `ask` (or
+  report `null`) when nothing needs the agent. An ask needs
+  `"chat.blocks.ask": {"version": 1}` in `mobius.json` beside
+  `chat.blocks.passive`, accepted by the owner and applied; without it the host
+  neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
