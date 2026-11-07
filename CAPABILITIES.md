@@ -81,10 +81,11 @@ bots, send messages or make paid calls.
 
 ### Paying for priced calls with credits
 
-An installation paired with a credits service (mobius.you's, through
-Möbius · You) keeps the owner's credits there, never in its own database. A
-creator publishes the price of one action of their app under their handle at
-that service; another owner's copy of the app pays for a call with
+The owner pairs this Möbius with a credits service using the owner-only
+`POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
+control is planned. The paired service keeps the owner's credits, never this
+Möbius's database. A creator publishes the price of one action of their app
+under their handle at that service; another owner's copy of the app pays for a call with
 `POST /api/identity/credits/charges`
 `{seller, app, action, idempotency_key, max_price_micro}`. Only the app's own
 service may call it, with the reviewed `permissions.spend_credits` grant (a
@@ -101,8 +102,9 @@ service could not be reached or did not answer in time, so the charge may have
 been made: retry with the same idempotency key, never a new one.
 Refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
-`key_spend_cap`). A refused key answers 409 `key_refused` and an address that is
-not a credits service 502 `not_found`, so neither reads as the caller's own
+`key_spend_cap`). `not_paired` means the owner has not connected credits yet.
+A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
+and an address that is not a credits service 502 `not_found`, so neither reads as the caller's own
 sign-in failing. Balance, history and purchase reads refuse a shared-browser
 guest.
 

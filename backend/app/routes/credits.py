@@ -4,8 +4,8 @@ Every route here is gated by exactly one dependency that both identifies the
 caller and applies the whole rule for what it may do:
 
 - ``get_credits_reader``: the balance, earnings, history and purchase terms.
-  The owner, or an app holding the reviewed ``credits_manage`` grant (the
-  Möbius · You app); never a shared-browser guest.
+  The owner, or an app holding the reviewed ``credits_manage`` grant; never
+  a shared-browser guest.
 - ``get_credits_controller``: pairing, buying, model funding, publishing a
   price and moving earnings. As the reader, and never a delegated helper.
 - ``get_credits_spender``: an app's own service paying for one priced call,
@@ -49,7 +49,6 @@ class _PairRequest(BaseModel):
 class _TopupRequest(BaseModel):
   amount_cents: int = Field(gt=0)
   waiver_accepted: bool = False
-  return_url: str | None = Field(default=None, max_length=2000)
   # The ``pairing`` the purchase terms were read under; a re-paired service
   # refuses rather than sell on terms the owner never saw.
   pairing: str | None = Field(default=None, max_length=64)
@@ -73,10 +72,6 @@ class _ChargeRequest(BaseModel):
   idempotency_key: str = Field(min_length=8, max_length=200)
   # The price the app showed the owner; a higher current price refuses.
   max_price_micro: int = Field(ge=0)
-
-
-class _ConnectRequest(BaseModel):
-  return_url: str | None = Field(default=None, max_length=2000)
 
 
 def _credits(action, *args):
@@ -112,7 +107,7 @@ def start_credits_topup(
 ):
   return _credits(
     credits_client.start_topup,
-    body.amount_cents, body.waiver_accepted, body.return_url, body.pairing)
+    body.amount_cents, body.waiver_accepted, body.pairing)
 
 
 @router.get("/purchase-terms")
@@ -199,11 +194,10 @@ def charge_credits_for_call(
 
 @router.post("/connect")
 def start_credits_connect(
-  body: _ConnectRequest | None = None,
   _owner: models.Owner = Depends(get_credits_controller),
 ):
   """Stripe's page for connecting the account that receives withdrawals."""
-  return _credits(credits_client.start_connect, body.return_url if body else None)
+  return _credits(credits_client.start_connect)
 
 
 @router.post("/convert")

@@ -12,7 +12,7 @@ like money. Prices live at the service too, under the creator's handle, for
 the same reason.
 
 The installation key (``mbc_…``) belongs to the installation, not to an app,
-like every account credential Möbius · You holds: it stays in the Möbius
+like every account credential this Möbius holds: it stays in the Möbius
 backend, and an app receives only its ordinary app token. It lives in
 ``<data_dir>/credits-client/credentials.json``, mode 0600, a folder the file
 API (``routes/fs.py``) refuses to every caller, backups keep with the other
@@ -289,7 +289,7 @@ def _stripe_page(value: object, host: str) -> str:
 
 
 def start_topup(amount_cents: int, waiver_accepted: bool,
-                return_url: str | None = None, pairing: str | None = None) -> dict:
+                pairing: str | None = None) -> dict:
   """A Stripe Checkout page for buying credits, and the purchase's id.
 
   ``pairing`` is the pairing the caller read the purchase terms under. When it
@@ -305,8 +305,6 @@ def start_topup(amount_cents: int, waiver_accepted: bool,
   started = _call("POST", "topups", credentials, {
     "amount_cents": int(amount_cents),
     "waiver_accepted": bool(waiver_accepted),
-    # Where Stripe sends the buyer back; the service appends the purchase id.
-    "return_url": return_url,
   })
   return {"checkout_url": _stripe_page(started.get("checkout_url"), "checkout.stripe.com"),
           "topup_id": started.get("topup_id")}
@@ -381,9 +379,9 @@ def app_scoped_key(payer: str, idempotency_key: str) -> str:
 # --- Earnings -----------------------------------------------------------------
 
 
-def start_connect(return_url: str | None = None) -> dict:
+def start_connect() -> dict:
   """Stripe's page for connecting the account that receives withdrawals."""
-  started = _call("POST", "payouts/connect", _paired(), {"return_url": return_url})
+  started = _call("POST", "payouts/connect", _paired(), {})
   return {"connect_url": _stripe_page(started.get("connect_url"), "connect.stripe.com")}
 
 

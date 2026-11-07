@@ -1,6 +1,7 @@
 """A Möbius paired with a credits service: pairing, reads, and app charges."""
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -264,10 +265,10 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
   paired.answers["payouts/connect"] = (
     200, {"connect_url": "https://connect.stripe.com/setup/e/acct_1/abc"})
   started = client.post("/api/identity/credits/topup", headers=auth, json={
-    "amount_cents": 1000, "waiver_accepted": True, "return_url": "https://me.example/x"})
+    "amount_cents": 1000, "waiver_accepted": True})
   assert started.json() == {"checkout_url": checkout, "topup_id": "t1"}
   assert paired.calls[-1]["json"] == {
-    "amount_cents": 1000, "waiver_accepted": True, "return_url": "https://me.example/x"}
+    "amount_cents": 1000, "waiver_accepted": True}
 
   requests = [
     ("get", "/api/identity/credits/topups/t1", None, "GET", "topups/t1"),
@@ -279,7 +280,7 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
      "GET", "prices/ana?app_slug=prompts"),
     ("put", "/api/identity/credits/prices/prompts/run", {"price_micro": 250_000},
      "PUT", "priced-actions/prompts/run"),
-    ("post", "/api/identity/credits/connect", {"return_url": "https://me.example/y"},
+    ("post", "/api/identity/credits/connect", None,
      "POST", "payouts/connect"),
     ("post", "/api/identity/credits/convert", None, "POST", "payouts/convert"),
     ("post", "/api/identity/credits/withdraw", None, "POST", "payouts/withdraw"),
@@ -292,7 +293,7 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
     assert (call["method"], call["url"].split("/api/billing/", 1)[1]) == (method, path)
   assert paired.calls[-5]["json"] == {
     "price_micro": 250_000, "description": None, "enabled": True}
-  assert paired.calls[-4]["json"] == {"return_url": "https://me.example/y"}
+  assert paired.calls[-4]["json"] == {}
 
 
 @pytest.mark.parametrize("page", [
@@ -623,3 +624,18 @@ def test_a_purchase_on_terms_from_an_earlier_pairing_buys_nothing(client, auth, 
     "amount_cents": 500, "pairing": current["pairing"]})
   assert started.status_code == 200, started.text
   assert paired.calls[-1]["url"] == "https://credits.example.test/api/billing/topups"
+
+
+@pytest.mark.parametrize("path,heading", [
+  ("CAPABILITIES.md", "### Paying for priced calls with credits"),
+  ("backend/scripts/seed-skills/building-apps.md", "## Priced calls paid with credits"),
+])
+def test_credits_docs_use_the_supported_pairing_flow(path, heading):
+  document = (Path(__file__).resolve().parents[2] / path).read_text()
+  section = document.split(heading, 1)[1].split("\n##", 1)[0]
+  assert "POST /api/identity/credits/pair" in section
+  assert "owner-only" in section
+  assert "Settings connect" in section and "planned" in section
+  assert "not_paired" in section and "has not connected credits yet" in section
+  assert "key_refused" in section and "invalid_api_key" in section
+  assert "Möbius · You" not in section

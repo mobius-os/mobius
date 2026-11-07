@@ -1070,10 +1070,14 @@ signs out; signing out also erases positions the phone had not uploaded yet.
 
 ## Priced calls paid with credits
 
+The owner pairs this Möbius with a credits service using the owner-only
+`POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
+control is planned.
+
 An app can charge for one of its actions. The creator publishes the price
-once from their own Möbius (Möbius · You, or
+once from their own Möbius with
 `PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
-1,000,000 micro). Another owner's copy pays for each call from its **own
+1,000,000 micro. Another owner's copy pays for each call from its **own
 service**, never its frame. Its manifest lists every `"<seller>/<app>"` it pays
 for, which the owner sees at install, and a charge to anything else is refused
 with `seller_not_allowed`: `"permissions": { "spend_credits": ["ana/prompts"] }`.
@@ -1094,8 +1098,9 @@ one `idempotency_key` per call so a retry never pays twice. A 503 (the credits
 service was unreachable or slow) may still have charged: retry with the same
 key, never a new one. Do the paid work
 only after a 200, and explain each refusal by its `detail.code`: `not_paired`
-(connect credits in Möbius · You), `insufficient_credits`, `price_changed`,
-`price_not_found`, `key_spend_cap`, or `key_refused` (connect credits again).
+(the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
+`price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
+(the credits service refused the key; the owner needs to pair again).
 The key is scoped to your app, so another app's identical key never replays
 your charge.
 
