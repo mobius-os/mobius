@@ -1,12 +1,15 @@
 /* Settings GitHub connection: status normalization and the server-paced sign-in wait. */
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { QueryClient } from '@tanstack/react-query'
 
 import {
   fetchGithubStatus,
+  githubStatus,
   hasFullPrAccess,
   hasPrivateRepoAccess,
   startGithubSignIn,
+  unknownGithubStatus,
   waitForGithubSignIn,
 } from '../githubConnection.js'
 
@@ -52,11 +55,21 @@ test('status carries the account and a resumable sign-in', async () => {
   assert.equal(connected.login, 'octo')
 })
 
-test('an unreachable or failing status is reported, never guessed', async () => {
+test('a read caches only the account, and a failed read leaves the last confirmed one untouched', async () => {
+  const queryClient = new QueryClient()
+  stubFetch(json({
+    connected: true, login: 'octo', scopes: ['repo', 'workflow'], device_flow_available: true,
+    active_attempt: { attempt_id: 'a1', user_code: 'WXYZ-1234', verification_uri: 'https://github.com/login/device' },
+  }))
+  assert.equal((await githubStatus.refresh(queryClient)).attempt.userCode, 'WXYZ-1234')
+  const account = { state: 'connected', login: 'octo', scopes: ['repo', 'workflow'], signInAvailable: true }
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), account)
   stubFetch(new TypeError('offline'))
-  assert.equal((await fetchGithubStatus()).state, 'unknown')
+  await assert.rejects(githubStatus.refresh(queryClient))
   stubFetch(json({ detail: 'Backend restarting' }, 503))
-  assert.deepEqual(await fetchGithubStatus(), { state: 'unknown', message: 'Backend restarting' })
+  await assert.rejects(githubStatus.refresh(queryClient), /Backend restarting/)
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), account)
+  assert.deepEqual(unknownGithubStatus(new Error('Backend restarting')), { state: 'unknown', message: 'Backend restarting' })
 })
 
 test('sign-in sends the private-repo choice and polls the exact attempt until complete', async () => {

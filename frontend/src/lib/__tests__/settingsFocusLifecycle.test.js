@@ -24,9 +24,7 @@ for (const page of ['account', 'provider']) {
         focus() { assert.equal(mounted, true); focused.push(section) },
       }
       let detailPage = null
-      let models = null
       const setDetailPage = next => { detailPage = next }
-      const setManageModelsProvider = next => { models = next }
       const setAttentionSection = () => {}
       const view = renderHook(({ focusTarget }) => {
         const setupFocusRefs = useRef({})
@@ -34,7 +32,7 @@ for (const page of ['account', 'provider']) {
         mounted = !detailPage
         setupFocusRefs.current = mounted ? { github: node, 'ai-providers': node } : {}
         useSettingsFocus({ focusTarget, providerReady: true, detailPage, setDetailPage,
-          setManageModelsProvider, setupFocusRefs, setAttentionSection })
+          setupFocusRefs, setAttentionSection })
       }, { focusTarget: null })
       t.after(() => view.unmount())
       detailPage = page === 'account' ? 'account' : 'codex'
@@ -47,7 +45,6 @@ for (const page of ['account', 'provider']) {
       for (const [id, fn] of frames) { frames.delete(id); fn() }
       assert.deepEqual(focused, [section])
       assert.deepEqual(scrolled, [section])
-      if (section === 'models') assert.equal(models, 'all')
       // A consumed request cannot reopen the overview when the owner opens detail.
       detailPage = page === 'account' ? 'account' : 'codex'
       view.rerender({ focusTarget })
@@ -71,7 +68,7 @@ for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-mo
     const view = renderHook(({ focusTarget }) => {
       const setupFocusRefs = useRef({})
       useSettingsFocus({ focusTarget, providerReady: true, detailPage, setDetailPage: next => { detailPage = next },
-        setManageModelsProvider: () => {}, setupFocusRefs, setAttentionSection: () => {} })
+        setupFocusRefs, setAttentionSection: () => {} })
     }, { focusTarget: null })
     t.after(() => view.unmount())
     view.rerender({ focusTarget: { section, nonce: 1 } })
@@ -79,3 +76,41 @@ for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-mo
     assert.equal(frames.size, 0)
   })
 }
+
+test('a models request opens the leading connected provider at its Chat models section, once', t => {
+  const frames = new Map()
+  const oldRaf = globalThis.requestAnimationFrame
+  const oldCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
+  globalThis.cancelAnimationFrame = id => frames.delete(id)
+  t.after(() => {
+    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
+    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
+  })
+  const focused = []
+  const attention = []
+  const chatModels = { scrollIntoView() {}, focus() { focused.push('chat-models') } }
+  let detailPage = null
+  const pages = []
+  const view = renderHook(({ focusTarget, providerReady, modelsProvider }) => {
+    const setupFocusRefs = useRef({})
+    setupFocusRefs.current = detailPage === 'claude' ? { 'chat-models': chatModels } : {}
+    useSettingsFocus({ focusTarget, providerReady, modelsProvider, detailPage,
+      setDetailPage: next => { pages.push(next); detailPage = next },
+      setupFocusRefs, setAttentionSection: next => attention.push(next) })
+  }, { focusTarget: null, providerReady: false, modelsProvider: null })
+  t.after(() => view.unmount())
+  const focusTarget = { section: 'models', nonce: 1 }
+  // The provider list decides the page, so nothing moves before it is known.
+  view.rerender({ focusTarget, providerReady: false, modelsProvider: null })
+  assert.deepEqual(pages, [])
+  view.rerender({ focusTarget, providerReady: true, modelsProvider: 'claude' })
+  assert.deepEqual(pages, ['claude'])
+  view.rerender({ focusTarget, providerReady: true, modelsProvider: 'claude' })
+  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  assert.deepEqual(focused, ['chat-models'])
+  assert.equal(attention[0], 'chat-models')
+  // Reordering providers later never moves the owner to another page.
+  view.rerender({ focusTarget, providerReady: true, modelsProvider: 'codex' })
+  assert.deepEqual(pages, ['claude'])
+})

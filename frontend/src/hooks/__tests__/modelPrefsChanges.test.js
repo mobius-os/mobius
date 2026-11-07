@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { QueryClient } from '@tanstack/react-query'
-import { hiddenChanges, modelQueries } from '../queries.js'
+import { modelQueries } from '../queries.js'
 
 function client(hiddenIds) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -83,9 +83,13 @@ test('a stuck save gives up after its deadline, so later saves still reach the s
   const saves = sent.filter(request => request.method === 'PATCH')
   assert.deepEqual(saves.map(request => request.body), [{ hidden: { a: true } }, { hidden: { a: false } }])
   assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: [] })
+  // The timed-out save may still land after the later one: read the server's list again.
+  assert.equal(queryClient.getQueryState(modelQueries.prefs.key).isInvalidated, true)
 })
 
-test('Manage models saves the difference between the saved and edited lists', () => {
-  assert.deepEqual(hiddenChanges(['a', 'b'], new Set(['b', 'c'])), { a: false, c: true })
-  assert.deepEqual(hiddenChanges(['a'], new Set(['a'])), {})
+test('a save the server answered needs no extra read', async t => {
+  const queryClient = client(['a'])
+  serve(t, () => json({ hidden_ids: [] }))
+  assert.equal(await modelQueries.prefs.saveChanges(queryClient, { a: false }), true)
+  assert.equal(queryClient.getQueryState(modelQueries.prefs.key).isInvalidated, false)
 })

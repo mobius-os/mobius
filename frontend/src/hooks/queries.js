@@ -415,8 +415,8 @@ function modelRegistryQueryOptions({ enabled = true } = {}) {
     enabled,
     // Mirror the server-side cache TTL so the client doesn't refetch
     // more often than upstream gives us new data. Refetches happen
-    // through explicit invalidation (the manage-models modal's
-    // refresh button) — not on every popover open.
+    // through explicit invalidation (a provider or account change), not on
+    // every popover open.
     staleTime: 5 * 60_000,
     retry: MODEL_READ_RETRY_COUNT,
   }
@@ -442,25 +442,17 @@ async function fetchModelPrefs() {
   }
 }
 
-/** The per-model changes (`{ id: hidden }`) that turn one hidden list into another. */
-export function hiddenChanges(fromIds, toIds) {
-  const from = new Set(fromIds)
-  const to = new Set(toIds)
-  const changes = {}
-  for (const id of new Set([...from, ...to])) {
-    if (from.has(id) !== to.has(id)) changes[id] = to.has(id)
-  }
-  return changes
-}
-
-// Picker visibility saves from every editor (Settings switches, Manage
-// models) reach the server one at a time, in the order they were made, so two
-// quick taps on one switch never land out of order. Only the newest save may
-// replace the cache with the server's list, so an earlier answer never briefly
-// undoes a later change still shown optimistically. Each save is time-boxed so
-// one stuck request cannot hold back every later save for the page's life.
+// Picker visibility saves from every editor reach the server one at a time,
+// in the order they were made, so two quick taps on one switch never land out
+// of order. Only the newest save may replace the cache with the server's list,
+// so an earlier answer never briefly undoes a later change still shown
+// optimistically. Each save is time-boxed so one stuck request cannot hold
+// back every later save for the page's life. A save the browser gave up on
+// may still reach the server after a later one, so once any save's outcome is
+// unknown the newest save re-reads the list instead of trusting its answer.
 const MODEL_PREFS_SAVE_TIMEOUT_MS = 15_000
 let latestPrefsSave = Promise.resolve(null)
+let prefsSaveOutcomeUnknown = false
 
 async function sendModelPrefsChanges(changes) {
   try {
@@ -468,6 +460,7 @@ async function sendModelPrefsChanges(changes) {
     const saved = res.ok ? await res.json() : null
     return Array.isArray(saved?.hidden_ids) ? saved.hidden_ids : null
   } catch {
+    prefsSaveOutcomeUnknown = true
     return null
   }
 }
@@ -475,7 +468,8 @@ async function sendModelPrefsChanges(changes) {
 /**
  * Shows `changes` (`{ id: hidden }`) at once and saves only them. Resolves
  * true when the server applied them. After the newest save settles the cache
- * holds the server's list: its answer, or a fresh read after a failure.
+ * holds the server's list: its answer, or a fresh read after a failure or
+ * after any save timed out.
  */
 async function saveModelPrefsChanges(queryClient, changes) {
   // A read already in flight would land the list from before this change.
@@ -493,7 +487,8 @@ async function saveModelPrefsChanges(queryClient, changes) {
   const hiddenIds = await save
   if (latestPrefsSave === save) {
     if (hiddenIds) queryClient.setQueryData(modelPrefsKey, { hidden_ids: hiddenIds })
-    else void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+    if (!hiddenIds || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+    prefsSaveOutcomeUnknown = false
   }
   return Boolean(hiddenIds)
 }

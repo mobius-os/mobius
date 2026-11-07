@@ -9,7 +9,7 @@ import {
   providerAllowanceSummary,
   providerWeeklyAllowance,
 } from '../../components/SettingsView/providerUsage.js'
-import { providerExtraUsage } from '../../components/SettingsView/providerUsage.js'
+import { providerExtraUsage, signInExpiryNotice } from '../../components/SettingsView/providerUsage.js'
 
 
 test('plan providers follow typed weekly meaning, not display labels or other limits', () => {
@@ -196,4 +196,23 @@ test('enabled extra usage keeps a missing percentage unknown', () => {
     usedPercent: null,
     summary: 'Extra usage enabled',
   })
+})
+
+test('a sign-in warns a week before its earliest possible end, then asks for a reconnect, never says expired', () => {
+  const now = new Date('2026-11-06T12:00:00Z')
+  // Quiet while far out or unknown.
+  assert.equal(signInExpiryNotice('2026-11-20T12:00:00Z', now), null)
+  assert.equal(signInExpiryNotice(null, now), null)
+  assert.equal(signInExpiryNotice('not a date', now), null)
+  // Claude may end a sign-in up to three days before the reported end, so the
+  // week of notice counts down to that earlier point.
+  assert.equal(signInExpiryNotice('2026-11-16T12:00:00Z', now).label, 'Reconnect within 7 days')
+  assert.equal(signInExpiryNotice('2026-11-17T12:00:01Z', now), null)
+  assert.equal(signInExpiryNotice('2026-11-12T08:00:00Z', now).label, 'Reconnect within 3 days')
+  assert.equal(signInExpiryNotice('2026-11-09T20:00:00Z', now).label, 'Reconnect within a day')
+  assert.equal(signInExpiryNotice('2026-11-07T12:00:00Z', now).label, 'Reconnect today')
+  // Past the reported end the current access token may still work.
+  const passed = signInExpiryNotice('2026-11-05T12:00:00Z', now)
+  assert.equal(passed.label, 'Reconnect now')
+  assert.equal(passed.endsBy.toISOString(), '2026-11-05T12:00:00.000Z')
 })

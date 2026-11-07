@@ -73,6 +73,30 @@ test('a failed read shows the caller artwork now and retries on the next visit',
   assert.ok(requests.length > failedReads)
 })
 
+test('a server error is not remembered as "no image": the next visit reads again', async t => {
+  let status = 502
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    requests.push(String(url))
+    return status === 200
+      ? new Response(new Blob(['png'], { type: 'image/png' }), { status })
+      : new Response('upstream unavailable', { status })
+  })
+  forgetAuthedImage('/test/upstream')
+  const first = renderHook(() => useAuthedImageUrl('/test/upstream', 'octocat'))
+  await settle(first)
+  assert.deepEqual(first.result.current, { url: null, status: 'none' })
+  first.unmount()
+
+  status = 200
+  const second = renderHook(() => useAuthedImageUrl('/test/upstream', 'octocat'))
+  t.after(() => second.unmount())
+  second.rerender()
+  await settle(second)
+  assert.equal(second.result.current.status, 'ready')
+  assert.equal(requests.length, 2)
+})
+
 test('no account means no request and no placeholder wait', t => {
   const requests = serveImages(t)
   const view = renderHook(() => useAuthedImageUrl('/test/avatar', ''))

@@ -18,10 +18,11 @@ function objectUrlFor(blob) {
   return url
 }
 
-// path + key -> { blob } once settled (blob null when unavailable), or
-// { pending } while a fetch is in flight, so simultaneous mounts share one.
-// A failed read settles as { blob: null, failed: true }: the caller shows its
-// own artwork now, and the next mount tries again.
+// path + key -> { blob } once an image arrived, or { pending } while a fetch
+// is in flight, so simultaneous mounts share one. Any other outcome (no
+// response, an error status such as a 502 from an upstream avatar, or a body
+// that is not an image) settles as { blob: null, failed: true }: the caller
+// shows its own artwork now, and the next mount tries again.
 const images = new Map()
 // Paths whose next read must skip the browser's HTTP cache, because the image
 // behind them just changed (see forgetAuthedImage).
@@ -38,7 +39,8 @@ function load(cacheKey, path) {
   const pending = apiFetch(path, { timeoutMs: 15_000, cache })
     .then(async (response) => {
       const blob = response.ok ? await response.blob() : null
-      images.set(cacheKey, { blob: blob?.type?.startsWith('image/') ? blob : null })
+      if (!blob?.type?.startsWith('image/')) throw new Error('no image')
+      images.set(cacheKey, { blob })
     })
     .catch(() => { images.set(cacheKey, { blob: null, failed: true }) })
   images.set(cacheKey, { pending })

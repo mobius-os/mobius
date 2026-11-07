@@ -8,7 +8,9 @@ import { completeAccountLink, linkMobiusAccount } from '../lib/mobiusAccountLink
  * a click handler: the sign-in window must open inside the click. While
  * `pending === 'complete'` the account has already approved, so cancel is a
  * no-op until the local completion settles. `onSignedIn(identity)` receives
- * the confirmed linked identity.
+ * the confirmed linked identity even when the page has since closed, so the
+ * caller can always apply it to the shared account cache
+ * (mobiusAccountQueries.signedIn).
  */
 export default function useMobiusSignIn({ onSignedIn, link = linkMobiusAccount, complete = completeAccountLink } = {}) {
   const [pending, setPending] = useState('')
@@ -31,11 +33,13 @@ export default function useMobiusSignIn({ onSignedIn, link = linkMobiusAccount, 
   }, [])
 
   const settle = useCallback(outcome => {
+    // The account is already linked on the server: leaving the page during
+    // "Finishing sign-in…" must not drop it, or Settings shows signed out.
+    if (outcome.status === 'linked') onSignedInRef.current?.(outcome.identity)
     if (!mountedRef.current) return
     if (outcome.status === 'linked') {
       setRetryPayload(null)
       setError('')
-      onSignedInRef.current?.(outcome.identity)
     } else {
       setRetryPayload(outcome.completion)
       setError(outcome.message)

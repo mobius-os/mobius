@@ -1,10 +1,13 @@
-/* Resuming sign-in is an activation action, not a side effect of ending a wait. */
+/* Resuming sign-in is an activation action, not a side effect of ending a wait; the settled account lives in the shared query cache. */
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { beforeEach, test } from 'node:test'
 import { setTimeout as tick } from 'node:timers/promises'
+import { QueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import GithubConnection from '../../components/SettingsView/GithubConnection.jsx'
+import { githubStatus } from '../githubConnection.js'
 import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { setShimQueryClient } from './react-query-shim.mjs'
 
 const json = body => new Response(JSON.stringify(body), { status: 200 })
 const attempt = { attempt_id: 'a1', user_code: 'TEST-CODE', verification_uri: 'https://github.com/login/device' }
@@ -26,6 +29,44 @@ const renderConnection = () => renderHook(() => GithubConnection({
   onToggle: noop,
   onExpand: noop,
 }))
+
+let queryClient
+beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  setShimQueryClient(queryClient)
+})
+
+test('reopening Settings paints the cached account before the fresh read lands', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let answer
+  api.github = { status: () => new Promise(resolve => { answer = resolve }) }
+  queryClient.setQueryData(githubStatus.key, { state: 'connected', login: 'octo-test', scopes: ['public_repo', 'workflow'], signInAvailable: true })
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  assert.match(JSON.stringify(view.result.current), /"children":"octo-test"/)
+  assert.doesNotMatch(JSON.stringify(view.result.current), /Checking…/)
+  answer(json({ connected: false, device_flow_available: true }))
+  await tick(20)
+  view.rerender()
+  assert.match(JSON.stringify(view.result.current), /Not connected/)
+})
+
+test('a sign-in waiting on GitHub resumes but is never kept in the cache', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  api.github = {
+    status: async () => json({ connected: false, device_flow_available: true, active_attempt: attempt }),
+    connectPoll: async () => json({ status: 'pending', retry_after: 100 }),
+  }
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  await tick(20)
+  assert.equal(findSignIn(view.result.current).props.attempt.userCode, 'TEST-CODE')
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), {
+    state: 'disconnected', login: '', scopes: [], signInAvailable: true,
+  })
+})
 
 test('closing and reopening GitHub discards disconnect confirmation', async t => {
   const original = api.github

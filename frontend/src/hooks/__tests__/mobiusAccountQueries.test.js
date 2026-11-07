@@ -35,3 +35,23 @@ test('a sign-out forgets the account deployments and refreshes provider status a
   assert.equal(stale(queryClient, authQueries.provider.statuses.key), true)
   assert.equal(stale(queryClient, modelQueries.registry.key), true)
 })
+
+test('a handle saved from either the guide or Settings becomes the cached account', async t => {
+  const queryClient = seeded()
+  const sent = []
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    sent.push({ url: String(url), method: init.method, body: JSON.parse(init.body) })
+    return Response.json({
+      account_mode: 'linked',
+      account_unavailable: false,
+      profile: { user_id: 'u1', email: 'owner@example.test', handle: 'new_handle', avatar_url: null },
+      deployments: [{ id: 'local', name: 'Test Möbius', status: 'Active', url: 'https://test.example', current: true }],
+    })
+  })
+  await mobiusAccountQueries.saveHandle(queryClient, 'new_handle')
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].url, /\/api\/identity\/profile$/)
+  assert.equal(sent[0].method, 'PATCH')
+  assert.deepEqual(sent[0].body, { handle: 'new_handle' })
+  assert.equal(queryClient.getQueryData(mobiusAccountQueries.identity.key).profile.handle, 'new_handle')
+})

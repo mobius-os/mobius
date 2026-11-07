@@ -19,6 +19,7 @@ import { dehydrate, QueryClient } from '@tanstack/react-query'
 import { persistQueryClientRestore } from '@tanstack/react-query-persist-client'
 import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
+import { accountSummary } from '../../hooks/mobiusAccountQueries.js'
 import {
   awaitCacheFlushBeforeReload,
   compactPersistedChatDetails,
@@ -91,6 +92,47 @@ test('settings + owner status queries persist by full key', () => {
     true,
   )
   assert.equal(shouldPersistQueryKey(['platform', 'status']), true)
+})
+
+test('Settings opens filled: usage, GitHub and the Möbius summary persist', () => {
+  for (const provider of ['claude', 'codex', 'mobius', 'app-12']) {
+    assert.equal(shouldPersistQueryKey(['settings', 'provider-usage', provider]), true)
+  }
+  assert.equal(shouldPersistQueryKey(['github', 'status']), true)
+  assert.equal(shouldPersistQueryKey(['identity-summary']), true)
+})
+
+test('the full Möbius identity, model access and deployments never persist', () => {
+  for (const key of [['identity', 'account'], ['identity', 'agent'], ['identity', 'railway'], ['identity']]) {
+    assert.equal(shouldPersistQueryKey(key), false, JSON.stringify(key))
+  }
+})
+
+test('what reaches IndexedDB about the accounts is the summary only: no email, deployments or sign-in code', async () => {
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.indexedDB = indexedDB
+  try {
+    const client = new QueryClient()
+    const identity = {
+      account_mode: 'linked',
+      email: 'private@example.test',
+      profile: { handle: 'test_handle', avatar_url: 'https://account.example/avatar/1' },
+      deployments: [{ id: 'dep-1', name: 'private deployment' }],
+    }
+    client.setQueryData(['identity', 'account'], identity)
+    client.setQueryData(['identity', 'railway'], { instances: [{ id: 'private' }] })
+    client.setQueryData(['identity-summary'], accountSummary(identity))
+    client.setQueryData(['github', 'status'], { state: 'connected', login: 'octo-test', scopes: ['repo'], signInAvailable: true })
+    await flushPersistedQueryCache(client)
+    const persisted = await get('mobius-query-cache')
+    assert.deepEqual(persisted.clientState.queries.map(q => q.queryKey), [['identity-summary'], ['github', 'status']])
+    assert.deepEqual(persisted.clientState.queries[0].state.data, {
+      status: 'linked', mode: 'linked', handle: 'test_handle', avatar: 'https://account.example/avatar/1',
+    })
+    assert.doesNotMatch(JSON.stringify(persisted), /private|attempt|user_code/)
+  } finally {
+    globalThis.indexedDB = previousIndexedDb
+  }
 })
 
 test('short-lived auth queries do NOT persist despite sharing the head', () => {

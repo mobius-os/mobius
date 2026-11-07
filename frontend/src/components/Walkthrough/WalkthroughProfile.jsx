@@ -4,13 +4,12 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
-import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
 import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_TYPES,
   HANDLE_PATTERN,
   avatarProblem,
-  mobiusAccessRequest,
   profileInitial,
 } from '../../lib/mobiusAccount.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
@@ -32,20 +31,11 @@ export function useAccountProfile() {
   const [editing, setEditing] = useState(false)
   // The same cached photo Settings shows; initials stand in until it loads.
   const avatarUrl = useAuthedImageUrl(AVATAR_PATH, identity?.profile?.avatar_url || '').url
-  const setIdentity = next => queryClient.setQueryData(mobiusAccountQueries.identity.key, next)
 
   async function claim(handle) {
-    const next = await mobiusAccessRequest('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }) })
+    // Marked first, so the new handle never reads as a returning owner's.
     if (!identity?.profile?.handle) setClaimedHere(true)
-    setIdentity(next)
-  }
-  async function uploadAvatar(file) {
-    const body = new FormData()
-    body.append('avatar', file)
-    const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
-    // The account may keep the same avatar address for new bytes.
-    forgetAuthedImage(AVATAR_PATH)
-    setIdentity(next)
+    await mobiusAccountQueries.saveHandle(queryClient, handle)
   }
   const returning = returningHandle({ handle: identity?.profile?.handle, claimedHere, editing })
   return {
@@ -58,7 +48,7 @@ export function useAccountProfile() {
     setEditing,
     returning,
     claim,
-    uploadAvatar,
+    uploadAvatar: file => mobiusAccountQueries.uploadAvatar(queryClient, file),
     signedIn: next => mobiusAccountQueries.signedIn(queryClient, next),
   }
 }

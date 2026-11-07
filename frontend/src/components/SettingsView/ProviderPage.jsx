@@ -92,7 +92,8 @@ function BackgroundModel({ provider, info, models, enabled, model, effort, onMod
  * Layout for one provider page. The parent owns data and side effects and
  * passes ready sections: `usage` (the Usage section), `access` (provider-
  * specific sections such as Möbius model access) and `connection` (the
- * connect/reconnect/disconnect panel).
+ * connect/reconnect/disconnect panel). `chatModelsRef` and `chatModelsAttention`
+ * let a Settings request (the `models` section) land on Chat models.
  */
 export default function ProviderPage({
   provider,
@@ -108,6 +109,8 @@ export default function ProviderPage({
   access = null,
   connection = null,
   connectionDetails = [],
+  chatModelsRef = null,
+  chatModelsAttention = false,
 }) {
   const connectionSection = connection && (
     <section className="settings-group" aria-labelledby={`settings-${provider}-connection`}>
@@ -158,7 +161,12 @@ export default function ProviderPage({
         </div>
       </section>
       {connectionSection}
-      <section className="settings-group" aria-labelledby={`settings-${provider}-chat-models`}>
+      <section
+        className={`settings-group${chatModelsAttention ? ' settings-setup-target' : ''}`}
+        ref={chatModelsRef}
+        tabIndex={-1}
+        aria-labelledby={`settings-${provider}-chat-models`}
+      >
         <div className="settings-group__head">
           <div className="settings-group__heading">
             <h2 className="settings-group__title" id={`settings-${provider}-chat-models`}>Chat models</h2>

@@ -22,7 +22,6 @@ import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
-import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
@@ -32,8 +31,9 @@ import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
 import { useMobiusAccountSummary } from '../../hooks/mobiusAccountQueries.js'
-import { formatPlanName, rowUsage } from './providerUsage.js'
+import { formatPlanName, rowUsage, signInExpiryNotice } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
@@ -127,6 +127,8 @@ function BackgroundProviderRow({
   onMove,
   onReorderStart,
   configuredProviders,
+  connectPrompt,
+  signInNotice,
   onOpen,
 }) {
   const info = providerInfo || providerInfoFor(row.provider)
@@ -197,11 +199,13 @@ function BackgroundProviderRow({
           <span className="settings-provider-summary__icon">{Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}</span>
           <span className="settings-provider-summary__copy">
             <span>{label}</span>
-            <small>{configured ? `Background: ${modelLabel}` : offLabel}</small>
+            {configured && signInNotice
+              ? <small className="settings-provider-summary__notice">{signInNotice.label}</small>
+              : <small>{configured ? `Background: ${modelLabel}` : offLabel}</small>}
           </span>
           {configured
             ? <UsageMeter usage={usage} />
-            : status?.available !== false && <span className="settings-badge settings-badge--accent settings-badge--plain">{row.provider === 'mobius' ? 'Sign in' : 'Connect'}</span>}
+            : status?.available !== false && connectPrompt && <span className="settings-badge settings-badge--accent settings-badge--plain">{connectPrompt}</span>}
         </button>
       </div>
     </div>
@@ -397,7 +401,6 @@ export default function SettingsView({
   // pointermove so the held row can follow the pointer 1:1 without a
   // React re-render per frame; render reads it for the same transform.
   const backgroundPointerYRef = useRef(0)
-  const [manageModelsProvider, setManageModelsProvider] = useState(null)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
   const configuredProvidersRef = useRef(configuredProviders)
@@ -434,9 +437,23 @@ export default function SettingsView({
     else closeDetailPage()
   }, [openDetailPage, closeDetailPage])
 
+  // Display order only: connected providers lead, disconnected ones sit below
+  // outside the reorderable priority. Row indexes below are display positions.
+  const effectiveBackgroundDraft = connectedProvidersFirst(backgroundDraft ||
+    normalizeBackgroundAgents(
+      settingsQuery.data?.background_agents,
+      providerFromSettings(settingsQuery.data),
+    ), configuredProviders)
+
   useSettingsFocus({
-    focusTarget, providerReady, detailPage, setDetailPage: navigateDetail,
-    setManageModelsProvider, setupFocusRefs, setAttentionSection,
+    focusTarget,
+    providerReady,
+    // Chat models open on the provider that leads background work.
+    modelsProvider: effectiveBackgroundDraft.find(row => configuredProviders.has(row.provider))?.provider || null,
+    detailPage,
+    setDetailPage: navigateDetail,
+    setupFocusRefs,
+    setAttentionSection,
   })
 
   const modelsForProvider = useCallback((provider) => {
@@ -834,13 +851,6 @@ export default function SettingsView({
     }
   }
 
-  // Display order only: connected providers lead, disconnected ones sit below
-  // outside the reorderable priority. Row indexes below are display positions.
-  const effectiveBackgroundDraft = connectedProvidersFirst(backgroundDraft ||
-    normalizeBackgroundAgents(
-      settingsQuery.data?.background_agents,
-      providerFromSettings(settingsQuery.data),
-    ), configuredProviders)
   useEffect(() => {
     backgroundRowRefs.current.length = effectiveBackgroundDraft.length
   }, [effectiveBackgroundDraft.length])
@@ -962,6 +972,9 @@ export default function SettingsView({
       </ProviderConnection>
     ) : null
     const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null
+    const signInNotice = configured ? signInExpiryNotice(providerStatusQuery.data?.[selectedProvider]?.login_expires_at) : null
+    // The Möbius account and its credit are the owner's: a guest sees neither.
+    const ownerAccountProvider = selectedProvider === 'mobius'
     detailBody = row ? (
       <div
         className={`settings-provider-page${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
@@ -980,7 +993,7 @@ export default function SettingsView({
             ...(effort ? { effort } : {}),
           })}
           onEffortChange={(effort) => setBackgroundProviderChoice(selectedProvider, { effort })}
-          usage={usageQuery ? (
+          usage={usageQuery && (showOwnerAccounts || !ownerAccountProvider) ? (
             <ProviderUsage
               id={`provider-usage-${selectedProvider}`}
               snapshot={usageQuery.data}
@@ -991,11 +1004,21 @@ export default function SettingsView({
               {...usageExtras}
             />
           ) : null}
-          access={selectedProvider === 'mobius' && showOwnerAccounts ? (
+          access={!ownerAccountProvider ? null : showOwnerAccounts ? (
             <MobiusModelAccess onSignIn={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} />
+          ) : !configured ? (
+            <p className="settings__notice">Möbius models use the owner’s Möbius account, which only the owner can sign in to.</p>
           ) : null}
           connection={connection}
-          connectionDetails={configured && version ? [{ label: 'Version', value: version }] : []}
+          connectionDetails={[
+            ...(signInNotice ? [{
+              label: 'Sign-in',
+              value: <span className="settings-badge settings-badge--warning" title={`May end by ${formatDateTime(signInNotice.endsBy)}`}>{signInNotice.label}</span>,
+            }] : []),
+            ...(configured && version ? [{ label: 'Version', value: version }] : []),
+          ]}
+          chatModelsRef={(node) => setSetupFocusRef('chat-models', node)}
+          chatModelsAttention={attentionSection === 'chat-models'}
         />
         {backgroundError && <Alert color="info" variant="soft" description={backgroundError} />}
       </div>
@@ -1105,6 +1128,8 @@ export default function SettingsView({
                     moveBackgroundProvider(index, index + delta)
                   }}
                   configuredProviders={configuredProviders}
+                  connectPrompt={row.provider !== 'mobius' ? 'Connect' : showOwnerAccounts ? 'Sign in' : null}
+                  signInNotice={signInExpiryNotice(providerStatusQuery.data?.[row.provider]?.login_expires_at)}
                   onReorderStart={startBackgroundReorder}
                   onOpen={() => openDetailPage(row.provider)}
                 />
@@ -1172,15 +1197,6 @@ export default function SettingsView({
           </div>
         </section>
         </>}
-        {manageModelsProvider && (
-          <ManageModelsModal
-            onClose={() => setManageModelsProvider(null)}
-            providerOrder={modelProviderOrder}
-            providerInfo={modelProviderInfo}
-            configuredProviders={configuredProviders}
-            onlyProvider={manageModelsProvider === 'all' ? null : manageModelsProvider}
-          />
-        )}
       </div>
     </div>
   )

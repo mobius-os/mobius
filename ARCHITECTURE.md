@@ -521,7 +521,6 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `CompactionCard.jsx` | Compaction summary affordance |
 | `Attachments.jsx` | File/image attachment previews |
 | `ConnectionStatus.jsx` | SSE reconnection indicator |
-| `ManageModelsModal.jsx` | Model management modal |
 | `streamReducers.js` | Stream-event reducers |
 | `chatRuntimeState.js` | Pure queue/stream branch helpers (`canFastForwardQueue`, referenced by the steer contract below) |
 | `streamPromotion.js` | Pure helpers sealing live stream items into the exact identity-owned durable assistant row on promote/steer (`promoteAssistantStream`, `streamItemsHaveRenderableContent`) — ChatView owns *when* promotion happens, this owns *how* |

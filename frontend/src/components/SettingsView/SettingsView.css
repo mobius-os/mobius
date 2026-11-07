@@ -321,6 +321,8 @@
   white-space: nowrap;
 }
 
+.settings-provider-summary__copy small.settings-provider-summary__notice { color: var(--warning-text, var(--warning)); }
+
 /* Background-model row on a provider page. */
 .settings-model-row--off .settings-item__title { color: var(--muted); }
 

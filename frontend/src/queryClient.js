@@ -103,26 +103,31 @@ export const persistOptions = {
 
 // Decide whether a query's cache entry is mirrored to IndexedDB.
 //
-// Top-level domains (chats, messages, theme, apps, app-consent) match on the first
-// key segment. The Settings view's provider/CLI-version/status queries
-// are persisted too so the panel paints from disk on open instead of
-// flashing empty details while the live probes revalidate:
+// Top-level domains (chats, messages, theme, apps, app-consent) match on the
+// first key segment. Settings persists what its overview paints, so it opens
+// from disk with every row filled while the live reads revalidate:
 //   - ['settings']                          → provider config + CLI versions
+//   - ['settings','provider-usage',<id>]    → each provider's usage snapshot
 //   - ['auth','providers','status']         → canonical provider state
 //   - ['platform','status']                 → last-known release identity
-// Matched by full key, not by ['auth'] alone, so the short-lived
-// setup-status query (['auth','setup','status']) is NOT persisted.
+//   - ['github','status']                   → GitHub login and scope flags
+//   - ['identity-summary']                  → Möbius handle, avatar address, mode
+// Everything else under ['auth'] and ['identity'] stays in memory: the
+// setup-status gate is short-lived, and the full Möbius identity carries the
+// private email and the account's deployments. A shared-browser guest uses
+// its own memory-only client (App.jsx), so it never reads or writes this cache.
+const PERSISTED_HEADS = new Set(['chats', 'chat-messages', 'theme', 'apps', 'app-consent'])
 const PERSISTED_FULL_KEYS = new Set([
   JSON.stringify(['settings']),
   JSON.stringify(['auth', 'providers', 'status']),
   JSON.stringify(['platform', 'status']),
+  JSON.stringify(['github', 'status']),
+  JSON.stringify(['identity-summary']),
 ])
 
 export function shouldPersistQueryKey(queryKey) {
-  const head = queryKey[0]
-  if (head === 'chats' || head === 'chat-messages' || head === 'theme' || head === 'apps' || head === 'app-consent') {
-    return true
-  }
+  if (PERSISTED_HEADS.has(queryKey[0])) return true
+  if (queryKey[0] === 'settings' && queryKey[1] === 'provider-usage') return true
   return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
 }
 

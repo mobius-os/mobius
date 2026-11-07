@@ -292,3 +292,31 @@ export function formatCreditBalance(value) {
   const formatted = amount > 0 && amount < 0.05 ? `<${format.format(0.1)}` : format.format(amount)
   return match[2] ? `${formatted} ${match[2]}` : formatted
 }
+
+const DAY_MS = 86_400_000
+const SIGN_IN_NOTICE_DAYS = 7
+// The reported end of a Claude sign-in is an upper bound: the CLI treats it as
+// a window, and the sign-in can end up to three days before it.
+const SIGN_IN_EARLY_END_MS = 3 * DAY_MS
+
+/**
+ * A provider sign-in near its end (`login_expires_at`, ISO 8601) as a short
+ * call to reconnect: `{ label, endsBy }`, or null while it is further out or
+ * unknown, so a healthy sign-in stays quiet. The countdown runs to the
+ * earliest possible end, three days before the reported one.
+ */
+export function signInExpiryNotice(value, now = new Date()) {
+  if (typeof value !== 'string' || !value) return null
+  const endsBy = new Date(value)
+  if (Number.isNaN(endsBy.getTime())) return null
+  // Past the reported end the current access token may keep working for a
+  // while, but renewing it can now fail: ask for a reconnect rather than
+  // calling a connection that still runs chats expired.
+  if (endsBy <= now) return { label: 'Reconnect now', endsBy }
+  const days = Math.ceil((endsBy - SIGN_IN_EARLY_END_MS - now) / DAY_MS)
+  if (days > SIGN_IN_NOTICE_DAYS) return null
+  const label = days <= 0
+    ? 'Reconnect today'
+    : days === 1 ? 'Reconnect within a day' : `Reconnect within ${days} days`
+  return { label, endsBy }
+}

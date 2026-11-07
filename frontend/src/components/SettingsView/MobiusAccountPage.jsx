@@ -17,7 +17,7 @@ import {
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
-import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
 import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_TYPES,
@@ -303,7 +303,8 @@ function ClaimHandle({ onSave }) {
   )
 }
 
-function ProfileSection({ identity, onIdentity }) {
+function ProfileSection({ identity }) {
+  const queryClient = useQueryClient()
   const profile = identity.profile
   const avatarUrl = useAuthedImageUrl(AVATAR_PATH, profile.avatar_url || '').url
   const [editing, setEditing] = useState(false)
@@ -312,9 +313,7 @@ function ProfileSection({ identity, onIdentity }) {
   const fileRef = useRef(null)
   const memberSince = formatMembershipMonth(identity.member_since)
 
-  const saveHandle = async handle => {
-    onIdentity(await mobiusAccessRequest('/identity/profile', { method: 'PATCH', ...json({ handle }) }))
-  }
+  const saveHandle = handle => mobiusAccountQueries.saveHandle(queryClient, handle)
 
   const upload = async event => {
     const file = event.target.files?.[0]
@@ -325,12 +324,7 @@ function ProfileSection({ identity, onIdentity }) {
     setUploading(true)
     setError('')
     try {
-      const body = new FormData()
-      body.append('avatar', file)
-      const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
-      // The account may keep the same avatar address for new bytes.
-      forgetAuthedImage(AVATAR_PATH)
-      onIdentity(next)
+      await mobiusAccountQueries.uploadAvatar(queryClient, file)
     } catch (uploadError) {
       setError(uploadError.message)
     } finally {
@@ -398,19 +392,24 @@ function ProfileSection({ identity, onIdentity }) {
 
 // ── Model access ──────────────────────────────────────────────────────────
 
+// The switch shows provider status `available`, the same value the picker and
+// the AI providers rows read, so a change made anywhere shows here too.
 function ModelVisibilityRow() {
   const queryClient = useQueryClient()
-  const visibility = mobiusAccountQueries.visibility.useQuery()
+  const status = authQueries.provider.statuses.useQuery()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const enabled = visibility.data
+  const enabled = status.data?.mobius?.available
   const change = async next => {
     if (saving) return
     setSaving(true)
     setError('')
     try {
       const result = await mobiusAccessRequest('/auth/providers/mobius/enabled', { method: 'PATCH', ...json({ enabled: next }) })
-      queryClient.setQueryData(mobiusAccountQueries.visibility.key, result.enabled === true)
+      queryClient.setQueryData(authQueries.provider.statuses.key, current => current && ({
+        ...current,
+        mobius: { ...current.mobius, available: result.enabled === true },
+      }))
       authQueries.provider.statuses.invalidate(queryClient)
       modelQueries.registry.invalidate(queryClient)
     } catch (changeError) {
@@ -434,9 +433,9 @@ function ModelVisibilityRow() {
           <Switch className="settings-switch" id="mobius-models-visible" checked={enabled === true} disabled={typeof enabled !== 'boolean' || saving} onCheckedChange={change} />
         </span>
       </div>
-      {(error || visibility.error) && (
+      {(error || (status.error && typeof enabled !== 'boolean')) && (
         <div className="settings-item-panel">
-          <ErrorMessage error={error || visibility.error} onRetry={error ? null : () => visibility.refetch()} />
+          <ErrorMessage error={error || status.error} onRetry={error ? null : () => status.refetch()} />
         </div>
       )}
     </>
@@ -1166,10 +1165,6 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
     wasActiveRef.current = active
   }, [active, intent, queryClient])
 
-  const setIdentity = useCallback(next => {
-    queryClient.setQueryData(mobiusAccountQueries.identity.key, next)
-  }, [queryClient])
-
   const signedIn = useCallback(next => {
     setIntent(null)
     void mobiusAccountQueries.signedIn(queryClient, next)
@@ -1225,7 +1220,7 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
       )}
 
       {mode === 'signed_out' && <SignInSection onSignedIn={signedIn} reconnecting={intent === 'signin-again'} />}
-      {editable && <ProfileSection identity={identity} onIdentity={setIdentity} />}
+      {editable && <ProfileSection identity={identity} />}
       <ModelsLink onOpenModels={onOpenModels} />
       <DeploymentsSection
         identity={identity}

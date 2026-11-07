@@ -19,9 +19,11 @@ const REACT_SHIM = new URL(
   '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs',
   import.meta.url,
 ).href
+const REACT_QUERY_SHIM = new URL('./react-query-shim.mjs', import.meta.url).href
 
 // Modules whose `react` import is redirected to the hook shim so a test in
-// this suite can drive them with renderHook. Opt-in per module rather than
+// this suite can drive them with renderHook (and their `@tanstack/react-query`
+// import to react-query-shim.mjs, which runs on the same hooks). Opt-in per module rather than
 // blanket: most files here are read as source text, and a global alias would
 // silently swap React out from under anything that later imports for real.
 const REACT_SHIMMED_MODULES = [
@@ -59,10 +61,11 @@ export async function resolve(specifier, context, nextResolve) {
     return { url: 'data:text/javascript,export default {}', shortCircuit: true }
   }
   if (
-    specifier === 'react'
+    (specifier === 'react' || specifier === '@tanstack/react-query')
     && REACT_SHIMMED_MODULES.some(m => context.parentURL?.endsWith(m))
   ) {
-    return { url: REACT_SHIM, shortCircuit: true, format: 'module' }
+    const url = specifier === 'react' ? REACT_SHIM : REACT_QUERY_SHIM
+    return { url, shortCircuit: true, format: 'module' }
   }
   return nextResolve(specifier, context)
 }

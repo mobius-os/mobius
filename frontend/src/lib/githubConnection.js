@@ -38,20 +38,42 @@ function attemptFrom(body) {
     : null
 }
 
+/** The instance's GitHub status, with a sign-in already waiting on GitHub (another tab, a reload) as `attempt`. Rejects when it cannot be read. */
 export async function fetchGithubStatus({ signal } = {}) {
-  try {
-    const s = await call(options => api.github.status({ ...options, signal }), 'Could not check GitHub.')
-    return {
-      state: s.connected ? 'connected' : 'disconnected',
-      login: s.login || '',
-      scopes: Array.isArray(s.scopes) ? s.scopes : [],
-      signInAvailable: !!s.device_flow_available,
-      // A sign-in already waiting on GitHub (another tab, a reload) resumes.
-      attempt: attemptFrom(s.active_attempt),
-    }
-  } catch (error) {
-    return { state: 'unknown', message: error?.message || 'Could not reach the GitHub connection service.' }
+  const s = await call(options => api.github.status({ ...options, signal }), 'Could not check GitHub.')
+  return {
+    state: s.connected ? 'connected' : 'disconnected',
+    login: s.login || '',
+    scopes: Array.isArray(s.scopes) ? s.scopes : [],
+    signInAvailable: !!s.device_flow_available,
+    attempt: attemptFrom(s.active_attempt),
   }
+}
+
+/** The status Settings shows when GitHub could not be read. */
+export const unknownGithubStatus = error => ({
+  state: 'unknown',
+  message: error?.message || 'Could not reach the GitHub connection service.',
+})
+
+const STATUS_KEY = ['github', 'status']
+
+/**
+ * GitHub status in the shared query cache, persisted (queryClient.js) so
+ * Settings paints the last confirmed account at once after a reload. The
+ * cache holds only that settled account state (connection, login, scopes); a
+ * sign-in waiting on GitHub goes to the caller of `refresh` and is never
+ * stored. Reads happen when Settings asks, so `options` only subscribes.
+ */
+export const githubStatus = {
+  key: STATUS_KEY,
+  options: { queryKey: STATUS_KEY, enabled: false, staleTime: Infinity },
+  /** Read the status now and cache its account part. Resolves the full status; rejects when it cannot be read. */
+  async refresh(queryClient) {
+    const { attempt, ...account } = await fetchGithubStatus()
+    queryClient.setQueryData(STATUS_KEY, account)
+    return { ...account, attempt }
+  },
 }
 
 export async function startGithubSignIn({ privateRepos = false, signal } = {}) {
