@@ -224,6 +224,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
    frame rather than resizing after load. `max-height` caps extreme tall ratios;
    `object-fit:contain` letterboxes inside the stable frame when necessary. */
 .md-image-frame {
+  position: relative;
   display: block;
   width: min(100%, var(--md-image-fit-width, 520px));
   max-width: 100%;
@@ -237,6 +238,20 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   font: inherit;
   cursor: pointer;
   overflow: hidden;
+}
+
+/* Image reservation is scroll geometry. Its loading/error treatment overlays
+   that same box instead of inserting or collapsing space when bytes arrive. */
+.md-image-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
 }
 
 .md-image-frame:focus-visible {
