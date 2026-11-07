@@ -4654,11 +4654,21 @@ class ChatWriterActor:
       run.goal_objective != cmd.objective
       or run.goal_id != goal_id
     )
+    attaching = run.goal_id != goal_id
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
-    if goal_was_missing:
-      # A helper spawned before promotion has no Goal snapshot yet. Adopt only
-      # this physical attempt's helpers, never an earlier turn sharing its root.
+    if attaching:
+      # Work this attempt started before it attached (a fresh promotion, or a
+      # Goal-less turn rejoining an existing Goal) has no Goal snapshot yet.
+      # Adopt only this physical attempt's unowned Waits and helpers: without
+      # them the Goal looks unowned at turn end and is wrongly settled. Rows
+      # already owned by a Goal and earlier turns sharing the root never move.
+      for wait in db.query(models.ChatWait).filter(
+        models.ChatWait.chat_id == cmd.chat_id,
+        models.ChatWait.created_by_run_id == run.id,
+        models.ChatWait.goal_id.is_(None),
+      ):
+        wait.goal_id = goal_id
       frontier = [cmd.chat_id]
       first = True
       while frontier:

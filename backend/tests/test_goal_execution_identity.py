@@ -190,3 +190,52 @@ def test_promotion_adopts_only_this_runs_unowned_helpers_and_nested_descendants(
   assert active_goal_helpers(goal_helper_tree(db, run, goal))
   with pytest.raises(GoalPlanError, match=r"active delegations.*: scout"):
     update_goal_record(db, run, goal, goal.revision, complete=True)
+
+
+def test_goal_less_turn_rejoining_open_goal_brings_its_own_waits_and_helpers(db, chat):
+  """A turn woken without a Goal hands work off, then rejoins the open Goal.
+
+  The Wait and helper it started must count as that Goal's owners, or turn
+  end wrongly runs Goal settlement and shows a false "Work interrupted".
+  """
+  from app.chat_handoffs import native_goal_handoffs
+  from app.chat_waits import declare_wait
+  from app.delegations import DelegationIntent, create_or_attach_delegation
+
+  started = datetime.now(UTC).replace(tzinfo=None)
+  goal = models.ChatGoal(id="open", chat_id=chat.id, objective="Ship it")
+  other = models.ChatGoal(id="other", chat_id=chat.id, objective="Earlier", status="completed")
+  previous = models.ChatRun(id="root", root_run_id="root", chat_id=chat.id,
+                            status="completed", started_at=started - timedelta(minutes=5))
+  db.add_all([goal, other, previous]); db.commit()
+  earlier_wait = declare_wait(db, chat_id=chat.id, created_by_run_id=previous.id,
+                              description="Earlier turn's condition", kind="timer", delay_secs=60)
+  owned_wait = declare_wait(db, chat_id=chat.id, created_by_run_id=previous.id,
+                            description="Another Goal's condition", kind="timer", delay_secs=60)
+  owned_wait.goal_id = other.id
+  run = models.ChatRun(id="wait-resume", root_run_id="root", chat_id=chat.id,
+                       status="running", started_at=started)
+  db.add(run); db.commit()
+
+  wait = declare_wait(db, chat_id=chat.id, created_by_run_id=run.id,
+                      description="Platform is quiet", kind="timer", delay_secs=60)
+  helper, attached = create_or_attach_delegation(db, DelegationIntent(
+    app_id=None, parent_chat_id=chat.id, parent_root_run_id="root", task_key="design",
+    prompt="Render the directions", provider="claude", model=None, effort=None, cwd="/data",
+  ))
+  assert not attached
+  db.add(models.ChatRun(id="design-run", chat_id=helper.child_chat_id, status="running"))
+  db.commit()
+  assert wait.goal_id is None and helper.goal_id is None
+  assert not native_goal_handoffs(db, goal).prevents_settlement
+
+  result = promote(db, chat, run, goal.objective, resume_goal_id=goal.id)
+
+  assert not isinstance(result, GoalPromotionRejected), result
+  assert result["goal_id"] == goal.id and run.goal_id == goal.id
+  assert wait.goal_id == helper.goal_id == goal.id
+  assert earlier_wait.goal_id is None and owned_wait.goal_id == other.id
+  handoffs = native_goal_handoffs(db, goal)
+  assert {w.wait_id for w in handoffs.waits} == {wait.id}
+  assert [h.delegation_id for h in handoffs.helpers] == [helper.id]
+  assert handoffs.prevents_settlement
