@@ -96,9 +96,7 @@ export const persistOptions = {
   // returns, and logout explicitly deletes this owner-scoped database.
   maxAge: Infinity,
   buster: QUERY_CACHE_BUSTER,
-  dehydrateOptions: {
-    shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
-  },
+  dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
 }
 
 // Decide whether a query's cache entry is mirrored to IndexedDB.
@@ -111,10 +109,10 @@ export const persistOptions = {
 //   - ['auth','providers','status']         → canonical provider state
 //   - ['platform','status']                 → last-known release identity
 //   - ['github','status']                   → GitHub login and scope flags
-//   - ['identity-summary']                  → Möbius handle, avatar address, mode
+//   - ['identity-summary']                  → Möbius handle, avatar fingerprint, mode
 // Everything else under ['auth'] and ['identity'] stays in memory: the
 // setup-status gate is short-lived, and the full Möbius identity carries the
-// private email and the account's deployments. A shared-browser guest uses
+// private email, the avatar address and the account's deployments. A shared-browser guest uses
 // its own memory-only client (App.jsx), so it never reads or writes this cache.
 const PERSISTED_HEADS = new Set(['chats', 'chat-messages', 'theme', 'apps', 'app-consent'])
 const PERSISTED_FULL_KEYS = new Set([
@@ -131,6 +129,14 @@ export function shouldPersistQueryKey(queryKey) {
   return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
 }
 
+/** Which cache entries both saves (the throttled one and the reload handoff)
+ * write. A query still on its first fetch has nothing to keep, and TanStack
+ * dehydrates it with its in-flight Promise, which IndexedDB cannot clone: one
+ * such entry would fail the whole write and save nothing. */
+export function shouldPersistQuery(query) {
+  return query.state.status !== 'pending' && shouldPersistQueryKey(query.queryKey)
+}
+
 /** Force the current in-memory cache to IndexedDB before an intentional shell
  * reload. Normal persistence is deliberately throttled because live streams
  * update the chat cache frequently. A deferred shell rebuild can become idle
@@ -143,9 +149,7 @@ export async function flushPersistedQueryCache(client = queryClient) {
   const persistedClient = {
     buster: QUERY_CACHE_BUSTER,
     timestamp: Date.now(),
-    clientState: dehydrate(client, {
-      shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
-    }),
+    clientState: dehydrate(client, persistOptions.dehydrateOptions),
   }
   await idbStorage.setItem(QUERY_CACHE_KEY, persistedClient)
 }

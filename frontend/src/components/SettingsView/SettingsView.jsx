@@ -33,7 +33,6 @@ import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
 import { useMobiusAccountSummary } from '../../hooks/mobiusAccountQueries.js'
 import { formatPlanName, rowUsage, signInExpiryNotice } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
-import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
@@ -305,6 +304,12 @@ export default function SettingsView({
   //   LOADING — no data yet and no error: the initial in-flight fetch.
   const providerReady = settingsQuery.data !== undefined
     && providerAvailability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+  // A connected sign-in near its end, for the overview row and the provider page.
+  const signInNoticeFor = provider => (
+    configuredProviders.has(provider)
+      ? signInExpiryNotice(providerStatusQuery.data?.[provider]?.login_expires_at)
+      : null
+  )
   // The overview shows each connected provider's allowance on its row, so
   // usage is read for every connected provider while Settings is open; a
   // provider page reads only its own. The server coalesces these probes.
@@ -972,7 +977,6 @@ export default function SettingsView({
       </ProviderConnection>
     ) : null
     const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null
-    const signInNotice = configured ? signInExpiryNotice(providerStatusQuery.data?.[selectedProvider]?.login_expires_at) : null
     // The Möbius account and its credit are the owner's: a guest sees neither.
     const ownerAccountProvider = selectedProvider === 'mobius'
     detailBody = row ? (
@@ -1010,13 +1014,8 @@ export default function SettingsView({
             <p className="settings__notice">Möbius models use the owner’s Möbius account, which only the owner can sign in to.</p>
           ) : null}
           connection={connection}
-          connectionDetails={[
-            ...(signInNotice ? [{
-              label: 'Sign-in',
-              value: <span className="settings-badge settings-badge--warning" title={`May end by ${formatDateTime(signInNotice.endsBy)}`}>{signInNotice.label}</span>,
-            }] : []),
-            ...(configured && version ? [{ label: 'Version', value: version }] : []),
-          ]}
+          signInNotice={signInNoticeFor(selectedProvider)}
+          connectionDetails={configured && version ? [{ label: 'Version', value: version }] : []}
           chatModelsRef={(node) => setSetupFocusRef('chat-models', node)}
           chatModelsAttention={attentionSection === 'chat-models'}
         />
@@ -1129,7 +1128,7 @@ export default function SettingsView({
                   }}
                   configuredProviders={configuredProviders}
                   connectPrompt={row.provider !== 'mobius' ? 'Connect' : showOwnerAccounts ? 'Sign in' : null}
-                  signInNotice={signInExpiryNotice(providerStatusQuery.data?.[row.provider]?.login_expires_at)}
+                  signInNotice={signInNoticeFor(row.provider)}
                   onReorderStart={startBackgroundReorder}
                   onOpen={() => openDetailPage(row.provider)}
                 />

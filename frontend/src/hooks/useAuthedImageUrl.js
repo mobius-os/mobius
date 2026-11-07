@@ -61,8 +61,8 @@ export function forgetAuthedImage(path) {
 
 /**
  * `{ url, status }` for an owner-authenticated image route (relative to /api,
- * e.g. '/identity/avatar'). `key` names what the image is (an account or its
- * avatar address);
+ * e.g. '/identity/avatar'). `key` names what the image is (an account, or a
+ * fingerprint of its avatar address);
  * an empty key or path means no image. `status` is 'loading' until the first
  * read settles, then 'ready' with a url or 'none' when there is no image, so
  * callers can show a quiet placeholder rather than swapping artwork in.

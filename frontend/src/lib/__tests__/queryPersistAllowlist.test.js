@@ -15,11 +15,11 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dehydrate, QueryClient } from '@tanstack/react-query'
-import { persistQueryClientRestore } from '@tanstack/react-query-persist-client'
+import { dehydrate, QueryClient, QueryObserver } from '@tanstack/react-query'
+import { persistQueryClientRestore, persistQueryClientSave } from '@tanstack/react-query-persist-client'
 import { indexedDB } from 'fake-indexeddb'
-import { get } from 'idb-keyval'
-import { accountSummary } from '../../hooks/mobiusAccountQueries.js'
+import { del, get } from 'idb-keyval'
+import { accountSummary, avatarKey } from '../../hooks/mobiusAccountQueries.js'
 import {
   awaitCacheFlushBeforeReload,
   compactPersistedChatDetails,
@@ -108,7 +108,7 @@ test('the full Möbius identity, model access and deployments never persist', ()
   }
 })
 
-test('what reaches IndexedDB about the accounts is the summary only: no email, deployments or sign-in code', async () => {
+test('what reaches IndexedDB about the accounts is the summary only: no email, deployments, avatar address or sign-in code', async () => {
   const previousIndexedDb = globalThis.indexedDB
   globalThis.indexedDB = indexedDB
   try {
@@ -127,9 +127,9 @@ test('what reaches IndexedDB about the accounts is the summary only: no email, d
     const persisted = await get('mobius-query-cache')
     assert.deepEqual(persisted.clientState.queries.map(q => q.queryKey), [['identity-summary'], ['github', 'status']])
     assert.deepEqual(persisted.clientState.queries[0].state.data, {
-      status: 'linked', mode: 'linked', handle: 'test_handle', avatar: 'https://account.example/avatar/1',
+      status: 'linked', mode: 'linked', handle: 'test_handle', avatar: avatarKey(identity),
     })
-    assert.doesNotMatch(JSON.stringify(persisted), /private|attempt|user_code/)
+    assert.doesNotMatch(JSON.stringify(persisted), /private|attempt|user_code|account\.example/)
   } finally {
     globalThis.indexedDB = previousIndexedDb
   }
@@ -177,6 +177,59 @@ test('explicit reload handoff preserves the complete loaded chat window', async 
   } finally {
     globalThis.indexedDB = previousIndexedDb
   }
+})
+
+// A query on its first fetch carries an in-flight Promise that IndexedDB's
+// structured clone rejects; were it written, the whole save would fail.
+function pendingQuery(client, queryKey) {
+  void client.prefetchQuery({ queryKey, queryFn: () => new Promise(() => {}) })
+}
+
+test('the reload handoff saves everything else while an allowlisted query is still on its first fetch', async () => {
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.indexedDB = indexedDB
+  try {
+    await del('mobius-query-cache')
+    const client = new QueryClient()
+    client.setQueryData(['chats'], [{ id: 'chat-1' }])
+    client.setQueryData(['chat-messages', 'chat-1'], { offset: 0, messages: [{ role: 'assistant', content: 'final reply' }] })
+    pendingQuery(client, ['settings', 'provider-usage', 'codex'])
+    pendingQuery(client, ['chat-messages', 'chat-2'])
+
+    await flushPersistedQueryCache(client)
+    const persisted = await get('mobius-query-cache')
+    assert.deepEqual(persisted.clientState.queries.map(q => q.queryKey), [['chats'], ['chat-messages', 'chat-1']])
+    assert.equal(persisted.clientState.queries[1].state.data.messages[0].content, 'final reply')
+  } finally {
+    globalThis.indexedDB = previousIndexedDb
+  }
+})
+
+test('the background save still writes after usage readings are reset while Settings reads them', async t => {
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.indexedDB = indexedDB
+  t.after(() => { globalThis.indexedDB = previousIndexedDb })
+  await del('mobius-query-cache')
+  const client = new QueryClient()
+  client.setQueryData(['chats'], [{ id: 'chat-1' }])
+  client.setQueryData(['settings', 'provider-usage', 'claude'], { state: 'ready', windows: [] })
+  // What the shell does on model_providers_changed / provider_usage_changed.
+  const reader = new QueryObserver(client, {
+    queryKey: ['settings', 'provider-usage', 'claude'],
+    queryFn: () => new Promise(() => {}),
+    staleTime: Infinity,
+  })
+  t.after(reader.subscribe(() => {}))
+  void client.resetQueries({ queryKey: ['settings', 'provider-usage'] })
+  assert.equal(client.getQueryState(['settings', 'provider-usage', 'claude']).status, 'pending')
+
+  await persistQueryClientSave({ queryClient: client, ...persistOptions })
+  let persisted
+  for (let waited = 0; !persisted && waited < 3000; waited += 50) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+    persisted = await get('mobius-query-cache')
+  }
+  assert.deepEqual(persisted?.clientState.queries.map(q => q.queryKey), [['chats']])
 })
 
 test('persisted cache restore accepts both structured and legacy JSON values', () => {

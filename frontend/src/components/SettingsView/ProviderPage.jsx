@@ -92,7 +92,8 @@ function BackgroundModel({ provider, info, models, enabled, model, effort, onMod
  * Layout for one provider page. The parent owns data and side effects and
  * passes ready sections: `usage` (the Usage section), `access` (provider-
  * specific sections such as Möbius model access) and `connection` (the
- * connect/reconnect/disconnect panel). `chatModelsRef` and `chatModelsAttention`
+ * connect/reconnect/disconnect panel). `signInNotice` (signInExpiryNotice)
+ * asks for a reconnect beside it. `chatModelsRef` and `chatModelsAttention`
  * let a Settings request (the `models` section) land on Chat models.
  */
 export default function ProviderPage({
@@ -109,9 +110,16 @@ export default function ProviderPage({
   access = null,
   connection = null,
   connectionDetails = [],
+  signInNotice = null,
   chatModelsRef = null,
   chatModelsAttention = false,
 }) {
+  const details = signInNotice
+    ? [{
+        label: 'Sign-in',
+        value: <span className="settings-badge settings-badge--warning" title={signInNotice.title}>{signInNotice.label}</span>,
+      }, ...connectionDetails]
+    : connectionDetails
   const connectionSection = connection && (
     <section className="settings-group" aria-labelledby={`settings-${provider}-connection`}>
       <div className="settings-group__head">
@@ -121,7 +129,7 @@ export default function ProviderPage({
         </div>
       </div>
       <div className="settings-list">
-        {connectionDetails.map(({ label, value }) => (
+        {details.map(({ label, value }) => (
           <div className="settings-item" key={label}>
             <span className="settings-item__body"><span className="settings-item__title">{label}</span></span>
             <span className="settings-item__value">{value}</span>

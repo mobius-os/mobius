@@ -35,6 +35,7 @@ const REACT_SHIMMED_MODULES = [
   '/components/Shell/useVisibleAppPresence.js',
   '/hooks/useSystemEventStream.js',
   '/hooks/useAuthedImageUrl.js',
+  '/hooks/mobiusAccountQueries.js',
   '/components/ChatView/useFileUpload.js',
   '/components/ChatView/usePaginationLifecycle.js',
   '/components/ChatView/hooks/useComposerDraftState.js',

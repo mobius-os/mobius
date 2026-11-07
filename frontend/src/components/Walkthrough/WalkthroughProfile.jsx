@@ -5,7 +5,7 @@ import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
 import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
-import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import { AVATAR_PATH, avatarKey, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_TYPES,
   HANDLE_PATTERN,
@@ -30,12 +30,15 @@ export function useAccountProfile() {
   const [claimedHere, setClaimedHere] = useState(false)
   const [editing, setEditing] = useState(false)
   // The same cached photo Settings shows; initials stand in until it loads.
-  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, identity?.profile?.avatar_url || '').url
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, avatarKey(identity)).url
 
   async function claim(handle) {
-    // Marked first, so the new handle never reads as a returning owner's.
-    if (!identity?.profile?.handle) setClaimedHere(true)
+    const first = !identity?.profile?.handle
     await mobiusAccountQueries.saveHandle(queryClient, handle)
+    // Marked only once the handle is saved, and before the query notifies its
+    // readers (TanStack batches that to a later task), so the same render that
+    // shows the new handle knows it was claimed here, not brought back.
+    if (first) setClaimedHere(true)
   }
   const returning = returningHandle({ handle: identity?.profile?.handle, claimedHere, editing })
   return {

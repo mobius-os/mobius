@@ -114,3 +114,35 @@ test('a models request opens the leading connected provider at its Chat models s
   view.rerender({ focusTarget, providerReady: true, modelsProvider: 'codex' })
   assert.deepEqual(pages, ['claude'])
 })
+
+test('a models request still focuses Chat models when the leading provider changes before the focus frame', t => {
+  const frames = new Map()
+  const oldRaf = globalThis.requestAnimationFrame
+  const oldCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
+  globalThis.cancelAnimationFrame = id => frames.delete(id)
+  t.after(() => {
+    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
+    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
+  })
+  const focused = []
+  const chatModels = { scrollIntoView() {}, focus() { focused.push(detailPage) } }
+  let detailPage = null
+  const pages = []
+  const view = renderHook(({ focusTarget, modelsProvider }) => {
+    const setupFocusRefs = useRef({})
+    setupFocusRefs.current = detailPage ? { 'chat-models': chatModels } : {}
+    useSettingsFocus({ focusTarget, providerReady: true, modelsProvider, detailPage,
+      setDetailPage: next => { pages.push(next); detailPage = next },
+      setupFocusRefs, setAttentionSection: () => {} })
+  }, { focusTarget: null, modelsProvider: 'claude' })
+  const focusTarget = { section: 'models', nonce: 1 }
+  view.rerender({ focusTarget, modelsProvider: 'claude' })
+  assert.deepEqual(pages, ['claude'])
+  // Cached settings are replaced by a fresh read that puts Codex first.
+  view.rerender({ focusTarget, modelsProvider: 'codex' })
+  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  assert.deepEqual(pages, ['claude'])
+  assert.deepEqual(focused, ['claude'])
+  view.unmount()
+})

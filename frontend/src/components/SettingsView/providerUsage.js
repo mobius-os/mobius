@@ -184,7 +184,19 @@ function gaugeKind(provider, snapshot) {
   return 'five_hour'
 }
 
-function allowanceForKind(provider, snapshot, kind) {
+// A reading taken before its window reset says nothing about that window now.
+// The server never serves one, but the last reading restored from disk can be
+// one while the server is unreachable, so such a window reads as unknown.
+function currentUsedPercent(window, now) {
+  if (window?.used_percent == null) return null
+  const used = Number(window.used_percent)
+  if (!Number.isFinite(used)) return null
+  const reset = window.resets_at ? new Date(window.resets_at) : null
+  if (reset && !Number.isNaN(reset.getTime()) && reset <= now) return null
+  return clampUsagePercent(used)
+}
+
+function allowanceForKind(provider, snapshot, kind, now) {
   const fallbackLabel = ALLOWANCE_LABELS[kind]
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
     return {
@@ -195,29 +207,28 @@ function allowanceForKind(provider, snapshot, kind) {
     }
   }
   const window = snapshot.windows.find(candidate => candidate?.kind === kind)
-  const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)
   const label = provider === 'codex' && kind === 'weekly' && window?.label === '7-day'
     ? '7-day usage'
     : fallbackLabel
   return {
     kind,
     label,
-    usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
+    usedPercent: currentUsedPercent(window, now),
     expiresAt: typeof window?.expires_at === 'string' ? window.expires_at : null,
     ...(snapshot.stale === true ? { stale: true } : {}),
   }
 }
 
 /** The allowance the brain's left lobe fills with. */
-export function providerAllowance(provider, snapshot) {
-  return allowanceForKind(provider, snapshot, gaugeKind(provider, snapshot))
+export function providerAllowance(provider, snapshot, now = new Date()) {
+  return allowanceForKind(provider, snapshot, gaugeKind(provider, snapshot), now)
 }
 
-/** The weekly allowance listed beside a 5-hour gauge, when one is reported. */
-export function providerWeeklyAllowance(provider, snapshot) {
+/** The weekly allowance listed beside a 5-hour gauge, when one is current. */
+export function providerWeeklyAllowance(provider, snapshot, now = new Date()) {
   if (gaugeKind(provider, snapshot) !== 'five_hour') return null
   if (!hasWindowKind(snapshot, 'weekly')) return null
-  const weekly = allowanceForKind(provider, snapshot, 'weekly')
+  const weekly = allowanceForKind(provider, snapshot, 'weekly', now)
   return weekly.usedPercent === null ? null : weekly
 }
 
@@ -254,14 +265,12 @@ const ROW_USAGE = [
 ]
 
 /** The single usage figure for a provider's top-level Settings row, or null. */
-export function rowUsage(snapshot) {
+export function rowUsage(snapshot, now = new Date()) {
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
   for (const { kind, label, noun } of ROW_USAGE) {
     const window = snapshot.windows.find(candidate => candidate?.kind === kind)
-    if (!window || window.used_percent == null) continue
-    const used = Number(window.used_percent)
-    if (!Number.isFinite(used)) continue
-    const percent = clampUsagePercent(used)
+    const percent = currentUsedPercent(window, now)
+    if (percent === null) continue
     const reset = formatUsageReset(window.resets_at)
     return {
       kind,
@@ -301,9 +310,10 @@ const SIGN_IN_EARLY_END_MS = 3 * DAY_MS
 
 /**
  * A provider sign-in near its end (`login_expires_at`, ISO 8601) as a short
- * call to reconnect: `{ label, endsBy }`, or null while it is further out or
- * unknown, so a healthy sign-in stays quiet. The countdown runs to the
- * earliest possible end, three days before the reported one.
+ * call to reconnect: `{ label, title, endsBy }` (`title` explains the date),
+ * or null while it is further out or unknown, so a healthy sign-in stays
+ * quiet. The countdown runs to the earliest possible end, three days before
+ * the reported one.
  */
 export function signInExpiryNotice(value, now = new Date()) {
   if (typeof value !== 'string' || !value) return null
@@ -312,11 +322,13 @@ export function signInExpiryNotice(value, now = new Date()) {
   // Past the reported end the current access token may keep working for a
   // while, but renewing it can now fail: ask for a reconnect rather than
   // calling a connection that still runs chats expired.
-  if (endsBy <= now) return { label: 'Reconnect now', endsBy }
+  if (endsBy <= now) {
+    return { label: 'Reconnect now', title: `Reported to end ${formatDateTime(endsBy)}; it may stop at any time`, endsBy }
+  }
   const days = Math.ceil((endsBy - SIGN_IN_EARLY_END_MS - now) / DAY_MS)
   if (days > SIGN_IN_NOTICE_DAYS) return null
   const label = days <= 0
     ? 'Reconnect today'
     : days === 1 ? 'Reconnect within a day' : `Reconnect within ${days} days`
-  return { label, endsBy }
+  return { label, title: `May end by ${formatDateTime(endsBy)}`, endsBy }
 }

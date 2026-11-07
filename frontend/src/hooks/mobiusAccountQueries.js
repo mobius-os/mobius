@@ -1,13 +1,13 @@
 /* Cached Möbius account reads (identity, model access, Railway inventory), the profile edits every surface shares, and the cheap summary Settings shows on its Accounts row. */
-import { useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { isSharedBrowserAuth } from '../api/client.js'
 import { authQueries, modelQueries } from './queries.js'
 import useAuthedImageUrl, { forgetAuthedImage } from './useAuthedImageUrl.js'
 import { accountState, mobiusAccessRequest } from '../lib/mobiusAccount.js'
 
 // Kept in memory only: ['identity', …] is not in queryClient.js's persisted
-// allowlist, so the private email and deployments never reach IndexedDB.
+// allowlist, so the private email, deployments and avatar address never reach
+// IndexedDB.
 const rootKey = ['identity']
 const identityKey = [...rootKey, 'account']
 const agentKey = [...rootKey, 'agent']
@@ -16,7 +16,7 @@ const railwayKey = [...rootKey, 'railway']
 // so account invalidations never try to fetch it.
 const summaryKey = ['identity-summary']
 
-const fetchIdentity = ({ signal } = {}) => mobiusAccessRequest('/identity', { signal })
+const fetchIdentity = async ({ signal, client }) => rememberIdentity(client, await mobiusAccessRequest('/identity', { signal }))
 const fetchAgent = ({ signal } = {}) => mobiusAccessRequest('/identity/agent', { signal })
 const fetchRailway = ({ signal } = {}) => mobiusAccessRequest('/identity/railway?dashboard=1', { signal })
 
@@ -60,7 +60,15 @@ function refreshProviders(queryClient) {
   void modelQueries.registry.invalidate(queryClient)
 }
 
-const setIdentity = (queryClient, identity) => queryClient.setQueryData(identityKey, identity)
+// Every identity the cache takes in, read or returned by an edit, also
+// refreshes the saved summary, so a change made from any surface (the
+// first-run guide too) reaches disk whether or not Settings is open.
+function rememberIdentity(queryClient, identity) {
+  if (identity) queryClient.setQueryData(summaryKey, accountSummary(identity))
+  return identity
+}
+
+const setIdentity = (queryClient, identity) => queryClient.setQueryData(identityKey, rememberIdentity(queryClient, identity))
 
 export const mobiusAccountQueries = {
   key: rootKey,
@@ -105,13 +113,30 @@ export const mobiusAccountQueries = {
   },
 }
 
-/** What Settings keeps on disk about the account; never the email or deployments. */
+/**
+ * What names the account's photo in the image cache: a short fingerprint of
+ * its avatar address ('' without one), so every surface showing the photo
+ * shares one read and the saved summary never holds the third-party address.
+ * A new photo gets a new address, or forgetAuthedImage drops the old bytes.
+ */
+export function avatarKey(identity) {
+  const address = identity?.profile?.avatar_url
+  if (typeof address !== 'string' || !address) return ''
+  // FNV-1a: a stable, synchronous 32-bit fingerprint is enough to tell photos apart.
+  let hash = 0x811c9dc5
+  for (let index = 0; index < address.length; index += 1) {
+    hash = Math.imul(hash ^ address.charCodeAt(index), 0x01000193)
+  }
+  return `avatar-${(hash >>> 0).toString(36)}`
+}
+
+/** What Settings keeps on disk about the account; never the email, deployments or avatar address. */
 export function accountSummary(identity) {
   return {
     status: accountState(identity),
     mode: identity.account_mode || null,
     handle: identity.profile?.handle || null,
-    avatar: identity.profile?.avatar_url || '',
+    avatar: avatarKey(identity),
   }
 }
 
@@ -123,12 +148,8 @@ export function accountSummary(identity) {
  * last-known summary paints until the live identity read lands.
  */
 export function useMobiusAccountSummary() {
-  const queryClient = useQueryClient()
   const identity = useIdentityQuery()
   const saved = useQuery({ queryKey: summaryKey, enabled: false, staleTime: Infinity })
-  useEffect(() => {
-    if (identity.data) queryClient.setQueryData(summaryKey, accountSummary(identity.data))
-  }, [queryClient, identity.data])
   const summary = identity.data ? accountSummary(identity.data) : ownerOnly(true) ? saved.data : null
   const avatar = useAuthedImageUrl(AVATAR_PATH, summary?.avatar || '')
   // The saved summary only paints until the live read settles: a failed read

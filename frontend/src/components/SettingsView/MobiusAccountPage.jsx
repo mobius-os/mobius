@@ -18,7 +18,7 @@ import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
-import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import { AVATAR_PATH, avatarKey, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_TYPES,
   HANDLE_PATTERN,
@@ -306,7 +306,7 @@ function ClaimHandle({ onSave }) {
 function ProfileSection({ identity }) {
   const queryClient = useQueryClient()
   const profile = identity.profile
-  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, profile.avatar_url || '').url
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, avatarKey(identity)).url
   const [editing, setEditing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')

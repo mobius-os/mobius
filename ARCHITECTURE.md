@@ -1980,9 +1980,12 @@ is network-first; a warm document that missed a transient event discovers the wa
 generation on a later foreground boundary and advertises it without interrupting work.
 
 Before the explicit navigation, `flushPersistedQueryCache()` writes the current
-allowlisted cache directly; this normally guarantees the reloaded ChatView hydrates
-the latest assistant row rather than a previous partial while its authoritative GET
-revalidates. The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be
+allowlisted cache directly, so the reloaded ChatView hydrates the latest assistant
+row rather than a previous partial while its authoritative GET revalidates, unless
+the write misses the deadline below. Both this write and the throttled one use
+`shouldPersistQuery`, which skips a query still on its first fetch: TanStack would
+dehydrate its in-flight Promise, IndexedDB cannot clone that, and one such entry
+would fail the whole write. The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be
 blocked by another browser lifecycle transaction, and a best-effort cache write must
 never strand an owner-requested refresh. The write may still finish after the deadline.
 
