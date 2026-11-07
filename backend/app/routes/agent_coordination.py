@@ -114,19 +114,22 @@ async def claim_current_work(
     )
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc
-  # Delivery is post-commit; every former executor already has an immutable
-  # obligation. Retrying this claim also recovers earlier interrupted transfers.
-  deliveries = []
-  for notice in pending_transfer_notices(db, claim_id=result["id"]).all():
-    deliveries.append(await deliver_work_claim_revocation(db, notice))
-  result["notification_pending"] = (
-    pending_transfer_notices(db, claim_id=result["id"]).first() is not None
-  )
-  if deliveries:
-    for state in ("steered", "woken", "queued", "unreachable"):
-      result[state] = list(dict.fromkeys(
-        recipient for delivery in deliveries for recipient in getattr(delivery, state)
-      ))
+  # Older obligations belong to the sweep, not a refresh/observer's request.
+  revision = result.pop("_created_transfer_notice_revision", None)
+  if revision is not None:
+    try:
+      notice = db.get(models.AgentWorkClaimRevocation, (result["id"], revision))
+      delivery = await deliver_work_claim_revocation(db, notice)
+      result["notification_pending"] = (
+        pending_transfer_notices(db, claim_id=result["id"]).first() is not None
+      )
+      for state in ("steered", "woken", "queued", "unreachable"):
+        result[state] = getattr(delivery, state)
+    except Exception:
+      # Ownership and its obligation already committed. Delivery failure must
+      # not turn that accepted transfer into a false failure or lose recovery.
+      db.rollback()
+      logging.getLogger(__name__).exception("Committed claim revocation awaits recovery")
   return result
 
 

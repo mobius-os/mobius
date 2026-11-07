@@ -1542,9 +1542,18 @@ def test_finish_release_and_reacquisition_preserve_older_revocations(db, release
     assert refreshed["state"] == "owned"
     assert refreshed["notification_pending"] is True
   notices = pending_transfer_notices(db).all()
+  expected_revisions = [3] if release else [2, 3]
   assert [(row.revision, row.acquisition_id) for row in notices] == [
-    (2, initial["acquisition_id"]), (3, initial["acquisition_id"]),
+    (revision, initial["acquisition_id"]) for revision in expected_revisions
   ]
+  if release:
+    from app.agent_work_claims import acknowledge_transfer_notice
+    acknowledge_transfer_notice(db, claim_id=initial["id"], revision=2)
+    superseded = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+    db.refresh(superseded)
+    assert superseded.outcome == "superseded"
+    assert superseded.delivered_at is None
+  assert db.query(models.AgentWorkClaimRevocation).count() == 2
 
 
 def test_outbox_insert_failure_rolls_back_ownership_and_goal_edges(db):
@@ -1599,7 +1608,8 @@ async def test_recovery_retains_unreachable_owner_without_blocking_other_notices
   monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", deliver)
   await recover_work_claim_revocations()
   db.expire_all()
-  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [first.id]
+  expected_pending = [] if unreachable == "deleted" else [first.id]
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == expected_pending
   assert second.id in calls
   assert db.query(models.AgentWorkClaimRevocation).count() == 2
   # Repeating recovery does not replay the acknowledged second revocation.
@@ -1636,3 +1646,71 @@ async def test_queued_revocation_cannot_be_pruned_before_the_former_owner_reads_
     f"(acquisition {initial['acquisition_id']}, transfer revision 2)",
     "Ordinary later note 1",
   }
+
+
+@pytest.mark.asyncio
+async def test_deleted_recipient_closes_without_a_delivery_receipt(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  first.deleted_at = now_naive_utc()
+  db.commit()
+
+  async def delivered(**kwargs):
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  await recover_work_claim_revocations()
+  assert pending_transfer_notices(db).count() == 0
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  db.refresh(notice)
+  assert notice.outcome == "recipient_deleted"
+  assert notice.delivered_at is None
+  current = claim_work(db, owner_id=owner.id, chat_id=third.id,
+                       run_id="claim-run-third", work_key=initial["work_key"],
+                       summary="Inspect after deletion")
+  assert current["notification_pending"] is False
+
+
+def test_chat_deletion_closes_its_revocations_in_the_deletion_transaction(db):
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  stage_release_claims_for_chat(db, first.id)
+  db.rollback()  # An aborted deletion must not close its notice.
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [2, 3]
+  first.deleted_at = now_naive_utc()
+  stage_release_claims_for_chat(db, first.id)
+  db.commit()
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  db.refresh(notice)
+  assert notice.outcome == "recipient_deleted"
+  assert notice.delivered_at is None
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [second.id]
+
+
+@pytest.mark.asyncio
+async def test_recovery_retires_a_legacy_notice_for_the_current_new_acquisition(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  finish_work(db, owner_id=owner.id, chat_id=third.id,
+              work_key=initial["work_key"], outcome="Released", release=True)
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=initial["work_key"], summary="A new acquisition")
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  notice.outcome = None  # Simulate an older re-acquisition path missing retirement.
+  db.commit()
+  recipients = []
+
+  async def delivered(**kwargs):
+    recipients.extend(kwargs["recipients"])
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  await recover_work_claim_revocations()
+  db.refresh(notice)
+  assert recipients == [second.id]
+  assert notice.outcome == "superseded"
+  assert notice.delivered_at is None

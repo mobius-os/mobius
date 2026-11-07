@@ -7067,6 +7067,29 @@ def _add_claim_revocation_outbox(eng) -> None:
     ))
 
 
+def _add_claim_revocation_outcomes(eng) -> None:
+  """Distinguish delivery receipts from superseded/deleted-recipient closure."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "agent_work_claim_revocations" not in inspector.get_table_names():
+    return
+  has_outcome = "outcome" in {
+    column["name"] for column in inspector.get_columns("agent_work_claim_revocations")
+  }
+  with eng.begin() as conn:
+    if not has_outcome:
+      conn.execute(text("ALTER TABLE agent_work_claim_revocations ADD COLUMN outcome VARCHAR(32)"))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_agent_work_claim_revocations_outcome "
+      "ON agent_work_claim_revocations (outcome)"
+    ))
+    conn.execute(text(
+      "UPDATE agent_work_claim_revocations SET outcome='delivered' "
+      "WHERE outcome IS NULL AND delivered_at IS NOT NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7190,6 +7213,7 @@ _SCHEMA_MIGRATIONS = (
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
   ("0100_chat_branch_origin", _add_chat_branch_origin),
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
+  ("0102_claim_revocation_outcomes", _add_claim_revocation_outcomes),
 )
 
 

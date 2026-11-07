@@ -1708,6 +1708,8 @@ class AgentWorkClaimRevocation(Base):
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
   delivered_at = Column(DateTime, nullable=True, index=True)
+  # NULL is owed; closure need not mean a notice was delivered.
+  outcome = Column(String(32), nullable=True, index=True)
 
 
 class AgentWorkInterest(Base):

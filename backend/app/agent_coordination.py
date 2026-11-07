@@ -1635,11 +1635,18 @@ async def deliver_work_claim_revocation(
   db: Session, notice: models.AgentWorkClaimRevocation,
 ) -> PeerDeliveryResult:
   """Retry from the immutable transfer snapshot, including after settlement."""
-  from app.agent_work_claims import acknowledge_transfer_notice
+  from app.agent_work_claims import (
+    acknowledge_transfer_notice, stage_retire_obsolete_transfer_notices,
+  )
 
+  stage_retire_obsolete_transfer_notices(db, claim_id=notice.claim_id)
+  db.commit()
+  db.refresh(notice)
+  if notice.outcome is not None or notice.delivered_at is not None:
+    return PeerDeliveryResult(steered=[], woken=[], queued=[])
   recipient = notice.recipient_chat_id
   if recipient not in _agent_chat_ids(db, {recipient}):
-    # Deletion or missing peer identity is not a delivery acknowledgement.
+    # A live chat without an addressable run still owes its notice.
     return PeerDeliveryResult(steered=[], woken=[], queued=[],
                              unreachable=[recipient])
   send_work_claim_transfer_notice(
@@ -1659,17 +1666,21 @@ async def deliver_work_claim_revocation(
 
 async def recover_work_claim_revocations() -> None:
   """The existing runtime sweep repairs crashes before peer persistence/delivery."""
-  from app.agent_work_claims import pending_transfer_notices
+  from app.agent_work_claims import (
+    pending_transfer_notices, stage_retire_obsolete_transfer_notices,
+  )
   from app.database import SessionLocal
 
   with SessionLocal() as db:
+    stage_retire_obsolete_transfer_notices(db)
+    db.commit()
     identities = [(row.claim_id, row.revision)
                   for row in pending_transfer_notices(db).all()]
   for identity in identities:
     try:
       with SessionLocal() as db:
         notice = db.get(models.AgentWorkClaimRevocation, identity)
-        if notice is not None and notice.delivered_at is None:
+        if notice is not None and notice.outcome is None and notice.delivered_at is None:
           await deliver_work_claim_revocation(db, notice)
     except Exception:
       log.warning("claim revocation delivery failed claim=%s revision=%s",

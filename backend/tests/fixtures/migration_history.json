@@ -111,6 +111,7 @@
     "0098_run_end_reason": "7f83b8c63fed2c9bb7ee75196574313942310c234263ad83e7e0ef688eccf4d2",
     "0099_app_chat_scope_starts": "7777710e7c661b7d9beb78fab57e44e3cb8a2e6b09c29f447cc617c43c12ae19",
     "0100_chat_branch_origin": "6cb0cd0d08ffa721d127a28923301a6da9d580af91b6ed8993afb1b1fa2baa1e",
-    "0101_claim_revocation_outbox": "8b00371c1f8861366880650203525e1c211dc02268edfde14a950aa6a5da6ea2"
+    "0101_claim_revocation_outbox": "8b00371c1f8861366880650203525e1c211dc02268edfde14a950aa6a5da6ea2",
+    "0102_claim_revocation_outcomes": "27f52b65dd411636c411ed37529d96ac0878a2113807a0bf4ab7ebe372a242b9"
   }
 }
