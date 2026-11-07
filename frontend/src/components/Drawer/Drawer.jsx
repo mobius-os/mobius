@@ -43,13 +43,10 @@ import {
   settleDrawerSwipe,
   watchDismissPointerEnd,
 } from '../../lib/drawerLifecycle.js'
-import {
-  PRESS_MENU_HOLD_MS,
-  PRE_HOLD_MOVE_PX,
-} from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
+import useItemMenuGestures from './useItemMenuGestures.js'
 import { createPinnedMutationQueue } from './pinnedMutationQueue.js'
 import {
   buildDrawerSections,
@@ -101,7 +98,6 @@ function writeListTab(tab) {
 // downstream.
 const EMPTY_SET = new Set()
 const EMPTY_LIST = []
-const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
 
 // Content still below the viewport bottom, in the scroller's own units.
 function scrollBelowViewport(root) {
@@ -1732,19 +1728,18 @@ const DrawerRow = memo(function DrawerRow({
   const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
-  const holdTimerRef = useRef(null)
-  const holdOriginRef = useRef(null)
   const itemButtonRef = useRef(null)
-  const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
-  const secondaryReleaseCleanupRef = useRef(null)
   const drawerGestureHandlerRef = useRef(null)
-  // iOS may dispatch its long-press contextmenu AFTER pointercancel. Keep the
-  // touch provenance independent of the live pointer session so that delayed
-  // native event cannot open actions before a release. It expires, and keyboard
-  // or mouse input clears it, so accessibility and desktop context menus remain.
-  const touchMenuPointerAtRef = useRef(0)
+  const {
+    triggerProps: cardMenuTriggerProps,
+    consumeHeldClick,
+    openItemMenu,
+    openMenuFromKey,
+    recordItemMenuPointer,
+    beginSecondaryMenuPress,
+  } = useItemMenuGestures(openItemMenuAt)
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
   // pointerdown AND click anywhere outside the rename input normally call
   // preventDefault + stopPropagation so another row, Settings, or New chat
@@ -1786,9 +1781,7 @@ const DrawerRow = memo(function DrawerRow({
   }, [renaming, actions])
 
   useEffect(() => () => {
-    if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
     reorderCleanupRef.current?.()
-    secondaryReleaseCleanupRef.current?.()
   }, [])
 
   drawerGestureHandlerRef.current = {
@@ -1888,79 +1881,6 @@ const DrawerRow = memo(function DrawerRow({
     })
   }
 
-  function suppressTouchContextMenu(event) {
-    // On Android, contextmenu is itself a PointerEvent and may arrive before
-    // pointerup or pointercancel. Stop it during capture so React's bubble-phase
-    // menu opener cannot mistake the browser's hold threshold for our release.
-    // Provenance remains as a fallback for browsers that expose it as a plain
-    // MouseEvent; keyboard input clears that provenance below.
-    const contextPointerType = event.nativeEvent?.pointerType || ''
-    const freshTouchPointer = touchMenuPointerAtRef.current > 0
-      && performance.now() - touchMenuPointerAtRef.current < TOUCH_CONTEXT_MENU_PROVENANCE_MS
-    const fromTouch = contextPointerType === 'touch' || contextPointerType === 'pen'
-    if (event.type !== 'contextmenu' || (!fromTouch && !freshTouchPointer)) return false
-    event.preventDefault()
-    event.stopPropagation()
-    event.nativeEvent?.stopImmediatePropagation?.()
-    return true
-  }
-
-  function openItemMenu(event) {
-    // Touch menus open only from the shared gesture controller during its
-    // stationary hold. Native contextmenu would steal that timing and re-open
-    // actions on release, so suppress it; mouse and keyboard remain semantic.
-    if (suppressTouchContextMenu(event)) return
-    event.preventDefault()
-    event.stopPropagation()
-    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
-    // UP below owns that gesture and opens only after release, so focus cannot
-    // snap back to the source or select a collision-flipped menu item.
-    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
-    openItemMenuAt({
-      x: event.clientX,
-      y: event.clientY,
-    }, event.currentTarget, {
-      focusFirstAction: event.type === 'keydown',
-    })
-  }
-
-  function recordItemMenuPointer(event) {
-    touchMenuPointerAtRef.current = event.pointerType === 'mouse'
-      ? 0
-      : performance.now()
-  }
-
-  function beginSecondaryMenuPress(event) {
-    if (event.pointerType !== 'mouse' || event.button !== 2) return false
-    event.preventDefault()
-    secondaryReleaseCleanupRef.current?.()
-    const sourceBtn = event.currentTarget
-    const pointerId = event.pointerId
-    const openingPoint = { x: event.clientX, y: event.clientY }
-    let timer = null
-    const cleanup = () => {
-      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
-      window.removeEventListener('pointercancel', cleanup, true)
-      window.removeEventListener('blur', cleanup, true)
-      if (timer !== null) clearTimeout(timer)
-      if (secondaryReleaseCleanupRef.current === cleanup) {
-        secondaryReleaseCleanupRef.current = null
-      }
-    }
-    const onSecondaryPointerUp = upEvent => {
-      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
-      upEvent.preventDefault()
-      cleanup()
-      openItemMenuAt(openingPoint, sourceBtn)
-    }
-    window.addEventListener('pointerup', onSecondaryPointerUp, true)
-    window.addEventListener('pointercancel', cleanup, true)
-    window.addEventListener('blur', cleanup, true)
-    timer = setTimeout(cleanup, 1500)
-    secondaryReleaseCleanupRef.current = cleanup
-    return true
-  }
-
   if (renaming) {
     if (variant === 'card') {
       return (
@@ -1993,21 +1913,6 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   if (variant === 'card') {
-    function beginCardHold(event) {
-      if (event.pointerType === 'mouse' || event.button !== 0) return
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdOriginRef.current = { x: event.clientX, y: event.clientY }
-      holdTimerRef.current = setTimeout(() => {
-        holdTimerRef.current = null
-        suppressCardClickRef.current = true
-        openItemMenuAt(holdOriginRef.current)
-      }, PRESS_MENU_HOLD_MS)
-    }
-    function cancelCardHold() {
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
-      holdOriginRef.current = null
-    }
     return (
       <div className="apps-directory__card">
         <button
@@ -2016,33 +1921,10 @@ const DrawerRow = memo(function DrawerRow({
           className="apps-directory__card-main"
           aria-label={`Open ${label}`}
           onClick={() => {
-            if (suppressCardClickRef.current) {
-              suppressCardClickRef.current = false
-              return
-            }
+            if (consumeHeldClick()) return
             actions.select(kind, id)
           }}
-          onContextMenuCapture={suppressTouchContextMenu}
-          onContextMenu={openItemMenu}
-          onPointerDown={event => {
-            recordItemMenuPointer(event)
-            if (beginSecondaryMenuPress(event)) return
-            beginCardHold(event)
-          }}
-          onPointerUp={cancelCardHold}
-          onPointerCancel={cancelCardHold}
-          onPointerMove={event => {
-            const origin = holdOriginRef.current
-            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > PRE_HOLD_MOVE_PX) {
-              cancelCardHold()
-            }
-          }}
-          onKeyDown={event => {
-            touchMenuPointerAtRef.current = 0
-            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-              openItemMenu(event)
-            }
-          }}
+          {...cardMenuTriggerProps}
         >
           <AppIcon
             item={item}
@@ -2307,10 +2189,7 @@ const DrawerRow = memo(function DrawerRow({
         onContextMenu={openItemMenu}
         onKeyDown={event => {
           suppressRowClickRef.current = false
-          touchMenuPointerAtRef.current = 0
-          if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-            openItemMenu(event)
-          }
+          openMenuFromKey(event)
         }}
       >
         {kind === 'app' && (
