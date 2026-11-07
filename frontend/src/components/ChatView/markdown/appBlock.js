@@ -30,6 +30,16 @@ export const shortText = (value, max) => typeof value === 'string' && value.trim
 export const boundedText = (value, max) => typeof value === 'string' && value.trim() && value.length <= max ? value.trim() : ''
 export const appBlockHref = (app, intent) => `/shell/?${new URLSearchParams({ app, intent })}`
 
+/** A change size (`lines: {added, removed}`, both whole numbers from 0 to a
+ *  billion) on a fact or a session row, or null. The host draws it as "+a −r"
+ *  in the theme's addition and deletion colours with a spoken name; the fact's
+ *  own `value` is the text an older host shows instead. */
+export function lineCounts(value) {
+  const count = n => Number.isSafeInteger(n) && n >= 0 && n <= 1e9
+  return value && typeof value === 'object' && count(value.added) && count(value.removed)
+    ? { added: value.added, removed: value.removed } : null
+}
+
 // The first entry wins for a repeated key, so rendered rows stay distinct.
 const firstBy = key => (item, index, list) => list.findIndex(other => key(other) === key(item)) === index
 
@@ -51,7 +61,8 @@ function blockFacts(value, max) {
     .map(fact => {
       // An unsafe source link stays plain snapshot text.
       const href = safeSourceUrl(fact.href, { httpsOnly: true })
-      return { label: boundedText(fact.label, APP_BLOCK_LIMITS.factLabel), value: fact.value, ...(href ? { href } : {}) }
+      const lines = lineCounts(fact.lines)
+      return { label: boundedText(fact.label, APP_BLOCK_LIMITS.factLabel), value: fact.value, ...(href ? { href } : {}), ...(lines ? { lines } : {}) }
     })
 }
 

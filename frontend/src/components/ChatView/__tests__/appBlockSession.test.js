@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appBlockFromToken } from '../markdown/appBlock.js'
+import { appBlockFromToken, lineCounts } from '../markdown/appBlock.js'
 import {
-  INCOMPLETE_CONFIRMATION, askMessage, passiveAppBlockAllowed, passiveAskAllowed, sessionAsk,
+  INCOMPLETE_CONFIRMATION, askMessage, confirmationOf, passiveAppBlockAllowed, passiveAskAllowed, sessionAsk,
   sessionDocumentReset, sessionRetained, sessionSnapshot, sessionState, sessionStateUpdate,
 } from '../markdown/appBlockSession.js'
 
@@ -258,7 +258,7 @@ test('a recovery hold says why once, in the block notice, not again on each acti
 
 test('the host advertises row-state and rows-v2, and a report can opt in to value-only row facts', async () => {
   const { SESSION_FEATURES } = await import('../markdown/appBlockSession.js')
-  assert.deepEqual([...SESSION_FEATURES], ['row-state', 'rows-v2'], 'rows-v2 extends row-state, which older apps still look for')
+  assert.deepEqual([...SESSION_FEATURES], ['row-state', 'rows-v2', 'lines-v1'], 'rows-v2 extends row-state, which older apps still look for')
   assert.equal(parseRows({ itemFacts: 'values' }).itemFacts, 'values')
   assert.equal(parseRows({ itemFacts: 'labels' }).itemFacts, '')
   assert.equal(sessionSnapshot(rowBlock(), parseRows({ itemFacts: 'values' })).itemFacts, 'values')
@@ -397,3 +397,31 @@ test('an app may ask only with passive admission and an admitted ask grant', () 
     assert.equal(passiveAskAllowed(app), false)
   }
 })
+
+// ---- lines-v1: a change size the host draws in colour, with its text kept.
+test('a change size is two whole counts from 0 to a billion, or nothing', () => {
+  assert.deepEqual(lineCounts({ added: 64, removed: 12, extra: 'ignored' }), { added: 64, removed: 12 })
+  assert.deepEqual(lineCounts({ added: 0, removed: 1e9 }), { added: 0, removed: 1e9 })
+  for (const bad of [null, undefined, 'x', [], { added: 1 }, { added: -1, removed: 0 }, { added: 1.5, removed: 0 },
+    { added: '3', removed: 0 }, { added: 1e9 + 1, removed: 0 }, { added: Number.NaN, removed: 0 }]) {
+    assert.equal(lineCounts(bad), null, JSON.stringify(bad))
+  }
+})
+
+test('rows and confirmation facts carry a valid change size; an invalid one leaves the text', () => {
+  const rows = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [], rows: [
+    { title: 'A', meta: 'owner/a', lines: { added: 64, removed: 12 } },
+    { title: 'B', meta: 'owner/b · +1 −2', lines: { added: -1, removed: 2 } }] }, 's', keys, new Set(), 'example').rows
+  assert.deepEqual(rows.map(row => row.lines), [{ added: 64, removed: 12 }, undefined])
+  assert.equal(rows[1].meta, 'owner/b · +1 −2')
+  const snapshot = sessionSnapshot(appRowBlock, sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [],
+    rows: [{ title: 'A', meta: 'owner/a', lines: { added: 3, removed: 0 } }] }, 's', keys, new Set(), 'example'))
+  assert.deepEqual(snapshot.items[0].lines, { added: 3, removed: 0 })
+  const confirmation = confirmationOf([{ title: 'A', facts: [{ label: 'Project', value: 'owner/a' },
+    { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }, { label: 'Size', value: '+1 −1', lines: { added: 'x' } }] }])
+  assert.deepEqual(confirmation[0].facts, [{ label: 'Project', value: 'owner/a' },
+    { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }, { label: 'Size', value: '+1 −1' }])
+  assert.equal(confirmationOf([{ title: 'A', facts: [{ label: 'Change', lines: { added: 1, removed: 0 } }] }]), null,
+    'the text value stays required, so an older reading never loses the size')
+})
+

@@ -38,11 +38,22 @@ export function Badges({ badges }) {
     <span key={i} className={`md-app-block__badge is-${badge.tone}`}>{badge.label}</span>)}</span>
 }
 
+/** A change size: "+a −r" in the theme's addition and deletion colours. The
+ *  signs stay, so colour is never the only cue, and assistive technology
+ *  hears "64 lines added, 12 removed". */
+export function LineCounts({ lines }) {
+  return <span className="md-app-block__lines">
+    <span className="md-app-block__sr-only">{`${lines.added} ${lines.added === 1 ? 'line' : 'lines'} added, ${lines.removed} removed`}</span>
+    <span aria-hidden="true"><span className="is-added">+{lines.added}</span>{'\u00a0'}<span className="is-removed">−{lines.removed}</span></span>
+  </span>
+}
+
 export function Facts({ facts }) {
   if (!facts.length) return null
   return <dl className="md-app-block__facts">{facts.map((fact, i) => <div key={i}>
     <dt>{fact.label}</dt>
-    <dd>{fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{fact.value}</a> : fact.value}</dd>
+    <dd>{fact.lines ? <LineCounts lines={fact.lines} />
+      : fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{fact.value}</a> : fact.value}</dd>
   </div>)}</dl>
 }
 
@@ -106,7 +117,8 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
         : <AppLink className="md-app-block__item-title" href={item.href} onInternalNav={onInternalNav}>{item.title}</AppLink>}
       <Badges badges={item.badges} />
       <Facts facts={item.facts} />
-      {item.appRow && item.meta ? <p className="md-app-block__item-meta">{item.meta}</p> : null}
+      {item.appRow && (item.meta || item.lines) ? <p className="md-app-block__item-meta">
+        {item.meta}{item.meta && item.lines ? ' · ' : null}{item.lines ? <LineCounts lines={item.lines} /> : null}</p> : null}
       {item.live?.note ? <p className="md-app-block__item-note">{item.live.note}</p> : null}
     </div>
     <ItemState live={item.live} title={item.title} />
@@ -152,7 +164,8 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
         Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
       {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
-        Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
+        {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
+        <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
     </header>
     {/* While the rows are the app's confirmation or its own rows, nothing is
         added around them. A live title is the app's; saved rows are still the

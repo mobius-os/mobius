@@ -30,7 +30,8 @@ test('a block renders its snapshot and app link without mounting the app', () =>
   assert.match(html, /<dt>Author<\/dt><dd>octocat<\/dd>/)
   assert.match(html, /<a href="https:\/\/github\.com\/owner\/repo" target="_blank" rel="noopener noreferrer">owner\/repo<\/a>/)
   assert.match(html, /md-app-block__badge is-success">Ready</)
-  assert.match(html, /href="\/shell\/\?app=example&amp;intent=open%3Aitem-42"[^>]*>Open in Example/)
+  // The header link shows the app's name; its accessible name says it opens the app.
+  assert.match(html, /href="\/shell\/\?app=example&amp;intent=open%3Aitem-42"><span class="md-app-block__sr-only">Open in <\/span>Example<svg/)
   assert.match(html, /aria-expanded="false"[^>]*>.*Show details here<\/button>/)
   assert.doesNotMatch(html, /md-app-block__view|<iframe/)
 })
@@ -45,7 +46,7 @@ test('an action and the expand control only name views the reader can open', () 
 test('link-only blocks have no expand control or action', () => {
   const html = render({ ...base, inline: false, action: { label: 'Send', intent: 'send:1' } })
   assert.doesNotMatch(html, /md-app-block__toggle|md-app-block__action/)
-  assert.match(html, /Open in Example/)
+  assert.match(html, /<span class="md-app-block__sr-only">Open in <\/span>Example/)
 })
 
 test('items render as generic linked rows with their own badges, facts and actions', () => {
@@ -308,7 +309,7 @@ test('expand:false offers no inline view; the action opens the app at its intent
   const html = render(noExpand)
   assert.doesNotMatch(html, /md-app-block__toggle|Show details here|aria-pressed|md-app-block__view/)
   assert.match(html, /<a class="md-app-block__action" href="\/shell\/\?app=example&amp;intent=send%3Aall">Publish<\/a>/)
-  assert.match(html, /intent=open%3Aitem-42"[^>]*>Open in Example/)
+  assert.match(html, /intent=open%3Aitem-42"><span class="md-app-block__sr-only">Open in <\/span>Example/)
   assert.match(html, /intent=open%3Aa"[^>]*>First change</)
   // The default keeps the expand control and the in-place view action.
   const expandable = render({ ...noExpand, expand: true })
@@ -557,3 +558,36 @@ test('an ask is drawn only for an admitted app on the attested chat\'s newest bl
     { state: { ...state, recoveryPending: true }, admitted: true, allowed: true, context },
   ]) assert.equal(blockAsk(input), null, JSON.stringify(input))
 })
+
+// ---- lines-v1: additions green and deletions red, with the signs as text.
+const LINES = /<span class="md-app-block__lines"><span class="md-app-block__sr-only">64 lines added, 12 removed<\/span><span aria-hidden="true"><span class="is-added">\+64<\/span>\u00a0<span class="is-removed">−12<\/span><\/span><\/span>/
+
+test('a change size is drawn as +a −r with a spoken name in an app row, after its metadata', () => {
+  const html = appRowsView({ title: '2 contributions', rows: [
+    { title: 'First change', meta: 'owner/a · Layer 1 of 2', lines: { added: 64, removed: 12 } },
+    { title: 'Second change', lines: { added: 1, removed: 0 } },
+    { title: 'Third change', meta: 'owner/c · +5 −1' }] })
+  const [first, second, third] = html.split('<li>').slice(1)
+  assert.match(first, new RegExp(`<p class="md-app-block__item-meta">owner/a · Layer 1 of 2 · ${LINES.source}</p>`))
+  assert.match(second, /<p class="md-app-block__item-meta"><span class="md-app-block__lines"><span class="md-app-block__sr-only">1 line added, 0 removed<\/span>/)
+  assert.match(third, /<p class="md-app-block__item-meta">owner\/c · \+5 −1<\/p>/, 'a row without lines keeps its plain text')
+  assert.doesNotMatch(third, /is-added|is-removed/)
+})
+
+test('a change size fact is coloured in the printed card and at Confirm; its text is the fallback', () => {
+  const fence = { ...base, interaction: 'inline', item_facts: 'values', confirm_facts: 'values', action: { label: 'Send 2', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Row A', intent: 'open:a', facts: [{ label: 'Project', value: 'owner/a' }, { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }] },
+      { title: 'Row B', intent: 'open:b', facts: [{ label: 'Change', value: '+7 −3', lines: { added: 7 } }] }] }
+  const printed = render(fence)
+  assert.match(printed, new RegExp(`<dt>Change</dt><dd>${LINES.source}</dd>`))
+  assert.match(printed, /<dt>Change<\/dt><dd>\+7 −3<\/dd>/, 'invalid counts show the fact\'s own text')
+  assert.match(printed, /<dt>Project<\/dt><dd>owner\/a<\/dd>/, 'nothing else is coloured')
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify(fence) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', confirming: true,
+    confirmation: [{ title: 'Row A', facts: [{ label: 'Project', value: 'owner/a' }, { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }] }] }] },
+  's', new Set(['send-batch:sel-1']), new Set(['open:a', 'open:b']))
+  const confirming = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {} }))
+  assert.match(confirming, new RegExp(`<li class="is-confirmation">[^]*<dt>Change</dt><dd>${LINES.source}</dd>`))
+  assert.match(confirming, />Not now<\/button><button type="button" class="md-app-block__action">Confirm<\/button>/)
+})
+

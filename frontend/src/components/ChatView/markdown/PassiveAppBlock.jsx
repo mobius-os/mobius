@@ -9,6 +9,7 @@ import { ASK_LABEL, askMessage, passiveAskAllowed, sessionSnapshot } from './app
 import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, StatusPill } from './AppBlockParts.jsx'
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
+import { useKeptFocus } from './blockFocus.js'
 import { passiveBlockMode } from './blockOwnership.js'
 import { appBlockChatKey, blockFingerprint, useAppBlockChat } from './appBlockChat.js'
 
@@ -182,7 +183,11 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   // chat's newest block of its app and intent; the block's JSON cannot.
   const chat = useAppBlockChat(appBlockChatKey(block))
   const chatRef = chat.ref
-  const sectionRef = useCallback(node => { nearRef(node); chatRef(node) }, [nearRef, chatRef])
+  const [sectionNode, setSectionNode] = useState(null)
+  const sectionRef = useCallback(node => { nearRef(node); chatRef(node); setSectionNode(node) }, [nearRef, chatRef])
+  // A control that vanishes under keyboard focus (Send becoming Confirm, an
+  // action hidden while it works) leaves focus in the block (blockFocus.js).
+  useKeptFocus(sectionNode)
   // Observers follow the committed showing (set after it renders).
   const [showing, setShowing] = useState(null)
   const [confirmRef, confirmView] = useOnScreen(showing)

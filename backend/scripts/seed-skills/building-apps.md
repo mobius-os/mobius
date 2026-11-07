@@ -446,7 +446,7 @@ most 16384.
   `kind:payload`: `kind` is 1-32 of `a-z`, `0-9`, `-` starting with a letter;
   `payload` is 1-256 printable ASCII characters with no whitespace. Invalid
   JSON or a bad required field leaves an ordinary code block.
-- Optional: up to 8 `facts` `{label (80), value (240), href?}`; up to 3
+- Optional: up to 8 `facts` `{label (80), value (240), href?, lines?}`; up to 3
   `badges` `{label (40), tone}` with tone `success|attention|danger|accent|neutral`;
   up to 12 `items` `{title, intent, facts? (up to 4), badges?, action?}`;
   `action` `{label (40), intent}`; `inline` (default `true`; `false` is a
@@ -465,6 +465,13 @@ most 16384.
   reply.
   Every intent field has the same bound. A repeated item intent or badge
   label keeps only its first entry.
+- A fact that is a change size may add `lines: {added, removed}` (whole
+  numbers, 0 to 1e9): the host then draws its value as "+added −removed",
+  the added count in the theme's green text colour and the removed count in
+  its danger text colour, with the signs kept so colour is never the only cue
+  and a spoken name ("64 lines added, 12 removed"). Keep the same text in
+  `value` (for example "+64 −12"): an older host shows it instead, and a fact
+  with invalid `lines` shows `value` too. Nothing else is coloured this way.
 - An item is drawn as its title over one quiet metadata line, its facts
   joined by a dot, each with its visible label. `"item_facts": "values"` opts
   the block in to value-only rows (labels kept for assistive technology); use
@@ -551,8 +558,9 @@ window messages; read them with `subscribe` or a `message` listener that checks
   action as an ordinary button), so keep your older presentation there.
   `"rows-v2"` means `rows`, `titleTone`, `titleBusy`, `context` and
   `app-block-refresh` below; a host without it sends no `context` and ignores
-  those fields. `"ask-v1"` means `ask` below; it is listed only when the owner
-  has also granted your app `chat.blocks.ask`.
+  those fields. `"lines-v1"` means a row's `lines` below; without it put the
+  change size in `meta` as text. `"ask-v1"` means `ask` below; it is listed
+  only when the owner has also granted your app `chat.blocks.ask`.
 - `{type:'moebius:app-block-refresh', sessionId, generation, reason}`, a hint
   to re-read your own state: `reason` is `turn` (a turn in this chat
   settled) or `visible` (the tab became visible again). It is sent only to a
@@ -609,10 +617,12 @@ included.
   exclamation mark for `attention` or `danger`, nothing for `neutral`. The
   title's words must say the state; the mark only reinforces it.
 - `rows` (`rows-v2`): your own list for the block, up to 12 `{title (120),
-  meta? (160), pill? (40), tone?, busy?, links?, intent?}`. They replace the
+  meta? (160), lines?, pill? (40), tone?, busy?, links?, intent?}`. They replace the
   block's saved items and root facts for display, and the "From this
   conversation" caption goes, because nothing saved is shown. `meta` is one
-  quiet line under the title (for example "owner/repo · +12 −4"), `pill` a
+  quiet line under the title (for example "owner/repo · +12 −4"); with
+  `lines-v1`, `lines: {added, removed}` is drawn at the end of that line as a
+  coloured change size, as for a fact, so leave it out of `meta`; `pill` a
   status pill in `tone` with a spinner when `busy`, `links` up to 2 `{label
   (40), url}` with uncredentialed `https:` URLs, and `intent` an app intent
   the row's title opens in your app. Rows carry no controls: while you report
@@ -694,8 +704,9 @@ included.
 
 **Confirmation contract.** To ask for Confirm, report the action with
 `confirming: true` and `confirmation`: the complete, current list of what
-Confirm will do, `[{title, facts: [{label, value}]}]` with 1-256 items, at most
-8 facts each and every text 1-512 characters. Only one action may be
+Confirm will do, `[{title, facts: [{label, value, lines?}]}]` with 1-256 items,
+at most 8 facts each and every text 1-512 characters (`lines` is a change
+size, as for a block fact; `value` stays required). Only one action may be
 confirming at a time, and a `hidden` action never is: if two or more report
 `confirming: true`, the host enables no Confirm, shows no list, and asks the
 reader to open the app. Describe the exact targets your app will act on now,
