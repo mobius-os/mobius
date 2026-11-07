@@ -1253,10 +1253,25 @@ def get_owner_or_app_with_connect_manage(
   )
 
 
+def is_account_owner(principal: Principal) -> bool:
+  """Whether the caller may use the owner's own Möbius account: its profile,
+  sign-in email, deployments and credit. These are the owner's alone, like
+  their own device: a shared-browser guest, or an app or agent working for
+  one, may neither read nor change them, whatever workspace access the guest
+  holds."""
+  return principal.browser is None
+
+
+def require_account_owner(principal: Principal) -> None:
+  if not is_account_owner(principal):
+    raise HTTPException(403, "Only the installation owner can use this Möbius account.")
+
+
 def get_owner_or_app_with_identity_manage(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
+  require_account_owner(principal)
   return _identity_manager(principal, db)
 
 
@@ -1265,15 +1280,18 @@ def get_identity_reader(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """``get_owner_or_app_with_identity_manage`` for reads a public service makes."""
+  require_account_owner(principal)
   return _identity_manager(principal, db)
 
 
-def _require_account_owner(principal: Principal) -> None:
-  """The owner's Möbius account and deployments are theirs alone, like their
-  own device: a shared-browser guest, or an app or agent working for one, may
-  neither read nor change them, whatever workspace access the guest holds."""
-  if principal.browser is not None:
-    raise HTTPException(403, "Only the installation owner can use this Möbius account.")
+def get_handle_directory_reader(
+  principal: Principal = Depends(get_principal_or_public_service),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """``get_identity_reader`` for the public handle directory. It resolves
+  other accounts' handles rather than reading this owner's account, so the
+  apps a guest uses may look collaborators up too."""
+  return _identity_manager(principal, db)
 
 
 def _identity_manager(principal: Principal, db: Session) -> models.Owner:
@@ -1284,7 +1302,6 @@ def _identity_manager(principal: Principal, db: Session) -> models.Owner:
   install/update already replaces that contract atomically. Omission on a
   later app version therefore revokes access on the next request.
   """
-  _require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner
@@ -1309,7 +1326,7 @@ def get_owner_or_app_with_railway_manage(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """Owner JWT, or an app with reviewed Railway deployment authority."""
-  _require_account_owner(principal)
+  require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner

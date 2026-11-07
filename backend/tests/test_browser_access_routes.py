@@ -105,6 +105,17 @@ def test_guest_and_apps_working_for_them_cannot_use_the_owners_mobius_account(ht
     no_picture = https.get("/api/identity/avatar", headers=headers)
     assert no_picture.status_code == 404, no_picture.text
 
+  # The Möbius credit meter is the account's too; other providers' usage and
+  # the public handle directory answer a guest exactly as they answer the owner.
+  usage = "/api/settings/provider-usage/mobius"
+  assert https.get(usage, headers=guest).status_code == 403
+  assert https.get(usage, headers=auth).status_code == 200
+  for path in ("/api/settings/provider-usage/claude", "/api/identity/handles/someone"):
+    owner_answer = https.get(path, headers=auth)
+    guest_answer = https.get(path, headers=guest)
+    assert guest_answer.status_code == owner_answer.status_code != 403, path
+    assert guest_answer.json() == owner_answer.json(), path
+
 
 def test_logout_ends_only_that_browser_not_other_recipient_or_owner(https, auth):
   grant_a, token_a, _ = invite(https, "Alice")
