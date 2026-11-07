@@ -56,6 +56,7 @@ def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
     "version": "1.0.0",
     "entry": "index.jsx",
     "icon": "icon.png",
+    "license": "MIT",
     "store": {
       "tagline": "Small and exact.",
       "description": "A calm list for the things that matter.",
@@ -70,6 +71,7 @@ def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
     _public_file("mobius.json", json.dumps(manifest).encode()),
     _public_file("index.jsx", b"export default function App() {}"),
     _public_file("icon.png", _png((1, 1, 1))),
+    _public_file("LICENSE", b"MIT License"),
     _public_file("static/store/hero.png", _png((2, 2, 2))),
     _public_file("static/store/screen.png", _png((3, 3, 3))),
   ]
@@ -198,6 +200,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
     "version": "1.0.0",
     "entry": "index.jsx",
     "icon": "icon.png",
+    "license": "MIT",
     "store": {
       "tagline": "Small and exact.",
       "description": "A calm list for the things that matter.",
@@ -212,6 +215,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
     "export default function App() { return null }\n", encoding="utf-8",
   )
   (repo / "icon.png").write_bytes(_png())
+  (repo / "LICENSE").write_text("MIT License\n", encoding="utf-8")
   (repo / "static" / "store").mkdir(parents=True)
   (repo / "static" / "store" / "screen.png").write_bytes(_png((7, 7, 7)))
   (repo / "static" / "runtime").mkdir()
@@ -234,6 +238,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
   assert resolved == accepted
   assert listing["screenshots"][0]["src"] == "static/store/screen.png"
   assert "static/store/screen.png" in published_paths
+  assert "LICENSE" in published_paths
   assert "static/runtime/bundle.js" not in published_paths
   assert ".mobius-static-assets.json" not in published_paths
 

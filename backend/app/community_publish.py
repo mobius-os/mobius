@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageOps, JpegImagePlugin, UnidentifiedImageError
 
-from app import app_git, icon_assets, models
+from app import app_git, icon_assets, models, store_licenses
 from app.config import get_settings
 from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
@@ -403,6 +403,7 @@ LISTING_ITEMS = (
   ("tagline", "Tagline"),
   ("description", "Description"),
   ("screenshots", "Screenshots"),
+  ("license", "License"),
   ("hero", "Banner image"),
 )
 _OPTIONAL_LISTING_ITEMS = {"hero"}
@@ -803,6 +804,20 @@ def _listing_screenshots(store: dict, by_path: dict[str, dict]) -> list[dict]:
   return projected
 
 
+def _listing_license(manifest: dict, by_path: dict[str, dict]) -> str:
+  """The offered license the source declares, with its text beside it."""
+  spdx = store_licenses.offered_license(manifest)
+  if not spdx:
+    raise _incomplete(
+      "Choose a free license so people know how they may use and share your app.",
+    )
+  if not store_licenses.has_license_file(by_path):
+    raise _incomplete(
+      "Add the license text. Saving the listing writes the LICENSE file.",
+    )
+  return spdx
+
+
 def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dict:
   """The listing as currently written, valid or not, for editing."""
   def text(field: str) -> str:
@@ -828,6 +843,7 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
+    "license": store_licenses.offered_license(manifest),
   }
 
 
@@ -939,6 +955,7 @@ def store_listing_review(
     store, "description", "a description", DESCRIPTION_MAX_BYTES,
   ))
   check("screenshots", lambda: _listing_screenshots(store, by_path))
+  check("license", lambda: _listing_license(manifest, by_path))
   check("hero", lambda: (
     _listing_asset(store.get("hero"), "banner image", by_path)
     if store.get("hero") not in (None, "") else None
@@ -964,6 +981,7 @@ def store_listing_review(
       "icon": results["icon"],
       "hero": {"path": hero} if hero else None,
       "screenshots": results["screenshots"],
+      "license": results["license"],
     }
   draft = _listing_draft(manifest, store, by_path)
   return {
