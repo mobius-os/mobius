@@ -4719,10 +4719,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   user-select: none;
 }
 
-.queued__hdr:hover {
-  background: var(--surface-2); /* CONTRACT: secondary opaque fill */
-}
-
 .queued__hdr:focus-visible {
   outline: 2px solid var(--accent, currentColor);
   outline-offset: -2px;
@@ -4782,10 +4778,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   gap: 0;
   border-radius: 8px;
   transition: background 0.15s;
-}
-
-.queued__row:hover {
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 .queued__toggle {
@@ -4876,10 +4868,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-.queued__row--in-composer:hover {
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
-}
-
 .queued__in-composer {
   flex-shrink: 0;
   align-self: center;
@@ -4919,21 +4907,43 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   display: block;
 }
 
-.queued__action:not(:disabled):hover {
-  color: var(--text);
-}
-
-.queued__steer:not(:disabled):hover {
-  color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
-}
-
-.queued__cancel:not(:disabled):hover,
 .queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+}
+
+/* Hover fills belong to fine pointers only. A touch tap leaves :hover on the
+   tapped element until the next tap elsewhere, so an ungated rule kept the
+   header or row lit after every expand/collapse. The row uses the header's
+   own secondary fill: the darker --bg read as a hole punched in the tray, and
+   on desktop it lit whichever row the expanding tray slid under a still
+   pointer. */
+@media (hover: hover) and (pointer: fine) {
+  .queued__hdr:hover,
+  .queued__row:hover {
+    background: var(--surface-2); /* CONTRACT: secondary opaque fill */
+  }
+
+  .queued__row--in-composer:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  }
+
+  .queued__action:not(:disabled):hover {
+    color: var(--text);
+  }
+
+  .queued__steer:not(:disabled):hover {
+    color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
+    background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
+  }
+
+  .queued__cancel:not(:disabled):hover {
+    color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
+    background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+  }
 }
 
 .queued__action:not(:disabled):active {

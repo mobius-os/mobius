@@ -313,6 +313,48 @@ test('queued row actions are compact and evenly spaced in send · edit · cancel
   assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
 })
 
+// Splits CSS into the text inside `@media (hover: hover) and (pointer: fine)`
+// blocks and everything else, matching braces so nested rules stay intact.
+function splitFinePointerHover(css) {
+  const opener = /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)\s*\{/g
+  let gated = ''
+  let ungated = ''
+  let cursor = 0
+  for (const match of css.matchAll(opener)) {
+    if (match.index < cursor) continue
+    ungated += css.slice(cursor, match.index)
+    let depth = 1
+    let i = match.index + match[0].length
+    while (depth > 0 && i < css.length) {
+      if (css[i] === '{') depth += 1
+      else if (css[i] === '}') depth -= 1
+      i += 1
+    }
+    gated += css.slice(match.index + match[0].length, i - 1)
+    cursor = i
+  }
+  ungated += css.slice(cursor)
+  return { gated, ungated }
+}
+
+test('queued tray hover fills never stick after a touch expand or collapse', () => {
+  const { gated, ungated } = splitFinePointerHover(stripComments(chatCss))
+
+  // A touch tap leaves :hover on the tapped header or row until the next tap
+  // elsewhere. Every tray hover rule must therefore be fine-pointer only.
+  assert.doesNotMatch(ungated, /\.queued[\w-]*(?:[.:][\w-]+|\([^)]*\))*:hover/,
+    'queued tray :hover rules must live inside (hover: hover) and (pointer: fine)')
+
+  // Header and rows share one secondary fill; --bg read as a hole in the tray.
+  const rowHover = gated.match(/[^{}]*\.queued__row:hover[^{}]*\{[^}]*\}/)?.[0] || ''
+  assert.match(rowHover, /\.queued__hdr:hover/)
+  assert.match(rowHover, /background:\s*var\(--surface-2\)/)
+  assert.doesNotMatch(gated, /\.queued__row:hover[^{]*\{[^}]*var\(--bg\)/)
+
+  // Press feedback stays available to touch.
+  assert.match(ungated, /\.queued__cancel:not\(:disabled\):active\s*\{[^}]*var\(--danger\)/)
+})
+
 test('queued message content participates in native text selection', () => {
   const css = stripComments(chatCss)
   const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
