@@ -124,9 +124,7 @@ async def start_queued_owner_continuation(
     raise
 
 
-def _input_must_queue(
-  db: Session, chat_id: str, principal: Principal, *, manual: bool = False,
-) -> bool:
+def _input_must_queue(db: Session, chat_id: str, *, waits_for_park: bool) -> bool:
   """Whether new input must join the queue behind work that already owns the
   chat, whether or not a turn is running.
 
@@ -135,11 +133,10 @@ def _input_must_queue(
     steer into a dying runner could start provider work mid-shutdown.
   - An approved typed restart wait (unfinished work A): later input B is
     durable but cannot be promoted until the ready-boot continuation owns A.
-  - A provider-limit park that resumes by itself: input waits for the
-    resumed turn rather than spending a new attempt or disabling the
-    automatic recovery. That includes the owner typing in a chat embedded in
-    an app (which carries the app's id); only an app's own sends skip it. The
-    explicit Resume control (`manual`) bypasses it.
+  - A provider-limit park that resumes by itself, when the caller says this
+    input waits for it (`waits_for_park`): the input waits for the resumed
+    turn rather than spending a new attempt or disabling the automatic
+    recovery.
 
   The typed send and the owner's empty send (`_send_queue`) share this one
   admission rule.
@@ -149,8 +146,7 @@ def _input_must_queue(
     is_draining()
     or activation_barrier_wait_id(db, chat_id) is not None
     or (
-      (principal.app_id is None or is_owner_input_principal(principal))
-      and not manual
+      waits_for_park
       and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
     )
   )
@@ -174,7 +170,9 @@ async def _send_queue(
   """
   if not is_owner_input_principal(principal) or principal.browser is not None:
     raise HTTPException(403, detail="Only the owner can send queued messages.")
-  if not (is_chat_running(chat_id) or _input_must_queue(db, chat_id, principal)):
+  # The held rows are the owner's own, never stamped as app work, so waiting
+  # behind an auto-resuming park keeps its recovery for every viewer.
+  if not (is_chat_running(chat_id) or _input_must_queue(db, chat_id, waits_for_park=True)):
     try:
       started = await start_queued_owner_continuation(
         chat_id, db, owner_send=True, restore_archived=restore_archived,
@@ -1593,7 +1591,12 @@ async def _send_message_locked(
   # before the queue-or-start branches below could spawn a turn. Resume
   # bypasses the park; a drain refused it above, so only an activation is
   # left to refuse it here.
-  if _input_must_queue(db, chat_id, principal, manual=manual_resume):
+  # A typed send through an app carries the app's id, which the park's
+  # auto-resume treats as app work, so only input without one waits for it.
+  # Resume bypasses the park by design.
+  if _input_must_queue(
+    db, chat_id, waits_for_park=principal.app_id is None and not manual_resume,
+  ):
     if manual_resume:
       raise HTTPException(409, detail={
         "code": "recovery_changed",

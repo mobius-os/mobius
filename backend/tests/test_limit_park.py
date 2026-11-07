@@ -857,17 +857,16 @@ def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
   ]
 
 
-@pytest.mark.parametrize("send", ["empty", "typed"])
-def test_the_owner_typing_in_an_embedded_chat_waits_behind_a_future_limit_park(
-  db, monkeypatch, send,
+def test_an_embedded_owners_empty_send_waits_and_keeps_the_park_resuming(
+  db, monkeypatch,
 ):
-  """An embedded chat's principal carries its app's id, yet it is the owner
-  typing: that input waits for the park like the owner's own, rather than
-  spending a provider attempt the way only an app's own send may."""
-  from app import schemas
+  """An embedded chat's principal carries its app's id. Its empty Send only
+  releases the owner's own held rows, which carry no app stamp, so it waits
+  for the park and the park still resumes by itself afterwards."""
+  from app.chat import _future_auto_resuming_limit_park_for_chat
   from app.deps import Principal
   from app.routes import chats_stream
-  cid = f"park-embedded-owner-{send}"
+  cid = "park-embedded-owner-empty"
   _seed_chat(cid, auto_resume=True)
   with SessionLocal() as setup_db:
     chat = setup_db.get(models.Chat, cid)
@@ -878,7 +877,7 @@ def test_the_owner_typing_in_an_embedded_chat_waits_behind_a_future_limit_park(
     }]
     setup_db.commit()
   _seed_run(
-    cid, f"rt-park-embedded-{send}", status="parked",
+    cid, "rt-park-embedded-empty", status="parked",
     parked_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
     park_reason="usage_limit",
   )
@@ -892,25 +891,16 @@ def test_the_owner_typing_in_an_embedded_chat_waits_behind_a_future_limit_park(
     owner=owner, app_id=42, scope="chat_embed", chat_id=cid,
     embed_instance_id="frame", operations=("chat:send",),
   )
-  app_send = Principal(owner=owner, app_id=42)
-  assert chats_stream._input_must_queue(db, cid, embedded) is True
-  assert chats_stream._input_must_queue(db, cid, app_send) is False, (
-    "an app's own send keeps its exemption"
-  )
-  db.expire_all()
-  chat = db.get(models.Chat, cid)
 
-  async def post():
-    if send == "empty":
-      return await chats_stream._send_queue(cid, db, embedded, False)
-    body = schemas.SendMessage(content="from the embed", cid="embedded-typed")
-    return await chats_stream._send_message_locked(body, cid, embedded, db, chat, False)
-
-  response = asyncio.run(post())
+  response = asyncio.run(chats_stream._send_queue(cid, db, embedded, False))
 
   assert response.status_code == 202
   assert scheduled == []
-  assert _run_row(f"rt-park-embedded-{send}")["status"] == "parked"
+  assert _run_row("rt-park-embedded-empty")["status"] == "parked"
+  db.expire_all()
+  assert _future_auto_resuming_limit_park_for_chat(db, cid) is not None, (
+    "the released rows must not switch off the park's automatic resume"
+  )
 
 
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
