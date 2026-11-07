@@ -84,16 +84,21 @@ bots, send messages or make paid calls.
 The owner pairs this Möbius with a credits service using the owner-only
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned. The paired service keeps the owner's credits, never this
-Möbius's database. A creator publishes the price of one action of their app
+Möbius's database. For now, app credits permissions work only for installed
+Store apps with accepted owner consent. Owner-built local apps cannot use
+`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
+their account, price and charge requests receive 403.
+
+A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
 `POST /api/identity/credits/charges`
 `{seller, app, action, idempotency_key, max_price_micro}`. Only the app's own
 service may call it, with the reviewed `permissions.spend_credits` grant (a
 critical consent row listing each `"<seller>/<app>"` it may pay; an update that
 adds one asks again): never the browser frame, a public invocation, or a
-service a shared-browser guest invoked, and never a seller the grant does not
+service a shared-browser guest or delegated helper invoked, and never a seller the grant does not
 list (`seller_not_allowed`). Each charge names the paying app (its package id,
-or its slug for an owner-built app) as `buyer_app`. The service reads the
+or its slug when no package id is recorded) as `buyer_app`. The service reads the
 published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
 price it showed the owner. Retrying the same idempotency key charges once;
 the key is scoped to the paying app before it reaches the service, so two apps

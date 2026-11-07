@@ -1447,7 +1447,7 @@ def get_credits_controller(
 
 
 def _require_credits_manage(principal: Principal, db: Session) -> models.Owner:
-  """The owner, or an app whose accepted contract holds ``credits_manage``.
+  """The owner, or a Store app's accepted ``credits_manage`` contract.
 
   The owner's credits are money at the paired credits service. That is its own
   critical grant, never implied by ``identity_manage``, whose consent covers
@@ -1460,6 +1460,7 @@ def _require_credits_manage(principal: Principal, db: Session) -> models.Owner:
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
   if _contract_data(app).get("credits_manage") is True:
     return principal.owner
   raise HTTPException(
@@ -1477,6 +1478,20 @@ def _contract_data(app: models.App) -> dict:
   return data if isinstance(data, dict) else {}
 
 
+def _require_credits_app_consent(app: models.App) -> None:
+  """Local manifests never self-grant access to the owner's credits.
+
+  Use the same Store/consent boundary as first-open approval, not package
+  identity: local apply can copy these permissions into a contract without
+  ever showing the owner a consent card.
+  """
+  if not app_consent.gated(app) or app_consent.status(app) != "accepted":
+    raise HTTPException(
+      status_code=403,
+      detail="App credits permissions need an installed Store app with accepted consent.",
+    )
+
+
 def spend_credits_targets(app: models.App) -> list[str]:
   """The ``"<seller>/<app>"`` entries the owner allowed this app to pay for."""
   targets = _contract_data(app).get("spend_credits")
@@ -1492,10 +1507,12 @@ def get_credits_spender(
   A charge spends the owner's money, so only the app's reviewed backend may
   make one: never its browser frame, which untrusted page content can drive,
   and never a public invocation (``get_principal`` refuses that scope), whose
-  caller is a visitor. A service a shared-browser guest invoked is refused
-  too: the guest must not spend the installation owner's credits. The route
-  then refuses a seller the grant does not name.
+  caller is a visitor. A service a shared-browser guest or delegated helper
+  invoked is refused too: neither may spend the installation owner's credits.
+  Only consent-gated Store apps qualify. The route then refuses a seller the
+  accepted grant does not name.
   """
+  require_nondelegated_owner_control(principal)
   if principal.app_id is None or not principal.app_is_service:
     raise HTTPException(
       status_code=403,
@@ -1509,6 +1526,7 @@ def get_credits_spender(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
   if not spend_credits_targets(app):
     raise HTTPException(
       status_code=403,
@@ -1524,7 +1542,7 @@ def get_credits_price_reader(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app with ``credits_manage`` or a ``spend_credits`` grant.
+  """Owner JWT, or a consented Store app's credits-management/spending grant.
 
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
@@ -1536,6 +1554,7 @@ def get_credits_price_reader(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
   if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
     return owner
   raise HTTPException(

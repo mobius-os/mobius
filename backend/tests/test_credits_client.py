@@ -7,7 +7,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app import credits_client, deps, models
+from app import app_consent, credits_client, deps, models
 from app.auth import create_access_token, create_agent_token, create_app_token
 from app.browser_access import BrowserLineage, redeem_invitation
 from app.config import get_settings
@@ -42,13 +42,17 @@ def paired(service):
   return service
 
 
-def _app(db, slug, *, spend_credits=("ana/prompts",), package_id=None, **grants):
+def _app(db, slug, *, spend_credits=("ana/prompts",), package_id=None, store=True,
+         **grants):
   row = models.App(
     slug=slug, source_dir=f"/tmp/mobius-tests/{slug}", name=slug,
     description="", jsx_source="export default function App(){}",
     compiled_path="/tmp/app.js", package_id=package_id,
+    manifest_url=f"https://store.example/{slug}/mobius.json" if store else None,
     capability_contract={"data": {"spend_credits": list(spend_credits), **grants}},
   )
+  if store:
+    assert app_consent.accept(row, app_consent.request_digest(app_consent.current_rows(row)))
   db.add(row)
   db.commit()
   db.refresh(row)
@@ -58,7 +62,7 @@ def _app(db, slug, *, spend_credits=("ana/prompts",), package_id=None, **grants)
 def _as(db, app, service):
   owner = db.query(models.Owner).first()
   token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
-                           service=service)
+                           consent=app_consent.session_id(app), service=service)
   return {"Authorization": f"Bearer {token}"}
 
 
@@ -367,6 +371,43 @@ def test_an_app_pays_only_the_sellers_its_grant_lists(client, auth, db, paired):
   assert len(paired.calls) == calls
 
 
+@pytest.mark.parametrize("through_frame", [False, True], ids=["agent", "app-frame"])
+def test_a_service_cannot_launder_helper_lineage_into_spending_credits(
+  client, auth, db, paired, through_frame,
+):
+  from tests.test_app_services import SERVICE_TOKEN, _service_agent_token, _service_app
+
+  app = _service_app(db, service_bytes=SERVICE_TOKEN)
+  app.manifest_url = "https://store.example/service-test/mobius.json"
+  app.capability_contract = {
+    **app.capability_contract, "data": {"spend_credits": ["ana/prompts"]},
+  }
+  assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
+  db.commit()
+  helper = _service_agent_token(db, delegated=True)
+  paired.answers["charges"] = (200, {"charge_id": "c1"})
+  for headers, delegated in (({"Authorization": f"Bearer {helper}"}, True), (auth, False)):
+    if through_frame:
+      frame = client.post("/api/auth/app-token", headers=headers, json={"app_id": app.id})
+      assert frame.status_code == 200, frame.text
+      headers = {"Authorization": f"Bearer {frame.json()['token']}"}
+    invocation = client.get(f"/api/apps/{app.id}/service/token", headers=headers)
+    assert invocation.status_code == 200, invocation.text
+    token = invocation.json()["token"]
+    principal = deps.get_principal(token, db)
+    assert principal.app_is_service
+    assert principal.delegation_id == ("service-helper" if delegated else None)
+    calls = len(paired.calls)
+    charged = client.post("/api/identity/credits/charges", json=CHARGE,
+                          headers={"Authorization": f"Bearer {token}"})
+    assert charged.status_code == (403 if delegated else 200), charged.text
+    assert len(paired.calls) == calls + (0 if delegated else 1)
+    if delegated:
+      assert "Delegated" in charged.json()["detail"]
+    else:
+      assert charged.json()["charge_id"] == "c1"
+
+
 def test_an_app_that_spends_credits_can_read_the_price_it_pays(client, auth, db, paired):
   granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
   path = "/api/identity/credits/prices/ana?app_slug=prompts"
@@ -450,6 +491,48 @@ OWNER_CREDIT_ROUTES = [
 
 
 @pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+@pytest.mark.parametrize("has_package_id", [False, True], ids=["local", "local-package"])
+def test_local_manifest_credits_permissions_do_not_grant_credits_access(
+  client, auth, db, paired, service_scope, has_package_id,
+):
+  from app.app_capabilities import contract_from_manifest
+
+  app = _app(db, "local-credits", store=False,
+             package_id="local-package" if has_package_id else None)
+  app.capability_contract = contract_from_manifest({
+    "permissions": {"credits_manage": True, "spend_credits": ["ana/prompts"]},
+  })
+  db.commit()
+  assert not app_consent.gated(app)
+  headers = _as(db, app, service_scope)
+  calls = len(paired.calls)
+  routes = [*OWNER_CREDIT_ROUTES,
+            ("POST", "/api/identity/credits/charges", CHARGE)]
+  for method, path, body in routes:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+    if not path.endswith("/charges") or service_scope == "private":
+      assert "installed Store app with accepted consent" in refused.json()["detail"]
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("gate", [deps.get_credits_reader, deps.get_credits_controller,
+                                  deps.get_credits_spender, deps.get_credits_price_reader])
+def test_credits_gates_require_the_store_contract_to_be_accepted(auth, db, gate):
+  app = _app(db, "credits-manager", credits_manage=True)
+  owner = db.query(models.Owner).first()
+  principal = deps.Principal(owner=owner, app_id=app.id, app_is_service=True)
+  assert gate(principal=principal, db=db) is not None
+  app.accepted_consent = None
+  db.commit()
+  with pytest.raises(HTTPException) as refused:
+    gate(principal=principal, db=db)
+  assert refused.value.status_code == 403
+  assert "installed Store app with accepted consent" in refused.value.detail
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
 def test_an_app_approved_only_to_manage_identity_cannot_reach_the_owners_credits(
   client, auth, db, paired, service_scope
 ):
@@ -502,7 +585,7 @@ def _guest(db, app=None):
       {"sub": owner.username}, token_epoch=owner.token_epoch, browser=lineage)
   else:
     token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
-                             browser=lineage)
+                             consent=app_consent.session_id(app), browser=lineage)
   return {"Authorization": f"Bearer {token}"}
 
 
@@ -515,7 +598,7 @@ def _delegated_helper(db, app=None):
                                **helper)
   else:
     token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
-                             **helper)
+                             consent=app_consent.session_id(app), **helper)
   return {"Authorization": f"Bearer {token}"}
 
 
@@ -569,10 +652,10 @@ def test_every_credits_route_has_exactly_one_gate():
 
 def test_two_apps_using_the_same_key_are_two_charges_upstream(client, auth, db, paired):
   store_app = _app(db, "store-payer", package_id="pkg-store-payer")
-  local_app = _app(db, "local-payer")
+  unpackaged_app = _app(db, "unpackaged-payer")
   paired.answers["charges"] = (200, {"charge_id": "c1"})
   sent = []
-  for app in (store_app, local_app, store_app):
+  for app in (store_app, unpackaged_app, store_app):
     answer = client.post("/api/identity/credits/charges", json=CHARGE,
                          headers=_as(db, app, "private"))
     assert answer.status_code == 200, answer.text

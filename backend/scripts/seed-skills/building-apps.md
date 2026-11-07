@@ -1074,6 +1074,12 @@ The owner pairs this Möbius with a credits service using the owner-only
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned.
 
+For now, app credits permissions work only for installed Store apps with
+accepted owner consent. Owner-built local apps cannot use `credits_manage`
+or `spend_credits`, even if their `mobius.json` declares them: account, price
+and charge requests receive 403. A delegated helper cannot spend credits,
+including through an otherwise approved app service.
+
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
 `PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
