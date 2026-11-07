@@ -144,10 +144,12 @@ test('retained sends move into the tray while authoritative failures restore the
   )
   assert.match(
     freshSend,
-    /else \{[\s\S]*?keepFailedDraft\(failedAttempt\)/,
+    /else \{[\s\S]*?keepFailedDraft\(failedAttempt, err\)/,
     'only the non-retained branch may restore the composer',
   )
-  assert.match(chatView, /function keepFailedDraft\(failedAttempt\) \{\n\s+if \(!fromComposer\) return\n\s+rememberFailedAttempt\(failedAttempt\)\n\s+restoreComposerAfterFailedSend\(\)/)
+  // A helper's chat refuses every owner send, so that refusal alone is not
+  // remembered for delivery reconciliation; the draft still comes back.
+  assert.match(chatView, /function keepFailedDraft\(failedAttempt, error\) \{\n\s+if \(!fromComposer\) return\n(?:\s+\/\/.*\n)*\s+if \(!isHelperChatSendFailure\(error\)\) rememberFailedAttempt\(failedAttempt\)\n\s+restoreComposerAfterFailedSend\(\)/)
   assert.match(chatView, /if \(keepQueued\) \{[\s\S]*?status: 'locally_queued', cid: silentCid/,
     'a retained answer must return a local receipt, not pretend server acceptance')
   assert.doesNotMatch(chatView, /queuedAnswerMsg|const silentUserMsg/,

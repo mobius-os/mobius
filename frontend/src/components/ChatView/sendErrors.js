@@ -6,18 +6,22 @@ export class ChatTransportError extends Error {
 }
 
 export class ChatHttpError extends Error {
-  constructor(status, { code = null, detail = null } = {}) {
+  constructor(status, { code = null, detail = null, parentChatId = null } = {}) {
     super(`HTTP ${status}`)
     this.name = 'ChatHttpError'
     this.status = Number(status)
     this.code = typeof code === 'string' ? code : null
     this.detail = typeof detail === 'string' ? detail : null
+    // A helper's chat refuses owner sends and names the parent chat that
+    // messages it (`delegation_managed`).
+    this.parentChatId = typeof parentChatId === 'string' && parentChatId ? parentChatId : null
   }
 }
 
 export async function chatHttpError(response) {
   let code = null
   let detail = null
+  let parentChatId = null
   try {
     const payload = await response.json()
     const responseDetail = payload?.detail
@@ -29,8 +33,9 @@ export async function chatHttpError(response) {
       : typeof responseDetail?.message === 'string'
         ? responseDetail.message
         : null
+    parentChatId = responseDetail?.parent_chat_id ?? null
   } catch {}
-  return new ChatHttpError(response.status, { code, detail })
+  return new ChatHttpError(response.status, { code, detail, parentChatId })
 }
 
 export function isQuestionStateChangedError(error) {

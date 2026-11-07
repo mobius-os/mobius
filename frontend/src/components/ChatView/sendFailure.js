@@ -8,6 +8,15 @@ export function isModelSelectionRequiredFailure(error) {
     && error?.code === 'model_selection_required'
 }
 
+// A helper's chat belongs to the parent agent that started it, so the server
+// refuses every direct owner send there. Retrying can never succeed.
+export function isHelperChatSendFailure(error) {
+  return Number(error?.status) === 409
+    && error?.code === 'delegation_managed'
+}
+
+export const HELPER_CHAT_SEND_MESSAGE = 'This is a helper’s chat. Message it from its parent chat.'
+
 export function isAmbiguousSendFailure(error) {
   return error?.name === 'ChatTransportError'
     || error?.name === 'AbortError'
@@ -74,6 +83,7 @@ export function sendFailureMessage(error, { online = true } = {}) {
   if (isModelSelectionRequiredFailure(error)) {
     return 'Choose a model before sending. Your message is safe in the composer.'
   }
+  if (isHelperChatSendFailure(error)) return HELPER_CHAT_SEND_MESSAGE
   if (retained) {
     return 'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.'
   }
@@ -86,6 +96,7 @@ export function sendFailureMessage(error, { online = true } = {}) {
 export function detachedSendFailureMessage(error, { online = true } = {}) {
   if (error?.outboxRetained === true) return sendFailureMessage(error, { online })
   if (!sendWasOnline(error, online)) return 'You’re offline. Try again when you reconnect.'
+  if (isHelperChatSendFailure(error)) return HELPER_CHAT_SEND_MESSAGE
   if (isAmbiguousSendFailure(error)) {
     return 'Möbius couldn’t confirm the send. It’s safe to try again.'
   }
@@ -100,6 +111,9 @@ export function queueSendFailureMessage(error) {
   }
   if (isModelSelectionRequiredFailure(error)) {
     return 'Choose a model before sending. Your queued messages are unchanged.'
+  }
+  if (isHelperChatSendFailure(error)) {
+    return `${HELPER_CHAT_SEND_MESSAGE} Your queued messages are unchanged.`
   }
   // A refusal says why; retrying would not change it.
   const status = Number(error?.status)

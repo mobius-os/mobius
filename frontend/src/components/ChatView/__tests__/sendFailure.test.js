@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   detachedSendFailureMessage,
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
@@ -219,10 +220,33 @@ test('a refused empty Send says the queue is unchanged, never that a draft came 
 
 test('a refused empty Send shows the server\'s reason instead of inviting a retry', () => {
   const message = queueSendFailureMessage(new ChatHttpError(409, {
-    code: 'delegation_managed',
-    detail: 'This evaluator chat is managed by its parent workflow.',
+    code: 'goal_clear_retired',
+    detail: 'Clear the Goal from its confirmed × control instead.',
   }))
-  assert.match(message, /managed by its parent workflow/)
+  assert.match(message, /confirmed × control/)
   assert.match(message, /unchanged/)
   assert.doesNotMatch(message, /try again/i)
+})
+
+test('a helper chat refusal says whose chat it is and never invites a retry', async () => {
+  const response = new Response(JSON.stringify({ detail: {
+    code: 'delegation_managed',
+    message: "This is a helper's chat. Message it from its parent chat.",
+    parent_chat_id: 'parent-chat',
+  } }), { status: 409 })
+  const error = await chatHttpError(response)
+  assert.equal(isHelperChatSendFailure(error), true)
+  assert.equal(error.parentChatId, 'parent-chat')
+  for (const message of [
+    sendFailureMessage(error),
+    detachedSendFailureMessage(error),
+    queueSendFailureMessage(error),
+  ]) {
+    assert.match(message, /^This is a helper’s chat\. Message it from its parent chat\./)
+    assert.doesNotMatch(message, /try again|send it again|evaluator|workflow/i)
+  }
+  assert.match(queueSendFailureMessage(error), /queued messages are unchanged/)
+  // Other conflicts keep their own handling.
+  assert.equal(isHelperChatSendFailure(new ChatHttpError(409, { code: 'pending_question_open' })), false)
+  assert.equal(new ChatHttpError(409).parentChatId, null)
 })

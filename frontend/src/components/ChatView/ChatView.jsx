@@ -176,12 +176,13 @@ import { createQueuedEditOrder } from './queuedEditOrder.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
-  sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { sendFailureNotice } from './HelperChatSendNotice.jsx'
 import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
@@ -3333,9 +3334,12 @@ export default function ChatView({
     }
     // A failed send's recovery belongs to the composer's draft; a send from
     // elsewhere only re-reads the transcript, which shows it if it arrived.
-    function keepFailedDraft(failedAttempt) {
+    function keepFailedDraft(failedAttempt, error) {
       if (!fromComposer) return
-      rememberFailedAttempt(failedAttempt)
+      // A helper's chat refuses every owner send, so nothing landed and there
+      // is no delivery to reconcile. Remembering the attempt would let a later
+      // transcript read replace the refusal with "send it again".
+      if (!isHelperChatSendFailure(error)) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
     }
     function settleAmbiguousFailure(failedAttempt) {
@@ -3589,9 +3593,11 @@ export default function ChatView({
             transportContent: text,
             attachments: composerFileSnapshot,
           }
-          keepFailedDraft(failedAttempt)
+          keepFailedDraft(failedAttempt, err)
         }
-        const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+        const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+          online: getOnlineSnapshot(), onInternalNav: internalNav,
+        })
         setSendFailure(banner)
         if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
         if (modelSelectionBlocked) {
@@ -3804,7 +3810,7 @@ export default function ChatView({
           transportContent: sendText,
           attachments: composerFileSnapshot,
         }
-        keepFailedDraft(failedAttempt)
+        keepFailedDraft(failedAttempt, err)
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
         // same cid with the restored draft so a manual retry can only reconcile
@@ -3816,7 +3822,9 @@ export default function ChatView({
           return next
         })
       }
-      const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+      const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+        online: getOnlineSnapshot(), onInternalNav: internalNav,
+      })
       setSendFailure(banner)
       if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
       if (modelSelectionBlocked) {
@@ -3857,6 +3865,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     acknowledgeFirstMessageAccepted,
+    internalNav,
   ])
 
   useEffect(() => {
