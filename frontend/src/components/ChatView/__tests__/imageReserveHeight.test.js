@@ -83,8 +83,10 @@ describe('.md-image-frame reserves height before image decode', () => {
   })
 
   test('frame width can shrink from first-layout image dimensions', () => {
-    assert.match(body, /width:\s*min\(100%,\s*var\(--md-image-fit-width/,
-      'portrait screenshots must shrink the frame width instead of showing side letterboxes')
+    assert.match(body, /width:\s*var\(--md-image-fit-width/,
+      'server dimensions must set the preferred width before image bytes arrive')
+    assert.match(body, /max-width:\s*100%/,
+      'the definite preferred width must still shrink to its containing column')
   })
 
   test('frame background is transparent so any remaining containment blends into chat', () => {
