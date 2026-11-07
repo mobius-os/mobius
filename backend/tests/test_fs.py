@@ -386,6 +386,64 @@ def test_the_paired_credits_key_is_out_of_reach_of_the_filesystem_api(
   assert [p.name for p in folder.iterdir()] == ["credentials.json"]
 
 
+@pytest.mark.parametrize("private_path", [
+  "credits-client/credentials.json", "cli-auth/provider/session.json",
+  "app-secrets/keys.json", "db/ultimate.db-wal",
+  ".contribution-runtime/receipt.json",
+])
+@pytest.mark.parametrize("symlinked_store", [False, True])
+def test_data_dir_secrets_stay_private_with_a_widened_view(
+  client, auth, db, tmp_path, monkeypatch, private_path, symlinked_store,
+):
+  """Widening the view must not turn data-dir-relative secrets into public files,
+  including a private store symlinked elsewhere inside the widened root."""
+  view = tmp_path / "view"
+  data = view / "data"
+  data.mkdir(parents=True)
+  monkeypatch.setattr(get_settings(), "data_dir", str(data))
+  monkeypatch.setattr(get_settings(), "fs_view_root", str(view))
+  store, *tail = Path(private_path).parts
+  actual_store = data / store
+  if symlinked_store:
+    actual_store = view / "relocated"
+    (data / store).symlink_to(actual_store, target_is_directory=True)
+  secret = actual_store.joinpath(*tail)
+  secret.parent.mkdir(parents=True, exist_ok=True)
+  secret.write_text("private stand-in")
+  alias = view / "alias"
+  alias.symlink_to(actual_store, target_is_directory=True)
+  paths = [f"data/{private_path}", str(alias.joinpath(*tail).relative_to(view)),
+           secret.relative_to(view).as_posix()]
+  app_auth, _ = _app_auth(db, filesystem_access=True)
+  for headers in (auth, app_auth):
+    tree = client.get("/api/fs/tree", params={"path": "data"}, headers=headers)
+    assert tree.status_code == 200
+    # The DB directory stays listable; only its raw file and sidecars are denied.
+    if store == "db" and not symlinked_store:
+      tree = client.get("/api/fs/tree", params={"path": "data/db"}, headers=headers)
+      assert tree.json()["entries"] == []
+      assert Path(private_path).name in tree.json()["redacted"]
+    else:
+      assert store not in {entry["name"] for entry in tree.json()["entries"]}
+      # A symlink is omitted regardless of its target; a literal store is redacted.
+      if not symlinked_store:
+        assert store in tree.json()["redacted"]
+    for path in paths:
+      for route in ("read", "tree", "du", "git"):
+        assert client.get(f"/api/fs/{route}", params={"path": path},
+                          headers=headers).status_code == 403, (route, path)
+    usage = client.get("/api/fs/du", headers=headers)
+    assert usage.status_code == 200 and usage.json()["bytes"] == 0
+    # Mutations are data-dir-relative. An out-of-data-dir symlink is refused
+    # by containment before the deny-list is reached.
+    denied = 400 if symlinked_store else 403
+    assert client.put("/api/fs/write", params={"path": private_path}, content="changed",
+                      headers={**headers, "Content-Type": "text/plain"}).status_code == denied
+    assert client.delete("/api/fs/delete", params={"path": private_path},
+                         headers=headers).status_code == denied
+  assert secret.read_text() == "private stand-in"
+
+
 @pytest.mark.parametrize("rel", [
   "push/private_key.pem",
   "shared/connect/outbound/config.json",
