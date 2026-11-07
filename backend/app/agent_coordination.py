@@ -1782,9 +1782,10 @@ async def _steer_running_recipient(chat_id: str) -> str:
       provider = chat.provider or "claude"
       if not has_live_steerable_turn(chat_id, provider):
         return "queued"
-      pending = list(chat.pending_messages or [])
       # Peer data must never jump ahead of owner-authored work, a Wait result,
-      # or any other product continuation already in the chat queue.
+      # or any other product continuation already in the chat queue. Rows a
+      # Stop held wait for the owner, not for this turn.
+      pending = [row for row in chat.pending_messages or [] if not row.get("held")]
       if pending and len(_carrier_rows(pending)) != len(pending):
         return "queued"
       run = db.query(models.ChatRun).filter(

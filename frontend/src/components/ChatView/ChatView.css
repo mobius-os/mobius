@@ -4697,13 +4697,21 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
+.queued__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  margin-bottom: 4px;
+}
+
 .queued__hdr {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px 6px;
-  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  margin-bottom: 4px;
   gap: 8px;
   cursor: pointer;
   border-radius: 6px;
@@ -4720,9 +4728,13 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   outline-offset: -2px;
 }
 
-.queued--collapsed .queued__hdr {
+.queued--collapsed .queued__bar {
   border-bottom: 0;
   margin-bottom: 0;
+}
+
+.queued__send-held {
+  margin-top: 0;
 }
 
 .queued--collapsed {

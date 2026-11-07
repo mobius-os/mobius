@@ -272,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
