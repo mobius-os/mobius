@@ -66,6 +66,9 @@ def _as(db, app, service):
   return {"Authorization": f"Bearer {token}"}
 
 
+TOPUP_ID = "12345678-1234-4567-89ab-123456789abc"
+
+
 CHARGE = {"seller": "ana", "app": "prompts", "action": "run",
           "idempotency_key": "run-00000001", "max_price_micro": 500_000}
 
@@ -265,17 +268,17 @@ def test_an_unreachable_service_is_an_error_not_a_zero(client, auth, paired, mon
 
 def test_owner_actions_reach_the_service_routes(client, auth, paired):
   checkout = "https://checkout.stripe.com/c/pay/cs_test_a1#fid=x"
-  paired.answers["topups"] = (200, {"topup_id": "t1", "checkout_url": checkout})
+  paired.answers["topups"] = (200, {"topup_id": TOPUP_ID, "checkout_url": checkout})
   paired.answers["payouts/connect"] = (
     200, {"connect_url": "https://connect.stripe.com/setup/e/acct_1/abc"})
   started = client.post("/api/identity/credits/topup", headers=auth, json={
     "amount_cents": 1000, "waiver_accepted": True})
-  assert started.json() == {"checkout_url": checkout, "topup_id": "t1"}
+  assert started.json() == {"checkout_url": checkout, "topup_id": TOPUP_ID}
   assert paired.calls[-1]["json"] == {
     "amount_cents": 1000, "waiver_accepted": True}
 
   requests = [
-    ("get", "/api/identity/credits/topups/t1", None, "GET", "topups/t1"),
+    ("get", f"/api/identity/credits/topups/{TOPUP_ID}", None, "GET", f"topups/{TOPUP_ID}"),
     ("get", "/api/identity/credits/transactions?limit=500", None,
      "GET", "transactions?limit=200"),
     ("post", "/api/identity/credits/model-funding",
@@ -314,7 +317,7 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
   None,
 ])
 def test_a_checkout_page_that_is_not_stripes_is_never_passed_on(client, auth, paired, page):
-  paired.answers["topups"] = (200, {"topup_id": "t1", "checkout_url": page})
+  paired.answers["topups"] = (200, {"topup_id": TOPUP_ID, "checkout_url": page})
   refused = client.post("/api/identity/credits/topup", headers=auth, json={
     "amount_cents": 1000, "waiver_accepted": True})
   assert refused.status_code == 502
@@ -474,7 +477,7 @@ OWNER_CREDIT_ROUTES = [
   ("GET", "/api/identity/credits", None),
   ("GET", "/api/identity/credits/transactions", None),
   ("GET", "/api/identity/credits/purchase-terms", None),
-  ("GET", "/api/identity/credits/topups/t1", None),
+  ("GET", f"/api/identity/credits/topups/{TOPUP_ID}", None),
   ("GET", "/api/identity/credits/prices/ana", None),
   ("POST", "/api/identity/credits/pair",
    {"operator_url": "https://www.mobius.you/credits", "key": "mbc_other_key"}),
@@ -701,12 +704,169 @@ def test_a_purchase_on_terms_from_an_earlier_pairing_buys_nothing(client, auth, 
   assert len(paired.calls) == calls
 
   paired.answers["topups"] = (200, {
-    "checkout_url": "https://checkout.stripe.com/c/pay/cs_1", "topup_id": "t1"})
+    "checkout_url": "https://checkout.stripe.com/c/pay/cs_1", "topup_id": TOPUP_ID})
   current = client.get("/api/identity/credits/purchase-terms", headers=auth).json()
   started = client.post("/api/identity/credits/topup", headers=auth, json={
     "amount_cents": 500, "pairing": current["pairing"]})
   assert started.status_code == 200, started.text
   assert paired.calls[-1]["url"] == "https://credits.example.test/api/billing/topups"
+
+
+# --- Path pieces cannot turn a public price read into a private account read ----
+
+
+@pytest.mark.parametrize("segment", ["%2e", "%2e%2e", "Ana", "ana.name"])
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_a_spending_app_cannot_escape_the_sellers_price_path(
+  client, auth, db, paired, segment, service_scope,
+):
+  app = _app(db, "price-reader")
+  calls = len(paired.calls)
+  refused = client.get(f"/api/identity/credits/prices/{segment}",
+                       headers=_as(db, app, service_scope))
+  assert refused.status_code == 422, refused.text
+  assert refused.json()["detail"]["code"] == "invalid_name"
+  assert len(paired.calls) == calls
+
+
+@pytest.mark.parametrize("piece", [".", "..", "../balance", "%2e%2e", "name?x=y",
+                                  "name#balance", "name\\balance", "name\n", ""])
+@pytest.mark.parametrize("field", ["seller", "topup_id", "app", "action", "app_slug"])
+def test_invalid_credits_names_never_send_the_installation_key(paired, piece, field):
+  calls = len(paired.calls)
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    if field == "seller":
+      credits_client.prices(piece)
+    elif field == "topup_id":
+      credits_client.read_topup(piece)
+    elif field == "app_slug":
+      credits_client.prices("ana", piece)
+    else:
+      credits_client.publish_price(piece if field == "app" else "prompts",
+                                   piece if field == "action" else "run", 1, None, True)
+  assert refused.value.status == 422 and refused.value.code == "invalid_name"
+  assert len(paired.calls) == calls
+
+
+@pytest.mark.parametrize("field,piece", [
+  ("seller", "a" * 41), ("seller", "Ana"),
+  ("app", "a" * 81), ("app", "Prompts"), ("action", "Run"),
+  ("topup_id", "not-a-uuid"),
+])
+def test_credits_names_use_the_services_handle_slug_and_id_formats(paired, field, piece):
+  calls = len(paired.calls)
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    if field == "seller":
+      credits_client.prices(piece)
+    elif field == "topup_id":
+      credits_client.read_topup(piece)
+    else:
+      credits_client.publish_price(piece if field == "app" else "prompts",
+                                   piece if field == "action" else "run", 1, None, True)
+  assert refused.value.status == 422
+  assert len(paired.calls) == calls
+
+
+def test_valid_credits_names_keep_the_service_path(paired):
+  credits_client.read_topup(TOPUP_ID)
+  assert paired.calls[-1]["url"].endswith(f"/topups/{TOPUP_ID}")
+  credits_client.prices("a" * 40, "a" + "._-9" * 19 + "xyz")
+  assert paired.calls[-1]["url"].endswith(
+    f"/prices/{'a' * 40}?app_slug={'a' + '._-9' * 19 + 'xyz'}")
+  credits_client.publish_price("app.v2_3-4", "run.v2_3-4", 1, None, True)
+  assert paired.calls[-1]["url"].endswith("/priced-actions/app.v2_3-4/run.v2_3-4")
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_a_consented_credits_manager_can_pair_and_unpair(
+  client, auth, db, paired, service_scope,
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _as(db, app, service_scope)
+  answer = client.post("/api/identity/credits/pair", headers=headers, json={
+    "operator_url": "https://credits.example", "key": "mbc_replacement"})
+  assert answer.status_code == 200, answer.text
+  assert credits_client.load_credentials()["operator_url"] == "https://credits.example"
+  assert credits_client.load_credentials()["key"] == "mbc_replacement"
+  assert client.post("/api/identity/credits/unpair", headers=headers).status_code == 200
+  assert credits_client.load_credentials() is None
+
+
+# --- An upstream server error is not proof that a charge failed -----------------
+
+
+UNKNOWN_CHARGE = {
+  "code": "charge_outcome_unknown",
+  "message": "The charge outcome is unknown. Retry with the same idempotency key.",
+}
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 599])
+@pytest.mark.parametrize("body", ["Bad Gateway", {"detail": {
+  "code": "upstream_failed", "message": "Server failed.", "extra": "not a refusal"}}])
+def test_upstream_charge_failures_require_retrying_the_same_key(
+  client, auth, db, paired, status, body,
+):
+  app = _app(db, "granted")
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (status, body)
+  calls = len(paired.calls)
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert unknown.status_code == 503, unknown.text
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+  assert len(paired.calls) == calls + 1  # The client never retries a charge itself.
+  first = paired.calls[-1]["json"]
+
+  paired.answers["charges"] = (200, {"charge_id": "c1", "replayed": True})
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["replayed"] is True
+  assert paired.calls[-1]["json"] == first
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout,
+                                  httpx.RemoteProtocolError])
+def test_charge_transport_failures_report_an_unknown_outcome(
+  client, auth, db, paired, monkeypatch, error,
+):
+  app = _app(db, "granted")
+
+  def fail(*_args, **_kwargs):
+    raise error("Lost the response")
+
+  monkeypatch.setattr(credits_client.httpx, "request", fail)
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert unknown.status_code == 503
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+
+
+def test_an_unreadable_charge_receipt_also_has_an_unknown_outcome(client, auth, db, paired):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (200, "not a receipt")
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert unknown.status_code == 503
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+
+
+def test_a_definite_missing_charge_endpoint_is_not_an_unknown_charge(
+  client, auth, db, paired,
+):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (404, {"detail": "Not Found"})
+  answer = client.post("/api/identity/credits/charges", json=CHARGE,
+                       headers=_as(db, app, "private"))
+  assert answer.status_code == 502
+  assert answer.json()["detail"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize("status", [500, 502, 504])
+def test_noncharge_server_errors_keep_the_service_refusal(client, auth, paired, status):
+  detail = {"code": "upstream_failed", "message": "Server failed."}
+  paired.answers["purchase-terms"] = (status, {"detail": detail})
+  answer = client.get("/api/identity/credits/purchase-terms", headers=auth)
+  assert answer.status_code == status
+  assert answer.json()["detail"] == detail
 
 
 @pytest.mark.parametrize("path,heading", [
@@ -717,7 +877,9 @@ def test_credits_docs_use_the_supported_pairing_flow(path, heading):
   document = (Path(__file__).resolve().parents[2] / path).read_text()
   section = document.split(heading, 1)[1].split("\n##", 1)[0]
   assert "POST /api/identity/credits/pair" in section
-  assert "owner-only" in section
+  assert "owner-only" not in section
+  assert "credits_manage" in section and "including frames" in section
+  assert "charge_outcome_unknown" in section and "5xx" in section
   assert "Settings connect" in section and "planned" in section
   assert "not_paired" in section and "has not connected credits yet" in section
   assert "key_refused" in section and "invalid_api_key" in section

@@ -1070,9 +1070,10 @@ signs out; signing out also erases positions the phone had not uploaded yet.
 
 ## Priced calls paid with credits
 
-The owner pairs this Möbius with a credits service using the owner-only
+The owner, or an installed Store app with accepted `credits_manage` consent
+(including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned.
+control is planned. Shared-browser guests and delegated helpers cannot pair.
 
 For now, app credits permissions work only for installed Store apps with
 accepted owner consent. Owner-built local apps cannot use `credits_manage`
@@ -1100,10 +1101,11 @@ const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charge
 Read the price first (`GET /api/identity/credits/prices/<seller>?app_slug=<app>`;
 `spend_credits` covers this read), show it to the owner, and send it as
 `max_price_micro`; a higher current price refuses with `price_changed`. Reuse
-one `idempotency_key` per call so a retry never pays twice. A 503 (the credits
-service was unreachable or slow) may still have charged: retry with the same
-key, never a new one. Do the paid work
-only after a 200, and explain each refusal by its `detail.code`: `not_paired`
+one `idempotency_key` per call so a retry never pays twice. An upstream 5xx,
+transport failure or unreadable receipt answers 503 `charge_outcome_unknown`:
+the service may still have charged. Retry with the same key, never a new one;
+the client never retries automatically. Do the paid work only after a 200,
+and explain each refusal by its `detail.code`: `not_paired`
 (the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
 `price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
 (the credits service refused the key; the owner needs to pair again).

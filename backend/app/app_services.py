@@ -61,6 +61,8 @@ _SERVICE_RESPONSE_HEADERS = frozenset({
 _SHARED_CACHE_DIRECTIVES = frozenset({
   "public", "s-maxage", "must-revalidate", "proxy-revalidate",
 })
+_DELEGATION_LINEAGE_KEYS = frozenset({"delegation_id", "delegation_chat"})
+_REQUEST_LINEAGE_KEYS = _DELEGATION_LINEAGE_KEYS | {"browser_grant_id", "browser_session_id"}
 _global_slots = {
   "private": asyncio.Semaphore(8),
   "public": asyncio.Semaphore(8),
@@ -1041,7 +1043,7 @@ async def _serialize_request(request_envelope: dict, max_bytes: int) -> bytes:
   if isinstance(request_envelope.get("actor"), dict):
     request_envelope = {**request_envelope, "actor": {
       key: value for key, value in request_envelope["actor"].items()
-      if key not in {"delegation_id", "delegation_chat"}
+      if key not in _DELEGATION_LINEAGE_KEYS
     }}
   try:
     buffer = io.BytesIO()
@@ -1085,8 +1087,7 @@ def request_actor(db, principal, caller=None) -> dict:
     "access": access,
   }
   if principal.delegation_id is not None:
-    actor.update(delegation_id=principal.delegation_id,
-                 delegation_chat=principal.delegation_chat or principal.chat_id)
+    actor.update({key: getattr(principal, key) for key in _DELEGATION_LINEAGE_KEYS})
   if principal.browser is not None:
     actor.update(browser_grant_id=principal.browser.grant_id,
                  browser_session_id=principal.browser.session_id)
@@ -1535,7 +1536,7 @@ async def invoke_policy(app, owner, path: str, body: dict, *, actor: dict | None
   """Invoke platform policy, retaining any initiating caller's provenance."""
   lineage = {
     key: value for key, value in (actor or {}).items()
-    if key in {"delegation_id", "delegation_chat", "browser_grant_id", "browser_session_id"}
+    if key in _REQUEST_LINEAGE_KEYS
   }
   status, result, _headers, media_type = await invoke_service(app, owner, {
     "schema": 1,

@@ -285,17 +285,19 @@ def _control_module():
   return module
 
 
-def test_promote_goal_tool_returns_verified_platform_identity(monkeypatch):
+@pytest.mark.parametrize("state", ["promoted", "active"])
+def test_promote_goal_tool_returns_goal_identity_not_execution_root(monkeypatch, state):
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
-    "state": "promoted",
+    "state": state,
     "objective": objective,
-    "root_run_id": "goal-1",
+    "goal_id": "goal-1",
+    "root_run_id": "root-1",
     "run_id": "run-1",
   })
 
-  assert control._promote_goal("Ship and verify") == {
-    "state": "promoted",
+  assert control._call_promote_goal({"objective": "Ship and verify"}) == {
+    "state": state,
     "objective": "Ship and verify",
     "goal_id": "goal-1",
     "run_id": "run-1",
@@ -316,7 +318,7 @@ def test_promote_goal_with_tasks_publishes_the_plan_in_the_same_call(monkeypatch
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
     "state": "promoted", "objective": objective,
-    "root_run_id": "goal-1", "run_id": "run-1",
+    "goal_id": "goal-1", "root_run_id": "root-1", "run_id": "run-1",
   })
   sent = []
   monkeypatch.setenv("CHAT_ID", "chat-1")
@@ -362,22 +364,43 @@ def test_update_goal_reports_compactly_and_rejects_unknown_arguments(monkeypatch
 def test_goal_report_supplies_completion_keys_without_bloating_progress_updates():
   control = _control_module()
   payload = {
-    "goal": {"status": "open", "revision": 1, "held_work_keys": ["test:verified"]},
+    "goal": {
+      "status": "open", "revision": 1,
+      "held_work_keys": ["test:verified"],
+      "completable_work_keys": ["test:before-goal", "test:verified"],
+    },
     "plan": {"tasks": [], "summary": {"can_complete": False, "completion_blockers": ["verify"]}},
   }
   compact = control._goal_report(payload, full=False)
   assert "test:verified" not in compact
+  assert "test:before-goal" not in compact
   full = control._goal_report(payload, full=True)
   assert "Completion blocked by: verify" in full
   assert "test:verified" in full
+  assert "test:before-goal" in full
+  assert "Eligible work_keys for finished_claims (name only work performed):" in full
+  assert "Held work_keys" not in full
   payload["plan"]["summary"]["can_complete"] = True
   ready = control._goal_report(payload, full=False)
   assert "Ready to complete after verification" in ready
   assert "test:verified" in ready
+  assert "test:before-goal" in ready
   payload["goal"]["status"] = "completed"
   settled = control._goal_report(payload, full=True)
   assert "Ready to complete" not in settled
   assert "test:verified" not in settled
+  assert "test:before-goal" not in settled
+
+
+def test_goal_report_lists_goal_less_completion_keys_without_goal_owned_claims():
+  control = _control_module()
+  text = control._goal_report({
+    "goal": {"status": "open", "revision": 1, "held_work_keys": [],
+             "completable_work_keys": ["test:before-goal"]},
+    "plan": {"summary": {"can_complete": True}},
+  }, full=False)
+  assert "Eligible work_keys for finished_claims" in text
+  assert "test:before-goal" in text
 
 
 def test_a_compile_refusal_carries_its_diagnostic_not_just_that_it_failed():
@@ -484,6 +507,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   monkeypatch.delenv("MOBIUS_COORDINATION_ENABLED", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   initialized = control._dispatch_message({
     "jsonrpc": "2.0",
@@ -655,6 +680,8 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 1, "method": "tools/list",
