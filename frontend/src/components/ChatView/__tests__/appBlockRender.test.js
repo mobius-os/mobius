@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { PassiveBlockView, SessionControls, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { AskControl, PassiveBlockView, SessionControls, blockAsk, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -482,4 +482,50 @@ test('jumping to the newest block moves focus there, without animation for reduc
   assert.deepEqual(calls, [['scroll', 'auto'], ['focus', true]])
   assert.equal(node.attrs.tabindex, '-1')
   jumpTo(null)
+})
+
+// ---- ask-v1: the host's ask replaces the block's controls.
+const fixAsk = { label: 'Fix in chat', text: 'Fix “Row”: upstream moved.', refs: [{ id: 'row-1', code: 'upstream_conflict' }] }
+const askView = (status, fields = {}) => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send all', intent: 'send-batch:sel-1' }, items: [{ title: 'Saved', intent: 'open:a', action: { label: 'Send', intent: 'send:a' } }] }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', label: 'Open Example', open: true },
+    { key: 'send:a', label: 'Send' }], rows: [{ title: 'Row', pill: 'Conflicts', tone: 'attention' }], ask: fixAsk, ...fields },
+  's', new Set(['send-batch:sel-1', 'send:a']), new Set(['open:a']), 'example', { ask: true })
+  return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {},
+    ask: status ? createElement(AskControl, { ask: state.ask, status, locked: false, onAsk() {} }) : null }))
+}
+
+test('a drawn ask is the block\'s one action: the app\'s own controls are not drawn beside it', () => {
+  const html = askView('ready')
+  assert.equal((html.match(/class="md-app-block__action/g) || []).length, 1)
+  assert.match(html, /<footer><span class="md-app-block__controls"><button type="button" class="md-app-block__action is-ask"><svg[^>]*>.*<\/svg>Fix in chat<\/button><\/span><\/footer>/)
+  assert.doesNotMatch(html, /Open Example|>Send</)
+  assert.match(html, /is-attention">Conflicts</)
+  assert.match(askView(null), /Open Example/, 'without an ask the app action stays')
+})
+
+test('after a tap the ask waits, and says why only to assistive technology', () => {
+  assert.match(askView('sending'), /is-ask" disabled="" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Asking…/)
+  const asked = askView('asked')
+  assert.match(asked, /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">Sent to this chat\./)
+  assert.match(askView('limited'), /disabled=""[^>]*>.*Asked<\/button><span[^>]*>This chat has had several/)
+  const locked = renderToStaticMarkup(createElement(AskControl, { ask: fixAsk, status: 'ready', locked: true, onAsk() {} }))
+  assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
+})
+
+test('an ask is drawn only for an admitted app on the attested chat\'s newest block, outside recovery', () => {
+  const state = { ask: fixAsk, recoveryPending: false }
+  const context = { chatId: 'chat-1', latest: true }
+  assert.equal(blockAsk({ state, admitted: true, allowed: true, context }), fixAsk)
+  for (const input of [
+    { state: null, admitted: true, allowed: true, context },
+    { state: { ...state, ask: null }, admitted: true, allowed: true, context },
+    { state, admitted: false, allowed: true, context },
+    { state, admitted: true, allowed: false, context },
+    { state, admitted: true, allowed: true, context: null },
+    { state, admitted: true, allowed: true, context: { chatId: 'chat-1', latest: false } },
+    { state, admitted: true, allowed: true, context: { chatId: '', latest: true } },
+    { state: { ...state, recoveryPending: true }, admitted: true, allowed: true, context },
+  ]) assert.equal(blockAsk(input), null, JSON.stringify(input))
 })

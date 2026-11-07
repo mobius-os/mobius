@@ -519,3 +519,17 @@ test('a refresh hint is raised only for a mounted, supported document, bound to 
   h.rerender({ block, near: false, refresh: { seq: 3, reason: 'turn' } })
   assert.equal(h.result.current.blockRefresh.seq, 2, 'a released frame gets no hint')
 })
+
+test('ask-v1 is advertised and an ask accepted only when the app is admitted to ask', () => {
+  const ask = { label: 'Fix in chat', text: 'Fix “Row”: it needs review.', refs: [{ id: 'row-1', code: 'needs_review' }] }
+  for (const allowed of [true, false]) {
+    const h = renderObserved({ block, near: true, ask: allowed })
+    assert.equal(h.result.current.blockSession.features.includes('ask-v1'), allowed)
+    h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+    h.result.current.onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current.sessionId,
+      actions: [{ key: 'send-batch:sel-1', label: 'Send all' }], ask }, { generation: 1 })
+    h.observe()
+    assert.deepEqual(h.result.current.state.ask, allowed ? ask : null)
+    assert.equal(h.result.current.event, null, 'reporting an ask sends the app no event')
+  }
+})

@@ -547,7 +547,8 @@ window messages; read them with `subscribe` or a `message` listener that checks
   action as an ordinary button), so keep your older presentation there.
   `"rows-v2"` means `rows`, `titleTone`, `titleBusy`, `context` and
   `app-block-refresh` below; a host without it sends no `context` and ignores
-  those fields.
+  those fields. `"ask-v1"` means `ask` below; it is listed only when the owner
+  has also granted your app `chat.blocks.ask`.
 - `{type:'moebius:app-block-refresh', sessionId, generation, reason}`, a hint
   to re-read your own state: `reason` is `turn` (a turn in this chat
   settled) or `visible` (the tab became visible again). It is sent only to a
@@ -631,6 +632,33 @@ included.
   URLs, opened outside Möbius. Row state is decoration only: it adds no
   control, is hidden while a confirmation owns the block, and is dropped while
   the block is held for recovery.
+- `ask` (`ask-v1`): `{label (≤ 24), text (≤ 400), refs: [{id, code}]}`, a
+  request the owner can send to this chat's agent with one tap, for a problem
+  only the agent can fix ("Fix in chat"). The host draws it as the block's
+  one action in place of yours; while it is shown none of your controls are
+  drawn, so do not report an action you need at the same time. On the tap the
+  host sends a visible owner message in this chat, which starts (or queues
+  behind) a turn: your `text`, a blank line, then one line it writes itself
+  per ref, `` `<app slug> · <id> · <code>` ``. Your document gets no event,
+  and the ask can cause no effect in your app: only `confirm` can. Build
+  `text` from your own fixed templates and your own data's titles, never from
+  external text such as a GitHub error. It must be one plain line with no
+  markup, links, mentions or leading `/`: no URL, `www.`, ``<>[]{}`*_~#|\@``,
+  control or direction characters, and a `label` other than "Confirm" or "Not
+  now". `refs` are 1 to 12, each `id` 1-128 of
+  `A-Za-z0-9._-` starting with a letter or digit, and each `code` a
+  lower-case `snake_case` word of at most 48. Anything else drops the whole
+  ask; it is never shortened. The host ignores `ask` while any action is
+  confirming or busy, during recovery, without admission, outside a chat
+  transcript and on any block that is not that chat's newest of its app and
+  intent. After a tap the control reads "Asked" until a turn in the chat
+  settles; the host does not send the same message twice within 10 minutes,
+  and a chat accepts at most 6 asks an hour. Omit `ask` (or report `null`)
+  when nothing needs the agent; report your own action again once the problem
+  is fixed, for example on the next `app-block-refresh`. An ask needs
+  `"chat.blocks.ask": {"version": 1}` in `mobius.json` beside
+  `chat.blocks.passive`, accepted by the owner and applied; without it the
+  host neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.

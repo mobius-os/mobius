@@ -2,9 +2,10 @@
    current state while the block is near the viewport; the host draws every
    control. See building-apps.md "Passive block sessions". */
 import { Suspense, useCallback, useEffect, useId, useState } from 'react'
+import { Chat } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
-import { sessionSnapshot } from './appBlockSession.js'
+import { askMessage, passiveAskAllowed, sessionSnapshot } from './appBlockSession.js'
 import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, StatusPill } from './AppBlockParts.jsx'
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
@@ -87,21 +88,51 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
   </div>
 }
 
+/** The ask this block may draw now, or null: only one its admitted app
+ *  reported in this document (never a saved snapshot), on the newest block of
+ *  its kind in the chat the transcript attests, outside recovery. The parser
+ *  already drops an ask while an action confirms or is busy. */
+export function blockAsk({ state, admitted, allowed, context }) {
+  return state?.ask && admitted && allowed && Boolean(context?.chatId) && context.latest === true && !state.recoveryPending
+    ? state.ask : null
+}
+
+const ASK_LABELS = { sending: 'Asking…', asked: 'Asked', limited: 'Asked' }
+const ASK_WAIT = { sending: 'Sending it to this chat.', asked: 'Sent to this chat. It comes back when the reply is done.',
+  limited: 'This chat has had several of these requests in the last hour. Try again later.' }
+
+/** The host's ask control (`ask-v1`): one tap sends `message` into this chat
+ *  as the owner's own visible message. It sends the app no event. `status` is
+ *  the chat's verdict for this card and message (appBlockChat.js askState). */
+export function AskControl({ ask, status, locked, onAsk }) {
+  const waitingId = useId()
+  const waiting = status !== 'ready'
+  return <span className="md-app-block__controls">
+    <button type="button" className="md-app-block__action is-ask" disabled={locked || waiting}
+      aria-describedby={waiting ? waitingId : undefined} onClick={onAsk}>
+      {status === 'sending' ? <span className="md-app-block__spinner" aria-hidden="true" />
+        : <Chat width={16} height={16} aria-hidden="true" />}
+      {ASK_LABELS[status] || ask.label}</button>
+    {waiting ? <span id={waitingId} className="md-app-block__sr-only">{ASK_WAIT[status]}</span> : null}
+  </span>
+}
+
 /** The passive block for one parsed session state. The parser allows at most
  *  one enabled confirmation; while it is open its app-supplied list is the
  *  block's only rows, with one Not now/Confirm (sessionSnapshot), and
- *  `listEdgeRefs` observes the list's two ends. */
+ *  `listEdgeRefs` observes the list's two ends. `ask` is the host's ask
+ *  control when one may be drawn; it replaces every app control. */
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
-  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', onJump = null, children = null }) {
+  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', onJump = null, ask = null, children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
   // A hidden action leaves no control, so its footer is not drawn either.
-  const actionFor = target => target && !actionState(target.intent)?.hidden
+  const actionFor = target => target && !ask && !actionState(target.intent)?.hidden
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
       confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} openHref={block.href} onInternalNav={onInternalNav} />
     : null
   const snapshot = sessionSnapshot(block, state)
   const count = snapshot.confirmation ? snapshot.items.length : 0
-  return <AppBlockLayout block={snapshot} app={app} onInternalNav={onInternalNav}
+  return <AppBlockLayout block={snapshot} app={app} onInternalNav={onInternalNav} ask={ask}
     actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs} onJump={onJump}>
     {/* Always present, so the polite announcement is heard when the rows change. */}
     <p className="md-app-block__sr-only" role="status">
@@ -155,11 +186,14 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   const [staticOpen, setStaticOpen] = useState(false)
   // Without admission no new frame starts; a retained one keeps its own.
   const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
+  const askAllowed = passiveAskAllowed(app)
   const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
-    confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh })
+    confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh, ask: askAllowed })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
+  const ask = blockAsk({ state: session.state, admitted, allowed: askAllowed, context: chat.context })
+  const message = ask ? askMessage(block.app, ask) : ''
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
@@ -168,6 +202,8 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
+    ask={ask ? <AskControl ask={ask} status={chat.askState(message)} locked={sessionLocked(session, admitted)}
+      onAsk={() => { void chat.ask(message) }} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>

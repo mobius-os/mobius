@@ -336,6 +336,14 @@ class AppOut(BaseModel):
 
   @computed_field
   @property
+  def passive_block_ask(self) -> bool:
+    """Whether this app's passive blocks may offer a host-drawn ask."""
+    from app.app_capabilities import passive_block_ask
+
+    return passive_block_ask(self)
+
+  @computed_field
+  @property
   def frame_version(self) -> str:
     """The app frame's reload key; see app_compile_contract.app_frame_version."""
     from app.app_compile_contract import app_frame_version

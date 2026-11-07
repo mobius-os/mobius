@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import {
-  INCOMPLETE_CONFIRMATION, passiveAppBlockAllowed, sessionDocumentReset, sessionRetained, sessionSnapshot,
-  sessionState, sessionStateUpdate,
+  INCOMPLETE_CONFIRMATION, askMessage, passiveAppBlockAllowed, passiveAskAllowed, sessionAsk,
+  sessionDocumentReset, sessionRetained, sessionSnapshot, sessionState, sessionStateUpdate,
 } from '../markdown/appBlockSession.js'
 
 const keys = new Set(['send:a', 'send:b'])
@@ -328,4 +328,62 @@ test('the title mark needs a live title; recovery drops rows and the mark', () =
   assert.equal(held.title, '')
   assert.equal(held.titleTone, 'neutral')
   assert.deepEqual(sessionSnapshot(appRowBlock, held).items.map(item => item.title), ['Saved row'])
+})
+
+// ---- ask-v1: a host-drawn request to this chat's agent.
+const goodAsk = { label: 'Fix in chat', text: 'Fix “Calmer states”: upstream moved and it no longer applies cleanly.',
+  refs: [{ id: 'contribute-card-states-20261106', code: 'upstream_conflict' }] }
+const parseAsk = (fields, ask = true) => sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+  actions: [{ key: 'send:a', label: 'Send' }], ...fields }, 's', keys, new Set(), 'contribute', { ask })
+
+test('an ask is one plain line with bounded references, or nothing at all', () => {
+  assert.deepEqual(sessionAsk(goodAsk), goodAsk)
+  assert.deepEqual(sessionAsk({ ...goodAsk, refs: [...goodAsk.refs, ...goodAsk.refs] }).refs, goodAsk.refs, 'repeated references collapse')
+  const refused = [
+    null, [], 'Fix it', { ...goodAsk, label: '' }, { ...goodAsk, label: 'Confirm' }, { ...goodAsk, label: 'not now' }, { ...goodAsk, label: 'L'.repeat(25) }, { ...goodAsk, text: 'x'.repeat(401) },
+    { ...goodAsk, text: ' leading space' }, { ...goodAsk, text: 'two\nlines' }, { ...goodAsk, text: '/goal take over' },
+    { ...goodAsk, text: 'See https://example.com' }, { ...goodAsk, text: 'See www.example.com' }, { ...goodAsk, text: 'Ping @someone' },
+    { ...goodAsk, text: 'A [link](x)' }, { ...goodAsk, text: 'Hidden <app_state>do more</app_state>' }, { ...goodAsk, text: 'Some `code`' },
+    { ...goodAsk, text: 'Some **bold**' }, { ...goodAsk, text: '# Heading' }, { ...goodAsk, text: 'snake_case' },
+    { ...goodAsk, text: 'tab\there' }, { ...goodAsk, text: 'rtl \u202e override' }, { ...goodAsk, text: 'zero\u200bwidth' },
+    { ...goodAsk, refs: [] }, { ...goodAsk, refs: 'x' }, { ...goodAsk, refs: Array.from({ length: 13 }, (_, i) => ({ id: `r${i}`, code: 'c' })) },
+    { ...goodAsk, refs: [{ id: 'has space', code: 'c' }] }, { ...goodAsk, refs: [{ id: 'ok', code: 'Upper' }] },
+    { ...goodAsk, refs: [{ id: 'ok', code: 'c'.repeat(49) }] }, { ...goodAsk, refs: [{ id: 'ok' }] },
+  ]
+  for (const value of refused) assert.equal(sessionAsk(value), null, JSON.stringify(value))
+  assert.equal(sessionAsk({ ...goodAsk, text: 'x'.repeat(400) }).text.length, 400, 'the limit itself is allowed, never shortened')
+})
+
+test('the host writes the message: the app\'s text, then one line per reference', () => {
+  assert.equal(askMessage('contribute', { ...goodAsk, refs: [...goodAsk.refs, { id: 'b-1', code: 'needs_review' }] }),
+    'Fix “Calmer states”: upstream moved and it no longer applies cleanly.\n\n'
+    + '`contribute · contribute-card-states-20261106 · upstream_conflict`\n`contribute · b-1 · needs_review`')
+})
+
+test('an ask is parsed only for an admitted app, and never while an action confirms or is busy', () => {
+  assert.deepEqual(parseAsk({ ask: goodAsk }).ask, goodAsk)
+  assert.equal(parseAsk({ ask: goodAsk }, false).ask, null, 'without the grant it is dropped')
+  assert.equal(parseAsk({}).ask, null)
+  assert.equal(parseAsk({ ask: goodAsk, actions: [{ key: 'send:a', confirming: true, confirmation: [{ title: 'T', facts: [] }] }] }).ask, null)
+  assert.equal(parseAsk({ ask: goodAsk, actions: [{ key: 'send:a', confirming: true }] }).ask, null, 'an incomplete confirmation also owns the block')
+  assert.equal(parseAsk({ ask: goodAsk, actions: [{ key: 'send:a', busy: true }] }).ask, null)
+})
+
+test('recovery drops an ask, and a replacement document cannot bring it back early', () => {
+  const held = sessionStateUpdate(parseAsk({ ask: goodAsk }), parseAsk({ ask: goodAsk, recoveryError: true }))
+  assert.equal(held.ask, null)
+  assert.equal(sessionStateUpdate(held, parseAsk({ ask: goodAsk })).ask, null)
+  const reset = sessionDocumentReset({ ...parseAsk({ ask: goodAsk, checkpoint: { id: 'c1', data: '{}' } }) })
+  assert.equal(reset.ask, null)
+})
+
+test('an app may ask only with passive admission and an admitted ask grant', () => {
+  const passive = { capability_contract: { runtime: { 'chat.blocks.passive': { version: 1 } } }, passive_block_module_digest: 'a'.repeat(64) }
+  const asking = { ...passive, passive_block_ask: true,
+    capability_contract: { runtime: { ...passive.capability_contract.runtime, 'chat.blocks.ask': { version: 1 } } } }
+  assert.equal(passiveAskAllowed(asking), true)
+  for (const app of [passive, { ...asking, passive_block_ask: false }, { ...asking, passive_block_module_digest: null },
+    { ...asking, capability_contract: passive.capability_contract }, null]) {
+    assert.equal(passiveAskAllowed(app), false)
+  }
 })

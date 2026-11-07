@@ -849,6 +849,24 @@ reaches the server again. An admitted module that does not export
 the block falls back to an explicit, visible open. That verdict belongs to one
 applied revision; after an update the block negotiates again.
 
+`chat.blocks.ask` v1 extends an admitted passive session with one more
+host-drawn control, an ask: a fixed, plain request the app reports for a
+problem only the chat's agent can fix. When the owner presses it, the host
+sends that text, followed by a host-written `<app slug> · <id> · <code>` line
+per reference, as the owner's own visible message in the block's chat. The app
+receives no event and the press causes no app effect. The host validates the
+shape (one plain line of at most 400 characters with no markup, links,
+mentions, leading slash or control and direction characters; 1 to 12
+regex-bounded references) and drops the whole ask otherwise. It draws an ask
+only on the newest block of its app and intent in the chat the transcript
+attests, never while an action is confirming or busy or during recovery, keeps
+one ask per block in flight until a turn in that chat settles, sends the same
+message at most once per 10 minutes and at most 6 asks per chat per hour.
+Admission mirrors passive execution: `AppOut.passive_block_ask` is true only
+when the owner's live grant exists, the immutable applied manifest declares it
+and passive execution itself is admitted. Only then does the session list
+`ask-v1` in its features. Declaring it is a reviewable widening.
+
 Each frame document has a host-assigned generation, echoed by the frame in
 `frame-mounted` and every `app-block-state`. Negotiation, reported state
 and owner events are bound to it; a reload or version promotion resets idle

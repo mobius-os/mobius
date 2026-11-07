@@ -3247,11 +3247,16 @@ export default function ChatView({
     if (!hasSendablePayload(text, attachments)) return false
 
     const pin = opts.pin !== false  // default true
+    // `composer: false` sends a message that is not the composer's draft (an
+    // app card's ask): the owner's draft, files, keyboard, voice input and
+    // failed-send recovery are left alone, and `opts.cid` may carry the
+    // caller's own identity for a repeated attempt.
+    const fromComposer = opts.composer !== false
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
-    if (listeningRef.current) stopVoiceRef.current?.()
+    if (fromComposer && listeningRef.current) stopVoiceRef.current?.()
 
     // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
     // textarea. Physical-tail geometry is authoritative; mode can lag a
@@ -3291,7 +3296,7 @@ export default function ChatView({
     // Keep the mobile keyboard open for queue-only sends so another follow-up
     // can be typed immediately. Fresh sends and explicit queue+steer submits
     // dismiss it; desktop retains its existing cursor-ready behaviour.
-    if (shouldDismissComposerKeyboardOnSubmit({
+    if (fromComposer && shouldDismissComposerKeyboardOnSubmit({
       isTouchPrimary: isTouchPrimary(),
       queuesBehindActiveTurn,
       directSteer,
@@ -3310,11 +3315,36 @@ export default function ChatView({
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
     function clearComposerFailedAttempt() {
-      clearFailedAttempt()
+      if (fromComposer) clearFailedAttempt()
     }
     function restoreComposerAfterFailedSend() {
+      if (!fromComposer) return
       restoreComposerText(text, { preserveFailedAttempt: true })
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
+    }
+    function clearComposerForSend() {
+      if (!fromComposer) return
+      setComposerInput('')
+      clearComposerFilesForSend()
+      // Drop the multi-line `data-composer-tall` attribute so send/mic
+      // re-center vertically. Without this, the pill stays in flex-end
+      // alignment after a send-from-tall and the freshly empty textarea
+      // renders pinned to the bottom until the user types again. Shared
+      // textarea sizing re-evaluates this on each committed value, but the
+      // synchronous reset keeps the send transition correct before React
+      // commits the empty value.
+      if (inputRef.current) resetComposerTextarea(inputRef.current)
+    }
+    // A failed send's recovery belongs to the composer's draft; a send from
+    // elsewhere only re-reads the transcript, which shows it if it arrived.
+    function keepFailedDraft(failedAttempt) {
+      if (!fromComposer) return
+      rememberFailedAttempt(failedAttempt)
+      restoreComposerAfterFailedSend()
+    }
+    function settleAmbiguousFailure(failedAttempt) {
+      if (fromComposer) void settleAmbiguousSendConfirmation(failedAttempt)
+      else void fetchMessages({ force: true, authoritative: true })
     }
 
     function revealPendingQuestion() {
@@ -3330,11 +3360,13 @@ export default function ChatView({
     // server may have accepted it, an unchanged restored draft reuses that cid
     // and lets the backend's durable identity gate answer the ambiguity.
     const draftIdentity = sendDraftIdentity(chatId, text, attachments)
-    const cid = cidForSendAttempt({
-      failedAttempt: failedSendAttemptRef.current,
-      draftIdentity,
-      mintCid: mintSendCid,
-    })
+    const cid = !fromComposer && typeof opts.cid === 'string' && opts.cid
+      ? opts.cid
+      : cidForSendAttempt({
+        failedAttempt: fromComposer ? failedSendAttemptRef.current : null,
+        draftIdentity,
+        mintCid: mintSendCid,
+      })
 
     // ACTIVE-TURN PATH: every send gets one optimistic pending row immediately.
     // Ordinary sends present it in the queue; a direct steer reserves it in the
@@ -3373,19 +3405,7 @@ export default function ChatView({
         // its first presentation is the inline steering surface, never the tray.
         pendingQueue.reserveForSteer([cid])
       }
-      setComposerInput('')
-      clearComposerFilesForSend()
-      if (inputRef.current) {
-        resetComposerTextarea(inputRef.current)
-        // Drop the multi-line `data-composer-tall` attribute so send/mic
-        // re-center vertically. Without this, the pill stays in
-        // flex-end alignment after a send-from-tall and the freshly
-        // empty textarea renders pinned to the bottom — text appears
-        // off-center (lower than its resting position) until the
-        // user types again. Shared textarea sizing re-evaluates this
-        // on each committed value, but the synchronous reset keeps the
-        // send transition correct before React commits the empty value.
-      }
+      clearComposerForSend()
       let queueRequest = null
       try {
         queueRequest = sendAfterSettingsSaved(
@@ -3572,12 +3592,11 @@ export default function ChatView({
             transportContent: text,
             attachments: composerFileSnapshot,
           }
-          rememberFailedAttempt(failedAttempt)
-          restoreComposerAfterFailedSend()
+          keepFailedDraft(failedAttempt)
         }
         const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
         setSendFailure(banner)
-        if (!keepQueued && isAmbiguousSendFailure(err)) void settleAmbiguousSendConfirmation(failedAttempt)
+        if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3617,13 +3636,7 @@ export default function ChatView({
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    setComposerInput('')
-    clearComposerFilesForSend()
-    if (inputRef.current) {
-      resetComposerTextarea(inputRef.current)
-      // Drop the multi-line `data-composer-tall` attribute — see queue-path
-      // comment above for the full rationale.
-    }
+    clearComposerForSend()
     setSending(true)
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
@@ -3794,8 +3807,7 @@ export default function ChatView({
           transportContent: sendText,
           attachments: composerFileSnapshot,
         }
-        rememberFailedAttempt(failedAttempt)
-        restoreComposerAfterFailedSend()
+        keepFailedDraft(failedAttempt)
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
         // same cid with the restored draft so a manual retry can only reconcile
@@ -3809,7 +3821,7 @@ export default function ChatView({
       }
       const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
       setSendFailure(banner)
-      if (!keepQueued && isAmbiguousSendFailure(err)) void settleAmbiguousSendConfirmation(failedAttempt)
+      if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -4964,8 +4976,14 @@ export default function ChatView({
 
   const chatProvider = chatInfo?.provider || null
   // Passive app blocks learn this chat's id from the transcript itself, and
-  // re-read their own state when a turn here settles or the tab is shown.
-  const appBlockChat = useMemo(() => chatId ? createAppBlockChat(chatId) : null, [chatId])
+  // re-read their own state when a turn here settles or the tab is shown. A
+  // card's ask (`ask-v1`) is sent as the owner's own message in this chat,
+  // without touching the composer's draft.
+  const askSendRef = useRef(null)
+  askSendRef.current = (text, { cid }) => doSend(text, { attachments: [], composer: false, cid })
+  const appBlockChat = useMemo(() => chatId
+    ? createAppBlockChat(chatId, { send: (text, options) => askSendRef.current(text, options) })
+    : null, [chatId])
   useEffect(() => {
     if (!appBlockChat || hidden) return undefined
     const onVisible = () => { if (document.visibilityState === 'visible') appBlockChat.refresh('visible') }
@@ -4975,6 +4993,7 @@ export default function ChatView({
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
+      appBlockChat?.turnSettled()
       if (!hidden && document.visibilityState === 'visible') appBlockChat?.refresh('turn')
       // Only this chat's provider spent allowance. Refreshing every provider
       // on every pane's turn end multiplied reads of rate-limited services.

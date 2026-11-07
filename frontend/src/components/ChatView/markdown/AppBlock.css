@@ -71,6 +71,9 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 /* An action that only opens the app is secondary: outlined, not filled. */
 .md-app-block a.md-app-block__action.is-secondary { border:1px solid var(--border); background:transparent; color:var(--text); }
 .md-app-block a.md-app-block__action.is-secondary:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
+/* The host's ask is tonal: it sends a message to the chat, not an app effect. */
+.md-app-block__action.is-ask { background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent-text, var(--accent)); }
+.md-app-block__action.is-ask:hover:not(:disabled) { background:color-mix(in srgb, var(--accent) 22%, transparent); }
 .md-app-block__notice { margin:0; padding:4px 16px 12px; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
 .md-app-block__view { border-top:1px solid var(--border); }
 .md-app-block__view > p { padding:12px 16px; margin:0; color:var(--muted); }
