@@ -29,6 +29,8 @@ CHECKPOINT_CHAT_TOOL_NAME = "checkpoint_chat"
 NOTIFY_OWNER_TOOL_NAME = "notify_owner"
 OPEN_ITEM_TOOL_NAME = "open_item"
 SECRET_TOOL_NAME = "request_secret"
+# App building is ordinary work a helper may do too; owner-facing interaction
+# (pushes, workspace placement, cards) stays with the top-level turn.
 APP_BUILD_TOOL_NAMES = ("list_apps", "apply_app", "screenshot")
 LIST_PEERS_TOOL_NAME = "list_agent_peers"
 SEND_MESSAGE_TOOL_NAME = "send_agent_message"
