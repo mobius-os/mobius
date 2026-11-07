@@ -26,7 +26,7 @@ def served_helper_requirement(monkeypatch):
   """Synthetic targets are not commits here, and most tests stub the status
   read for other contracts. The helper-protocol gate tests below opt in."""
   monkeypatch.setattr(dc, "_required_helper_protocol",
-                      lambda target_sha=None: _REQUIRED_HELPER_PROTOCOL())
+                      lambda target_sha=None, repo=None: _REQUIRED_HELPER_PROTOCOL())
   monkeypatch.setattr(dc, "_ensure_host_helper_meets_release", lambda _target: None)
 
 
@@ -1396,6 +1396,37 @@ async def test_target_release_requiring_a_newer_helper_is_refused_before_dispatc
     status = await dc._request_self_hosted_rebuild(expected_sha=target, final_check=lambda: None)
     assert status["state"] == "queued"
     (inbox / "request.json").unlink()
+
+
+def test_host_helper_certification_is_read_from_host_status_and_fails_closed(
+  tmp_path, monkeypatch,
+):
+  # Activation reads the same certified protocol that gates dispatch, so the
+  # helper migration stops being owed once the host installer certified it.
+  monkeypatch.setattr(dc, "_required_helper_protocol", _REQUIRED_HELPER_PROTOCOL)
+  served = _REQUIRED_HELPER_PROTOCOL()
+  repo, (newer,) = _release_repo(tmp_path, served + 1)
+  monkeypatch.setattr(dc.platform_update, "PLATFORM_REPO", repo)
+  control, inbox = _install_control(tmp_path, monkeypatch)
+  assert dc.host_helper_meets_release() is True
+  assert dc.host_helper_meets_release(newer) is False
+  assert dc.host_helper_meets_release("f" * 40) is False  # unreadable requirement
+
+  status = json.loads((control / "status.json").read_text())
+  (control / "status.json").write_text(json.dumps({**status, "helper_protocol": served + 1}))
+  assert dc.host_helper_meets_release(newer) is True
+  # A queued, still unclaimed request does not hide the installed helper.
+  (inbox / "request.json").write_text(json.dumps({"expected_sha": "a" * 40, "nonce": "n"}))
+  assert dc.host_helper_meets_release(newer) is True
+
+  (control / "status.json").unlink()
+  assert dc.host_helper_meets_release() is False
+
+  def unreadable():
+    raise PermissionError("inbox not searchable")
+
+  monkeypatch.setattr(dc, "_read_host_status", unreadable)
+  assert dc.host_helper_meets_release() is False  # status reads never raise
 
 
 @pytest.mark.asyncio

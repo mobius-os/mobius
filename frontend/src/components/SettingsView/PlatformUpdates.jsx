@@ -39,7 +39,10 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
   const settling = platform?.unfinished_update?.stage === 'settling'
   const stall = platformUpdateStall(platform, rebuild)
   const packageWarning = platformPackageWarning(platform, rebuild)
-  const available = platform?.available || platform?.newer_updates_available
+  const available = platform?.available
+  // A newer release waits behind the update in flight. Only a suggestion:
+  // finishing this update stays the primary action.
+  const newerBehind = platform?.newer_updates_available ? platform.unfinished_update : null
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
   const recoveryRequired = rebuild?.state === 'needs_recovery'
@@ -73,7 +76,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
     setReview(intent)
   }
   function closeReview() { restoreFocus.current = true; setReview(null) }
-  // Retry drops the stalled update, then reviews the release again from scratch.
+  // Drops the in-flight update, then reviews the latest release from scratch.
   async function retry() {
     if (await update.cancel()) openReview()
   }
@@ -146,6 +149,16 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={update.cancel}>Cancel update</button>
         )}
       </div>
+      {newerBehind && !stall && !repairReason && !busy && !recoveryRequired && (
+        <div className="platform-updates__description">
+          <p role="status">A version newer than the update in progress is available.{newerBehind.cancellable
+            ? ' You can finish this one, or cancel it and update straight to the latest instead.'
+            : ' It will be offered once this update finishes.'}</p>
+          {newerBehind.cancellable && (
+            <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={retry}>Cancel and update to latest</button>
+          )}
+        </div>
+      )}
       {stall && !repairReason && !busy && (
         <div className="platform-updates__description">
           <p role="status">{stall.message}</p>

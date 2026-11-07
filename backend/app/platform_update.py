@@ -381,10 +381,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # Conflict-only backlog signal. This remains false outside ``state ==
-  # "conflict"`` even when ``available`` is true. While resolving a conflict it
-  # becomes true when origin/main advances past the pinned release, letting
-  # Settings offer one combined review+resolve instead of one per release.
+  # Backlog signal for an in-flight update: true when ``unfinished_update``
+  # is pinned to a release (resolving, prepared/finishing or settling) and
+  # the selected release strictly descends it. It stays false for an ordinary
+  # ``available`` update with nothing in flight: that release is itself the
+  # thing to apply. Settings uses it to suggest cancelling the stale update
+  # and reviewing the latest instead; nothing switches automatically.
   # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
@@ -2113,6 +2115,26 @@ def _without_python_inputs_installed_for(
   return [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
 
 
+def _without_certified_host_helper(
+  repo: Path, paths: list[str], release: str | None,
+) -> list[str]:
+  """Drop the helper migration marker once the host has done that work.
+
+  Reinstalling the helper is host work the container cannot perform, but the
+  host's root-owned status certifies the protocol its last completed install
+  provides, the same evidence that gates replacement dispatch. Status or a
+  requirement that cannot be read keeps the work owed.
+  """
+  marker = platform_activation.HOST_HELPER_REQUIREMENT_PATH
+  if marker not in paths:
+    return paths
+  from app import deployment_control  # it imports this module
+
+  if not deployment_control.host_helper_meets_release(release, repo):
+    return paths
+  return [path for path in paths if path != marker]
+
+
 def _incoming_activation_impact(
   repo: Path,
   before: str | None,
@@ -2120,8 +2142,12 @@ def _incoming_activation_impact(
 ) -> PlatformActivationImpact:
   """Classify target work that is not already proven active in this image."""
   return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(
-      repo, _activation_paths_between(repo, before, target_sha), target_sha,
+    _without_certified_host_helper(
+      repo,
+      _without_python_inputs_installed_for(
+        repo, _activation_paths_between(repo, before, target_sha), target_sha,
+      ),
+      target_sha,
     ),
   )
 
@@ -2260,11 +2286,14 @@ def _pending_activation_work(
   served_paths = [*(served_to_head or []), *additional_served_paths]
   paths.extend(served_paths)
   paths.extend(image_input_drift(repo) or [])
+  release = release or _contained_official_source(repo)
   owed = _image_work_owed(
-    repo, [str(path) for path in paths if str(path)],
-    release or _contained_official_source(repo),
+    repo, [str(path) for path in paths if str(path)], release,
   )
-  return sorted({*owed, *damaged}), _served_boot_restart(served_paths, owed)
+  return (
+    _without_certified_host_helper(repo, sorted({*owed, *damaged}), release),
+    _served_boot_restart(served_paths, owed),
+  )
 
 
 def _served_boot_restart(served_paths: list[str], image_owed: list[str]) -> list[str]:
@@ -2429,7 +2458,8 @@ def _complete_boot_activation(repo: Path) -> None:
   A fresh server always satisfies ``server_restart``.  A new image identity
   that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
-  cannot observe or control those external planes.
+  cannot observe or control those external planes; status alone reads the
+  host's certified helper (``_without_certified_host_helper``).
   """
   marker = _read_activation_marker()
   if not marker:
@@ -5745,18 +5775,18 @@ def platform_status(
   current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
   blocker = restart_blocker(repo)
+  # Newer releases stacked up behind the update in flight wait until it
+  # finishes or is cancelled; ``target`` is the last-fetched selected release.
+  pending = unfinished_update(repo)
+  pinned = pending["target_sha"] if pending else None
+  newer_available = bool(
+    target and pinned and target != pinned
+    and _is_ancestor(repo, pinned, target)
+  )
 
   if conflict:
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
-    # `target` is the last-fetched origin/main. If it strictly descends the
-    # version this conflict is pinned to, newer releases stacked up behind it.
-    # They wait until this one finishes (see ``unfinished_update``).
-    conflict_target = flag.get("upstream")
-    newer_available = bool(
-      target and conflict_target and target != conflict_target
-      and _is_ancestor(repo, conflict_target, target)
-    )
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
@@ -5776,7 +5806,7 @@ def platform_status(
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
       recovery_refs=recovery_refs,
-      unfinished_update=unfinished_update(repo),
+      unfinished_update=pending,
       local_overlay=local_overlay_summary(repo, local=local, target=target),
       restart_blocker=blocker,
       )
@@ -5821,11 +5851,11 @@ def platform_status(
     current_build_committed_at=current_build_committed_at,
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
-    newer_updates_available=False,
+    newer_updates_available=newer_available,
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
     recovery_refs=recovery_refs,
-    unfinished_update=unfinished_update(repo),
+    unfinished_update=pending,
     local_overlay=local_overlay_summary(repo, local=local, target=target),
     restart_blocker=blocker,
   )
