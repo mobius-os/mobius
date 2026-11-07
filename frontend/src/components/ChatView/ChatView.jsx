@@ -3449,7 +3449,8 @@ export default function ChatView({
             onStreamEndRef.current?.({ continues: false })
           }
           fetchMessages({ force: true, authoritative: true })
-          return true
+          // The server already had this message: nothing new was posted.
+          return 'duplicate'
         }
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
@@ -3717,7 +3718,7 @@ export default function ChatView({
         setServerRunningState(continues)
         if (!continues) onStreamEndRef.current?.({ continues: false })
         fetchMessages({ force: true, authoritative: true })
-        return true
+        return 'duplicate'
       }
       if (result?.status === 'queued') {
         const canonicalPending = result.pending_message || null
@@ -4978,7 +4979,8 @@ export default function ChatView({
   // Passive app blocks learn this chat's id from the transcript itself, and
   // re-read their own state when a turn here settles or the tab is shown. A
   // card's ask (`ask-v1`) is sent as the owner's own message in this chat,
-  // without touching the composer's draft.
+  // without touching the composer's draft; doSend resolves to 'duplicate'
+  // when the server already had its message id.
   const askSendRef = useRef(null)
   askSendRef.current = (text, { cid }) => doSend(text, { attachments: [], composer: false, cid })
   const appBlockChat = useMemo(() => chatId

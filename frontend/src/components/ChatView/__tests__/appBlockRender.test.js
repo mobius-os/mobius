@@ -485,7 +485,7 @@ test('jumping to the newest block moves focus there, without animation for reduc
 })
 
 // ---- ask-v1: the host's ask replaces the block's controls.
-const fixAsk = { refs: [{ id: 'row-1', code: 'upstream_conflict' }] }
+const fixAsk = { refs: [{ id: 'row-1', code: 'upstream_conflict', rev: 'abc1234' }] }
 const askView = (status, fields = {}) => {
   const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
     action: { label: 'Send all', intent: 'send-batch:sel-1' }, items: [{ title: 'Saved', intent: 'open:a', action: { label: 'Send', intent: 'send:a' } }] }) })
@@ -508,6 +508,7 @@ test('a drawn ask is the block\'s one action, with the host\'s own label; the ap
 test('after a tap the ask waits, and says why only to assistive technology', () => {
   assert.match(askView('sending'), /is-ask" disabled="" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Asking…/)
   assert.match(askView('asked'), /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">The request is in this chat\./)
+  assert.match(askView('already'), /disabled=""[^>]*>.*Already asked<\/button><span[^>]*>This chat already has this request\./)
   const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
 })

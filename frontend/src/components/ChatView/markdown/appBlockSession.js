@@ -126,23 +126,27 @@ export function sessionRows(value, app) {
 export const ASK_LABEL = 'Fix in chat'
 const ASK_REF_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const ASK_REF_CODE = /^[a-z][a-z0-9_]{1,47}$/
+const ASK_REF_REV = /^[0-9a-f]{7,64}$/
 
-/** `{refs: [{id, code}]}` with 1 to 12 references, or null. Any invalid
- *  reference rejects the whole ask; repeats collapse. */
+/** `{refs: [{id, code, rev}]}` with 1 to 12 references, or null. `rev` is the
+ *  app's token for the state being reported (for example the record's
+ *  reviewed head or its last failure's digest): it only keys the message id,
+ *  so a changed state can be asked about again. Any invalid reference
+ *  rejects the whole ask; repeats collapse. */
 export function sessionAsk(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !Array.isArray(value.refs) || value.refs.length < 1 || value.refs.length > SESSION_LIMITS.askRefs) return null
   const refs = []
   for (const ref of value.refs) {
-    if (typeof ref?.id !== 'string' || typeof ref.code !== 'string'
-      || !ASK_REF_ID.test(ref.id) || !ASK_REF_CODE.test(ref.code)) return null
-    if (!refs.some(seen => seen.id === ref.id && seen.code === ref.code)) refs.push({ id: ref.id, code: ref.code })
+    if (typeof ref?.id !== 'string' || typeof ref.code !== 'string' || typeof ref.rev !== 'string'
+      || !ASK_REF_ID.test(ref.id) || !ASK_REF_CODE.test(ref.code) || !ASK_REF_REV.test(ref.rev)) return null
+    if (!refs.some(seen => seen.id === ref.id && seen.code === ref.code && seen.rev === ref.rev)) refs.push({ id: ref.id, code: ref.code, rev: ref.rev })
   }
   return { refs }
 }
 
 /** The owner message an ask sends, written entirely by the host: one fixed
- *  sentence naming the app, then one line per reference. */
+ *  sentence naming the app, then one line per reference (without `rev`). */
 export function askMessage(app, ask) {
   return [`Please fix what the ${app} card in this chat flagged:`, '',
     ...ask.refs.map(ref => `\`${app} · ${ref.id} · ${ref.code}\``)].join('\n')

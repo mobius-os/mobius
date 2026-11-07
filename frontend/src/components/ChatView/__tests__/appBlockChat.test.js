@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  ASK_PERIOD_MS, AppBlockChatContext, appBlockChatKey, askCid, blockFingerprint, createAppBlockChat, useAppBlockChat,
+  AppBlockChatContext, appBlockChatKey, askCid, blockFingerprint, createAppBlockChat, useAppBlockChat,
 } from '../markdown/appBlockChat.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 
@@ -74,52 +74,96 @@ test('the block\'s own JSON cannot supply a chat context', () => {
 
 // ---- Card asks (ask-v1).
 const KEY = 'contribute\nchat:contributions'
-const REFS = [{ id: 'b-1', code: 'needs_review' }, { id: 'a-1', code: 'upstream_conflict' }]
+const REFS = [{ id: 'b-1', code: 'needs_review', rev: 'b'.repeat(40) }, { id: 'a-1', code: 'upstream_conflict', rev: 'a'.repeat(40) }]
 const FINGERPRINT = blockFingerprint(appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
   app: 'contribute', intent: 'chat:contributions', title: 'Cards', interaction: 'inline', items: [{ title: 'A', intent: 'review:a-1' }],
   action: { label: 'Contribute', intent: 'chat-send:a-1' } }) }))
 const request = { message: 'Please fix', fingerprint: FINGERPRINT, refs: REFS }
-// The server's existing duplicate check, as the chat's sender sees it: a
-// repeated client id is the same message, posted once.
+// The server's existing duplicate check, as doSend reports it: a repeated
+// client id is the same message, posted once, and answered 'duplicate'.
 function server() {
   const posted = new Map()
-  return { posted, send: async (message, { cid }) => { if (!posted.has(cid)) posted.set(cid, message); return true } }
+  return { posted, send: async (message, { cid }) => { if (posted.has(cid)) return 'duplicate'; posted.set(cid, message); return true } }
 }
-function askChat(send, clock = { at: Date.parse('2026-11-07T10:15:00Z') }) {
-  return { chat: createAppBlockChat('chat-1', { send, now: () => clock.at }), clock }
-}
+const askChat = send => createAppBlockChat('chat-1', { send })
 
-test('the ask id depends only on the chat, the block, the sorted refs and the clock hour', async () => {
-  const at = Date.parse('2026-11-07T10:15:00Z')
-  const id = await askCid('chat-1', FINGERPRINT, REFS, at)
+test('the ask id depends only on the chat, the block content and the refs with their revisions', async () => {
+  const id = await askCid('chat-1', FINGERPRINT, REFS)
   assert.match(id, /^ask-[0-9a-f]{32}$/)
-  assert.equal(await askCid('chat-1', FINGERPRINT, [...REFS].reverse(), at + 30 * 60 * 1000), id)
-  for (const other of [await askCid('chat-2', FINGERPRINT, REFS, at), await askCid('chat-1', `${FINGERPRINT}x`, REFS, at),
-    await askCid('chat-1', FINGERPRINT, REFS.slice(1), at), await askCid('chat-1', FINGERPRINT, REFS, at + ASK_PERIOD_MS)]) {
+  assert.equal(await askCid('chat-1', FINGERPRINT, [...REFS].reverse()), id, 'order does not matter')
+  for (const other of [await askCid('chat-2', FINGERPRINT, REFS), await askCid('chat-1', `${FINGERPRINT}x`, REFS),
+    await askCid('chat-1', FINGERPRINT, REFS.slice(1)), await askCid('chat-1', FINGERPRINT, [REFS[0], { ...REFS[1], rev: 'c'.repeat(40) }])]) {
     assert.notEqual(other, id)
   }
 })
 
-test('a reload, a second tab, a retry or concurrent taps post the same ask once', async () => {
+test('a lost acknowledgement retried later, on another device with another clock, posts once', async () => {
   const { posted, send } = server()
-  const views = [askChat(send).chat, askChat(send).chat, askChat(send).chat] // three views of one chat
+  let lose = true
+  const flaky = async (message, options) => { const result = await send(message, options); if (lose) { lose = false; throw new Error('lost ack') } return result }
+  const realNow = Date.now
+  const card = {}
+  try {
+    Date.now = () => Date.parse('2026-11-07T10:59:59.999Z')
+    const first = askChat(flaky)
+    first.place(KEY, card, node(1))
+    assert.equal(await first.ask(KEY, card, request), false, 'the server took it, but the answer was lost')
+    assert.equal(first.askState(KEY), 'ready')
+    Date.now = () => Date.parse('2026-11-07T11:00:00.000Z')
+    assert.equal(await first.ask(KEY, card, request), true, 'the retry is recognised')
+    assert.equal(first.askState(KEY), 'already', 'and said truthfully')
+    Date.now = () => Date.parse('2026-11-08T03:17:00.000Z') // another device, skewed clock
+    const other = askChat(send)
+    other.place(KEY, card, node(1))
+    assert.equal(await other.ask(KEY, card, request), true)
+    assert.equal(other.askState(KEY), 'already')
+  } finally { Date.now = realNow }
+  assert.equal(posted.size, 1)
+})
+
+test('reloads, tabs and concurrent taps of one state post once; a new revision can be asked', async () => {
+  const { posted, send } = server()
+  const views = [askChat(send), askChat(send), askChat(send)] // three views of one chat
   const card = {}
   for (const chat of views) chat.place(KEY, card, node(1))
   const results = await Promise.all([...views.map(chat => chat.ask(KEY, card, request)), views[0].ask(KEY, card, request)])
   assert.deepEqual(results, [true, true, true, false], 'the same view refuses a second tap while sending')
   assert.equal(posted.size, 1)
+  assert.deepEqual(views.map(chat => chat.askState(KEY)).sort(), ['already', 'already', 'asked'])
   views[0].turnSettled()
-  assert.equal(await views[0].ask(KEY, card, request), true, 'the button comes back after the turn, and the server still dedupes')
-  assert.equal(posted.size, 1)
-  const failing = askChat(async () => { throw new Error('offline') }).chat
-  failing.place(KEY, card, node(1))
-  assert.equal(await failing.ask(KEY, card, request), false)
-  assert.equal(failing.askState(KEY), 'ready', 'a failed send frees the button; the retry carries the same id')
+  assert.equal(views[0].askState(KEY), 'ready')
+  assert.equal(await views[0].ask(KEY, card, request), true)
+  assert.equal(views[0].askState(KEY), 'already', 'an unchanged state is never asked twice')
+  views[0].turnSettled()
+  const restaged = { ...request, refs: [REFS[0], { ...REFS[1], rev: 'c'.repeat(40) }] }
+  assert.equal(await views[0].ask(KEY, card, restaged), true)
+  assert.equal(views[0].askState(KEY), 'asked')
+  assert.equal(posted.size, 2)
+})
+
+test('identical blocks share their asks; the fingerprint is saved content, not position', async () => {
+  const fence = { app: 'contribute', intent: 'chat:contributions', title: 'Cards', interaction: 'inline', items: [{ title: 'A', intent: 'review:a-1' }] }
+  const parse = value => appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify(value) })
+  assert.equal(blockFingerprint(parse(fence)), blockFingerprint(parse(fence)))
+  assert.notEqual(blockFingerprint(parse(fence)), blockFingerprint(parse({ ...fence, items: [{ title: 'B', intent: 'review:b-1' }] })))
+  assert.equal(blockFingerprint(parse(fence)), blockFingerprint(parse({ ...fence, items: [{ title: 'Renamed', intent: 'review:a-1' }] })),
+    'a row title is not part of it')
+})
+
+test('a failed send frees the button', async () => {
+  const chat = askChat(async () => { throw new Error('offline') })
+  const card = {}
+  chat.place(KEY, card, node(1))
+  assert.equal(await chat.ask(KEY, card, request), false)
+  assert.equal(chat.askState(KEY), 'ready')
+  const refused = askChat(async () => false)
+  refused.place(KEY, card, node(1))
+  assert.equal(await refused.ask(KEY, card, request), false)
 })
 
 test('one view shows the tapped card as sending, then asked until a turn settles', async () => {
   let release
-  const { chat } = askChat(() => new Promise(resolve => { release = resolve }))
+  const chat = askChat(() => new Promise(resolve => { release = resolve }))
   const card = {}
   chat.place(KEY, card, node(1))
   const pending = chat.ask(KEY, card, request)
@@ -134,7 +178,7 @@ test('one view shows the tapped card as sending, then asked until a turn settles
 
 test('only the newest card of its key may ask', async () => {
   const { posted, send } = server()
-  const { chat } = askChat(send)
+  const chat = askChat(send)
   const [older, newer] = [{}, {}]
   chat.place(KEY, older, node(1))
   chat.place(KEY, newer, node(2))
@@ -146,7 +190,7 @@ test('only the newest card of its key may ask', async () => {
 
 test('the block hook exposes its own card ask', async () => {
   const { posted, send } = server()
-  const { chat } = askChat(send)
+  const chat = askChat(send)
   let seen = null
   const Probe = () => { seen = useAppBlockChat(KEY); return null }
   renderToStaticMarkup(createElement(AppBlockChatContext.Provider, { value: chat }, createElement(Probe)))
@@ -159,6 +203,7 @@ test('the block hook exposes its own card ask', async () => {
 test('the chat sends a card ask as an owner message that leaves the composer\'s draft alone', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  assert.equal((src.match(/return 'duplicate'/g) || []).length, 2, 'both send paths report a duplicate as such')
   assert.match(src, /askSendRef\.current = \(text, \{ cid \}\) => doSend\(text, \{ attachments: \[\], composer: false, cid \}\)/)
   assert.match(src, /createAppBlockChat\(chatId, \{ send: \(text, options\) => askSendRef\.current\(text, options\) \}\)/)
   assert.match(src, /appBlockChat\?\.turnSettled\(\)\n\s+if \(!hidden && document\.visibilityState === 'visible'\) appBlockChat\?\.refresh\('turn'\)/,

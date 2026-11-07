@@ -12,26 +12,29 @@
 
    It also sends this chat's card asks (`ask-v1`): one owner tap sends the
    host-built message through `send` as an ordinary owner message, with a
-   client message id derived from the chat, the block, its references and
-   the hour (askCid). The server already treats a repeated id as the same
-   message, so a retry, a reload, a second tab or a concurrent tap of the same
-   ask posts it at most once that hour. Nothing here counts or remembers sends
-   for safety; `pending` only shows the tapped card as waiting. */
+   client message id derived from the chat, the block's content and its
+   references with their revisions (askCid). The server already treats a
+   repeated id as the same message, so a retry, a reload, a second tab or a
+   concurrent tap of the same ask about the same state posts it once; a
+   changed state (a new `rev`) can be asked about again. Nothing here counts
+   or remembers sends for safety; `pending` only shows the tapped card's
+   state. */
 import { createContext, useContext, useLayoutEffect, useState, useSyncExternalStore } from 'react'
 
 export const REFRESH_REASONS = Object.freeze(['turn', 'visible'])
-export const ASK_PERIOD_MS = 60 * 60 * 1000
-
 /** What makes one block itself, for its asks: its app, intent, title and the
- *  intents it lists and acts on, as the transcript printed them. */
+ *  intents it lists and acts on, as the transcript printed them. It is the
+ *  block's saved content, not where it occurs: two identical blocks in one
+ *  chat share their asks, which is intended. It grants nothing. */
 export const blockFingerprint = block => JSON.stringify([block.app, block.intent, block.title,
   (block.items || []).map(item => item.intent), [block.action, ...(block.items || []).map(item => item.action)].filter(Boolean).map(action => action.intent)])
 
-/** The deterministic client message id of one ask: the same chat, block,
- *  references (in any order) and hour always give the same id. */
-export async function askCid(chatId, fingerprint, refs, at) {
-  const sorted = refs.map(ref => `${ref.id}\n${ref.code}`).sort()
-  const input = JSON.stringify(['ask-v1', chatId, fingerprint, sorted, Math.floor(at / ASK_PERIOD_MS)])
+/** The deterministic client message id of one ask: the same chat, block
+ *  content and references with their revisions (in any order) always give
+ *  the same id, whenever and wherever it is computed. */
+export async function askCid(chatId, fingerprint, refs) {
+  const sorted = refs.map(ref => JSON.stringify([ref.id, ref.code, ref.rev])).sort()
+  const input = JSON.stringify(['ask-v1', chatId, fingerprint, sorted])
   const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
   return `ask-${[...new Uint8Array(digest)].slice(0, 16).map(byte => byte.toString(16).padStart(2, '0')).join('')}`
 }
@@ -39,12 +42,13 @@ export async function askCid(chatId, fingerprint, refs, at) {
 const follows = (node, other) => Boolean(node && other
   && node.compareDocumentPosition(other) & 4 /* Node.DOCUMENT_POSITION_FOLLOWING */)
 
-export function createAppBlockChat(chatId, { send = null, now = () => Date.now() } = {}) {
+export function createAppBlockChat(chatId, { send = null } = {}) {
   const groups = new Map() // key -> Map(id -> { node, superseded })
   const listeners = new Set()
   let refresh = { seq: 0, reason: '' }
-  // Per card key: 'sending' until the send settles, then 'asked' until a
-  // turn here settles. Presentation only: the message id is what dedupes.
+  // Per card key: 'sending' until the send settles, then 'asked' (it was
+  // posted) or 'already' (the server already had it) until a turn here
+  // settles. Presentation only: the message id is what dedupes.
   const pending = new Map()
   let askVersion = 0
   const notify = () => listeners.forEach(listener => listener())
@@ -91,21 +95,24 @@ export function createAppBlockChat(chatId, { send = null, now = () => Date.now()
      *  ask is over, so its control comes back unless askState still limits it. */
     turnSettled() {
       let cleared = false
-      for (const [key, state] of pending) if (state === 'asked') { pending.delete(key); cleared = true }
+      for (const [key, state] of pending) if (state !== 'sending') { pending.delete(key); cleared = true }
       if (cleared) changed()
     },
-    /** One card's ask control: `ready`, `sending` or `asked`. */
+    /** One card's ask control: `ready`, `sending`, `asked` or `already`. */
     askState(key) { return pending.get(key) || 'ready' },
     /** Send one card's ask (`message` with the id from `fingerprint` and
      *  `refs`) as an owner message, if that card is still the newest of its
-     *  key and not already sending. Resolves to whether it was accepted. */
+     *  key and not already sending. Resolves to whether it was accepted.
+     *  `send` resolves to true, 'duplicate' (the server already had this
+     *  id) or false. */
     async ask(key, id, { message, fingerprint, refs }) {
       if (!send || typeof message !== 'string' || !message || !chat.latest(key, id) || pending.get(key) === 'sending') return false
       pending.set(key, 'sending')
       changed()
-      let ok = false
-      try { ok = (await send(message, { cid: await askCid(chatId, fingerprint, refs, now()) })) === true } catch { ok = false }
-      if (ok) pending.set(key, 'asked')
+      let result = false
+      try { result = await send(message, { cid: await askCid(chatId, fingerprint, refs) }) } catch { result = false }
+      const ok = result === true || result === 'duplicate'
+      if (ok) pending.set(key, result === true ? 'asked' : 'already')
       else pending.delete(key)
       changed()
       return ok

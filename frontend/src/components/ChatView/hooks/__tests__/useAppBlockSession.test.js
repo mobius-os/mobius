@@ -521,7 +521,7 @@ test('a refresh hint is raised only for a mounted, supported document, bound to 
 })
 
 test('ask-v1 is advertised and an ask accepted only when the app is admitted to ask', () => {
-  const ask = { refs: [{ id: 'row-1', code: 'needs_review' }] }
+  const ask = { refs: [{ id: 'row-1', code: 'needs_review', rev: 'abc1234' }] }
   for (const allowed of [true, false]) {
     const h = renderObserved({ block, near: true, ask: allowed })
     assert.equal(h.result.current.blockSession.features.includes('ask-v1'), allowed)

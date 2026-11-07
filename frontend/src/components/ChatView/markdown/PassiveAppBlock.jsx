@@ -97,8 +97,9 @@ export function blockAsk({ state, admitted, allowed, context }) {
     ? state.ask : null
 }
 
-const ASK_LABELS = { sending: 'Asking…', asked: 'Asked' }
-const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', asked: 'The request is in this chat.' }
+const ASK_LABELS = { sending: 'Asking…', asked: 'Asked', already: 'Already asked' }
+const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', asked: 'The request is in this chat.',
+  already: 'This chat already has this request.' }
 
 /** The host's ask control (`ask-v1`): its label is the host's, and one tap
  *  sends the host-written request (askMessage) into this chat as the owner's
