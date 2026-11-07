@@ -776,6 +776,9 @@ def test_review_status_still_blocks_an_overlapping_existing_pr_update(client, ow
   path = Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions" / "overlap-update.json"
   record = json.loads(path.read_text())
   record["plan"]["action"] = "pr_update"
+  record["plan"]["pr_metadata"] = {
+    "old_title": record["plan"]["title"], "old_body": record["plan"]["body_draft"],
+  }
   path.write_text(json.dumps(record))
   verdict = review_status(client, app_id, app_token)
   assert verdict["state"] == "needs_refresh", verdict
