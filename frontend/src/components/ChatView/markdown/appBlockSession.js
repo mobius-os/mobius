@@ -190,7 +190,8 @@ export function sessionState(message, sessionId, keys, intents = new Set(), app 
 function recoveryHold(previous, incoming, error = previous?.checkpoint && !previous?.recoveryError ? null : RECOVERY_ERROR) {
   const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
     .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
-      hidden: false, open: false, note: error || RECOVERY_ERROR }))
+      // The block's notice says it once; the action adds no second copy.
+      hidden: false, open: false, note: '' }))
   return { ...incoming, actions, title: '', titleTone: 'neutral', titleBusy: false, items: new Map(), rows: null, itemFacts: '', ask: null, checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
     recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
 }

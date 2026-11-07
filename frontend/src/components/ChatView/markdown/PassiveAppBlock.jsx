@@ -2,7 +2,7 @@
    current state while the block is near the viewport; the host draws every
    control. See building-apps.md "Passive block sessions". */
 import { Suspense, useCallback, useEffect, useId, useState } from 'react'
-import { Chat } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat, Check } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
 import { ASK_LABEL, askMessage, passiveAskAllowed, sessionSnapshot } from './appBlockSession.js'
@@ -97,7 +97,7 @@ export function blockAsk({ state, admitted, allowed, context }) {
     ? state.ask : null
 }
 
-const ASK_LABELS = { sending: 'Asking…', asked: 'Asked', already: 'Already asked' }
+const ASK_LABELS = { sending: 'Requesting…', asked: 'Requested in chat', already: 'Requested in chat' }
 const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', asked: 'The request is in this chat.',
   already: 'This chat already has this request.' }
 
@@ -108,13 +108,19 @@ const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', aske
 export function AskControl({ status, locked, onAsk }) {
   const waitingId = useId()
   const waiting = status !== 'ready'
+  const sending = status === 'sending'
+  // A request already in the chat is a settled state, not a faded button.
+  const settled = status === 'asked' || status === 'already'
   return <span className="md-app-block__controls">
-    <button type="button" className="md-app-block__action is-ask" disabled={locked || waiting}
+    <button type="button" className={`md-app-block__action is-ask${sending ? ' is-requesting' : ''}${settled ? ' is-settled' : ''}`}
+      disabled={locked || waiting} aria-busy={sending || undefined}
       aria-describedby={waiting ? waitingId : undefined} onClick={onAsk}>
-      {status === 'sending' ? <span className="md-app-block__spinner" aria-hidden="true" />
-        : <Chat width={16} height={16} aria-hidden="true" />}
+      {sending ? <span className="md-app-block__spinner" aria-hidden="true" />
+        : settled ? <Check width={16} height={16} aria-hidden="true" /> : <Chat width={16} height={16} aria-hidden="true" />}
       {ASK_LABELS[status] || ASK_LABEL}</button>
     {waiting ? <span id={waitingId} className="md-app-block__sr-only">{ASK_WAIT[status]}</span> : null}
+    {/* The acknowledgement is announced, not only shown on a disabled button. */}
+    <span className="md-app-block__sr-only" role="status">{settled ? ASK_WAIT[status] : ''}</span>
   </span>
 }
 

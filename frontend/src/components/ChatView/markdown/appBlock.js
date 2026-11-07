@@ -105,9 +105,13 @@ export function appBlockFromToken(token) {
     action: inline ? blockAction(value.action) : null,
     expandLabel: boundedText(value.expand_label, APP_BLOCK_LIMITS.expandLabel),
     // `"item_facts": "values"` draws row facts as their values only (labels
-    // for assistive technology); anything else keeps visible labels. Never
-    // applied to an app's confirmation rows.
+    // for assistive technology); anything else keeps visible labels. It is
+    // never applied to an app's confirmation rows, which opt in separately.
     itemFacts: value.item_facts === 'values' ? 'values' : '',
+    // `"confirm_facts": "values"` opts the block's confirmation rows into the
+    // same value-only facts (labels for assistive technology). Without it an
+    // app's confirmation keeps visible labels, as before.
+    confirmFacts: value.confirm_facts === 'values' ? 'values' : '',
     height: typeof value.height === 'number' && Number.isFinite(value.height)
       ? Math.max(240, Math.min(640, value.height)) : 480,
   }

@@ -469,7 +469,11 @@ most 16384.
   joined by a dot, each with its visible label. `"item_facts": "values"` opts
   the block in to value-only rows (labels kept for assistive technology); use
   it only when every value reads on its own ("owner/repo", "3 files · +88
-  −21"). An app's confirmation rows always keep visible labels.
+  −21"). An app's confirmation rows keep visible labels unless the block
+  also sets `"confirm_facts": "values"`, which draws them value-only too
+  (labels kept for assistive technology). Set it only when each confirmation
+  value still reads on its own at approval time. Older hosts ignore it and
+  keep the labels.
 - Every block links to `/shell/?app=<slug>&intent=<intent>`, and each item to
   its own intent. Nothing app-owned runs until the reader clicks the expand
   control or an action; the app's ordinary view then opens in the transcript
@@ -659,11 +663,12 @@ included.
   of the chat, the block's saved content (app, intent, title and the intents
   it lists and acts on) and the refs with their `rev`, so the server posts one
   ask about one state once, however often it is tapped, retried or reloaded,
-  on any device; after a duplicate the button says "Already asked". Change
+  on any device; after a duplicate the button says "Requested in chat". Change
   `rev` when the state changes (the agent restaged, a new failure) and the
   owner can ask again. The block identity is its content, not its position:
   two identical blocks in one chat share their asks, by design. After a tap
-  the button reads "Asked" until a turn in the chat settles. Omit `ask` (or
+  the button reads "Requested in chat" (announced politely) until a turn in
+  the chat settles. Omit `ask` (or
   report `null`) when nothing needs the agent. An ask needs
   `"chat.blocks.ask": {"version": 1}` in `mobius.json` beside
   `chat.blocks.passive`, accepted by the owner and applied; without it the host

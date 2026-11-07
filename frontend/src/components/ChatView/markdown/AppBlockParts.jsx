@@ -47,10 +47,12 @@ export function Facts({ facts }) {
 }
 
 /** App-reported links open outside Möbius, marked by an arrow. */
-export function ExternalLinks({ links }) {
+export function ExternalLinks({ links, context = '' }) {
   if (!links.length) return null
+  // A short label such as "#42" names its row for assistive technology.
   return <span className="md-app-block__links">{links.map(link =>
-    <a key={link.url} className="md-app-block__link" href={link.url} target="_blank" rel="noopener noreferrer">
+    <a key={link.url} className="md-app-block__link" href={link.url} target="_blank" rel="noopener noreferrer"
+      aria-label={`${link.label}${context ? `, ${context}` : ''}, opens in a new tab`}>
       {link.label}<ArrowUpRight width={14} height={14} aria-hidden="true" /></a>)}</span>
 }
 
@@ -63,10 +65,10 @@ export function StatusPill({ status, tone = 'neutral', busy = false }) {
 }
 
 /** A row's live state from a passive session (appBlockSession.js sessionItems). */
-function ItemState({ live }) {
+function ItemState({ live, title = '' }) {
   if (!live) return null
   return <span className="md-app-block__item-state">
-    <ExternalLinks links={live.links} />
+    <ExternalLinks links={live.links} context={title} />
     <StatusPill status={live.status} tone={live.statusTone} busy={live.busy} />
   </span>
 }
@@ -86,7 +88,7 @@ export function TitleMark({ tone = 'neutral', busy = false }) {
 /** Every shape says why it offers no app view when its app is missing. */
 export function UnavailableNotice({ slug, loading }) {
   return <p className="md-app-block__notice" role="status">
-    {loading ? 'Checking installed apps…' : `${slug} is not installed. The saved snapshot remains here.`}</p>
+    {loading ? 'Checking installed apps…' : `The ${slug} app is not installed. The saved snapshot remains here.`}</p>
 }
 
 /** The block's rows. A passive session's confirmation rows (sessionSnapshot)
@@ -107,7 +109,7 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
       {item.appRow && item.meta ? <p className="md-app-block__item-meta">{item.meta}</p> : null}
       {item.live?.note ? <p className="md-app-block__item-note">{item.live.note}</p> : null}
     </div>
-    <ItemState live={item.live} />
+    <ItemState live={item.live} title={item.title} />
     {actionFor(item.action)}
     {i === last ? <span ref={listEdgeRefs?.end} className="md-app-block__list-edge is-end" aria-hidden="true" /> : null}
   </li>)}</ul>
@@ -136,7 +138,8 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   // A host-drawn ask (PassiveAppBlock.jsx) takes the place of the block's own
   // action, so the block still offers one action.
   const action = ask || actionFor(block.action)
-  const valueFacts = block.itemFacts === 'values' ? ' md-app-block--value-facts' : ''
+  const valueFacts = (block.itemFacts === 'values' ? ' md-app-block--value-facts' : '')
+    + (block.confirmFacts === 'values' ? ' md-app-block--confirm-values' : '')
   // An app that reports no rows and shows no control folds its block to one
   // quiet line (for example "Continued below" on an earlier card).
   const folded = block.appRows && !block.items.length && !action && !toggle && !summary

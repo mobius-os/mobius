@@ -246,6 +246,16 @@ test('a recovery hold shows no live title, row state or open link', () => {
   assert.equal(sessionSnapshot(rowBlock(), replacement).title, 'Saved title')
 })
 
+test('a recovery hold says why once, in the block notice, not again on each action', () => {
+  const held = sessionDocumentReset(sessionStateUpdate(null, parseRows({ retain: true, checkpoint: { id: 'c1', data: '{}' },
+    actions: [{ key: 'send:a', label: 'Send', note: 'An app note' }] })))
+  assert.match(held.notice, /Open the app/)
+  assert.ok(held.actions.every(action => action.disabled && action.note === ''))
+  const reported = sessionStateUpdate(held, parseRows({ recoveryError: true, actions: [{ key: 'send:a', label: 'Send' }] }))
+  assert.match(reported.notice, /needs recovery/)
+  assert.ok(reported.actions.every(action => action.note === ''))
+})
+
 test('the host advertises row-state and rows-v2, and a report can opt in to value-only row facts', async () => {
   const { SESSION_FEATURES } = await import('../markdown/appBlockSession.js')
   assert.deepEqual([...SESSION_FEATURES], ['row-state', 'rows-v2'], 'rows-v2 extends row-state, which older apps still look for')
