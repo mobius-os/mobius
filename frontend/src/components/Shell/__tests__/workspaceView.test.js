@@ -5,7 +5,7 @@ import * as tabModel from '../tabModel.js'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan, projectFocusedPane,
   MODE_MOTION,
-  EMPTY_SINGLE_SURFACE_KEY,
+  EMPTY_SINGLE_SURFACE_KEY, panesShareScreen,
 } from '../workspaceView.js'
 
 const { makeTab, tabKey } = tabModel
@@ -583,4 +583,14 @@ test('an empty projection has no decorative mode transaction', () => {
   const ws = paneModel.seedFromFlatTabs([])
   const projection = project(ws)
   assert.equal(deriveModeSnapshotPlan({ workspace: ws, projection, contentRect: CONTENT }), null)
+})
+
+test('side-by-side panes share the screen; a maximized pane, single view, or phone stack does not', () => {
+  const tiled = { visibleLeaves: ['p0', 'p1'] }
+  const alone = { visibleLeaves: ['p1'] }
+  assert.equal(panesShareScreen({ viewMode: 'panes', projection: tiled, layoutMode: 'wide' }), true)
+  assert.equal(panesShareScreen({ viewMode: 'panes', projection: tiled, layoutMode: 'compact' }), true)
+  assert.equal(panesShareScreen({ viewMode: 'panes', projection: alone, layoutMode: 'wide' }), false)
+  assert.equal(panesShareScreen({ viewMode: 'single', projection: tiled, layoutMode: 'wide' }), false)
+  assert.equal(panesShareScreen({ viewMode: 'panes', projection: tiled, layoutMode: 'phone' }), false)
 })

@@ -7,7 +7,8 @@
 // two overlay branches (especially immersive-solo, which had no multi-pane
 // coverage) are unit-testable without a DOM.
 //
-// Immersive solos its pane over the WHOLE workspace (design §4/§9): the chrome
+// Applied immersive solos its pane over the WHOLE workspace (design §4/§9); it is
+// not applied while side-by-side panes share the screen (lib/immersive.js). The chrome
 // is hidden, the holder app is painted full-bleed over the entire content box,
 // and every sibling — app frames and chat panes alike — is hidden so it stops
 // painting and receives frame-visibility:false. Exit restores the tree exactly
@@ -120,6 +121,16 @@ export function deriveModeSnapshotPlan({ workspace, projection, contentRect }) {
   return Object.keys(offsets).length > 0
     ? { offsets, totalMs: MODE_MOTION.slideMs }
     : null
+}
+
+// Whether side-by-side panes are sharing the screen right now: the tiled
+// builder world with two or more visible panes. A maximized pane or single view
+// has the screen to itself. A stacked phone split does not count: there every
+// pane already spans the width, so taking the screen changes only height.
+export function panesShareScreen({ viewMode, projection, layoutMode }) {
+  return viewMode !== 'single'
+    && projection.visibleLeaves.length >= 2
+    && layoutMode !== 'phone'
 }
 
 // deriveContentVisibility({ workspace, projection, settingsOverlayOpen,
