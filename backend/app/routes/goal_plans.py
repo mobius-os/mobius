@@ -270,7 +270,7 @@ class GoalUpdateRequest(BaseModel):
 
 
 def _goal_summary(db: Session, goal) -> dict[str, Any]:
-  from app.agent_work_claims import open_claim_keys
+  from app.agent_work_claims import completable_claim_keys, open_claim_keys
   from app.goals import goal_hold
   return {
     "hold": goal_hold(goal) if goal.status == "stopped" else None,
@@ -278,6 +278,9 @@ def _goal_summary(db: Session, goal) -> dict[str, Any]:
     "objective": goal.objective, "next_action": goal.next_action,
     "result": goal.result,
     "held_work_keys": sorted(open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)),
+    "completable_work_keys": sorted(completable_claim_keys(
+      db, chat_id=goal.chat_id, goal_id=goal.id,
+    )),
   }
 
 
