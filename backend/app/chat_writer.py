@@ -2899,7 +2899,8 @@ class ChatWriterActor:
 
   def _withdraw_wait(self, db, cmd: WithdrawWait) -> dict:
     from app.chat_waits import (
-      _broadcast_changed, _cancel_active_check, serialize_wait, stage_withdraw_wait,
+      _WITHDRAWN_DISPOSITIONS, _broadcast_changed, _cancel_active_check,
+      serialize_wait, stage_withdraw_wait,
     )
     row = db.get(models.ChatWait, cmd.wait_id)
     if row is None or row.chat_id != cmd.chat_id:
@@ -2911,7 +2912,7 @@ class ChatWriterActor:
     result = {**serialize_wait(row, db=db), **outcome}
     if not _commit_or_rollback(db):
       raise _PersistFailed("WithdrawWait did not persist")
-    if outcome["disposition"] == "withdrawn":
+    if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
       _cancel_active_check(cmd.wait_id)
       _broadcast_changed(cmd.chat_id)
     return result

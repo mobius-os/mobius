@@ -149,8 +149,9 @@ CANCEL_WAIT_DESCRIPTION = (
   "Withdraw one exact armed wait or owed follow-up owned by this top-level chat when the owner's "
   "latest request clearly makes it obsolete. Do not cancel merely because the "
   "owner sent another message: waits continue unless their purpose has really "
-  "been superseded. Inspect disposition: withdrawn, already_delivered, or not_withdrawable. "
-  "Withdrawal cannot undo input already admitted to a provider or tools already executed."
+  "been superseded. Inspect disposition: withdrawn, withdrawn_after_attempt (future delivery only), "
+  "already_delivered, or not_withdrawable. Live or unresolved admitting runs must settle first. "
+  "Earlier provider input and tool effects are never undone."
 )
 LIST_AGENT_PEERS_DESCRIPTION = (
   "Discover addressable live agents and the caller's broadcast scope. Use "

@@ -821,7 +821,7 @@ export default function ChatView({
   ))
   const handleCancelWait = useCallback(async (waitId) => {
     const result = await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
-    // A successful HTTP response may refuse withdrawal after provider entry.
+    // HTTP success may refuse withdrawal while an admitting turn is unresolved.
     // Do not hide an owed follow-up until the durable disposition confirms it.
     setArmedWaits(prev => {
       const next = result.status === 'armed' || result.delivery_pending

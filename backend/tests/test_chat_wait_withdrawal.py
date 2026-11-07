@@ -185,9 +185,9 @@ def test_provider_entry_then_cancel_then_receipt_keep_truthful_order(db, chat):
   assert final["result_disposition"] == "delivered"
 
 
-@pytest.mark.parametrize("status", ["running", "failed", "interrupted", "completed"])
+@pytest.mark.parametrize("status", ["running", "parked", "unknown", "failed", "interrupted", "completed", "stopped"])
 @pytest.mark.parametrize("admitted", [True, None])
-def test_admitted_direct_carrier_cannot_be_called_unstarted_even_without_prompt_snapshot(
+def test_only_live_or_unknown_admitting_carriers_refuse_future_withdrawal(
   client, auth, db, chat, status, admitted,
 ):
   wait = _wait(db, chat)
@@ -195,9 +195,19 @@ def test_admitted_direct_carrier_cannot_be_called_unstarted_even_without_prompt_
   run.status = status
   run.provider_execution_admitted = admitted
   db.commit()
-  assert _cancel(client, auth, wait)["disposition"] == "not_withdrawable"
+  terminal = status in {"failed", "interrupted", "completed", "stopped"}
+  result = _cancel(client, auth, wait)
+  assert result["disposition"] == ("withdrawn_after_attempt" if terminal else "not_withdrawable")
+  assert not result["can_withdraw"]
   db.refresh(wait)
-  assert wait.result_disposition is None and wait.cancelled_at is None
+  if terminal:
+    assert wait.result_disposition == "withdrawn_after_attempt"
+    assert wait.cancelled_at is not None
+    assert wait.resume_delivered_at is None and wait.received_run_id is None
+  else:
+    assert wait.result_disposition is None and wait.cancelled_at is None
+    if status != "running":
+      assert "Use Stop" not in result["detail"]
 
 
 def test_other_results_admitted_on_same_chat_do_not_prevent_this_withdrawal(client, auth, db, chat):
@@ -257,3 +267,89 @@ def test_promoted_wait_notice_is_still_withdrawable_before_provider_entry(client
       run_token=token)).result(timeout=5)
   db.expire_all()
   assert db.get(models.ChatRun, token).provider_execution_admitted is False
+
+
+@pytest.mark.parametrize("status", ["failed", "interrupted", "completed", "stopped"])
+def test_withdraw_after_ended_attempt_stops_injection_into_the_next_ordinary_turn(
+  client, auth, db, chat, status,
+):
+  wait = _wait(db, chat)
+  attempted = _receiver(db, chat, "attempt-a")
+  _admit(chat, attempted, wait).result(timeout=5)
+  attempted.status = status
+  attempted.ended_at = now_naive_utc()
+  db.commit()
+  assert chat_waits.owed_wait_results(db, chat.id, "", run_id=attempted.id)[1] == (wait.id,)
+  assert chat_waits.serialize_wait(wait, db=db)["can_withdraw"]
+  result = _cancel(client, auth, wait)
+  assert result["disposition"] == result["result_disposition"] == "withdrawn_after_attempt"
+  assert "not undone" in result["detail"]
+  assert not result["delivery_pending"]
+  assert _cancel(client, auth, wait) == result
+  # A late acknowledgement cannot convert withdrawal of future delivery into
+  # a receipt, and cancellation never rewrites the earlier execution record.
+  _receipt(chat, attempted, wait).result(timeout=5)
+  db.refresh(attempted)
+  assert attempted.status == status and attempted.provider_execution_admitted
+  assert attempted.admitted_wait_results_json == [wait.id]
+  receiving = _receiver(db, chat, "ordinary-b")
+  assert chat_waits.owed_wait_results(db, chat.id, "Continue", run_id=receiving.id) == ("", ())
+  assert chat_waits.wait_delivery_blocker(db, db.get(models.ChatWait, wait.id)) == "withdrawn"
+  with pytest.raises(_PersistFailed, match="Wait result is no longer receivable"):
+    _admit(chat, receiving, wait).result(timeout=5)
+  get_writer().submit(AdmitProviderExecution(chat_id=chat.id,
+    run_token=receiving.id)).result(timeout=5)
+  db.expire_all()
+  assert db.get(models.ChatRun, receiving.id).admitted_wait_results_json == []
+  assert db.get(models.ChatWait, wait.id).result_disposition == "withdrawn_after_attempt"
+
+
+def test_one_live_admitting_run_blocks_withdrawal_until_every_attempt_ends(client, auth, db, chat):
+  wait = _wait(db, chat)
+  ended = _receiver(db, chat, "failed-attempt")
+  _admit(chat, ended, wait).result(timeout=5)
+  ended.status = "failed"
+  db.commit()
+  live = _receiver(db, chat, "live-attempt")
+  _admit(chat, live, wait).result(timeout=5)
+  assert not chat_waits.serialize_wait(wait, db=db)["can_withdraw"]
+  assert _cancel(client, auth, wait)["disposition"] == "not_withdrawable"
+  live.status = "interrupted"
+  db.commit()
+  assert chat_waits.serialize_wait(wait, db=db)["can_withdraw"]
+  assert _cancel(client, auth, wait)["disposition"] == "withdrawn_after_attempt"
+
+
+@pytest.mark.parametrize("withdraw_first", [True, False])
+def test_future_withdrawal_after_an_ended_attempt_orders_against_new_provider_entry(db, chat, withdraw_first):
+  from app.chat_writer import WithdrawWait
+  wait = _wait(db, chat)
+  ended = _receiver(db, chat, "ended-attempt")
+  _admit(chat, ended, wait).result(timeout=5)
+  ended.status = "failed"
+  db.commit()
+  next_run = _receiver(db, chat, "new-attempt")
+  writer = get_writer()
+  command = WithdrawWait(chat_id=chat.id, wait_id=wait.id)
+  if withdraw_first:
+    cancel = writer.submit(command)
+    admission = _admit(chat, next_run, wait)
+    assert cancel.result(timeout=5)["disposition"] == "withdrawn_after_attempt"
+    with pytest.raises(_PersistFailed, match="Wait result is no longer receivable"):
+      admission.result(timeout=5)
+  else:
+    admission = _admit(chat, next_run, wait)
+    cancel = writer.submit(command)
+    admission.result(timeout=5)
+    assert cancel.result(timeout=5)["disposition"] == "not_withdrawable"
+  db.expire_all()
+  assert db.get(models.ChatRun, next_run.id).provider_execution_admitted is not withdraw_first
+
+
+def test_never_entered_terminal_carrier_does_not_claim_an_earlier_attempt(client, auth, db, chat):
+  wait = _wait(db, chat)
+  run = _receiver(db, chat, "wait-resume-" + wait.id)
+  run.status = "failed"
+  db.commit()
+  assert chat_waits.serialize_wait(wait, db=db)["can_withdraw"]
+  assert _cancel(client, auth, wait)["disposition"] == "withdrawn"

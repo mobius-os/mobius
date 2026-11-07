@@ -158,7 +158,7 @@ def stage_wait_results_delivered(
 
 def wait_delivery_blocker(db: Session, row: models.ChatWait) -> str | None:
   """Durable admission check; a held Goal cannot degrade into Goal-less work."""
-  if row.status == "cancelled" or row.result_disposition == "withdrawn":
+  if row.status == "cancelled" or row.result_disposition in _WITHDRAWN_DISPOSITIONS:
     return "withdrawn"
   if row.status not in _OUTCOMES:
     return "not_fired"
@@ -192,6 +192,10 @@ _OUTPUT_TAIL = 2000
 _OUTPUT_TAIL_BYTES = _OUTPUT_TAIL * 4
 _RESULT_MAX = 3000
 _OUTCOMES = {"met": "met", "expired": "deadline_expired", "failed": "check_failed"}
+_WITHDRAWN_DISPOSITIONS = frozenset({"withdrawn", "withdrawn_after_attempt"})
+_AFTER_ATTEMPT_WITHDRAWAL_DETAIL = (
+  "Future delivery stopped. Any earlier provider input or tool effects were not undone."
+)
 _RESUME_RETRY = ".retry"
 
 def _closed_wait_goal(db: Session, row: models.ChatWait) -> bool:
@@ -369,34 +373,59 @@ def cancel_wait(db: Session, row: models.ChatWait) -> dict:
   return result
 
 
-def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
-  """Stop an ordinary check/owed follow-up, never undo admitted execution.
+def wait_withdrawal_outcome(db: Session, row: models.ChatWait) -> dict:
+  """Project one withdrawal outcome; the writer rechecks it before mutation.
 
-  The writer orders this with AdmitProviderExecution and provider receipt.
-  The conditional update also tolerates a check firing outside the writer.
-  A fired condition keeps its outcome; withdrawal is a separate disposition.
+  An ended attempt is not a permanent claim on future delivery. Only a live
+  or unresolved admitting run blocks withdrawal; earlier execution is never
+  described as undone, even when its delivery receipt is still owed.
   """
   if row.kind == "platform_activation":
     return {"disposition": "not_withdrawable", "detail": "Use the Restart card or Stop the chat instead."}
   if row.resume_delivered_at is not None or row.result_disposition == "delivered":
     return {"disposition": "already_delivered"}
+  if row.result_disposition == "withdrawn_after_attempt":
+    return {"disposition": "withdrawn_after_attempt", "detail": _AFTER_ATTEMPT_WITHDRAWAL_DETAIL}
   if row.status == "cancelled" or row.result_disposition == "withdrawn":
     return {"disposition": "withdrawn"}
   if row.result_disposition is not None or row.status not in ("armed", *_OUTCOMES):
     return {"disposition": "not_withdrawable", "detail": "This Wait is already settled."}
+  # Provider admission accepts only fired results, never an armed monitor.
+  if row.status == "armed":
+    return {"disposition": "withdrawn"}
 
-  # Selection is reversible; provider entry is not. Include dedicated carriers
-  # even if their prompt snapshot is missing (legacy/ambiguous execution).
+  from app.chat_writer import _TERMINAL_RUN_STATUSES
   carriers = {"wait-resume-" + row.id, "wait-resume-" + row.id + _RESUME_RETRY}
-  admitted = db.query(models.ChatRun.id, models.ChatRun.admitted_wait_results_json).filter(
+  admitted = db.query(models.ChatRun.id, models.ChatRun.status,
+    models.ChatRun.admitted_wait_results_json).filter(
     models.ChatRun.chat_id == row.chat_id,
     models.ChatRun.provider_execution_admitted.is_not(False),
   )
-  if any(token in carriers or row.id in (ids or ()) for token, ids in admitted):
-    return {"disposition": "not_withdrawable", "detail": (
-      "This follow-up may already have entered a provider. Stopping a Wait cannot undo "
-      "input already sent or tools already executed. Use Stop to interrupt a current turn."
-    )}
+  attempted = False
+  for token, status, ids in admitted:
+    # Dedicated carriers also cover legacy/ambiguous prompt snapshots.
+    if token not in carriers and row.id not in (ids or ()):
+      continue
+    attempted = True
+    if status not in _TERMINAL_RUN_STATUSES:
+      detail = (
+        "A receiving turn has not ended. Use Stop if it is running, or resolve its recovery "
+        "state, before withdrawing future delivery. Earlier provider input and tool effects cannot be undone."
+        if status == "running" else
+        "A receiving attempt is paused or its outcome is unresolved. Resolve its recovery "
+        "state before withdrawing future delivery. Earlier input and tool effects cannot be undone."
+      )
+      return {"disposition": "not_withdrawable", "detail": detail}
+  return ({"disposition": "withdrawn_after_attempt", "detail": _AFTER_ATTEMPT_WITHDRAWAL_DETAIL}
+    if attempted else {"disposition": "withdrawn"})
+
+
+def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
+  """Withdraw future ordinary delivery, preserving condition and prior effects."""
+  outcome = wait_withdrawal_outcome(db, row)
+  if (outcome["disposition"] not in _WITHDRAWN_DISPOSITIONS
+      or row.result_disposition in _WITHDRAWN_DISPOSITIONS or row.status == "cancelled"):
+    return outcome
   now = now_naive_utc()
   db.query(models.ChatWait).filter(
     models.ChatWait.id == row.id,
@@ -406,15 +435,11 @@ def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
     models.ChatWait.status: case((models.ChatWait.status == "armed", "cancelled"),
       else_=models.ChatWait.status),
     models.ChatWait.cancelled_at: now,
-    models.ChatWait.result_disposition: "withdrawn",
+    models.ChatWait.result_disposition: outcome["disposition"],
     models.ChatWait.result_disposed_at: now,
   }, synchronize_session=False)
   db.refresh(row)
-  if row.result_disposition == "withdrawn":
-    return {"disposition": "withdrawn"}
-  if row.resume_delivered_at is not None:
-    return {"disposition": "already_delivered"}
-  return {"disposition": "not_withdrawable", "detail": "This Wait is already settled."}
+  return wait_withdrawal_outcome(db, row)
 
 
 def stage_cancel_waits_for_chat(db: Session, chat_id: str) -> int:
@@ -511,6 +536,11 @@ def serialize_wait(row: models.ChatWait, *, db: Session) -> dict:
     "kind": row.kind,
     "command": row.command,
     "status": row.status,
+    "can_withdraw": (
+      row.kind != "platform_activation" and row.result_disposition is None
+      and row.resume_delivered_at is None and row.status in ("armed", *_OUTCOMES)
+      and wait_withdrawal_outcome(db, row)["disposition"] in _WITHDRAWN_DISPOSITIONS
+    ),
     "delivery_pending": row.status in _OUTCOMES and row.resume_delivered_at is None and row.result_disposition is None,
     "result_disposition": row.result_disposition,
     "received_run_id": row.received_run_id,
@@ -642,7 +672,7 @@ def terminal_wait_summaries_by_message_index(
         models.ChatRun.id.in_(answer_by_run_id),
       ).all()
     ]
-  non_waking = {"retired_by_goal_outcome", "withdrawn"}
+  non_waking = _WITHDRAWN_DISPOSITIONS | {"retired_by_goal_outcome"}
   owning_goals = dict(db.query(models.ChatRun.id, models.ChatRun.goal_id).filter(
     models.ChatRun.chat_id == chat_id, models.ChatRun.id.in_(answer_by_run_id),
   ).all()) if answer_by_run_id and any(

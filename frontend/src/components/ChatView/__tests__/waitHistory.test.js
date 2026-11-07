@@ -205,6 +205,7 @@ test('Goal completion and cancellation without a receipt trail the owning answer
     ['met', 'retired_by_goal_outcome', 'Wait completed'],
     ['cancelled', 'withdrawn', 'Wait stopped'],
     ['met', 'withdrawn', 'Wait completed'],
+    ['met', 'withdrawn_after_attempt', 'Wait completed'],
   ]) {
     const summary = {
       id: result_disposition, description: 'Exact Goal result', status,
@@ -245,7 +246,7 @@ test('owed ordinary results expose Stop follow-up even behind a recovery hold', 
     for (const resume_blocker of [null, 'owner_input', 'manual_resume', 'resume_failed', 'restart']) {
       for (const expanded of [false, true]) {
         const html = renderToStaticMarkup(createElement(WaitCard, {
-          wait: { id: 'owed-result', kind: 'timer', status, delivery_pending: true, resume_blocker },
+          wait: { id: 'owed-result', kind: 'timer', status, delivery_pending: true, resume_blocker, can_withdraw: true },
           expanded, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
         }))
         assert.match(html, /Stop follow-up/, `${status}: ${resume_blocker}`)
@@ -262,6 +263,8 @@ test('delivered, withdrawn and activation waits never expose a generic Stop cont
   for (const wait of [
     { kind: 'timer', status: 'met', delivery_pending: false, result_disposition: 'delivered' },
     { kind: 'timer', status: 'met', delivery_pending: false, result_disposition: 'withdrawn' },
+    { kind: 'timer', status: 'met', delivery_pending: false, result_disposition: 'withdrawn_after_attempt' },
+    { kind: 'timer', status: 'met', delivery_pending: true, can_withdraw: false },
     { kind: 'timer', status: 'cancelled', delivery_pending: false },
     { kind: 'platform_activation', status: 'armed' },
     { kind: 'platform_activation', status: 'met', delivery_pending: true },
@@ -271,4 +274,23 @@ test('delivered, withdrawn and activation waits never expose a generic Stop cont
     }))
     assert.doesNotMatch(html, /Stop follow-up|Stop waiting/)
   }
+})
+
+
+test('ended-attempt withdrawal remains a non-waking historical fact, not provider delivery', () => {
+  for (const status of ['met', 'expired', 'failed']) {
+    assert.equal(waitWokeItsAnswer({ status, delivery_pending: false,
+      result_disposition: 'withdrawn_after_attempt' }), false)
+  }
+})
+
+
+test('an unresolved admitting run hides Stop follow-up without hiding recovery', () => {
+  const html = renderToStaticMarkup(createElement(WaitCard, {
+    wait: { id: 'unresolved-attempt', kind: 'timer', status: 'met', delivery_pending: true,
+      can_withdraw: false, resume_blocker: 'manual_resume' },
+    expanded: false, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
+  }))
+  assert.doesNotMatch(html, /Stop follow-up|Stop waiting/)
+  assert.match(html, /View recovery/)
 })

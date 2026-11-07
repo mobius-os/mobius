@@ -162,9 +162,11 @@ JSON
 
 `call cancel_wait --args-json '{"wait_id":"..."}'` withdraws an armed monitor or
 its fired-but-undelivered follow-up. Inspect the returned `disposition`:
-`withdrawn`, `already_delivered`, or `not_withdrawable`. Provider admission is a
-one-way boundary: withdrawal cannot undo input already admitted or tools
-already executed. Use Stop to interrupt a current turn; delivered history stays.
+`withdrawn` (before an attempt), `withdrawn_after_attempt` (future delivery only),
+`already_delivered`, or `not_withdrawable`. A live or unresolved admitting turn
+must end before future delivery can be withdrawn. Provider input and tool
+effects from earlier attempts are never undone. Use Stop to interrupt a current
+turn; delivered history stays.
 Restart-activation Waits remain owned by their Restart cards.
 
 ## What happens on resume
@@ -199,7 +201,8 @@ automatically resume from it.
   it stays armed until met, failed, expired, or cancelled. The chat's Stop
   action stops its turn, not independent monitors; use `cancel <id>` or the
   card's **Stop waiting** action to cancel an armed monitor. Once the check
-  finishes, **Stop follow-up** withdraws the owed result before provider admission.
+  finishes, **Stop follow-up** withdraws future delivery before provider admission
+  or after every earlier attempt has ended without a successful receipt.
 
 ## Reading outcomes
 

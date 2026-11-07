@@ -27,6 +27,7 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
   const needsRecovery = wait.delivery_pending && ['manual_resume', 'resume_failed', 'restart'].includes(wait.resume_blocker)
   const cancellable = wait.kind !== 'platform_activation' && !wait.result_disposition
     && (wait.delivery_pending || !wait.status || wait.status === 'armed')
+    && (wait.can_withdraw !== false || !!cancelError)
   const recoveryAction = needsRecovery && onRevealRecovery
     ? { label: 'View recovery', onClick: onRevealRecovery } : null
   return (
@@ -40,7 +41,7 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
       stateLabel={wait.delivery_pending && ['manual_resume', 'resume_failed', 'owner_input', 'restart'].includes(wait.resume_blocker) ? 'Needs you' : 'Waiting'}
       action={cancellable && onCancel ? {
         label: cancelling ? 'Stopping…' : wait.delivery_pending ? 'Stop follow-up' : 'Stop waiting',
-        onClick: cancel, disabled: cancelling, error: cancelError,
+        onClick: cancel, disabled: cancelling || wait.can_withdraw === false, error: cancelError,
       } : recoveryAction}
       secondaryAction={cancellable && onCancel ? recoveryAction : null}
       rows={[
