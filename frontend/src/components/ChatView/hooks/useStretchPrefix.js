@@ -2,9 +2,10 @@
    the loaded history page. Copy normally reads the rendered transcript; a
    stretch whose start is not loaded is read with its own requests instead
    (never paging the transcript, so the reader never moves), projected through
-   the same reply presentation as the transcript, and its plain text is
-   rendered with the chat's Markdown renderer, as the transcript's is. */
-import { useEffect, useState } from 'react'
+   the same reply presentation as the transcript, and its plain text is read
+   from the Markdown's HTML by the transcript's clipboard rules. */
+import { useEffect, useMemo, useState } from 'react'
+import { Marked } from 'marked'
 import { apiFetch, jsonOrThrow } from '../../../api/client.js'
 import { assistantReplyGroups, presentAssistantActivity, presentAssistantReply } from '../assistantReplies.js'
 import { replyProse, stretchTail } from '../messageCopy.js'
@@ -32,7 +33,9 @@ export async function readStretchStart(fetchPage, before) {
 
 /** The Markdown of everything a stretch's rows say, as the transcript shows
  *  it: each reply projected as AssistantReply projects it, so a replayed
- *  continuation copies once even across the loaded page's edge. */
+ *  continuation copies once even across the loaded page's edge. Read rows
+ *  carry no peer-note positions, so a replay the transcript keeps split at a
+ *  note copies joined: the same words, without the duplicate. */
 export function stretchProse(rows) {
   return [...new Set(assistantReplyGroups(rows).values())].flatMap(group => {
     const shown = presentAssistantActivity(presentAssistantReply(group.rows)).rows
@@ -48,18 +51,21 @@ export function stretchClipboard(markdown, plainTextOf) {
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
 }
 
-/** Reads Markdown's plain text exactly as Copy reads the transcript: rendered
- *  by the chat's Markdown renderer into an inert template (nothing loads), then
- *  serialized by the same clipboard rules. */
-async function markdownPlainText() {
-  const [{ createElement }, { renderToStaticMarkup }, { StandardMarkdown }] = await Promise.all([
-    import('react'), import('react-dom/server'), import('../markdown/BlockRenderer.jsx'),
-  ])
-  return text => {
-    const template = document.createElement('template')
-    template.innerHTML = renderToStaticMarkup(createElement(StandardMarkdown, { text }))
-    return plainTextFromFragment(template.content)
-  }
+const markdownParser = new Marked({ gfm: true })
+
+/** Markdown as plain HTML: the chat's Markdown parser without the live
+ *  renderer's effects or app context, so an image keeps its alt text and an
+ *  app link stays a link. */
+export function markdownHtml(text) {
+  return markdownParser.parse(text)
+}
+
+/** Markdown's plain text by the transcript's clipboard rules, read from an
+ *  inert template (nothing in it loads). */
+function markdownPlainText(text) {
+  const template = document.createElement('template')
+  template.innerHTML = markdownHtml(text)
+  return plainTextFromFragment(template.content)
 }
 
 /** Null while it is not needed, still loading, failed, or has no prose.
@@ -67,7 +73,6 @@ async function markdownPlainText() {
 export function useStretchPrefix(chatId, before, loadedRows, needed) {
   const key = needed && before > 0 ? `${chatId}:${before}` : null
   const [start, setStart] = useState({ key: null, rows: null })
-  const [payload, setPayload] = useState({ start: null, loadedRows: null, value: null })
   useEffect(() => {
     if (!key) return undefined
     let cancelled = false
@@ -79,14 +84,7 @@ export function useStretchPrefix(chatId, before, loadedRows, needed) {
     return () => { cancelled = true }
   }, [chatId, before, key])
   const startRows = start.key === key ? start.rows : null
-  useEffect(() => {
-    if (!startRows || !loadedRows) return undefined
-    let cancelled = false
-    markdownPlainText()
-      .then(plainTextOf => stretchClipboard(stretchProse([...startRows, ...loadedRows]), plainTextOf))
-      .then(value => { if (!cancelled) setPayload({ start: startRows, loadedRows, value }) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [startRows, loadedRows])
-  return payload.start === startRows && payload.loadedRows === loadedRows ? payload.value : null
+  return useMemo(() => (startRows && loadedRows
+    ? stretchClipboard(stretchProse([...startRows, ...loadedRows]), markdownPlainText)
+    : null), [startRows, loadedRows])
 }

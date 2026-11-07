@@ -3,7 +3,7 @@
    the whole stretch is projected as the transcript shows it. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readStretchStart, stretchClipboard, stretchProse } from '../useStretchPrefix.js'
+import { markdownHtml, readStretchStart, stretchClipboard, stretchProse } from '../useStretchPrefix.js'
 import { stretchTail } from '../../messageCopy.js'
 
 const owner = content => ({ role: 'user', content })
@@ -58,4 +58,14 @@ test('plain text comes from the rendered Markdown and Markdown stays in its own 
     plainText: 'Result\n\nChart',
   })
   assert.equal(stretchClipboard(['   '], () => ''), null)
+})
+
+test('the read start’s HTML keeps image alt text and app links without the live renderer', () => {
+  // The live renderer resolves images in an effect and renders app links as
+  // cards needing app context; plain text must not depend on either.
+  const image = markdownHtml('![Chart of results](/api/chats/c/media/x.png)')
+  assert.match(image, /<img [^>]*alt="Chart of results"/)
+  const link = markdownHtml('See [Kanban](/shell/?app=12) and **this**.')
+  assert.match(link, /<a href="\/shell\/\?app=12">Kanban<\/a>/)
+  assert.match(link, /<strong>this<\/strong>/)
 })
