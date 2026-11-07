@@ -580,7 +580,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
 | Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); platform skills live in `backend/scripts/seed-skills/` and advance at server start from their recorded `.seed-skills.json` baseline, while local changes stay in place for review; the index (`skills-index.md`) is generated — never hand-edit it |
-| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Möbius · You) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
+| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Social) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -675,9 +675,11 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Möbius ·
-You)** install from their canonical catalog manifests through
-`backend/app/bootstrap.py` on first boot. These are recovery or management
+**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Social)**
+install from their canonical catalog manifests through
+`backend/app/bootstrap.py` on first boot. New deployments no longer install
+Möbius · You: the Möbius account and models live in Settings and the platform's
+own catalogue, and an existing copy is an ordinary app. These are recovery or management
 surfaces; domain apps are installed explicitly rather than named in platform
 boot policy. Each becomes an ordinary owner-editable app under
 `/data/apps/<slug>` and follows the same update and divergence rules as any

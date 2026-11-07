@@ -12,7 +12,18 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'background-agents',
   'github',
   'models',
+  // Whole sub-pages: Accounts › Möbius, and AI providers › Möbius (credit,
+  // trial and Möbius models).
+  'mobius-account',
+  'mobius-models',
 ])
+
+/** The sub-page a section id opens, or null for a section on the overview. */
+export function settingsSectionPage(section) {
+  if (section === 'mobius-account') return 'mobius-account'
+  if (section === 'mobius-models') return 'mobius'
+  return null
+}
 
 const KNOWN = new Set(SETTINGS_SECTIONS)
 

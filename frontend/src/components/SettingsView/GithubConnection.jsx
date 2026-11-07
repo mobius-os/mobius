@@ -1,5 +1,7 @@
-/* The instance's GitHub account row in the Settings Accounts card: connect with a device code, add private-repo access, or disconnect. */
+/* The instance's GitHub account row in Settings › Accounts: avatar and login, then connect with a device code, add or remove private-repo access, or disconnect. */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowUpRight, ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
 import {
   cancelGithubSignIn,
   disconnectGithub,
@@ -9,6 +11,10 @@ import {
   startGithubSignIn,
   waitForGithubSignIn,
 } from '../../lib/githubConnection.js'
+
+function GithubMark() {
+  return <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.3 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3Z" /></svg>
+}
 
 function SignInCode({ attempt, retrying, cancelling, unconfirmed, message, onCancel }) {
   const [copied, setCopied] = useState(false)
@@ -36,8 +42,13 @@ function SignInCode({ attempt, retrying, cancelling, unconfirmed, message, onCan
   )
 }
 
+// The last confirmed connection for this page load. Reopening Settings paints
+// it (and its cached avatar) at once while a fresh status read confirms it; a
+// sign-in attempt is never carried over, only the settled account state.
+let lastConfirmed = null
+
 export default function GithubConnection({ active = true, focusRef, attention = false, expanded, onToggle, onExpand }) {
-  const [conn, setConn] = useState({ state: 'checking' })
+  const [conn, setConn] = useState(() => lastConfirmed || { state: 'checking' })
   // null, 'starting', or the attempt being waited on.
   const [signIn, setSignIn] = useState(null)
   const [retrying, setRetrying] = useState(false)
@@ -51,6 +62,9 @@ export default function GithubConnection({ active = true, focusRef, attention = 
 
   const refresh = useCallback(async (options = {}) => {
     const next = await fetchGithubStatus(options)
+    if (next.state === 'connected' || next.state === 'disconnected') {
+      lastConfirmed = { ...next, attempt: null }
+    }
     if (!options.signal?.aborted) setConn(next)
     return next
   }, [])
@@ -160,63 +174,63 @@ export default function GithubConnection({ active = true, focusRef, attention = 
   const privateAccess = connected && hasPrivateRepoAccess(conn.scopes)
   const needsReconnect = connected && !hasFullPrAccess(conn.scopes)
 
-  const note = message ? <p className="pa__error" role="status">{message}</p> : null
+  const note = message ? <p className="settings-message settings-message--error" role="status">{message}</p> : null
   const button = (label, onClick, extra = '') => (
-    <button type="button" className={`pa__btn pa__btn--sm${extra}`} disabled={busy} onClick={onClick}>{label}</button>
+    <button type="button" className={`settings__btn settings__btn--sm ${extra || 'settings__btn--outline'}`} disabled={busy} onClick={onClick}>{label}</button>
   )
   let panel
   if (signIn === 'starting') {
-    panel = <p className="pa__muted" role="status">Starting GitHub sign-in…</p>
+    panel = <p className="settings-item-panel__text" role="status">Starting GitHub sign-in…</p>
   } else if (signIn) {
     panel = <SignInCode attempt={signIn} retrying={retrying} cancelling={busy} unconfirmed={conn.state === 'unknown'} message={message} onCancel={cancel} />
   } else if (conn.state === 'unknown') {
     panel = (
-      <div className="provider-connection">
-        <p className="pa__muted">{conn.message}</p>
-        <div className="provider-connection__actions">{button('Check again', refresh)}</div>
+      <div className="settings-github__panel">
+        <p className="settings-item-panel__text">{conn.message}</p>
+        <div className="settings-actions">{button('Check again', refresh)}</div>
       </div>
     )
   } else if (!connected) {
     panel = conn.signInAvailable ? (
-      <div className="provider-connection">
-        <p className="pa__muted">Used to send changes, open pull requests, and follow reviews as you.</p>
+      <div className="settings-github__panel">
+        <p className="settings-item-panel__text">Used to send changes, open pull requests, and follow reviews as you.</p>
         <label className="settings-github__check">
           <input type="checkbox" checked={includePrivate} onChange={event => setIncludePrivate(event.target.checked)} />
           Include private repositories
         </label>
-        <div className="provider-connection__actions">
-          <button type="button" className="pa__btn" onClick={() => start(includePrivate)}>Connect GitHub</button>
+        <div className="settings-actions">
+          <button type="button" className="settings__btn settings__btn--sm" onClick={() => start(includePrivate)}>Connect GitHub</button>
         </div>
         {note}
       </div>
-    ) : <p className="pa__muted">GitHub sign-in is not configured for this Möbius instance.</p>
+    ) : <p className="settings-item-panel__text">GitHub sign-in is not configured for this Möbius instance.</p>
   } else if (confirmDisconnect) {
     panel = (
-      <div className="provider-connection">
-        <p className="pa__muted">Disconnect GitHub? Saved drafts and review history stay in your apps.</p>
-        <div className="provider-connection__actions">
+      <div className="settings-github__panel">
+        <p className="settings-item-panel__text">Disconnect GitHub? Saved drafts and review history stay in your apps.</p>
+        <div className="settings-actions">
           {button('Cancel', () => setConfirmDisconnect(false))}
-          {button(busy ? 'Disconnecting…' : 'Disconnect', disconnect, ' provider-connection__disconnect')}
+          {button(busy ? 'Disconnecting…' : 'Disconnect', disconnect, 'settings__btn--danger')}
         </div>
         {note}
       </div>
     )
   } else {
     panel = (
-      <div className="provider-connection">
+      <div className="settings-github__panel">
         {needsReconnect ? (
-          <p className="pa__muted">This older connection lacks access Möbius now needs to send changes. Disconnect, then connect again.</p>
+          <p className="settings-item-panel__text">This older connection lacks access Möbius now needs to send changes. Disconnect, then connect again.</p>
         ) : null}
-        {!needsReconnect && !privateAccess ? <p className="pa__muted">Private access applies to all private repositories your GitHub account can access, not just one Project.</p> : null}
-        <div className="provider-connection__actions">
+        {!needsReconnect && !privateAccess ? <p className="settings-item-panel__text">Private access applies to all private repositories your GitHub account can access, not just one Project.</p> : null}
+        <div className="settings-actions">
           {!needsReconnect && !privateAccess ? button('Enable private repositories', () => start(true, 'add-private')) : null}
           {privateAccess && !removePrivateOpen ? button('Remove private access…', () => setRemovePrivateOpen(true)) : null}
-          {button('Disconnect…', () => setConfirmDisconnect(true))}
+          {button('Disconnect…', () => setConfirmDisconnect(true), 'settings__btn--danger')}
         </div>
         {privateAccess && removePrivateOpen ? <div className="settings-github__permission-guide">
-          <p className="pa__muted">Removing the saved connection here does not revoke GitHub’s permission. First revoke this app under GitHub’s Authorized OAuth Apps, then reconnect with public repositories only. GitHub actions in Möbius will pause until you reconnect.</p>
-          <div className="provider-connection__actions">
-            <a className="pa__btn pa__btn--sm" href="https://github.com/settings/applications" target="_blank" rel="noopener noreferrer">Open GitHub authorizations</a>
+          <p className="settings-item-panel__text">Removing the saved connection here does not revoke GitHub’s permission. First revoke this app under GitHub’s Authorized OAuth Apps, then reconnect with public repositories only. GitHub actions in Möbius will pause until you reconnect.</p>
+          <div className="settings-actions">
+            <a className="settings__btn settings__btn--sm settings__btn--outline" href="https://github.com/settings/applications" target="_blank" rel="noopener noreferrer">Open GitHub authorizations</a>
             {button('I revoked it — reconnect public only', () => start(false, 'remove-private'))}
             {button('Cancel', () => setRemovePrivateOpen(false))}
           </div>
@@ -226,7 +240,25 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     )
   }
 
-  const icon = <span className="settings__account-icon settings__account-icon--github" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.3 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3Z" /></svg></span>
+  // The avatar's address names the login, so it and its cached copies follow
+  // the connected account; reopening Settings shows it at once, and until the
+  // first read settles a quiet placeholder stands in.
+  const avatar = useAuthedImageUrl(
+    connected && conn.login ? `/github/avatar/${encodeURIComponent(conn.login)}` : null,
+    connected ? conn.login : '',
+  )
+  const avatarPending = conn.state === 'checking' || avatar.status === 'loading'
+  const profileUrl = connected && conn.login ? `https://github.com/${encodeURIComponent(conn.login)}` : null
+  const exception = connected && needsReconnect
+    ? <span className="settings-badge settings-badge--warning">Reconnect needed</span>
+    : conn.state === 'unknown'
+      ? <span className="settings-badge settings-badge--warning">Unavailable</span>
+      : conn.state === 'disconnected' && conn.signInAvailable && !signIn
+        ? <span className="settings-badge settings-badge--accent settings-badge--plain">Connect</span>
+        : null
+  const subtitle = connected
+    ? conn.login
+    : conn.state === 'checking' ? 'Checking…' : conn.state === 'unknown' ? 'Status unavailable' : 'Not connected'
 
   return (
     <div
@@ -235,16 +267,31 @@ export default function GithubConnection({ active = true, focusRef, attention = 
       ref={focusRef}
       tabIndex={-1}
     >
-      <button type="button" className="settings__account-link" aria-expanded={expanded} aria-controls="settings-github-detail" onClick={onToggle}>
-        {icon}
-        <span className="settings__account-link-copy"><strong>GitHub</strong><small>{connected ? `${conn.login}${privateAccess ? ' · private repos' : ''}` : conn.state === 'checking' ? 'Checking…' : conn.state === 'unknown' ? 'Status unavailable' : 'Not connected'}</small></span>
-        <span className="settings__account-link-arrow" aria-hidden="true">›</span>
+      <button type="button" className="settings-item" aria-expanded={expanded} aria-controls="settings-github-detail" onClick={onToggle}>
+        <span className="settings-item__icon settings-item__icon--round settings-github__mark" aria-hidden="true">
+          {avatar.url ? <img src={avatar.url} alt="" /> : avatarPending ? null : <GithubMark />}
+        </span>
+        <span className="settings-item__body">
+          <span className="settings-item__title">GitHub</span>
+          <span className="settings-item__sub">{subtitle}</span>
+        </span>
+        {exception}
+        <ChevronDown className="settings-item__chevron" width={18} height={18} aria-hidden="true" />
       </button>
-      {expanded && <section className="settings__account-detail" id="settings-github-detail" aria-label="GitHub connection">
-        <div className="settings-account-detail-row"><span>Account</span><strong>{connected ? conn.login : 'Not connected'}</strong></div>
-        <div className="settings-account-detail-row"><span>Status</span><strong>{connected ? needsReconnect ? 'Reconnect needed' : 'Connected' : conn.state === 'unknown' ? 'Unavailable' : 'Not connected'}</strong></div>
-        {connected && <div className="settings-account-detail-row"><span>Repository access</span><strong>{privateAccess ? 'Public and private repositories' : 'Public repositories only'}</strong></div>}
-        <div className="settings-github-detail__actions">{panel}</div>
+      {expanded && <section className="settings-item-panel settings-github__detail" id="settings-github-detail" aria-label="GitHub connection">
+        {connected && !signIn && !confirmDisconnect && <dl className="settings-kv">
+          <div className="settings-kv__row">
+            <dt>Account</dt>
+            <dd><a className="settings-link" href={profileUrl} target="_blank" rel="noopener noreferrer">{conn.login}<ArrowUpRight width={14} height={14} aria-hidden="true" /></a></dd>
+          </div>
+          <div className="settings-kv__row">
+            <dt>Private repositories</dt>
+            <dd>{privateAccess
+              ? <span className="settings-badge settings-badge--success">Active</span>
+              : <span className="settings-badge">Off</span>}</dd>
+          </div>
+        </dl>}
+        {panel}
       </section>}
     </div>
   )

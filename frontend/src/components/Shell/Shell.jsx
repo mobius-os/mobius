@@ -334,10 +334,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // composer handoff exists below.
   const beforeRestoreRouteRef = useRef(null)
   const beforeDrawerOpenRef = useRef(null)
-  const walkthroughHandoffRef = useRef(false)
-  const onWalkthroughHandoffChange = useCallback((suspended) => {
-    walkthroughHandoffRef.current = suspended
-  }, [])
 
   const {
     initialNav,
@@ -991,9 +987,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // only for a saved draft; on desktop it restores keyboard focus.
   beforeRestoreRouteRef.current = (route) => {
     if (route?.view !== 'chat' || route.chatId == null) return
-    // The guide owns focus when Back returns from an app it handed the owner
-    // to. A chat restore still restores the chat; only its composer-focus request yields.
-    if (walkthroughHandoffRef.current) return
     // Dismissing navigation restores the prior keyboard state, not merely a
     // saved draft. A draft whose keyboard was down must stay down.
     if (drawerOpenRef.current && isTouchPrimary()) {
@@ -5009,12 +5002,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
       {showWalkthrough && (
         <Suspense fallback={null}>
-          <WalkthroughOverlay
-            apps={apps}
-            activeAppId={activeView === 'canvas' ? activeAppId : null}
-            onOpenApp={openAppWithIntent}
-            onHandoffChange={onWalkthroughHandoffChange}
-          />
+          <WalkthroughOverlay apps={apps} />
         </Suspense>
       )}
 
@@ -5624,7 +5612,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               <SettingsView
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
-                onOpenApp={openAppWithIntent}
                 focusTarget={settingsFocusTarget}
                 active={settingsFullBleed || !!settingsPaned}
                 refreshToken={settingsRefreshToken}
