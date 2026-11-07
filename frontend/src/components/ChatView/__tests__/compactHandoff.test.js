@@ -185,10 +185,37 @@ test('helpers are one openable row each, never a "Waiting on N helpers" count', 
     helpers: [{ delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' }],
     unlistedHelpers: 3,
   }))
-  assert.match(capped, /and 3 more helpers/)
+  // A server-capped list is already more than a few rows: it folds into the summary.
+  assert.match(capped, /1 helper working · 3 more helpers/)
   // Only a server-owned automatic handoff may promise the chat resumes.
   assert.match(html, /This chat resumes when they finish/)
   assert.doesNotMatch(capped, /resumes/)
+})
+
+test('dozens of helpers fold into one summary line that opens into groups', async () => {
+  const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  const helpers = Array.from({ length: 12 }, (_, i) => ({ delegation_id: `del-${i}`, task_key: `helper-${i}`, provider: 'claude', status: 'running' }))
+  helpers.push({ delegation_id: 'ask', task_key: 'asks-parent', provider: 'codex', status: 'needs_input' })
+  const waits = [1, 2, 3].map(i => ({ id: `w${i}`, kind: 'timer', description: `Deployment ${i}` }))
+  const props = { chatId: 'summary-chat', helpers, waits, onCancel: () => {} }
+  const collapsed = renderWithModels(h(WaitingChip, props))
+  assert.match(collapsed, /class="chat__wait-card chat__handoff-summary"/)
+  assert.match(collapsed, /aria-expanded="false"/)
+  assert.match(collapsed, /12 helpers working · 1 waiting on coordinator · 3 waits/)
+  // Collapsed means one line: no rows, no wait cards, no countdown clocks.
+  assert.doesNotMatch(collapsed, /chat__helper-row|Deployment 1|chat__handoff-group/)
+
+  const { persistDisclosureOpen } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  persistDisclosureOpen('summary-chat', 'foot-handoffs', true)
+  const open = renderWithModels(h(WaitingChip, props))
+  assert.match(open, /chat__handoffs--open/)
+  assert.match(open, /aria-expanded="true"/)
+  assert.equal((open.match(/chat__helper-row/g) || []).length, 13)
+  const order = ['Working · 12', 'Waiting · 4'].map(label => open.indexOf(label))
+  assert.ok(order.every(index => index > 0) && order[0] < order[1], 'working is listed before waiting')
+  assert.ok(open.indexOf('asks-parent') > open.indexOf('Waiting · 4'), 'a helper asking its coordinator waits with the waits')
+  // The choice belongs to that chat only.
+  assert.doesNotMatch(renderWithModels(h(WaitingChip, { ...props, chatId: 'other-chat' })), /chat__helper-row/)
 })
 
 test('Waiting panel preserves expanded evidence, action errors and disabled state', () => {

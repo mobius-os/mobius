@@ -4392,6 +4392,46 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   align-items: flex-start;
 }
 
+/* Many handoffs: one summary line that stays on top while its list scrolls
+   beneath it. The open list is backed by the page colour so nothing in the
+   transcript reads through the gaps between its cards. */
+.chat__handoffs--open {
+  background: var(--bg); /* CONTRACT: opaque page fill behind the open list */
+  border-radius: 12px;
+}
+
+.chat__handoff-summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.chat__handoff-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat__handoff-group-label {
+  margin: 4px 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* In the grouped list the stack is the one scroller; a group's helper card
+   grows with its rows instead of nesting a second scroll inside it. */
+.chat__handoff-group .chat__helper-list {
+  max-height: none;
+  overflow: visible;
+}
+
+.chat__handoff-notes {
+  padding: 4px 8px 4px 0;
+}
+
 /* A wait's exact command, revealed on request: monospace, wrapped, and
    scrollable when long. */
 .chat__wait-command-toggle {
