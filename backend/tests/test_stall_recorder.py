@@ -149,8 +149,8 @@ def test_a_failing_snapshot_keeps_the_watchdog_and_its_stall_line(tmp_path, reco
       await task
 
   asyncio.run(scenario())
-  # Both blocks are logged; a loaded runner may add short stalls of its own.
-  assert len([e for e in records if e["kind"] == "loop_stall" and e["ms"] >= 300]) >= 2
+  # Each block is logged once; a loaded runner may add short stalls of its own.
+  assert len([e for e in records if e["kind"] == "loop_stall" and e["ms"] >= 300]) == 2
   (late,) = [e for e in records if e["kind"] == "slow_request"]
   assert late["no_busy_threads"] is False
 
@@ -213,9 +213,10 @@ def test_stall_seen_while_the_snapshot_runs_keeps_its_snapshot(tmp_path):
   ]
   stalls = [e for e in events if e["kind"] == "loop_stall"]
   snapshot_ids = {e["snapshot_id"] for e in events if e["kind"] == "snapshot"}
-  # The blocked wake links its snapshot, and every snapshot is linked; a
-  # loaded runner may add short stalls of its own.
-  assert any(e["ms"] >= 100 and e["snapshot"] in snapshot_ids for e in stalls)
+  # The blocked wake is logged once and links its snapshot, and every snapshot
+  # is linked; a loaded runner may add short stalls of its own.
+  (blocked,) = [e for e in stalls if e["ms"] >= 100]
+  assert blocked["snapshot"] in snapshot_ids
   assert {e["snapshot"] for e in stalls} - {None} == snapshot_ids
 
 

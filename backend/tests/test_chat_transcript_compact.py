@@ -11,7 +11,6 @@ from app.chat_transcript import (
   redundant_interaction_tool_indexes,
 )
 from app.pending_questions import PendingQuestion
-from app.routes import chats as chats_routes
 from app.routes.chats import _chat_detail_window
 from sqlalchemy import event
 from app.memory_recall import EMPTY_RECALL_BINDING
@@ -850,20 +849,12 @@ def test_runtime_route_does_not_select_transcript_json(
   )
   chat_id = created.json()["id"]
   monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
-  # One run snapshot serves both the runtime fields and the lifecycle key.
-  snapshots = []
-  real_snapshot = chats_routes._latest_run_snapshot
-
-  def counted_snapshot(*args):
-    snapshots.append(real_snapshot(*args))
-    return snapshots[-1]
-
-  monkeypatch.setattr(chats_routes, "_latest_run_snapshot", counted_snapshot)
-  statements = []
+  statements, executed = [], []
   engine = db.get_bind()
 
-  def capture_sql(_, __, statement, *args):
+  def capture_sql(_, __, statement, parameters, *args):
     statements.append(statement.lower())
+    executed.append((statement.lower(), tuple(parameters or ())))
 
   event.listen(engine, "before_cursor_execute", capture_sql)
   try:
@@ -872,7 +863,18 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
-  assert len(snapshots) == 1
+  # One read of this chat's run rows and one of its settled waits serve both
+  # the runtime fields and the lifecycle key. Only reads naming this chat (and,
+  # for waits, a settled status) count, so unrelated reads cannot break this.
+  def reads(table, *values):
+    return sum(
+      f"from {table}" in statement and chat_id in params
+      and all(value in params for value in values)
+      for statement, params in executed
+    )
+
+  assert reads("chat_run_updates") == 1
+  assert reads("chat_waits", "met", "cancelled") == 1
   body = runtime.json()
   assert isinstance(body.pop("lifecycle_projection_key"), str)
   assert body == {
