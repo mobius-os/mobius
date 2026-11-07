@@ -1,4 +1,6 @@
 """Shared browser identity stays revocable across request and token boundaries."""
+from pathlib import Path
+
 import pytest
 from app import auth as tokens, models
 from app.config import get_settings
@@ -70,6 +72,38 @@ def test_guest_cannot_create_grants_or_launder_install_or_job_credentials(https,
   assert https.post("/api/auth/install-pass", json={"slug": "example"}, headers=guest).status_code == 403
   assert https.post("/api/auth/app-job-token", json={"app_id": 1}, headers=guest).status_code == 403
   assert https.post("/api/admin/sign-out-everywhere", headers=guest).status_code == 403
+
+
+def test_guest_and_apps_working_for_them_cannot_use_the_owners_mobius_account(https, auth, db):
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  account_app = models.App(
+    name="Account", slug="account",
+    source_dir=str(Path(get_settings().data_dir) / "account"),
+    capability_contract={"schema": 1, "data": {"identity_manage": True, "railway_manage": True}},
+  )
+  db.add(account_app); db.commit()
+
+  def app_bearer(headers):
+    minted = https.post("/api/auth/app-token", json={"app_id": account_app.id}, headers=headers)
+    assert minted.status_code == 200, minted.text
+    return {"Authorization": "Bearer " + minted.json()["token"]}
+
+  reads = ("/api/identity", "/api/identity/agent", "/api/identity/railway")
+  for headers in (guest, app_bearer(guest)):
+    for path in (*reads, "/api/identity/avatar"):
+      response = https.get(path, headers=headers)
+      assert response.status_code == 403, path
+      assert "installation owner" in response.json()["detail"]
+    assert https.patch("/api/identity/profile", json={"handle": "guest_handle"},
+                       headers=headers).status_code == 403
+    assert https.post("/api/identity/railway/disconnect", headers=headers).status_code == 403
+  # The owner and the owner's reviewed app keep the signed-out account.
+  for headers in (auth, app_bearer(auth)):
+    for path in reads:
+      assert https.get(path, headers=headers).status_code == 200, path
+    no_picture = https.get("/api/identity/avatar", headers=headers)
+    assert no_picture.status_code == 404, no_picture.text
 
 
 def test_logout_ends_only_that_browser_not_other_recipient_or_owner(https, auth):

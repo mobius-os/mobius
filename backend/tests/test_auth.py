@@ -804,6 +804,24 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   assert app_body["mobius"]["configured"] is True
   assert "trial" not in app_body["mobius"]
 
+  # A shared-browser guest uses the same models, but not the owner's credit.
+  from app.browser_access import BrowserLineage, redeem_invitation
+  from tests.browser_access_fixtures import link_grant
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    grant, invitation = link_grant(session, owner, "Guest")
+    _, browser_session, _, _ = redeem_invitation(session, invitation)
+    guest_token = create_access_token(
+      {"sub": owner.username}, token_epoch=owner.token_epoch,
+      browser=BrowserLineage(grant.id, browser_session.id),
+    )
+  guest_body = client.get(
+    "/api/auth/providers/status",
+    headers={"Authorization": f"Bearer {guest_token}"},
+  ).json()
+  assert guest_body["mobius"]["configured"] is True
+  assert "trial" not in guest_body["mobius"]
+
 
 def test_providers_status_rejects_empty_claude_oauth_record(
   client, auth, tmp_path, monkeypatch,

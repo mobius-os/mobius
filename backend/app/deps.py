@@ -1268,6 +1268,14 @@ def get_identity_reader(
   return _identity_manager(principal, db)
 
 
+def _require_account_owner(principal: Principal) -> None:
+  """The owner's Möbius account and deployments are theirs alone, like their
+  own device: a shared-browser guest, or an app or agent working for one, may
+  neither read nor change them, whatever workspace access the guest holds."""
+  if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can use this Möbius account.")
+
+
 def _identity_manager(principal: Principal, db: Session) -> models.Owner:
   """Owner JWT, or an app with the reviewed identity-management grant.
 
@@ -1276,6 +1284,7 @@ def _identity_manager(principal: Principal, db: Session) -> models.Owner:
   install/update already replaces that contract atomically. Omission on a
   later app version therefore revokes access on the next request.
   """
+  _require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner
@@ -1300,6 +1309,7 @@ def get_owner_or_app_with_railway_manage(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """Owner JWT, or an app with reviewed Railway deployment authority."""
+  _require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner

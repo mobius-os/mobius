@@ -2084,7 +2084,9 @@ and busy ones cost no query per event. Bytes already
 forwarded to a remote service cannot be recalled.
 Installation identity, credential, access administration and lifecycle controls
 remain separately gated; ordinary readable owner-input cards retain their
-existing participant-answer contract.
+existing participant-answer contract. The owner's Möbius account and its
+deployments stay owner-only for reads as well as changes
+(`deps._require_account_owner`).
 
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input

@@ -903,7 +903,11 @@ async def providers_status(
   fields without the owner's credit units and grant expiries.
   """
   require_chat_embed_operation(principal, "models:read")
-  is_owner_caller = principal.app_id is None and principal.scope == "owner"
+  # A shared-browser guest uses the owner's models, not the owner's account.
+  is_owner_caller = (
+    principal.app_id is None and principal.scope == "owner"
+    and principal.browser is None
+  )
   from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir
   from app.providers import refresh_app_model_providers
