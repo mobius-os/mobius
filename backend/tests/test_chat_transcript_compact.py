@@ -862,22 +862,18 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
-  # One read of this chat's run rows and one of its settled waits serve both
-  # the runtime fields and the lifecycle key. Only reads naming this chat (and,
-  # for waits, the settled statuses and not "armed", which the outstanding-wait
-  # list reads) count, so unrelated reads cannot break this.
-  def reads(table, *values, without=()):
+  # One read of this chat's run rows serves both the runtime fields and the
+  # lifecycle key; one wait read settles the key and the other lists the
+  # outstanding waits. Only reads naming this chat count, so unrelated reads
+  # cannot break this.
+  def reads(table):
     return sum(
       f"from {table}" in statement and chat_id in params
-      and all(value in params for value in values)
-      and not any(value in params for value in without)
       for statement, params in executed
     )
 
   assert reads("chat_run_updates") == 1
-  assert reads(
-    "chat_waits", "met", "expired", "failed", "cancelled", without=("armed",),
-  ) == 1
+  assert reads("chat_waits") == 2
   statements = [statement for statement, _ in executed]
   body = runtime.json()
   assert isinstance(body.pop("lifecycle_projection_key"), str)
