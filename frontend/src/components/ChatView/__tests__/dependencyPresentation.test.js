@@ -3,11 +3,11 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement as h } from 'react'
 import { renderToStaticMarkup as render } from 'react-dom/server'
-import { createServer } from 'vite'
+import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 const previousWindow = globalThis.window
 globalThis.window = { location: { href: 'http://localhost/' } }
 after(() => { globalThis.window = previousWindow })
-const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
+const vite = await createSsrRenderServer()
 after(() => vite.close())
 const load = async path => (await vite.ssrLoadModule('/src/components/' + path + '.jsx')).default
 const Marker = await load('Drawer/DrawerStatusMarker')

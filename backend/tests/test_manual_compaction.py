@@ -126,6 +126,20 @@ def test_changed_source_cannot_continue_or_replace_session(client, auth, db, fak
     path.unlink()
 
 
+def test_a_queue_held_by_stop_does_not_block_compaction(client, auth, db, fake_synthesis):
+  """After Stop nothing is running: the held messages wait for the owner and
+  stay queued through the compaction."""
+  chat_id, _ = make_chat(client, auth, db)
+  chat = db.get(models.Chat, chat_id)
+  chat.pending_messages = [{"role": "user", "content": "Held follow-up", "cid": "h", "held": True}]
+  db.commit()
+  response = batch(client, auth, chat_id)
+  assert response.status_code == 200, response.text
+  assert response.json()["ok"]
+  db.expire_all()
+  assert [row["cid"] for row in db.get(models.Chat, chat_id).pending_messages] == ["h"]
+
+
 def test_missing_or_unbound_notes_do_not_replace_original_history(client, auth, db, fake_synthesis):
   chat_id, original = make_chat(client, auth, db)
   path = note_path(get_settings().data_dir, chat_id)

@@ -104,6 +104,10 @@ export function appBlockFromToken(token) {
     // An action only opens the app's own view with its intent.
     action: inline ? blockAction(value.action) : null,
     expandLabel: boundedText(value.expand_label, APP_BLOCK_LIMITS.expandLabel),
+    // `"item_facts": "values"` draws row facts as their values only (labels
+    // for assistive technology); anything else keeps visible labels. Never
+    // applied to an app's confirmation rows.
+    itemFacts: value.item_facts === 'values' ? 'values' : '',
     height: typeof value.height === 'number' && Number.isFinite(value.height)
       ? Math.max(240, Math.min(640, value.height)) : 480,
   }

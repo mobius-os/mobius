@@ -3673,6 +3673,7 @@ def _app_chat_started(chat: models.Chat, db: Session) -> bool:
     chat.has_messages
     or chat.pending_question_id
     or chat.session_id
+    or chat.pending_messages
     or is_chat_busy(db, chat)
     or (goal and goal.get("status") in {"active", "paused", "completed", "cannot_complete", "cancelled"})
   )
@@ -4206,6 +4207,7 @@ async def patch_app_chat(
         if (
           chat.has_messages
           or chat.session_id
+          or chat.pending_messages
           or is_chat_busy(db, chat)
         ):
           raise HTTPException(

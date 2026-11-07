@@ -16,7 +16,8 @@ const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.s
 /* Like PassiveAppBlock, each observation names the showing it was made for:
    the one committed when the test supplied it. A new showing is unseen until
    the test observes again (`h.observe()`), as an IntersectionObserver reports
-   only after the new layout. */
+   only after the new layout. The list's start follows its end unless a test
+   sets it apart. */
 function renderObserved(initial) {
   let committed = null
   let lastProps = null
@@ -24,14 +25,16 @@ function renderObserved(initial) {
   const h = renderHook(props => {
     if (props !== lastProps) {
       lastProps = props
-      observation = { showing: committed, confirm: props.confirmVisible === true, end: props.listEndVisible === true }
+      observation = { showing: committed, confirm: props.confirmVisible === true, end: props.listEndVisible === true,
+        start: (props.listStartVisible ?? props.listEndVisible) === true }
     }
-    const { confirmVisible: _c, listEndVisible: _l, ...rest } = props
+    const { confirmVisible: _c, listStartVisible: _s, listEndVisible: _l, ...rest } = props
     // The unkeyed booleans are what 5272c66 read; they show the old head
     // borrowing a stale observation. The keyed views are what counts now.
     const session = useAppBlockSession({ ...rest,
       confirmVisible: observation.confirm, listEndVisible: observation.end,
       confirmView: { showing: observation.showing, visible: observation.confirm },
+      listStartView: { showing: observation.showing, visible: observation.start },
       listEndView: { showing: observation.showing, visible: observation.end } })
     committed = session.showing
     return session
@@ -335,6 +338,29 @@ test('Confirm arms only after the list end has been on screen during this showin
     mock.timers.tick(CONFIRM_ARM_MS - 1)
     assert.equal(h.result.current.confirmArmed, false)
     mock.timers.tick(1)
+    assert.equal(h.result.current.confirmArmed, true)
+    assert.equal(h.result.current.dispatch('send-batch:sel-1', 'confirm'), true)
+  } finally { mock.timers.reset() }
+})
+
+test('with the rows above Confirm, their end alone never arms it: the start must be seen too', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const h = renderObserved({ block, near: true, confirmVisible: true, listStartVisible: false, listEndVisible: true })
+    const report = fields => h.result.current.onBlockState({ type: 'moebius:app-block-state',
+      sessionId: h.result.current.sessionId, ...fields }, { generation: 1 })
+    h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+    // The block's own action is in its footer: the last row sits just above
+    // Confirm, while the first row is scrolled above the viewport.
+    report(confirmList('Long list'))
+    h.observe()
+    mock.timers.tick(CONFIRM_ARM_MS * 4)
+    assert.equal(h.result.current.confirmArmed, false)
+    assert.equal(h.result.current.dispatch('send-batch:sel-1', 'confirm'), false)
+    // The reader scrolls up to the first row, then back down to Confirm.
+    h.rerender({ block, near: true, confirmVisible: false, listStartVisible: true, listEndVisible: false })
+    h.rerender({ block, near: true, confirmVisible: true, listStartVisible: false, listEndVisible: true })
+    mock.timers.tick(CONFIRM_ARM_MS)
     assert.equal(h.result.current.confirmArmed, true)
     assert.equal(h.result.current.dispatch('send-batch:sel-1', 'confirm'), true)
   } finally { mock.timers.reset() }

@@ -31,6 +31,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -91,6 +92,7 @@ from app.github_checks import (
 from app.github_contribution_contract import COAUTHOR_TRAILER as _COAUTHOR_TRAILER
 from app.github_contribution_contract import GITHUB_LOGIN as _GITHUB_LOGIN
 from app.github_contribution_contract import coauthor_trailer_required
+from app.github_connection import has_full_pr_access
 from app.github_contribution_git import (
   _git,
   _gh,
@@ -110,6 +112,10 @@ from app.github_contribution_git import (
   _record_patch_with,
   _normalize_head_attribution,
   _assert_head_attribution,
+  commit_identity_mismatch,
+  head_attribution_matches,
+  publishes_to_target_repository,
+  upstream_push_permission,
   _upstream_default_branch,
   _assert_upstream_push_permission,
   _upstream_branch_sha,
@@ -179,6 +185,7 @@ from app.github_contributions import (
   _authoritative_public_reconciliation,
   observe_publication_effect,
   _exact_reviewed_pr_text,
+  assert_publishable_review_text,
   _find_existing_pr,
   _existing_branch_pr,
   _is_transient_push_error,
@@ -1294,16 +1301,50 @@ _REVIEW_STATUS_MESSAGES = {
   "missing_commits": (
     "The reviewed commits are no longer in the staged checkout."
   ),
-  "github_reconnect": "Reconnect GitHub before sending this PR stack.",
+  "github_reconnect": (
+    "Reconnect GitHub with full pull request access before sending this."
+  ),
   "commit_identity_mismatch": (
-    "The staged commits were made with a different identity than the "
-    "connected GitHub account, so the stack has to be restaged."
+    "The reviewed commit's author or committer is not the connected GitHub "
+    "account, and it is published directly to the target repository. The "
+    "agent must recommit it with the connected identity and stage it again."
+  ),
+  "publication_destination_unavailable": (
+    "GitHub could not confirm where this would be published, so its commit "
+    "identity could not be checked. Try again."
+  ),
+  "invalid_pr_text": (
+    "The reviewed title or description cannot be published on GitHub exactly "
+    "as written."
+  ),
+  "review_refresh_needed": (
+    "This update no longer carries the exact public title and description it "
+    "was reviewed against."
+  ),
+  "screenshot_invalid": (
+    "The description's screenshot references do not match the attached "
+    "screenshots."
+  ),
+  "screenshot_changed": (
+    "An attached screenshot is missing or changed since it was reviewed."
+  ),
+  "screenshot_update_unsupported": (
+    "Screenshots cannot be sent with an update to an open pull request."
+  ),
+  "screenshot_body_too_large": (
+    "With its screenshot links, this description exceeds GitHub's size limit."
   ),
   "review_unavailable": "This review could not be verified locally.",
 }
 # Codes a later check can clear without a new review; every other problem
 # needs a refresh.
-_UNAVAILABLE_REVIEW_CODES = frozenset({"review_unavailable", "github_reconnect"})
+_UNAVAILABLE_REVIEW_CODES = frozenset({
+  "review_unavailable", "github_reconnect",
+  "publication_destination_unavailable",
+})
+# Account readiness, not a defect in the reviewed candidate: a verdict may be
+# recorded while it is unresolved, and the card stays unsendable until it is.
+_ACCOUNT_REVIEW_CODES = frozenset({"github_reconnect"})
 
 _PUBLICATION_STATUS_MESSAGES = {
   "ready": "The target repository still has the reviewed default-branch head.",
@@ -1491,17 +1532,146 @@ def _publication_status(
   }
 
 
+@dataclass(frozen=True)
+class _ReviewDestination:
+  """Whether Send would push one review's commit directly to its target.
+
+  Resolved before any lock is taken, because a new standalone PR needs a
+  GitHub permission read; ``binding`` names the account, target and exact
+  reviewed candidate it was resolved for. ``direct`` is ``None`` when GitHub
+  could not answer.
+  """
+
+  binding: tuple
+  direct: bool | None
+
+
+def _review_destination_binding(record: dict, github_state: dict) -> tuple:
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  return (
+    str(github_state.get("login") or ""),
+    str(github_state.get("user_id") or ""),
+    str(plan.get("repo") or record.get("repo") or ""),
+    str(plan.get("action") or ""),
+    str(record.get("head_repository") or plan.get("head_repository") or ""),
+    isinstance(plan.get("stack"), dict),
+    str(plan.get("head_sha") or record.get("head_sha") or ""),
+    str(plan.get("diff_sha256") or ""),
+  )
+
+
+def _review_publishes_directly(
+  record: dict,
+  login: str,
+  push_permission: Callable[[], bool | None],
+) -> bool | None:
+  """Send's destination policy for one prepared review (``None``: unknown)."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  try:
+    upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+    existing_head_repository = (
+      _validate_repo_slug(
+        record.get("head_repository") or plan.get("head_repository")
+      )
+      if plan.get("action") == "pr_update" else None
+    )
+  except ContributionSubmitError:
+    return None
+  # Stack routes push every layer to the target with an explicit base branch.
+  return publishes_to_target_repository(
+    upstream_repo,
+    login,
+    direct_base=isinstance(plan.get("stack"), dict),
+    existing_head_repository=existing_head_repository,
+    push_permission=push_permission,
+  )
+
+
+def _commit_identity_matches(
+  repo: Path, revision: str, author_name: str, author_email: str,
+) -> bool:
+  fields = app_git._run(
+    repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", revision,
+    read_only=True,
+  ).stdout.rstrip("\n").split("\x00")
+  if len(fields) != 4:
+    raise ValueError("unexpected commit metadata")
+  return head_attribution_matches(
+    dict(zip(
+      ("author_name", "author_email", "committer_name", "committer_email"),
+      fields,
+    )),
+    author_name=author_name,
+    author_email=author_email,
+  )
+
+
+def _resolve_review_destinations(
+  records: list[dict], github_state: dict,
+) -> dict[str, _ReviewDestination]:
+  """Read where Send would publish each review; call it outside every lock.
+
+  Only a commit whose identity differs from the connected account needs the
+  answer, and only a new standalone PR needs GitHub to give it, at most once
+  per target repository in one call. Every failure of that read (timeout,
+  missing ``gh``, error exit, malformed output) is an unknown destination,
+  never an error. Nothing is forked, pushed or uploaded.
+  """
+  login = str(github_state.get("login") or "")
+  try:
+    author_name, author_email = _connected_git_identity(github_state, login)
+  except ContributionSubmitError:
+    return {}
+  if not has_full_pr_access(github_state.get("scopes")):
+    return {}  # The inspector asks to reconnect before any identity verdict.
+  permissions: dict[str, bool | None] = {}
+  destinations: dict[str, _ReviewDestination] = {}
+  for record in records:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    try:
+      repo = _safe_repo_path(plan.get("repo_path"))
+      upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+      head = str(plan.get("head_sha") or record.get("head_sha") or "")
+      if _commit_identity_matches(repo, head, author_name, author_email):
+        continue
+    except ContributionSubmitError:
+      continue
+    except (
+      OSError, subprocess.SubprocessError, RuntimeError, ValueError, UnicodeError,
+    ):
+      # The locked inspection owns this checkout's verdict.
+      continue
+
+    def push_permission(repo=repo, upstream_repo=upstream_repo) -> bool | None:
+      key = upstream_repo.casefold()
+      if key not in permissions:
+        try:
+          permissions[key] = upstream_push_permission(repo, upstream_repo)
+        except (OSError, subprocess.SubprocessError):
+          permissions[key] = None
+      return permissions[key]
+
+    destinations[str(record.get("id") or "")] = _ReviewDestination(
+      binding=_review_destination_binding(record, github_state),
+      direct=_review_publishes_directly(record, login, push_permission),
+    )
+  return destinations
+
+
 def _inspect_prepared_review(
   record: dict,
   diff_path: Path,
   github_state: dict,
+  destination: _ReviewDestination | None = None,
 ) -> dict:
   """Read-only local preflight for one prepared review.
 
-  This deliberately stops before every remote/network check. Its job is to
-  catch local drift while the owner is reviewing the card, rather than after
-  they press the public Send action. The submit endpoint remains authoritative
-  and repeats these checks before any push.
+  It catches, while the owner is reviewing the card, the local candidate
+  defects Send would refuse before its first public step: drift, the commit
+  trailer and identity, and text or screenshots GitHub cannot publish
+  exactly. It never contacts GitHub; ``destination`` carries the one remote
+  fact the identity rule needs, resolved before any lock. The submit endpoint
+  remains authoritative and repeats these checks before any push.
   """
   record_id = str(record.get("id") or "")
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else None
@@ -1589,22 +1759,37 @@ def _inspect_prepared_review(
     # mirror the Send downgrade here rather than reporting it as not ready.
     _publication_source_mode(record, _assert_pending_equivalence_preflight)
 
-    stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
-    if stack and login and _GITHUB_LOGIN.match(login):
+    assert_publishable_review_text(
+      record, diff_path, login=login if _GITHUB_LOGIN.match(login) else None,
+    )
+    # Disconnected preparation stays private and unsendable; the connected
+    # account decides both Send's readiness and the identity it publishes.
+    if login:
       try:
         author_name, author_email = _connected_git_identity(github_state, login)
       except ContributionSubmitError:
         return _review_status_problem(record_id, code="github_reconnect")
-      attribution = app_git._run(
-        repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", branch,
-        read_only=True,
-      ).stdout.rstrip("\n").split("\x00")
-      if attribution != [author_name, author_email, author_name, author_email]:
-        raise ContributionSubmitError(
-          "This PR stack was prepared with a different commit identity.",
-          code="commit_identity_mismatch",
+      if not has_full_pr_access(github_state.get("scopes")):
+        return _review_status_problem(record_id, code="github_reconnect")
+      if not _commit_identity_matches(
+        repo, head_oid, author_name, author_email,
+      ):
+        # A fork publication normalizes its one commit before push; a direct
+        # one publishes it as reviewed.
+        direct = (
+          destination.direct
+          if destination is not None
+          and destination.binding
+          == _review_destination_binding(record, github_state)
+          else _review_publishes_directly(record, login, lambda: None)
         )
+        if direct is None:
+          return _review_status_problem(
+            record_id, code="publication_destination_unavailable",
+          )
+        if direct:
+          raise commit_identity_mismatch()
     # Last, because it is the only verdict here that is not about the staged
     # checkout: the source can match its review exactly and still be
     # unmergeable. A dirty or moved checkout is the more urgent thing to say,
@@ -1651,6 +1836,7 @@ async def _inspect_prepared_review_locked(
   record: dict,
   diff_path: Path,
   github_state: dict,
+  destination: _ReviewDestination | None = None,
 ) -> dict:
   """Inspect one review while holding every repository its proof reads."""
   record_id = str(record.get("id") or "")
@@ -1682,6 +1868,7 @@ async def _inspect_prepared_review_locked(
       record,
       diff_path,
       github_state,
+      destination,
     )
 
 
@@ -1789,6 +1976,14 @@ async def contribution_review_status(
             detail=exc.message,
           )
 
+  destinations = await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+    _resolve_review_destinations,
+    [
+      record for record in prepared
+      if str(record.get("id") or "") not in structural_problems
+    ],
+    github_state,
+  )
   results = []
   for record in prepared:
     record_id = str(record.get("id") or "")
@@ -1800,6 +1995,7 @@ async def contribution_review_status(
       record,
       diff_path,
       github_state,
+      destinations.get(record_id),
     ))
 
   # Local validity is deliberately complete before this remote read. No DB,
@@ -2417,7 +2613,18 @@ async def stage_contribution(
       contribution_screenshots.prune(
         record_path, contribution_screenshots.plan_entries(record["plan"]),
       )
-  return {"record": record, "source_sync": record["source_sync"]}
+  response = {"record": record, "source_sync": record["source_sync"]}
+  if record.get("status") == "prepared":
+    # The same proof a verdict needs, so the preparing agent learns of a
+    # blocker (such as a commit identity Send cannot publish) at staging.
+    github_state = github_auth.read_state() or {}
+    destination = (await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+      _resolve_review_destinations, [record], github_state,
+    )).get(record_id)
+    response["review_status"] = await _inspect_prepared_review_locked(
+      record, diff_path, github_state, destination,
+    )
+  return response
 
 
 @router.get("/contributions/{app_id}/{record_id}/screenshots/{name}")
@@ -2476,8 +2683,9 @@ async def record_contribution_review(
 
   The verdict names the head and diff the reviewer read; a moved candidate is
   refused rather than inheriting it. ``all_clear`` additionally requires the
-  same local freshness proof the review card shows, so a verdict never marks
-  a checkout that Send would refuse.
+  same local proof the review card shows, so a verdict never marks a
+  candidate that Send would refuse. Where Send would publish it is resolved
+  before the storage lock and bound to the exact candidate and account.
   """
   _validate_submit_app(app_id, principal, db)
   if not _CONTRIBUTION_ID.fullmatch(record_id):
@@ -2485,6 +2693,13 @@ async def record_contribution_review(
   db.close()
   record_path, diff_path = _record_paths(app_id, record_id)
   github_state = github_auth.read_state() or {}
+  destination = None
+  if body.state == "all_clear":
+    async with fs_locks.app_storage_lock(app_id):
+      snapshot = _read_record(record_path)
+    destination = (await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+      _resolve_review_destinations, [snapshot], github_state,
+    )).get(record_id)
   async with fs_locks.app_storage_lock(app_id):
     record = _read_record(record_path)
     plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -2509,8 +2724,13 @@ async def record_contribution_review(
         },
       )
     if body.state == "all_clear":
-      status = await _inspect_prepared_review_locked(record, diff_path, github_state)
-      if status["state"] != "ready":
+      status = await _inspect_prepared_review_locked(
+        record, diff_path, github_state, destination,
+      )
+      if (
+        status["state"] != "ready"
+        and status["code"] not in _ACCOUNT_REVIEW_CODES
+      ):
         raise HTTPException(
           status_code=409,
           detail={"message": status["message"], "code": status["code"]},
@@ -2922,6 +3142,7 @@ def _observed_pr_record(record: dict, attempt: dict, result: dict) -> dict:
     "plan", "head_sha", "head_repository", "last_submit_stage",
     "last_submit_push_sha", "last_submit_base_branch", "last_submit_upstream_branch",
     "last_submit_upstream_sha", "last_pushed_branch", "last_successor_base_branch",
+    "last_submit_screenshots",
   }
   now = _now_iso()
   submitted = (attempt.get("action_input") or {}).get("action") in {"submit", "submit_stack"}

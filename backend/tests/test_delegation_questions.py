@@ -1122,13 +1122,13 @@ def test_owner_stop_preserves_a_queued_answer_without_starting_it(
   _wake_in_asking_root(db, row, "wake-stop-run", question.root_run_id)
   assert _answer(client, owner_token, row, "Use sqlite.", question_id).status_code == 202
 
-  _stopped, cleared = asyncio.run(chat_mod.stop_chat_for(row.child_chat_id))
-  # Stop wins: nothing starts, and the parent's answer is neither re-sent as
-  # owner text nor dropped.
-  assert delegations.helper_answer_continuation_id(question_id) not in cleared
+  asyncio.run(chat_mod.stop_chat_for(row.child_chat_id))
+  # Stop wins: nothing starts, and the parent's answer is neither turned into
+  # held owner text nor dropped.
   db.expire_all()
   assert db.get(models.ChatRun, "wake-stop-run").status == "stopped"
-  assert len(_queued_answers(db, row, question_id)) == 1
+  [answer] = _queued_answers(db, row, question_id)
+  assert "held" not in answer
   assert _status(db, row) == "stopped"
   chat_mod.reconcile_startup_chats(db)
   assert asyncio.run(delegations.reconcile_unstarted_delegations()) == 0

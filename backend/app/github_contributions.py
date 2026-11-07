@@ -102,7 +102,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     raise ContributionSubmitError(
       "This prepared PR has a title GitHub cannot publish exactly. Ask the "
       "agent to prepare a nonblank single-line title without surrounding "
-      "whitespace."
+      "whitespace.",
+      code="invalid_pr_text",
     )
   if (
     not isinstance(body, str)
@@ -112,7 +113,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "
-      "agent to prepare a nonblank body within GitHub's size limit."
+      "agent to prepare a nonblank body within GitHub's size limit.",
+      code="invalid_pr_text",
     )
   return title, body
 
@@ -2859,16 +2861,18 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
     return changed("The signed effect has a different PR URL.")
   if action == "pr" and phase == "complete" and raw_number is None:
     return unavailable("The complete receipt omitted the PR number.")
-  if action == "pr" and effect == "create_pr" and (
-      request.get("title") != plan.get("title")
-      or request.get("body") != plan.get("body_draft")):
-    return changed("The create request differs from the reviewed PR text.")
   try:
     title, body = _exact_reviewed_pr_text(candidate)
     if action == "pr_update":
       _reviewed_existing_pr_metadata(candidate)
   except ContributionSubmitError:
     return changed("The exact reviewed PR text witness is incomplete.")
+  body = _published_pr_body(plan, body, patch, branch)
+  if body is None:
+    return unavailable("The signed screenshot publication witness is incomplete.")
+  if action == "pr" and effect == "create_pr" and (
+      request.get("title") != title or request.get("body") != body):
+    return changed("The create request differs from the reviewed PR text.")
 
   def branch_tip(owner_repo: str, name: str) -> object:
     """A read tip, or ``None`` when absent or unreadable: never no-effect proof."""
@@ -3024,6 +3028,33 @@ def _observed_pr_labels(
   if missing:
     outcome.update(labels_missing=missing, labels_note="Some reviewed labels are not on the pull request.")
   return outcome
+
+
+def _published_pr_body(plan: dict, body: str, patch: dict, branch: str) -> str | None:
+  """The reviewed body exactly as Send published it, derived read-only.
+
+  Send pins each reviewed screenshot reference to its uploaded commit before
+  it creates the PR, and signs that asset repository and commit into the
+  attempt's record patch. ``None`` means that witness is incomplete; nothing
+  is uploaded or relaxed to fill it in.
+  """
+  entries = contribution_screenshots.plan_entries(plan)
+  if not entries:
+    return body
+  witness = patch.get("last_submit_screenshots")
+  if not isinstance(witness, dict):
+    return None
+  commit = str(witness.get("commit") or "")
+  if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+    return None
+  try:
+    return contribution_screenshots.resolve_body(
+      body, entries,
+      assets_repo=_git_ops._validate_repo_slug(witness.get("repo")),
+      commit=commit, branch=branch,
+    )
+  except (ContributionSubmitError, KeyError, TypeError):
+    return None
 
 
 def _assert_reviewed_existing_pr_metadata(
@@ -3762,6 +3793,44 @@ def _check_screenshot_body(
     )
 
 
+def assert_publishable_review_text(
+  record: dict, diff_path: Path, *, login: str | None,
+) -> None:
+  """Local review-time proof that Send can publish this record's text exactly.
+
+  Read-only and offline: the same validators Send runs on the title, body,
+  existing-PR witness and attached screenshots, so a review that passes them
+  is not refused for its text at Send. ``login`` is the connected account, if
+  any; without one the screenshot links' length cannot be bounded yet.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  _title, body = _exact_reviewed_pr_text(record)
+  is_update = plan.get("action") == "pr_update"
+  if is_update:
+    _reviewed_existing_pr_metadata(record)
+  screenshots = contribution_screenshots.plan_entries(plan)
+  if not screenshots:
+    return
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here.",
+      code="screenshot_update_unsupported",
+    )
+  contribution_screenshots.check_references(screenshots, body)
+  contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  if login:
+    _check_screenshot_body(
+      body, screenshots,
+      upstream_repo=_git_ops._validate_repo_slug(
+        plan.get("repo") or record.get("repo")
+      ),
+      login=login,
+      branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+      record_patch={},
+    )
+
+
 def _publish_reviewed_screenshots(
   record: dict,
   diff_path: Path,
@@ -3984,19 +4053,15 @@ def _submit_prepared_pr(
       record, diff_path, repo, branch,
     )
     _git_ops._assert_coauthor_trailer(repo, branch, record)
-    if existing_head_repository is not None:
-      # Updating a known PR is not the same routing decision as creating a new
-      # one. Its live identity fixes the destination repository regardless of
-      # generic upstream permission discovered for the connected account.
-      same_repo_submission = (
-        existing_head_repository.casefold() == upstream_repo.casefold()
-      )
-    else:
-      same_repo_submission = bool(
-        direct_base
-        or upstream_repo.split("/", 1)[0].casefold() == login.casefold()
-        or _git_ops._has_upstream_push_permission(repo, upstream_repo)
-      )
+    same_repo_submission = bool(_git_ops.publishes_to_target_repository(
+      upstream_repo,
+      login,
+      direct_base=bool(direct_base),
+      existing_head_repository=existing_head_repository,
+      push_permission=lambda: _git_ops._has_upstream_push_permission(
+        repo, upstream_repo,
+      ),
+    ))
     if same_repo_submission:
       _git_ops._assert_head_attribution(
         repo,

@@ -438,8 +438,8 @@ def test_owner_stop_of_a_queued_first_turn_never_lets_a_replay_admit_it_again(
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert stop.status_code == 200, stop.text
-  assert stop.json()["cleared_pending_cids"] == ["first-cid"]
   assert stop.json()["stop_receipt"] == {"chat_id": chat_id, "run_id": None}
+  # An app's queued first turn goes with Stop; a replay never admits it again.
   assert _pending_cids(db, chat_id) == []
   chat_queue.reset_for_tests()  # A restart forgets every in-memory lock.
 
@@ -537,11 +537,10 @@ def test_process_death_after_acceptance_before_the_route_returns_never_admits_tw
 
   owner = {"Authorization": f"Bearer {owner_token}"}
   if owner_action == "stop":
-    cleared = client.post("/api/chat/stop", json={"chat_id": chat_id}, headers=owner)
-    assert cleared.json()["cleared_pending_cids"] == ["first-cid"]
+    acted = client.post("/api/chat/stop", json={"chat_id": chat_id}, headers=owner)
   else:
-    cleared = client.delete(f"/api/chats/{chat_id}/pending/first-cid", headers=owner)
-    assert cleared.status_code < 300, cleared.text
+    acted = client.delete(f"/api/chats/{chat_id}/pending/first-cid", headers=owner)
+  assert acted.status_code < 300, acted.text
   assert _pending_cids(db, chat_id) == []
   chat_queue.reset_for_tests()
 
