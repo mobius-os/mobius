@@ -246,11 +246,86 @@ test('a recovery hold shows no live title, row state or open link', () => {
   assert.equal(sessionSnapshot(rowBlock(), replacement).title, 'Saved title')
 })
 
-test('the host advertises row-state, and a report can opt in to value-only row facts', async () => {
+test('the host advertises row-state and rows-v2, and a report can opt in to value-only row facts', async () => {
   const { SESSION_FEATURES } = await import('../markdown/appBlockSession.js')
-  assert.deepEqual([...SESSION_FEATURES], ['row-state'])
+  assert.deepEqual([...SESSION_FEATURES], ['row-state', 'rows-v2'], 'rows-v2 extends row-state, which older apps still look for')
   assert.equal(parseRows({ itemFacts: 'values' }).itemFacts, 'values')
   assert.equal(parseRows({ itemFacts: 'labels' }).itemFacts, '')
   assert.equal(sessionSnapshot(rowBlock(), parseRows({ itemFacts: 'values' })).itemFacts, 'values')
   assert.equal(parseRows({ items: [{ intent: 'open:a', status: 'Merged', statusTone: 'accent' }] }).items.get('open:a').statusTone, 'accent')
+})
+
+// ---- rows-v2: app-sourced rows and the header's state mark.
+const appRowBlock = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+  app: 'example', intent: 'chat:list', title: 'Saved title', interaction: 'inline',
+  facts: [{ label: 'Saved', value: 'root fact' }],
+  action: { label: 'Send all', intent: 'send:a' },
+  items: [{ title: 'Saved row', intent: 'open:r', facts: [{ label: 'Project', value: 'owner/r' }], action: { label: 'Send', intent: 'send:b' } }] }) })
+
+test('rows are bounded plain text with an optional pill, HTTPS links and an app intent', () => {
+  const state = parse({ rows: [
+    { title: 'T'.repeat(200), meta: 'M'.repeat(300), pill: 'P'.repeat(80), tone: 'accent', busy: true, intent: 'review:x-1',
+      links: [{ label: '#1', url: 'https://github.com/o/r/pull/1' }, { label: 'bad', url: 'http://github.com/o/r/pull/2' },
+        { label: 'creds', url: 'https://u:p@github.com/o/r/pull/3' }, { label: '#4', url: 'https://github.com/o/r/pull/4' },
+        { label: '#5', url: 'https://github.com/o/r/pull/5' }] },
+    { title: '   ', meta: 'dropped: no title' },
+    { title: 'Plain', tone: 'neon', intent: 'not an intent' },
+    null,
+  ] })
+  assert.equal(state.rows.length, 2)
+  const [first, plain] = state.rows
+  assert.equal(first.title.length, 120)
+  assert.equal(first.meta.length, 160)
+  assert.equal(first.live.status.length, 40)
+  assert.equal(first.live.statusTone, 'accent')
+  assert.equal(first.live.busy, true)
+  assert.deepEqual(first.live.links.map(link => link.label), ['#1'], 'only the first two links count, and unsafe ones are dropped')
+  assert.equal(first.intent, undefined, 'without the app slug no row links anywhere')
+  assert.equal(plain.live.statusTone, 'neutral')
+  assert.equal(plain.intent, undefined)
+  const linked = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [], rows: [{ title: 'A', intent: 'review:x-1' }] }, 's', keys, new Set(), 'example')
+  assert.equal(linked.rows[0].href, '/shell/?app=example&intent=review%3Ax-1')
+  assert.equal(parse({ rows: Array.from({ length: 20 }, (_, i) => ({ title: `R${i}` })) }).rows.length, 12)
+})
+
+test('no rows field keeps the saved snapshot; an empty list shows no rows', () => {
+  assert.equal(parse({}).rows, null)
+  assert.equal(parse({ rows: 'nope' }).rows, null)
+  assert.deepEqual(parse({ rows: [] }).rows, [])
+})
+
+test('app rows replace every saved row, root fact and item control, keeping only the block action', () => {
+  const state = parse({ title: '2 contributions', titleTone: 'success', rows: [{ title: 'From the app', meta: 'owner/a · +1 −0', pill: 'Open', tone: 'success' }] })
+  const view = sessionSnapshot(appRowBlock, state)
+  assert.equal(view.appRows, true)
+  assert.equal(view.title, '2 contributions')
+  assert.equal(view.titleTone, 'success')
+  assert.deepEqual(view.facts, [])
+  assert.deepEqual(view.items.map(item => [item.title, item.meta, item.action, item.live.status]), [['From the app', 'owner/a · +1 −0', null, 'Open']])
+  assert.equal(view.action.intent, 'send:a')
+  assert.ok(!view.items.some(item => item.title === 'Saved row'))
+})
+
+test('a confirmation keeps sole ownership while rows are reported, and an incomplete one shows the saved card', () => {
+  const rows = [{ title: 'Decorative app row', pill: 'Ready' }]
+  const complete = sessionSnapshot(appRowBlock, parse({ rows, actions: [{ key: 'send:a', confirming: true,
+    confirmation: [{ title: 'Exact target', facts: [{ label: 'Project', value: 'owner/a' }] }] }] }))
+  assert.equal(complete.confirmation, true)
+  assert.deepEqual(complete.items.map(item => item.title), ['Exact target'])
+  assert.equal(complete.appRows, undefined)
+  const incomplete = sessionSnapshot(appRowBlock, parse({ rows, actions: [{ key: 'send:a', confirming: true, confirmation: [] }] }))
+  assert.equal(incomplete.appRows, undefined)
+  assert.deepEqual(incomplete.items.map(item => item.title), ['Saved row'])
+})
+
+test('the title mark needs a live title; recovery drops rows and the mark', () => {
+  assert.equal(sessionSnapshot(appRowBlock, parse({ titleTone: 'success', titleBusy: true })).titleTone, 'neutral')
+  assert.equal(sessionSnapshot(appRowBlock, parse({ titleTone: 'success', titleBusy: true })).titleBusy, false)
+  assert.equal(parse({ title: 'x', titleTone: 'neon' }).titleTone, 'neutral')
+  const held = sessionStateUpdate(parse({ title: 'Sent', titleTone: 'success', rows: [{ title: 'Row' }] }),
+    parse({ recoveryError: true, title: 'Sent', titleTone: 'success', rows: [{ title: 'Row' }] }))
+  assert.equal(held.rows, null)
+  assert.equal(held.title, '')
+  assert.equal(held.titleTone, 'neutral')
+  assert.deepEqual(sessionSnapshot(appRowBlock, held).items.map(item => item.title), ['Saved row'])
 })

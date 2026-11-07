@@ -38,7 +38,9 @@ export function blockSessionEnvelope(session, generation) {
     items: Array.isArray(session.items) ? session.items : [],
     features: Array.isArray(session.features) ? session.features : [],
     checkpoint: session.checkpoint ?? null, retain: session.retain === true,
-    recoveryError: session.recoveryError ?? null }
+    recoveryError: session.recoveryError ?? null,
+    ...(session.context ? { context: { chatId: session.context.chatId, latest: session.context.latest !== false,
+      intent: typeof session.context.intent === 'string' ? session.context.intent : '' } } : {}) }
 }
 
 /** Whether app-reported state may reach the block host: it must come from
@@ -64,6 +66,18 @@ export function blockEventDelivery({ session, event, document, sentNonce }) {
   if (event.nonce === sentNonce) return null
   return { type: 'moebius:app-block-action', sessionId: event.sessionId, generation: event.generation,
     key: event.key, event: event.event, nonce: event.nonce }
+}
+
+/** The refresh hint to post to the live document, once per hint. It names
+ *  the document generation it was raised for, so a reloaded document never
+ *  receives an earlier document's hint. It carries no data and no authority:
+ *  the app only re-reads its own state. */
+export function blockRefreshDelivery({ session, refresh, document, sentSeq }) {
+  if (!session || !refresh || document?.supported !== true) return null
+  if (refresh.sessionId !== session.sessionId || refresh.generation !== document.generation) return null
+  if (refresh.seq === sentSeq) return null
+  return { type: 'moebius:app-block-refresh', sessionId: refresh.sessionId, generation: refresh.generation,
+    reason: refresh.reason }
 }
 
 /** A host request is honoured only from the live document. A transcript or

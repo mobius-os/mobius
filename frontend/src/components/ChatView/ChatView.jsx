@@ -278,6 +278,7 @@ import {
   normalizeGoalPresentation,
   progressRailViewModel,
 } from './goalProgress.js'
+import { AppBlockChatContext, createAppBlockChat } from './markdown/appBlockChat.js'
 import './ChatView.css'
 
 // Inspectors and side panels that open only on request stay off the startup
@@ -4962,9 +4963,19 @@ export default function ChatView({
   }, [chatId, embedded, hidden, handleOpenChanges])
 
   const chatProvider = chatInfo?.provider || null
+  // Passive app blocks learn this chat's id from the transcript itself, and
+  // re-read their own state when a turn here settles or the tab is shown.
+  const appBlockChat = useMemo(() => chatId ? createAppBlockChat(chatId) : null, [chatId])
+  useEffect(() => {
+    if (!appBlockChat || hidden) return undefined
+    const onVisible = () => { if (document.visibilityState === 'visible') appBlockChat.refresh('visible') }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [appBlockChat, hidden])
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
+      if (!hidden && document.visibilityState === 'visible') appBlockChat?.refresh('turn')
       // Only this chat's provider spent allowance. Refreshing every provider
       // on every pane's turn end multiplied reads of rate-limited services.
       if (chatProvider) {
@@ -4977,7 +4988,7 @@ export default function ChatView({
         .finally(() => setLiveContext(null))
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, chatProvider, turnActive, queryClient])
+  }, [chatId, chatProvider, turnActive, queryClient, appBlockChat, hidden])
 
   useEffect(() => {
     function freezeStreamingReturn(event) {
@@ -6134,6 +6145,7 @@ export default function ChatView({
         {/* The reservation is a permanent geometry invariant for every
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
+        <AppBlockChatContext.Provider value={appBlockChat}>
         <LocalAnswersContext.Provider value={localAnswerIntents}>
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
@@ -6273,6 +6285,7 @@ export default function ChatView({
         </ul>
         </PeerTimelineContext.Provider>
         </LocalAnswersContext.Provider>
+        </AppBlockChatContext.Provider>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
       </div>
