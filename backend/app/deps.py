@@ -1281,8 +1281,9 @@ def require_account_owner_control(principal: Principal = Depends(get_principal))
   make either. Deliberately independent of how much workspace access a guest
   holds, unlike ``require_installation_owner_control``.
 
-  Writes to GitHub or the Community Store under the owner's identity require
-  this: Contribute's PR sends, updates, assignments, merges and replies,
+  Linking the owner's Möbius account, and writes to GitHub or the Community
+  Store under the owner's identity, require this: Contribute's PR sends,
+  updates, assignments, merges and replies,
   project pushes, Reviewer grants and manual posts, and Store publishing,
   reviews and install receipts. Reviewer's automatic posts under an existing
   grant require only ``require_account_owner``, so a delegated helper may

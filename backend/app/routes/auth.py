@@ -41,6 +41,7 @@ from app.deps import (
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
   acts_for_guest, get_owner_or_delegated_owner_for_app_token, reject_cross_site,
+  require_account_owner_control,
   require_chat_embed_operation,
   require_installation_owner_control,
 )
@@ -1099,7 +1100,10 @@ async def _consume_mobius_pending(state: str) -> dict:
 
 
 @router.post(
-  "/provider/mobius/login", dependencies=[Depends(reject_cross_site)],
+  "/provider/mobius/login",
+  # Linking the owner's Möbius account is theirs alone, whatever workspace
+  # access a guest holds.
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("3/minute")
 async def mobius_login_start(

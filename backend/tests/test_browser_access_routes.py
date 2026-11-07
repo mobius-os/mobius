@@ -211,6 +211,21 @@ def test_guest_cannot_act_on_github_as_the_owner_whatever_access_they_hold(
     assert read.status_code == 409 and read.json()["detail"] == "Connect GitHub first."
 
 
+def test_guest_cannot_link_the_owners_mobius_account_whatever_access_they_hold(
+  https, auth, monkeypatch,
+):
+  from app import deps
+  _, token, _ = invite(https)
+  monkeypatch.setattr(
+    deps, "require_installation_owner_control", deps.require_nondelegated_owner_control,
+  )
+  response = https.post(
+    "/api/auth/provider/mobius/login", headers={"Authorization": "Bearer " + token},
+  )
+  assert response.status_code == 403, response.text
+  assert response.json()["detail"] == ACCOUNT_OWNER_ONLY
+
+
 def test_delegated_helper_cannot_assign_a_review_as_the_owner(https, auth, db):
   contribute = models.App(
     name="Contribute", slug="contribute", github_access=True,
