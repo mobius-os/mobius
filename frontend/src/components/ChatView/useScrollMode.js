@@ -394,8 +394,8 @@ export default function useScrollMode({
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
   const paneResizeRunRef = useRef(null)
-  // Committed transcript growth shares the observer's guarded geometry pass;
-  // sizing the reservation and following its tail must happen before paint.
+  // Transcript-source handoffs share the observer's guarded geometry pass;
+  // sizing the reservation and applying its mode must happen before paint.
   const committedLayoutRunRef = useRef(null)
   // Footer height changes are scroll geometry: the controller observes the
   // footer and publishes its list clearance in the same guarded transaction.
@@ -2385,11 +2385,11 @@ export default function useScrollMode({
     footRef,
   ])
 
-  // Synchronize each committed reveal and transcript-source handoff before
+  // Synchronize each transcript-source handoff before
   // paint, including reservation consumption and an armed PIN -> FOLLOW
   // transition. The same effect-owned pass handles reader-gesture deferral
   // and conditional anchor/pin repair; no second scroll authority is created.
-  // ResizeObserver still handles later intrinsic media/markdown growth.
+  // ResizeObserver owns live reveal and intrinsic media/markdown growth.
   const reapplyActiveMode = useCallback(() => {
     if (!revealedRef.current || !readingPositionOwnerRef.current) return
     committedLayoutRunRef.current?.({

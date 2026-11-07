@@ -5886,12 +5886,12 @@ export default function ChatView({
   useLayoutEffect(() => {
     committedReplyGroupsRef.current = { chatId, groups: replyGroups }
   }, [chatId, replyGroups])
-  // Every committed typewriter frame changes transcript geometry, even when
-  // message count is unchanged. Keep live reveal, catch-up, and peer-source
-  // handoffs in the controller's same pre-paint spacer-and-scroll transaction.
+  // Source handoffs can change geometry without changing message count.
+  // Synchronize those commits here; the controller's ResizeObserver owns live
+  // reveal and intrinsic growth without a second layout pass per text frame.
   useLayoutEffect(() => {
     reapplyActiveMode()
-  }, [streamItems, catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
+  }, [catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
   const projectedActiveMirrorMsg = activeMirrorMsg?.id
     ? peerTimeline.messages.find(message => message.id === activeMirrorMsg.id)
       || activeMirrorMsg
