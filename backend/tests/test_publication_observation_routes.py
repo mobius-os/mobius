@@ -392,8 +392,20 @@ async def test_public_request_waiting_on_observer_does_not_hold_auth_database_le
   async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
     observing = asyncio.create_task(client.post(f["url"], headers=f["headers"]))
     assert await asyncio.to_thread(entered.wait, 5)
+    # Signal the sender's actual admission: it has run every auth dependency
+    # and reached the record's action lock, which the observer still holds.
+    queued = asyncio.Event()
+    real_lock = routes._ready_action_lock
+    class Admission:
+      def __init__(self, lock): self.lock = lock
+      async def __aenter__(self):
+        assert self.lock.locked()
+        queued.set()
+        return await self.lock.__aenter__()
+      async def __aexit__(self, *exc): return await self.lock.__aexit__(*exc)
+    monkeypatch.setattr(routes, "_ready_action_lock", lambda *args: Admission(real_lock(*args)))
     sending = asyncio.create_task(client.post(f["url"].removesuffix("observe") + "submit", headers=f["headers"]))
-    await asyncio.sleep(.05)
+    await asyncio.wait_for(queued.wait(), 5)
     assert not sending.done() and checked_out_connections() == 0
     finish.set()
     seen, sent = await asyncio.gather(observing, sending)
