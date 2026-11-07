@@ -443,6 +443,26 @@ export function suppressedQuestionToolIndices(blocks) {
   return suppressed
 }
 
+// One stable text block per card, so memoized Markdown and cached image
+// lookups see the same object across renders.
+const cardMessageBlocks = new WeakMap()
+
+/**
+ * The closing message a saved owner card carries, as the ordinary assistant
+ * text block it renders as, directly above its card. Null when it has none
+ * (every card saved before the field existed).
+ */
+export function cardMessageBlock(block) {
+  if (block?.type !== 'question') return null
+  if (typeof block.message !== 'string' || !block.message.trim()) return null
+  let text = cardMessageBlocks.get(block)
+  if (!text) {
+    text = { type: 'text', content: block.message, ownerCard: block }
+    cardMessageBlocks.set(block, text)
+  }
+  return text
+}
+
 /**
  * The blocks MsgContent renders in place, each with its rendered position
  * `idx` — the number its text carries as `data-markdown-block`. Deliverables
@@ -457,11 +477,12 @@ export function suppressedQuestionToolIndices(blocks) {
 export function renderedBlockEntries(blocks) {
   const skipToolIdx = suppressedQuestionToolIndices(blocks)
   return blocks
-    .map((item, rawIdx) => ({ item, rawIdx }))
-    .filter(({ item, rawIdx }) => (
-      item?.type !== 'generated_files' && !skipToolIdx.has(rawIdx)
-    ))
-    .map(({ item }, idx) => ({ item, idx }))
+    .flatMap((item, rawIdx) => {
+      if (item?.type === 'generated_files' || skipToolIdx.has(rawIdx)) return []
+      const message = cardMessageBlock(item)
+      return message ? [message, item] : [item]
+    })
+    .map((item, idx) => ({ item, idx }))
 }
 
 /**
@@ -502,6 +523,7 @@ export function upsertQuestionItem(prev, incoming) {
     if (existing.platform_action && !merged.platform_action) {
       merged.platform_action = existing.platform_action
     }
+    if (existing.message && !merged.message) merged.message = existing.message
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {

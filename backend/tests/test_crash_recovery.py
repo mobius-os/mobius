@@ -368,7 +368,7 @@ def test_reconcile_assigns_ts_to_interrupted_messages(db):
 
 
 def test_reconcile_warns_on_markerless_pending_queue_but_leaves_it(db, caplog):
-  """A Stop's ClearPending committing just before a racing AppendPending leaves
+  """A Stop's HoldPending committing just before a racing AppendPending leaves
   an idle chat with a non-empty pending queue. Reconciliation must
   NOT consume it — auto-promoting at startup would spawn a post-crash turn, and
   the next POST's stale-pending drain is the repair path — but it WARNS so a

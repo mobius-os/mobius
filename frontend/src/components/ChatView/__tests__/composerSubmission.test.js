@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import { hasSendablePayload } from '../composerSubmission.js'
+import { hasSendablePayload, queueAwaitsOwnerSend } from '../composerSubmission.js'
 
 test('plain text remains sendable without an attachment', () => {
   assert.equal(hasSendablePayload('hello', []), true)
@@ -85,4 +85,20 @@ test('a fresh send lands its pin once, at submit, not again on acknowledgement',
   assert.equal(landings.length, 1, 'the fresh path commits its send intent exactly once')
   assert.ok(transport > 0 && landings[0] < transport,
     'the single landing happens at submit, before the POST is acknowledged')
+})
+
+test('a queue a Stop held waits for the owner\'s send only while no turn runs', () => {
+  const held = [{ cid: 'a', content: 'first', held: true }, { cid: 'b', content: 'second', held: true }]
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: held }), true)
+  assert.equal(queueAwaitsOwnerSend({ turnActive: true, pendingMessages: held }), false,
+    'during a turn nothing can start the held rows, so no send is offered')
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [{ cid: 'a' }] }), false,
+    'an ordinary queue keeps its Stop')
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: [] }), false)
+})
+
+
+test('a shared-browser guest is not offered the owner\'s held queue', () => {
+  const held = [{ cid: 'a', held: true }]
+  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: held, sharedGuest: true }), false)
 })

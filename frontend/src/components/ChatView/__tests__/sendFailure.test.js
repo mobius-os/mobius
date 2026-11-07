@@ -6,6 +6,7 @@ import {
   isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
+  queueSendFailureMessage,
   sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from '../sendFailure.js'
@@ -198,4 +199,30 @@ test('a send that never took the composer draft never says its message is in the
     outboxRetained: true,
   })
   assert.equal(detachedSendFailureMessage(retained), sendFailureMessage(retained))
+})
+
+test('a refused empty Send says the queue is unchanged, never that a draft came back', () => {
+  for (const error of [
+    new ChatHttpError(409, { code: 'pending_question_open' }),
+    new ChatHttpError(409, { code: 'model_selection_required' }),
+    new ChatTransportError(new Error('offline')),
+  ]) {
+    const message = queueSendFailureMessage(error)
+    assert.match(message, /queued messages are unchanged|still queued/)
+    assert.doesNotMatch(message, /composer/)
+  }
+  assert.match(
+    queueSendFailureMessage(new ChatHttpError(409, { code: 'pending_question_open' })),
+    /pending question/,
+  )
+})
+
+test('a refused empty Send shows the server\'s reason instead of inviting a retry', () => {
+  const message = queueSendFailureMessage(new ChatHttpError(409, {
+    code: 'delegation_managed',
+    detail: 'This evaluator chat is managed by its parent workflow.',
+  }))
+  assert.match(message, /managed by its parent workflow/)
+  assert.match(message, /unchanged/)
+  assert.doesNotMatch(message, /try again/i)
 })

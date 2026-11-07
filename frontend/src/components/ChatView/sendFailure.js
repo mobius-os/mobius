@@ -80,7 +80,7 @@ export function sendFailureMessage(error, { online = true } = {}) {
   return 'Möbius couldn’t send the message. It’s back in the composer—try again.'
 }
 
-// A send that never took the composer draft (a reply's Try again) put nothing
+// A send that never took the composer draft put nothing
 // back in the composer, so its failure must not point there. Tapping it again
 // reuses the unconfirmed send's identity, so a retry cannot send it twice.
 export function detachedSendFailureMessage(error, { online = true } = {}) {
@@ -90,4 +90,21 @@ export function detachedSendFailureMessage(error, { online = true } = {}) {
     return 'Möbius couldn’t confirm the send. It’s safe to try again.'
   }
   return 'Möbius couldn’t send the message. Try again in a moment.'
+}
+
+// An empty Send asks the server to run the queue a Stop held. Nothing left the
+// composer and the queue stays queued, so say that instead of a draft message.
+export function queueSendFailureMessage(error) {
+  if (isPendingQuestionSendFailure(error)) {
+    return 'Answer the pending question above first. Your queued messages are unchanged.'
+  }
+  if (isModelSelectionRequiredFailure(error)) {
+    return 'Choose a model before sending. Your queued messages are unchanged.'
+  }
+  // A refusal says why; retrying would not change it.
+  const status = Number(error?.status)
+  if (status >= 400 && status < 500 && error?.detail) {
+    return `${error.detail} Your queued messages are unchanged.`
+  }
+  return 'Möbius couldn’t send the queued messages. They’re still queued—try again.'
 }

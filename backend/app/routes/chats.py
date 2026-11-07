@@ -76,7 +76,8 @@ from app.chat_titles import (
   first_user_message_title,
   renamed_event,
 )
-from app.database import get_db
+from app.database import SessionLocal, get_db
+from app.settled import run_settled
 from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal, presented_deferred_goals, presented_dependency_goals
 from app.helper_transcripts import read_helper_conversation
@@ -722,6 +723,23 @@ def _chat_detail_window(
   return messages[start:], start, None
 
 
+def _branch_origin_ref(db: Session, chat: models.Chat) -> dict | None:
+  """What the "Branched from" divider shows: the source's current title and
+  whether it can still be opened. The provider fork point stays server-side."""
+  origin = chat.branch_origin
+  if not isinstance(origin, dict) or not origin.get("chat_id"):
+    return None
+  source = db.query(models.Chat.title, models.Chat.deleted_at).filter(
+    models.Chat.id == origin["chat_id"],
+  ).first()
+  return {
+    "chat_id": origin["chat_id"],
+    "title": source.title if source is not None else origin.get("title"),
+    "through_count": origin.get("through_count"),
+    "available": source is not None and source.deleted_at is None,
+  }
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -962,6 +980,7 @@ def _chat_detail_response(
     # Same ref shape as the chat list rows: the composer's @-mention of
     # project files activates only for a chat that belongs to a live project.
     "project": _project_ref_for_chat(db, chat),
+    "branch_origin": _branch_origin_ref(db, chat),
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
@@ -1933,6 +1952,54 @@ def unarchive_owner_chat(
   chat = get_active_chat_or_404(db, chat_id)
   chat_archive.unarchive_chat(db, chat)
   return {"archived_at": chat.archived_at, "pinned_at": chat.pinned_at}
+
+
+class ChatBranchRequest(BaseModel):
+  # The chosen reply's stored message id.
+  through_id: str = Field(min_length=1, max_length=256)
+
+
+def _branch_in_own_session(chat_id: str, through_id: str) -> str:
+  """Create the branch on a session of its own; returns the new chat's id.
+
+  Runs as one settled thread step: once it has started, it commits or cleans
+  up its links before the request can unwind, even if the client goes away.
+  """
+  from app.chat_branches import BranchPointError, branch_chat
+
+  with SessionLocal() as db:
+    source = get_active_chat_or_404(db, chat_id)
+    if source.project_id is not None and db.query(models.Project.id).filter(
+      models.Project.id == source.project_id,
+      models.Project.deleted_at.isnot(None),
+    ).first() is not None:
+      raise HTTPException(409, "This chat's project was deleted.")
+    try:
+      # Finding the fork point reads the source's provider session file,
+      # which can be large; this keeps it off the event loop.
+      return branch_chat(db, source, through_id, data_dir=get_settings().data_dir).id
+    except BranchPointError as exc:
+      raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/{chat_id}/branch", dependencies=[Depends(reject_cross_site)])
+async def branch_owner_chat(
+  chat_id: str,
+  body: ChatBranchRequest,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Start a new chat that continues this one from the chosen reply."""
+  project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
+  db.rollback()
+  # A branch joins its source's project; serialize with project deletion so
+  # it can never land in a project that is being removed.
+  async with serialize_project_lifecycle(project_id):
+    branch_id = await run_settled(_branch_in_own_session, chat_id, body.through_id)
+  branch = db.query(models.Chat).filter(models.Chat.id == branch_id).one()
+  activity.log_event("chat_created", chat_id=branch.id)
+  _reclaim_expired_tombstones_after_chat_write(db)
+  return _chat_create_response(branch, db)
 
 
 @router.get("/{chat_id}")
@@ -3606,6 +3673,7 @@ def _app_chat_started(chat: models.Chat, db: Session) -> bool:
     chat.has_messages
     or chat.pending_question_id
     or chat.session_id
+    or chat.pending_messages
     or is_chat_busy(db, chat)
     or (goal and goal.get("status") in {"active", "paused", "completed", "cannot_complete", "cancelled"})
   )
@@ -4139,6 +4207,7 @@ async def patch_app_chat(
         if (
           chat.has_messages
           or chat.session_id
+          or chat.pending_messages
           or is_chat_busy(db, chat)
         ):
           raise HTTPException(

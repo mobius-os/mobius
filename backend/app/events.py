@@ -552,6 +552,9 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     platform_action = event.get("platform_action")
     if isinstance(platform_action, dict):
       new_block["platform_action"] = copy.deepcopy(platform_action)
+    message = card_message(event)
+    if message:
+      new_block["message"] = message
     # Answer delivery is fixed when the card is created, not by later partial
     # updates. Continuation cards have no provider future to keep alive.
     if event.get("response_mode") == "continuation":
@@ -1515,14 +1518,28 @@ def undo_question_scrub(
         target.pop("action_key", None)
 
 
+def card_message(block: dict) -> str:
+  """The closing message an owner card carries, shown above the card."""
+  message = block.get("message")
+  return message if isinstance(message, str) else ""
+
+
+def assistant_prose(blocks: list) -> str:
+  """The reply's prose in transcript order: text blocks and card messages."""
+  return _join_text_parts([
+    b.get("content") if b.get("type") == "text" else card_message(b)
+    for b in blocks
+    if isinstance(b, dict) and b.get("type") in ("text", "question")
+  ])
+
+
 def build_assistant_message(
   assistant_blocks: list,
 ) -> dict:
   """Converts accumulated blocks into a message dict for DB storage."""
-  all_text = _join_text_parts([
-    b["content"] for b in assistant_blocks
-    if b.get("type") == "text" and b.get("content")
-  ])
+  # `content` is what search, compaction and handoffs read, so a card's
+  # closing message counts as the reply's prose at the card's position.
+  all_text = assistant_prose(assistant_blocks)
   # Drop the internal `text_boundary` marker from the persisted blocks. It is
   # a live-stream-only signal (the frontend's forceNewTextBlock) and is never
   # a renderable block; the throttled mid-turn PersistTranscript path writes

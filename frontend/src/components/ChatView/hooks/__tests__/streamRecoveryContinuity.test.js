@@ -180,6 +180,20 @@ test('manual Resume does not clear the answer while acknowledgement or catchup i
   catchup.resolve(new Response(null, { status: 204 }))
 })
 
+test('an empty Send that the server queues behind other work starts no stream', async () => {
+  await setup()
+  let posted
+  globalThis.fetch = async (_url, options) => {
+    posted = JSON.parse(options.body)
+    return Response.json({ status: 'queued', running: false }, { status: 202 })
+  }
+  const result = await hook.result.current.sendMessage('', undefined, { continuation: 'queue' })
+  assert.equal(posted.continuation, 'queue')
+  assert.equal(result.status, 'queued')
+  assert.equal(hook.result.current.isStreaming, false, 'nothing runs until the queue drains')
+  assert.equal(visibleAnswer(), 'The answer before interruption')
+})
+
 for (const [action, options] of [
   ['manual Resume', { continuation: 'manual' }],
   ['answer', { answers: { question: 'Yes' } }],
