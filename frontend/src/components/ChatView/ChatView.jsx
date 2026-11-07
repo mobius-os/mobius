@@ -105,7 +105,7 @@ import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
-import AssistantReply, { endsAgentStretch } from './AssistantReply.jsx'
+import AssistantReply, { agentStretchStart } from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
@@ -196,6 +196,8 @@ import {
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
+import { replyProse } from './messageCopy.js'
+import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
@@ -5906,6 +5908,31 @@ export default function ChatView({
     }
   }
 
+  // One footer for the whole chat, on the reply at its very end: the live
+  // reply while the agent works (empty until it settles), otherwise the reply
+  // holding the last visible row. Once the owner speaks there is none.
+  const footerGroup = replyGroups.get(showActiveAssistantSurface
+    ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length)
+    : lastVisibleMessageIndex) || null
+  const footerStretch = useMemo(() => {
+    if (!footerGroup) return null
+    const first = agentStretchStart(peerTimeline.messages, replyGroups, footerGroup)
+    const stretch = peerTimeline.messages.slice(first.start, footerGroup.end + 1)
+    let before = first.start - 1
+    while (before >= 0 && peerTimeline.messages[before]?.hidden) before -= 1
+    return {
+      startKey: first.rows[0].key,
+      copyable: replyProse(stretch).length > 0,
+      // The stretch may have begun before the loaded page.
+      truncated: before < 0 && offset > 0,
+    }
+  }, [footerGroup, peerTimeline.messages, replyGroups, offset])
+  const stretchPrefix = useStretchPrefix(chatId, offset, !turnActive && !!footerStretch?.truncated)
+  // Copy only once the whole stretch can be copied.
+  const stretchCopyable = footerStretch?.truncated
+    ? stretchPrefix != null && (footerStretch.copyable || stretchPrefix !== '')
+    : !!footerStretch?.copyable
+
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
     setDepth: depth => { fileDragDepthRef.current = depth },
@@ -5964,11 +5991,12 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      endsStretch={endsAgentStretch(peerTimeline.messages, replyGroups, group)}
-      // Only an idle latest reply pins its actions. A live reply may not yet
-      // have a stored row; that must not leave the previous reply pinned too.
-      metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={showMessageMeta}
+      // The footer clears the moment a new turn starts (an answered card
+      // included) and fills again where the agent next stops.
+      footer={group === footerGroup ? (turnActive ? 'working' : 'settled') : null}
+      stretchStartKey={group === footerGroup ? footerStretch?.startKey : undefined}
+      stretchCopyable={group === footerGroup && stretchCopyable}
+      stretchPrefix={group === footerGroup ? stretchPrefix || '' : ''}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

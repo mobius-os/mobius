@@ -62,22 +62,23 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('older reply actions reveal only on tap; only the latest reply keeps its row in view', () => {
+test('the chat has one reply footer, on the reply at its very end', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
-    'hovering an earlier reply must not reveal another Copy above the current reply')
+    'hovering a reply must not reveal another Copy above the current reply')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /metaVisible=\{\(!turnActive && last\) \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
-    'only the idle latest reply pins its actions; a new turn hides the previous footer')
+  assert.match(chatView, /footer=\{group === footerGroup \? \(turnActive \? 'working' : 'settled'\) : null\}/,
+    'only the last reply holds the footer; a new turn empties it')
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
 })
 
-test('ChatView passes each reply whether it ends the agent’s stretch', () => {
-  assert.match(chatView, /endsStretch=\{endsAgentStretch\(peerTimeline\.messages, replyGroups, group\)\}/)
+test('ChatView gives the footer the start of the agent’s stretch to copy from', () => {
+  assert.match(chatView, /agentStretchStart\(peerTimeline\.messages, replyGroups, footerGroup\)/)
+  assert.match(chatView, /stretchStartKey=\{group === footerGroup \? footerStretch\?\.startKey : undefined\}/)
 })
 
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {

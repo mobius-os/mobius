@@ -453,12 +453,12 @@
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
-/* A reply's row is its own line under the reply, not an overlay in the
-   conversation gap: it keeps its space while hidden and while the reply is
-   still streaming, so settling, revealing or pinning it never moves the
-   transcript, and it always sits the same distance below the reply's last
-   line (its fixed height comes from .chat__msg-meta). Time and Copy stay
-   together, inset to match the reply's prose. */
+/* The chat's one reply footer, on its last reply, is its own line under the
+   reply, not an overlay in the conversation gap: it keeps its space while
+   the agent works, so settling never moves the transcript, and it always
+   sits the same distance below the reply's last line (its fixed height comes
+   from .chat__msg-meta). Time and Copy stay together, inset to match the
+   reply's prose. */
 .chat__msg-meta--start {
   display: flex;
   width: fit-content;
@@ -466,12 +466,11 @@
   margin: 6px 0 0;
   padding: 0 8px;
 }
-/* An earlier reply in a stretch has no time: pull Copy back by its own
-   padding so its glyph still lines up with the reply's prose. */
+/* A reply saved without a time: pull Copy back by its own padding so its
+   glyph still lines up with the reply's prose. */
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
-/* Older replies reveal actions only on tap/click; hovering must not expose
-   another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. */
+/* Owner messages reveal their row only on tap/click; the chat's last reply
+   keeps its footer visible. */
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: visible;
@@ -487,8 +486,8 @@
 /* ── One-tap message copy ──────────────────────────────
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
-   see chatUiPolish.test), but a single tap reveals a quiet ghost button
-   below a reply or beside an owner message. */
+   see chatUiPolish.test), but a quiet ghost button sits in the chat's one
+   reply footer, and a single tap reveals one beside an owner message. */
 .chat__msg-copy,
 .chat__msg-branch {
   display: inline-flex;
