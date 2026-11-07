@@ -55,7 +55,7 @@ import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { finishAppFileExport } from '../../lib/appFileExport.js'
+import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -65,16 +65,6 @@ import './AppCanvas.css'
 function appFrameRequestUrl(appId, version, frameRev) {
   return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
     + (frameRev ? `-${frameRev}` : '')
-}
-
-// Label ink on the app's own manifest colour (always #rrggbb): white while it
-// keeps 3:1, the rule the theme's --accent-fg uses, else a near-black.
-function fileExportInk(color) {
-  if (!/^#[0-9a-f]{6}$/i.test(color || '')) return undefined
-  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255)
-    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
-  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#172008'
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {

@@ -159,11 +159,17 @@ def release_holds(rows: list[Any], released_at: str) -> list[Any]:
   ]
 
 
+def runnable_pending(pending: Iterable[Any] | None) -> list[Mapping[str, Any]]:
+  """The queued rows that can run without the owner: every row a Stop did
+  not hold."""
+  return [row for row in pending or () if isinstance(row, Mapping) and not row.get("held")]
+
+
 def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
-  """Whether the queue holds work that can run without the owner: any row a
-  Stop did not hold. Held rows are not runnable work, so checks that mean
-  "something is queued to run" use this rather than a non-empty queue."""
-  return any(isinstance(row, Mapping) and not row.get("held") for row in pending or ())
+  """Whether the queue holds work that can run without the owner. Held rows
+  are not runnable work, so checks that mean "something is queued to run"
+  use this rather than a non-empty queue."""
+  return bool(runnable_pending(pending))
 
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:

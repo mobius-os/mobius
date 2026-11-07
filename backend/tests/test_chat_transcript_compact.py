@@ -849,11 +849,11 @@ def test_runtime_route_does_not_select_transcript_json(
   )
   chat_id = created.json()["id"]
   monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
-  statements = []
+  executed = []
   engine = db.get_bind()
 
-  def capture_sql(_, __, statement, *args):
-    statements.append(statement.lower())
+  def capture_sql(_, __, statement, parameters, *args):
+    executed.append((statement.lower(), tuple(parameters or ())))
 
   event.listen(engine, "before_cursor_execute", capture_sql)
   try:
@@ -862,10 +862,19 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
-  # One run snapshot and one settled-wait read serve both the runtime fields
-  # and the lifecycle key; the other wait read lists the armed waits.
-  assert sum("from chat_run_updates" in statement for statement in statements) == 1
-  assert sum("from chat_waits" in statement for statement in statements) == 2
+  # One read of this chat's run rows serves both the runtime fields and the
+  # lifecycle key; one wait read settles the key and the other lists the
+  # outstanding waits. Only reads naming this chat count, so unrelated reads
+  # cannot break this.
+  def reads(table):
+    return sum(
+      f"from {table}" in statement and chat_id in params
+      for statement, params in executed
+    )
+
+  assert reads("chat_run_updates") == 1
+  assert reads("chat_waits") == 2
+  statements = [statement for statement, _ in executed]
   body = runtime.json()
   assert isinstance(body.pop("lifecycle_projection_key"), str)
   assert body == {

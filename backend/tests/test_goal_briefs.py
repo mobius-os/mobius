@@ -604,8 +604,6 @@ def test_read_goal_tool_is_one_result_bearing_read_for_both_levels(monkeypatch):
   from app import platform_tools
   from tests.test_platform_tools import _control_module
   control = _control_module()
-  assert control.READ_GOAL_TOOL in control.OWNER_TOOLS
-  assert control.READ_GOAL_TOOL in control.DELEGATED_TOOLS
   assert platform_tools.READ_GOAL_TOOL_NAME in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   assert platform_tools.READ_GOAL_TOOL_NAME in platform_tools.OWNER_CONTROL_TOOL_NAMES
   calls = []

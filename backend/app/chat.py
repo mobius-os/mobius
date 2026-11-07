@@ -99,7 +99,7 @@ from app.provider_errors import (
   classify_provider_error,
   is_workspace_credits_exhausted,
 )
-from app.continuations import has_runnable_pending
+from app.continuations import has_runnable_pending, runnable_pending
 from app.chat_writer import (
   AcknowledgeProviderSuccess,
   AdmitProviderExecution,
@@ -871,7 +871,8 @@ def reconcile_startup_chats(
     try:
       from app.delegations import retired_delegation_for_chat
       retired_helper = retired_delegation_for_chat(db, chat.id)
-      queued = len(chat.pending_messages or [])
+      # Rows a Stop held wait for the owner's send, not for this turn.
+      queued = len(runnable_pending(chat.pending_messages))
       running_runs = (
         db.query(models.ChatRun)
         .filter(models.ChatRun.chat_id == chat.id)

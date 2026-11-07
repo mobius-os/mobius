@@ -22,12 +22,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.streaming import ClosingStreamingResponse
-from app.broadcast import (
-  get_active_broadcast,
-  get_all_active_broadcasts,
-  get_broadcast,
-  get_system_broadcast,
-)
+from app.broadcast import get_broadcast, get_system_broadcast, publish_system_event
 from app.database import get_db
 from app.deps import (
   revocable_browser_stream,
@@ -50,26 +45,6 @@ _KEEPALIVE_INTERVAL = 30
 # (and the polite live region), so a single POST cannot flood the rail with an
 # unbounded string.
 _LABEL_MAX = 80
-
-# Catch-up-unsafe events: they ride the system broadcast alone and are NEVER
-# fanned out to per-chat broadcasts, because a chat reconnect replaying an old
-# copy from its event log would fire a spurious shell apply (or a stale
-# failure signal). SystemBroadcast has no replay, so one delivery per client —
-# no frontend dedup needed. These diagnostics remain classified here so every
-# producer uses the same system-bus-only contract (the frontend also never
-# recognizes them on a chat stream).
-_SYSTEM_BUS_ONLY_EVENTS = frozenset({
-  "shell_rebuilding",
-  "shell_rebuilt",
-  "shell_apply_now",
-  "shell_rebuild_failed",
-  "app_build_failed",
-  "app_created",
-  "app_preview_ready",
-  # open_item is an ACTION event (open this now); a chat reconnect replaying it
-  # would re-open the item a second time, so it rides the replay-free system bus.
-  "open_item",
-})
 
 # The typed fields an `open_item` request carries (split-pane design §6.3), plus
 # the closed enums their strings must belong to. Confined to `open_item` alone by
@@ -340,35 +315,6 @@ def notify(
       publish_now("shell_apply_now")
     except Exception:
       log.exception("shell_apply_now publish hook failed")
-
-
-def publish_system_event(event: dict) -> None:
-  """Deliver a system event to the Shell, and to running chats when its
-  replay is safe."""
-  # ALWAYS publish to the system broadcast — Shell subscribes to it
-  # for system events regardless of which view the user is on.
-  # Without this, an app_updated emitted after the chat finished
-  # streaming (or while the user is on the canvas / settings) would
-  # have nowhere to land: chat broadcasts close shortly after the
-  # turn ends, and the canvas view never had a subscription.
-  get_system_broadcast().publish(event)
-
-  # Fan out to running per-chat broadcasts ONLY for catch-up-SAFE list/theme
-  # refreshes (theme_updated, app_updated), where a chat reconnect's replay is
-  # a genuine backstop for a dropped system stream. The shell-rebuild lifecycle
-  # events (shell_rebuilding/rebuilt/apply_now/rebuild_failed) are
-  # catch-up-UNSAFE: a replayed `shell_rebuilt` tells the Shell a fresh build
-  # just landed and triggers a spurious apply. They ride the system broadcast
-  # alone (no replay), so single-bus delivery is exactly one hit and the
-  # frontend needs no dedup.
-  if event["type"] not in _SYSTEM_BUS_ONLY_EVENTS:
-    targets = get_all_active_broadcasts()
-    if not targets:
-      bc = get_active_broadcast()
-      if bc is not None:
-        targets = [bc]
-    for bc in targets:
-      bc.publish(event)
 
 
 @router.get("/api/events/system")

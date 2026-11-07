@@ -97,10 +97,48 @@ def test_a_new_message_runs_alone_and_the_held_queue_follows(client, auth, db, c
   assert pending(db, chat) == []
 
 
-def test_an_empty_send_needs_a_queue(client, auth, db, chat, scheduled):
+def test_an_empty_send_with_nothing_held_is_already_done(client, auth, db, chat, scheduled):
+  """Another device may have sent or cancelled the held rows since this
+  tray rendered. The owner's intent is already met, so this is no error."""
   response = send(client, auth, chat, content="", continuation="queue")
-  assert response.status_code == 409, response.text
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "duplicate"
   assert scheduled == []
+
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+  assert send(client, auth, chat, content="", continuation="queue").json()["status"] == "started"
+  scheduled.clear()
+
+  response = send(client, auth, chat, content="", continuation="queue")
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "duplicate"
+  assert scheduled == []
+
+
+@pytest.mark.parametrize("owner", ["drain", "activation"])
+def test_an_empty_send_waits_behind_the_same_work_a_typed_send_does(
+  client, auth, db, chat, scheduled, monkeypatch, owner,
+):
+  """Both sends share one admission rule: a restart drain or a pending
+  platform activation takes the input into the queue instead of a turn."""
+  from app import platform_restart
+  from app.routes import chats_stream
+  queue(db, chat, ("a", "first"))
+  stop(client, auth, chat)
+  if owner == "drain":
+    monkeypatch.setattr(chats_stream, "is_draining", lambda: True)
+  else:
+    monkeypatch.setattr(platform_restart, "activation_barrier_wait_id", lambda db, chat_id: "w")
+
+  queued = send(client, auth, chat, content="", continuation="queue")
+  typed = send(client, auth, chat, content="new", cid="n")
+
+  assert queued.status_code == 202, queued.text
+  assert queued.json()["status"] == "queued"
+  assert typed.json()["status"] == "queued"
+  assert scheduled == []
+  assert pending(db, chat) == [("a", None), ("n", None)]
 
 
 def test_an_empty_send_carries_no_message(client, auth, chat):
