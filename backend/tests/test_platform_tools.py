@@ -308,8 +308,8 @@ def test_promote_goal_result_names_the_real_plan_tool():
   control = _control_module()
   next_action = control._GOALS.PLAN_NEXT_ACTION
   assert "update_goal" in next_action
-  assert control.UPDATE_GOAL_TOOL in control.OWNER_TOOLS
-  assert control.UPDATE_GOAL_TOOL not in control.DELEGATED_TOOLS
+  assert control.UPDATE_GOAL_TOOL in platform_tools.OWNER_CONTROL_TOOL_NAMES
+  assert control.UPDATE_GOAL_TOOL not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_promote_goal_with_tasks_publishes_the_plan_in_the_same_call(monkeypatch):
@@ -618,7 +618,7 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
-    control.LIST_AGENT_PEERS_TOOL, *control.HELPER_TOOLS,
+    control.LIST_AGENT_PEERS_TOOL, *platform_tools.HELPER_TOOL_NAMES,
   ):
     assert len(tools[name]["description"]) <= 1000, name
 
@@ -1361,12 +1361,13 @@ def test_apply_app_publishes_the_directory_and_returns_where_to_open_it(
 
 def test_helpers_may_build_apps_but_not_reach_the_owner(monkeypatch):
   control = _control_module()
-  for name in control.APP_TOOLS:
-    assert name in control.DELEGATED_TOOLS
+  for name in platform_tools.APP_BUILD_TOOL_NAMES:
+    assert name in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   for name in (
     control.NOTIFY_OWNER_TOOL, control.OPEN_ITEM_TOOL, control.REQUEST_SECRET_TOOL,
   ):
-    assert name in control.OWNER_TOOLS and name not in control.DELEGATED_TOOLS
+    assert name in platform_tools.OWNER_CONTROL_TOOL_NAMES
+    assert name not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_screenshot_returns_the_image_and_the_owner_embed_line(monkeypatch, tmp_path):
