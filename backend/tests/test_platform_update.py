@@ -411,8 +411,8 @@ def test_conflict_serves_old_and_flags(clone_env):
 
 def test_conflict_flags_newer_updates_when_origin_advances(clone_env):
   """A pinned conflict reports ``newer_updates_available`` once origin/main moves
-  past the version it is pinned to, so Settings can offer one combined
-  review+resolve instead of forcing a resolve per stacked release."""
+  past the version it is pinned to, so Settings can suggest cancelling it and
+  reviewing the latest instead of resolving a stale release."""
   origin, platform = clone_env
   _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
@@ -429,6 +429,24 @@ def test_conflict_flags_newer_updates_when_origin_advances(clone_env):
 
   status = pu.platform_status(platform)
   assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
+  assert status["newer_updates_available"] is True
+
+
+def test_prepared_update_flags_newer_when_origin_advances(clone_env):
+  """A prepared (finish-stage) update, not just a conflict, reports
+  ``newer_updates_available`` once origin/main moves past the release it is
+  pinned to, so Settings can suggest cancelling it and reviewing the latest."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert pu.unfinished_update(platform)["stage"] == "finish"
+  assert pu.platform_status(platform)["newer_updates_available"] is False
+
+  _advance_origin(origin, edits={"docs/RELEASE.md": "later\n"}, msg="later deploy")
+  _git(platform, "fetch", "-q", "origin")
+
+  status = pu.platform_status(platform)
+  assert status["unfinished_update"]["stage"] == "finish"
   assert status["newer_updates_available"] is True
 
 
@@ -2425,7 +2443,7 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   ).stdout.strip()
   assert status["installed_release_sha"] == installed
   assert status["recorded_upstream_sha"] == installed
-  # This field is deliberately about releases stacked behind a conflict, not
+  # This field is about releases stacked behind an in-flight update, not
   # ordinary update availability. ``available`` is the ordinary signal.
   assert status["newer_updates_available"] is False
   # A check only advances remote-tracking refs — the served tree is NOT mutated.
@@ -4039,6 +4057,160 @@ def test_boot_retires_compatible_host_paths_but_preserves_required_migrations(
       assert marker is None
 
 
+def test_host_certified_helper_retires_the_helper_migration_from_status(
+  clone_env, monkeypatch,
+):
+  """Boot keeps the helper migration owed because the container cannot do
+  host work, but the host's certified helper protocol is the proof that it
+  was done: status then stops asking for host maintenance."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  _, platform = clone_env
+  pu._write_activation_marker(
+    _served_sha(platform), ["deployment/self-hosted-helper.required"],
+  )
+  certified = []
+  monkeypatch.setattr(
+    deployment_control, "host_helper_meets_release",
+    lambda release=None, repo=None: bool(certified),
+  )
+  assert pu.platform_status(platform)["activation"]["level"] == "host_maintenance"
+
+  certified.append(True)
+  status = pu.platform_status(platform)
+  assert status["activation"]["level"] == "live"
+  assert status["state"] != pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  # The marker keeps the requirement: a later helper downgrade owes it again.
+  assert pu._read_activation_marker()["paths"] == ["deployment/self-hosted-helper.required"]
+
+
+def test_review_asks_the_host_about_the_exact_incoming_release(
+  clone_env, monkeypatch,
+):
+  """The review of a release that raises the helper requirement keeps host
+  maintenance unless the host certified a helper for that exact release."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  _advance_origin(
+    origin, edits={"deployment/self-hosted-helper.required": "99\n"},
+    msg="raise the helper protocol",
+  )
+  _git(platform, "fetch", "-q", "origin")
+  target = _git(platform, "rev-parse", "origin/main").stdout.strip()
+  asked = []
+  certified_for = set()
+
+  def meets(release=None, repo=None):
+    asked.append((release, repo))
+    return release in certified_for
+
+  monkeypatch.setattr(deployment_control, "host_helper_meets_release", meets)
+  impact = pu._incoming_activation_impact(platform, before, target, read_host=True)
+  assert impact["level"] == "host_maintenance"
+  assert asked == [(target, platform)]
+
+  certified_for.add(target)
+  assert pu._incoming_activation_impact(
+    platform, before, target, read_host=True,
+  )["level"] != "host_maintenance"
+
+
+def test_rebuild_request_and_finish_review_use_the_host_certification(
+  clone_env, monkeypatch,
+):
+  """The reviewed rebuild request, the finish review of a prepared update and
+  the Apply response judge a helper-raising release by the evidence the owner
+  reviewed: a certified host leaves only the image replacement, so dispatch is
+  not refused as external activation. The marker still records the work."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  origin, platform = clone_env
+  current = _served_sha(platform)
+  marker = "deployment/self-hosted-helper.required"
+  target = _advance_origin(origin, edits={
+    "Dockerfile": "FROM official-new\n", marker: "99\n",
+  })
+  _git(platform, "fetch", "origin")
+  certified = []
+  monkeypatch.setattr(
+    deployment_control, "host_helper_meets_release",
+    lambda release=None, repo=None: bool(certified),
+  )
+
+  def reviewed():
+    preview = pu.platform_update_preview(platform, target_sha=target)
+    return pu.reviewed_container_rebuild_plan(
+      repo=platform, plan_id=preview["plan_id"], current_sha=current,
+      target_sha=target, image_digest=None,
+    )
+
+  def finish_review():
+    record = {
+      "state": "prepared", "snapshot": current, "prepared": target,
+      "target": target, "image_digest": None, "requires_image": True,
+      "local_tests": None,
+    }
+    with monkeypatch.context() as m:
+      m.setattr(pu, "read_prepared_update", lambda: record)
+      return pu.prepared_update_preview(platform)["activation"]
+
+  plan = reviewed()
+  assert platform_activation.requires_agent_activation(plan["activation"])
+  assert "host_maintenance" in finish_review()["required_actions"]
+
+  certified.append(True)
+  plan = reviewed()
+  assert plan["activation"]["required_actions"] == ["image_rebuild"]
+  assert plan["incoming_activation"]["required_actions"] == ["image_rebuild"]
+  assert not platform_activation.requires_agent_activation(plan["activation"])
+  assert finish_review()["required_actions"] == ["image_rebuild"]
+
+  # The Apply response discounts certified host work; the marker keeps it.
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(current + "\n")
+  head = _local_commit(platform, edits={marker: "99\n"})
+  impact = pu._record_update_activation(platform, head, current, read_host=True)
+  assert "host_maintenance" not in impact["required_actions"]
+  assert marker in pu._read_activation_marker()["paths"]
+
+
+def test_boot_and_record_paths_never_read_host_helper_evidence(
+  clone_env, monkeypatch,
+):
+  """Boot runs the record/finalize path from the image's boot closure, which
+  does not include deployment_control. Those paths keep recording the helper
+  requirement and never ask the host; only status and reviews do."""
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  _, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  head = _local_commit(
+    platform, edits={"deployment/self-hosted-helper.required": "99\n"},
+  )
+
+  def must_not_read_host(*_args, **_kwargs):
+    raise AssertionError("a boot/record path read host helper evidence")
+
+  monkeypatch.setattr(pu, "_without_certified_host_helper", must_not_read_host)
+  marker = "deployment/self-hosted-helper.required"
+  recorded = pu._record_update_activation(platform, head, served)
+  assert recorded["level"] == "host_maintenance"
+  assert marker in pu._read_activation_marker()["paths"]
+  assert pu._owed_activation(platform, served, head)["level"] == "host_maintenance"
+  assert pu._incoming_activation_impact(platform, served, head)["level"] == "host_maintenance"
+  pu._complete_boot_activation(platform)
+  assert pu._read_activation_marker()["paths"] == [marker]
+  # Status is the owner-facing reader and does ask.
+  with pytest.raises(AssertionError, match="read host helper evidence"):
+    pu.platform_status(platform)
+
+
 def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   clone_env, monkeypatch,
 ):
@@ -5286,7 +5458,7 @@ async def test_apply_keeps_cross_process_lock_through_final_progress(
   # Keep its real flock and durable progress writes; isolate unrelated work so
   # bounded event waits contain a broken handshake, not a full update's runtime.
   monkeypatch.setattr(pu, "_reconcile_under_lock", reconciled)
-  monkeypatch.setattr(pu, "_record_update_activation", lambda *_args:
+  monkeypatch.setattr(pu, "_record_update_activation", lambda *_args, **_kw:
     platform_activation.classify_activation([]))
   monkeypatch.setattr(pu, "_refresh_git_hooks", lambda *_args: None)
   monkeypatch.setattr(pu, "_set_update_progress", paused_progress)
