@@ -24,7 +24,8 @@ function render(platform) {
 test('a cancellable in-flight update suggests the newer release and offers to jump to it', () => {
   const html = render({
     state: 'activation_needed', contained_upstream_sha: target,
-    newer_updates_available: true,
+    // A release newer than the pinned one is never contained yet.
+    available: true, newer_updates_available: true,
     activation: { level: 'image_rebuild', required_actions: ['image_rebuild'] },
     unfinished_update: { stage: 'finish', action: 'replace', cancellable: true },
   })
@@ -37,13 +38,15 @@ test('a cancellable in-flight update suggests the newer release and offers to ju
 test('a settling update names the newer release but offers no cancel-to-latest', () => {
   const html = render({
     state: 'up_to_date', contained_upstream_sha: target,
-    newer_updates_available: true,
+    // A release newer than the pinned one is never contained yet.
+    available: true, newer_updates_available: true,
     unfinished_update: { stage: 'settling', action: 'none', cancellable: false },
   })
   assert.match(html, /It will be offered once this update finishes\./)
   assert.doesNotMatch(html, /Cancel and update to latest/)
-  // The newer release does not restyle the settling check as an update offer.
-  assert.match(html, /<button class="settings__btn settings__btn--sm settings__btn--outline">Check again<\/button>/)
+  // Confirming the settling update stays the primary action; nothing is reviewed.
+  assert.match(html, /<button[^>]*>Check again<\/button>/)
+  assert.doesNotMatch(html, /Review update/)
 })
 
 test('an ordinary available update with nothing in flight shows no in-flight suggestion', () => {

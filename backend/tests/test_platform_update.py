@@ -4109,12 +4109,46 @@ def test_review_asks_the_host_about_the_exact_incoming_release(
     return release in certified_for
 
   monkeypatch.setattr(deployment_control, "host_helper_meets_release", meets)
-  impact = pu._incoming_activation_impact(platform, before, target)
+  impact = pu._incoming_activation_impact(platform, before, target, read_host=True)
   assert impact["level"] == "host_maintenance"
   assert asked == [(target, platform)]
 
   certified_for.add(target)
-  assert pu._incoming_activation_impact(platform, before, target)["level"] != "host_maintenance"
+  assert pu._incoming_activation_impact(
+    platform, before, target, read_host=True,
+  )["level"] != "host_maintenance"
+
+
+def test_boot_and_record_paths_never_read_host_helper_evidence(
+  clone_env, monkeypatch,
+):
+  """Boot runs the record/finalize path from the image's boot closure, which
+  does not include deployment_control. Those paths keep recording the helper
+  requirement and never ask the host; only status and reviews do."""
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  _, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  head = _local_commit(
+    platform, edits={"deployment/self-hosted-helper.required": "99\n"},
+  )
+
+  def must_not_read_host(*_args, **_kwargs):
+    raise AssertionError("a boot/record path read host helper evidence")
+
+  monkeypatch.setattr(pu, "_without_certified_host_helper", must_not_read_host)
+  marker = "deployment/self-hosted-helper.required"
+  recorded = pu._record_update_activation(platform, head, served)
+  assert recorded["level"] == "host_maintenance"
+  assert marker in pu._read_activation_marker()["paths"]
+  assert pu._owed_activation(platform, served, head)["level"] == "host_maintenance"
+  assert pu._incoming_activation_impact(platform, served, head)["level"] == "host_maintenance"
+  pu._complete_boot_activation(platform)
+  assert pu._read_activation_marker()["paths"] == [marker]
+  # Status is the owner-facing reader and does ask.
+  with pytest.raises(AssertionError, match="read host helper evidence"):
+    pu.platform_status(platform)
 
 
 def test_boot_rebuild_retires_only_upstream_covered_image_paths(

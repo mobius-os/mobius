@@ -1831,8 +1831,12 @@ def reviewed_container_rebuild_plan(
     base = _git(
       "merge-base", current_sha, target_sha, repo=repo, check=False,
     ).stdout.strip() or current_sha
-    incoming_activation = _incoming_activation_impact(repo, base, target_sha)
-    activation = _owed_activation(repo, base, target_sha)
+    # The owner reviewed this with the host's evidence; the request is
+    # judged by the same evidence, never on a boot path.
+    incoming_activation = _incoming_activation_impact(
+      repo, base, target_sha, read_host=True,
+    )
+    activation = _owed_activation(repo, base, target_sha, read_host=True)
     return PlatformReviewedRebuild(
       target_sha=target_sha,
       image_digest=image_digest,
@@ -2124,12 +2128,18 @@ def _without_certified_host_helper(
   host's root-owned status certifies the protocol its last completed install
   provides, the same evidence that gates replacement dispatch. Status or a
   requirement that cannot be read keeps the work owed.
+
+  Only owner-facing status and reviews ask (``read_host=True``). Boot, record
+  and finalize paths never do: they run from the image's boot closure, which
+  does not include deployment_control, and the marker must keep recording
+  the requirement anyway.
   """
   marker = platform_activation.HOST_HELPER_REQUIREMENT_PATH
   if marker not in paths:
     return paths
   from app import deployment_control  # it imports this module
 
+  release = release or _contained_official_source(repo)
   if not deployment_control.host_helper_meets_release(release, repo):
     return paths
   return [path for path in paths if path != marker]
@@ -2139,31 +2149,35 @@ def _incoming_activation_impact(
   repo: Path,
   before: str | None,
   target_sha: str | None,
+  *,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
-  """Classify target work that is not already proven active in this image."""
-  return platform_activation.classify_activation(
-    _without_certified_host_helper(
-      repo,
-      _without_python_inputs_installed_for(
-        repo, _activation_paths_between(repo, before, target_sha), target_sha,
-      ),
-      target_sha,
-    ),
+  """Classify target work that is not already proven active in this image.
+  ``read_host`` also discounts host work the host certifies as done."""
+  paths = _without_python_inputs_installed_for(
+    repo, _activation_paths_between(repo, before, target_sha), target_sha,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, target_sha)
+  return platform_activation.classify_activation(paths)
 
 
 def _owed_activation(
   repo: Path, before: str, target: str, *, release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Everything the running process owes once it serves ``target``: its
   still-pending activation plus the changes from ``before``. Image work is
   judged against the official ``release`` ``target`` carries (``target``
-  itself unless it is a prepared local revision on top of one)."""
+  itself unless it is a prepared local revision on top of one). ``read_host``
+  (reviews only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, release=release or target,
     additional_served_paths=_activation_paths_between(repo, before, target),
   )
   owed_paths = _without_python_inputs_installed_for(repo, paths, target)
+  if read_host:
+    owed_paths = _without_certified_host_helper(repo, owed_paths, release or target)
   return platform_activation.classify_activation(
     owed_paths,
     served_restart_paths=served_restart,
@@ -2286,14 +2300,11 @@ def _pending_activation_work(
   served_paths = [*(served_to_head or []), *additional_served_paths]
   paths.extend(served_paths)
   paths.extend(image_input_drift(repo) or [])
-  release = release or _contained_official_source(repo)
   owed = _image_work_owed(
-    repo, [str(path) for path in paths if str(path)], release,
+    repo, [str(path) for path in paths if str(path)],
+    release or _contained_official_source(repo),
   )
-  return (
-    _without_certified_host_helper(repo, sorted({*owed, *damaged}), release),
-    _served_boot_restart(served_paths, owed),
-  )
+  return sorted({*owed, *damaged}), _served_boot_restart(served_paths, owed)
 
 
 def _served_boot_restart(served_paths: list[str], image_owed: list[str]) -> list[str]:
@@ -2443,10 +2454,15 @@ def _platform_activation_impact(
   *,
   served_to_head: list[str] | None = None,
   release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
+  """What the running process still owes. ``read_host`` (status and reviews
+  only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, served_to_head=served_to_head, release=release,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, release)
   return platform_activation.classify_activation(
     paths, served_restart_paths=served_restart,
   )
@@ -2458,8 +2474,9 @@ def _complete_boot_activation(repo: Path) -> None:
   A fresh server always satisfies ``server_restart``.  A new image identity
   that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
-  cannot observe or control those external planes; status alone reads the
-  host's certified helper (``_without_certified_host_helper``).
+  cannot observe or control those external planes. The marker keeps the
+  helper requirement; only status and reviews discount it against the host's
+  certified helper (``_without_certified_host_helper``), never this boot step.
   """
   marker = _read_activation_marker()
   if not marker:
@@ -5749,7 +5766,7 @@ def platform_status(
   if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
     rolled_back = False
     rollback = None
-  activation = _platform_activation_impact(repo)
+  activation = _platform_activation_impact(repo, read_host=True)
   activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
@@ -5967,7 +5984,9 @@ def prepared_update_preview(
     return None
   current = _update_source_tip(repo)
   activation = _with_prepared_image_requirement(
-    _incoming_activation_impact(repo, record["snapshot"], record["prepared"]),
+    _incoming_activation_impact(
+      repo, record["snapshot"], record["prepared"], read_host=True,
+    ),
     record,
   )
   preview = empty_platform_update_preview(
@@ -6147,7 +6166,7 @@ def _platform_update_preview_unlocked(
       current_sha=local_sha, target_sha=target,
       image_digest=image_digest,
     )
-    activation = _platform_activation_impact(repo, release=target)
+    activation = _platform_activation_impact(repo, release=target, read_host=True)
     if local_sha and target and activation["level"] != "live":
       preview.update(
         state=_state_for_activation(activation).value,
@@ -6202,7 +6221,9 @@ def _platform_update_preview_unlocked(
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
-  incoming_activation = _incoming_activation_impact(repo, base, target)
+  incoming_activation = _incoming_activation_impact(
+    repo, base, target, read_host=True,
+  )
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     actionable=True, operation="update",
@@ -6394,7 +6415,7 @@ def _apply_platform_update_sync(
         raise PlatformUpdateError(res.error or res.status)
 
       if res.status in {"conflict", "rolled_back"}:
-        activation = _platform_activation_impact(repo)
+        activation = _platform_activation_impact(repo, read_host=True)
 
       final_phase = (
         PlatformUpdatePhase.BLOCKED
