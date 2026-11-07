@@ -133,8 +133,8 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__title-mark .md-app-block__spinner { width:14px; height:14px; }
 /* A folded block is one quiet line: no rows, no controls. */
 .md-app-block--folded { border-style:dashed; background:transparent; }
-.md-app-block--folded > header { padding:4px 8px 4px 16px; }
-.md-app-block--folded > header strong { color:var(--muted); font-size:14px; font-weight:500; }
+.md-app-block--folded > header { flex-wrap:wrap; padding:4px 8px 4px 16px; }
+.md-app-block--folded > header strong { flex:1 0 auto; color:var(--muted); font-size:14px; font-weight:500; white-space:nowrap; }
 .md-app-block__jump { display:inline-flex; flex-shrink:0; align-items:center; gap:4px; min-height:44px; padding:0 8px; border:0; border-radius:8px; background:transparent;
   color:var(--accent-text, var(--accent)); font:inherit; font-size:13px; font-weight:600; white-space:nowrap; cursor:pointer; }
 .md-app-block__jump:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
