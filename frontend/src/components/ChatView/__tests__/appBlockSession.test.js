@@ -62,6 +62,33 @@ test('live badges replace saved badges; while confirming only app badges show', 
   assert.deepEqual(sessionSnapshot(block, appOwned).badges, [{ label: 'Reviewed', tone: 'success' }])
 })
 
+test('while confirming, the app list owns the block: its rows only, no saved facts, one action', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+    app: 'example', intent: 'open:a', title: 'Fix', interaction: 'inline', action: { label: 'Send all', intent: 'send:a' },
+    facts: [{ label: 'Target', value: 'saved by the conversation' }],
+    items: [{ title: 'One', intent: 'open:1' }, { title: 'Two', intent: 'open:2', action: { label: 'Send', intent: 'send:b' } },
+      { title: 'Three', intent: 'open:3' }] }) })
+  const list = [{ title: 'App one', facts: [{ label: 'Project', value: 'owner/repo' }] }, { title: 'App two', facts: [] }]
+  const rows = [
+    { title: 'App one', facts: [{ label: 'Project', value: 'owner/repo' }], badges: [], action: null, confirmation: true },
+    { title: 'App two', facts: [], badges: [], action: null, confirmation: true }]
+  const all = sessionSnapshot(block, parse({ actions: [{ key: 'send:a', confirming: true, confirmation: list }] }))
+  assert.deepEqual(all.items, rows)
+  assert.deepEqual(all.facts, [], 'saved facts are not shown beside the app list')
+  assert.deepEqual([all.action.intent, all.confirmation, all.title], ['send:a', true, 'Fix'])
+  // An item's action owns the block the same way, drawn once as the block's action.
+  const one = sessionSnapshot(block, parse({ actions: [{ key: 'send:b', confirming: true, confirmation: list,
+    badges: [{ label: 'Reviewed', tone: 'success' }] }] }))
+  assert.deepEqual(one.items, rows)
+  assert.deepEqual(one.action, { label: 'Send', intent: 'send:b' })
+  assert.deepEqual(one.badges, [{ label: 'Reviewed', tone: 'success' }], 'only the app\'s badges')
+  // Without a complete list (incomplete or ambiguous), the saved block stays.
+  const incomplete = sessionSnapshot(block, parse({ actions: [{ key: 'send:a', confirming: true }] }))
+  assert.deepEqual(incomplete.items.map(item => item.title), ['One', 'Two', 'Three'])
+  assert.equal(incomplete.facts.length, 1)
+  assert.equal(incomplete.confirmation, undefined)
+})
+
 test('idle offscreen sessions are released; unacknowledged and unresolved owners are retained', () => {
   const idle = { actions: [{ busy: false, confirming: false }], retain: false, ackNonce: 'one' }
   assert.equal(sessionRetained(idle, null), false)
@@ -142,4 +169,163 @@ test('across a reload only an unacknowledged confirm, the one event that may cau
   assert.ok(held.actions.every(action => action.disabled))
   assert.equal(sessionDocumentReset({ ...idle, ackNonce: 'n1' }, { event: 'confirm', nonce: 'n1' }), null,
     'an acknowledged confirm is the app\'s to report (busy, checkpoint) and is not held by the host')
+})
+
+// Live row state and a live title (building-apps.md "Passive block sessions").
+const rowBlock = () => appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+  app: 'example', intent: 'open:all', title: 'Saved title', interaction: 'inline', action: { label: 'Send all', intent: 'send:a' },
+  items: [{ title: 'Row A', intent: 'open:a' }, { title: 'Row B', intent: 'open:b' }] }) })
+const intents = new Set(['open:a', 'open:b'])
+const parseRows = fields => sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+  actions: [{ key: 'send:a', label: 'Send all' }], ...fields }, 's', keys, intents)
+
+test('row state is keyed by listed item intents, bounded, plain text and HTTPS-only', () => {
+  const state = parseRows({ title: 'T'.repeat(200), items: [
+    { intent: 'open:a', status: 'S'.repeat(80), statusTone: 'neon', busy: true, note: 'N'.repeat(300), links: [
+      { label: '#12', url: 'https://github.com/owner/repo/pull/12' }, { label: 'bad', url: 'javascript:alert(1)' },
+      { label: 'bad', url: 'https://user:pw@github.com/x' }, { label: '#13', url: 'https://github.com/owner/repo/pull/13' },
+      { label: '#14', url: 'https://github.com/owner/repo/pull/14' }] },
+    { intent: 'open:a', status: 'Second report for the same row' },
+    { intent: 'open:unlisted', status: 'Dropped' },
+    { intent: 'open:b' },
+  ] })
+  assert.equal(state.title.length, 120)
+  assert.deepEqual([...state.items.keys()], ['open:a'], 'unknown intents and empty rows are dropped; the first report wins')
+  const row = state.items.get('open:a')
+  assert.equal(row.status.length, 40)
+  assert.equal(row.statusTone, 'neutral')
+  assert.equal(row.busy, true)
+  assert.equal(row.note.length, 200)
+  // Up to two links are read; unsafe ones are dropped after that bound.
+  assert.deepEqual(row.links, [{ label: '#12', url: 'https://github.com/owner/repo/pull/12' }])
+  // Without the block's intents nothing is accepted.
+  const unscoped = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [],
+    items: [{ intent: 'open:a', status: 'Open' }] }, 's', keys)
+  assert.equal(unscoped.items.size, 0)
+  assert.equal(parseRows({ items: Array.from({ length: 13 }, () => ({ intent: 'open:a', status: 'x' })) }).items.size, 1)
+  assert.equal(parseRows({ items: 'not a list' }).items.size, 0)
+})
+
+test('the live title and row state replace the saved ones, and an open confirmation hides row state', () => {
+  const block = rowBlock()
+  assert.equal(sessionSnapshot(block, null).title, 'Saved title')
+  assert.equal(sessionSnapshot(block, null).items[0].live, null)
+  const sent = parseRows({ title: '2 pull requests opened', items: [
+    { intent: 'open:a', status: 'Open', statusTone: 'success', links: [{ label: '#12', url: 'https://github.com/owner/repo/pull/12' }] }] })
+  const snapshot = sessionSnapshot(block, sent)
+  assert.equal(snapshot.title, '2 pull requests opened')
+  assert.deepEqual(snapshot.items.map(item => item.live?.status ?? null), ['Open', null])
+  assert.equal(sessionSnapshot(block, parseRows({ title: '' })).title, 'Saved title', 'an empty title keeps the saved one')
+  const confirming = parseRows({ title: 'Live', items: [{ intent: 'open:a', status: 'Open' }],
+    actions: [{ key: 'send:a', confirming: true, confirmation: [{ title: 'Exact', facts: [] }] }] })
+  const owned = sessionSnapshot(block, confirming)
+  assert.deepEqual(owned.items.map(item => [item.title, item.live ?? null]), [['Exact', null]])
+  const incomplete = parseRows({ items: [{ intent: 'open:a', status: 'Open' }], actions: [{ key: 'send:a', confirming: true }] })
+  assert.ok(sessionSnapshot(block, incomplete).items.every(item => item.live === null))
+})
+
+test('open is a navigation-only action and never coexists with confirming', () => {
+  assert.equal(parseRows({ actions: [{ key: 'send:a', open: true, label: 'Open Example' }] }).actions[0].open, true)
+  assert.equal(parseRows({ actions: [{ key: 'send:a', open: 'yes' }] }).actions[0].open, false)
+  const both = parseRows({ actions: [{ key: 'send:a', open: true, confirming: true, confirmation: [{ title: 'Exact', facts: [] }] }] })
+  assert.equal(both.actions[0].open, false)
+  assert.equal(both.actions[0].confirming, true)
+})
+
+test('a recovery hold shows no live title, row state or open link', () => {
+  const previous = sessionStateUpdate(null, parseRows({ title: 'Live', retain: true, checkpoint: { id: 'c1', data: '{}' },
+    items: [{ intent: 'open:a', status: 'Sending', busy: true }], actions: [{ key: 'send:a', open: true }] }))
+  const held = sessionDocumentReset(previous)
+  assert.equal(held.title, '')
+  assert.equal(held.items.size, 0)
+  assert.equal(held.actions[0].open, false)
+  const replacement = sessionStateUpdate(held, parseRows({ title: 'Too early', items: [{ intent: 'open:a', status: 'Open' }] }))
+  assert.equal(replacement.recoveryPending, true)
+  assert.equal(replacement.title, '')
+  assert.equal(replacement.items.size, 0)
+  assert.equal(sessionSnapshot(rowBlock(), replacement).title, 'Saved title')
+})
+
+test('the host advertises row-state and rows-v2, and a report can opt in to value-only row facts', async () => {
+  const { SESSION_FEATURES } = await import('../markdown/appBlockSession.js')
+  assert.deepEqual([...SESSION_FEATURES], ['row-state', 'rows-v2'], 'rows-v2 extends row-state, which older apps still look for')
+  assert.equal(parseRows({ itemFacts: 'values' }).itemFacts, 'values')
+  assert.equal(parseRows({ itemFacts: 'labels' }).itemFacts, '')
+  assert.equal(sessionSnapshot(rowBlock(), parseRows({ itemFacts: 'values' })).itemFacts, 'values')
+  assert.equal(parseRows({ items: [{ intent: 'open:a', status: 'Merged', statusTone: 'accent' }] }).items.get('open:a').statusTone, 'accent')
+})
+
+// ---- rows-v2: app-sourced rows and the header's state mark.
+const appRowBlock = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+  app: 'example', intent: 'chat:list', title: 'Saved title', interaction: 'inline',
+  facts: [{ label: 'Saved', value: 'root fact' }],
+  action: { label: 'Send all', intent: 'send:a' },
+  items: [{ title: 'Saved row', intent: 'open:r', facts: [{ label: 'Project', value: 'owner/r' }], action: { label: 'Send', intent: 'send:b' } }] }) })
+
+test('rows are bounded plain text with an optional pill, HTTPS links and an app intent', () => {
+  const state = parse({ rows: [
+    { title: 'T'.repeat(200), meta: 'M'.repeat(300), pill: 'P'.repeat(80), tone: 'accent', busy: true, intent: 'review:x-1',
+      links: [{ label: '#1', url: 'https://github.com/o/r/pull/1' }, { label: 'bad', url: 'http://github.com/o/r/pull/2' },
+        { label: 'creds', url: 'https://u:p@github.com/o/r/pull/3' }, { label: '#4', url: 'https://github.com/o/r/pull/4' },
+        { label: '#5', url: 'https://github.com/o/r/pull/5' }] },
+    { title: '   ', meta: 'dropped: no title' },
+    { title: 'Plain', tone: 'neon', intent: 'not an intent' },
+    null,
+  ] })
+  assert.equal(state.rows.length, 2)
+  const [first, plain] = state.rows
+  assert.equal(first.title.length, 120)
+  assert.equal(first.meta.length, 160)
+  assert.equal(first.live.status.length, 40)
+  assert.equal(first.live.statusTone, 'accent')
+  assert.equal(first.live.busy, true)
+  assert.deepEqual(first.live.links.map(link => link.label), ['#1'], 'only the first two links count, and unsafe ones are dropped')
+  assert.equal(first.intent, undefined, 'without the app slug no row links anywhere')
+  assert.equal(plain.live.statusTone, 'neutral')
+  assert.equal(plain.intent, undefined)
+  const linked = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [], rows: [{ title: 'A', intent: 'review:x-1' }] }, 's', keys, new Set(), 'example')
+  assert.equal(linked.rows[0].href, '/shell/?app=example&intent=review%3Ax-1')
+  assert.equal(parse({ rows: Array.from({ length: 20 }, (_, i) => ({ title: `R${i}` })) }).rows.length, 12)
+})
+
+test('no rows field keeps the saved snapshot; an empty list shows no rows', () => {
+  assert.equal(parse({}).rows, null)
+  assert.equal(parse({ rows: 'nope' }).rows, null)
+  assert.deepEqual(parse({ rows: [] }).rows, [])
+})
+
+test('app rows replace every saved row, root fact and item control, keeping only the block action', () => {
+  const state = parse({ title: '2 contributions', titleTone: 'success', rows: [{ title: 'From the app', meta: 'owner/a · +1 −0', pill: 'Open', tone: 'success' }] })
+  const view = sessionSnapshot(appRowBlock, state)
+  assert.equal(view.appRows, true)
+  assert.equal(view.title, '2 contributions')
+  assert.equal(view.titleTone, 'success')
+  assert.deepEqual(view.facts, [])
+  assert.deepEqual(view.items.map(item => [item.title, item.meta, item.action, item.live.status]), [['From the app', 'owner/a · +1 −0', null, 'Open']])
+  assert.equal(view.action.intent, 'send:a')
+  assert.ok(!view.items.some(item => item.title === 'Saved row'))
+})
+
+test('a confirmation keeps sole ownership while rows are reported, and an incomplete one shows the saved card', () => {
+  const rows = [{ title: 'Decorative app row', pill: 'Ready' }]
+  const complete = sessionSnapshot(appRowBlock, parse({ rows, actions: [{ key: 'send:a', confirming: true,
+    confirmation: [{ title: 'Exact target', facts: [{ label: 'Project', value: 'owner/a' }] }] }] }))
+  assert.equal(complete.confirmation, true)
+  assert.deepEqual(complete.items.map(item => item.title), ['Exact target'])
+  assert.equal(complete.appRows, undefined)
+  const incomplete = sessionSnapshot(appRowBlock, parse({ rows, actions: [{ key: 'send:a', confirming: true, confirmation: [] }] }))
+  assert.equal(incomplete.appRows, undefined)
+  assert.deepEqual(incomplete.items.map(item => item.title), ['Saved row'])
+})
+
+test('the title mark needs a live title; recovery drops rows and the mark', () => {
+  assert.equal(sessionSnapshot(appRowBlock, parse({ titleTone: 'success', titleBusy: true })).titleTone, 'neutral')
+  assert.equal(sessionSnapshot(appRowBlock, parse({ titleTone: 'success', titleBusy: true })).titleBusy, false)
+  assert.equal(parse({ title: 'x', titleTone: 'neon' }).titleTone, 'neutral')
+  const held = sessionStateUpdate(parse({ title: 'Sent', titleTone: 'success', rows: [{ title: 'Row' }] }),
+    parse({ recoveryError: true, title: 'Sent', titleTone: 'success', rows: [{ title: 'Row' }] }))
+  assert.equal(held.rows, null)
+  assert.equal(held.title, '')
+  assert.equal(held.titleTone, 'neutral')
+  assert.deepEqual(sessionSnapshot(appRowBlock, held).items.map(item => item.title), ['Saved row'])
 })

@@ -1016,6 +1016,36 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
       assert "# Interruptions in Möbius" in agent.prompt
 
 
+def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tmp_path):
+  """A raising or invalid identity/env hook must block, not run unscoped."""
+  from contextlib import ExitStack
+  from types import SimpleNamespace
+
+  factory = claude_host._host_options(
+    key=SimpleNamespace(cwd=str(tmp_path)), host_env={},
+    skill_text="C", connector_plan=None, skills_enabled=False,
+    model=None, supports_effort=True,
+  )
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None,
+                         pre_compact=None, subagent_stop=None)
+  with ExitStack() as stack:
+    options = factory(host, None, stack)
+  assert [m.on_failure for m in options.hooks["PreToolUse"]] == ["block"]
+  for event in ("PostToolUse", "PostToolUseFailure", "PreCompact", "SubagentStop"):
+    assert all(m.on_failure is None for m in options.hooks[event]), event
+
+
+@pytest.mark.asyncio
+async def test_helper_pre_tool_use_denies_once_identity_is_closed(tmp_path):
+  """Under on_failure="block" a None return blocks; a closed host must say deny."""
+  host = _claude_host(tmp_path)
+  host._cancel_pending_identity()
+  result = await host.pre_tool_use(
+    {"tool_name": "Read", "tool_input": {}, "agent_id": "unknown-agent"}, "t1", {},
+  )
+  assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,expected_agent", [
   ("claude-haiku-4-5-20251001", "mobius-helper"),

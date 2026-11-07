@@ -276,11 +276,8 @@ def _normalize_head_attribution(
   before_amend: Callable[[dict], None] | None = None,
 ) -> dict:
   before = _head_commit_metadata(repo, branch)
-  if (
-    before["author_name"] == author_name
-    and before["author_email"] == author_email
-    and before["committer_name"] == author_name
-    and before["committer_email"] == author_email
+  if head_attribution_matches(
+    before, author_name=author_name, author_email=author_email,
   ):
     return {}
 
@@ -367,11 +364,8 @@ def _normalize_head_attribution(
       "Normalizing commit attribution changed the staged source tree. "
       "Ask your agent to prepare this PR again."
     )
-  if (
-    after["author_name"] != author_name
-    or after["author_email"] != author_email
-    or after["committer_name"] != author_name
-    or after["committer_email"] != author_email
+  if not head_attribution_matches(
+    after, author_name=author_name, author_email=author_email,
   ):
     raise ContributionSubmitError(
       "Could not normalize the staged commit attribution. Ask your agent "
@@ -388,6 +382,53 @@ def _normalize_head_attribution(
   return _head_sha_patch(record, before["sha"], after["sha"])
 
 
+def commit_identity_mismatch() -> ContributionSubmitError:
+  """The shared review/Send refusal for a direct commit with another identity."""
+  return ContributionSubmitError(
+    "The reviewed commit's author or committer is not the connected GitHub "
+    "account. It is published directly to the target repository, where "
+    "reviewed commits are never rewritten, so nothing was published. Ask the "
+    "agent to recommit it with the connected identity and stage it again.",
+    code="commit_identity_mismatch",
+  )
+
+
+def publishes_to_target_repository(
+  upstream_repo: str,
+  login: str,
+  *,
+  direct_base: bool,
+  existing_head_repository: str | None,
+  push_permission: Callable[[], bool | None],
+) -> bool | None:
+  """Whether a reviewed PR's branch is pushed to the target repository itself.
+
+  The reviewed commit is then published as-is: rewriting it would break a
+  stack's reviewed parent links or an existing PR's public history. Its author
+  and committer must already be the connected account. A fork publication
+  instead normalizes the one reviewed commit before push. ``None`` means the
+  push permission that decides it could not be read.
+  """
+  if existing_head_repository is not None:
+    # A known PR's live head repository fixes the destination regardless of
+    # the connected account's generic upstream permission.
+    return existing_head_repository.casefold() == upstream_repo.casefold()
+  if direct_base or upstream_repo.split("/", 1)[0].casefold() == login.casefold():
+    return True
+  return push_permission()
+
+
+def head_attribution_matches(
+  metadata: dict, *, author_name: str, author_email: str,
+) -> bool:
+  return (
+    metadata["author_name"] == author_name
+    and metadata["author_email"] == author_email
+    and metadata["committer_name"] == author_name
+    and metadata["committer_email"] == author_email
+  )
+
+
 def _assert_head_attribution(
   repo: Path,
   branch: str,
@@ -395,25 +436,17 @@ def _assert_head_attribution(
   author_name: str,
   author_email: str,
 ) -> None:
-  """Require a stack commit to already carry the connected owner identity.
+  """Require a directly published commit to carry the connected identity.
 
-  Standalone submissions may safely amend their one reviewed commit before
-  push.  A stack cannot: rewriting a parent commit would invalidate every
-  child's reviewed base SHA and ancestry.  Stack preparation therefore pins
-  the identity up front and submission only verifies it.
+  Review applies the same rule, so this repeats it only for an account or
+  branch that changed after review.
   """
-  metadata = _head_commit_metadata(repo, branch)
-  if (
-    metadata["author_name"] != author_name
-    or metadata["author_email"] != author_email
-    or metadata["committer_name"] != author_name
-    or metadata["committer_email"] != author_email
+  if not head_attribution_matches(
+    _head_commit_metadata(repo, branch),
+    author_name=author_name,
+    author_email=author_email,
   ):
-    raise ContributionSubmitError(
-      "This PR stack was prepared with a different commit identity. Leave "
-      "feedback so your agent can rebuild the stack without rewriting its "
-      "reviewed parent links."
-    )
+    raise commit_identity_mismatch()
 
 
 def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
@@ -430,14 +463,22 @@ def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
   return _validate_branch(branch)
 
 
-def _has_upstream_push_permission(repo: Path, upstream_repo: str) -> bool:
+def upstream_push_permission(repo: Path, upstream_repo: str) -> bool | None:
+  """Read the connected account's push permission; ``None`` if unreadable."""
   proc = _gh(
     repo,
     "api", f"repos/{upstream_repo}",
     "--jq", ".permissions.push",
     check=False,
   )
-  return proc.returncode == 0 and (proc.stdout or "").strip().lower() == "true"
+  value = (proc.stdout or "").strip().lower()
+  if proc.returncode != 0 or value not in ("true", "false"):
+    return None
+  return value == "true"
+
+
+def _has_upstream_push_permission(repo: Path, upstream_repo: str) -> bool:
+  return upstream_push_permission(repo, upstream_repo) is True
 
 
 def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:

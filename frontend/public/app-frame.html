@@ -1022,13 +1022,15 @@
     //      it to the runtime's init (`frameVisible` in its config).
     //  11. transcript block session (building-apps.md "Passive block
     //      sessions"): frame-init may carry blockSession {sessionId,
-    //      generation, actions, items, checkpoint, retain, recoveryError}. Only a
+    //      generation, actions, items, features, checkpoint, retain,
+    //      recoveryError, context}. `context` {chatId, latest, intent} is attested by
+    //      the chat host, never by block JSON. Only a
     //      server-admitted revision whose bytes match _FRAME_PASSIVE_BLOCK_DIGEST
     //      and whose module exports `appBlockSessions = true` mounts; it gets
     //      props.blockSession. frame-mounted reports supportsAppBlocks and the
     //      document's blockGeneration; app-block-state must carry the same
     //      generation (setState stamps it). Parent
-    //      app-block-init/app-block-action messages reach app listeners only for
+    //      app-block-init/app-block-action/app-block-refresh messages reach app listeners only for
     //      this exact session and document generation; any other is stopped
     //      here, before app code can see it.
     //
@@ -1521,6 +1523,10 @@
         generation: session.generation,
         actions: Array.isArray(session.actions) ? session.actions : [],
         items: Array.isArray(session.items) ? session.items : [],
+        features: Array.isArray(session.features) ? session.features : [],
+        context: session.context && typeof session.context.chatId === 'string'
+          ? Object.freeze({ chatId: session.context.chatId, latest: session.context.latest !== false,
+            intent: typeof session.context.intent === 'string' ? session.context.intent : '' }) : null,
         checkpoint: session.checkpoint || null,
         retain: session.retain === true,
         recoveryError: session.recoveryError || null,
@@ -1543,7 +1549,8 @@
     // session or document generation, or for a module without the export, is
     // stopped here: this listener is registered before any app listener.
     function deliverBlockSessionMessage(event, msg) {
-      if (msg.type !== 'moebius:app-block-init' && msg.type !== 'moebius:app-block-action') return false;
+      if (msg.type !== 'moebius:app-block-init' && msg.type !== 'moebius:app-block-action'
+          && msg.type !== 'moebius:app-block-refresh') return false;
       if (event.source !== window.parent || event.origin !== window.location.origin
           || !supportsAppBlocks || !currentBlockSession
           || msg.sessionId !== currentBlockSession.sessionId

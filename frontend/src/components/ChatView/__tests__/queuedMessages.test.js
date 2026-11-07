@@ -69,6 +69,28 @@ test('an open queued message can be saved while a question waits or the draft up
     'a draft still waits for its uploads')
 })
 
+test('a held queue is sent from its tray while the empty composer keeps the mic', () => {
+  const sendHeld = /<button[^>]*aria-label="Send queued messages"[^>]*>/
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), onSendHeld() {},
+  }))
+  assert.match(html, sendHeld)
+  assert.match(html, /Waiting for you — sends when you send/)
+  assert.doesNotMatch(renderToStaticMarkup(createElement(QueuedMessages, { items })), sendHeld,
+    'an ordinary queue has no send-all control')
+  assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/,
+    'dictation stays reachable')
+})
+
+test('held rows never claim to send after a running turn', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), turnActive: true,
+  }))
+  assert.match(html, /Waiting for you — sends when you send/)
+  assert.doesNotMatch(html, /after the current turn/)
+  assert.doesNotMatch(html, /aria-label="Send queued messages"/)
+})
+
 test('the strip counts the draft\'s files, which stay with the draft', () => {
   assert.equal(composerDraftPreview('Then deploy it', 2), 'Then deploy it · 2 files')
   assert.equal(composerDraftPreview('', 1), '1 file')
@@ -149,4 +171,11 @@ test('a queued message without files shows no file label', async () => {
     renderToStaticMarkup(createElement(QueuedMessages, { items })),
     /queued__files/,
   )
+})
+
+test('a message queued during a turn is not captioned as waiting for the owner', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: [{ ...items[0], held: true }, items[1]], turnActive: true,
+  }))
+  assert.match(html, /1 waiting for you; the rest send after this turn/)
 })
