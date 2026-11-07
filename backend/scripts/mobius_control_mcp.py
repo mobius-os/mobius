@@ -347,8 +347,9 @@ def _agent_api_json(
     raise RuntimeError(
       f"Refused ({exc.code}): {_refusal_message(raw)}"
     ) from exc
-  except URLError as exc:
-    raise RuntimeError(f"coordination request failed: {exc.reason}") from exc
+  except (URLError, TimeoutError) as exc:
+    reason = exc.reason if isinstance(exc, URLError) else "request timed out"
+    raise RuntimeError(f"coordination request failed: {reason}") from exc
   try:
     return json.loads(raw) if raw else {}
   except json.JSONDecodeError as exc:
@@ -437,34 +438,66 @@ ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 # agent run starts no extra process for them. The backend owns the listing and
 # runs each call through the app's reviewed service (backend app/app_tools.py).
 APP_TOOLS_PATH = "/api/agent/app-tools/"
+APP_TOOL_CATALOGUE_FILE_ENV = "MOBIUS_APP_TOOL_CATALOGUE_FILE"
+APP_TOOLS_UNAVAILABLE_TOOL = "app_tools_unavailable"
+APP_TOOLS_UNAVAILABLE_MESSAGE = (
+  "Installed-app tool catalogue unavailable. This is not an empty catalogue "
+  "or a successful app search. Report app-dependent work as blocked; do not "
+  "claim that no matching data was found."
+)
 # Slightly above the backend's limit so its own timeout error is what arrives.
 APP_TOOL_CALL_TIMEOUT_SECONDS = 615
 
 
-def _app_tool_listings() -> list[dict[str, Any]]:
-  """Live app tools for this run; none when the run cannot list them."""
-  try:
-    listed = _agent_api_call("GET", APP_TOOLS_PATH).get("tools")
-  except RuntimeError:
-    return []
-  if not isinstance(listed, list):
-    return []
+def _validated_app_tool_listings(payload: Any) -> list[dict[str, Any]]:
+  listed = payload.get("tools") if isinstance(payload, dict) else None
+  if not isinstance(listed, list) or any(
+    not isinstance(tool, dict)
+    or not isinstance(tool.get("name"), str) or not tool["name"]
+    or not isinstance(tool.get("description"), str)
+    or not isinstance(tool.get("inputSchema"), dict)
+    for tool in listed
+  ):
+    raise RuntimeError("Installed-app tool catalogue returned malformed data.")
   return [
     tool for tool in listed
-    if isinstance(tool, dict)
-    and isinstance(tool.get("name"), str)
-    and tool["name"] not in _TOOL_DEFINITIONS
+    if tool["name"] not in _TOOL_DEFINITIONS
+    and tool["name"] != APP_TOOLS_UNAVAILABLE_TOOL
   ]
 
 
+def _app_tool_listings() -> list[dict[str, Any]]:
+  """Discovery only: a shared Claude host has metadata, not a run bearer."""
+  path = os.environ.get(APP_TOOL_CATALOGUE_FILE_ENV)
+  if path and os.environ.get(HELPER_HOST_ENV):
+    try:
+      catalogue = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+      raise RuntimeError("Installed-app tool catalogue snapshot could not be read.") from exc
+  else:
+    catalogue = _agent_api_call("GET", APP_TOOLS_PATH)
+  return _validated_app_tool_listings(catalogue)
+
+
 def _tools_list_result() -> dict[str, Any]:
+  try:
+    app_tools = _app_tool_listings()
+  except RuntimeError as exc:
+    # A model may never read server stderr. Keep controls usable, but make
+    # failure visible in the catalogue it actually receives.
+    app_tools = [{
+      "name": APP_TOOLS_UNAVAILABLE_TOOL,
+      "description": f"{APP_TOOLS_UNAVAILABLE_MESSAGE} Diagnostic: {exc}",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+      "_meta": ALWAYS_LOAD_META,
+    }]
   return {
     "tools": [
       *(
         {**_TOOL_DEFINITIONS[name], "_meta": ALWAYS_LOAD_META}
         for name in _available_tool_names()
       ),
-      *_app_tool_listings(),
+      *app_tools,
     ],
   }
 
@@ -2061,10 +2094,17 @@ def _call_tool(params: Any) -> dict[str, Any]:
   if not isinstance(arguments, dict):
     return _tool_result("Tool arguments must be an object.", is_error=True)
   with _CallerEnv(arguments):
-    if isinstance(name, str) and name not in _TOOL_DEFINITIONS and any(
-      tool["name"] == name for tool in _app_tool_listings()
-    ):
-      return _call_app_tool(name, arguments, params.get("_meta"))
+    if name == APP_TOOLS_UNAVAILABLE_TOOL:
+      return _tool_result(APP_TOOLS_UNAVAILABLE_MESSAGE, is_error=True)
+    if isinstance(name, str) and name not in _TOOL_DEFINITIONS:
+      try:
+        # A discovery snapshot is not execution authority. Check the live
+        # catalogue with this exact caller, never the shared host's metadata.
+        listed = _validated_app_tool_listings(_agent_api_call("GET", APP_TOOLS_PATH))
+      except RuntimeError as exc:
+        return _tool_result(f"{APP_TOOLS_UNAVAILABLE_MESSAGE} {exc}", is_error=True)
+      if any(tool["name"] == name for tool in listed):
+        return _call_app_tool(name, arguments, params.get("_meta"))
     return _call_tool_as_caller(name, arguments)
 
 

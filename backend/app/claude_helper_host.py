@@ -31,6 +31,7 @@ import dataclasses
 import json
 import logging
 import shlex
+import tempfile
 import time
 import uuid
 from contextlib import ExitStack
@@ -1037,7 +1038,9 @@ def _host_options(
     _system_prompt_with_register,
   )
   from app.connectors import claude_mcp_config_handle
-  from app.platform_tools import claude_control_servers
+  from app.platform_tools import CONTROL_SERVER_NAME, claude_control_servers
+  from app import app_tools
+  from app.database import SessionLocal
 
   blocked = [
     # Supported AgentDefinition restriction: reports belong to Möbius, not
@@ -1121,9 +1124,22 @@ def _host_options(
     )
     if skills_enabled:
       options["skills"] = "all"
+    # tools/list precedes any child call, so it cannot use a child's bearer.
+    # Share reviewed metadata only, for this host's lifetime. Execution still
+    # fetches the live catalogue with the hook-stamped exact child identity.
+    catalogue_dir = stack.enter_context(tempfile.TemporaryDirectory(
+      prefix="mobius-helper-tools-",
+    ))
+    catalogue_file = Path(catalogue_dir) / "catalogue.json"
+    with SessionLocal() as db:
+      catalogue = {"tools": [tool.listing() for tool in app_tools.live_app_tools(db)]}
+    catalogue_file.write_text(json.dumps(catalogue), encoding="utf-8")
+    servers = claude_control_servers(enabled=True)
+    servers[CONTROL_SERVER_NAME]["env"] = {
+      "MOBIUS_APP_TOOL_CATALOGUE_FILE": str(catalogue_file),
+    }
     handle = stack.enter_context(claude_mcp_config_handle(
-      connector_plan,
-      extra_servers=claude_control_servers(enabled=True),
+      connector_plan, extra_servers=servers,
     ))
     if handle:
       options["mcp_servers"] = handle.path
