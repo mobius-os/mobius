@@ -83,7 +83,6 @@ fs_router = _load("fs")
 uploads_router = _load("uploads")
 generated_files_router = _load("generated_files")
 media_router = _load("media")
-secrets_router = _load("secrets")
 github_router = _load("github")
 github_access_router = _load("github_access")
 reviewer_router = _load("reviewer")
@@ -107,6 +106,8 @@ contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
+keys_router = _load("keys")
+app_secrets_compat_router = _load("app_secrets_compat")
 browser_access_router = _load("browser_access")
 projects_router = _load("projects")
 project_copies_router = _load("project_copies")
@@ -143,7 +144,6 @@ __all__ = [
   "uploads_router",
   "generated_files_router",
   "media_router",
-  "secrets_router",
   "github_router",
   "github_access_router",
   "reviewer_router",
@@ -167,6 +167,8 @@ __all__ = [
   "platform_router",
   "published_router",
   "connect_router",
+  "keys_router",
+  "app_secrets_compat_router",
   "browser_access_router",
   "projects_router",
   "project_copies_router",

@@ -10,7 +10,6 @@ from app import background_agents, models, providers
 from app.app_capabilities import contract_from_manifest
 from app.config import get_settings
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
-from app.routes.secrets import _write_secret
 
 
 def _manifest():
@@ -122,7 +121,7 @@ def test_bad_app_model_declarations_fail_before_acceptance(change):
 
 
 @pytest.mark.asyncio
-async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp_path):
+async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp_path, monkeypatch):
   manifest = _manifest()
   app = models.App(
     name="DeepSeek Connect", slug="deepseek-connect", description="",
@@ -152,7 +151,17 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   assert resolved["primary"] == {
     "provider": provider_id, "model": "deepseek-flash", "effort": "high",
   }
-  _write_secret(Path(data_dir) / "app-secrets" / str(app_id) / "api_key", "test-only-placeholder-key")
+  # The owner approves the app's request for its declared vault key.
+  from app import key_vault
+  granted = {(app_id, "api_key")}
+  monkeypatch.setattr(
+    key_vault, "model_provider_key_sync",
+    lambda a, name, base_url: name if (a, name) in granted else None,
+  )
+  monkeypatch.setattr(
+    key_vault, "reveal_model_provider_key",
+    lambda a, name, base_url: "test-only-placeholder-key" if (a, name) in granted else None,
+  )
   adapter = providers.PROVIDERS[provider_id]
   assert providers.provider_runtime_kind(provider_id) == "codex_sdk"
   assert adapter.check_auth(data_dir) is None

@@ -107,8 +107,6 @@ class Principal:
   operations: frozenset[str] = frozenset()
   delegation_id: str | None = None
   app_is_service: bool = False
-  # Signed supervised-job identity/grant; never copied into frame bearers.
-  app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
 
@@ -747,7 +745,6 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     delegation_id=payload.get("delegation_id"),
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
-    app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
   )
 
 

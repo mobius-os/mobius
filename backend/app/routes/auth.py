@@ -615,7 +615,6 @@ def create_app_job_token_endpoint(
       app_nonce=app.token_nonce,
       consent=app_consent.session_id(app),
       expires_delta=timedelta(hours=2),
-      job_secrets=(app.capability_contract or {}).get("data", {}).get("job_secret_read", []),
     )
   }
 

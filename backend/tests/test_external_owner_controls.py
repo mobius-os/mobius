@@ -255,21 +255,18 @@ def test_delegated_bearer_cannot_add_connector(
   assert calls == []
 
 
-def test_delegated_bearer_cannot_write_app_secret(
+def test_delegated_bearer_cannot_manage_keys(
   client, owner_token, db,
 ):
-  auths, app_id = _external_control_auth(client, owner_token, db)
-  secret = client.put(
-    f"/api/apps/{app_id}/secrets/provider-key",
-    headers=auths["delegated"],
-    json={"value": "private-value"},
+  auths, _app_id = _external_control_auth(client, owner_token, db)
+  saved = client.put(
+    "/api/keys/provider-key", headers=auths["delegated"], json={"value": "private-value"},
   )
-  assert secret.status_code == 403, secret.text
-  deleted = client.delete(
-    f"/api/apps/{app_id}/secrets/provider-key",
-    headers=auths["delegated"],
-  )
+  assert saved.status_code == 403, saved.text
+  deleted = client.delete("/api/keys/provider-key", headers=auths["delegated"])
   assert deleted.status_code == 403, deleted.text
+  approved = client.post("/api/keys/requests/1-k/approve", headers=auths["delegated"], json={})
+  assert approved.status_code == 403, approved.text
 
 
 def test_delegated_bearer_cannot_create_paired_host(
@@ -422,13 +419,6 @@ def test_owner_top_level_agent_and_scoped_app_keep_scoped_connection_controls(
       },
     )
     assert added.status_code == 201, (actor, added.text)
-
-    secret = client.put(
-      f"/api/apps/{app_id}/secrets/provider-key",
-      headers=auths[actor],
-      json={"value": f"private-{actor}"},
-    )
-    assert secret.status_code == 204, (actor, secret.text)
 
     host = client.post(
       "/api/connect/hosts",

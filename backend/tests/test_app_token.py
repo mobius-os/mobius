@@ -85,20 +85,10 @@ def test_delegated_helper_mints_app_token_but_keeps_delegation_boundary(
     f"/api/storage/apps/{app_id}/state.json", headers=app_token_auth,
   ).status_code == 200
 
-  # Boundary preserved: a clean owner-minted app token may write a secret, but
-  # the delegated app token is still refused by the delegated-blocked control.
-  clean_app_token = client.post(
-    "/api/auth/app-token", json={"app_id": app_id},
-    headers={"Authorization": f"Bearer {owner_token}"},
-  ).json()["token"]
+  # Boundary preserved: a delegated app token never manages keys.
   assert client.put(
-    f"/api/apps/{app_id}/secrets/API_KEY", json={"value": "s3cr3t"},
-    headers={"Authorization": f"Bearer {clean_app_token}"},
-  ).status_code == 204
-  assert client.put(
-    f"/api/apps/{app_id}/secrets/API_KEY", json={"value": "s3cr3t"},
-    headers=app_token_auth,
-  ).status_code == 403
+    "/api/keys/API_KEY", json={"value": "s3cr3t-value"}, headers=app_token_auth,
+  ).status_code in (401, 403)
 
 
 def test_app_token_cannot_access_settings(client, owner_token):

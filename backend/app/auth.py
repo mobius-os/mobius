@@ -184,7 +184,6 @@ def create_app_token(
   delegation_id: str | None = None,
   delegation_chat: str | None = None,
   service: str | None = None,
-  job_secrets: list[str] | None = None,
   browser: BrowserLineage | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
@@ -200,16 +199,11 @@ def create_app_token(
   only by callers without the row; the resolver then falls back to
   row-existence.
 
-  `job_secrets` is set only by the owner-authorized job-token endpoint. It
-  records the reviewed names at mint time, not a blanket service credential.
-  Every secret read also intersects the current accepted permission.
-
   `service` marks a token minted only for one invocation of the app's own
   server-side service (see app_services.service_environment), never for the
   browser frame. `"private"` is an invocation by an authenticated caller: the
   token keeps the app's authority and additionally lets deps.Principal tell the
-  app's reviewed backend from its untrusted frame, which is what allows a
-  service to read back its own secrets (routes/secrets.get_secret). `"public"`
+  app's reviewed backend from its untrusted frame. `"public"`
   is an invocation by an anonymous visitor: the token gets its own scope, which
   every principal resolver refuses except
   deps.get_principal_or_public_service, so it can reach only the few routes a
@@ -224,10 +218,6 @@ def create_app_token(
     claims["consent"] = consent
   if service == "private":
     claims["service"] = True
-  if job_secrets is not None:
-    # Only the owner-authorized supervised-job mint sets this distinct claim.
-    # Snapshot names prevent a running older job gaining newly approved access.
-    claims["job_secrets"] = job_secrets
   if (delegation_id is None) != (delegation_chat is None):
     raise ValueError("delegation identity and chat must be supplied together")
   if delegation_id is not None:

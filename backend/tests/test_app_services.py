@@ -873,8 +873,8 @@ def test_public_invocation_cannot_spend_on_the_owners_providers(client, auth, db
   ).status_code == 403
   assert client.get("/api/app-chats", headers=public).status_code == 403
   assert client.get(
-    f"/api/apps/{app.id}/secrets/key", headers=public,
-  ).status_code == 403
+    "/api/keys/use/key/api.example.com/v1", headers=public,
+  ).status_code in (401, 403)
   # It keeps the few reads and notices a public service is reviewed to use.
   assert client.get("/api/apps/", headers=public).status_code == 200
   assert client.post(

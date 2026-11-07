@@ -101,10 +101,11 @@ _DENY_RELPATHS = (
   "db/ultimate.db",
   ".storage-meta",
   ".contribution-runtime",
-  # Credential stores: the Web Push signing key, encrypted app secrets, the
-  # identity broker, the agent's signed-in browser sessions, and Connect
-  # runner tokens / pairing codes.
+  # Credential stores: the Web Push signing key, the key vault and the
+  # retired app-secret store, the identity broker, the agent's signed-in
+  # browser sessions, and Connect runner tokens / pairing codes.
   "push/private_key.pem",
+  ".vault",
   "app-secrets",
   "identity-broker",
   "agent-browser-profiles",

@@ -194,3 +194,20 @@ def recheck_app_identity(db: Session, app_id: int, expected_nonce) -> None:
   )
   if row is None or row.token_nonce != expected_nonce:
     raise HTTPException(status_code=404, detail="App not found.")
+
+
+def authorized_app_nonce(principal: Principal, app: models.App) -> str:
+  """The installation of ``app`` a request was authorized for: the
+  ``expected_nonce`` its locked recheck compares.
+
+  An app token names its own installation, checked when it was authenticated.
+  Never take that from a row read afterwards: by then the id may belong to an
+  app that reused it, and the recheck would pass for the wrong app. An app
+  token without that binding fails closed. The owner names no installation, so
+  it acts on the one ``app`` is: the row the route just selected.
+  """
+  if principal.app_id is None:
+    return app.token_nonce
+  if principal.app_instance_id is None:
+    raise HTTPException(status_code=401, detail="App token is not bound to an installation.")
+  return principal.app_instance_id

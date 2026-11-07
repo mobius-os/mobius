@@ -11,6 +11,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'ai-providers',
   'background-agents',
   'github',
+  'keys',
   'models',
 ])
 

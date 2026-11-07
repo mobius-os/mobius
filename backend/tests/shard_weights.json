@@ -37,7 +37,6 @@
   "tests/test_app_report_context.py": 0.1,
   "tests/test_app_runtime_migration.py": 0.1,
   "tests/test_app_schedule_ownership.py": 0.8,
-  "tests/test_app_secrets.py": 2.2,
   "tests/test_app_services.py": 8.4,
   "tests/test_app_skills.py": 24.0,
   "tests/test_app_source.py": 2.9,

@@ -54,21 +54,23 @@ def test_connector_mutation_preflight_allows_the_generation_header(client):
   assert "x-mobius-connector-generation" in allowed
 
 
-def test_app_secret_presence_check_preflight_allows_head(client):
-  """Apps learn whether their key is saved with an authenticated HEAD (an
-  app-token GET is forbidden). From the opaque frame that HEAD is preflighted;
-  without it in the allow-list the check dies as "Failed to fetch"."""
+def test_key_use_from_an_app_frame_passes_preflight_and_sees_refusals(client):
+  """Apps borrow keys through /api/keys/use from the opaque frame, where every
+  bearer request is preflighted; the vault's refusal marker must be readable
+  or an app cannot tell "not approved yet" from the site's own error."""
   r = client.options(
-    "/api/apps/1/secrets/api_key",
+    "/api/keys/use/maps/api.example.com/v1/route",
     headers={
       "Origin": "null",
-      "Access-Control-Request-Method": "HEAD",
-      "Access-Control-Request-Headers": "authorization",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "authorization,content-type",
     },
   )
   assert r.status_code == 200
   allowed = r.headers.get("access-control-allow-methods", "").upper()
-  assert "HEAD" in [m.strip() for m in allowed.split(",")]
+  assert "POST" in [m.strip() for m in allowed.split(",")]
+  denied = client.get("/api/keys/use/maps/api.example.com/v1", headers={"Origin": "null"})
+  assert "x-vault-denied" in denied.headers.get("access-control-expose-headers", "").lower()
 
 
 def test_community_mutation_preflight_allows_idempotency_key(client):

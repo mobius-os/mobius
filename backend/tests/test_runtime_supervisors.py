@@ -87,12 +87,18 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   monkeypatch.setattr(supervisors, "_start_frontend_watcher", frontend)
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", broken_chat_wiring)
 
+  async def key_vault_stub():
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr("app.key_vault.supervise_key_vault", key_vault_stub)
+
   await supervisors.start_process_services()
   before = set(supervisors._tasks)
   await supervisors.start_database_services()
 
   assert frontend_started is True
   assert "connect-outbound" in supervisors._tasks
+  assert "key-vault" in supervisors._tasks
   assert set(supervisors._tasks) == before
   assert supervisors.database_service_readiness() == (
     False, "runtime_supervisor_start_failed",

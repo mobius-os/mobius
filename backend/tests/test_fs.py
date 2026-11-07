@@ -343,6 +343,8 @@ def test_contribution_runtime_is_denied_to_privileged_filesystem_api(
 
 @pytest.mark.parametrize("rel", [
   "push/private_key.pem",
+  ".vault/keys.json",
+  ".vault/master.key",
   "shared/connect/outbound/config.json",
   "agent-browser-profiles/profile/Cookies",
 ])

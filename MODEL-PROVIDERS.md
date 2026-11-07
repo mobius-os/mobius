@@ -5,7 +5,7 @@ capability contract, rather than editable source, is projected into the same
 provider registry used by chats, model pickers, app pickers, and background
 agents. That includes owner-built local apps: their `mobius.json` declaration
 is accepted with each source Apply (and kept across owner permission edits),
-limited to the HTTPS app-secret transport below; the broker transport stays
+limited to the HTTPS vault-key transport below; the broker transport stays
 reserved for the reviewed Möbius · You package. The provider appears shortly
 after install/Apply and disappears shortly after uninstall (registry reads are
 throttled for one second). Existing chats
@@ -16,15 +16,19 @@ those chats to a different company.
 The shared transport is **OpenAI Responses-compatible HTTPS**, driven by the
 existing Codex agent runtime. A compatible endpoint must support streamed
 Responses with tool calls; merely offering Chat Completions is insufficient.
-The app owns its setup UI, connection instructions, and one encrypted app
-secret. The owner enters the key into the app's own browser UI (which writes
-`PUT /api/apps/{app_id}/secrets/{secret_name}`); it is not a manifest value and
-must not pass through a chat prompt. The core only checks whether the secret
-exists when displaying availability. At turn launch it decrypts the secret for
-the inference transport and excludes that environment variable from Codex
-shell tools. The provider app's endpoint receives the conversation and tool
-requests, so installing and connecting one is a substantive trust and billing
-decision. No background provider is enabled automatically by adding an app.
+The app owns its setup UI and connection instructions; its key lives in the
+owner's key vault. The app asks for the key named by `secret_name`
+(`POST /api/keys/requests`) and the owner enters and approves it in
+**Settings › Keys**; it is not a manifest value and never passes through the
+app or a chat prompt. The platform looks for the app's own key created for
+that name (for example by the upgrade import, which keeps names like `api.key`
+distinct even when stored as `api-key` or `app<id>-api-key`), and otherwise a
+key with exactly that name. The models are available while the owner's grant
+to the app stands. At turn launch the platform reads the key for the inference
+transport (logged as `platform:app-<id>`) and excludes that environment
+variable from Codex shell tools. The provider app's endpoint receives the
+conversation and tool requests, so installing and connecting one is a
+substantive trust and billing decision. No background provider is enabled automatically by adding an app.
 
 Example declaration, based on DeepSeek's Responses API (model names are
 illustrative and should be updated by the app publisher as the API changes):
@@ -46,7 +50,8 @@ illustrative and should be updated by the app publisher as the API changes):
 
 The other required `mobius.json` fields (`id`, `name`, `version`,
 `description`, `entry`) are omitted above. The app also needs an actual setup
-screen to save/delete its `api_key` secret; the platform does not invent one.
+screen that asks for its `api_key` key and shows whether it is approved; the
+platform does not invent one.
 Model IDs are provider wire IDs, not display labels. They must be unique across
 installed providers. The provider identity is the stable local app row ID
 (`app-<id>`), independent of an app rename or its repository URL. An update can
@@ -55,7 +60,7 @@ changes only after the normal reviewed update/Apply boundary.
 
 Möbius · You uses an accepted declaration for its model names, effort levels,
 context ceilings, and endpoint too. Its `identity_broker` transport has a
-fixed `http://127.0.0.1:8765/v1` endpoint and no app secret; only the
+fixed `http://127.0.0.1:8765/v1` endpoint and no vault key; only the
 `identity` app with the reviewed `identity_manage` grant may declare it. The
 image-owned broker keeps account credentials and signs inference requests.
 Other connector apps use HTTPS and their own encrypted keys. Any app model
