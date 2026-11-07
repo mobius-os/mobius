@@ -272,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -286,6 +289,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never

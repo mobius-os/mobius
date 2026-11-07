@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import hashlib
 from typing import Any
 
@@ -123,6 +123,48 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
   if not isinstance(cid, str) or not cid.startswith(HELPER_ANSWER_CID_PREFIX):
     return None
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
+
+def is_owner_typed(message: object) -> bool:
+  """Whether Stop keeps a queued row for the owner's next send: a visible row
+  not positively marked as another sender's (an app's request, a browser
+  guest's message, an agent's message, a helper's answer). Rows queued before
+  owner input was stamped count, so Stop never drops the owner's text; they
+  just cannot release holds (`releases_holds`)."""
+  return bool(
+    isinstance(message, Mapping)
+    and not message.get("hidden")
+    and message.get("_initiated_by_app_id") is None
+    and message.get("_browser_grant_id") is None
+    and not message.get("_agent_input")
+    and helper_answer_question_id(message) is None
+  )
+
+
+def releases_holds(message: object) -> bool:
+  """Whether starting this row releases the rows a Stop held, so they follow
+  it: the owner's own message, with positive proof (`_owner_input_at`, which
+  only the owner's send stamps). Releasing stamps the held rows as owner
+  input, so nothing less than that proof may do it."""
+  return is_owner_typed(message) and bool(message.get("_owner_input_at"))
+
+
+def release_holds(rows: list[Any], released_at: str) -> list[Any]:
+  """Return the queue with every hold released. The owner's send is owner
+  input now, so each released row is stamped with that time: a Goal a Stop
+  paused resumes for it like for a freshly typed message."""
+  return [
+    {**{k: v for k, v in row.items() if k != "held"}, "_owner_input_at": released_at}
+    if isinstance(row, Mapping) and row.get("held") else row
+    for row in rows
+  ]
+
+
+def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
+  """Whether the queue holds work that can run without the owner: any row a
+  Stop did not hold. Held rows are not runnable work, so checks that mean
+  "something is queued to run" use this rather than a non-empty queue."""
+  return any(isinstance(row, Mapping) and not row.get("held") for row in pending or ())
+
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""

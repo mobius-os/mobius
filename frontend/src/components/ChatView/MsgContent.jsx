@@ -27,6 +27,7 @@ import PauseRecordCard from './PauseRecordCard.jsx'
 import { isContinuationMessage, isSideQuestionMessage, PAUSE_RECORD_BLOCK } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
+  cardMessageBlock,
   legacyRestartActivityOwners,
   repairInterleavedQuestionText,
   renderedBlockEntries,
@@ -209,6 +210,7 @@ function generatedFileLayout(files, { chatId, isStreaming, embeddedImageKey }) {
  * can depend on the set's content rather than on a per-render Set. */
 function embeddedImagePathKey(blocks) {
   return (blocks || [])
+    .map(block => cardMessageBlock(block) || block)
     .flatMap(block => block?.type === 'text' ? markdownImagePaths(block) : [])
     .sort()
     .join('\n')
@@ -466,6 +468,9 @@ function MsgContentInner({
         )
       }
       if (block.type === 'text') {
+        // A card's closing message hides with its card while the live
+        // surface renders both.
+        if (block.ownerCard && suppressedQuestionKeys?.has(questionKey(block.ownerCard))) return null
         const text = msg.role === 'user'
           ? stripAugmentation(block.content) : block.content
         if (!text) return null

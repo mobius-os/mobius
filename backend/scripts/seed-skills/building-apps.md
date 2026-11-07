@@ -1339,17 +1339,17 @@ more, or `'started'` with the existing `chatId`. After a cancellation,
 treat it as final. A new attempt needs a new scope.
 
 To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
-When Stop ended the chat's run and cleared its queue, the result carries
+Stop ends the running turn. Messages your app queued in that chat go with the
+Stop; messages the owner typed stay queued until the owner sends. When Stop
+ended the chat's run and settled its queue, the result carries
 `stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
 idle run (`run_id: null` if it never ran). It certifies only that run. Later
-work in the chat, such as an owner resume, a Wait firing, or a helper result,
+work in the chat, such as an owner send, a Wait firing, or a helper result,
 runs under a different `run_id`. Bind the cancellation to the receipt's
 `run_id`, never to a later `chat.status(chatId)`: a status with another
 `run_id`, or with `running: true`, is newer work and is not cancelled. Without
 a receipt (`stop_receipt: null`) nothing was certified, even with
-`stopped: true`: during a Möbius restart, for example, Stop keeps queued turns
-so they survive it, and they run afterwards. Keep any reservation and call
-Stop again later.
+`stopped: true`. Keep any reservation and call Stop again later.
 
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.

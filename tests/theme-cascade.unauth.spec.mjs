@@ -5,20 +5,25 @@
  * appliers against DOM stubs and a limited cascade model; only a real browser
  * proves layer precedence and computed values. Fixture-only: it serves the
  * real applier sources to a synthetic origin and needs no login, backend or
- * owner state, hence the dependency-free unauthenticated project. */
+ * owner state, hence the dependency-free unauthenticated project. The themes
+ * are the server's own output for each case (themeCssCases.json `expected`,
+ * pinned to backend/app/theme.py by backend/tests/test_theme_roles.py). */
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { dirname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-import { withThemeDefaults, themeDefaultsForCss } from '../frontend/src/theme.js'
 
 const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..', 'frontend')
 const SRC = join(FRONTEND, 'src')
 const FRAME_HTML = readFileSync(join(FRONTEND, 'public', 'app-frame.html'), 'utf8')
 const PREPAINT_SRC = (await import('../frontend/src/lib/applyTheme.js')).PREPAINT_SRC
 const ORIGIN = 'http://theme-fixture.test'
-const CORE_VARS = Object.keys(themeDefaultsForCss(''))
+const CASES = JSON.parse(readFileSync(join(SRC, 'lib', '__tests__', 'themeCssCases.json'), 'utf8'))
+/** The case whose name starts with `prefix`: its owner css, served css and resolved owner values. */
+const served = prefix => CASES.find(c => c.name.startsWith(prefix))
+// Every core variable: the generated block of any served theme holds them all.
+const CORE_VARS = [...served('a named owner layer').expected
+  .match(/:where\(:root\) \{([^}]*)\}/)[1].matchAll(/(--[\w-]+):/g)].map(m => m[1])
 const FONT_URL = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
 
 /** A top-level `function NAME(...) { ... }` from the frame's inline script. */
@@ -107,24 +112,22 @@ for (const surface of ['shell', 'frame']) {
   test.describe(`${surface} theme application`, () => {
     test('an owner root rule in any cascade layer beats the generated defaults', async ({ page }) => {
       await open(page, pages[surface])
-      const owner = ':root { --accent: #00ffff; --text: #112233; }'
-      for (const css of [
-        `@layer owner { ${owner} }`,
-        `@layer { ${owner} }`,
-        `@layer base, owner;\n@layer owner { ${owner} }\n@layer base { :root { --accent: #ff0000; } }`,
+      for (const { css, expected, owner, bg } of [
+        served('a named owner layer'),
+        served('an anonymous owner layer'),
+        served('a layer-order statement'),
       ]) {
-        await applyIn[surface](page, withThemeDefaults(css), '#0d0d0d', 'dark')
+        await applyIn[surface](page, expected, bg, 'dark')
         const state = await rootState(page, CORE_VARS)
-        expect(state.vars['--accent'], css).toBe('#00ffff')
-        expect(state.vars['--text'], css).toBe('#112233')
+        for (const [name, value] of Object.entries(owner)) expect(state.vars[name], css).toBe(value)
         expectEveryCoreVarResolves(state)
       }
     })
 
     test('a multi-weight font import stays one whole link and the defaults still apply', async ({ page }) => {
       await open(page, pages[surface])
-      for (const imp of [`@import url("${FONT_URL}");`, `@import url(${FONT_URL});`]) {
-        await applyIn[surface](page, withThemeDefaults(`${imp}\n:root { --bg: #112233; }`), '#112233', 'dark')
+      for (const { expected } of [served('a quoted multi-weight'), served('a bare multi-weight')]) {
+        await applyIn[surface](page, expected, '#112233', 'dark')
         const state = await rootState(page, CORE_VARS)
         expect(state.links).toEqual([FONT_URL])
         expect(state.styleText).not.toContain('@import')
@@ -135,8 +138,7 @@ for (const surface of ['shell', 'frame']) {
 
     test('an escaped ) in a bare import URL keeps the import whole and the owner root', async ({ page }) => {
       await open(page, pages[surface])
-      const css = withThemeDefaults('@import url(https://example.test/a\\);b.css);\n:root { --accent: #00ffff; }')
-      await applyIn[surface](page, css, '#0d0d0d', 'dark')
+      await applyIn[surface](page, served('an escaped ) in an unquoted import URL').expected, '#0d0d0d', 'dark')
       const state = await rootState(page, CORE_VARS)
       expect(state.links).toEqual(['https://example.test/a);b.css'])
       expect(state.styleText).not.toContain('b.css')
@@ -146,8 +148,7 @@ for (const surface of ['shell', 'frame']) {
 
     test('an html-rule background wins over a dark hint and leaves no inline --bg', async ({ page }) => {
       await open(page, pages[surface])
-      const css = withThemeDefaults('html { --bg: #ffffff; --text: #111111; }')
-      await applyIn[surface](page, css, '#0d0d0d', 'light')
+      await applyIn[surface](page, served('an html rule outranks').expected, '#0d0d0d', 'light')
       const state = await rootState(page, CORE_VARS)
       expect(state.inlineBg).toBe('')
       expect(state.vars['--bg']).toBe('#ffffff')
@@ -162,8 +163,7 @@ test('the shell records the background of the mode it switches to', async ({ pag
   // Mode-keyed themes resolve a different --bg once data-theme flips; the
   // theme-color meta and next-boot hint must follow the new mode.
   await open(page, SHELL_PAGE)
-  const css = withThemeDefaults(
-    ':root[data-theme="dark"] { --bg: #000000; }\n:root[data-theme="light"] { --bg: #ffffff; }')
+  const css = served('mode-keyed backgrounds').expected
   await applyIn.shell(page, css, '#000000', 'dark')
   expect((await rootState(page, ['--bg'])).themeColor).toBe('#000000')
   await applyIn.shell(page, css, '#000000', 'light')
@@ -174,8 +174,7 @@ test('the shell records the background of the mode it switches to', async ({ pag
 })
 
 test('the pre-paint script lets the served stylesheet own the background', async ({ page }) => {
-  const css = withThemeDefaults('html { --bg: #ffffff; --text: #111111; }')
-  await open(page, prepaintPage({ css, bg: '#0d0d0d', mode: 'light' }))
+  await open(page, prepaintPage({ css: served('an html rule outranks').expected, bg: '#0d0d0d', mode: 'light' }))
   const state = await rootState(page, CORE_VARS)
   expect(state.inlineBg).toBe('')
   expect(state.vars['--bg']).toBe('#ffffff')

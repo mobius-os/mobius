@@ -1,6 +1,5 @@
 // A guest's theme comes from the server each time; only the owner caches it.
 import { ownerStore } from './workspaceStorage.js'
-import { inferThemeMode } from '../theme.js'
 
 /**
  * Theme application library — the SINGLE source of truth for how a
@@ -160,10 +159,8 @@ export function applyTheme(theme, { doc = globalThis.document, store = ownerStor
   const css = theme && typeof theme.css === 'string' ? theme.css : ''
   const bg = theme && theme.bg
   let themeStyleEl = null
-  // Mode precedence: an explicit theme.mode, else inferMode(bg), else the
-  // --bg parsed out of the CSS body (so a css-only apply with no bg arg still
-  // resolves a mode — this preserves the old themeService._inferThemeMode
-  // css-parse fallback now that the shell delegates here).
+  // Mode precedence: an explicit theme.mode (the server always sends one),
+  // else inferMode(bg), else the --bg the applied stylesheet resolves.
   let mode = (theme && theme.mode) || inferMode(bg)
 
   if (css) {
@@ -208,7 +205,7 @@ export function applyTheme(theme, { doc = globalThis.document, store = ownerStor
     doc.documentElement.style.removeProperty('--bg')
     doc.documentElement.style.background = 'var(--bg)'
     if (doc.body) doc.body.style.background = 'var(--bg)'
-    mode = mode || inferMode(cascadeBg(doc) || hint) || inferThemeMode(css)
+    mode = mode || inferMode(cascadeBg(doc) || hint)
   } else if (hint) {
     doc.documentElement.style.background = hint
     if (doc.body) doc.body.style.background = hint

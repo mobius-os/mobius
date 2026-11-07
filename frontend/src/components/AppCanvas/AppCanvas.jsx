@@ -9,7 +9,6 @@ import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -68,9 +67,14 @@ function appFrameRequestUrl(appId, version, frameRev) {
     + (frameRev ? `-${frameRev}` : '')
 }
 
+// Label ink on the app's own manifest colour (always #rrggbb): white while it
+// keeps 3:1, the rule the theme's --accent-fg uses, else a near-black.
 function fileExportInk(color) {
-  const contrast = contrastingAccentFg(color)
-  return contrast === '#000000' ? '#172008' : contrast || undefined
+  if (!/^#[0-9a-f]{6}$/i.test(color || '')) return undefined
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#172008'
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {

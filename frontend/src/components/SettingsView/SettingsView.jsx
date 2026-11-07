@@ -852,10 +852,10 @@ export default function SettingsView({
         save: () => themeService.toggleTheme(queryClient, currentMode, api),
         reload: onStatusBarThemeReload,
       })
-    } catch {
+    } catch (err) {
       setThemeMode(currentMode)
       setThemeError(
-        'Could not save theme. Check your connection and try again.',
+        err?.detail || 'Could not save theme. Check your connection and try again.',
       )
       // Force the mode query to resync with the server. Covers the
       // write-succeeded-but-response-lost case: refetching reads

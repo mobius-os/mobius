@@ -742,8 +742,8 @@
        dark-shell owner on a light-OS device therefore keeps the dark :root
        default; light only appears from a positive owner signal (this attribute)
        or from the server-filled __mobius-theme__ slot. No signal => dark
-       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS /
-       LIGHT_ROLES (backend/tests/test_theme_roles.py enforces the parity). */
+       default. Mirrors theme.py's light palette (_LIGHT_DEFAULTS and its roles;
+       backend/tests/test_theme_roles.py enforces the parity). */
     :where(:root[data-theme="light"]) {
       --bg: #f0eeeb; --surface: #ffffff; --surface-2: #e8e6e2;
       --border: #d4d1cc; --border-light: #e2dfdb;
