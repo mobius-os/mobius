@@ -145,22 +145,97 @@ def test_guest_cannot_read_or_change_the_owners_github_connection(https, auth, d
   assert https.get("/api/github/status", headers=auth).status_code == 200
 
 
-def test_guest_cannot_use_the_owners_store_identity_but_can_record_installs(https, auth):
+def test_guest_cannot_use_the_owners_store_identity_or_record_installs_under_it(https, auth):
   _, token, _ = invite(https)
   guest = {"Authorization": "Bearer " + token}
   app_path = "/api/community/apps/app_guest_probe"
+  # An install receipt makes the owner's Store account eligible to review the
+  # app, so it is the owner's identity too, like the publications list.
   for method, path in (
     ("get", "/api/community/identity"), ("get", "/api/community/github-status"),
+    ("get", "/api/community/publications"),
+    ("get", "/api/community/publications/github/preview?app_id=1"),
     ("put", f"{app_path}/review"), ("post", f"{app_path}/withdraw"),
     ("post", "/api/community/publications/github"),
+    ("post", f"{app_path}/revisions/rev_guest_probe/installs"),
   ):
     response = getattr(https, method)(path, headers=guest)
     assert response.status_code == 403, (path, response.text)
-  # Recording an install keeps a revision cached, as a guest's local install
-  # may; it fails here only on the missing body, never on who is asking.
-  install = https.post(f"{app_path}/revisions/rev_guest_probe/installs", headers=guest)
-  assert install.status_code != 403, install.text
   assert https.get("/api/community/github-status", headers=auth).status_code == 200
+
+
+def test_guest_cannot_act_on_github_as_the_owner_whatever_access_they_hold(
+  https, auth, db, monkeypatch,
+):
+  from app import deps
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  contribute = models.App(
+    name="Contribute", slug="contribute", github_access=True,
+    source_dir=str(Path(get_settings().data_dir) / "contribute"),
+  )
+  db.add(contribute); db.commit()
+  minted = https.post("/api/auth/app-token", json={"app_id": contribute.id}, headers=guest)
+  assert minted.status_code == 200, minted.text
+  guest_app = {"Authorization": "Bearer " + minted.json()["token"]}
+  # Per-person access may lift installation controls for a guest; it never
+  # lends them the owner's GitHub identity.
+  monkeypatch.setattr(
+    deps, "require_installation_owner_control", deps.require_nondelegated_owner_control,
+  )
+  base = f"/api/github/contributions/{contribute.id}"
+  pull = {"repo": "mobius-os/mobius", "number": 1}
+  for headers in (guest, guest_app):
+    for path, body in (
+      (f"{base}/assign-review", pull),
+      (f"{base}/rec_probe/submit", {}),
+      (f"{base}/rec_probe/update-existing", {}),
+      (f"{base}/rec_probe/reply", {}),
+      (f"/api/github/reviewer/{contribute.id}/comment", {}),
+      (f"/api/contribution-relay/{contribute.id}/rec_probe/submit", {}),
+      ("/api/github/review-runs", {}),
+    ):
+      response = https.post(path, json=body, headers=headers)
+      assert response.status_code == 403, (path, response.text)
+      assert "installation owner" in response.json()["detail"], path
+  # The owner passes authorization and reaches the missing connection.
+  owner_assign = https.post(f"{base}/assign-review", json=pull, headers=auth)
+  assert owner_assign.status_code == 409, owner_assign.text
+  # Reading GitHub through the owner's connection stays shared with guests.
+  for headers in (auth, guest, guest_app):
+    read = https.get(f"{base}/assignees", params={"repo": "mobius-os/mobius"}, headers=headers)
+    assert read.status_code == 409 and read.json()["detail"] == "Connect GitHub first."
+
+
+def test_guest_turn_in_a_review_conversation_cannot_drive_its_github_actions(auth, db):
+  from types import SimpleNamespace
+  from fastapi import HTTPException
+  from app.browser_access import BrowserLineage
+  from app.deps import Principal
+  from app.routes.contribution_reviews import _parent
+  with SessionLocal() as session:
+    grant, _ = link_grant(session, session.query(models.Owner).one(), "Guest")
+    principal = Principal(
+      owner=session.query(models.Owner).one(), app_id=None, chat_id="review-chat",
+      run_id="guest-run", browser=BrowserLineage(grant.id),
+    )
+  with pytest.raises(HTTPException) as refused:
+    _parent(db, SimpleNamespace(chat_id="review-chat"), principal)
+  assert refused.value.status_code == 403
+
+
+def test_guest_never_sees_the_owners_claude_sign_in_expiry(https, auth, monkeypatch):
+  from app import providers
+  from app.providers import ClaudeProvider
+  monkeypatch.setattr(ClaudeProvider, "check_auth", lambda self, data_dir: None)
+  monkeypatch.setattr(providers, "claude_login_expires_at", lambda data_dir: "2026-11-06T17:25:33Z")
+  _, token, _ = invite(https)
+  guest = https.get("/api/auth/providers/status", headers={"Authorization": "Bearer " + token})
+  assert guest.status_code == 200, guest.text
+  assert guest.json()["claude"]["configured"] is True
+  assert "login_expires_at" not in guest.json()["claude"]
+  owner = https.get("/api/auth/providers/status", headers=auth).json()
+  assert owner["claude"]["login_expires_at"] == "2026-11-06T17:25:33Z"
 
 
 def test_logout_ends_only_that_browser_not_other_recipient_or_owner(https, auth):

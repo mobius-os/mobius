@@ -908,13 +908,13 @@ async def providers_status(
   Availability is safe to share across the app/embed boundary; the owner's
   Möbius trial balance and Claude sign-in expiry are not. `trial` (mobius)
   and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
-  read failed) are therefore attached only for a true owner caller, so an app
-  or chat-embed principal sees the same availability fields without them.
+  read failed) are therefore attached only for a true owner caller, so an app,
+  chat-embed principal, or shared-browser guest (or work it started) sees the
+  same availability fields without them.
   `login_expires_at` is an upper bound: the CLI treats the stored end as a
   window, so the sign-in can end up to three days before it.
   """
   require_chat_embed_operation(principal, "models:read")
-  # A shared-browser guest uses the owner's models, not the owner's account.
   is_owner_caller = (
     principal.app_id is None and principal.scope == "owner"
     and not acts_for_guest(principal)

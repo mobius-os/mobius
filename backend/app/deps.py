@@ -1266,7 +1266,7 @@ def get_owner_or_app_with_connect_manage(
   )
 
 
-def require_account_owner(principal: Principal) -> None:
+def require_account_owner(principal: Principal = Depends(get_principal)) -> None:
   """The owner's own accounts (the Möbius account's profile, sign-in email,
   deployments and credit; the GitHub connection; their public Store
   identity) are theirs alone, like their own device: the API never serves
@@ -1276,10 +1276,16 @@ def require_account_owner(principal: Principal) -> None:
     raise HTTPException(403, "Only the installation owner can use this account.")
 
 
-def require_account_owner_control(principal: Principal) -> None:
+def require_account_owner_control(principal: Principal = Depends(get_principal)) -> None:
   """``require_account_owner`` for changes, which a delegated helper may not
   make either. Deliberately independent of how much workspace access a guest
-  holds, unlike ``require_installation_owner_control``."""
+  holds, unlike ``require_installation_owner_control``.
+
+  Every write to GitHub or the Community Store under the owner's identity
+  (Contribute's PR sends, updates, assignments, merges and replies; Reviewer
+  posts; Store publishing, reviews and install receipts) requires this, so a
+  guest's apps may read GitHub through the owner's connection but never act
+  on it as the owner."""
   require_nondelegated_owner_control(principal)
   require_account_owner(principal)
 
@@ -1454,7 +1460,7 @@ def revocable_browser_stream(iterator, principal: Principal):
   changed (``access_signal``), so streamed events cost no queries and an idle
   stream still closes promptly on revocation or logout.
   """
-  if principal.browser is None:
+  if not acts_for_guest(principal):
     return iterator
   # Read plain values now, while the request's ORM session is still open.
   return _until_browser_revoked(
