@@ -1296,6 +1296,13 @@ so changing physical executors cannot strand a previously suppressed Goal.
 Attaching a Goal to a Goal-less physical attempt atomically adopts only its
 open Goal-less acquisitions, under the same graph fence and cycle checks,
 whether the Goal is new or an existing intent being explicitly resumed.
+The same transaction adopts this attempt's unowned helpers and live ordinary
+Waits, so execution, liveness and result admission share one ownership truth.
+Wait declaration fences and refreshes its exact creating run's snapshot, so
+concurrent attachment cannot miss a newly committed handoff.
+Older attempts, disposed Wait results and card-owned activation keep their
+saved identities. Source diagnostics stay in the stored dependency outcome;
+follower notices and summaries exclude that operator-only evidence.
 Earlier attempts' claims do not become Goal-owned merely by sharing a chat or
 causal root; an explicit refresh of the exact work key can adopt them.
 Replacing a completed Goal in the same physical turn also requires explicit

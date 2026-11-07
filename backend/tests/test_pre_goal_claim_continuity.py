@@ -373,3 +373,130 @@ def test_claim_acquisition_serializes_goal_snapshot_with_promotion(db, monkeypat
       chat_id=source.id, run_token=run.id, objective="Exact action"))
   db.expire_all()
   assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id == promoted["goal_id"]
+
+
+@pytest.mark.parametrize("existing_goal", [False, True])
+@pytest.mark.parametrize("handoff", ["wait", "helper"])
+def test_first_goal_attachment_adopts_the_same_attempts_pre_goal_handoff(db, existing_goal, handoff):
+  _, source, run, acquired = setup_claim(db)
+  if handoff == "wait":
+    from app.chat_waits import declare_wait
+    native = declare_wait(db, chat_id=source.id, created_by_run_id=run.id,
+      description="Exact action's condition", kind="timer", delay_secs=60)
+  else:
+    from app.delegations import DelegationIntent, create_or_attach_delegation
+    native, _ = create_or_attach_delegation(db, DelegationIntent(
+      app_id=None, parent_chat_id=source.id, parent_root_run_id=run.id,
+      task_key="executor", prompt="Complete the action", provider="codex",
+      model=None, effort=None, cwd="/data"))
+    db.add(models.ChatRun(id="helper-run", chat_id=native.child_chat_id, status="running"))
+    db.commit()
+  assert native.goal_id is None
+  if existing_goal:
+    goal = models.ChatGoal(id="retained", chat_id=source.id, objective="Retained work")
+    db.add(goal); db.commit()
+    result = get_writer()._promote_run_to_goal(db, PromoteRunToGoal(
+      chat_id=source.id, run_token=run.id, objective=goal.objective, resume_goal_id=goal.id))
+  else:
+    result = promote(db, source, run)
+  run.status = "completed"
+  db.commit()
+  assert stage_reconcile_claim_sources(db) == 0
+  db.refresh(native)
+  assert native.goal_id == result["goal_id"]
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id == result["goal_id"]
+
+
+def test_wait_adoption_excludes_earlier_attempts_disposed_results_and_activation(db):
+  from app.chat_waits import declare_wait
+  _, source, run, _ = setup_claim(db)
+  previous = models.ChatRun(id="previous", root_run_id="previous", chat_id=source.id,
+    status="completed", started_at=run.started_at - timedelta(minutes=1))
+  db.add(previous)
+  run.root_run_id = previous.id
+  db.commit()
+  def wait(run_id, label):
+    return declare_wait(db, chat_id=source.id, created_by_run_id=run_id,
+      description=label, kind="timer", delay_secs=60)
+  older = wait(previous.id, "Earlier attempt")
+  current = wait(run.id, "Current attempt")
+  disposed = wait(run.id, "Already received")
+  disposed.status = "met"
+  disposed.result_disposition = "delivered"
+  activation = wait(run.id, "Card-owned activation")
+  activation.kind = "platform_activation"
+  db.commit()
+  goal_id = promote(db, source, run)["goal_id"]
+  db.expire_all()
+  assert current.goal_id == goal_id
+  assert older.goal_id is disposed.goal_id is activation.goal_id is None
+  assert current.root_run_id == older.root_run_id == previous.id
+
+
+def test_source_stall_diagnostics_stay_stored_but_never_enter_follower_notices(db):
+  from app.goal_dependencies import dependency_notice, dependency_summary
+  _, source, run, _ = setup_claim(db)
+  goal_id = promote(db, source, run)["goal_id"]
+  run.status = "failed"
+  db.commit()
+  assert stage_reconcile_claim_sources(db) == 1
+  db.commit(); db.expire_all()
+  dependency = db.query(models.GoalDependency).one()
+  stored = dict(dependency.outcome_json)
+  assert stored["source_diagnostics"]["owner_run"]["id"] == run.id
+  notice = dependency_notice(dependency)
+  assert "source_diagnostics" not in notice
+  assert run.id not in notice and goal_id not in notice
+  assert "owner_not_progressing" in notice and KEY in notice
+  assert "source_diagnostics" not in dependency_summary(db, dependency)["outcome"]
+  db.refresh(dependency)
+  assert dependency.outcome_json == stored
+
+
+def test_wait_declaration_serializes_its_goal_snapshot_with_first_attachment(db, monkeypatch):
+  from sqlalchemy import event
+  from sqlalchemy.orm import Session
+  from app import chat_waits
+  from app.database import SessionLocal
+  from app.decision_cards import fence_owner
+  _, source, run, _ = setup_claim(db)
+  fenced = False
+  promoted = None
+  def mark_fence(session):
+    nonlocal fenced
+    fence_owner(session)
+    fenced = True
+  def promote_before_unfenced_wait_flush(session, _ctx, _instances):
+    nonlocal promoted
+    if fenced or promoted is not None or not any(
+      isinstance(row, models.ChatWait) for row in session.new
+    ):
+      return
+    with SessionLocal() as other:
+      promoted = get_writer()._promote_run_to_goal(other, PromoteRunToGoal(
+        chat_id=source.id, run_token=run.id, objective="Exact action"))
+  monkeypatch.setattr(chat_waits, "fence_owner", mark_fence, raising=False)
+  event.listen(Session, "before_flush", promote_before_unfenced_wait_flush)
+  try:
+    wait = chat_waits.declare_wait(db, chat_id=source.id, created_by_run_id=run.id,
+      description="Concurrent handoff", kind="timer", delay_secs=60)
+  finally:
+    event.remove(Session, "before_flush", promote_before_unfenced_wait_flush)
+  if promoted is None:
+    promoted = promote(db, source, run)
+  db.refresh(wait)
+  assert wait.goal_id == promoted["goal_id"]
+
+
+def test_wait_declaration_refreshes_the_exact_run_after_promotion_wins(db):
+  from app.chat_waits import declare_wait
+  from app.database import SessionLocal
+  _, source, run, _ = setup_claim(db)
+  with SessionLocal() as other:
+    promoted = get_writer()._promote_run_to_goal(other, PromoteRunToGoal(
+      chat_id=source.id, run_token=run.id, objective="Exact action"))
+  # This session still has the pre-promotion physical attempt cached.
+  assert run.goal_id is None
+  wait = declare_wait(db, chat_id=source.id, created_by_run_id=run.id,
+    description="Promotion already committed", kind="timer", delay_secs=60)
+  assert wait.goal_id == promoted["goal_id"]
