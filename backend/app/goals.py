@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 from sqlalchemy import or_, update
 from app import models
+from app.prompt_blocks import json_block_data
 
 log = logging.getLogger(__name__)
 
@@ -132,10 +132,6 @@ def scoped_goal_context(db, goal, task_id=None, *, role="coordinator"):
   return payload
 
 
-def _compact_json(payload):
-  return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
 def resume_context(db, run_id):
   run = db.get(models.ChatRun, run_id)
   goal = goal_for_run(db, run)
@@ -154,7 +150,7 @@ def resume_context(db, run_id):
     "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
     "If the owner defers a step, continue other authorized work. When none can proceed, "
     "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
-    "<mobius_goal>" + _compact_json(scoped_goal_context(db, goal)) + "</mobius_goal>"
+    "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal)) + "</mobius_goal>"
   )
 
 
@@ -191,7 +187,7 @@ def helper_goal_brief(db, chat_id):
     "brief, for example after context compaction; read_goal(task=<id>) shows "
     "any task of this Goal in full, and read_goal(task=<parent id>) lists "
     "your neighbouring tasks.\n"
-    "<mobius_goal_brief>" + _compact_json(helper_goal_view(db, assignment))
+    "<mobius_goal_brief>" + json_block_data(helper_goal_view(db, assignment))
     + "</mobius_goal_brief>"
   )
 
