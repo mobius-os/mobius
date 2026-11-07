@@ -29,11 +29,14 @@ from app import models, provider_usage, providers
 from app.config import get_settings as get_app_settings
 from app.database import get_db
 from app.deps import (
+  Principal,
   get_current_owner,
   get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
+  get_owner_principal,
   reject_cross_site,
+  require_account_owner,
 )
 from app.schemas import (
   ModelPrefsUpdate,
@@ -230,11 +233,16 @@ def get_settings_view(
 @settings_router.get("/provider-usage/{provider_id}")
 async def get_provider_usage(
   provider_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_principal),
 ) -> dict:
-  """Returns one connected provider's current plan allowance windows."""
+  """Returns one connected provider's current plan allowance windows.
+
+  Möbius's allowance is the owner's own account credit, so a shared-browser
+  guest never reads it, as with the balance in providers/status."""
   if provider_id not in providers.PROVIDERS:
     raise HTTPException(status_code=404, detail="Unknown provider.")
+  if provider_id == "mobius":
+    require_account_owner(principal)
   return await provider_usage.read_provider_usage(
     provider_id,
     get_app_settings().data_dir,

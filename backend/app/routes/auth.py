@@ -40,7 +40,8 @@ from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
-  get_owner_or_delegated_owner_for_app_token, reject_cross_site,
+  acts_for_guest, get_owner_or_delegated_owner_for_app_token, reject_cross_site,
+  require_account_owner_control,
   require_chat_embed_operation,
   require_installation_owner_control,
 )
@@ -889,13 +890,17 @@ async def providers_status(
   Availability is safe to share across the app/embed boundary; the owner's
   Möbius trial balance and Claude sign-in expiry are not. `trial` (mobius)
   and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
-  read failed) are therefore attached only for a true owner caller, so an app
-  or chat-embed principal sees the same availability fields without them.
+  read failed) are therefore attached only for a true owner caller, so an app,
+  chat-embed principal, or shared-browser guest (or work it started) sees the
+  same availability fields without them.
   `login_expires_at` is an upper bound: the CLI treats the stored end as a
   window, so the sign-in can end up to three days before it.
   """
   require_chat_embed_operation(principal, "models:read")
-  is_owner_caller = principal.app_id is None and principal.scope == "owner"
+  is_owner_caller = (
+    principal.app_id is None and principal.scope == "owner"
+    and not acts_for_guest(principal)
+  )
   from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir
   from app.providers import refresh_app_model_providers
@@ -1076,7 +1081,10 @@ async def _consume_mobius_pending(state: str) -> dict:
 
 
 @router.post(
-  "/provider/mobius/login", dependencies=[Depends(reject_cross_site)],
+  "/provider/mobius/login",
+  # Linking the owner's Möbius account is theirs alone, whatever workspace
+  # access a guest holds.
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("3/minute")
 async def mobius_login_start(

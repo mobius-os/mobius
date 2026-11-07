@@ -2087,7 +2087,18 @@ and busy ones cost no query per event. Bytes already
 forwarded to a remote service cannot be recalled.
 Installation identity, credential, access administration and lifecycle controls
 remain separately gated; ordinary readable owner-input cards retain their
-existing participant-answer contract.
+existing participant-answer contract. The owner's Möbius account (profile,
+sign-in email, deployments and credit), management of the owner's GitHub
+connection, and publishing or changing anything on GitHub or the Community
+Store under the owner's identity (Contribute's sends, updates, assignments,
+merges and replies, project pushes, Reviewer posts, Store listings, reviews
+and install receipts) are refused to any bearer carrying a guest's lineage:
+the guest's session and the apps, services, agents and helpers it starts,
+whatever access the guest holds (`deps.require_account_owner`,
+`require_account_owner_control`). The apps a guest uses may still read GitHub
+through the owner's connection, as part of the shared workspace, and resolve
+handles in the public directory. This is an API boundary, not a sandbox
+around what a guest-started agent or a guest-edited app can later do.
 
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input

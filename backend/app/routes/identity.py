@@ -30,6 +30,7 @@ from app import models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
+  get_handle_directory_reader,
   get_identity_reader,
   get_owner_or_app_with_identity_manage,
   get_owner_or_app_with_railway_manage,
@@ -562,7 +563,7 @@ async def resolve_handle_hosts(
 @router.get("/handles/{handle}")
 async def read_handle_hosts(
   handle: str,
-  owner: models.Owner = Depends(get_identity_reader),
+  owner: models.Owner = Depends(get_handle_directory_reader),
   db: Session = Depends(get_db),
 ):
   """Resolve an account handle for a reviewed app without exposing credentials."""

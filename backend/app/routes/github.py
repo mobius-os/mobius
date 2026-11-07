@@ -205,6 +205,7 @@ from app.deps import (
   get_agent_run_principal,
   get_principal,
   require_installation_owner_control,
+  require_account_owner_control,
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
@@ -3249,7 +3250,7 @@ async def observe_contribution_publication(
   "/contributions/{app_id}/{record_id}/submit",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
@@ -3502,7 +3503,7 @@ async def submit_contribution(
   "/contributions/{app_id}/{record_id}/ready",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
@@ -3701,7 +3702,7 @@ def _prepared_existing_pr_target(record: dict) -> tuple[str, int, str, str]:
   "/contributions/{app_id}/{record_id}/update-existing",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
@@ -4140,7 +4141,7 @@ async def contribution_assignees(
 
 @router.post(
   "/contributions/{app_id}/assign-review",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("10/minute")
 async def assign_contribution_review(
@@ -4194,7 +4195,7 @@ async def assign_contribution_review(
   "/contributions/{app_id}/update-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_stack_action),
   ],
@@ -4539,7 +4540,7 @@ async def update_contribution_stack(
   "/contributions/{app_id}/submit-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_stack_action),
   ],
@@ -4769,7 +4770,7 @@ async def submit_contribution_stack(
   "/contributions/{app_id}/land-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_stack_action),
   ],
@@ -5663,7 +5664,7 @@ async def _autopilot_escalate_and_notify(
   "/contributions/{app_id}/{record_id}/respond",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("10/minute")
@@ -5862,7 +5863,7 @@ def _autopilot_round_brief(
   "/contributions/{app_id}/{record_id}/reply",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("30/minute")
@@ -6220,7 +6221,7 @@ async def autopilot_escalate(
   "/contributions/{app_id}/{record_id}/autopilot",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("20/minute")
@@ -6335,7 +6336,7 @@ def _completed_autopilot_update_result(
   "/contributions/{app_id}/{record_id}/update",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
     Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
