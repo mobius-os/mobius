@@ -22,11 +22,11 @@ from app.agent_coordination import (
   owner_chat_snapshot,
   owner_project_snapshot,
   send_agent_message,
-  send_work_claim_transfer_notice,
+  deliver_work_claim_revocation,
   visible_peer_messages,
 )
 from app.agent_work_claims import (
-  acknowledge_transfer_notice,
+  pending_transfer_notices,
   claim_work,
   finish_work,
 )
@@ -114,36 +114,19 @@ async def claim_current_work(
     )
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc
-  previous = result.get("previous_owner_chat_id")
-  if previous and result.get("notification_pending"):
-    send_work_claim_transfer_notice(
-      db,
-      owner_id=principal.owner.id,
-      claim_id=result["id"],
-      revision=result["transfer_notice_revision"],
-      sender_chat_id=principal.chat_id,
-      recipients=[previous],
-      body=(
-        f"Work claim {result['work_key']} transferred to {principal.chat_id}: "
-        f"{result.get('takeover_reason') or 'ownership changed'}"
-      ),
-    )
-    delivery = await deliver_peer_recipients(
-      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
-      sender_chat_id=principal.chat_id,
-    )
-    # Persist the retry latch only after the durable notice has also reached
-    # its requested live/wake/queue delivery path. A crash or delivery error
-    # before this point leaves notification_pending true, so the exact same
-    # transfer request retries idempotently instead of losing the wake.
-    acknowledge_transfer_notice(
-      db, claim_id=result["id"], revision=result["transfer_notice_revision"],
-    )
-    result["notification_pending"] = False
-    result["steered"] = delivery.steered
-    result["woken"] = delivery.woken
-    result["queued"] = delivery.queued
-    result["unreachable"] = delivery.unreachable
+  # Delivery is post-commit; every former executor already has an immutable
+  # obligation. Retrying this claim also recovers earlier interrupted transfers.
+  deliveries = []
+  for notice in pending_transfer_notices(db, claim_id=result["id"]).all():
+    deliveries.append(await deliver_work_claim_revocation(db, notice))
+  result["notification_pending"] = (
+    pending_transfer_notices(db, claim_id=result["id"]).first() is not None
+  )
+  if deliveries:
+    for state in ("steered", "woken", "queued", "unreachable"):
+      result[state] = list(dict.fromkeys(
+        recipient for delivery in deliveries for recipient in getattr(delivery, state)
+      ))
   return result
 
 

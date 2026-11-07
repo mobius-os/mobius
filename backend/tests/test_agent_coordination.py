@@ -879,6 +879,46 @@ def test_unknown_deleted_and_never_started_recipients_fail_atomically(
   assert db.query(models.AgentCoordinationMessage).count() == 0
 
 
+def test_transfer_after_crash_recovers_every_former_owner_notice(
+  client, auth, db, monkeypatch,
+):
+  """Ownership can move again before the first route ever persisted its note."""
+  from app.agent_work_claims import claim_work
+
+  chats, _ = _network_fixture(db)
+  owner = db.query(models.Owner).one()
+  key = "platform:test:crashed-transfer-chain"
+  claim_work(db, owner_id=owner.id, chat_id=chats["root"].id,
+             run_id="root-run", work_key=key, summary="Do the shared action")
+  # The ownership transaction committed; the process died before route delivery.
+  claim_work(db, owner_id=owner.id, chat_id=chats["outsider"].id,
+             run_id="outside-run", work_key=key, summary="Continue the action",
+             takeover_reason="The original executor handed over the action.",
+             expected_owner_chat_id=chats["root"].id)
+  assert db.query(models.AgentCoordinationMessage).count() == 0
+
+  async def delivered(**kwargs):
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  monkeypatch.setattr("app.routes.agent_coordination.deliver_peer_recipients", delivered)
+  moved = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
+    json={"work_key": key, "summary": "Finish the action",
+          "takeover_reason": "The second executor handed over the action.",
+          "expected_owner_chat_id": chats["outsider"].id},
+  )
+  assert moved.status_code == 200, moved.text
+  notices = db.query(models.AgentCoordinationMessage).all()
+  assert {row.to_chat_id for row in notices} == {
+    chats["root"].id, chats["outsider"].id,
+  }
+  first = next(row for row in notices if row.to_chat_id == chats["root"].id)
+  assert first.from_chat_id == chats["outsider"].id
+  assert "original executor" in first.body
+
+
 def test_work_claim_transfer_acknowledges_only_after_delivery(
   client, auth, db, monkeypatch,
 ):
@@ -906,7 +946,7 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
     raise RuntimeError("delivery interrupted before acknowledgement")
 
   monkeypatch.setattr(
-    "app.routes.agent_coordination.deliver_peer_recipients", fail_delivery,
+    "app.agent_coordination.deliver_peer_recipients", fail_delivery,
   )
   transfer_body = {
     "work_key": work_key,
@@ -937,7 +977,7 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
     )
 
   monkeypatch.setattr(
-    "app.routes.agent_coordination.deliver_peer_recipients", deliver_on_retry,
+    "app.agent_coordination.deliver_peer_recipients", deliver_on_retry,
   )
   retried = client.post(
     "/api/agent-coordination/work-claims",

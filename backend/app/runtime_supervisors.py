@@ -417,6 +417,13 @@ class RuntimeSupervisors:
             raise
           except Exception as exc:
             self.log.error("dependency delivery sweep failed: %s", exc, exc_info=True)
+          try:
+            from app.agent_coordination import recover_work_claim_revocations
+            await recover_work_claim_revocations()
+          except asyncio.CancelledError:
+            raise
+          except Exception as exc:
+            self.log.error("claim revocation sweep failed: %s", exc, exc_info=True)
       finally:
         system_broadcast.unsubscribe(events)
 

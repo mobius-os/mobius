@@ -58,11 +58,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "owner_goal_id": row.owner_goal_id,
     "revision": row.revision,
     "acquisition_id": row.acquisition_id,
-    "notification_pending": (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    ),
+    "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
     "takeover_reason": row.takeover_reason,
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
@@ -240,11 +236,9 @@ def claim_work(
         previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
     db.commit()
     db.refresh(row)
-    pending_transfer = (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    )
+    pending_transfer = pending_transfer_notices(db, claim_id=row.id).filter(
+      models.AgentWorkClaimRevocation.revision == row.transfer_notice_revision,
+    ).first() is not None
     result = _serialize(db, row, "transferred" if pending_transfer else "owned")
     if pending_transfer:
       result["previous_owner_chat_id"] = row.previous_owner_chat_id
@@ -311,7 +305,20 @@ def claim_work(
   db.refresh(row)
   previous_follow_status = _stage_goal_owner_change(db, row, previous=previous,
     previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
-  db.commit()
+  db.add(models.AgentWorkClaimRevocation(
+    claim_id=row.id, revision=previous_revision + 1,
+    acquisition_id=row.acquisition_id, owner_id=owner_id,
+    sender_chat_id=chat_id, recipient_chat_id=previous,
+    body=(f"Work claim {key} transferred to {chat_id}: {reason} "
+          f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
+  ))
+  # No peer-message helper may commit here. The ownership change and its
+  # revocation obligation either both persist or both roll back.
+  try:
+    db.commit()
+  except Exception:
+    db.rollback()
+    raise
   db.refresh(row)
   result = _serialize(db, row, "transferred")
   # Settlement may have committed between transfer and refresh. The event's
@@ -598,12 +605,33 @@ def finish_work(
   return _serialize(db, row, state)
 
 
+def pending_transfer_notices(db: Session, *, claim_id: str | None = None):
+  query = db.query(models.AgentWorkClaimRevocation).filter(
+    models.AgentWorkClaimRevocation.delivered_at.is_(None),
+  )
+  if claim_id is not None:
+    query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
+  return query.order_by(models.AgentWorkClaimRevocation.created_at,
+                        models.AgentWorkClaimRevocation.revision)
+
+
 def acknowledge_transfer_notice(
   db: Session, *, claim_id: str, revision: int,
 ) -> None:
-  row = db.get(models.AgentWorkClaim, claim_id)
-  if row is None or row.transfer_notice_revision != revision:
-    return
-  if row.notification_revision < revision:
-    row.notification_revision = revision
+  """Acknowledge only this obligation, never a later transfer's notice.
+
+  This is a delivery-path receipt, not evidence the former executor stopped.
+  """
+  db.query(models.AgentWorkClaimRevocation).filter_by(
+    claim_id=claim_id, revision=revision, delivered_at=None,
+  ).update({models.AgentWorkClaimRevocation.delivered_at: now_naive_utc()},
+           synchronize_session=False)
+  # Retain the last-transfer projection for existing claim readers. Recovery
+  # and notification_pending use per-transfer obligations, never this latch.
+  db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.id == claim_id,
+    models.AgentWorkClaim.transfer_notice_revision == revision,
+    models.AgentWorkClaim.notification_revision < revision,
+  ).update({models.AgentWorkClaim.notification_revision: revision},
+           synchronize_session=False)
   db.commit()
