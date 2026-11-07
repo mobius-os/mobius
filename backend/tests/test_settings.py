@@ -717,17 +717,19 @@ def test_model_registry_returns_known_models_on_discovery_failure(
   from app import providers
   from app.providers import KNOWN_MODELS, _fallback_models, invalidate_model_cache
 
+  # Patch the classes: restoring an inherited method on a shared provider
+  # instance leaves a bound attribute that shadows later class-level patches.
   monkeypatch.setattr(
-    providers.PROVIDERS["mobius"],
+    providers.MobiusProvider,
     "check_auth",
-    lambda _data_dir: "Möbius account is not linked",
+    lambda _self, _data_dir: "Möbius account is not linked",
   )
 
-  async def discovery_fails(_data_dir):
+  async def discovery_fails(_self, _data_dir):
     raise RuntimeError("offline")
 
-  for provider in providers.PROVIDERS.values():
-    monkeypatch.setattr(provider, "fetch_models", discovery_fails)
+  for provider_class in {type(provider) for provider in providers.PROVIDERS.values()}:
+    monkeypatch.setattr(provider_class, "fetch_models", discovery_fails)
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200

@@ -238,9 +238,9 @@ export default function SettingsView({
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const mobiusAccount = useMobiusAccountSummary()
-  // The Möbius account and its model credit are the owner's own; a
-  // shared-browser guest never sees or opens them (the queries never run).
-  const showMobiusAccount = !isSharedBrowserAuth()
+  // The owner's own accounts (Möbius with its model credit, and GitHub) are
+  // never shown to a shared-browser guest, and their reads never run.
+  const showOwnerAccounts = !isSharedBrowserAuth()
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -419,14 +419,14 @@ export default function SettingsView({
   }, [settingsQuery.data])
 
   const openDetailPage = useCallback((page) => {
-    if (page === MOBIUS_ACCOUNT_PAGE && !showMobiusAccount) return
+    if (page === MOBIUS_ACCOUNT_PAGE && !showOwnerAccounts) return
     // Remember who was connected when the page opened, so a provider that
     // connects from its page gets the curated first-connection defaults.
     authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
     setDetailPage(page)
     openDetailHistory()
     settingsBoundaryRef.current?.scrollTo({ top: 0 })
-  }, [openDetailHistory, showMobiusAccount])
+  }, [openDetailHistory, showOwnerAccounts])
   const closeDetailPage = closeDetailHistory
   // Settings requests (deep links, focus) arrive as a page id or null.
   const navigateDetail = useCallback((page) => {
@@ -997,7 +997,7 @@ export default function SettingsView({
               {...usageExtras}
             />
           ) : null}
-          access={selectedProvider === 'mobius' && showMobiusAccount ? (
+          access={selectedProvider === 'mobius' && showOwnerAccounts ? (
             <MobiusModelAccess onSignIn={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} />
           ) : null}
           connection={connection}
@@ -1038,14 +1038,14 @@ export default function SettingsView({
         {detailBody}
 
         {!detailPage && <>
-        <section className="settings-group" aria-labelledby="settings-accounts-title">
+        {showOwnerAccounts && <section className="settings-group" aria-labelledby="settings-accounts-title">
           <div className="settings-group__head">
             <div className="settings-group__heading">
               <h2 className="settings-group__title" id="settings-accounts-title">Accounts</h2>
             </div>
           </div>
           <div className="settings-list">
-            {showMobiusAccount && <button type="button" className="settings-item" onClick={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} aria-label={`Möbius account: ${mobiusAccountLine}`}>
+            <button type="button" className="settings-item" onClick={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} aria-label={`Möbius account: ${mobiusAccountLine}`}>
               <span className={`settings-item__icon${mobiusAccount.avatarUrl || mobiusAccount.avatarPending ? ' settings-item__icon--round' : ''}`} aria-hidden="true">{mobiusAccountMark}</span>
               <span className="settings-item__body">
                 <span className="settings-item__title">Möbius</span>
@@ -1053,7 +1053,7 @@ export default function SettingsView({
               </span>
               {mobiusAccount.status === 'unavailable' && <span className="settings-badge settings-badge--warning">Unavailable</span>}
               {mobiusAccount.status === 'signed_out' && <span className="settings-badge settings-badge--accent settings-badge--plain">Sign in</span>}
-            </button>}
+            </button>
             <GithubConnection
               active={active}
               expanded={githubAccountOpen}
@@ -1063,7 +1063,7 @@ export default function SettingsView({
               attention={attentionSection === 'github'}
             />
           </div>
-        </section>
+        </section>}
 
         <section
           className={`settings-group settings-ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}

@@ -142,8 +142,17 @@ test('Möbius models turned off read as turned off, not as a signed-out account'
   assert.match(signedOut, />Sign in</)
 })
 
+function settingsHtml() {
+  return render([
+    [['settings'], { background_agents: [{ provider: 'mobius', enabled: true }] }],
+    [['auth', 'providers', 'status'], { mobius: { name: 'Möbius', configured: false, available: true } }],
+    [['models', 'registry'], { mobius: [] }],
+  ], {}, SettingsView)
+}
+
 // Keep last: a shared-browser session cannot be ended within this process.
 test('a shared-browser guest never reads the owner’s Möbius account or credit', () => {
+  assert.match(settingsHtml(), /id="settings-accounts-title"/)
   assert.deepEqual(accountReads(), {
     identity: 'fetching', agent: 'fetching', visibility: 'fetching', railway: 'fetching', mobiusUsage: 'fetching', claudeUsage: 'fetching',
   })
@@ -152,4 +161,8 @@ test('a shared-browser guest never reads the owner’s Möbius account or credit
   assert.deepEqual(accountReads(), {
     identity: 'idle', agent: 'idle', visibility: 'idle', railway: 'idle', mobiusUsage: 'idle', claudeUsage: 'fetching',
   })
+  // Nor are the owner's accounts (Möbius and GitHub) shown to a guest.
+  const guestHtml = settingsHtml()
+  assert.doesNotMatch(guestHtml, /id="settings-accounts-title"/)
+  assert.match(guestHtml, /id="settings-ai-title"/)
 })
