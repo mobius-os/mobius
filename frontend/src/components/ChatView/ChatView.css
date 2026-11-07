@@ -4304,6 +4304,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
+.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 

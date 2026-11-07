@@ -1462,8 +1462,9 @@ that is data compatibility, not a second delivery mechanism.
 (ignoring whitespace) is unmet, and other unsuccessful results or a 120-second
 timeout fail the check. At the deadline, the final check still runs: met wins,
 broken reports failed, and only still-unmet expires. Timer due means met.
-Cancellation applies to armed waits and creates no wake. Every committed check
-outcome emits `chat_wait_changed`, independently of continuation admission.
+Cancellation disarms an armed monitor or withdraws future delivery of an owed result;
+neither creates a wake. Every committed check outcome emits `chat_wait_changed`,
+independently of continuation admission.
 
 The sweep bounds concurrent checks, delivers existing terminal receipts first,
 then admits newly terminal results as their checks finish. It serializes wake
@@ -1481,9 +1482,9 @@ check the receiving run's Goal; admission freezes the carried IDs in
 `ChatRun.admitted_wait_results_json`, and `received_run_id` records the successful
 carrier. Success cannot receipt a result that fired after its prompt snapshot.
 The activation exception retains its earlier scheduling receipt (`scheduled`).
-New ordinary dispositions distinguish `delivered`, `retired_by_goal_outcome`
-and `withdrawn`; old ambiguous timestamps become `legacy_consumed`, with no
-fabricated receiving run and no historical wake storm. A Goal-owned carrier
+New ordinary dispositions distinguish `delivered`, `retired_by_goal_outcome`,
+`withdrawn` and `withdrawn_after_attempt`; old ambiguous timestamps become
+`legacy_consumed`, with no fabricated receiving run and no historical wake storm. A Goal-owned carrier
 superseded before proven provider entry uses the existing single retry identity
 only with writer-stamped `owner_superseded_by_run_id` evidence;
 an unrelated turn cannot adopt its result. Stop/hold still blocks that wake.
@@ -1506,8 +1507,21 @@ restore a stopped/dismissed Goal. The wait itself is independent: chat Stop ends
 a turn/questions/consumer but does not cancel armed monitors. Deletion cancels
 armed monitors. For Goal-less waits, the existing undelivered row can still
 requeue a notice cleared by Stop; Goal-owned results remain blocked by their
-Goal's hold. The wait cancel action continues to accept only armed rows.
-Do not broaden Stop silently while cleaning up the implementation.
+Goal's hold. The ordinary Wait cancel action withdraws armed monitors and
+fired-but-unreceived follow-ups through the chat writer, ordered with provider
+admission and success receipts. It returns `withdrawn` before any attempt, or
+`withdrawn_after_attempt` when every admitting attempt has ended without a
+successful receipt, including resolved provider-limit pauses (`parked_notified`).
+The latter stops future delivery; it never retracts earlier
+provider input or tool effects. A live or unresolved admitting run returns
+`not_withdrawable`; an existing receipt returns `already_delivered`. The read-side
+`can_withdraw` projection shares this eligibility check, but the writer rechecks
+it at mutation. Withdrawal also removes its queued result notices, interrupts
+exact never-admitted Wait carriers, and clears their live-message pointers in
+the same transaction, without stopping unrelated turns. Delivered history stays
+unchanged and Restart-activation Waits
+remain card-owned. Do not broaden Stop silently while cleaning up the
+implementation.
 
 The ordinary Wait lifecycle remains:
 
@@ -1516,7 +1530,7 @@ The ordinary Wait lifecycle remains:
 | Stop / owner hold | Keeps observing | Kept owed; no automatic Goal reopening |
 | Later owner continuation of that Goal | Unchanged | Eligible for that exact Goal's successful receipt |
 | Explicit Goal outcome | Keeps observing | Retired, not delivered |
-| Stop waiting | Withdrawn without a wake | Existing armed-only action does not apply |
+| Stop waiting / Stop follow-up | Withdrawn without a wake | Future delivery withdrawn before admission or after all attempts end; live/unknown attempts must settle first |
 | Chat deletion | Withdrawn in lifecycle transaction | Existing supervisor cancels on observing deletion |
 
 Deletion/restore timing for ordinary results is unchanged: restore before the

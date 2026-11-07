@@ -146,10 +146,12 @@ DECLARE_WAIT_DESCRIPTION = (
   "deadline wakes this chat to inspect the stall. Polling uses no model tokens."
 )
 CANCEL_WAIT_DESCRIPTION = (
-  "Cancel one exact armed wait owned by this top-level chat when the owner's "
+  "Withdraw one exact armed wait or owed follow-up owned by this top-level chat when the owner's "
   "latest request clearly makes it obsolete. Do not cancel merely because the "
   "owner sent another message: waits continue unless their purpose has really "
-  "been superseded."
+  "been superseded. Inspect disposition: withdrawn, withdrawn_after_attempt (future delivery only), "
+  "already_delivered, or not_withdrawable. Live or unresolved admitting runs must settle first. "
+  "Earlier provider input and tool effects are never undone."
 )
 LIST_AGENT_PEERS_DESCRIPTION = (
   "Discover addressable live agents and the caller's broadcast scope. Use "

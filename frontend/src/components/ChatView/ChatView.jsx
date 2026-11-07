@@ -820,21 +820,17 @@ export default function ChatView({
     normalizeBackgroundHelpers(cached?.background_helpers)
   ))
   const handleCancelWait = useCallback(async (waitId) => {
+    const result = await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
+    // HTTP success may refuse withdrawal while an admitting turn is unresolved.
+    // Do not hide an owed follow-up until the durable disposition confirms it.
     setArmedWaits(prev => {
-      const next = prev.filter(wait => wait.id !== waitId)
-      // Keep the persisted cache in step so a remount doesn't resurrect the
-      // cancelled chip from stale cached waits.
-      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
-        waits: next,
-      })
+      const next = result.status === 'armed' || result.delivery_pending
+        ? prev.map(wait => wait.id === waitId ? result : wait)
+        : prev.filter(wait => wait.id !== waitId)
+      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), { waits: next })
       return next
     })
-    try {
-      await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
-    } catch {
-      // The durable row is authoritative; the next detail read restores it if
-      // the cancel didn't commit.
-    }
+    return result
   }, [chatId, queryClient])
   const setGoalPresentationLocalState = useCallback((goal) => {
     const normalized = normalizeGoalPresentation(goal)

@@ -1421,6 +1421,14 @@ class PrepareAutoResume(_Command):
 
 
 @dataclass
+class WithdrawWait(_Command):
+  """Withdraw one ordinary Wait before its follow-up crosses provider entry."""
+  chat_id: str = ""
+  run_token: str = ""
+  wait_id: str = ""
+
+
+@dataclass
 class WithdrawGoalDependency(_Command):
   """Owner withdrawal of one exact pending/owed edge, not its Goal or source."""
   chat_id: str = ""
@@ -2168,6 +2176,8 @@ class ChatWriterActor:
       # graph edge or decision disposition, so need no owner-wide lock.
       from app.decision_cards import fence_decisions
       fence_decisions(db)
+    if isinstance(cmd, WithdrawWait):
+      return self._withdraw_wait(db, cmd)
     if isinstance(cmd, WithdrawGoalDependency):
       return self._withdraw_goal_dependency(db, cmd)
     if isinstance(cmd, ReconcileClaimSources):
@@ -2887,11 +2897,74 @@ class ChatWriterActor:
       raise _PersistFailed("PersistSessionId did not persist")
     return True
 
+  def _stage_remove_pending_result_notices(
+    self, db, chat, *, message_kind: str, result_id: str, resolve_result,
+  ) -> None:
+    """Remove only notices bound to this exact result's saved ownership."""
+    chat.pending_messages = [message for message in (chat.pending_messages or [])
+      if not (message.get("kind") == message_kind
+        and (target := resolve_result(db, chat.id, message)) is not None
+        and target.id == result_id)]
+
+  def _stage_interrupt_unadmitted_carriers(
+    self, db, chat, *, tokens: tuple[str, ...], goal_id: str | None, end_reason: str,
+  ) -> set[str]:
+    """Retire exact unentered carriers; release actor ownership only after commit."""
+    from app.timeutil import now_naive_utc
+    stopped_tokens = set()
+    for token in tokens:
+      carrier = db.get(models.ChatRun, token)
+      if (carrier is not None and carrier.chat_id == chat.id
+          and carrier.goal_id == goal_id and carrier.status == "running"
+          and carrier.provider_execution_admitted is False):
+        carrier.status = "interrupted"
+        carrier.end_reason = end_reason
+        carrier.ended_at = now_naive_utc()
+        stopped_tokens.add(token)
+        if (chat.live_assistant or {}).get("id") == token:
+          chat.live_assistant = None
+        if chat.active_assistant_message_id == token:
+          chat.active_assistant_message_id = None
+    return stopped_tokens
+
+  def _withdraw_wait(self, db, cmd: WithdrawWait) -> dict:
+    from app.continuations import WAIT_RESULT_MESSAGE_KIND
+    from app.run_state import _wait_result_row
+    from app.chat_waits import (
+      _WITHDRAWN_DISPOSITIONS, _broadcast_changed, _cancel_active_check,
+      serialize_wait, stage_withdraw_wait,
+    )
+    row = db.get(models.ChatWait, cmd.wait_id)
+    if row is None or row.chat_id != cmd.chat_id:
+      return {"id": cmd.wait_id, "disposition": "not_withdrawable",
+        "detail": "This Wait is no longer available."}
+    outcome = stage_withdraw_wait(db, row)
+    stopped_tokens = set()
+    if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
+      chat = db.get(models.Chat, cmd.chat_id)
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=WAIT_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=_wait_result_row)
+      stopped_tokens = self._stage_interrupt_unadmitted_carriers(
+        db, chat,
+        tokens=("wait-resume-" + row.id, "wait-resume-" + row.id + ".retry"),
+        goal_id=row.goal_id, end_reason="wait_withdrawn",
+      )
+    # Capture the response in this transaction, not a route-side read that
+    # could mix an earlier disposition with a later provider receipt.
+    result = {**serialize_wait(row, db=db, withdrawal_outcome=outcome), **outcome}
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("WithdrawWait did not persist")
+    if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
+      if self._run_token_owner.get(cmd.chat_id) in stopped_tokens:
+        self._run_token_owner.pop(cmd.chat_id, None)
+      _cancel_active_check(cmd.wait_id)
+      _broadcast_changed(cmd.chat_id)
+    return result
+
   def _withdraw_goal_dependency(self, db, cmd: WithdrawGoalDependency) -> str:
     from app.decision_cards import fence_decisions
     from app.goal_dependencies import stage_withdraw_dependency, dependency_result_row
     from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND
-    from app.timeutil import now_naive_utc
     fence_decisions(db)
     result = stage_withdraw_dependency(db, cmd.chat_id, cmd.dependency_id)
     stopped_tokens = set()
@@ -2901,23 +2974,13 @@ class ChatWriterActor:
       # Queue/transcript ownership stays here, not in the dependency module.
       # Rechecking at enqueue, turn admission and provider admission closes
       # the read-before-withdraw windows without cancelling unrelated work.
-      chat.pending_messages = [message for message in (chat.pending_messages or [])
-        if not (message.get("kind") == DEPENDENCY_RESULT_MESSAGE_KIND
-          and (target := dependency_result_row(db, chat.id, message)) is not None
-          and target.id == row.id)]
-      for token in ("dependency-resume-" + row.id, "dependency-resume-" + row.id + ".retry"):
-        carrier = db.get(models.ChatRun, token)
-        if (carrier is not None and carrier.chat_id == chat.id
-            and carrier.goal_id == row.waiting_goal_id and carrier.status == "running"
-            and carrier.provider_execution_admitted is False):
-          carrier.status = "interrupted"
-          carrier.end_reason = "dependency_withdrawn"
-          carrier.ended_at = now_naive_utc()
-          stopped_tokens.add(token)
-          if (chat.live_assistant or {}).get("id") == token:
-            chat.live_assistant = None
-          if chat.active_assistant_message_id == token:
-            chat.active_assistant_message_id = None
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=DEPENDENCY_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=dependency_result_row)
+      stopped_tokens = self._stage_interrupt_unadmitted_carriers(
+        db, chat,
+        tokens=("dependency-resume-" + row.id, "dependency-resume-" + row.id + ".retry"),
+        goal_id=row.waiting_goal_id, end_reason="dependency_withdrawn",
+      )
     if not _commit_or_rollback(db):
       raise _PersistFailed("WithdrawGoalDependency did not persist")
     if result == "withdrawn":
