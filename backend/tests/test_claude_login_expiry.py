@@ -85,7 +85,13 @@ def test_owner_status_reports_no_login_end_for_an_unusable_stored_date(
   (5, 0, 5),
   (5, -86400, 5),
   (5, float("inf"), 5),
+  (5, 1e308, 5),
+  (5, 3651 * 86400, 5),  # past the CLI's ten-year horizon
   (None, 7 * 86400, None),  # no stored end: the CLI records none either
+  # A stored end the CLI would reject is dropped, not kept or replaced.
+  (-3650, 7 * 86400, None),  # before 2025, like a stored 0
+  (3651, 7 * 86400, None),
+  (float("nan"), 7 * 86400, None),
 ])
 async def test_refresh_keeps_the_earlier_login_end(monkeypatch, stored_in_days, lifetime, expected_in_days):
   import httpx
@@ -115,8 +121,25 @@ def test_login_end_is_unknown_without_credentials(tmp_path):
   assert claude_login_expires_at(str(tmp_path)) is None
   creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
   creds.parent.mkdir(parents=True)
-  creds.write_text("not json")
-  assert claude_login_expires_at(str(tmp_path)) is None
+  for text in ("not json", "[]", '"x"', '{"claudeAiOauth": []}'):
+    creds.write_text(text)
+    assert claude_login_expires_at(str(tmp_path)) is None
+
+
+def test_owner_status_survives_credentials_that_are_not_an_object(
+  client, auth, monkeypatch, tmp_path,
+):
+  from app.config import get_settings
+
+  # The file can change between check_auth's read and this one.
+  monkeypatch.setattr(ClaudeProvider, "check_auth", lambda self, data_dir: None)
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text("[]")
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  response = client.get("/api/auth/providers/status", headers=auth)
+  assert response.status_code == 200
+  assert response.json()["claude"]["login_expires_at"] is None
 
 
 def test_provider_status_shows_login_end_only_to_the_owner(client, auth, monkeypatch):
@@ -147,6 +170,9 @@ def test_signed_out_claude_status_has_no_login_end(client, auth, monkeypatch):
   ({}, None),
   ({"refresh_token_expires_in": None}, None),
   ({"refresh_token_expires_in": True}, None),
+  ({"refresh_token_expires_in": float("inf")}, None),
+  ({"refresh_token_expires_in": 1e308}, None),
+  ({"refresh_token_expires_in": 3651 * 86400}, None),  # past the CLI's horizon
 ])
 def test_mobius_sign_in_records_the_login_end_when_the_response_has_it(tmp_path, monkeypatch, extra, expected_seconds):
   from app.config import get_settings

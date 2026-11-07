@@ -1727,6 +1727,9 @@ _CLAUDE_TOKEN_REFRESH_MARGIN_MS = 60_000
 # from now; anything else it treats as no end.
 _CLAUDE_LOGIN_END_EARLIEST_MS = 1_735_689_600_000
 _CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
+# The CLI treats a stored sign-in end more than this far before the access
+# token's own expiry as stale and reports no end at all.
+_CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
 
 
 def _finite_number(value: Any) -> float | None:
@@ -1746,6 +1749,17 @@ def _claude_login_end_ms(value: Any) -> float | None:
     return None
   return end
 
+
+def claude_login_end_after(now_ms: int, lifetime_s: Any) -> int | None:
+  """The sign-in end `lifetime_s` seconds after `now_ms`, or None unless the
+  lifetime is a positive finite number and the end is one the CLI accepts."""
+  lifetime = _finite_number(lifetime_s)
+  if lifetime is None or lifetime <= 0:
+    return None
+  end = _claude_login_end_ms(now_ms + lifetime * 1000)
+  return None if end is None else int(end)
+
+
 # Serializes Claude OAuth refreshes within this process. Anthropic rotates
 # the single-use refresh token on every grant, so two concurrent refreshes
 # of the same .credentials.json (the chat pre-turn refresh + the model-
@@ -1763,7 +1777,7 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   if not creds_path.exists():
     raise RuntimeError("claude credentials missing")
   raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth")
+  oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
   if not isinstance(oauth, dict):
     raise RuntimeError("claude credentials malformed")
   return creds_path, oauth
@@ -1841,9 +1855,10 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
 
   Anthropic's OAuth refresh-token grant rotates the refresh token, so we
   persist whatever the endpoint returns (a stale refresh token would fail
-  the NEXT refresh). Like the CLI, a refresh can only make the stored
-  sign-in end earlier: it keeps the earlier of that end and the response's
-  positive `refresh_token_expires_in` from now."""
+  the NEXT refresh). Like the CLI, a refresh never adds or extends the
+  stored sign-in end: it drops a stored end the CLI would reject and keeps
+  the earlier of a valid one and the response's `refresh_token_expires_in`
+  from now."""
   import httpx  # local import — only the registry path needs it
 
   refresh_token = oauth.get("refreshToken")
@@ -1869,11 +1884,11 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
   refreshed["refreshToken"] = data["refresh_token"]
   now_ms = int(time.time() * 1000)
   refreshed["expiresAt"] = now_ms + data["expires_in"] * 1000
-  stored_end = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
-  lifetime_s = _finite_number(data.get("refresh_token_expires_in"))
-  if stored_end is not None and lifetime_s is not None and lifetime_s > 0:
-    refreshed["refreshTokenExpiresAt"] = min(
-      stored_end, now_ms + int(lifetime_s * 1000),
+  stored_end = _claude_login_end_ms(refreshed.pop("refreshTokenExpiresAt", None))
+  if stored_end is not None:
+    new_end = claude_login_end_after(now_ms, data.get("refresh_token_expires_in"))
+    refreshed["refreshTokenExpiresAt"] = (
+      stored_end if new_end is None else min(stored_end, new_end)
     )
   if data.get("scope"):
     refreshed["scopes"] = data["scope"].split()
@@ -1935,11 +1950,6 @@ def claude_subscription_type(data_dir: str) -> str | None:
     return None
   value = oauth.get("subscriptionType")
   return value if isinstance(value, str) and value.strip() else None
-
-
-# The CLI treats a stored sign-in end more than this far before the access
-# token's own expiry as stale and reports no end at all.
-_CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
 
 
 def claude_login_expires_at(data_dir: str) -> str | None:

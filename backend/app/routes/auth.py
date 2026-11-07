@@ -769,12 +769,12 @@ def _write_credentials(token_data: dict) -> None:
   }
   # The sign-in's hard end, in the field the CLI reports as `loginExpiresAt`
   # and check_auth honors; refreshes keep it. When the response has no
-  # refresh_token_expires_in, Möbius leaves it absent (unknown) rather than
-  # assuming the CLI's 30-day default.
-  refresh_expires_in = token_data.get("refresh_token_expires_in")
-  if (isinstance(refresh_expires_in, (int, float))
-      and not isinstance(refresh_expires_in, bool) and refresh_expires_in > 0):
-    oauth["refreshTokenExpiresAt"] = now_ms + int(refresh_expires_in * 1000)
+  # usable refresh_token_expires_in, Möbius leaves it absent (unknown) rather
+  # than assuming the CLI's 30-day default.
+  from app.providers import claude_login_end_after
+  login_end = claude_login_end_after(now_ms, token_data.get("refresh_token_expires_in"))
+  if login_end is not None:
+    oauth["refreshTokenExpiresAt"] = login_end
   creds = {"claudeAiOauth": oauth}
   path = os.path.join(cli_home, ".credentials.json")
   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

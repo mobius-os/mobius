@@ -1036,21 +1036,14 @@ def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_name,agent_id", [
-  ("Read", None),  # dispatcher reaching for an unregistered tool
-  ("ToolSearch", None),
-  ("Read", "unknown-agent"),
-])
-async def test_helper_pre_tool_use_never_returns_none_under_block_policy(tool_name, agent_id):
-  """Under on_failure="block" a None return blocks; no-opinion paths return {}."""
-  host = claude_host.ClaudeHelperHost.__new__(claude_host.ClaudeHelperHost)
-  host._turn_by_dispatch, host._specs, host._turn_by_tool_use = {}, {}, {}
-  host._turn_by_agent, host._agent_identity = {}, {}
-  host._identity_closed, host._rejected_agents = True, set()
+async def test_helper_pre_tool_use_denies_once_identity_is_closed(tmp_path):
+  """Under on_failure="block" a None return blocks; a closed host must say deny."""
+  host = _claude_host(tmp_path)
+  host._cancel_pending_identity()
   result = await host.pre_tool_use(
-    {"tool_name": tool_name, "tool_input": {}, "agent_id": agent_id}, "t1", {},
+    {"tool_name": "Read", "tool_input": {}, "agent_id": "unknown-agent"}, "t1", {},
   )
-  assert isinstance(result, dict)
+  assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio
