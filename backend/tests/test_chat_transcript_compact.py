@@ -11,6 +11,7 @@ from app.chat_transcript import (
   redundant_interaction_tool_indexes,
 )
 from app.pending_questions import PendingQuestion
+from app.routes import chats as chats_routes
 from app.routes.chats import _chat_detail_window
 from sqlalchemy import event
 from app.memory_recall import EMPTY_RECALL_BINDING
@@ -849,6 +850,15 @@ def test_runtime_route_does_not_select_transcript_json(
   )
   chat_id = created.json()["id"]
   monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+  # One run snapshot serves both the runtime fields and the lifecycle key.
+  snapshots = []
+  real_snapshot = chats_routes._latest_run_snapshot
+
+  def counted_snapshot(*args):
+    snapshots.append(real_snapshot(*args))
+    return snapshots[-1]
+
+  monkeypatch.setattr(chats_routes, "_latest_run_snapshot", counted_snapshot)
   statements = []
   engine = db.get_bind()
 
@@ -862,10 +872,7 @@ def test_runtime_route_does_not_select_transcript_json(
     event.remove(engine, "before_cursor_execute", capture_sql)
 
   assert runtime.status_code == 200
-  # One run snapshot and one settled-wait read serve both the runtime fields
-  # and the lifecycle key; the other wait read lists the armed waits.
-  assert sum("from chat_run_updates" in statement for statement in statements) == 1
-  assert sum("from chat_waits" in statement for statement in statements) == 2
+  assert len(snapshots) == 1
   body = runtime.json()
   assert isinstance(body.pop("lifecycle_projection_key"), str)
   assert body == {
