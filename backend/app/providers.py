@@ -769,7 +769,7 @@ class ClaudeProvider(BaseProvider):
       access_token = oauth.get("accessToken")
       refresh_token = oauth.get("refreshToken")
       expires_at = _finite_number(oauth.get("expiresAt"))
-      refresh_expires_at = _finite_number(oauth.get("refreshTokenExpiresAt"))
+      refresh_expires_at = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
       now_ms = time.time() * 1000
       access_is_current = (
         isinstance(access_token, str)
@@ -777,9 +777,9 @@ class ClaudeProvider(BaseProvider):
         and expires_at is not None
         and expires_at - now_ms >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
       )
+      # Like the CLI, an end it would reject counts as no end.
       refresh_expiry_is_current = (
-        "refreshTokenExpiresAt" not in oauth
-        or (refresh_expires_at is not None and refresh_expires_at > now_ms)
+        refresh_expires_at is None or refresh_expires_at > now_ms
       )
       can_refresh = (
         isinstance(refresh_token, str)
@@ -1733,9 +1733,16 @@ _CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
 
 
 def _finite_number(value: Any) -> float | None:
-  """A stored time or duration, or None unless it is a finite non-bool number."""
-  if isinstance(value, (int, float)) and not isinstance(value, bool):
-    return value if math.isfinite(value) else None
+  """A stored time or duration, or None unless it is a finite non-bool number.
+
+  Python ints are exact and always finite (math.isfinite would overflow on
+  one beyond float range), so they are returned as they are."""
+  if isinstance(value, bool):
+    return None
+  if isinstance(value, int):
+    return value
+  if isinstance(value, float) and math.isfinite(value):
+    return value
   return None
 
 
@@ -1752,12 +1759,57 @@ def _claude_login_end_ms(value: Any) -> float | None:
 
 def claude_login_end_after(now_ms: int, lifetime_s: Any) -> int | None:
   """The sign-in end `lifetime_s` seconds after `now_ms`, or None unless the
-  lifetime is a positive finite number and the end is one the CLI accepts."""
+  lifetime is a finite number and the end is one the CLI accepts.
+
+  Like the CLI, a zero or negative lifetime is recorded as an end at or
+  before now (an ended sign-in); only the range check rejects an end."""
   lifetime = _finite_number(lifetime_s)
-  if lifetime is None or lifetime <= 0:
+  if lifetime is None:
     return None
   end = _claude_login_end_ms(now_ms + lifetime * 1000)
   return None if end is None else int(end)
+
+
+def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
+  """The claudeAiOauth block a token endpoint response leaves behind.
+
+  `stored` is the current block for a refresh, whose other keys are kept, or
+  None for a new sign-in. Raises RuntimeError for a response the CLI could not
+  use, so the caller stores nothing.
+
+  The sign-in end follows the CLI: a new sign-in records the response's
+  `refresh_token_expires_in` (and no end, rather than the CLI's 30-day
+  default, when it has none the CLI accepts); a refresh never adds or extends
+  the end: it drops a stored end the CLI would reject and keeps the earlier of
+  a valid one and the response's."""
+  if not isinstance(tokens, dict):
+    raise RuntimeError("token response is not an object")
+  for field in ("access_token", "refresh_token"):
+    if not isinstance(tokens.get(field), str) or not tokens[field]:
+      raise RuntimeError(f"token response missing '{field}'")
+  now_ms = int(time.time() * 1000)
+  lifetime = _finite_number(tokens.get("expires_in"))
+  expires_at = None if lifetime is None else now_ms + lifetime * 1000
+  # The CLI cannot parse a non-finite expiry, and an access token cannot
+  # outlast the latest sign-in end the CLI accepts.
+  if expires_at is None or not (
+    now_ms < expires_at <= now_ms + _CLAUDE_LOGIN_END_HORIZON_MS
+  ):
+    raise RuntimeError("token response has no usable 'expires_in'")
+  oauth = {"scopes": []} if stored is None else dict(stored)
+  oauth["accessToken"] = tokens["access_token"]
+  oauth["refreshToken"] = tokens["refresh_token"]
+  oauth["expiresAt"] = int(expires_at)
+  end = claude_login_end_after(now_ms, tokens.get("refresh_token_expires_in"))
+  if stored is not None:
+    stored_end = _claude_login_end_ms(oauth.pop("refreshTokenExpiresAt", None))
+    end = stored_end if end is None or stored_end is None else min(stored_end, end)
+  if end is not None:
+    oauth["refreshTokenExpiresAt"] = end
+  scope = tokens.get("scope")
+  if isinstance(scope, str) and scope:
+    oauth["scopes"] = scope.split()
+  return oauth
 
 
 # Serializes Claude OAuth refreshes within this process. Anthropic rotates
@@ -1783,7 +1835,9 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   return creds_path, oauth
 
 
-def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
+def _write_claude_oauth(
+  creds_path: Path, oauth: dict | None, top_level: dict[str, str | None] | None = None,
+) -> None:
   """Persist a claudeAiOauth block, or remove it when oauth is None,
   in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
   leave a truncated file the chat path then reads).
@@ -1799,7 +1853,10 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
   would drop those sibling keys on the first registry-path refresh, which is
   what 'the file stays the single source of truth' is meant to prevent. The
   file mode is preserved (the CLI writes 0600); we mirror it on the tmp file
-  and default to 0600 when the source is gone."""
+  and default to 0600 when the source is gone.
+
+  `top_level` sets, or with None removes, other top-level keys in the same
+  write: a new sign-in replaces the account's `organizationUuid`."""
   try:
     raw = json.loads(creds_path.read_text())
     if not isinstance(raw, dict):
@@ -1812,6 +1869,11 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
     raw.pop("claudeAiOauth", None)
   else:
     raw["claudeAiOauth"] = oauth
+  for key, value in (top_level or {}).items():
+    if value is None:
+      raw.pop(key, None)
+    else:
+      raw[key] = value
   try:
     mode = stat.S_IMODE(creds_path.stat().st_mode)
   except OSError:
@@ -1848,17 +1910,14 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
 async def _refresh_claude_access_token(oauth: dict) -> dict:
   """Exchanges the stored refresh token for a fresh access token.
 
-  Returns the new claudeAiOauth dict (accessToken/refreshToken/expiresAt/
-  scopes preserved). Raises when there's no refresh token or the token
-  endpoint rejects the exchange — the caller then falls back to
-  KNOWN_MODELS, same as any other registry-fetch failure.
+  Returns the new claudeAiOauth dict (claude_oauth_after_token_grant).
+  Raises when there's no refresh token or the token endpoint rejects the
+  exchange — the caller then falls back to KNOWN_MODELS, same as any other
+  registry-fetch failure.
 
   Anthropic's OAuth refresh-token grant rotates the refresh token, so we
   persist whatever the endpoint returns (a stale refresh token would fail
-  the NEXT refresh). Like the CLI, a refresh never adds or extends the
-  stored sign-in end: it drops a stored end the CLI would reject and keeps
-  the earlier of a valid one and the response's `refresh_token_expires_in`
-  from now."""
+  the NEXT refresh)."""
   import httpx  # local import — only the registry path needs it
 
   refresh_token = oauth.get("refreshToken")
@@ -1876,23 +1935,7 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
     )
     resp.raise_for_status()
     data = resp.json()
-  for field in ("access_token", "refresh_token", "expires_in"):
-    if field not in data:
-      raise RuntimeError(f"refresh response missing '{field}'")
-  refreshed = dict(oauth)
-  refreshed["accessToken"] = data["access_token"]
-  refreshed["refreshToken"] = data["refresh_token"]
-  now_ms = int(time.time() * 1000)
-  refreshed["expiresAt"] = now_ms + data["expires_in"] * 1000
-  stored_end = _claude_login_end_ms(refreshed.pop("refreshTokenExpiresAt", None))
-  if stored_end is not None:
-    new_end = claude_login_end_after(now_ms, data.get("refresh_token_expires_in"))
-    refreshed["refreshTokenExpiresAt"] = (
-      stored_end if new_end is None else min(stored_end, new_end)
-    )
-  if data.get("scope"):
-    refreshed["scopes"] = data["scope"].split()
-  return refreshed
+  return claude_oauth_after_token_grant(data, oauth)
 
 
 async def claude_access_token(data_dir: str) -> str:

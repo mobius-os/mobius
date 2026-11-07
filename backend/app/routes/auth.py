@@ -748,38 +748,24 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _write_credentials(token_data: dict) -> None:
-  """Transforms the token endpoint response into CLI credential format."""
-  for field in ("access_token", "refresh_token", "expires_in"):
-    if field not in token_data:
-      raise ValueError(f"Token response missing '{field}'")
+  """Stores a new Claude sign-in from the token endpoint response.
 
+  The CLI home is created if needed; the file is written atomically, 0600
+  unless it already exists with another mode, and keeps its other top-level
+  keys (such as MCP sign-ins) like a refresh does. The account's
+  `organizationUuid` (which usage controls address) is the response's, as
+  the CLI records it, so a previous account's never survives the sign-in."""
+  from app.providers import _write_claude_oauth, claude_oauth_after_token_grant
+
+  oauth = claude_oauth_after_token_grant(token_data, None)
+  email = (token_data.get("account") or {}).get("email_address", "")
+  oauth["email"] = email
+  organization = (token_data.get("organization") or {}).get("uuid")
   _, cli_home = _cli_env()
-
-  # Extract email from the account object if present.
-  account = token_data.get("account") or {}
-  email = account.get("email_address", "")
-
-  now_ms = int(time.time() * 1000)
-  oauth = {
-    "accessToken": token_data["access_token"],
-    "refreshToken": token_data["refresh_token"],
-    "expiresAt": now_ms + token_data["expires_in"] * 1000,
-    "scopes": token_data.get("scope", "").split(),
-    "email": email,
-  }
-  # The sign-in's hard end, in the field the CLI reports as `loginExpiresAt`
-  # and check_auth honors; refreshes keep it. When the response has no
-  # usable refresh_token_expires_in, Möbius leaves it absent (unknown) rather
-  # than assuming the CLI's 30-day default.
-  from app.providers import claude_login_end_after
-  login_end = claude_login_end_after(now_ms, token_data.get("refresh_token_expires_in"))
-  if login_end is not None:
-    oauth["refreshTokenExpiresAt"] = login_end
-  creds = {"claudeAiOauth": oauth}
-  path = os.path.join(cli_home, ".credentials.json")
-  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(fd, "w") as f:
-    json.dump(creds, f)
+  _write_claude_oauth(
+    Path(cli_home) / ".credentials.json", oauth,
+    {"organizationUuid": organization if isinstance(organization, str) and organization else None},
+  )
   log.info("Credentials written for %s", email or "(unknown)")
 
 
