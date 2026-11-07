@@ -159,3 +159,106 @@ def test_partial_stack_success_is_kept_and_only_the_unsent_layer_is_uncertain(
   kept = [routes._read_personal_attempt(routes._record_paths(app_id, rid)[0], app_id=app_id, record_id=rid)
           for rid in record_ids]
   assert kept[0] is None and kept[1]["phase"] == "branch_published"
+
+
+def test_armed_screenshot_send_failure_is_unconfirmed_and_keeps_its_receipt(
+  client, owner_token, monkeypatch, events,
+):
+  """Approved images may already be public before the first code-push phase."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff = _prepared_real_review(app_id, "armed-screenshots")
+  record["plan"]["screenshots"] = [{"name": "after.png", "sha256": "f" * 64, "alt": "After"}]
+  record["plan"]["body_draft"] += "\n\n![After](screenshot:after.png)"
+  _write_contribution(app_id, record["id"], record, diff)
+  _quiet_source(monkeypatch)
+  monkeypatch.setattr(routes, "_submit_prepared_pr", _crash_after(None))
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 503, response.text
+  assert response.json()["detail"]["code"] == "publication_unconfirmed"
+  path, _ = routes._record_paths(app_id, record["id"])
+  receipt = routes._read_personal_attempt(path, app_id=app_id, record_id=record["id"])
+  assert receipt is not None and receipt["phase"] == "armed"
+  [event] = events
+  assert event["certainty"] == "unknown"
+
+
+def _accepted(phase="complete"):
+  url = "https://github.com/mobius-os/app-demo/pull/5"
+  def publish(record, _diff, *, attempt_event, **_kwargs):
+    attempt_event(phase, {"action": "create_pr", "url": url, "number": 5,
+                          "head_sha": record["plan"]["head_sha"]}, {})
+    return url, 5, {}
+  return publish
+
+
+@pytest.mark.parametrize("route,writer", [
+  ("submit", "_mark_submit_success"), ("update-existing", "_mark_existing_pr_update_success"),
+])
+def test_failed_final_ledger_write_is_unconfirmed_and_keeps_the_receipt(
+  client, owner_token, monkeypatch, events, route, writer,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = f"ledger-fail-{route}"
+  _repo, record, diff = _prepared_real_review(app_id, record_id)
+  if route == "update-existing":
+    _as_update(app_id, record, diff, monkeypatch)
+  _quiet_source(monkeypatch)
+  monkeypatch.setattr(routes, "_submit_prepared_pr", _accepted())
+  def full_disk(**_kwargs): raise OSError("no space left on device")
+  monkeypatch.setattr(routes, writer, full_disk)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/{route}",
+    headers={"Authorization": f"Bearer {owner_token}"}, json={},
+  )
+  assert response.status_code == 503, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "publication_unconfirmed" and detail["number"] == 5
+  path, _ = routes._record_paths(app_id, record_id)
+  receipt = routes._read_personal_attempt(path, app_id=app_id, record_id=record_id)
+  assert receipt is not None and receipt["phase"] == "complete"
+  assert json.loads(path.read_text())["status"] == "submitting"  # nothing rolled back
+  [event] = events
+  assert event["certainty"] == "unknown" and event["status"] == 503
+
+
+@pytest.mark.parametrize("route", ["submit", "update-existing"])
+def test_failed_receipt_retirement_never_reports_a_durable_success_as_failed(
+  client, owner_token, monkeypatch, events, route,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = f"retire-fail-{route}"
+  _repo, record, diff = _prepared_real_review(app_id, record_id)
+  if route == "update-existing":
+    _as_update(app_id, record, diff, monkeypatch)
+  _quiet_source(monkeypatch)
+  monkeypatch.setattr(routes, "_submit_prepared_pr", _accepted())
+  def stuck(_self): raise OSError("read-only file system")
+  monkeypatch.setattr(routes._PersonalAttemptOwner, "settle", stuck)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/{route}",
+    headers={"Authorization": f"Bearer {owner_token}"}, json={},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["number"] == 5
+  [event] = events
+  assert event["certainty"] == "effect"
+
+
+def _as_update(app_id, record, diff, monkeypatch):
+  record.update(number=5, url="https://github.com/mobius-os/app-demo/pull/5",
+                head_repository="octocat/app-demo")
+  record["plan"].update(action="pr_update",
+                        pr_metadata={"old_title": record["plan"]["title"],
+                                     "old_body": record["plan"]["body_draft"]})
+  _write_contribution(app_id, record["id"], record, diff)
+  monkeypatch.setattr(routes, "_autopilot_live_target", lambda *_a: {
+    "error": None, "head_sha": record["plan"]["base_sha"], "base_branch": "main",
+    "title": record["plan"]["title"], "body": record["plan"]["body_draft"],
+  })
+  monkeypatch.setattr(routes, "_assert_reviewed_update_contains_live_head", lambda *_a: None)

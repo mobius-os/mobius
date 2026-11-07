@@ -451,3 +451,25 @@ def test_screenshot_body_mismatch_or_missing_witness_never_settles(monkeypatch, 
     attempt["record_patch"]["last_submit_screenshots"]["commit"] = "not-a-commit"
   proof_remote(monkeypatch, live_patch={"body": live_body})
   assert proof.observe_publication_effect(record, attempt)["outcome"] == expected
+
+
+@pytest.mark.parametrize("phase", ["push_pending", "push_ambiguous", "branch_published"])
+@pytest.mark.parametrize("remote,expected", [
+  ({"list_rows": []}, "pending"),
+  ({"list_rows": [], "branch_code": 404}, "unavailable"),
+  ({"list_rows": [], "branch": OLD}, "changed"),
+  ({}, "settled"),
+])
+def test_new_pr_push_receipts_observe_the_branch_read_only(monkeypatch, phase, remote, expected):
+  """The sender's real push-only states, including a crash before create intent."""
+  record, attempt = fixture("pr", phase)
+  request = attempt["effective_request"]
+  request["action"] = "push"
+  request.pop("title"); request.pop("body")
+  calls = proof_remote(monkeypatch, **remote)
+  result = proof.observe_publication_effect(record, attempt)
+  assert result["outcome"] == expected, result
+  assert (result.get("effect") == "branch_published") is (expected == "pending")
+  if expected == "pending":
+    assert "has not confirmed" in result["message"]
+  assert all(call.startswith("repos/") for call in calls)  # reads only

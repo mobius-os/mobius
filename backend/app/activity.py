@@ -32,8 +32,9 @@ read both):
   {"ev":"contribution_publication_outcome", "ts", "app_id", "attempt_id",
                            "action", "phase", "code", "status",
                            "certainty":"effect|none|unknown"}
-                           # one per Send/update/observed attempt outcome, never
-                           # per poll; no public text, patch, path or Git output
+                           # best effort, normally one per Send/update/observed
+                           # attempt outcome, never per poll; no public text,
+                           # patch, path or Git output
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
   {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
   {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}

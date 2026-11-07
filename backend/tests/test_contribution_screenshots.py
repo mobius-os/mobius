@@ -600,8 +600,8 @@ def submit(tmp_path, monkeypatch):
   monkeypatch.setattr(git_ops + "_git", fake_git)
   monkeypatch.setattr(git_ops + "_gh", fake_gh)
 
-  def send(upstream_repo):
-    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path)
+  def send(upstream_repo, **kwargs):
+    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path, **kwargs)
 
   return {"send": send, "events": events, "push": push}
 
@@ -635,6 +635,23 @@ def test_a_failed_push_after_the_upload_keeps_the_upload_for_the_retry(submit):
   assert raised.value.record_patch["last_submit_screenshots"] == {
     "repo": "octocat/project", "commit": "c" * 40,
   }
+
+
+def test_an_upload_before_the_first_signed_push_phase_leaves_the_attempt_armed(submit, monkeypatch):
+  """The images can be public while the receipt still says armed.
+
+  Send's failure mapping therefore never treats an armed attempt with
+  screenshots as certainly unpublished.
+  """
+  phases = []
+  def unreadable_tip(*_a, **_k):
+    raise RuntimeError("remote tip read failed after the image push")
+  monkeypatch.setattr("app.github_contribution_git._authoritative_upstream_branch_sha", unreadable_tip)
+  with pytest.raises(RuntimeError):
+    submit["send"]("octocat/project", attempt_event=lambda phase, *_a: phases.append(phase))
+  assert ("upload", "octocat/project") in submit["events"]
+  assert not any(event[0] == "push" for event in submit["events"] if isinstance(event, tuple))
+  assert set(phases) <= {"armed"}
 
 
 # --- Stacks ---------------------------------------------------------------------

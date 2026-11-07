@@ -2788,7 +2788,10 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
   phase = attempt.get("phase")
   effect = request.get("action")
   valid_effects = {
-    "pr": {"branch_published": {"create_pr"},
+    # A new PR's push phases are read-only witnesses too: an exact branch
+    # with no confirmed PR stays pending; only the sender may open the PR.
+    "pr": {"push_pending": {"push"}, "push_ambiguous": {"push"},
+           "branch_published": {"push", "create_pr"},
            "pr_ambiguous": {"create_pr"}, "complete": {"create_pr", "reconcile_pr"}},
     "pr_update": {
       "push_pending": {"push", "advance_successor_branch"},
@@ -2920,8 +2923,8 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
         if branch_sha == head_sha:
           return answer(
             "pending",
-            "The reviewed branch is published, but its pull request is not "
-            "open. Only the original approved Send can open it.",
+            "The reviewed branch is published, but GitHub has not confirmed "
+            "its exact pull request. Checking never opens one.",
             effect="branch_published",
           )
         if branch_sha is None:

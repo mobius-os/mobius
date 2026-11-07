@@ -662,3 +662,36 @@ def test_lost_screenshot_create_reply_settles_and_keeps_its_asset_witness(client
   saved = body["records"][0]
   assert saved["number"] == 7 and saved["last_submit_screenshots"] == witness
   assert not receipt_path(f).exists()
+
+
+def test_push_only_new_pr_receipt_is_pending_and_keeps_the_ledger(client, observation, monkeypatch):
+  f = observation
+  claim = copy.deepcopy(f["record"])
+  for key in ("last_submit_error", "last_submit_error_code", "last_submit_error_detail"):
+    claim.pop(key)
+  claim["status"] = "submitting"
+  routes._write_record(f["path"], claim)
+  owner = routes._PersonalAttemptOwner(app_id=f["app_id"], record_id=claim["id"], record_path=f["path"],
+    claimed=claim, action_input={"action": "submit", "publication_stage": "draft"})
+  # The push succeeded and the process died before writing its create intent.
+  owner.event("branch_published", {k: v for k, v in f["effect"].items() if k not in {"title", "body"}}
+              | {"action": "push"}, f["patch"])
+  routes._write_record(f["path"], {**claim, **f["patch"], "status": "prepared"})
+  remote = github_contribution_git._gh
+  monkeypatch.setattr(github_contribution_git, "_gh", lambda repo, *args, **kw: (
+    subprocess.CompletedProcess(args, 0, "[]", "") if "/pulls?" in args[1] else remote(repo, *args, **kw)))
+  before, receipt = f["path"].read_bytes(), receipt_path(f).read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "pending" and body["effect"] == "branch_published", body
+  assert body["attempt"] == {"action": "submit", "phase": "branch_published", "effect": "push"}
+  assert f["path"].read_bytes() == before and receipt_path(f).read_bytes() == receipt
+
+
+def test_resumed_local_settlement_logs_its_outcome(client, observation, monkeypatch):
+  f = observation
+  seen = []
+  monkeypatch.setattr(routes.activity, "log_event", lambda ev, **fields: seen.append(fields))
+  _crash_after_journal(client, f, monkeypatch)
+  assert seen == []
+  assert client.post(f["url"], headers=f["headers"]).json()["outcome"] == "settled"
+  assert [(e["action"], e["certainty"]) for e in seen] == [("observe", "effect")]

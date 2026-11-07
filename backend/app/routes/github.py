@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -806,9 +806,11 @@ def _log_publication_event(
 ) -> None:
   """Record one content-free publication outcome at a route boundary.
 
-  The attempt id is a stable, non-secret digest shared by one claim's sender
-  and observer. No public text, patch, path, credential or Git output is
-  recorded.
+  This is best-effort diagnostic telemetry, not exactly-once accounting: a
+  process death between a ledger write and its event loses that event. The
+  attempt id is a stable, non-secret digest of the claimed review, shared by
+  its sender and observer (a resend of the same claim reuses it). No public
+  text, patch, path, credential or Git output is recorded.
   """
   activity.log_event(
     "contribution_publication_outcome", app_id=app_id,
@@ -827,6 +829,22 @@ def _attempt_phase(owner: "_PersonalAttemptOwner") -> str | None:
   return str(receipt.get("phase") or "") if receipt else None
 
 
+def _attempt_may_be_public(owner: "_PersonalAttemptOwner") -> bool:
+  """Whether an attempt may already have a public effect, by its signed facts.
+
+  The code push phases are signed, but Send hosts a new PR's approved
+  screenshots while the receipt is still armed: those images may be public
+  before any later phase is written. Only an armed or normalizing attempt
+  without screenshots is certainly unpublished. (A fork Send creates first is
+  an empty copy of the public target and carries no reviewed content.)
+  """
+  phase = _attempt_phase(owner)
+  if phase not in _NO_EFFECT_ATTEMPT_PHASES:
+    return True
+  plan = owner.claim_input.get("plan") if isinstance(owner.claim_input, dict) else None
+  return bool(contribution_screenshots.plan_entries(plan if isinstance(plan, dict) else {}))
+
+
 def _log_publication_outcome(
   owner: "_PersonalAttemptOwner", *, action: str, status: int, code: str = "",
   settled_effect: bool = False,
@@ -838,10 +856,43 @@ def _log_publication_outcome(
     action=action, phase=phase, code=code, status=status,
     certainty=(
       "effect" if settled_effect
-      else "none" if phase in _NO_EFFECT_ATTEMPT_PHASES
-      else "unknown"
+      else "unknown" if _attempt_may_be_public(owner)
+      else "none"
     ),
   )
+
+
+@contextmanager
+def _settling_public_effect(
+  owner: "_PersonalAttemptOwner", *, action: str, url: object, number: object,
+):
+  """Report a failed final ledger write after an accepted effect as unconfirmed.
+
+  GitHub already accepted the effect, so the complete receipt is kept for
+  read-only observation and nothing is rolled back. The response is built
+  without reading or writing the ledger again.
+  """
+  try:
+    yield
+  except Exception as exc:
+    log.exception("Contribution %s settlement write failed for %s/%s",
+                  action, owner.app_id, owner.record_id)
+    _log_publication_outcome(owner, action=action, status=503, code="publication_unconfirmed")
+    raise HTTPException(status_code=503, detail={
+      "message": _PUBLICATION_UNCONFIRMED, "code": "publication_unconfirmed",
+      "record": None, "url": url, "number": number,
+    }) from exc
+
+
+def _retire_settled_attempt(owner: "_PersonalAttemptOwner") -> None:
+  # The ledger already holds the success. A failed retirement leaves a
+  # complete receipt that cleanup or observation retires; it never turns the
+  # durable success into a reported failure.
+  try:
+    owner.settle()
+  except OSError:
+    log.warning("Contribution receipt retirement failed for %s/%s",
+                owner.app_id, owner.record_id, exc_info=True)
 
 
 def _log_open_attempt_outcomes(
@@ -858,11 +909,11 @@ def _unexpected_publication_failure(
 ) -> tuple[str, str, int]:
   """Map an unexpected exception by signed phase, never by its text.
 
-  Only attempts still before their first public effect make a definite
-  refusal. Any later phase may already be public, so it is reported as
-  unconfirmed for read-only observation, not as a failure to resend.
+  Only attempts certainly before any public effect make a definite refusal.
+  Anything that may already be public is reported as unconfirmed, keeps its
+  receipt, and is never offered as a failure to resend.
   """
-  if all(_attempt_phase(owner) in _NO_EFFECT_ATTEMPT_PHASES for owner in owners):
+  if not any(_attempt_may_be_public(owner) for owner in owners):
     return refused, "publication_failed", 500
   return _PUBLICATION_UNCONFIRMED, "publication_unconfirmed", 503
 
@@ -3273,6 +3324,15 @@ async def observe_contribution_publication(
       value["effect"] = effect
     return value
 
+  def log_settled(attempt: dict) -> None:
+    # Boundary telemetry, best effort: a crash between the ledger write and
+    # this line loses the event; a resumed local settlement logs it instead.
+    _log_publication_event(
+      app_id, record_id, attempt.get("claim_sha256"), action="observe",
+      phase=str(attempt.get("phase") or ""), code="observed_settled",
+      status=200, certainty="effect",
+    )
+
   # Every sender of this record holds its action lock from admission to its
   # ledger write, and it alone spans the remote reads below: no database,
   # source-dir or app-storage lease is retained during GitHub I/O.
@@ -3289,6 +3349,7 @@ async def observe_contribution_publication(
       if attempt.get("observation_settlement") is not None:
         settled = _finish_observation_settlement(app_id, record_id, attempt)
         if settled is not None:
+          log_settled(attempt)
           return response("settled", settled, "The observed outcome is saved.")
         if not _observation_unapplied(record, attempt):
           return response("changed", record, "The saved settlement no longer matches the ledger.", attempt)
@@ -3328,11 +3389,7 @@ async def observe_contribution_publication(
       saved = _finish_observation_settlement(app_id, record_id, settled_attempt)
       if saved is None:
         return response("changed", current, "The settlement changed before its ledger write.", attempt)
-      _log_publication_event(
-        app_id, record_id, attempt.get("claim_sha256"), action="observe",
-        phase=str(attempt.get("phase") or ""), code="observed_settled",
-        status=200, certainty="effect",
-      )
+      log_settled(attempt)
       return response("settled", saved, "The exact publication outcome is saved.")
 
 
@@ -3524,7 +3581,7 @@ async def submit_contribution(
         app_id=app_id, record_path=record_path, message=message, code=code,
       )
       _log_publication_outcome(attempt_owner, action="submit", status=status, code=code)
-      if attempt_owner.replay_phase() == "armed":
+      if attempt_owner.replay_phase() == "armed" and not _attempt_may_be_public(attempt_owner):
         attempt_owner.settle()
     raise HTTPException(
       status_code=status,
@@ -3547,15 +3604,16 @@ async def submit_contribution(
         status_code=409,
         detail="This contribution changed while the PR was being created.",
       )
-    submitted = _mark_submit_success(
-      record_path=record_path,
-      record=current,
-      pr_url=pr_url,
-      number=number,
-      record_patch=record_patch,
-    )
+    with _settling_public_effect(attempt_owner, action="submit", url=pr_url, number=number):
+      submitted = _mark_submit_success(
+        record_path=record_path,
+        record=current,
+        pr_url=pr_url,
+        number=number,
+        record_patch=record_patch,
+      )
     _log_publication_outcome(attempt_owner, action="submit", status=200, settled_effect=True)
-    attempt_owner.settle()
+    _retire_settled_attempt(attempt_owner)
 
   # Stamp the autopilot grant AFTER the PR is durably open. The grant is the
   # trust anchor for the background loop and lives in the DB (never the
@@ -4128,7 +4186,8 @@ async def update_existing_contribution(
           app_id=app_id, record_path=record_path, message=message, code=code,
         )
       _log_publication_outcome(attempt_owner, action="update_existing", status=status, code=code)
-      if not successor and attempt_owner.replay_phase() == "armed":
+      if (not successor and attempt_owner.replay_phase() == "armed"
+          and not _attempt_may_be_public(attempt_owner)):
         attempt_owner.settle()
     raise HTTPException(
       status_code=status,
@@ -4151,17 +4210,20 @@ async def update_existing_contribution(
         status_code=409,
         detail="This contribution changed while the pull request was updating.",
       )
-    updated = _mark_existing_pr_update_success(
-      record_path=record_path,
-      record=current,
-      pr_url=pr_url,
-      number=number,
-      record_patch=record_patch,
-    )
+    with _settling_public_effect(
+      attempt_owner, action="update_existing", url=pr_url, number=number,
+    ):
+      updated = _mark_existing_pr_update_success(
+        record_path=record_path,
+        record=current,
+        pr_url=pr_url,
+        number=number,
+        record_patch=record_patch,
+      )
     _log_publication_outcome(
       attempt_owner, action="update_existing", status=200, settled_effect=True,
     )
-    attempt_owner.settle()
+    _retire_settled_attempt(attempt_owner)
 
   pushed_head = str(
     (record_patch or {}).get("last_submit_push_sha")
@@ -4572,7 +4634,7 @@ async def update_contribution_stack(
         _log_publication_outcome(
           attempt_owner, action=action_input["action"], status=200, settled_effect=True,
         )
-        attempt_owner.settle()
+        _retire_settled_attempt(attempt_owner)
       updated_rows.append({
         "id": updated.get("id"),
         "url": pr_url,
@@ -4651,7 +4713,7 @@ async def update_contribution_stack(
         open_owners, action=action_input["action"], status=status, code=code,
       )
       for owner in open_owners:
-        if owner.replay_phase() == "armed":
+        if owner.replay_phase() == "armed" and not _attempt_may_be_public(owner):
           owner.settle()
     raise HTTPException(
       status_code=status,
@@ -4850,7 +4912,7 @@ async def submit_contribution_stack(
         _log_publication_outcome(
           attempt_owner, action=action_input["action"], status=200, settled_effect=True,
         )
-        attempt_owner.settle()
+        _retire_settled_attempt(attempt_owner)
       submitted_urls.append({
         "id": opened.get("id"),
         "url": pr_url,
@@ -4903,7 +4965,7 @@ async def submit_contribution_stack(
         open_owners, action=action_input["action"], status=status, code=code,
       )
       for owner in open_owners:
-        if owner.replay_phase() == "armed":
+        if owner.replay_phase() == "armed" and not _attempt_may_be_public(owner):
           owner.settle()
     raise HTTPException(
       status_code=status,
