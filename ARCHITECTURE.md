@@ -1500,9 +1500,10 @@ The latter stops future delivery; it never retracts earlier
 provider input or tool effects. A live or unresolved admitting run returns
 `not_withdrawable`; an existing receipt returns `already_delivered`. The read-side
 `can_withdraw` projection shares this eligibility check, but the writer rechecks
-it at mutation. Withdrawal also interrupts exact never-admitted Wait carriers
-and clears their live-message pointers in the same transaction, without stopping
-unrelated turns. Delivered history stays unchanged and Restart-activation Waits
+it at mutation. Withdrawal also removes its queued result notices, interrupts
+exact never-admitted Wait carriers, and clears their live-message pointers in
+the same transaction, without stopping unrelated turns. Delivered history stays
+unchanged and Restart-activation Waits
 remain card-owned. Do not broaden Stop silently while cleaning up the
 implementation.
 

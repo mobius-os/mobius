@@ -2897,6 +2897,15 @@ class ChatWriterActor:
       raise _PersistFailed("PersistSessionId did not persist")
     return True
 
+  def _stage_remove_pending_result_notices(
+    self, db, chat, *, message_kind: str, result_id: str, resolve_result,
+  ) -> None:
+    """Remove only notices bound to this exact result's saved ownership."""
+    chat.pending_messages = [message for message in (chat.pending_messages or [])
+      if not (message.get("kind") == message_kind
+        and (target := resolve_result(db, chat.id, message)) is not None
+        and target.id == result_id)]
+
   def _stage_interrupt_unadmitted_carriers(
     self, db, chat, *, tokens: tuple[str, ...], goal_id: str | None, end_reason: str,
   ) -> set[str]:
@@ -2919,6 +2928,8 @@ class ChatWriterActor:
     return stopped_tokens
 
   def _withdraw_wait(self, db, cmd: WithdrawWait) -> dict:
+    from app.continuations import WAIT_RESULT_MESSAGE_KIND
+    from app.run_state import _wait_result_row
     from app.chat_waits import (
       _WITHDRAWN_DISPOSITIONS, _broadcast_changed, _cancel_active_check,
       serialize_wait, stage_withdraw_wait,
@@ -2930,14 +2941,17 @@ class ChatWriterActor:
     outcome = stage_withdraw_wait(db, row)
     stopped_tokens = set()
     if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
+      chat = db.get(models.Chat, cmd.chat_id)
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=WAIT_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=_wait_result_row)
       stopped_tokens = self._stage_interrupt_unadmitted_carriers(
-        db, db.get(models.Chat, cmd.chat_id),
+        db, chat,
         tokens=("wait-resume-" + row.id, "wait-resume-" + row.id + ".retry"),
         goal_id=row.goal_id, end_reason="wait_withdrawn",
       )
     # Capture the response in this transaction, not a route-side read that
     # could mix an earlier disposition with a later provider receipt.
-    result = {**serialize_wait(row, db=db), **outcome}
+    result = {**serialize_wait(row, db=db, withdrawal_outcome=outcome), **outcome}
     if not _commit_or_rollback(db):
       raise _PersistFailed("WithdrawWait did not persist")
     if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
@@ -2960,10 +2974,8 @@ class ChatWriterActor:
       # Queue/transcript ownership stays here, not in the dependency module.
       # Rechecking at enqueue, turn admission and provider admission closes
       # the read-before-withdraw windows without cancelling unrelated work.
-      chat.pending_messages = [message for message in (chat.pending_messages or [])
-        if not (message.get("kind") == DEPENDENCY_RESULT_MESSAGE_KIND
-          and (target := dependency_result_row(db, chat.id, message)) is not None
-          and target.id == row.id)]
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=DEPENDENCY_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=dependency_result_row)
       stopped_tokens = self._stage_interrupt_unadmitted_carriers(
         db, chat,
         tokens=("dependency-resume-" + row.id, "dependency-resume-" + row.id + ".retry"),

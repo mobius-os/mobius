@@ -1,6 +1,8 @@
 """Ordinary Wait withdrawal is ordered with admission, never provider rollback."""
 
 import pytest
+from sqlalchemy import event, null
+from sqlalchemy.orm import Session
 
 from app import chat_waits, models
 from app.chat_writer import (
@@ -127,6 +129,10 @@ def test_cancel_owed_result_prevents_queued_or_direct_carrier_admission(
   if carrier == "queued":
     get_writer().submit(AppendPending(chat_id=chat.id, user_msg=notice)).result(timeout=5)
   _cancel(client, auth, wait)
+  db.expire_all()
+  assert chat.pending_messages == []
+  from app.chat import is_chat_busy
+  assert not is_chat_busy(db, chat)
   if carrier == "queued":
     result = get_writer().submit(PromotePending(chat_id=chat.id,
       run_token="queued-carrier")).result(timeout=5)
@@ -139,6 +145,114 @@ def test_cancel_owed_result_prevents_queued_or_direct_carrier_admission(
     assert isinstance(result, StartContinuationBlocked) and result.reason == "withdrawn"
   db.expire_all()
   assert db.query(models.ChatRun).filter_by(chat_id=chat.id).count() == 0
+
+
+@pytest.mark.parametrize("attempted", [False, True])
+def test_withdrawal_removes_only_its_exact_queued_notices(client, auth, db, chat, attempted):
+  wait = _wait(db, chat)
+  other = _wait(db, chat)
+  if attempted:
+    run = _receiver(db, chat)
+    _admit(chat, run, wait).result(timeout=5)
+    run.status = "failed"
+    db.commit()
+  writer = get_writer()
+  for cid in ("wait-result-" + wait.id, "wait-result-" + wait.id + ".retry", "wait-result-" + other.id):
+    writer.submit(AppendPending(chat_id=chat.id, user_msg={
+      "role": "user", "kind": "wait_result", "hidden": True,
+      "cid": cid, "content": "Synthetic result", "ts": 1,
+    })).result(timeout=5)
+  writer.submit(AppendPending(chat_id=chat.id, user_msg={
+    "role": "user", "cid": "owner-message", "content": "Unrelated owner input", "ts": 2,
+  })).result(timeout=5)
+  result = _cancel(client, auth, wait)
+  assert result["disposition"] == ("withdrawn_after_attempt" if attempted else "withdrawn")
+  db.expire_all()
+  assert [message["cid"] for message in chat.pending_messages] == ["wait-result-" + other.id, "owner-message"]
+  if attempted:
+    assert run.status == "failed" and run.admitted_wait_results_json == [wait.id]
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_unsuccessful_withdrawal_preserves_queued_notices(db, chat, monkeypatch, refused):
+  from app import chat_writer
+  wait = _wait(db, chat)
+  if refused:
+    run = _receiver(db, chat)
+    _admit(chat, run, wait).result(timeout=5)
+  notice = {"role": "user", "kind": "wait_result", "hidden": True,
+    "cid": "wait-result-" + wait.id, "content": "Synthetic result", "ts": 1}
+  writer = get_writer()
+  writer.submit(AppendPending(chat_id=chat.id, user_msg=notice)).result(timeout=5)
+  if not refused:
+    monkeypatch.setattr(chat_writer, "_commit_or_rollback", lambda session: session.rollback() or False)
+  result = writer.submit(chat_writer.WithdrawWait(chat_id=chat.id, wait_id=wait.id))
+  if refused:
+    assert result.result(timeout=5)["disposition"] == "not_withdrawable"
+  else:
+    with pytest.raises(_PersistFailed, match="WithdrawWait did not persist"):
+      result.result(timeout=5)
+  db.expire_all()
+  assert [message["cid"] for message in chat.pending_messages] == [notice["cid"]]
+  assert wait.result_disposition is None
+
+
+@pytest.mark.parametrize("attempt", ["none", "ended", "live"])
+def test_writer_computes_withdrawal_eligibility_once(db, chat, monkeypatch, attempt):
+  from app.chat_writer import WithdrawWait
+  wait = _wait(db, chat)
+  if attempt != "none":
+    run = _receiver(db, chat)
+    _admit(chat, run, wait).result(timeout=5)
+    if attempt == "ended":
+      run.status = "failed"
+      db.commit()
+  calls = []
+  original = chat_waits.wait_withdrawal_outcome
+  def observed(session, row):
+    calls.append(row.id)
+    return original(session, row)
+  monkeypatch.setattr(chat_waits, "wait_withdrawal_outcome", observed)
+  result = get_writer().submit(WithdrawWait(chat_id=chat.id, wait_id=wait.id)).result(timeout=5)
+  assert result["disposition"] == {
+    "none": "withdrawn", "ended": "withdrawn_after_attempt", "live": "not_withdrawable",
+  }[attempt]
+  assert calls == [wait.id]
+
+
+@pytest.mark.parametrize("unrelated_count", [0, 90])
+def test_withdrawal_reads_only_dedicated_carriers_or_nonempty_result_snapshots(db, chat, unrelated_count):
+  wait = _wait(db, chat)
+  snapshots = {"wait-resume-" + wait.id: None,
+    "attempted-this-result": [wait.id], "attempted-another-result": ["another-wait"]}
+  for token, ids in snapshots.items():
+    db.add(models.ChatRun(id=token, chat_id=chat.id, status="failed", provider="claude",
+      provider_execution_admitted=True, admitted_wait_results_json=ids))
+  for index in range(unrelated_count):
+    db.add(models.ChatRun(id=f"unrelated-{index}", chat_id=chat.id, status="running", provider="claude",
+      provider_execution_admitted=True,
+      admitted_wait_results_json=(None, [], null())[index % 3]))
+  db.commit()
+  # Explicit NULL INSERTs can take the Boolean column's False default;
+  # use an UPDATE to represent legacy unknown admission faithfully.
+  db.query(models.ChatRun).filter(models.ChatRun.id.in_(
+    [f"unrelated-{index}" for index in range(0, unrelated_count, 2)],
+  )).update({models.ChatRun.provider_execution_admitted: None}, synchronize_session=False)
+  db.commit()
+  loaded = []
+  def observe(state):
+    if state.is_select and [item["name"] for item in state.statement.column_descriptions] == [
+      "id", "status", "admitted_wait_results_json",
+    ]:
+      rows = state.invoke_statement().freeze()
+      loaded.append({row[0] for row in rows.data})
+      return rows()
+  event.listen(Session, "do_orm_execute", observe, retval=True)
+  try:
+    assert chat_waits.wait_withdrawal_outcome(db, wait)["disposition"] == "withdrawn_after_attempt"
+  finally:
+    event.remove(Session, "do_orm_execute", observe)
+  assert loaded == [set(snapshots)]
 
 
 @pytest.mark.parametrize("carrier", ["ordinary", "direct"])

@@ -37,7 +37,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import case
+from sqlalchemy import Text, case, cast, or_
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
@@ -400,6 +400,11 @@ def wait_withdrawal_outcome(db: Session, row: models.ChatWait) -> dict:
     models.ChatRun.admitted_wait_results_json).filter(
     models.ChatRun.chat_id == row.chat_id,
     models.ChatRun.provider_execution_admitted.is_not(False),
+    # Keep legacy dedicated carriers even without a snapshot. Exclude
+    # canonical empty/null snapshots in SQL, before decoding run history.
+    # Text comparison also works on PostgreSQL's equality-less JSON type.
+    or_(models.ChatRun.id.in_(carriers),
+      cast(models.ChatRun.admitted_wait_results_json, Text).not_in(("null", "[]"))),
   )
   attempted = False
   for token, status, ids in admitted:
@@ -429,7 +434,7 @@ def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
       or row.result_disposition in _WITHDRAWN_DISPOSITIONS or row.status == "cancelled"):
     return outcome
   now = now_naive_utc()
-  db.query(models.ChatWait).filter(
+  updated = db.query(models.ChatWait).filter(
     models.ChatWait.id == row.id,
     models.ChatWait.kind != "platform_activation",
     (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
@@ -441,7 +446,9 @@ def stage_withdraw_wait(db: Session, row: models.ChatWait) -> dict:
     models.ChatWait.result_disposed_at: now,
   }, synchronize_session=False)
   db.refresh(row)
-  return wait_withdrawal_outcome(db, row)
+  # Reuse the transaction's eligibility decision when the guarded write won.
+  # A lost write instead reports the now-settled row, never a false success.
+  return outcome if updated else wait_withdrawal_outcome(db, row)
 
 
 def stage_cancel_waits_for_chat(db: Session, chat_id: str) -> int:
@@ -526,7 +533,10 @@ def wait_resume_blocker(db: Session, row: models.ChatWait) -> str | None:
   return None
 
 
-def serialize_wait(row: models.ChatWait, *, db: Session) -> dict:
+def serialize_wait(
+  row: models.ChatWait, *, db: Session, withdrawal_outcome: dict | None = None,
+) -> dict:
+  """Project state, reusing the writer's action outcome inside its transaction."""
   # Platform activation has no product deadline. Its non-null storage value is
   # retained only for compatibility with the original shared ChatWait schema.
   presented_deadline = None if row.kind == "platform_activation" else row.deadline_at
@@ -541,7 +551,8 @@ def serialize_wait(row: models.ChatWait, *, db: Session) -> dict:
     "can_withdraw": (
       row.kind != "platform_activation" and row.result_disposition is None
       and row.resume_delivered_at is None and row.status in ("armed", *_OUTCOMES)
-      and wait_withdrawal_outcome(db, row)["disposition"] in _WITHDRAWN_DISPOSITIONS
+      and (withdrawal_outcome if withdrawal_outcome is not None
+        else wait_withdrawal_outcome(db, row))["disposition"] in _WITHDRAWN_DISPOSITIONS
     ),
     "delivery_pending": row.status in _OUTCOMES and row.resume_delivered_at is None and row.result_disposition is None,
     "result_disposition": row.result_disposition,
