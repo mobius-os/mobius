@@ -108,7 +108,10 @@ async def start_queued_owner_continuation(
     )
     if not next_user:
       if owner_send:
-        raise HTTPException(409, detail="Nothing is queued to send.")
+        # Nothing was held or runnable any more: the empty send's caller
+        # settles that without an error (`_send_queue`).
+        discard_starting(chat_id)
+        return None
       raise HTTPException(503, detail="Could not resume the question; please try again.")
     get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
     _schedule_continuation(
@@ -121,47 +124,75 @@ async def start_queued_owner_continuation(
     raise
 
 
+def _input_must_queue(
+  db: Session, chat_id: str, principal: Principal, *, manual: bool = False,
+) -> bool:
+  """Whether new input must join the queue behind work that already owns the
+  chat, whether or not a turn is running.
+
+  - A restart drain: no turn may start until the restart (design §2.2). The
+    input self-heals on the owner's next action after it. Steers queue too: a
+    steer into a dying runner could start provider work mid-shutdown.
+  - An approved typed restart wait (unfinished work A): later input B is
+    durable but cannot be promoted until the ready-boot continuation owns A.
+  - A provider-limit park that resumes by itself: the owner's input waits for
+    the resumed turn rather than spending a new attempt or disabling the
+    automatic recovery. The explicit Resume control (`manual`) bypasses it.
+
+  The typed send and the owner's empty send (`_send_queue`) share this one
+  admission rule.
+  """
+  from app.platform_restart import activation_barrier_wait_id
+  return (
+    is_draining()
+    or activation_barrier_wait_id(db, chat_id) is not None
+    or (
+      principal.app_id is None and not manual
+      and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
+    )
+  )
+
+
 async def _send_queue(
   chat_id: str, db: Session, principal: Principal, restore_archived: bool,
 ):
   """The owner's empty send: release the queue a Stop held.
 
   The held rows rejoin the ordinary queue as owner input of this moment, so
-  they take exactly the admission an ordinary owner message would: while
-  other work owns the chat (a running turn, a restart drain, an activation,
-  an auto-resuming provider-limit park) they rejoin the queue and drain after
-  it (`ReleaseHeld`); otherwise they start now as the same turn the queue
-  would drain into, released in the commit that starts it, so a refusal
-  leaves them held. A shared browser guest cannot send the owner's queue: it
-  would run as the owner's work, outside the guest's revocable grant.
+  they take exactly the admission a typed owner message would: while other
+  work owns the chat (a running turn, or `_input_must_queue`) they rejoin
+  the queue and drain after it (`ReleaseHeld`); otherwise they start now as
+  the same turn the queue would drain into, released in the commit that
+  starts it, so a refused start leaves them held. When nothing is held any
+  more (another device already sent or cancelled them) the send has nothing
+  left to do and says so, rather than failing. A shared browser guest cannot
+  send the owner's queue: it would run as the owner's work, outside the
+  guest's revocable grant.
   """
   if not is_owner_input_principal(principal) or principal.browser is not None:
     raise HTTPException(403, detail="Only the owner can send queued messages.")
-  chat = db.get(models.Chat, chat_id)
-  if not chat.pending_messages:
-    raise HTTPException(409, detail="Nothing is queued to send.")
-  from app.platform_restart import activation_barrier_wait_id
-  if (
-    is_chat_running(chat_id) or is_draining()
-    or activation_barrier_wait_id(db, chat_id) is not None
-    or _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
-  ):
-    from app.chat_writer import ReleaseHeld
-    await await_ack(get_writer().submit(ReleaseHeld(
-      chat_id=chat_id, restore_archived=restore_archived,
-    )))
-    return JSONResponse(status_code=202, content={
-      "status": "queued", "running": is_chat_running(chat_id),
+  if not (is_chat_running(chat_id) or _input_must_queue(db, chat_id, principal)):
+    try:
+      started = await start_queued_owner_continuation(
+        chat_id, db, owner_send=True, restore_archived=restore_archived,
+      )
+    except chat_queue.PendingAdmissionBlocksPromotion as exc:
+      if exc.reason != "activation":
+        raise _pending_question_open_conflict() from exc
+      started = None  # An activation armed meanwhile: wait behind it.
+    if started:
+      return JSONResponse(status_code=202, content={"status": "started", "message": started})
+  from app.chat_writer import ReleaseHeld
+  released = await await_ack(get_writer().submit(ReleaseHeld(
+    chat_id=chat_id, restore_archived=restore_archived,
+  )))
+  if not released["released"]:
+    return JSONResponse(status_code=200, content={
+      "status": "duplicate", "running": is_chat_running(chat_id),
     })
-  try:
-    started = await start_queued_owner_continuation(
-      chat_id, db, owner_send=True, restore_archived=restore_archived,
-    )
-  except chat_queue.PendingAdmissionBlocksPromotion as exc:
-    if exc.reason == "activation":
-      raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
-    raise _pending_question_open_conflict()
-  return JSONResponse(status_code=202, content={"status": "started", "message": started})
+  return JSONResponse(status_code=202, content={
+    "status": "queued", "running": is_chat_running(chat_id),
+  })
 
 
 def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
@@ -1554,57 +1585,17 @@ async def _send_message_locked(
       "message": "This chat is already continuing or restarting. Refresh its state before resuming.",
     })
 
-  # Drain gate (design §2.2): while the worker is draining for a restart, never
-  # start a new turn or promote the queue — append to pending and return
-  # "queued". The send is preserved and self-heals on the owner's next action
-  # after the restart (the stale-pending drain), so nothing the owner sent is
-  # lost. This must intercept BEFORE the queue-or-start branches below, which
-  # would otherwise spawn a turn (fresh StartTurn, or a stale-pending drain).
-  # force_steer is deliberately NOT exempt: a steer accepted while the drain is
-  # interrupting a handle can buffer into the dying runner's continuation and
-  # start fresh provider work mid-shutdown (or, with no running turn at all,
-  # fall through to a fresh StartTurn). During the restart window every send —
-  # steer included — queues.
-  if is_draining():
-    new_msg = await _append_to_pending(
-      chat, body, db, initiated_by_app_id=principal.app_id,
-      browser_grant_id=principal.browser_grant_id,
-      restore_archived=restore_archived,
-      owner_input=is_owner_input_principal(principal),
-    )
-    db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
-
-  # An approved typed restart wait is unfinished work A. Later owner input B is
-  # durable, but cannot be promoted until the ready-boot continuation owns A.
-  # The activation writer command has the sole authenticated bypass.
-  from app.platform_restart import activation_barrier_wait_id
-  if activation_barrier_wait_id(db, chat_id) is not None:
+  # Work that already owns the chat (a restart drain, an approved restart's
+  # activation, an auto-resuming limit park) takes new input into its queue
+  # before the queue-or-start branches below could spawn a turn. Resume
+  # bypasses the park; a drain refused it above, so only an activation is
+  # left to refuse it here.
+  if _input_must_queue(db, chat_id, principal, manual=manual_resume):
     if manual_resume:
       raise HTTPException(409, detail={
         "code": "recovery_changed",
         "message": "The saved restart must finish before this chat can resume.",
       })
-    new_msg = await _append_to_pending(
-      chat, body, db, initiated_by_app_id=principal.app_id,
-      browser_grant_id=principal.browser_grant_id,
-      restore_archived=restore_archived,
-      owner_input=is_owner_input_principal(principal),
-    )
-    db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
-
-  # A provider-limit park has no live process, but it is still the chat's
-  # exact unfinished run. Ordinary owner messages join its durable queue and
-  # wait until the resumed turn finishes; they do not implicitly spend a new
-  # provider attempt or disable automatic recovery. The explicit recovery
-  # control sends ``continuation=manual`` and deliberately bypasses this hold
-  # after credits or an account reset restore availability.
-  if (
-    principal.app_id is None
-    and body.continuation != "manual"
-    and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
-  ):
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
       browser_grant_id=principal.browser_grant_id,
