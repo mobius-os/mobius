@@ -12,6 +12,7 @@ export const SESSION_LIMITS = Object.freeze({
   confirmationItems: 256, confirmationFacts: 8, confirmationText: 512,
   title: 120, items: 12, itemStatus: 40, itemNote: 200, itemLinks: 2, itemLinkLabel: 40,
   rows: 12, rowTitle: 120, rowMeta: 160,
+  askRefs: 12,
 })
 const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'accent'])
 /** What this host draws from a session report beyond the original fields,
@@ -19,9 +20,11 @@ const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'acc
  *  covers `title`, `items`, `itemFacts`, `open` and the `accent` tone;
  *  `rows-v2` adds app-sourced `rows`, `titleTone`/`titleBusy`, the host's
  *  `context` (chat id, newest block) and `moebius:app-block-refresh` hints.
- *  An app that does not see a feature is on an older host and should keep its
- *  older presentation. */
+ *  `ask-v1` (only for an app admitted to `chat.blocks.ask`, passiveAskAllowed)
+ *  adds the host-drawn `ask`. An app that does not see a feature is on an
+ *  older host, or lacks the grant, and should keep its older presentation. */
 export const SESSION_FEATURES = Object.freeze(['row-state', 'rows-v2'])
+export const ASK_FEATURE = 'ask-v1'
 const RECOVERY_ERROR = 'This app session needs recovery. Open the app to check the result before trying again.'
 export const INCOMPLETE_CONFIRMATION = 'Open the app to review this action. Its full current identity is unavailable here.'
 export const AMBIGUOUS_CONFIRMATION = 'Open the app to review these actions. More than one is asking for confirmation at once.'
@@ -116,9 +119,43 @@ export function sessionRows(value, app) {
   return rows
 }
 
+/* An ask (`ask-v1`) names what the app flagged; it carries no words of the
+   app's own. The host writes the whole owner message from a fixed template
+   and these references, so what is sent is predictable and identical for the
+   owner and the agent. */
+export const ASK_LABEL = 'Fix in chat'
+const ASK_REF_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const ASK_REF_CODE = /^[a-z][a-z0-9_]{1,47}$/
+const ASK_REF_REV = /^[0-9a-f]{7,64}$/
+
+/** `{refs: [{id, code, rev}]}` with 1 to 12 references, or null. `rev` is the
+ *  app's token for the state being reported (for example the record's
+ *  reviewed head or its last failure's digest): it only keys the message id,
+ *  so a changed state can be asked about again. Any invalid reference
+ *  rejects the whole ask; repeats collapse. */
+export function sessionAsk(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !Array.isArray(value.refs) || value.refs.length < 1 || value.refs.length > SESSION_LIMITS.askRefs) return null
+  const refs = []
+  for (const ref of value.refs) {
+    if (typeof ref?.id !== 'string' || typeof ref.code !== 'string' || typeof ref.rev !== 'string'
+      || !ASK_REF_ID.test(ref.id) || !ASK_REF_CODE.test(ref.code) || !ASK_REF_REV.test(ref.rev)) return null
+    if (!refs.some(seen => seen.id === ref.id && seen.code === ref.code && seen.rev === ref.rev)) refs.push({ id: ref.id, code: ref.code, rev: ref.rev })
+  }
+  return { refs }
+}
+
+/** The owner message an ask sends, written entirely by the host: one fixed
+ *  sentence naming the app, then one line per reference (without `rev`). */
+export function askMessage(app, ask) {
+  return [`Please fix what the ${app} card in this chat flagged:`, '',
+    ...ask.refs.map(ref => `\`${app} · ${ref.id} · ${ref.code}\``)].join('\n')
+}
+
 /** Parse one app-block-state message for this session, its known action keys
- *  and (optionally) the block's item intents. */
-export function sessionState(message, sessionId, keys, intents = new Set(), app = '') {
+ *  and (optionally) the block's item intents. `ask` says whether this app may
+ *  report an ask at all; it is dropped while any action confirms or is busy. */
+export function sessionState(message, sessionId, keys, intents = new Set(), app = '', { ask = false } = {}) {
   if (!message || message.type !== 'moebius:app-block-state' || message.sessionId !== sessionId
     || !Array.isArray(message.actions) || message.actions.length > SESSION_LIMITS.actions) return null
   const checkpoint = Object.hasOwn(message, 'checkpoint') ? sessionCheckpoint(message.checkpoint) : null
@@ -142,6 +179,7 @@ export function sessionState(message, sessionId, keys, intents = new Set(), app 
     title: shortText(message.title, SESSION_LIMITS.title), items: sessionItems(message.items, intents),
     titleTone: tone(message.titleTone), titleBusy: message.titleBusy === true, rows: sessionRows(message.rows, app),
     itemFacts: message.itemFacts === 'values' ? 'values' : '',
+    ask: ask && !actions.some(action => action.confirming || action.busy) ? sessionAsk(message.ask) : null,
     retain: message.retain === true || Boolean(checkpoint), checkpoint: checkpoint ?? null,
     checkpointInvalid: checkpoint === undefined, recoveryError: message.recoveryError === true ? RECOVERY_ERROR : null,
     checkpointAck: checkpointId(message.checkpointAck) ? message.checkpointAck : null,
@@ -153,7 +191,7 @@ function recoveryHold(previous, incoming, error = previous?.checkpoint && !previ
   const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
     .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
       hidden: false, open: false, note: error || RECOVERY_ERROR }))
-  return { ...incoming, actions, title: '', titleTone: 'neutral', titleBusy: false, items: new Map(), rows: null, itemFacts: '', checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
+  return { ...incoming, actions, title: '', titleTone: 'neutral', titleBusy: false, items: new Map(), rows: null, itemFacts: '', ask: null, checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
     recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
 }
 
@@ -232,4 +270,11 @@ export function passiveAppBlockAllowed(app) {
   return app?.capability_contract?.runtime?.['chat.blocks.passive']?.version === 1
     && typeof app.passive_block_module_digest === 'string'
     && /^[a-f0-9]{64}$/.test(app.passive_block_module_digest)
+}
+
+/** An ask additionally needs the owner's `chat.blocks.ask` grant, which the
+ *  server admits only for the same applied bundle (`passive_block_ask`). */
+export function passiveAskAllowed(app) {
+  return passiveAppBlockAllowed(app) && app.capability_contract?.runtime?.['chat.blocks.ask']?.version === 1
+    && app.passive_block_ask === true
 }

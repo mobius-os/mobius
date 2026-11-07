@@ -5502,10 +5502,16 @@ def test_autopilot_update_rechecks_current_source_before_push(
   ).exists()
 
 
+@pytest.mark.parametrize("observe_between", [False, True])
 def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
-  client, owner_token, monkeypatch,
+  client, owner_token, monkeypatch, observe_between,
 ):
-  """A lost push response saves its head and retries without orphaning the PR."""
+  """A lost push response saves its head and retries without orphaning the PR.
+
+  Read-only observation never settles or retires the Autopilot receipt, even
+  when GitHub shows the exact pushed PR: the round's own retry is what
+  records the pushed head in its grant.
+  """
   from app import contribution_autopilot
   from app.database import SessionLocal
 
@@ -5514,7 +5520,7 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
     client, owner_token, github_access=True,
   )
   repo, record, diff_text = _prepared_real_review(
-    app_id, "autopilot-ambiguous-retry",
+    app_id, f"autopilot-ambiguous-retry-{int(observe_between)}",
   )
   record.update({
     "status": "open",
@@ -5588,7 +5594,9 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
       }
       _kwargs["attempt_event"](
         "branch_published",
-        {"action": "push", "head_sha": record["plan"]["head_sha"]},
+        {"action": "push", "repo": record["repo"], "head_repository": "octocat/app-demo",
+         "branch": record["branch"], "head_sha": record["plan"]["head_sha"],
+         "base_branch": "main"},
         patch,
       )
       raise ContributionSubmitError(
@@ -5622,6 +5630,30 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
   )
   assert saved["last_submit_push_sha"] == record["plan"]["head_sha"]
 
+  receipt_path = github_routes.contribution_runtime.personal_attempt_path(
+    app_id, record["id"],
+  )
+  if observe_between:
+    receipt = receipt_path.read_bytes()
+    before = json.loads(receipt)
+    assert before["phase"] == "branch_published"
+    exact_pr = {
+      "number": 58, "html_url": record["url"], "state": "open", "draft": True,
+      "title": record["plan"]["title"], "body": record["plan"]["body_draft"],
+      "head": {"ref": record["branch"], "sha": record["plan"]["head_sha"],
+               "repo": {"full_name": "octocat/app-demo"}},
+      "base": {"ref": "main", "repo": {"full_name": record["repo"]}},
+    }
+    monkeypatch.setattr("app.github_contribution_git._gh", lambda _repo, *args, **_kw: _cp(
+      json.dumps({"object": {"sha": record["plan"]["head_sha"]}} if "/git/ref/" in args[1] else exact_pr)))
+    observed = client.post(
+      f"/api/github/contributions/{app_id}/{record['id']}/observe",
+      headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert observed.status_code == 200, observed.text
+    assert observed.json()["outcome"] == "not_eligible", observed.json()["message"]
+    assert receipt_path.read_bytes() == receipt
+
   _remove_reviewed_change_from_source(record)
   second = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update",
@@ -5631,6 +5663,13 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
 
   assert second.status_code == 200, second.text
   assert attempts == [None, record["plan"]["head_sha"]]
+  session = SessionLocal()
+  try:
+    row = contribution_autopilot.get_row(session, app_id, record["id"])
+    # The round itself recorded the pushed head; nothing else touched the grant.
+    assert row.round_head_sha == record["plan"]["head_sha"]
+  finally:
+    session.close()
 
 
 def test_review_status_shows_a_diverged_projection_as_sendable(

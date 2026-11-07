@@ -132,8 +132,10 @@ export function AppBlockView({ app, intent, height, onHostRequest }) {
 /** Shared block chrome. `actionFor` renders the control for one app action;
  *  `summary` is optional app-reported text shown under the saved title. */
 export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionFor, toggle = null,
-  summary = '', sectionRef = null, listEdgeRefs = null, onJump = null, children = null }) {
-  const action = actionFor(block.action)
+  summary = '', sectionRef = null, listEdgeRefs = null, onJump = null, ask = null, children = null }) {
+  // A host-drawn ask (PassiveAppBlock.jsx) takes the place of the block's own
+  // action, so the block still offers one action.
+  const action = ask || actionFor(block.action)
   const valueFacts = block.itemFacts === 'values' ? ' md-app-block--value-facts' : ''
   // An app that reports no rows and shows no control folds its block to one
   // quiet line (for example "Continued below" on an earlier card).
