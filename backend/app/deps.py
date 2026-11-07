@@ -800,6 +800,13 @@ def _owner_principal_or_403(principal: Principal) -> models.Owner:
   return principal.owner
 
 
+def get_owner_principal(principal: Principal = Depends(get_principal)) -> Principal:
+  """``get_current_owner``'s caller, for owner-only routes that also need its
+  lineage."""
+  _owner_principal_or_403(principal)
+  return principal
+
+
 def get_current_owner_for_lifecycle_control(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
@@ -809,10 +816,16 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
+def acts_for_guest(principal: Principal) -> bool:
+  """Whether this bearer acts for a shared-browser guest: the guest's own
+  session, or an app, service, agent or helper working for one."""
+  return principal.browser is not None
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
   require_nondelegated_owner_control(principal)
-  if principal.browser is not None:
+  if acts_for_guest(principal):
     raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
@@ -1253,10 +1266,38 @@ def get_owner_or_app_with_connect_manage(
   )
 
 
+def require_account_owner(principal: Principal = Depends(get_principal)) -> None:
+  """The owner's own accounts (the Möbius account's profile, sign-in email,
+  deployments and credit; the GitHub connection; their public Store
+  identity) are theirs alone, like their own device: the API never serves
+  them to a shared-browser guest or work it started, whatever workspace
+  access the guest holds."""
+  if acts_for_guest(principal):
+    raise HTTPException(403, "Only the installation owner can use this account.")
+
+
+def require_account_owner_control(principal: Principal = Depends(get_principal)) -> None:
+  """``require_account_owner`` for changes, which a delegated helper may not
+  make either. Deliberately independent of how much workspace access a guest
+  holds, unlike ``require_installation_owner_control``.
+
+  Linking the owner's Möbius account, and writes to GitHub or the Community
+  Store under the owner's identity, require this: Contribute's PR sends,
+  updates, assignments, merges and replies,
+  project pushes, Reviewer grants and manual posts, and Store publishing,
+  reviews and install receipts. Reviewer's automatic posts under an existing
+  grant require only ``require_account_owner``, so a delegated helper may
+  still consume that grant. A guest's apps may read GitHub through the
+  owner's connection but never act on it as the owner."""
+  require_nondelegated_owner_control(principal)
+  require_account_owner(principal)
+
+
 def get_owner_or_app_with_identity_manage(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
+  require_account_owner(principal)
   return _identity_manager(principal, db)
 
 
@@ -1265,6 +1306,17 @@ def get_identity_reader(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """``get_owner_or_app_with_identity_manage`` for reads a public service makes."""
+  require_account_owner(principal)
+  return _identity_manager(principal, db)
+
+
+def get_handle_directory_reader(
+  principal: Principal = Depends(get_principal_or_public_service),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """``get_identity_reader`` for the public handle directory. It resolves
+  other accounts' handles rather than reading this owner's account, so the
+  apps a guest uses may look collaborators up too."""
   return _identity_manager(principal, db)
 
 
@@ -1300,6 +1352,7 @@ def get_owner_or_app_with_railway_manage(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """Owner JWT, or an app with reviewed Railway deployment authority."""
+  require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner
@@ -1480,8 +1533,11 @@ def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app token with live GitHub credential authority."""
-  require_nondelegated_owner_control(principal)
+  """Owner JWT, or an app token with live GitHub credential authority.
+
+  The connection is the owner's credential: neither a delegated helper nor a
+  shared-browser guest, or work it started, may read or change it."""
+  require_account_owner_control(principal)
   owner = principal.owner
   if principal.app_id is None:
     db.close()
@@ -1535,7 +1591,7 @@ def revocable_browser_stream(iterator, principal: Principal):
   changed (``access_signal``), so streamed events cost no queries and an idle
   stream still closes promptly on revocation or logout.
   """
-  if principal.browser is None:
+  if not acts_for_guest(principal):
     return iterator
   # Read plain values now, while the request's ORM session is still open.
   return _until_browser_revoked(

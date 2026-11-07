@@ -3425,29 +3425,6 @@ async def _check_reconciled_python(pending: _UncheckedPythonTree) -> CheckedPyth
   return CheckedPythonTree(tree_oid=pending.tree_oid, env=env)
 
 
-def _require_package_python_lock(
-  manifest: dict, package_tree: dict[str, bytes], runtime_root: Path,
-) -> None:
-  """Refuse a reconciled tree whose Python lock is not the reviewed package's."""
-  try:
-    key = app_python_env.declared_key(runtime_root)
-  except app_python_env.PythonEnvUnavailable as exc:
-    raise HTTPException(422, detail={
-      "code": "python_env_failed", "message": str(exc),
-    }) from exc
-  package_lock = package_tree.get(python_lock(manifest))
-  if package_lock is None or key != app_python_env.env_key(package_lock):
-    # Only a local edit to the lock merged into the update can differ here.
-    raise HTTPException(409, detail={
-      "code": "python_lock_diverged",
-      "message": (
-        "This app's local source changes its Python lock, so it no longer "
-        "matches the update's. The update was not installed; reconcile the "
-        "lock in the app source, Apply it, and retry."
-      ),
-    })
-
-
 def _apply_manifest_metadata(
   db: Session,
   app: models.App,
@@ -3616,13 +3593,6 @@ async def _activate_install_source(
         applied_app_runtime.prepare_runtime, source_dir, snapshot.tree_oid,
         static_assets=plan.static_assets, runtime_manifest=runtime_manifest,
       )
-      try:
-        _require_package_python_lock(
-          manifest, plan.published_source_tree, runtime.root,
-        )
-      except BaseException:
-        shutil.rmtree(runtime.root)
-        raise
       raise _UncheckedPythonTree(
         snapshot.tree_oid, runtime, app.id if plan.updating else None,
       )

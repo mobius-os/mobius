@@ -8,7 +8,8 @@ import pytest
 
 from app import models, platform_update
 from app.database import SessionLocal
-from app.platform_restart import project_restart_observations, restart_observation_key
+from app.platform_restart import project_restart_observations
+from app.routes.chats import _lifecycle_projection_key
 from app.timeutil import now_naive_utc
 from tests.test_platform_restart_cards import _install
 
@@ -53,7 +54,7 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
   assert observation["continuation"] == expected
   assert observation["observed_at"].endswith("Z")
   runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
-  assert runtime["restart_observation_key"] == response.json()["restart_observation_key"]
+  assert runtime["lifecycle_projection_key"] == response.json()["lifecycle_projection_key"]
   # Observation grants neither restart approval nor agent admission, and the
   # already offered action remains intact for an explicit owner choice.
   assert card["platform_action"]["status"] == "awaiting_owner"
@@ -163,17 +164,23 @@ def test_receipt_freshness_tracks_observation_hold_and_delivery(monkeypatch):
     "replayed": replayed[0],
   })
   with SessionLocal() as db:
-    keys = [restart_observation_key(db, chat_id)]
+    def key():
+      return _lifecycle_projection_key(db, chat_id, 0, include_foreign_context=True)
+
+    keys = [key()]
     wait = db.get(models.ChatWait, wait_id)
     wait.met_at = now_naive_utc()
     wait.status = "met"
     db.commit()
-    keys.append(restart_observation_key(db, chat_id))
+    keys.append(key())
+    # The hold lives on disk, so only the key's hold input can see it move.
     replayed[0] = "restored-sha"
-    keys.append(restart_observation_key(db, chat_id))
+    keys.append(key())
     held[0] = False
-    keys.append(restart_observation_key(db, chat_id))
-    assert len(set(keys)) == len(keys)
+    keys.append(key())
     wait.resume_delivered_at = now_naive_utc()
     db.commit()
-    assert restart_observation_key(db, chat_id) == keys[0]
+    keys.append(key())
+    assert len(set(keys)) == len(keys)
+    held[0] = True
+    assert key() == keys[-1], "a delivered receipt no longer shows the hold"

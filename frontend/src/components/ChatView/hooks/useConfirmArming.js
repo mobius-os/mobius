@@ -6,16 +6,17 @@
    release, so no earlier arming is ever reused.
 
    Within a showing, Confirm arms only once
-   - the end of the app's list (a sentinel after its last item) has been on
-     screen at least once during this showing, and
+   - both ends of the app's list (sentinels in its first and last row) have
+     been on screen at least once during this showing, and
    - Confirm itself is on screen in a visible page,
    and the second condition has then held continuously for CONFIRM_ARM_MS.
-   Both observations arrive as `{ showing, visible }` and count only for the
-   showing they name: an element's position under an earlier list (the same
-   sentinel before 256 items pushed it down) can never arm a new showing.
-   The list is drawn below Confirm, so its end having been on screen means
-   the whole list has passed through the viewport; a long list just needs
-   scrolling. A double-click, a swapped list or an unseen list never arms. */
+   Every observation arrives as `{ showing, visible }` and counts only for the
+   showing it names: an element's position under an earlier list (the same
+   sentinel before 256 rows pushed it away) can never arm a new showing.
+   The list is drawn as the block's only rows, above its one Confirm, so
+   both ends having been on screen means the reader scrolled from the first
+   row to Confirm (an endpoint gate: a jump past the middle is not detected).
+   A double-click, a swapped list or an unseen list never arms. */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export const CONFIRM_ARM_MS = 500
@@ -27,7 +28,7 @@ export function confirmationIdentity(state) {
 
 const seenFor = (view, showing) => Boolean(showing) && view?.showing === showing && view.visible === true
 
-export default function useConfirmArming({ state, generation, supported, confirmView, listEndView }) {
+export default function useConfirmArming({ state, generation, supported, confirmView, listStartView, listEndView }) {
   const identity = confirmationIdentity(state)
   const [disarms, setDisarms] = useState(0)
   // Unique per showing: a disarm or new generation changes it even when the
@@ -41,9 +42,11 @@ export default function useConfirmArming({ state, generation, supported, confirm
     committed.current = { showing, action, identity, recoveryPending: state?.recoveryPending === true }
   }, [showing, action, identity, state?.recoveryPending])
 
+  const [startSeen, setStartSeen] = useState(null)
   const [endSeen, setEndSeen] = useState(null)
+  const listStartVisible = seenFor(listStartView, showing)
   const listEndVisible = seenFor(listEndView, showing)
-  const ready = Boolean(showing) && endSeen === showing && seenFor(confirmView, showing)
+  const ready = Boolean(showing) && startSeen === showing && endSeen === showing && seenFor(confirmView, showing)
 
   const [armed, setArmed] = useState(null)
   const armedRef = useRef(null)
@@ -57,8 +60,11 @@ export default function useConfirmArming({ state, generation, supported, confirm
     }, CONFIRM_ARM_MS)
     return () => clearTimeout(timer)
   }, [ready, showing])
-  // Latch "the list end was on screen" for this showing. (After the arming
-  // effect, so the render this latch causes is the one that starts the timer.)
+  // Latch "this end of the list was on screen" for this showing. (After the
+  // arming effect, so the render a latch causes is the one that starts the timer.)
+  useEffect(() => {
+    if (showing && listStartVisible && startSeen !== showing) setStartSeen(showing)
+  }, [showing, listStartVisible, startSeen])
   useEffect(() => {
     if (showing && listEndVisible && endSeen !== showing) setEndSeen(showing)
   }, [showing, listEndVisible, endSeen])

@@ -2,6 +2,7 @@ import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListR
 import { invalidateEventFedCachesAfterReconnect } from './eventFedCaches.js'
 import { ownerStore, sessionStore } from '../../lib/workspaceStorage.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
+import { openChatWithAppDraft, openExistingChat } from '../../lib/appChatNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -235,6 +236,16 @@ const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
 // they need a short deadline rather than holding notifications behind a stalled request.
 const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
+// A list read that is merely slow (a busy server building every drawer row) would
+// miss the same short bound on every retry, and the abandoned reads keep the server
+// busy. Each retry doubles the bound, below the stream's 30s connect deadline.
+const SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS = 20_000
+function reconnectListTimeoutMs(failedAttempts = 0) {
+  return Math.min(
+    SYSTEM_RECONNECT_LIST_TIMEOUT_MS * 2 ** Math.max(0, failedAttempts),
+    SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS,
+  )
+}
 // Run/wait events arriving this close together share one scoped rows read.
 const CHAT_ROW_REFRESH_BATCH_MS = 250
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
@@ -323,10 +334,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // composer handoff exists below.
   const beforeRestoreRouteRef = useRef(null)
   const beforeDrawerOpenRef = useRef(null)
-  const walkthroughHandoffRef = useRef(false)
-  const onWalkthroughHandoffChange = useCallback((suspended) => {
-    walkthroughHandoffRef.current = suspended
-  }, [])
 
   const {
     initialNav,
@@ -335,7 +342,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     activeChatId,
     activeProjectId,
     activeArtifactRef,
-    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerOpen, drawerOpening, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, recordChatNavigation, navigateBackward, navigateForward,
     tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
@@ -516,6 +523,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
+  // Immersive hides the drawer panel (Shell.css), so a modal drawer cannot stay
+  // logically open underneath it: its dimming, tap-blocking scrim would cover
+  // the app with nothing visible to dismiss. This happens when an app claims
+  // immersive while the owner has the drawer open (e.g. during a game's load).
+  useLayoutEffect(() => {
+    if (immersiveActive && modalDrawerOpen) closeDrawerRef.current()
+  }, [immersiveActive, modalDrawerOpen])
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
   // branches are unit-tested in workspaceView.test.js, and so one commit flips
@@ -973,9 +987,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // only for a saved draft; on desktop it restores keyboard focus.
   beforeRestoreRouteRef.current = (route) => {
     if (route?.view !== 'chat' || route.chatId == null) return
-    // The guide owns focus when Back returns from an app it handed the owner
-    // to. A chat restore still restores the chat; only its composer-focus request yields.
-    if (walkthroughHandoffRef.current) return
     // Dismissing navigation restores the prior keyboard state, not merely a
     // saved draft. A draft whose keyboard was down must stay down.
     if (drawerOpenRef.current && isTouchPrimary()) {
@@ -1078,6 +1089,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const startChatFromCommandRef = useRef(null)
   const handleNewChatCommand = useCallback(
     options => startChatFromCommandRef.current?.(options) ?? Promise.resolve(false),
+    [],
+  )
+  const branchChatRef = useRef(null)
+  const handleBranchChat = useCallback(
+    (chatId, throughId) => branchChatRef.current?.(chatId, throughId) ?? Promise.resolve(false),
     [],
   )
   // Latest-materialize ref so the deferred-New-Chat watcher (stable deps) runs this
@@ -1764,21 +1780,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     })
   }
 
-  async function createProjectChat(project, {
-    title = 'New chat', prompt = null, autoSend = false, settings = null,
-  } = {}) {
-    if (!project?.id) return null
-    const response = await api.projects.createChat(project.id, {
-      title,
-      recovery_request_id: crypto.randomUUID(),
-    })
-    const created = await jsonOrThrow(response, 'Project chat creation failed:')
-    // The copy lands before the chat opens, so an auto-sent first message
-    // already runs on the copied model, and every cache below holds the chat
-    // as the copy saved it rather than the pre-copy creation record.
-    const copy = await copyChatSettings(created.id, settings)
-    const chat = withCopiedSettings(created, copy.saved)
-    const sendsPrompt = !!prompt && autoSend && copy.ok
+  // One created project chat joins the project's caches before it opens.
+  function publishProjectChat(project, chat) {
     knownExistingOffListChatIdsRef.current.add(String(chat.id))
     queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
       chat,
@@ -1799,6 +1802,24 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           : row)
         : current
     ))
+  }
+
+  async function createProjectChat(project, {
+    title = 'New chat', prompt = null, autoSend = false, settings = null,
+  } = {}) {
+    if (!project?.id) return null
+    const response = await api.projects.createChat(project.id, {
+      title,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const created = await jsonOrThrow(response, 'Project chat creation failed:')
+    // The copy lands before the chat opens, so an auto-sent first message
+    // already runs on the copied model, and every cache below holds the chat
+    // as the copy saved it rather than the pre-copy creation record.
+    const copy = await copyChatSettings(created.id, settings)
+    const chat = withCopiedSettings(created, copy.saved)
+    const sendsPrompt = !!prompt && autoSend && copy.ok
+    publishProjectChat(project, chat)
     // A staged auto-send is read by the chat as it opens, so stage it first.
     if (sendsPrompt) stageComposerHandoff(chat.id, prompt, { autoSend: true })
     openProjectChat(project, chat)
@@ -1838,6 +1859,36 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   function startChatFromCommand(options) {
     return startNewChatFromCommand(newChatCommandDeps(), options)
+  }
+
+  // A reply's Branch action: the server copies the conversation through that
+  // reply into a new chat (same project and model), which then opens with
+  // history, so Back returns to the source. Resolves false when it failed.
+  async function branchChat(sourceChatId, throughId) {
+    try {
+      const chat = await jsonOrThrow(
+        await api.chats.branch(sourceChatId, throughId), 'Branching failed:',
+      )
+      const project = chat.project?.id != null
+        ? projectsRef.current.find(row => String(row.id) === String(chat.project.id))
+        : null
+      if (project) {
+        publishProjectChat(project, chat)
+        openProjectChat(project, chat)
+      } else {
+        publishCreatedChat(chat)
+        navTo('chat', { chatId: chat.id })
+      }
+      focusSelectedChatComposer(chat.id)
+      return true
+    } catch (error) {
+      recordClientError({ where: 'branch-chat', error })
+      // A refusal (409) says why, such as a reply still being written.
+      notifyShell(error?.status === 409 && typeof error.detail === 'string'
+        ? error.detail
+        : "Couldn't branch this chat — please try again.", { variant: 'error' })
+      return false
+    }
   }
 
   async function createProjectFromTemplate(template) {
@@ -2723,16 +2774,32 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ))
     archiveRequestsRef.current.set(sid, request)
     let committed = false
+    let unreachable = false
     try {
       const response = await request
       committed = response.ok
-    } catch {}
+    } catch (error) {
+      // The client already resent once after a dropped connection; a
+      // TypeError here means the server could not be reached at all.
+      unreachable = error instanceof TypeError
+    }
     if (archiveActionsRef.current.get(sid)?.token !== token) return false
     archiveActionsRef.current.delete(sid)
     archiveRequestsRef.current.delete(sid)
     refreshChatRows(sid)
     if (!committed) {
-      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat.`, { variant: 'error' })
+      const reason = unreachable ? 'Möbius couldn’t be reached' : 'Möbius hit an error'
+      notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat: ${reason}.`, {
+        variant: 'error',
+        // Shares the success notice's key: a retry's own notice (success with
+        // Undo, or a fresh failure) replaces this one. A retry is a new
+        // action, so it is undoable even when the failed attempt was an Undo.
+        noticeKey: `chat-archive:${sid}`,
+        action: {
+          label: 'Try again',
+          onAction: () => setChatArchived(sid, archived),
+        },
+      })
       return false
     }
     if (!undoable) return true
@@ -2813,6 +2880,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     notifyShell,
     setAppIntents,
     navToRef,
+    requestComposer,
   })
 
   // The one way the shell opens Settings for someone else (a mini-app, the
@@ -2883,8 +2951,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [projectsQuery.isSuccess])
 
   // Route a mini-app crash report to the chat that built the app (its
-  // `chat_id`), falling back to a new chat when that chat was deleted. The
-  // report is set as a DRAFT (not auto-sent) so the owner reviews before
+  // `chat_id`), falling back to a new chat when that chat was deleted or
+  // cannot take a draft. The report is added after the owner's unsent DRAFT
+  // there (never sent, never replacing it) so the owner reviews before
   // sending. AppCanvas forwards ONLY its LIVE frame's app-error here (it
   // swallows a hidden incoming preview frame's), so there is no window-level
   // e.source guard to make — source attribution now lives entirely in
@@ -2899,19 +2968,25 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const buildingChatId = appReportChatId(appEntry, chatId)
     const buildingChat = buildingChatId
       && chatsRef.current.find(c => c.id === buildingChatId)
+    const reportInNewChat = () => newChatRef.current?.({ draft: report, forceNew: true })
     if (buildingChat) {
-      stageComposerHandoff(buildingChatId, report)
       // Open the building chat in the crashed app's OWN pane (fallback: focused
       // pane) so a background app's crash report lands beside it (contract §1.4.7).
       const ownerPane = paneModel.paneOf(
         workspaceStateRef.current.ws,
         tabModel.tabKey(tabModel.makeTab('app', appId)),
       )
-      navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
-      requestComposer(buildingChatId, { draft: report })
-      refreshChats()
+      // Like an app's draft, the report follows the owner's unsent text there.
+      void openChatWithAppDraft(buildingChatId, report, {
+        open: draft => {
+          navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
+          requestComposer(buildingChatId, { draft })
+          refreshChats()
+        },
+        openNew: reportInNewChat,
+      }).catch(error => console.error('Opening a chat for the crash report failed.', error))
     } else {
-      newChatRef.current?.({ draft: report, forceNew: true })
+      reportInNewChat()
     }
   }, [refreshChats, requestComposer, workspaceStateRef])
 
@@ -2946,7 +3021,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         return
       }
       if (request.type === 'moebius:open-chat') {
-        const draftText = request.draft || null
+        const open = draft => {
+          if (request.view === 'changes') requestChatChanges(request.chatId)
+          navToRef.current('chat', { chatId: request.chatId })
+          // Storage covers an unmounted target. The explicit request also updates
+          // an already-retained ChatView, whose controlled composer state would
+          // otherwise keep showing its old value until a full remount.
+          if (draft !== undefined) requestComposer(request.chatId, { draft })
+          refreshChats()
+        }
+        if (request.requireExisting) return openExistingChat(request, open)
         // Do not stage a dead chat and wait for ChatView's later 404 repair:
         // that briefly paints a destination which immediately disappears. The
         // direct resource probe is the shell's authoritative deletion signal.
@@ -2954,25 +3038,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         const targetState = await probeDeletion(
           `/chats/${encodeURIComponent(request.chatId)}?limit=1&compact=1`,
         )
-        if (targetState === 'deleted') {
+        const openNewChat = async () => {
           await newChatRef.current?.({
-            draft: draftText || undefined,
+            draft: request.draft || undefined,
             forceNew: true,
           })
           refreshChats()
-          return
         }
-        if (draftText != null) {
-          stageComposerHandoff(request.chatId, draftText)
-        }
-        if (request.view === 'changes') requestChatChanges(request.chatId)
-        navToRef.current('chat', { chatId: request.chatId })
-        // Storage covers an unmounted target. The explicit request also updates
-        // an already-retained ChatView, whose controlled composer state would
-        // otherwise keep showing its old value until a full remount.
-        if (draftText != null) requestComposer(request.chatId, { draft: draftText })
-        refreshChats()
-        return
+        if (targetState === 'deleted') return openNewChat()
+        return openChatWithAppDraft(request.chatId, request.draft, { open, openNew: openNewChat })
       }
       if (request.type === 'moebius:open-app') {
         await openAppWithIntent(request.appId, request.intent)
@@ -3524,18 +3598,19 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(async ({ signal } = {}) => {
+  const reconcileSystemStateOnOpen = useCallback(async ({ signal, failedAttempts = 0 } = {}) => {
+    const listTimeoutMs = reconnectListTimeoutMs(failedAttempts)
     // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
       ...invalidateEventFedCachesAfterReconnect(queryClient),
-      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
+      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: listTimeoutMs, signal })),
     ])
     await reconcileDeletedChatIdentities()
     signal?.throwIfAborted()
-    const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
+    const refreshedChats = await fetchFreshChats({ timeoutMs: listTimeoutMs, signal })
     signal?.throwIfAborted()
     const reconciledLocalIds = reconcileLocalChatRuns(
       refreshedChats,
@@ -4353,6 +4428,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
   startChatFromCommandRef.current = startChatFromCommand
+  branchChatRef.current = branchChat
   // Keep the latest-materialize ref current so the watcher effect (stable deps) always
   // runs this render's live closure without depending on the function's identity.
   materializeNewChatHomeRef.current = materializeNewChatHome
@@ -4926,12 +5002,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
       {showWalkthrough && (
         <Suspense fallback={null}>
-          <WalkthroughOverlay
-            apps={apps}
-            activeAppId={activeView === 'canvas' ? activeAppId : null}
-            onOpenApp={openAppWithIntent}
-            onHandoffChange={onWalkthroughHandoffChange}
-          />
+          <WalkthroughOverlay apps={apps} />
         </Suspense>
       )}
 
@@ -5090,6 +5161,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // mode scene (cross-origin app interaction is inert throughout).
                 interactive={appRuntimeVisible
                   && !modalDrawerOpen && !modeBeatActive}
+                // Reaching for the drawer holds whatever a leave would hold, so a
+                // heavy game cannot starve the drawer and its sound stops first.
+                covered={modalDrawerOpen || drawerOpening}
                 version={versionForApp(id)}
                 storageGeneration={app?.storage_generation}
                 appName={app?.name}
@@ -5224,6 +5298,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onNewChatSubmit={queueDraftFirstNewChat}
                 onNewChatRetry={retryDraftFirstNewChat}
                 onNewChatCommand={handleNewChatCommand}
+                onBranchChat={handleBranchChat}
                 artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
@@ -5537,7 +5612,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               <SettingsView
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
-                onOpenApp={openAppWithIntent}
                 focusTarget={settingsFocusTarget}
                 active={settingsFullBleed || !!settingsPaned}
                 refreshToken={settingsRefreshToken}

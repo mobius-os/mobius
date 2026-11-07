@@ -272,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -286,6 +289,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
@@ -1898,6 +1906,46 @@ class ChatAppArtifact(Base):
   )
   touched_at = Column(DateTime, nullable=False, default=now_naive_utc)
   seen_at = Column(DateTime, nullable=True, default=None)
+
+
+class AppChatScopeStart(Base):
+  """The one first turn an app's scoped handoff may admit for a scope.
+
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
+
+  Admission is recorded here too, not inferred from the chat alone: an owner
+  Stop or queued-message removal can leave an admitted chat with no messages,
+  queue, or run, and a replay must still find it started.
+  """
+
+  __tablename__ = "app_chat_scope_starts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  scope = Column(String(160), primary_key=True)
+  # The chat this scope admitted; NULL only when cancelled before admission.
+  chat_id = Column(String(64), nullable=True)
+  # Set once by the app's cancellation; a cancelled scope never admits a turn.
+  cancelled_at = Column(DateTime, nullable=True)
+  # Set once, in the chat writer commit that accepted the chat's first turn
+  # (see app_chat_scopes); never cleared.
+  admitted_at = Column(DateTime, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (
+    CheckConstraint(
+      "chat_id IS NOT NULL OR cancelled_at IS NOT NULL",
+      name="ck_app_chat_scope_starts_outcome",
+    ),
+    CheckConstraint(
+      "admitted_at IS NULL OR (chat_id IS NOT NULL AND cancelled_at IS NULL)",
+      name="ck_app_chat_scope_starts_admitted",
+    ),
+  )
 
 
 class PushSubscription(Base):

@@ -32,3 +32,15 @@ test('idle + online + no turn is neutral, never the misleading turn copy', () =>
     'Queued to send',
   )
 })
+
+test('a queue a Stop held waits for the owner, during a turn too', () => {
+  assert.equal(queuedHint({ turnActive: false, held: 2, total: 2 }), 'Waiting for you — sends when you send')
+  assert.equal(queuedHint({ turnActive: true, held: 2, total: 2 }), 'Waiting for you — sends when you send')
+})
+
+
+test('with held and new rows the caption tells them apart', () => {
+  assert.equal(queuedHint({ turnActive: true, held: 1, total: 2 }),
+    '1 waiting for you; the rest send after this turn')
+  assert.equal(queuedHint({ turnActive: false, held: 1, total: 2 }), '1 waiting for you')
+})

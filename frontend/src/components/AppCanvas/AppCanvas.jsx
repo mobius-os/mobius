@@ -9,7 +9,6 @@ import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -53,7 +52,7 @@ import {
 } from './appFrameProtocol.js'
 import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
 import {
-  blockEventDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
+  blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import { finishAppFileExport } from '../../lib/appFileExport.js'
@@ -68,9 +67,14 @@ function appFrameRequestUrl(appId, version, frameRev) {
     + (frameRev ? `-${frameRev}` : '')
 }
 
+// Label ink on the app's own manifest colour (always #rrggbb): white while it
+// keeps 3:1, the rule the theme's --accent-fg uses, else a near-black.
 function fileExportInk(color) {
-  const contrast = contrastingAccentFg(color)
-  return contrast === '#000000' ? '#172008' : contrast || undefined
+  if (!/^#[0-9a-f]{6}$/i.test(color || '')) return undefined
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#172008'
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {
@@ -190,13 +194,15 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      scrim but synchronously cancels any Android compositor scroll already in
 //      flight. Hidden/incoming frames receive false too.
 //
-//   3c. {type: 'moebius:frame-visibility', visible, navigationReady,
+//   3c. {type: 'moebius:frame-visibility', visible, covered, navigationReady,
 //        backgroundPlayback} parent → frame
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
-//      app-frame.html turns visible:false into a hidden page and pauses the
-//      frame's sound unless backgroundPlayback says the document owns an open
-//      media session (deliberate playback the drawer still controls).
+//      app-frame.html turns visible:false into a hidden page and holds the
+//      sound and animation frames of the app and every document it nests,
+//      unless backgroundPlayback says the document owns an open media session
+//      (deliberate playback the drawer still controls). covered holds the same
+//      work while the modal drawer is over a frame that stays painted.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -244,6 +250,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      the document generation; frame-mounted (`blockGeneration`) and every
 //      app-block-state must name that exact generation, or they are dropped;
 //      each owner event is posted once, to the generation it was dispatched for. It grants no app authority.
+//      moebius:app-block-refresh {sessionId, generation, reason} is a host
+//      hint to re-read (a turn settled in this chat, the tab became visible),
+//      posted once per hint to the generation it was raised for.
 //
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
@@ -289,6 +298,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //   - {type: 'moebius:new-chat', draft?}                     frame → host
 //     (always an editable draft; see appHostRequest)
 //   - {type: 'moebius:open-chat', chatId, draft?}            frame → host
+//   - {type: 'moebius:open-existing-chat', requestId, chatId, draft?}
+//     → {type: 'moebius:open-chat-result', requestId, ok, result: {outcome}}
+//     (that exact chat or an outcome, never a new-chat fallback)
 //   - {type: 'moebius:open-app', appId, intent?}             frame → host
 //   - {type: 'moebius:open-settings', section?}              frame → host
 // App crashes are separately attributed here and sent to `onAppError`.
@@ -434,13 +446,17 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the scrim, but compositor momentum inside its iframe must be cancelled so
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
+  // The modal drawer is opening or open over this frame. It stays painted and
+  // honestly not hidden, but app-frame.html holds its sound and animation
+  // frames, the same as leaving does.
+  covered = false,
   // Whether this canvas's live frame is the app's shell navigation target:
   // `data-app-id` (below) and the app's saved shell location. An embedded
   // transcript view of the same app neither restores nor overwrites that place.
   navigationTarget = true,
   pendingIntent = null,
   // Optional transcript block session (see 6b above).
-  blockSession = null, blockEvent = null, onBlockState, onBlockCapability,
+  blockSession = null, blockEvent = null, blockRefresh = null, onBlockState, onBlockCapability,
   shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
@@ -592,6 +608,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const blockDocumentsRef = useRef(null)
   blockDocumentsRef.current ??= createBlockDocuments()
   const sentBlockNonceRef = useRef(null)
+  const sentBlockRefreshRef = useRef(null)
   const reportedBlockRef = useRef(null)
   const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
   // Tell the block host about the live document's negotiation once per
@@ -1243,9 +1260,11 @@ const AppCanvas = forwardRef(function AppCanvas({
         }
         const responseType = hostRequest.type === 'moebius:chat-control'
           ? 'moebius:chat-control-result'
+          : hostRequest.type === 'moebius:open-chat' ? 'moebius:open-chat-result'
           : 'moebius:projects-result'
         const fallbackError = hostRequest.type === 'moebius:chat-control'
           ? 'Chat control failed.'
+          : hostRequest.type === 'moebius:open-chat' ? 'Opening the conversation failed.'
           : 'Projects request failed.'
         // A hidden transcript or session document runs without an owner
         // gesture on screen. Ordinary shell apps keep their background reads.
@@ -1573,6 +1592,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     sentBlockNonceRef.current = message.nonce
     postToFrame(swap.liveVersion, message)
   }, [swap.liveLoaded, swap.liveVersion, blockSession, blockEvent, blockDocumentRevision])
+  useEffect(() => {
+    if (!swap.liveLoaded) return
+    const message = blockRefreshDelivery({ session: blockSession, refresh: blockRefresh,
+      document: blockDocumentsRef.current.get(swap.liveVersion), sentSeq: sentBlockRefreshRef.current })
+    if (!message) return
+    sentBlockRefreshRef.current = blockRefresh.seq
+    postToFrame(swap.liveVersion, message)
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockRefresh, blockDocumentRevision])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
@@ -1661,6 +1688,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, {
       type: 'moebius:frame-visibility',
       visible,
+      covered,
       // Restoration that needs a new history entry waits for pane focus.
       navigationFocused: activeRef.current,
       // A chat handoff can keep pixels foreground after logical navigation ends.
@@ -1711,7 +1739,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, visible, active, swap.liveVersion, swap.liveLoaded])
+  }, [frameVisible, covered, visible, active, swap.liveVersion, swap.liveLoaded])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then

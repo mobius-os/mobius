@@ -2302,6 +2302,83 @@ def test_failed_api_attempts_surface_as_one_error_not_prose():
   assert terminal["error"] == "API Error: flagged.\n\nRequest ID: req_2"
 
 
+def _refusal_attempt(request_id: str) -> AssistantMessage:
+  return AssistantMessage(
+    content=[TextBlock(text=f"API Error: flagged.\n\nRequest ID: {request_id}")],
+    model="<synthetic>",
+    error="invalid_request",
+    stop_reason="refusal",
+  )
+
+
+def _error_result(*, is_error: bool = True, stop_reason=None) -> ResultMessage:
+  return ResultMessage(
+    subtype="success",
+    duration_ms=20,
+    duration_api_ms=15,
+    is_error=is_error,
+    num_turns=1,
+    session_id="sess-1",
+    stop_reason=stop_reason,
+    total_cost_usd=0.0,
+    result="API Error: flagged." if is_error else "done",
+  )
+
+
+def test_refused_turn_is_marked_from_the_provider_signal_not_its_wording():
+  """The CLI's result may omit the stop reason; the root attempt's own
+  `refusal` stop reason still identifies the turn as a provider refusal."""
+  bus = _Bus()
+  state: dict = {}
+  session_id, _ = dispatch_sdk_message(
+    _refusal_attempt("req_1"), bus, None, usage_state=state,
+  )
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, session_id, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is True
+
+
+def test_refusal_cleared_by_a_later_successful_root_call():
+  bus = _Bus()
+  state: dict = {}
+  dispatch_sdk_message(_refusal_attempt("req_1"), bus, None, usage_state=state)
+  dispatch_sdk_message(AssistantMessage(
+    content=[TextBlock(text="Recovered answer.")],
+    model="claude-opus-5-5",
+    stop_reason="end_turn",
+  ), bus, None, usage_state=state)
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, None, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is False
+
+
+def test_a_sub_agent_refusal_does_not_mark_the_root_turn():
+  bus = _Bus()
+  state: dict = {}
+  sub_agent = _refusal_attempt("req_1")
+  sub_agent.parent_tool_use_id = "toolu_task"
+  dispatch_sdk_message(sub_agent, bus, None, usage_state=state)
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, None, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is False
+
+
+def test_other_failures_and_clean_turns_are_not_refusals():
+  bus = _Bus()
+  _, failed = dispatch_sdk_message(
+    _error_result(stop_reason="end_turn"), bus, None, usage_state={},
+  )
+  _, clean = dispatch_sdk_message(
+    _error_result(is_error=False, stop_reason="refusal"), bus, None,
+    usage_state={"refused": True},
+  )
+  assert failed["provider_refusal"] is False
+  assert clean["provider_refusal"] is False
+
+
 def test_failed_api_call_keeps_the_last_real_context_size():
   """The CLI's synthetic error message carries zeroed usage. It is not a
   model call, so neither the live meter nor the saved context size may
@@ -3502,6 +3579,18 @@ async def test_native_prompt_hook_refuses_work_after_card_or_stop(monkeypatch):
   # The closed adapter cannot be revived by a queued CLI input.
   result = await hook({}, None, {})
   assert result["continue_"] is False
+
+
+@pytest.mark.asyncio
+async def test_queued_prompt_gate_fails_closed_and_tool_result_hooks_stay_permissive(monkeypatch):
+  """A failing Stop/card gate refuses the prompt; a failing card-end hook must
+  not turn the saved card's completed tool call into an error result."""
+  clients = _install_fake_client(monkeypatch)
+  await _run_turn("prompt-gate-fail-closed")
+  hooks = clients[0].options.hooks
+  assert [m.on_failure for m in hooks["UserPromptSubmit"]] == ["block"]
+  for event in ("PostToolUse", "PreCompact", "Stop"):
+    assert all(m.on_failure is None for m in hooks[event]), event
 
 
 @pytest.mark.asyncio

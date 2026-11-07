@@ -21,12 +21,21 @@ async def chat_stop(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
 ):
-  """Stops the agent subprocess and clears its session.
+  """Stops the agent subprocess and settles the chat's queue.
 
-  `cleared_pending_cids` is the stable `cid` of the queued messages this Stop
-  actually removed; the frontend resends only those so a queued message the
-  turn-end drain already promoted into a continuation isn't double-sent
-  (PM 115).
+  The owner's typed messages stay queued until the owner sends; rows an app or
+  a browser guest queued go with the Stop (`HoldPending`).
+  `cleared_pending_cids` is always `[]`: an older cached client resends only
+  what it lists, so the queue is never sent twice during a rolling upgrade.
+
+  A per-chat Stop that ended the chat's run and settled its queue also
+  returns `stop_receipt: {chat_id, run_id}`, the chat's latest run at Stop's
+  serialized boundary (`None` if it never ran). It certifies only that run:
+  later work (an owner send, a Wait firing, a helper result) runs under
+  another run id. An app binds its cancellation to that run, not to a status
+  read after this response. The global sweep, an unconfirmed Stop, and a Stop
+  that could not hold the queue or close the run return `stop_receipt: None`
+  (`ChatStopOutcome`).
   """
   require_nondelegated_owner_control(principal)
   if principal.scope == "app":
@@ -36,11 +45,12 @@ async def chat_stop(
     raise HTTPException(status_code=403, detail="Embedded chat id is required.")
   if body.chat_id:
     require_active_chat_access(db, body.chat_id, principal)
-  stopped, cleared_pending_cids = await stop_chat(
+  outcome = await stop_chat(
     body.chat_id or None, db=db,
     actor="owner" if is_owner_input_principal(principal) else "agent",
     actor_id=principal.run_id or principal.chat_id or principal.embed_session_id,
   )
+  stopped = outcome.stopped
   cancelled_delegations = []
   if body.chat_id and stopped:
     # This route is the owner's explicit Stop. Planned restart draining bypasses
@@ -58,6 +68,7 @@ async def chat_stop(
       )
   return {
     "stopped": stopped,
-    "cleared_pending_cids": cleared_pending_cids,
+    "cleared_pending_cids": [],
     "cancelled_delegations": cancelled_delegations,
+    "stop_receipt": outcome.receipt,
   }

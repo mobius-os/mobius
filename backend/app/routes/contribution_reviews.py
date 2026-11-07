@@ -31,7 +31,8 @@ from app.config import get_settings
 from app.contribution_autopilot import resolve_round_choice
 from app.database import get_db
 from app.deps import (Principal, get_agent_run_principal, get_principal, is_owner_input_principal,
-                      reject_cross_site, require_nondelegated_owner_or_app_control)
+                      reject_cross_site, require_account_owner, require_account_owner_control,
+                      require_nondelegated_owner_or_app_control)
 from app.github_contributions import _validate_submit_app
 from app.github_contribution_git import _gh
 from app.github_connection import _github_connection_transaction
@@ -260,7 +261,7 @@ def _chat_approval(db, body, principal):
 
 
 @router.post(APP_PREFIX + "/{app_id}/review-runs", dependencies=[Depends(reject_cross_site),
-             Depends(require_nondelegated_owner_or_app_control)])
+             Depends(require_account_owner_control)])
 async def start_reviews(app_id: int | None, body: StartReviews,
                         db: Session = Depends(get_db),
                         principal: Principal = Depends(get_principal)):
@@ -647,6 +648,9 @@ def _review_stop_requested(row):
 def _parent(db, row, principal):
   if principal.delegation_id is not None or principal.chat_id != row.chat_id:
     raise HTTPException(403, "Only this review's owning conversation may report an outcome or merge.")
+  # Its posts, repairs, merges and readiness act as the owner on GitHub, so a
+  # turn a guest started in that shared conversation cannot drive them.
+  require_account_owner(principal)
   _assert_execution_live(db, row, principal)
   frozen = row.options_json or {}
   chat = db.query(models.Chat).populate_existing().filter_by(id=row.chat_id).first()
@@ -654,7 +658,7 @@ def _parent(db, row, principal):
     raise HTTPException(409, "The owning conversation's model choice changed. This frozen workflow cannot continue under a different choice.")
 
 
-@router.post("/api/github/review-runs", dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+@router.post("/api/github/review-runs", dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)])
 async def core_start_reviews(body: StartReviews, db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
   return await start_reviews(None, body, db, principal)
 

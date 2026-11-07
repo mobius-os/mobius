@@ -249,7 +249,7 @@ async def get_platform_update_progress(
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformUpdateProgress:
   """Observable phase of the active or most recent owner-triggered Apply."""
-  return platform_update.platform_update_progress()
+  return platform_update.current_update_progress()
 
 
 @router.post("/apply", dependencies=[Depends(reject_cross_site)])

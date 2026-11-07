@@ -818,6 +818,45 @@ def test_owner_message_queues_behind_future_limit_park(
   }]
 
 
+def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
+  client, auth, db, monkeypatch,
+):
+  """Send queued messages takes an owner message's admission: the held rows
+  rejoin the queue behind the park instead of spending a provider attempt."""
+  cid = "park-owner-queue-send"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  parked_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+  _seed_run(
+    cid, "rt-park-owner-queue-send", status="parked",
+    parked_until=parked_until, park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  response = client.post(
+    f"/api/chats/{cid}/messages", json={"content": "", "continuation": "queue"}, headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert _run_row("rt-park-owner-queue-send")["status"] == "parked"
+  assert [(row["cid"], row.get("held")) for row in _chat_row(cid)["pending"]] == [
+    ("held-owner", None),
+  ]
+
+
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
   client, auth, db, monkeypatch,
 ):
@@ -3612,6 +3651,36 @@ def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
   assert kwargs == {"parked": False}
   assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
   assert "five automatic retries" in sink.events[-1]["message"]
+
+
+def test_provider_refusal_is_a_resumable_pause_never_a_retry():
+  """A refusal is not a limit or a busy model: no automatic retry is
+  scheduled, and the card owns the moves that change the request."""
+  report = "API Error: safeguards flagged this message. Details: [category]"
+  sink = _Sink()
+
+  # The 429 proves the refusal outranks the usage-limit branch.
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": report, "provider_refusal": True, "api_error_status": 429},
+    report,
+    provider_id="claude",
+  )
+
+  assert kwargs == {"parked": False}
+  event = sink.events[-1]
+  assert event["type"] == "error"
+  assert event["resumable"] is True
+  assert event["pause"] == {"kind": "provider_refusal", "provider": "claude"}
+  assert event["message"] == report
+
+
+def test_unmarked_failure_with_refusal_like_text_stays_a_plain_error():
+  sink = _Sink()
+  text = "API Error: safeguards flagged this message."
+
+  assert chat_mod._park_exit(sink, {"error": text}, text) == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": text}
 
 
 def test_provider_limit_continuation_does_not_claim_quota_recovered():
