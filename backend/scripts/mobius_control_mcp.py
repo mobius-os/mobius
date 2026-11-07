@@ -225,7 +225,7 @@ def _promote_goal(objective: str) -> dict:
   return {
     "state": payload["state"],
     "objective": payload["objective"],
-    "goal_id": payload["root_run_id"],
+    "goal_id": payload["goal_id"],
     "run_id": payload["run_id"],
     "next_action": _GOALS.PLAN_NEXT_ACTION,
   }
@@ -535,10 +535,10 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
       lines.append("Ready to complete after verification; omit next_action.")
     elif full and summary.get("completion_blockers"):
       lines.append("Completion blocked by: " + ", ".join(summary["completion_blockers"]) + ".")
-    if (full or summary.get("can_complete")) and goal.get("held_work_keys"):
+    if (full or summary.get("can_complete")) and goal.get("completable_work_keys"):
       lines.append(
-        "Held work_keys (finished_claims accepts only these; name only work performed): "
-        + ", ".join(goal["held_work_keys"]) + "."
+        "Eligible work_keys for finished_claims (name only work performed): "
+        + ", ".join(goal["completable_work_keys"]) + "."
       )
   elif isinstance(goal.get("hold"), dict) and goal["hold"].get("cause") == "deferred":
     lines.append("On hold: " + goal["hold"]["reason"])
@@ -1794,7 +1794,11 @@ _TOOL_DEFINITIONS = {
                   "description": "Why remaining work is deferred, after other authorized work is done. Quietly holds this Goal, not an outcome or a new question; tasks may share this atomic call. Do not combine with next_action or outcomes."},
         "finished_claims": {
           "type": "array", "items": {"type": "string"}, "maxItems": 50,
-          "description": "With complete only: exact held work_keys this Goal performed, not claim ids or invented names. Other held claims are released.",
+          "description": (
+            "With complete only: exact work_keys performed, from this Goal's open "
+            "claims or same-chat Goal-less claims, not claim ids or invented names. "
+            "Unnamed Goal-owned claims are released; unnamed Goal-less claims stay open."
+          ),
         },
         "goal_id": {"type": "string"},
       },
