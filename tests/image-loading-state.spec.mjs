@@ -57,6 +57,8 @@ for (const viewport of [{ width: 1180, height: 820 }, { width: 390, height: 844 
       await expect(frame).toHaveAttribute('aria-busy', 'true')
       await expect(frame).toContainText('Loading image…')
       const before = await frame.boundingBox()
+      // A short paragraph must not shrink the pending preview to label width.
+      expect(before.width).toBeGreaterThan(200)
       const afterParagraph = painted.getByText('After image.', { exact: true })
       const paragraphBefore = await afterParagraph.boundingBox()
       releaseToken()
