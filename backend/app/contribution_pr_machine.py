@@ -26,8 +26,10 @@ The rules, in plain words:
     An approval of an older commit still counts when the fact reader proved the
     PR's own change the same: a merge of the base is a new commit, not new work.
   - Only new commits bring their PR back for re-review; replies never do. A
-    reviewer who looked again and only commented has not approved: a plain
-    comment never lifts a change request on GitHub.
+    reviewer who only commented has not approved, however long they looked: a
+    plain comment never lifts a change request on GitHub, and a PR that needs an
+    approval does not get one from it. Anyone who commented on this version can
+    be asked to approve.
   - One agent job per PR at a time.
 Pure: no I/O. Reason strings are shown to the owner verbatim (the server's 409).
 """
@@ -82,19 +84,27 @@ def _review_standing(people: list[dict], head) -> dict:
   carried = [{"by": r.get("by"), "commit": r.get("commit")} for r in people if approved_here(r) and not at_head(r)]
   changes_older = _names(people, lambda r: r.get("state") == "CHANGES_REQUESTED" and not at_head(r))
   commented_at_head = _names(people, lambda r: r.get("state") == "COMMENTED" and at_head(r))
+  changes_at_head = _names(people, lambda r: r.get("state") == "CHANGES_REQUESTED" and at_head(r))
   # Whose change request is of an older version, but who has looked at this one since and only commented.
   looked_again = [name for name in changes_older if any(_same(other, name) for other in commented_at_head)]
+  # Who commented on this version without approving it, and holds no change request: they looked and gave no verdict.
+  holding_or_approved = [*approved_at_head, *changes_at_head, *changes_older]
+  commented_only = [name for name in commented_at_head if not any(_same(other, name) for other in holding_or_approved)]
   return {
     "approved_at_head": approved_at_head,
     "approved_older": approved_older,
     "carried": carried,
     "carried_only": bool(approved_at_head) and all(
       any(_same(item["by"], name) for item in carried) for name in approved_at_head),
-    "changes_at_head": _names(people, lambda r: r.get("state") == "CHANGES_REQUESTED" and at_head(r)),
+    "changes_at_head": changes_at_head,
     "changes_older": changes_older,
     "looked_again": looked_again,
+    "commented_only": commented_only,
+    # Who Ask for approval can ask: everyone who commented on this version and has not approved it.
+    "approval_from": [*looked_again, *commented_only],
     # Who a re-review request can still ask: an older review of theirs that they have not looked past.
-    "rereview": [name for name in dict.fromkeys([*changes_older, *approved_older]) if name not in looked_again],
+    "rereview": [name for name in dict.fromkeys([*changes_older, *approved_older])
+                 if name not in looked_again and name not in commented_only],
   }
 
 
@@ -144,6 +154,9 @@ STATES = {
     "you", "Looked again · not approved",
     "Your PR · {who} looked again and left a comment, but GitHub still holds their change request. "
     "Ask for their approval", "ask_approval"),
+  "author.commented": _state(
+    "you", "Commented · not approved",
+    "Your PR · {who} left a comment but hasn’t approved. Ask for their approval", "ask_approval"),
   "author.approval_stale": _state("other", "Approval is old", "Your PR · approved on an older version. Waiting on {who} to look again"),
   "author.waiting_review": _state("other", "Waiting on reviewers", "Your PR · waiting on reviewers"),
   "author.approved_checks": _state("other", "Approved", "Your PR · approved. {checks}"),
@@ -200,6 +213,8 @@ def _author_standing(facts: dict, d: dict) -> str:
     return "author.looked_again" if d["looked_again"] else "author.waiting_rereview"
   if d["approved_at_head"]:
     return _approved_standing(facts)
+  if d["commented_only"]:
+    return "author.commented"
   if d["approved_older"]:
     return "author.approval_stale"
   return "author.waiting_review"
@@ -355,19 +370,19 @@ def _back_to_draft_guard(facts: dict, d: dict) -> str:
 def _ask_rereview_guard(facts: dict, d: dict) -> str:
   if d["rereview"]:
     return _first_reason(_readable(facts), _still_open(facts))
-  if d["looked_again"]:
+  if d["approval_from"]:
     return "They already looked at this version. Ask them to approve."
   return "Nobody reviewed an older version."
 
 
 def _ask_approval_guard(facts: dict, d: dict) -> str:
-  if not d["looked_again"]:
-    return "Nobody has looked again without approving."
+  if not d["approval_from"]:
+    return "Nobody has commented without approving."
   return _first_reason(_readable(facts), _still_open(facts))
 
 
 def _ask_approval_title(d: dict) -> str:
-  return f"Ask {', '.join(d['looked_again'])} to approve" if d["looked_again"] else "Ask for approval"
+  return f"Ask {', '.join(d['approval_from'])} to approve" if d["approval_from"] else "Ask for approval"
 
 
 def _close_guard(facts: dict, d: dict) -> str:
@@ -421,7 +436,7 @@ ACTIONS = (
 def _headline_who(key: str, d: dict) -> list[str]:
   """The people a headline names: who approved this version, or whose review is of an older one."""
   return {"author.waiting_rereview": d["changes_older"], "author.looked_again": d["looked_again"],
-          "author.approval_stale": d["approved_older"], "author.approved": d["approved_at_head"]}.get(key, [])
+          "author.commented": d["commented_only"], "author.approval_stale": d["approved_older"], "author.approved": d["approved_at_head"]}.get(key, [])
 
 
 def _headline(key: str, facts: dict, d: dict) -> str:
@@ -457,6 +472,7 @@ def decide(facts: dict) -> dict:
   approved_by names who approved this version (carried_from: those of them whose
   approval is of an older commit with the same work, as {by, commit}); looked_again
   who looked at this version and only commented while their change request stands;
+  approval_from everyone who only commented on it and has not approved (looked_again included);
   rereview_from whose review is of an older version that they have not looked
   past (the people Ask for re-review may ask).
   """
@@ -470,7 +486,8 @@ def decide(facts: dict) -> dict:
           "headline": _headline(key, facts, d), "next": state["next"],
           "waiting_on": _waiting_on(key, facts, d), "actions": actions,
           "approved_by": d["approved_at_head"], "carried_from": d["carried"],
-          "looked_again": d["looked_again"], "rereview_from": d["rereview"]}
+          "looked_again": d["looked_again"], "approval_from": d["approval_from"],
+          "rereview_from": d["rereview"]}
 
 
 def action_blocker(facts: dict, action_id: str) -> str:

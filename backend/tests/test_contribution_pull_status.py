@@ -167,15 +167,22 @@ def test_ask_for_approval_posts_a_note_that_names_no_one():
 def test_ask_for_approval_is_refused_for_a_person_who_has_not_looked_again():
   github = looked_again()
   assert refused(github, "ask-approval", approving(["sam", "bob"])) == (
-    409, "Ask only people who looked again without approving: sam.")
+    409, "Ask only people who commented without approving: sam.")
   assert github.writes_seen == []
 
 
-def test_ask_for_approval_is_refused_for_someone_whose_review_is_not_a_change_request():
+def test_ask_for_approval_is_refused_for_someone_who_has_not_commented_on_this_version():
+  github = looked_again()
+  github.comments = []
+  assert refused(github, "ask-approval", approving(["sam"])) == (409, "Nobody has commented without approving.")
+  assert github.writes_seen == []
+
+
+def test_ask_for_approval_posts_to_someone_who_only_commented_and_holds_no_change_request():
   github = looked_again()
   github.reviews = []
-  assert refused(github, "ask-approval", approving(["sam"])) == (409, "Nobody has looked again without approving.")
-  assert github.writes_seen == []
+  assert change(github, "ask-approval", approving(["sam"], "@sam could you approve?"))["state"] == "asked"
+  assert github.writes_seen == [("comment", "@sam could you approve?")]
 
 
 @pytest.mark.parametrize("note", ["@bob please approve", "Thanks @sam and @bob", "cc @sam-smith", "mail a@example.org"])
@@ -185,10 +192,10 @@ def test_ask_for_approval_is_refused_when_the_note_names_anyone_but_the_people_a
   assert github.writes_seen == []
 
 
-def test_ask_for_approval_is_refused_in_the_machines_words_when_nobody_looked_again():
+def test_ask_for_approval_is_refused_in_the_machines_words_when_nobody_commented():
   waiting = StatusGitHub()
   waiting.reviews = [{"state": "CHANGES_REQUESTED", "author": {"login": "sam"}, "commit": {"oid": OLDER}}]
-  assert refused(waiting, "ask-approval", approving(["sam"])) == (409, "Nobody has looked again without approving.")
+  assert refused(waiting, "ask-approval", approving(["sam"])) == (409, "Nobody has commented without approving.")
   theirs = looked_again()
   theirs.pull["user"] = {"id": 7, "login": "kim"}
   assert refused(theirs, "ask-approval", approving(["sam"])) == (409, "You can’t do that as the reviewer of this PR.")
