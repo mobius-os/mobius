@@ -5886,12 +5886,12 @@ export default function ChatView({
   useLayoutEffect(() => {
     committedReplyGroupsRef.current = { chatId, groups: replyGroups }
   }, [chatId, replyGroups])
-  // Activity projection is a transcript-source commit too: peer rows may
-  // arrive after the first reveal without changing message count. Keep all
-  // source handoffs in the controller's same pre-paint transaction.
+  // Every committed typewriter frame changes transcript geometry, even when
+  // message count is unchanged. Keep live reveal, catch-up, and peer-source
+  // handoffs in the controller's same pre-paint spacer-and-scroll transaction.
   useLayoutEffect(() => {
     reapplyActiveMode()
-  }, [catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
+  }, [streamItems, catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
   const projectedActiveMirrorMsg = activeMirrorMsg?.id
     ? peerTimeline.messages.find(message => message.id === activeMirrorMsg.id)
       || activeMirrorMsg
