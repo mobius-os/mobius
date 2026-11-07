@@ -2458,7 +2458,8 @@ def _complete_boot_activation(repo: Path) -> None:
   A fresh server always satisfies ``server_restart``.  A new image identity
   that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
-  cannot observe or control those external planes.
+  cannot observe or control those external planes; status alone reads the
+  host's certified helper (``_without_certified_host_helper``).
   """
   marker = _read_activation_marker()
   if not marker:

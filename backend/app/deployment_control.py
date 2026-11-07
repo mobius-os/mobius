@@ -551,8 +551,8 @@ def host_helper_meets_release(
   the only evidence; unreadable status or requirement is never proof."""
   try:
     installed = _read_host_status().get("helper_protocol")
-  except DeploymentControlError:
-    return False
+  except (DeploymentControlError, OSError):
+    return False  # a read-only status call must never fail on host state
   return _helper_protocol_meets(installed, _required_helper_protocol(target_sha, repo))
 
 

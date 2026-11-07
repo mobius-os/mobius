@@ -1422,6 +1422,12 @@ def test_host_helper_certification_is_read_from_host_status_and_fails_closed(
   (control / "status.json").unlink()
   assert dc.host_helper_meets_release() is False
 
+  def unreadable():
+    raise PermissionError("inbox not searchable")
+
+  monkeypatch.setattr(dc, "_read_host_status", unreadable)
+  assert dc.host_helper_meets_release() is False  # status reads never raise
+
 
 @pytest.mark.asyncio
 async def test_outdated_helper_is_refused_before_an_update_is_prepared(
