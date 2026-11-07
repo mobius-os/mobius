@@ -30,6 +30,7 @@ treated as the envelope; anything else is the inner object and is only
 accepted for `.json` paths.
 """
 
+import asyncio
 import base64
 import datetime
 import heapq
@@ -1084,9 +1085,10 @@ async def write_shared_file(
   # memory — are always extensioned text the filename guess recovers), so the
   # stored-mime half of the decode result is discarded here.
   content, _ = await _decode_write_body(request, file_path)
-  if file_path == base / "theme.css":
-    # Snapshots the prior theme and serializes with the light/dark switch.
-    save_theme_css(settings.data_dir, content)
+  if file_path == base.resolve() / "theme.css":
+    # Snapshots the prior theme and waits for a light/dark switch in progress,
+    # off the event loop.
+    await asyncio.to_thread(save_theme_css, settings.data_dir, content)
   else:
     atomic_write(file_path, content)
   # storage_write for shared/* — debounced per (0, path) to match the
@@ -1134,7 +1136,7 @@ def delete_shared_file(
     deleted_size = file_path.stat().st_size
   except OSError:
     deleted_size = 0
-  if file_path == base / "theme.css":
+  if file_path == base.resolve() / "theme.css":
     with THEME_CSS_LOCK:  # so the light/dark switch cannot write it back
       file_path.unlink()
   else:

@@ -280,6 +280,34 @@ def test_repeated_and_nested_root_declarations_survive():
     assert persisted.count(":root") == 1
 
 
+def test_the_root_keeps_its_order_and_every_line():
+  # Under CSS nesting a declaration after a nested rule outranks it, so the
+  # order is kept; lines no pattern reads are kept verbatim.
+  css = (":root {\n  --bg: #0d0d0d;\n  @media (min-width: 1px) { --gap: 1px; }\n  --gap: 2px;\n"
+         "  --2xl: 40px;\n  *zoom: 1;\n  --accent: #00ffff\n}\n")
+  there, _ = toggle_once(css, "dark")
+  back, _ = toggle_once(there, "light")
+  for persisted in (there, back):
+    assert persisted.index("@media (min-width: 1px) { --gap: 1px; }") < persisted.index("--gap: 2px;")
+    assert "--2xl: 40px;" in persisted and "*zoom: 1;" in persisted
+    assert "--accent: #00ffff;" in persisted
+
+
+def test_deep_nesting_is_read_without_recursion():
+  depth = 3000
+  css = ":root { --bg: #ffffff; }\n" + ".a { " * depth + "--deep: 1px; " + "} " * depth
+  assert theme._scan_theme_css(css)[1] == {"--deep"}
+  assert theme._infer_theme_mode(css) == "light"
+  toggle_once(css, "light")
+
+
+def test_text_before_the_leading_statements_ends_them():
+  css = "}\n@import url(https://fonts.example.test/a.css);\n:root { --bg: #ffffff; }\n"
+  served = _ensure_core_vars(css)
+  assert served.startswith(f"@layer {theme.DEFAULTS_LAYER};\n/* {theme.INJECTED_DEFAULTS_MARKER} */")
+  assert served.endswith(css)
+
+
 def test_typography_is_left_to_the_defaults_unless_declared():
   persisted, painted = toggle_once(theme.DEFAULT_THEME, "dark")
   for name in ("--font", "--mono", "font-size"):
@@ -421,12 +449,20 @@ def test_the_mode_endpoint_is_guarded(client, auth, shared, events):
 
 def test_every_theme_writer_waits_for_the_switch(client, auth, shared, events):
   import threading
-  (shared / "theme.css").write_text(CUSTOM_DARK)
-  with theme.THEME_CSS_LOCK:  # as the switch holds it while it rewrites
-    writer = threading.Thread(target=client.put, args=("/api/storage/shared/theme.css",),
-                              kwargs={"headers": auth, "json": {"content": ":root { --bg: #ffffff; }"}})
-    writer.start()
-    writer.join(0.3)
-    assert writer.is_alive() and (shared / "theme.css").read_text() == CUSTOM_DARK
-  writer.join()
-  assert (shared / "theme.css").read_text() == ":root { --bg: #ffffff; }"
+  writes = {
+    "put": lambda: client.put("/api/storage/shared/theme.css", headers=auth,
+                              json={"content": ":root { --bg: #ffffff; }"}),
+    "delete": lambda: client.delete("/api/storage/shared/theme.css", headers=auth),
+    "reset": lambda: theme.reset_theme_override(os.environ["DATA_DIR"]),
+  }
+  for kind, write in writes.items():
+    (shared / "theme.css").write_text(CUSTOM_DARK)
+    with theme.THEME_CSS_LOCK:  # as the switch holds it while it rewrites
+      writer = threading.Thread(target=write)
+      writer.start()
+      writer.join(0.3)
+      assert writer.is_alive(), kind
+      assert (shared / "theme.css").read_text() == CUSTOM_DARK, kind
+    writer.join()
+    path = shared / "theme.css"
+    assert (path.read_text() == ":root { --bg: #ffffff; }") if kind == "put" else not path.exists(), kind

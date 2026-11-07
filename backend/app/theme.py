@@ -671,7 +671,7 @@ def theme_role_vars(
   return out
 
 
-_DECLARATION_RE = re.compile(r"(-?-?[A-Za-z_][A-Za-z0-9_-]*)[ \t\n\r\f]*:(.*)", re.S)
+_DECLARATION_RE = re.compile(r"(--[\w-]+|-?[A-Za-z_][\w-]*)[ \t\n\r\f]*:(.*)", re.S)
 _IMPORTANT_RE = re.compile(r"![ \t\n\r\f]*important$", re.I)
 _URL_OPEN_RE = re.compile(r"url\(\s*(?=[^\s\"'])", re.I)
 
@@ -766,8 +766,9 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
   or `}` inside a comment, string or url() is never structure, plus whether
   the parse is exact.  It is not when the lexer cannot follow the CSS or the
   braces do not balance; the nodes are then a best effort (an unclosed rule
-  is dropped), which only the leading-statement reader relies on.  Text
-  after the last `;` or `}` at a level is not a node."""
+  is dropped, a stray `}` ends a node of its own), which only the
+  leading-statement reader relies on.  Text after the last `;` or `}` at a
+  level is not a node."""
   text, mask, ok = _lex_theme_css(css)
   levels: list[list[_CssNode]] = [[]]
   opened: list[tuple[str, int]] = []
@@ -785,6 +786,8 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
     elif ch == "}":
       if not opened:
         ok = False
+        head, start = head_at(i + 1)
+        levels[-1].append(_CssNode(head, start, i + 1, None))
         segment = i + 1
         continue
       head, start = head_at(i)
@@ -803,23 +806,26 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
   return levels[0], ok and not opened
 
 
-def _declarations(nodes: "list[_CssNode]") -> list[tuple[str, str]]:
-  """(name, value) of each declaration among `nodes`, in source order."""
-  out = []
-  for node in nodes:
-    m = _DECLARATION_RE.fullmatch(node.head) if node.body is None else None
-    if m:
-      out.append((m.group(1), m.group(2).strip(_CSS_WS)))
-  return out
+def _declaration(node: "_CssNode") -> tuple[str, str] | None:
+  """(name, value) when `node` is a declaration, else None."""
+  m = _DECLARATION_RE.fullmatch(node.head) if node.body is None else None
+  return (m.group(1), m.group(2).strip(_CSS_WS)) if m else None
 
 
-def _winning(declarations: "list[tuple[str, str]]") -> dict[str, str]:
-  """The value each name resolves to: the last, except that an !important
-  one beats later normal ones.  Values keep their `!important`."""
-  out: dict[str, str] = {}
-  for name, value in declarations:
-    if not (_IMPORTANT_RE.search(out.get(name, "")) and not _IMPORTANT_RE.search(value)):
-      out[name] = value
+def _custom_declarations(nodes: "list[_CssNode]") -> "list[tuple[str, str, _CssNode]]":
+  """(name, value, node) of each custom property among `nodes`, in order."""
+  return [(*decl, node) for node in nodes
+          if (decl := _declaration(node)) and decl[0].startswith("--")]
+
+
+def _winners(declarations: "list[tuple[str, str, _CssNode]]") -> dict[str, int]:
+  """The index of the declaration each name resolves to: the last, except
+  that an !important one beats later normal ones."""
+  out: dict[str, int] = {}
+  for i, (name, value, _node) in enumerate(declarations):
+    if not (name in out and _IMPORTANT_RE.search(declarations[out[name]][1])
+            and not _IMPORTANT_RE.search(value)):
+      out[name] = i
   return out
 
 
@@ -828,11 +834,14 @@ def _is_root_rule(node: "_CssNode") -> bool:
 
 
 def _custom_names(nodes: "list[_CssNode]") -> set[str]:
-  """Every custom property declared among `nodes`, at any depth."""
-  names = {name for name, _ in _declarations(nodes) if name.startswith("--")}
-  for node in nodes:
-    if node.body is not None:
-      names |= _custom_names(node.body)
+  """Every custom property declared among `nodes`, at any depth (walked
+  without recursion, so no nesting depth can overflow the stack)."""
+  names: set[str] = set()
+  pending = [nodes]
+  while pending:
+    level = pending.pop()
+    names.update(name for name, _value, _node in _custom_declarations(level))
+    pending += [node.body for node in level if node.body is not None]
   return names
 
 
@@ -851,16 +860,16 @@ def _scan_theme_css(css: str) -> tuple[dict[str, str], set[str]] | None:
 
 
 def _scan_nodes(nodes: "list[_CssNode]") -> tuple[dict[str, str], set[str]]:
-  in_root: list[tuple[str, str]] = []
+  in_root: list[tuple[str, str, _CssNode]] = []
   elsewhere: set[str] = set()
   for node in nodes:
     if _is_root_rule(node):
-      in_root += [d for d in _declarations(node.body) if d[0].startswith("--")]
+      in_root += _custom_declarations(node.body)
       elsewhere |= _custom_names([child for child in node.body if child.body is not None])
     else:
       elsewhere |= _custom_names([node])
-  root = {name: _IMPORTANT_RE.sub("", value).strip(_CSS_WS)
-          for name, value in _winning(in_root).items()}
+  root = {name: _IMPORTANT_RE.sub("", in_root[i][1]).strip(_CSS_WS)
+          for name, i in _winners(in_root).items()}
   return root, elsewhere
 
 
@@ -1021,10 +1030,12 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   in `old_mode` (a previously generated block in it is ignored).
 
   Only the first top-level plain `:root` rule is rebuilt; every other byte
-  of the owner's CSS is kept.  Inside that rule every declaration other than
-  a mode-owned colour and `color-scheme` is kept, a repeated one (a fallback
-  before a newer syntax) included, and so are its nested rules; only its
-  comments are dropped.  CSS the parser cannot follow (an unclosed string,
+  of the owner's CSS is kept.  Inside that rule the content stays in its
+  order: a mode-owned colour is swapped where it stood, a custom property
+  overridden later in the rule and `color-scheme` are dropped, and
+  everything else -- a repeated declaration (a fallback before a newer
+  syntax), a nested rule, a line no pattern here reads -- is kept verbatim;
+  only the comments between them go.  CSS the parser cannot follow (an unclosed string,
   comment or url(), or unbalanced braces) raises `UnreadableThemeCss`: its
   rules cannot be found, so no rewrite could change the colours it sets
   without stacking another rule on every switch.
@@ -1059,8 +1070,10 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   else:
     before, after = "", owner[prelude_end:].strip()
   body = rule.body if rule else []
-  declarations = _declarations(body)
-  declared = _winning([d for d in declarations if d[0].startswith("--")])
+  custom = _custom_declarations(body)
+  winners = _winners(custom)
+  declared = {name: custom[i][1] for name, i in winners.items()}
+  winner_at = {custom[i][2].start: name for name, i in winners.items()}
 
   derived = theme_role_vars({k: v for k, v in root.items() if k not in _DERIVED_KEYS}, old_mode)
 
@@ -1069,19 +1082,31 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
             or (key != "--accent-fg" and _is_shipped_value(key, value))
             or (key in _DERIVED_KEYS and derived.get(key) == value))
 
-  # The full base palette first, so a token an older toggle stripped is
-  # restored; then the owner's own values over it. A non-structural colour the
-  # theme sets in another rule (a layer, an `html {}`) is left to that rule:
-  # a plain :root would override it.
-  colors = {key: value for key, value in _base_colors(new_mode).items()
-            if key in _STRUCTURAL_KEYS or key not in elsewhere}
-  colors.update((key, value) for key, value in declared.items() if not mode_owned(key, value))
-  kept = [f"  {key}: {value};\n" for key, value in colors.items()]
-  kept.append(f"  color-scheme: {new_mode};\n")
-  kept += [f"  {key}: {value};\n" for key, value in declarations
-           if not key.startswith("--") and key != "color-scheme"]
-  kept += [f"  {owner[node.start:node.end]}\n" for node in body if node.body is not None]
-  rebuilt = f":root {{\n  /* Colors - {new_mode} theme */\n{''.join(kept)}}}"
+  # The full base palette, so a token an older toggle stripped is restored. A
+  # non-structural colour the theme sets in another rule (a layer, an
+  # `html {}`) is left to that rule: a plain :root would override it.
+  fresh = {key: value for key, value in _base_colors(new_mode).items()
+           if key in _STRUCTURAL_KEYS or key not in elsewhere}
+  lines = [f"  {key}: {value};" for key, value in fresh.items() if key not in declared]
+  lines.append(f"  color-scheme: {new_mode};")
+  # Then the rule's own content in its order, since a declaration after a
+  # nested rule outranks it: a mode-owned colour takes the new mode's value
+  # where it stood, an overridden custom property goes, and everything else
+  # (a fallback pair, a nested rule, a line no pattern here reads) is kept.
+  for node in body:
+    name = (_declaration(node) or ("",))[0]
+    if name.startswith("--"):
+      if winner_at.get(node.start) != name:
+        continue
+      if mode_owned(name, declared[name]):
+        if name in fresh:
+          lines.append(f"  {name}: {fresh[name]};")
+        continue
+    elif name == "color-scheme":
+      continue
+    source = owner[node.start:node.end].rstrip(_CSS_WS)
+    lines.append(f"  {source}" + ("" if node.body is not None or source.endswith(";") else ";"))
+  rebuilt = f":root {{\n  /* Colors - {new_mode} theme */\n" + "\n".join(lines) + "\n}"
   prelude = owner[:prelude_end].strip()
   return "\n\n".join(part for part in (prelude, before, rebuilt, after) if part) + "\n"
 
