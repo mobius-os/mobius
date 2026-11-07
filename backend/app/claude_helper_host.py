@@ -1099,7 +1099,15 @@ def _host_options(
       cli_path=_claude_cli_path(),
       stderr=capture_stderr,
       hooks={
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
+        # PreToolUse owns dispatch identity, built-in-tool denial and each
+        # helper's env file, so a hook that raises or returns no valid
+        # decision must block the call, not run it unscoped (a timeout already
+        # blocks). Every no-opinion path returns {}, since None now blocks.
+        # The post-tool and lifecycle hooks below stay permissive on purpose:
+        # failing them closed would misreport a tool that already ran.
+        "PreToolUse": [HookMatcher(
+          matcher=None, hooks=[host.pre_tool_use], on_failure="block",
+        )],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
