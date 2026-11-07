@@ -102,7 +102,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     raise ContributionSubmitError(
       "This prepared PR has a title GitHub cannot publish exactly. Ask the "
       "agent to prepare a nonblank single-line title without surrounding "
-      "whitespace."
+      "whitespace.",
+      code="invalid_pr_text",
     )
   if (
     not isinstance(body, str)
@@ -112,7 +113,8 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "
-      "agent to prepare a nonblank body within GitHub's size limit."
+      "agent to prepare a nonblank body within GitHub's size limit.",
+      code="invalid_pr_text",
     )
   return title, body
 
@@ -3727,6 +3729,44 @@ def _check_screenshot_body(
     )
 
 
+def assert_publishable_review_text(
+  record: dict, diff_path: Path, *, login: str | None,
+) -> None:
+  """Local review-time proof that Send can publish this record's text exactly.
+
+  Read-only and offline: the same validators Send runs on the title, body,
+  existing-PR witness and attached screenshots, so a review that passes them
+  is not refused for its text at Send. ``login`` is the connected account, if
+  any; without one the screenshot links' length cannot be bounded yet.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  _title, body = _exact_reviewed_pr_text(record)
+  is_update = plan.get("action") == "pr_update"
+  if is_update:
+    _reviewed_existing_pr_metadata(record)
+  screenshots = contribution_screenshots.plan_entries(plan)
+  if not screenshots:
+    return
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here.",
+      code="screenshot_update_unsupported",
+    )
+  contribution_screenshots.check_references(screenshots, body)
+  contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  if login:
+    _check_screenshot_body(
+      body, screenshots,
+      upstream_repo=_git_ops._validate_repo_slug(
+        plan.get("repo") or record.get("repo")
+      ),
+      login=login,
+      branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+      record_patch={},
+    )
+
+
 def _publish_reviewed_screenshots(
   record: dict,
   diff_path: Path,
@@ -3949,19 +3989,15 @@ def _submit_prepared_pr(
       record, diff_path, repo, branch,
     )
     _git_ops._assert_coauthor_trailer(repo, branch, record)
-    if existing_head_repository is not None:
-      # Updating a known PR is not the same routing decision as creating a new
-      # one. Its live identity fixes the destination repository regardless of
-      # generic upstream permission discovered for the connected account.
-      same_repo_submission = (
-        existing_head_repository.casefold() == upstream_repo.casefold()
-      )
-    else:
-      same_repo_submission = bool(
-        direct_base
-        or upstream_repo.split("/", 1)[0].casefold() == login.casefold()
-        or _git_ops._has_upstream_push_permission(repo, upstream_repo)
-      )
+    same_repo_submission = bool(_git_ops.publishes_to_target_repository(
+      upstream_repo,
+      login,
+      direct_base=bool(direct_base),
+      existing_head_repository=existing_head_repository,
+      push_permission=lambda: _git_ops._has_upstream_push_permission(
+        repo, upstream_repo,
+      ),
+    ))
     if same_repo_submission:
       _git_ops._assert_head_attribution(
         repo,

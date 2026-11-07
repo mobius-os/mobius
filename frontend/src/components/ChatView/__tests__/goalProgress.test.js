@@ -163,7 +163,7 @@ test('ChatView retains settled goals independently of transport liveness', () =>
   )
   assert.match(
     chatView,
-    /if \(endingGoal \|\| pendingQueue\.pendingMessagesRef\.current\.length > 0\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    /if \(endingGoal \|\| \(pendingQueue\.pendingMessagesRef\.current\.length > 0\s*&& !handlingStopRef\.current\)\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
     'the existing authoritative refresh owns completed versus paused Goal status',
   )
   assert.match(

@@ -10,11 +10,22 @@ export const SESSION_LIMITS = Object.freeze({
   actions: 24, label: 40, status: 40, note: 500, notice: 500, summary: 240,
   links: 12, linkLabel: 120, checkpointId: 128, checkpointBytes: 32768, nonce: 128,
   confirmationItems: 256, confirmationFacts: 8, confirmationText: 512,
+  title: 120, items: 12, itemStatus: 40, itemNote: 200, itemLinks: 2, itemLinkLabel: 40,
 })
-const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger'])
+const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'accent'])
+/** What this host draws from a session report beyond the original fields,
+ *  advertised in `blockSession.features` and `app-block-init`: `row-state`
+ *  covers `title`, `items`, `itemFacts`, `open` and the `accent` tone. An app
+ *  that does not see it is on an older host and should keep its older
+ *  presentation. */
+export const SESSION_FEATURES = Object.freeze(['row-state'])
 const RECOVERY_ERROR = 'This app session needs recovery. Open the app to check the result before trying again.'
 export const INCOMPLETE_CONFIRMATION = 'Open the app to review this action. Its full current identity is unavailable here.'
 export const AMBIGUOUS_CONFIRMATION = 'Open the app to review these actions. More than one is asking for confirmation at once.'
+
+const sessionLinks = (value, max, labelMax) => (Array.isArray(value) ? value : []).slice(0, max)
+  .map(link => ({ label: shortText(link?.label, labelMax), url: safeSourceUrl(link?.url, { httpsOnly: true }) }))
+  .filter(link => link.label && link.url)
 
 const checkpointId = value => typeof value === 'string' && value.length >= 1 && value.length <= SESSION_LIMITS.checkpointId
 const tone = value => SESSION_TONES.has(value) ? value : 'neutral'
@@ -55,16 +66,34 @@ function sessionAction(raw) {
     hidden: raw.hidden === true,
     note: incomplete ? INCOMPLETE_CONFIRMATION : shortText(raw.note, SESSION_LIMITS.note),
     tone: tone(raw.tone), status: shortText(raw.status, SESSION_LIMITS.status), statusTone: tone(raw.statusTone),
-    links: (Array.isArray(raw.links) ? raw.links : []).slice(0, SESSION_LIMITS.links)
-      .map(link => ({ label: shortText(link?.label, SESSION_LIMITS.linkLabel), url: safeSourceUrl(link?.url, { httpsOnly: true }) }))
-      .filter(link => link.label && link.url),
+    links: sessionLinks(raw.links, SESSION_LIMITS.links, SESSION_LIMITS.linkLabel),
+    // An action that can do nothing here may instead open the block in the
+    // app; it sends no event, so it can never confirm.
+    open: raw.open === true && !confirming,
     // Omission keeps the saved snapshot's badges; an empty list clears them.
     ...(Array.isArray(raw.badges) ? { badges: blockBadges(raw.badges) } : {}),
   }
 }
 
-/** Parse one app-block-state message for this session and its known keys. */
-export function sessionState(message, sessionId, keys) {
+/** Live state for the block's listed rows, keyed by item intent: a short
+ *  status (a pill), a busy mark, one short note and up to two links. Unknown
+ *  intents are dropped and the first report for an intent wins. Decoration
+ *  only: a row's state never adds a control or changes what Confirm does. */
+export function sessionItems(value, intents) {
+  const items = new Map()
+  for (const raw of (Array.isArray(value) ? value : []).slice(0, SESSION_LIMITS.items)) {
+    if (!raw || !intents.has(raw.intent) || items.has(raw.intent)) continue
+    const item = { status: shortText(raw.status, SESSION_LIMITS.itemStatus), statusTone: tone(raw.statusTone),
+      busy: raw.busy === true, note: shortText(raw.note, SESSION_LIMITS.itemNote),
+      links: sessionLinks(raw.links, SESSION_LIMITS.itemLinks, SESSION_LIMITS.itemLinkLabel) }
+    if (item.status || item.busy || item.note || item.links.length) items.set(raw.intent, item)
+  }
+  return items
+}
+
+/** Parse one app-block-state message for this session, its known action keys
+ *  and (optionally) the block's item intents. */
+export function sessionState(message, sessionId, keys, intents = new Set()) {
   if (!message || message.type !== 'moebius:app-block-state' || message.sessionId !== sessionId
     || !Array.isArray(message.actions) || message.actions.length > SESSION_LIMITS.actions) return null
   const checkpoint = Object.hasOwn(message, 'checkpoint') ? sessionCheckpoint(message.checkpoint) : null
@@ -85,6 +114,8 @@ export function sessionState(message, sessionId, keys) {
   }
   return {
     actions, notice: shortText(message.notice, SESSION_LIMITS.notice), summary: shortText(message.summary, SESSION_LIMITS.summary),
+    title: shortText(message.title, SESSION_LIMITS.title), items: sessionItems(message.items, intents),
+    itemFacts: message.itemFacts === 'values' ? 'values' : '',
     retain: message.retain === true || Boolean(checkpoint), checkpoint: checkpoint ?? null,
     checkpointInvalid: checkpoint === undefined, recoveryError: message.recoveryError === true ? RECOVERY_ERROR : null,
     checkpointAck: checkpointId(message.checkpointAck) ? message.checkpointAck : null,
@@ -95,8 +126,8 @@ export function sessionState(message, sessionId, keys) {
 function recoveryHold(previous, incoming, error = previous?.checkpoint && !previous?.recoveryError ? null : RECOVERY_ERROR) {
   const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
     .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
-      hidden: false, note: error || RECOVERY_ERROR }))
-  return { ...incoming, actions, checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
+      hidden: false, open: false, note: error || RECOVERY_ERROR }))
+  return { ...incoming, actions, title: '', items: new Map(), itemFacts: '', checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
     recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
 }
 
@@ -134,14 +165,27 @@ export function sessionStateUpdate(previous, safe) {
   return { ...safe, retain: safe.retain || Boolean(safe.checkpoint), recoveryPending: false, recoveryError: null }
 }
 
-/** The snapshot to show beside live state. While the app asks for
- *  confirmation, only badges the app itself supplies are shown. */
+/** The snapshot to show beside live state. While one action is confirming
+ *  with a complete list, that confirmation owns the whole block: the app's
+ *  items are the only rows (marked `confirmation`, linking nowhere), the
+ *  saved facts and every other control are gone, and the confirming action
+ *  is drawn once, as the block's own action. Otherwise, while anything is
+ *  confirming, only badges the app itself supplies are shown. */
 export function sessionSnapshot(block, state) {
-  const confirming = Boolean(state?.actions.some(action => action.confirming))
+  const confirming = state?.actions.find(action => action.confirming)
   const live = key => state?.actions.find(action => action.key === key)?.badges
+  if (confirming?.confirmation) {
+    const target = [block.action, ...block.items.map(item => item.action)].find(action => action?.intent === confirming.key)
+    return { ...block, title: state.title || block.title, badges: live(confirming.key) ?? [], facts: [], action: target || null, confirmation: true,
+      items: confirming.confirmation.map(item => ({ title: item.title, facts: item.facts, badges: [], action: null, confirmation: true })) }
+  }
   const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
-  return { ...block, badges: badges(block.badges, block.action?.intent),
-    items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent) })) }
+  // The app's live title and row state replace the saved snapshot's; an
+  // open confirmation (above) shows only the app's list.
+  return { ...block, title: state?.title || block.title, liveTitle: Boolean(state?.title),
+    itemFacts: state?.itemFacts || block.itemFacts, badges: badges(block.badges, block.action?.intent),
+    items: block.items.map(item => ({ ...item, badges: badges(item.badges, item.action?.intent),
+      live: confirming ? null : state?.items?.get(item.intent) || null })) }
 }
 
 /** Passive execution needs the owner's accepted grant and the server's

@@ -465,6 +465,11 @@ most 16384.
   reply.
   Every intent field has the same bound. A repeated item intent or badge
   label keeps only its first entry.
+- An item is drawn as its title over one quiet metadata line, its facts
+  joined by a dot, each with its visible label. `"item_facts": "values"` opts
+  the block in to value-only rows (labels kept for assistive technology); use
+  it only when every value reads on its own ("owner/repo", "3 files · +88
+  −21"). An app's confirmation rows always keep visible labels.
 - Every block links to `/shell/?app=<slug>&intent=<intent>`, and each item to
   its own intent. Nothing app-owned runs until the reader clicks the expand
   control or an action; the app's ordinary view then opens in the transcript
@@ -472,7 +477,8 @@ most 16384.
   else, and never restores or overwrites the app's saved place in the shell.
   If the app is not installed, the block keeps its snapshot and says so.
 - Every block is captioned "From this conversation": its title, facts and
-  badges are the agent's words, not status the app verified.
+  badges are the agent's words, not status the app verified. The caption is
+  hidden only while a passive session shows the app's own confirmation rows.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -510,8 +516,8 @@ display. Never act, publish, or change state because of an intent at startup
 or on `app-block-init`; act only on an owner `confirm`, and check that
 request against your own data first.
 
-`props.blockSession` is `{sessionId, generation, actions, items, checkpoint,
-retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+`props.blockSession` is `{sessionId, generation, actions, items, features,
+checkpoint, retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
 `[{key, intent, label}]` and `key` is the action's intent, and `items` is
 `[{intent}]`: the block's item intents in card order, after the host's
 validation and deduplication (an empty array when the block lists no items).
@@ -523,7 +529,11 @@ window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
 - `{type:'moebius:app-block-init', sessionId, generation, actions, items,
-  checkpoint, retain, recoveryError}` when the session envelope changes.
+  features, checkpoint, retain, recoveryError}` when the session envelope
+  changes. `features` lists what this host draws beyond the original report
+  fields: `"row-state"` means `title`, `items`, `itemFacts`, `open` and the
+  `accent` tone below. Without it the host ignores them (and draws an `open`
+  action as an ordinary button), so keep your older presentation there.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -549,13 +559,38 @@ the frame's window, so the host cannot tell documents apart by sender: it drops
 any report with a missing, older or newer generation, acknowledgements
 included.
 
-- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, confirming?,
-  confirmation?, note?, tone?, status?, statusTone?, links?, badges?}`, one
-  per key from `actions` (a key you do not report stays "Loading…"; use
-  `hidden: true` to remove its control). Unknown keys are dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
+- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, open?,
+  confirming?, confirmation?, note?, tone?, status?, statusTone?, links?,
+  badges?}`, one per key from `actions` (a key you do not report stays
+  "Loading…"; use `hidden: true` to remove its control). Unknown keys are
+  dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
   `links` are up to 12 `{label, url}` with uncredentialed `https:` URLs; tones
-  are `neutral|success|attention|danger`; `badges` replaces the block's saved
-  badges for that action (omit to keep them, `[]` to clear them).
+  are `neutral|success|attention|danger|accent`; `badges` replaces the block's saved
+  badges for that action (omit to keep them, `[]` to clear them). `status` is
+  drawn as a small pill in its tone and `note` as one plain line beside the
+  control, never in a warning colour. `busy` adds a spinner to the disabled
+  control. `open: true` turns the control into a link that opens the block in
+  your app (the block's own intent) with `label` as its text; it sends no
+  event, so use it when nothing can be done from the chat. It is ignored while
+  the action is confirming.
+- `title` (120): plain text that replaces the block's saved title while your
+  document reports, for a header that says what happened ("3 pull requests
+  opened"). It is your app's framing, not something the host verified, and it
+  stays while a confirmation is open. The caption then reads "Rows from this
+  conversation", because the rows are still the block's. Omit it or send `''`
+  to keep the saved title.
+- `itemFacts: "values"`: the same value-only row facts as the block's
+  `item_facts`, for rows whose values read on their own. Confirmation rows
+  keep their labels.
+- `items`: up to 12 `{intent, status?, statusTone?, busy?, note?, links?}`,
+  live state for the block's listed rows, matched by the row's `intent` (the
+  intents in `blockSession.items`); unknown intents are dropped and the first
+  report for an intent wins. `status` (40) is a pill with `statusTone`, `busy`
+  adds a spinner to it, `note` (200) is one short plain line under the row,
+  and `links` are up to 2 `{label (40), url}` with uncredentialed `https:`
+  URLs, opened outside Möbius. Row state is decoration only: it adds no
+  control, is hidden while a confirmation owns the block, and is dropped while
+  the block is held for recovery.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
@@ -581,27 +616,32 @@ Confirm will do, `[{title, facts: [{label, value}]}]` with 1-256 items, at most
 8 facts each and every text 1-512 characters. Only one action may be
 confirming at a time, and a `hidden` action never is: if two or more report
 `confirming: true`, the host enables no Confirm, shows no list, and asks the
-reader to open the app. Describe the exact targets and
-versions your app will act on now, from your own data, not the block's saved
-snapshot. The host shows every item, hides the block's saved badges unless you
-supply `badges`, and says the saved title and details come from the
-conversation. It never shortens the list: a missing, empty, oversized or
-malformed `confirmation` keeps Confirm disabled and shows "Open the app to
-review this action. Its full current identity is unavailable here." Confirm
-replaces the action's button in place, with "Not now" beside it. It stays
-disabled until, during this showing of that exact confirmation (the action
-and its list), the end of the list has been on screen at least once (as
-observed after this showing's own layout; a position under an earlier list
-never counts), and
-then Confirm itself has been on screen in a visible page for about 500 ms
-without interruption. The list is drawn below Confirm, so its end having been
-on screen means the whole list has passed through the viewport; a long list
-just needs scrolling to its end and back. A showing ends, and the next one
-starts from nothing, when the list changes or disappears, when Confirm or "Not
-now" is pressed, or on reload; Confirm leaving the screen or the page being
-hidden restarts the delay. So a double-click on the action, a list swapped
-just before a click, or a list that was never on screen never sends
-`confirm`. Treat
+reader to open the app. Describe the exact targets your app will act on now,
+from your own data, not the block's saved snapshot. While it is open, your
+list owns the block: its items are the block's only rows, in the same layout
+(title, then facts, linking nowhere), and the saved facts, rows, other
+controls and "From this conversation" caption are hidden. The confirming
+action is drawn once, in the block's footer, as "Not now" and Confirm, even
+when it is an item's action or several placements share its key. No heading
+or explanation is added: give each item the facts the card's own rows show,
+and the rows look the same before and after the press unless something
+changed. "Not now" brings the saved card back. The block's saved badges are
+hidden unless you supply `badges`. Facts of up to 512 characters wrap inside
+the block. The host never shortens the list: a missing, empty, oversized or
+malformed `confirmation` keeps the saved card and Confirm disabled, and shows
+"Open the app to review this action. Its full current identity is unavailable
+here." Confirm stays disabled until, during this showing of that exact
+confirmation (the action and its list), both the first and the last of your
+rows have been on screen at least once (as observed after this showing's own
+layout; a position under an earlier list never counts), and then Confirm
+itself has been on screen in a visible page for about 500 ms without
+interruption. The rows are drawn above Confirm, so reaching the first row
+means scrolling up through the list; a jump past the middle is not detected.
+A showing ends, and the next one starts from nothing, when the list changes or
+disappears, when Confirm or "Not now" is pressed, or on reload; Confirm
+leaving the screen or the page being hidden restarts the delay. So a
+double-click on the action, a list swapped just before a click, or a list
+whose first row was never on screen never sends `confirm`. Treat
 `confirm` as a request: check it again in the app before acting, and report
 `busy` and then the result.
 
@@ -1259,17 +1299,17 @@ more, or `'started'` with the existing `chatId`. After a cancellation,
 treat it as final. A new attempt needs a new scope.
 
 To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
-When Stop ended the chat's run and cleared its queue, the result carries
+Stop ends the running turn. Messages your app queued in that chat go with the
+Stop; messages the owner typed stay queued until the owner sends. When Stop
+ended the chat's run and settled its queue, the result carries
 `stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
 idle run (`run_id: null` if it never ran). It certifies only that run. Later
-work in the chat, such as an owner resume, a Wait firing, or a helper result,
+work in the chat, such as an owner send, a Wait firing, or a helper result,
 runs under a different `run_id`. Bind the cancellation to the receipt's
 `run_id`, never to a later `chat.status(chatId)`: a status with another
 `run_id`, or with `running: true`, is newer work and is not cancelled. Without
 a receipt (`stop_receipt: null`) nothing was certified, even with
-`stopped: true`: during a Möbius restart, for example, Stop keeps queued turns
-so they survive it, and they run afterwards. Keep any reservation and call
-Stop again later.
+`stopped: true`. Keep any reservation and call Stop again later.
 
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.

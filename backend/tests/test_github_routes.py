@@ -5707,6 +5707,8 @@ def test_review_status_shows_a_diverged_projection_as_sendable(
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
+      "title": "Resolved projection",
+      "body_draft": "Resolved projection body.",
       "branch": "fix/resolved",
       "repo_path": str(review),
       "base_sha": base,
@@ -5744,9 +5746,9 @@ def test_review_status_releases_db_before_git_inspection(
   observed = []
   original = github_routes._inspect_prepared_review
 
-  def inspect(record, diff_path, github_state):
+  def inspect(record, *args):
     observed.append(checked_out_connections())
-    return original(record, diff_path, github_state)
+    return original(record, *args)
 
   monkeypatch.setattr(github_routes, "_inspect_prepared_review", inspect)
   response = client.get(
@@ -6058,7 +6060,7 @@ def test_review_status_keeps_recent_stack_together_past_filename_scan_cap(
   monkeypatch.setattr(
     github_routes,
     "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
+    lambda record, *_args: {
       "id": record["id"], "state": "ready", "code": "ready",
       "message": "Still matches the exact source you reviewed.",
     },
@@ -6122,7 +6124,7 @@ def test_review_status_accepts_reviewed_updates_for_an_existing_pr_stack(
   monkeypatch.setattr(
     github_routes,
     "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
+    lambda record, *_args: {
       "id": record["id"], "state": "ready", "code": "ready",
       "message": "Still matches the exact source you reviewed.",
     },
@@ -6158,9 +6160,9 @@ def test_addressed_review_status_ignores_unrelated_git_and_preserves_publication
     assert path.stem != "unrelated-heavy"
     return original_read(path)
 
-  async def inspect(record, diff_path, state):
+  async def inspect(record, *args):
     seen.append(record["id"])
-    return await original(record, diff_path, state)
+    return await original(record, *args)
 
   async def heads(_token, _query, _variables):
     return {"repo0": {"defaultBranchRef": {
@@ -14292,6 +14294,10 @@ def _as_existing_pr_update(app_id, record_id):
   )
   stored = json.loads(path.read_text())
   stored["plan"]["action"] = "pr_update"
+  stored["plan"]["pr_metadata"] = {
+    "old_title": stored["plan"]["title"],
+    "old_body": stored["plan"]["body_draft"],
+  }
   path.write_text(json.dumps(stored))
 
 
@@ -16342,7 +16348,13 @@ def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
   )
   assert verdict == {
     "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
-    "message": "Reconnect GitHub before sending this PR stack.",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["github_reconnect"],
+  }
+
+
+def _connected_state(login: str, user_id: int) -> dict:
+  return {
+    "login": login, "user_id": user_id, "scopes": ["public_repo", "workflow"],
   }
 
 
@@ -16354,10 +16366,133 @@ def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_toke
   record["plan"]["stack"] = {"position": 1}
   # The staged commits are octocat's; the connected account is now hubot.
   verdict = github_routes._inspect_prepared_review(
-    record, diff_path, {"login": "hubot", "user_id": 7},
+    record, diff_path, _connected_state("hubot", 7),
   )
   assert verdict == {
     "id": "identity-source", "state": "needs_refresh",
     "code": "commit_identity_mismatch",
     "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
+  }
+
+
+def test_review_status_accepts_a_stack_commit_with_the_connected_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-match")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("octocat", 42),
+  )
+  assert verdict["state"] == "ready", verdict
+
+
+def test_review_status_asks_to_reconnect_without_full_pr_access(
+  client, owner_token,
+):
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "partial-scopes")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path,
+    {"login": "octocat", "user_id": 42, "scopes": ["public_repo"]},
+  )
+  assert (verdict["state"], verdict["code"]) == ("unavailable", "github_reconnect")
+
+
+@pytest.mark.parametrize("head_repository,expected", [
+  ("mobius-os/app-demo", "commit_identity_mismatch"),
+  ("hubot/app-demo", "ready"),
+])
+def test_review_status_follows_an_existing_prs_head_repository(
+  client, owner_token, head_repository, expected,
+):
+  """An update publishes where its PR lives, whatever the account may push."""
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(
+    app_id, f"existing-head-{expected.replace('_', '-')}",
+  )
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["action"] = "pr_update"
+  record["plan"]["pr_metadata"] = {
+    "old_title": record["plan"]["title"],
+    "old_body": record["plan"]["body_draft"],
+  }
+  record["head_repository"] = head_repository
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("hubot", 7),
+  )
+  assert verdict["code"] == expected
+
+
+def test_send_refuses_a_direct_commit_after_the_account_changed_since_review(
+  client, owner_token, monkeypatch,
+):
+  """Review saw a matching account; Send sees another one and stops cleanly."""
+  from app import github_contributions
+
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  repo, record, _diff = _prepared_real_review(app_id, "account-switch")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  assert github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("octocat", 42),
+  )["state"] == "ready"
+  head_before = subprocess.check_output(
+    ["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True,
+  ).strip()
+
+  _write_token(login="hubot", user_id=7)
+  monkeypatch.setattr(
+    "app.github_contribution_git._has_upstream_push_permission",
+    lambda *_args: True,
+  )
+  for name in (
+    "_ensure_owner_fork_remote", "_push_branch", "_push_topic_branch",
+    "_authoritative_public_reconciliation",
+  ):
+    monkeypatch.setattr(
+      github_contributions, name,
+      lambda *_a, **_k: pytest.fail("nothing may be published or read"),
+    )
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._submit_prepared_pr(record, diff_path)
+  assert caught.value.code == "commit_identity_mismatch"
+  assert "stack" not in caught.value.message.lower()
+  assert subprocess.check_output(
+    ["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True,
+  ).strip() == head_before
+
+
+def test_review_status_keeps_other_targets_when_one_destination_read_fails(
+  client, owner_token, monkeypatch,
+):
+  from app import github_contribution_git as git_ops
+
+  _write_token(login="hubot", user_id=7)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, "timed-out-target")
+  _prepared_real_review(app_id, "fork-target")
+  path = github_routes._record_paths(app_id, "fork-target")[0]
+  stored = json.loads(path.read_text())
+  stored["repo"] = stored["plan"]["repo"] = "mobius-os/app-other"
+  path.write_text(json.dumps(stored))
+
+  def gh(_repo, *args, **_kwargs):
+    if args[1] == "repos/mobius-os/app-demo":
+      raise subprocess.TimeoutExpired(["gh", *args], 90)
+    return subprocess.CompletedProcess(args, 0, "false\n", "")
+
+  monkeypatch.setattr(git_ops, "_gh", gh)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200, response.text
+  verdicts = {row["id"]: row["code"] for row in response.json()["records"]}
+  assert verdicts == {
+    "timed-out-target": "publication_destination_unavailable",
+    "fork-target": "ready",
   }
