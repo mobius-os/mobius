@@ -4564,6 +4564,10 @@ class ChatWriterActor:
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
     """Atomically bind one exact live attempt to durable intent."""
+    # Promotion adopts exact acquisitions, changing subscriber graph edges.
+    # Serialize the identity read as well as adoption with follows/refreshes.
+    from app.decision_cards import fence_owner
+    fence_owner(db)
     run = db.query(models.ChatRun).filter(
       models.ChatRun.id == cmd.run_token,
       models.ChatRun.chat_id == cmd.chat_id,
@@ -4654,9 +4658,33 @@ class ChatWriterActor:
       run.goal_objective != cmd.objective
       or run.goal_id != goal_id
     )
+    was_goal_less = run.goal_id is None
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
-    if goal_was_missing:
+    if was_goal_less:
+      # First attachment owns this attempt's claims whether the Goal is new
+      # or retained. Replacing a prior Goal still needs explicit claim refresh.
+      from app.agent_work_claims import stage_adopt_pre_goal_claims
+      try:
+        stage_adopt_pre_goal_claims(db, run)
+      except ValueError:
+        db.rollback()
+        return GoalPromotionRejected("claim_adoption_conflict")
+      # Bind the same attempt's live ordinary Waits too: native progress and
+      # later result admission must agree on one saved ownership snapshot.
+      # Card-owned activation and already-disposed history keep their identity.
+      from app.chat_waits import _FIRED_UNDELIVERED
+      db.query(models.ChatWait).filter(
+        models.ChatWait.chat_id == cmd.chat_id,
+        models.ChatWait.created_by_run_id == run.id,
+        models.ChatWait.root_run_id == root_id,
+        models.ChatWait.goal_id.is_(None),
+        models.ChatWait.kind != "platform_activation",
+        models.ChatWait.linked_question_id.is_(None),
+        models.ChatWait.result_disposition.is_(None),
+        models.ChatWait.resume_delivered_at.is_(None),
+        (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
+      ).update({models.ChatWait.goal_id: goal_id}, synchronize_session=False)
       # A helper spawned before promotion has no Goal snapshot yet. Adopt only
       # this physical attempt's helpers, never an earlier turn sharing its root.
       frontier = [cmd.chat_id]

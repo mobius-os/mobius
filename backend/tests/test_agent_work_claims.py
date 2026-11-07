@@ -400,37 +400,31 @@ def test_new_claim_after_goal_ends_is_not_released_as_old_work(db, status):
   assert finished["state"] == "completed"
 
 
-def test_racing_first_claims_leave_one_owner_and_one_follower(db):
+def test_racing_first_claims_leave_one_owner_and_one_follower(db, monkeypatch):
   """Two chats insert the same key at once: the unique key picks one owner."""
-  from sqlalchemy import event
-  from sqlalchemy.orm import Session
-
+  from app import agent_work_claims
   from app.database import SessionLocal
 
   owner, first, second = _fixture(db)
   raced = []
+  original_fence = agent_work_claims.fence_owner
 
-  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
-    pending = [
-      row for row in session.new
-      if isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == second.id
-    ]
-    if not pending or raced:
-      return
-    raced.append(True)
-    with SessionLocal() as other:
-      won = claim_work(other, owner_id=owner.id, chat_id=first.id,
-                       run_id="claim-run-first", work_key=KEY,
-                       summary="Merge the reviewed PR")
-      assert won["state"] == "claimed"
+  def first_chat_wins_before_the_fence(session, owner_id):
+    # Another writer can win after the collision read, not while acquisition
+    # already holds the graph fence through its flush and commit.
+    if session is db and not raced:
+      raced.append(True)
+      with SessionLocal() as other:
+        won = claim_work(other, owner_id=owner.id, chat_id=first.id,
+                         run_id="claim-run-first", work_key=KEY,
+                         summary="Merge the reviewed PR")
+        assert won["state"] == "claimed"
+    original_fence(session, owner_id)
 
-  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
-  try:
-    lost = claim_work(db, owner_id=owner.id, chat_id=second.id,
-                      run_id="claim-run-second", work_key=KEY,
-                      summary="Merge the same reviewed PR")
-  finally:
-    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+  monkeypatch.setattr(agent_work_claims, "fence_owner", first_chat_wins_before_the_fence)
+  lost = claim_work(db, owner_id=owner.id, chat_id=second.id,
+                    run_id="claim-run-second", work_key=KEY,
+                    summary="Merge the same reviewed PR")
 
   assert raced == [True]
   assert (lost["state"], lost["owner_chat_id"]) == ("held_by_peer", first.id)

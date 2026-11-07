@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
+from app.decision_cards import fence_owner
 from app.chat_message_identity import assistant_message_run_id
 from app.config import get_settings
 from app.continuations import (
@@ -324,11 +325,15 @@ def declare_wait(
     )
 
   deadline_at = now + timedelta(seconds=deadline)
+  if created_by_run_id is not None:
+    # Share first attachment's fence through the Wait commit. The writer
+    # either adopts this row or declaration reads its already-attached Goal.
+    fence_owner(db)
   source = (
     db.query(models.ChatRun).filter(
       models.ChatRun.id == created_by_run_id,
       models.ChatRun.chat_id == chat_id,
-    ).first() if created_by_run_id else None
+    ).populate_existing().first() if created_by_run_id else None
   )
   row = models.ChatWait(
     id=uuid.uuid4().hex,
@@ -1338,7 +1343,7 @@ def outstanding_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWai
 
 
 def _goal_waits(db: Session, chat_id: str, goal_id: str):
-  """Immutable Wait affinity; migration backfills only proven old ownership."""
+  """Saved Wait affinity; first attachment may adopt exact-attempt unowned work."""
   return db.query(models.ChatWait).filter(
     models.ChatWait.chat_id == chat_id,
     models.ChatWait.goal_id == goal_id,

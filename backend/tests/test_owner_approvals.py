@@ -523,35 +523,30 @@ def approval_run_id(chat):
 
 
 def test_racing_approval_requests_on_one_key_save_exactly_one_card(
-  client, chat, approval_run, db,
+  client, chat, approval_run, db, monkeypatch,
 ):
   """The other chat's claim lands between this request's check and insert."""
-  from sqlalchemy import event
-  from sqlalchemy.orm import Session
+  from app import agent_work_claims
   from app.agent_work_claims import claim_work
 
   other, sink, headers = _second_approval_chat(db)
-  owner_id = db.query(models.Owner).first().id
   raced = []
+  original_fence = agent_work_claims.fence_owner
 
-  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
-    if raced or not any(
-      isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == other.id
-      for row in session.new
-    ):
-      return
-    raced.append(True)
-    with SessionLocal() as competing:
-      claim_work(competing, owner_id=owner_id, chat_id=chat.id,
-                 run_id=approval_run_id(chat), work_key=SHARED_KEY,
-                 summary="Merge the reviewed PR")
+  def first_chat_wins_before_the_fence(session, owner_id):
+    # Compete after the collision read, before acquisition holds the fence;
+    # another writer cannot commit from inside its protected flush anymore.
+    if not raced:
+      raced.append(True)
+      with SessionLocal() as competing:
+        claim_work(competing, owner_id=owner_id, chat_id=chat.id,
+                   run_id=approval_run_id(chat), work_key=SHARED_KEY,
+                   summary="Merge the reviewed PR")
+    original_fence(session, owner_id)
 
   keyed = {**PROMPT, "work_key": SHARED_KEY}
-  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
-  try:
-    lost = _ask_as(client, other, sink, headers, keyed)
-  finally:
-    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+  monkeypatch.setattr(agent_work_claims, "fence_owner", first_chat_wins_before_the_fence)
+  lost = _ask_as(client, other, sink, headers, keyed)
   won = _ask(client, chat, approval_run, keyed)
 
   assert raced == [True]
