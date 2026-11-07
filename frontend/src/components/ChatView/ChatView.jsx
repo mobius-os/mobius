@@ -5886,9 +5886,9 @@ export default function ChatView({
   useLayoutEffect(() => {
     committedReplyGroupsRef.current = { chatId, groups: replyGroups }
   }, [chatId, replyGroups])
-  // Activity projection is a transcript-source commit too: peer rows may
-  // arrive after the first reveal without changing message count. Keep all
-  // source handoffs in the controller's same pre-paint transaction.
+  // Source handoffs can change geometry without changing message count.
+  // Synchronize those commits here; the controller's ResizeObserver owns live
+  // reveal and intrinsic growth without a second layout pass per text frame.
   useLayoutEffect(() => {
     reapplyActiveMode()
   }, [catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])

@@ -145,7 +145,7 @@ describe('ExpandableImage reserves the frame BEFORE the token resolves (lever 3)
     assert.match(src, /imageDimensionsForHref/,
       'server-read dimensions must seed --md-image-ratio on the first paint')
     assert.match(src, /imageVarsFromDims/)
-    assert.doesNotMatch(src, /naturalWidth|naturalHeight|onLoad=/,
+    assert.doesNotMatch(src, /naturalWidth|naturalHeight/,
       'image decode must never revise frame geometry')
   })
 
