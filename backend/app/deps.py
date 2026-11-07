@@ -1281,11 +1281,13 @@ def require_account_owner_control(principal: Principal = Depends(get_principal))
   make either. Deliberately independent of how much workspace access a guest
   holds, unlike ``require_installation_owner_control``.
 
-  Every write to GitHub or the Community Store under the owner's identity
-  (Contribute's PR sends, updates, assignments, merges and replies; Reviewer
-  posts; Store publishing, reviews and install receipts) requires this, so a
-  guest's apps may read GitHub through the owner's connection but never act
-  on it as the owner."""
+  Writes to GitHub or the Community Store under the owner's identity require
+  this: Contribute's PR sends, updates, assignments, merges and replies,
+  project pushes, Reviewer grants and manual posts, and Store publishing,
+  reviews and install receipts. Reviewer's automatic posts under an existing
+  grant require only ``require_account_owner``, so a delegated helper may
+  still consume that grant. A guest's apps may read GitHub through the
+  owner's connection but never act on it as the owner."""
   require_nondelegated_owner_control(principal)
   require_account_owner(principal)
 
