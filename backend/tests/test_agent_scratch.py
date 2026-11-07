@@ -313,6 +313,52 @@ async def test_scratch_outlives_its_turns_until_a_day_without_changes(
 
 
 @pytest.mark.asyncio
+async def test_viewed_shared_folder_copies_expire_while_the_chat_keeps_its_scratch(
+  monkeypatch, tmp_path, db
+):
+  """The last photo an agent viewed must not stay for the chat's idle day."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  scratch = agent_scratch.scratch_for_chat("viewing-chat")
+  prepared = scratch / "notes.md"
+  prepared.write_text("still in use")
+  copies = scratch / agent_scratch.SHARED_FOLDER_COPIES_DIR
+  copies.mkdir()
+  viewed = copies / "1-photo.jpg"
+  viewed.write_bytes(b"x" * 256)
+  expired = time.time() - agent_scratch.SHARED_FOLDER_COPY_SECONDS - 60
+  os.utime(viewed, (expired, expired))
+  just_viewed = copies / "2-photo.jpg"
+  just_viewed.write_bytes(b"y")
+
+  result = await agent_scratch.sweep_idle_scratch()
+
+  assert not viewed.exists()
+  assert just_viewed.exists()
+  assert prepared.read_text() == "still in use"
+  assert result["bytes"] >= 256
+
+
+@pytest.mark.asyncio
+async def test_copy_expiry_never_follows_a_symlink_out_of_scratch(monkeypatch, tmp_path, db):
+  _pin_data_dir(monkeypatch, tmp_path)
+  old = time.time() - agent_scratch.SHARED_FOLDER_COPY_SECONDS - 60
+  outside = tmp_path / "outside"
+  (outside / agent_scratch.SHARED_FOLDER_COPIES_DIR).mkdir(parents=True)
+  elsewhere = [outside / "report.pdf", outside / agent_scratch.SHARED_FOLDER_COPIES_DIR / "notes.md"]
+  for path in elsewhere:
+    path.write_bytes(b"keep")
+    os.utime(path, (old, old))
+  scratch = agent_scratch.scratch_for_chat("linking-chat")
+  # A linked copies directory, and a linked chat directory holding one.
+  (scratch / agent_scratch.SHARED_FOLDER_COPIES_DIR).symlink_to(outside, target_is_directory=True)
+  (scratch.parent / "linked-chat").symlink_to(outside, target_is_directory=True)
+
+  await agent_scratch.sweep_idle_scratch()
+
+  assert all(path.exists() for path in elsewhere)
+
+
+@pytest.mark.asyncio
 async def test_sweep_reclaims_old_loose_files_in_the_scratch_root(
   monkeypatch, tmp_path, db
 ):

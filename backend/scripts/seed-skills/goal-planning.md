@@ -43,7 +43,10 @@ completion conditions in the checklist; keep the full requested outcome.
 
 Successful completion is a signal, `complete: true`, not another summary to
 write. Verify first; keep useful evidence in task results or the chat
-checkpoint rather than repeating it at completion. Communicate the outcome
+checkpoint rather than repeating it at completion. Save that chat checkpoint
+**before** calling `update_goal(complete: true)`: completing can end the run's
+claim to be the live turn, and a checkpoint attempted afterwards may be
+refused as stale. Communicate the outcome
 once in your normal visible reply, including consequential limitations or
 next actions; do not leave them only inside record details. Non-success
 outcomes and deferrals still need their specific explanations.

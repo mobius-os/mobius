@@ -42,6 +42,11 @@ IDLE_RETENTION_SECONDS = 24 * 60 * 60
 # are not ordered against each other, so even the disk-pressure sweep spares
 # scratch touched this recently: a starting run may not have registered yet.
 START_RACE_GRACE_SECONDS = 15 * 60
+# `folders show` saves copies of the owner's shared files here, one look each.
+# They must not wait out the chat's day of idle scratch, so the sweep expires
+# them on their own clock. backend/scripts/folders.py writes this directory.
+SHARED_FOLDER_COPIES_DIR = "shared-folders"
+SHARED_FOLDER_COPY_SECONDS = 10 * 60
 _RELEASED_DIR = re.compile(
   r"^\.[A-Za-z0-9_-]+\.released-[0-9a-f]{32}$"
 )
@@ -138,12 +143,49 @@ def _last_change(path: Path) -> float:
   return newest
 
 
+def _viewed_copies(root: Path) -> list[Path]:
+  """Entries of each chat's copies directory, never through a symlink.
+
+  An agent can replace its scratch or copies directory with a link, and the
+  expiry must not follow it to delete old files elsewhere.
+  """
+  copies: list[Path] = []
+  for chat_dir in root.iterdir():
+    folder = chat_dir / SHARED_FOLDER_COPIES_DIR
+    if chat_dir.is_symlink() or folder.is_symlink() or not folder.is_dir():
+      continue
+    try:
+      copies.extend(folder.iterdir())
+    except OSError as exc:
+      log.warning("shared-folder copy expiry skipped %s: %s", folder, exc)
+  return copies
+
+
+def _expire_shared_folder_copies(root: Path, now: float) -> int:
+  """Delete viewed copies of shared-folder files older than their limit; return bytes."""
+  cutoff = now - SHARED_FOLDER_COPY_SECONDS
+  reclaimed = 0
+  for copy in _viewed_copies(root):
+    try:
+      stat = copy.lstat()
+      if not copy.is_file() or copy.is_symlink() or stat.st_mtime > cutoff:
+        continue
+      copy.unlink()
+    except OSError as exc:
+      log.warning("shared-folder copy expiry skipped %s: %s", copy, exc)
+      continue
+    reclaimed += stat.st_size
+  return reclaimed
+
+
 async def sweep_idle_scratch(
   *, now: float | None = None, idle_seconds: float = IDLE_RETENTION_SECONDS,
 ) -> dict:
   """Delete scratch unchanged for ``idle_seconds`` whose chat has no run in flight.
 
-  Loose files in the scratch root follow the same age rule. Returns a summary
+  Loose files in the scratch root follow the same age rule. Viewed copies of
+  shared-folder files expire after ``SHARED_FOLDER_COPY_SECONDS`` even while
+  their chat keeps its scratch. Returns a summary
   so the runtime retention supervisor can report what it reclaimed. Failure
   to remove one entry must not prevent the rest, so errors are logged rather
   than aborting the sweep.
@@ -152,8 +194,10 @@ async def sweep_idle_scratch(
   if not root.is_dir():
     return {"removed": 0, "bytes": 0, "kept_recent": 0}
 
-  cutoff = (time.time() if now is None else now) - idle_seconds
-  removed = reclaimed = kept_recent = 0
+  now = time.time() if now is None else now
+  cutoff = now - idle_seconds
+  removed = kept_recent = 0
+  reclaimed = await asyncio.to_thread(_expire_shared_folder_copies, root, now)
 
   for entry in list(root.iterdir()):
     if not entry.is_dir() or entry.is_symlink():

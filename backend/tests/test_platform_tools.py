@@ -27,17 +27,24 @@ def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
   assert 'maxLength' not in complete
 
 
-def test_checkpoint_chat_saves_a_short_summary_and_a_cumulative_digest_uncapped():
+def test_checkpoint_guidance_names_the_layers_and_leaves_them_uncapped():
   control = _control_module()
   definition = control._TOOL_DEFINITIONS["checkpoint_chat"]
   description = definition["description"]
   properties = definition["inputSchema"]["properties"]
 
-  assert "chat_summary replaces its short Summary" in description
-  assert "digest_entry appends one entry to its cumulative Digest" in description
+  assert "chat_summary replaces the Chat summary" in description
+  assert "digest_entry appends one entry to the Full digest" in description
+  assert "two short, connected paragraphs" in description
+  assert "important earlier outcomes" in description
+  assert "recent phase and open work" in description
+  assert "not an execution diary" in description
   assert set(properties) == {"title", "chat_summary", "digest_entry"}
+  # Length is guided by the instructions, not enforced by a cap.
   assert "maxLength" not in properties["chat_summary"]
   assert "maxLength" not in properties["digest_entry"]
+  assert properties["chat_summary"]["description"].startswith("Chat summary.")
+  assert properties["digest_entry"]["description"].startswith("Full digest entry.")
   # A save written for the old plain field names is refused, not misfiled.
   with pytest.raises(ValueError, match="chat_summary, digest_entry"):
     control._call_checkpoint_chat({"summary": "Facts written for the old meaning."})
@@ -211,7 +218,9 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
     "MOBIUS_DELEGATION_ID",
     # Non-secret capture context for the screenshot tool.
     "VIEWPORT_WIDTH", "VIEWPORT_HEIGHT", "VIEWPORT_PIXEL_RATIO",
-    "AGENT_BROWSER_SESSION",
+    "AGENT_BROWSER_SESSION", "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_ARGS",
+    "AGENT_BROWSER_CONFIG", "AGENT_BROWSER_EXECUTABLE_PATH",
+    "MOBIUS_SCREENSHOT_REAL_BROWSER",
   }
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {
@@ -504,7 +513,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   ]
   restart = tools[platform_tools.RESTART_TOOL_NAME]
   assert restart["inputSchema"] == {
-    "type": "object", "properties": {}, "additionalProperties": False,
+    "type": "object", "properties": {"message": control.CARD_MESSAGE_PROPERTY},
+    "additionalProperties": False,
   }
   assert "platform derives" in restart["description"]
   assert "without waking an agent" in restart["description"]
@@ -682,7 +692,7 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert "unavailable" in denied_cancel["content"][0]["text"]
 
 
-def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
+def test_request_restart_takes_only_a_closing_message(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   receipt = {
@@ -694,7 +704,7 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   monkeypatch.setattr(
     control._APPROVALS,
     "request_restart",
-    lambda: calls.append("request_restart") or receipt,
+    lambda **arguments: calls.append(arguments) or receipt,
   )
 
   response = control._call_tool({
@@ -703,14 +713,19 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   })
   assert response["isError"] is False
   assert json.loads(response["content"][0]["text"]) == receipt
-  assert calls == ["request_restart"]
+  with_message = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {"message": "The fix is committed."},
+  })
+  assert with_message["isError"] is False
+  assert calls == [{}, {"message": "The fix is committed."}]
 
   invalid = control._call_tool({
     "name": platform_tools.RESTART_TOOL_NAME,
     "arguments": {"command": "restart"},
   })
   assert invalid["isError"] is True
-  assert "takes no arguments" in invalid["content"][0]["text"]
+  assert "takes only message" in invalid["content"][0]["text"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -1049,17 +1064,31 @@ def test_question_tool_requires_only_owner_facing_meaning():
 
 
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """Every exposed saved-card tool carries the same complete instruction."""
+  """Every exposed saved-card tool carries the same complete instruction, and
+  the closing message travels in the card call itself where the card has one."""
   control = _control_module()
   instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
   for name in (
     control.REQUEST_APPROVAL_TOOL,
     control.REQUEST_QUESTION_TOOL,
     control.REQUEST_RESTART_TOOL,
-    control.REQUEST_SECRET_TOOL,
   ):
-    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    definition = control._TOOL_DEFINITIONS[name]
+    description = definition["description"].lower()
     assert description.count(instruction) == 1
+    assert "closeout before this call" not in description
+    message = definition["inputSchema"]["properties"]["message"]
+    assert message is control.CARD_MESSAGE_PROPERTY
+    assert "message" not in definition["inputSchema"].get("required", [])
+  assert "put your closing message in `message`" in instruction
+  assert "where things stand" in instruction
+  assert "at most a one-sentence lead-in" in control.CARD_MESSAGE_PROPERTY["description"]
+  # The sealed card has no message field, so its closing message stays prose.
+  secret = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]
+  secret_instruction = control.SECRET_CARD_TERMINAL_INSTRUCTION.lower()
+  assert secret["description"].lower().count(secret_instruction) == 1
+  assert "message" not in secret["inputSchema"]["properties"]
+  assert "before this call, write your closing message" in secret_instruction
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
@@ -1550,3 +1579,4 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert not result.get('isError'), result
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
+

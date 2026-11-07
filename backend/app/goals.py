@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from app import models
 
 log = logging.getLogger(__name__)
@@ -341,21 +341,22 @@ def _helper_blockers(db, run, goal) -> list[str]:
   what reaches the coordinator, so blocking would be uncleared forever.
   """
   from app.delegations import _self_resuming_helper_rows
-  from app.goal_plans import _delegation_tree, active_goal_helpers
+  from app.goal_plans import active_goal_helpers, goal_helper_tree
 
-  tree_ids, owners, frontier = set(), {goal.chat_id}, _delegation_tree(
-    db, run, goal, all_attempts=True,
-  )
+  tree = goal_helper_tree(db, run, goal)
+  tree_ids, owners, frontier = set(), {goal.chat_id}, list(tree)
   while frontier:
     node = frontier.pop()
     tree_ids.add(node["id"])
     frontier.extend(node.get("children") or [])
   owners |= {row.child_chat_id for row in db.query(models.Delegation.child_chat_id)
              .filter(models.Delegation.id.in_(tree_ids))} if tree_ids else set()
-  return active_goal_helpers(db, run, goal) + [
+  # A still-working helper is already named by its task; list it only once.
+  active = active_goal_helpers(tree)
+  return list(active.values()) + [
     "helper:" + row.id
     for row, _status in _self_resuming_helper_rows(db, owners)
-    if row.app_id is None and (
+    if row.app_id is None and row.id not in active and (
       row.id in tree_ids
       or (row.parent_chat_id == goal.chat_id and row.goal_id == goal.id)
     )
@@ -425,8 +426,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
-    GoalPlanConflict, GoalPlanError, active_goal_helpers, normalize_tasks,
-    staged_task_edits,
+    GoalPlanConflict, GoalPlanError, normalize_tasks, staged_task_edits,
   )
   # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (
@@ -473,7 +473,8 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     if finished_claims:
       completed_keys = {row[0] for row in db.query(models.AgentWorkClaim.work_key).filter(
         models.AgentWorkClaim.owner_chat_id == goal.chat_id,
-        models.AgentWorkClaim.owner_goal_id == goal.id,
+        or_(models.AgentWorkClaim.owner_goal_id == goal.id,
+            models.AgentWorkClaim.owner_goal_id.is_(None)),
         models.AgentWorkClaim.completed_at.is_not(None),
       ).all()}
       if set(finished_claims) - completed_keys:
@@ -549,8 +550,8 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         + ", ".join(blockers),
         code="goal_completion_blocked", completion_blockers=blockers,
       )
-    from app.agent_work_claims import held_claims_hint, open_claim_keys
-    held = open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)
+    from app.agent_work_claims import completable_claim_keys, held_claims_hint
+    held = completable_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)
     unknown = set(finished_claims) - held
     if unknown:
       raise GoalPlanError(

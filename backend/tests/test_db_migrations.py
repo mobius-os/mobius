@@ -763,9 +763,10 @@ def test_app_identity_migration_materializes_legacy_source_without_overwriting_d
 
   from app import compiler
 
-  async def fake_compile(source, *, out_path, source_path):
+  async def fake_compile(source, *, out_path, source_path, source_root):
     assert source == stored
     assert Path(source_path) == source_dir / "index.jsx"
+    assert Path(source_root) == source_dir
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_text("compiled legacy app", encoding="utf-8")
 
@@ -1881,8 +1882,40 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0095_unique_live_claim_follows",
     "0096_app_accepted_consent",
     "0097_core_contribution_review_runs",
+    "0098_run_end_reason",
+    "0099_app_chat_scope_starts",
+    "0100_chat_branch_origin",
   ]
   assert second == first
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_app_chat_scope_starts_exist_after_fresh_and_frozen_upgrade(tmp_path, start):
+  db_path = tmp_path / "scope-starts-boot.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_app_chat_scope_starts(eng)  # Idempotent on a crash retry.
+
+  assert "0099_app_chat_scope_starts" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  # Every binding names a chat or a cancellation; admission excludes the latter.
+  for columns, values in (
+    ("app_id, scope, created_at", "1, 'neither', '2026-10-01 12:00:00'"),
+    ("app_id, scope, chat_id, cancelled_at, admitted_at, created_at",
+     "1, 'both', 'c', '2026-10-01', '2026-10-01', '2026-10-01'"),
+  ):
+    with pytest.raises(IntegrityError):
+      with eng.begin() as conn:
+        conn.execute(text(
+          f"INSERT INTO app_chat_scope_starts ({columns}) VALUES ({values})"
+        ))
+  eng.dispose()
 
 
 def test_notification_seen_migration_preserves_current_unread_history(tmp_path):

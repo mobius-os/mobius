@@ -48,7 +48,7 @@ export function formatCacheHitRate(totals, fractionDigits = 0) {
   return `${rate.toFixed(digits).replace(/\.0$/, '')}%`
 }
 
-export function formatUsageMenuText(totals) {
+export function formatUsageMenuText(totals, coverage) {
   if (!totals) return null
   const input = formatTokenCount(nonCachedInputTokens(totals))
   const output = formatTokenCount(totals.output_tokens)
@@ -59,8 +59,9 @@ export function formatUsageMenuText(totals) {
   if (output) parts.push(`${output} out`)
   if (cache) parts.push(`${cache} cache`)
   if (cost !== null) parts.push(cost)
-  if (!parts.length) return null
-  return parts.join(' · ')
+  const incomplete = incompleteRuns(coverage) > 0
+  if (!parts.length) return incomplete ? 'Usage unknown' : null
+  return `${incomplete ? 'At least ' : ''}${parts.join(' · ')}`
 }
 
 export function modelDisplayName(modelId, registry, provider) {
@@ -100,3 +101,30 @@ export function formatTimestamp(value) {
   return formatDateTime(date)
 }
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
+
+// Per-turn usage coverage (backend usage_metrics.USAGE_QUALITIES). A complete
+// aggregate needs no label; every other kind says what its numbers mean.
+const USAGE_QUALITY_LABELS = {
+  partial: 'Partial (at least this much)',
+  unknown: 'Not known for this turn',
+}
+
+export function usageQualityLabel(quality) {
+  return USAGE_QUALITY_LABELS[quality] || null
+}
+
+// Turns whose usage is a lower bound or not counted. In-flight and untracked
+// turns (missing) have their own note and never mark the totals incomplete.
+function incompleteRuns(coverage) {
+  const byQuality = coverage?.runs_by_quality || {}
+  return Object.keys(USAGE_QUALITY_LABELS)
+    .reduce((sum, quality) => sum + (Number(byQuality[quality]) || 0), 0)
+}
+
+/** Why chat totals are a lower bound rather than a complete aggregate. */
+export function incompleteUsageNote(coverage) {
+  const count = incompleteRuns(coverage)
+  if (count <= 0) return null
+  const turns = count === 1 ? '1 turn has' : `${count} turns have`
+  return `${turns} partial or unknown usage, so totals are a lower bound.`
+}

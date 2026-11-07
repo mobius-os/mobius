@@ -39,6 +39,8 @@ from typing import Any
 
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
+from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
 
@@ -260,13 +262,17 @@ class HelperTurn:
   summary: str | None = None
   # Provider report, distinct from task lifecycle summaries and closing text.
   report: HelperReport = dataclasses.field(default_factory=HelperReport)
-  usage: dict | None = None
+  # Per-call usage of this turn's own model calls, by Claude message id.
+  call_usage: dict = dataclasses.field(default_factory=dict)
   dispatch_error: str | None = None
   dispatch_tool_error: bool = False
   dispatch_consumed: bool = False
   dispatch_cancelled: bool = False
   # The helper's last API error from its provider, as (kind, message text).
   api_error: tuple[str, str] | None = None
+  # The helper's last provider call ended in a safety refusal (its own
+  # stop reason); a later successful call clears it.
+  refused: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   # goals.CompactionBriefRefresh for a helper with a Goal assignment.
@@ -275,12 +281,21 @@ class HelperTurn:
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
 
-  def finish(self, status: str, summary: str | None = None, usage=None) -> None:
+  def finish(self, status: str, summary: str | None = None) -> None:
     if self.done.is_set():
       return
-    self.status, self.summary, self.usage = status, summary, usage
+    self.status, self.summary = status, summary
     self.started.set()
     self.done.set()
+
+
+# One Claude process hosts all of a parent's helpers, so one memory kill ends
+# them together; say so, or agents guess at an unrelated cause and retry the
+# same parallel load.
+HOST_OUT_OF_MEMORY = (
+  "The helper host was stopped because Möbius ran out of memory, ending every "
+  "helper it was running. Run fewer memory-heavy helpers at once before retrying."
+)
 
 
 class ClaudeHelperHost(Host):
@@ -298,6 +313,9 @@ class ClaudeHelperHost(Host):
     self._turn_by_tool_use: dict[str, HelperTurn] = {}
     self._agent_of_tool_use: dict[str, str] = {}
     self._turn_by_agent: dict[str, HelperTurn] = {}
+    # OOM evidence: the container's kill counter at start and the exit code.
+    self._oom_kills_at_start: int | None = None
+    self._exit_code: int | None = None
     # A first tool can precede its task-start event. Identity has no deadline:
     # only accepted/rejected task start or host shutdown settles it.
     self._agent_identity: dict[str, asyncio.Future] = {}
@@ -366,6 +384,7 @@ class ClaudeHelperHost(Host):
       resume = None
     self._client = client
     self.session_id = resume
+    self._oom_kills_at_start = cgroup_oom_kill_count()
     self.process_group_id = _claude_process_group_id(client)
     lower_process_group_priority(
       self.process_group_id, logger=log, label="Claude helper host",
@@ -540,6 +559,9 @@ class ClaudeHelperHost(Host):
       turn.dispatch_tool_error = True
       if not turn.done.is_set() and turn.dispatch_id in self._turn_by_dispatch:
         self._specs[turn.dispatch_id] = turn.spec
+        # Nothing was consumed, so a Stop during the re-ask must not stop the
+        # (resumable) agent this turn addresses.
+        turn.dispatch_consumed = False
       log.warning("helper dispatch tool error kind=%s id=%s", turn.kind, turn.dispatch_id)
 
   async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
@@ -633,6 +655,11 @@ class ClaudeHelperHost(Host):
         if turn is None or turn.done.is_set():
           continue
         if isinstance(message, AssistantMessage):
+          # Claude repeats one model call's message per content block; the
+          # latest copy carries that call's most complete usage.
+          if message.message_id and isinstance(message.usage, dict):
+            turn.call_usage[message.message_id] = message.usage
+          turn.refused = message.stop_reason == "refusal"
           if error:
             turn.api_error = (str(error), _message_text(message))
           else:
@@ -655,7 +682,8 @@ class ClaudeHelperHost(Host):
           log.debug("helper event routing failed", exc_info=True)
     except asyncio.CancelledError:
       raise
-    except Exception:
+    except Exception as exc:
+      self._exit_code = getattr(exc, "exit_code", None)
       log.warning("Claude helper host stream ended key=%s", self.key.digest, exc_info=True)
     finally:
       if not self._closed:
@@ -670,10 +698,15 @@ class ClaudeHelperHost(Host):
     self._cancel_pending_identity()
     for dispatch in self._host_tasks:
       dispatch.cancel()
+    summary = (
+      HOST_OUT_OF_MEMORY
+      if process_was_oom_killed(self._exit_code, oom_kills_before=self._oom_kills_at_start)
+      else "The helper host stopped unexpectedly."
+    )
     for turn in list(self._turn_by_dispatch.values()):
       if not turn.done.is_set():
         turn.host_lost = True
-      turn.finish("failed", "The helper host stopped unexpectedly.")
+      turn.finish("failed", summary)
 
   def _turn_for_parent(self, tool_use_id: str) -> HelperTurn | None:
     agent = self._agent_of_tool_use.get(tool_use_id)
@@ -711,7 +744,9 @@ class ClaudeHelperHost(Host):
     if identity is not None and not identity.done():
       identity.set_result(turn)
 
-  def _on_task_end(self, task_id, status, summary, usage) -> None:
+  def _on_task_end(self, task_id, status, summary, _task_usage=None) -> None:
+    # Claude's task counters are not this turn's usage: a task notification's
+    # total is its last model call only. The turn sums its own calls instead.
     turn = self._turn_by_agent.get(task_id)
     # A follow-up turn is mapped to its agent before the agent resumes, and
     # each run reports its end more than once; a late report of the previous
@@ -722,7 +757,7 @@ class ClaudeHelperHost(Host):
     report = turn.report.final()
     if report is not None:
       turn.sink.publish({"type": "assistant_result", "content": report})
-    turn.finish(normalized, summary, dict(usage) if usage else None)
+    turn.finish(normalized, summary)
 
   # ------------------------------------------------------------------ work
 
@@ -1064,7 +1099,15 @@ def _host_options(
       cli_path=_claude_cli_path(),
       stderr=capture_stderr,
       hooks={
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
+        # PreToolUse owns dispatch identity, built-in-tool denial and each
+        # helper's env file, so a hook that raises or returns no valid
+        # decision must block the call, not run it unscoped (a timeout already
+        # blocks). Every no-opinion path returns {}, since None now blocks.
+        # The post-tool and lifecycle hooks below stay permissive on purpose:
+        # failing them closed would misreport a tool that already ran.
+        "PreToolUse": [HookMatcher(
+          matcher=None, hooks=[host.pre_tool_use], on_failure="block",
+        )],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
@@ -1225,12 +1268,14 @@ async def run_claude_host_turn(
         )
         if kind == "rate_limit":
           result["api_error_status"] = 429
-      if turn.usage:
-        result["usage_metrics"] = {
-          "total_tokens": turn.usage.get("total_tokens"),
-          "duration_ms": turn.usage.get("duration_ms")
-          or int((time.monotonic() - started_at) * 1000),
-        }
+        if turn.refused:
+          result["provider_refusal"] = True
+      usage = normalize_claude_helper_usage(
+        list(turn.call_usage.values()),
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+      )
+      if usage is not None:
+        result["usage_metrics"] = usage
       return result
   finally:
     if handle is not None:

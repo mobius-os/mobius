@@ -43,7 +43,7 @@ import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -52,6 +52,7 @@ from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
 from app import storage_io
+from app.storage_response import StorageFileResponse
 from app.storage_io import (
   app_dir_usage,
   atomic_write,
@@ -525,8 +526,13 @@ def _with_json_listing_content(
       read_bytes += len(raw)
       if len(raw) != size:
         continue
-      entry["content"] = json.loads(raw)
-    except (HTTPException, OSError, UnicodeDecodeError, json.JSONDecodeError,
+      content = json.loads(raw)
+      # Python accepts non-finite numbers and escaped lone surrogates that
+      # the HTTP JSON response cannot emit. Isolate them like malformed JSON,
+      # rather than letting one raw file break the whole listing page.
+      json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
+      entry["content"] = content
+    except (HTTPException, OSError, UnicodeError, ValueError,
             RecursionError):
       # RecursionError (deeply nested content) is a RuntimeError, so without it
       # a list-with-content read would 500 instead of just skipping the entry.
@@ -552,21 +558,27 @@ def _serve_file(file_path: Path, stored_mime: str | None = None):
   """
   mime = stored_mime or mimetypes.guess_type(file_path.name)[0]
   is_text = mime is None or mime.startswith(tuple(_TEXT_PREFIXES))
+  if not is_text:
+    return StorageFileResponse(file_path, media_type=mime)
   try:
-    too_big = file_path.stat().st_size > _INLINE_READ_MAX
-  except OSError:
+    with file_path.open("rb") as source:
+      source_stat = os.fstat(source.fileno())
+      if source_stat.st_size > _INLINE_READ_MAX:
+        raw = None
+      else:
+        raw = source.read(_INLINE_READ_MAX + 1)
+    if raw is not None and len(raw) <= _INLINE_READ_MAX:
+      return PlainTextResponse(
+        raw.decode("utf-8"), media_type=(mime or "text/plain"),
+        headers={"etag": file_version_token(file_path, stat_result=source_stat)},
+      )
+  except (FileNotFoundError, IsADirectoryError):
     raise HTTPException(status_code=404, detail="File not found.")
-  if not is_text or too_big:
-    return FileResponse(
-      file_path, media_type=(mime or "application/octet-stream")
-    )
-  try:
-    text = file_path.read_text(encoding="utf-8")
   except UnicodeDecodeError:
-    return FileResponse(
-      file_path, media_type=(mime or "application/octet-stream")
-    )
-  return PlainTextResponse(text, media_type=(mime or "text/plain"))
+    pass
+  return StorageFileResponse(
+    file_path, media_type=(mime or "application/octet-stream"),
+  )
 
 
 def _git_read_env() -> dict[str, str]:
@@ -705,7 +717,6 @@ def read_app_file(
   # never accept. Always expose the canonical storage version and keep mutable
   # private app data out of the browser HTTP cache; the app runtime owns its
   # explicit offline/read-through cache.
-  response.headers["ETag"] = file_version_token(file_path)
   response.headers["Cache-Control"] = "no-store"
   return response
 

@@ -26,9 +26,12 @@ REVIEW_SCOPE = (
   "correctness", "maintainability", "simplicity", "tests",
   "security_privacy", "technical_debt",
 )
-# Reviewed public inputs besides the diff. A verdict survives a restage only
-# while all of them, and the canonical diff bytes, are unchanged.
-_REVIEWED_TEXT_FIELDS = ("title", "body_draft", "labels", "coauthor_trailer")
+# Reviewed public inputs besides the diff, including published screenshots.
+# A verdict survives a restage only while all of them, and the canonical diff
+# bytes, are unchanged.
+_REVIEWED_TEXT_FIELDS = (
+  "title", "body_draft", "labels", "coauthor_trailer", "screenshots",
+)
 
 
 @dataclass(frozen=True)

@@ -12,11 +12,12 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
 from app.manifest_contract import (
-  PUBLIC_SERVICE_REQUESTS_PER_MINUTE, SERVICE_REQUEST_MAX_BYTES,
+  MANIFEST_MAX_BYTES, PUBLIC_SERVICE_REQUESTS_PER_MINUTE, SERVICE_REQUEST_MAX_BYTES,
   accepted_service_max_bytes, accepted_service_route_limits,
 )
 
@@ -293,6 +294,42 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  # Runs accepted app code in a hidden frame while one of its chat blocks is
+  # near the viewport. See CAPABILITIES.md "Passive transcript sessions".
+  "chat.blocks.passive": {
+    "version": 1,
+    "kind": "session",
+    "title": "Run in its chat blocks",
+    "description": (
+      "Run this app's code, without showing it, while one of its blocks is "
+      "near the visible part of a chat, so the block can show current status. "
+      "After you press the block's Confirm, the app can act on your behalf, "
+      "for example publish a change."
+    ),
+    "risk": "execution",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
+  # Lets a passive chat block offer a host-drawn "Fix in chat" button that
+  # sends a host-written request naming what the app flagged into that chat
+  # as the owner's own message. Only for an app also admitted to
+  # chat.blocks.passive.
+  "chat.blocks.ask": {
+    "version": 1,
+    "kind": "session",
+    "title": "Ask this chat's agent from its chat blocks",
+    "description": (
+      "Show a Fix in chat button on this app's chat blocks. When you press "
+      "it, Möbius sends your message to that chat asking its agent to fix "
+      "the items the block names. The app cannot choose the wording, and you "
+      "see the exact message in the chat."
+    ),
+    "risk": "messages",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "device.storage": {
     "version": 1,
     "kind": "invoke",
@@ -354,6 +391,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "lifecycle": "background",
     "default_limits": {"max_text_chars": 50_000},
     "hard_limits": {"max_text_chars": (1, 250_000)},
+  },
+  # Controls tracking in the M\u00f6bius phone app. The app can ask only while
+  # it is visible; once started, the phone keeps recording in the background
+  # (under the OS location indicator) until stopped from a visible app again.
+  # Reading the recorded history is the separate `location_history_read`
+  # server permission.
+  "location.tracking": {
+    "version": 1,
+    "kind": "invoke",
+    "title": "Track your phone's location",
+    "description": (
+      "See, start, stop, or change location tracking in the M\u00f6bius phone app. "
+      "Once started, the phone keeps recording in the background until you "
+      "stop it."
+    ),
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {},
+    "hard_limits": {},
   },
   "media.microphone.capture": {
     "version": 1,
@@ -561,6 +617,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "helper_activity_read": bool(perms.get("helper_activity_read", False)),
+      "location_history_read": bool(perms.get("location_history_read", False)),
     },
     "background": (
       {
@@ -684,6 +742,13 @@ def contract_from_app_state(
     )
   if tools is None:
     tools = agent_tools_from_contract(getattr(app, "capability_contract", None))
+  # Contract-only grants have no App column. An explicit mapping (manifest
+  # apply) is authoritative; otherwise keep what the stored contract accepted.
+  contract_grants = contract_permissions
+  if contract_grants is None:
+    stored = getattr(app, "capability_contract", None)
+    stored_data = stored.get("data") if isinstance(stored, dict) else None
+    contract_grants = stored_data if isinstance(stored_data, dict) else {}
   manifest = {
     "system_prompt": getattr(app, "system_prompt_file", None),
     "embeds_agent": bool(getattr(app, "embeds_agent", False)),
@@ -699,17 +764,16 @@ def contract_from_app_state(
       "connections_manage": bool(getattr(app, "connections_manage", False)),
       "connect_manage": bool(getattr(app, "connect_manage", False)),
       # Manifest apply passes an explicit mapping: omission revokes. An
-      # unrelated row projection (no mapping) retains reviewed job access.
-      "job_secret_read": (
-        contract_permissions if contract_permissions is not None else
-        (getattr(app, "capability_contract", None) or {}).get("data", {})
-      ).get("job_secret_read", []),
-      # These contract-only grants must be declared on every local apply.
-      "identity_manage": bool(
-        (contract_permissions or {}).get("identity_manage", False)
+      # unrelated row projection (no mapping, e.g. a PATCH of pinned or
+      # chat_log_access) retains every contract-only grant the owner accepted.
+      "job_secret_read": contract_grants.get("job_secret_read", []),
+      "identity_manage": bool(contract_grants.get("identity_manage", False)),
+      "railway_manage": bool(contract_grants.get("railway_manage", False)),
+      "helper_activity_read": bool(
+        contract_grants.get("helper_activity_read", False)
       ),
-      "railway_manage": bool(
-        (contract_permissions or {}).get("railway_manage", False)
+      "location_history_read": bool(
+        contract_grants.get("location_history_read", False)
       ),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
@@ -941,7 +1005,8 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "public.storage.read",
+  "data.railway_manage", "data.helper_activity_read",
+  "data.location_history_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {
@@ -1070,3 +1135,95 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     group = path.split(".", 1)[0]
     return any(key.startswith(f"{group}.") for key in after_leaves)
   return True
+
+
+PASSIVE_BLOCK_CAPABILITY = "chat.blocks.passive"
+PASSIVE_ASK_CAPABILITY = "chat.blocks.ask"
+
+
+class _RuntimeManifestUnavailable(Exception):
+  """The frozen runtime tree is absent; never cache that answer."""
+
+
+@lru_cache(maxsize=512)
+def _applied_passive_admission(
+  app_id: int, runtime_revision: str, compiled_path: str,
+) -> tuple[str | None, bool]:
+  """Digest of one immutable (runtime revision, compiled bundle) pair, and
+  whether that revision also declares chat.blocks.ask.
+
+  Both inputs are content addressed, so the answer can never change for this
+  key: a new Apply produces a new revision and bundle name. The editable source
+  manifest is never consulted, and a missing runtime cache is not rebuilt from
+  a serializer; it simply stays unadmitted until the frame is next served.
+  """
+  from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_parent
+  from app.compiler import app_bundle_digest
+
+  digest = app_bundle_digest(app_id, compiled_path)
+  if digest is None:
+    return None, False
+  try:
+    root = runtime_parent(app_id) / runtime_revision
+    if not root.is_dir():
+      raise _RuntimeManifestUnavailable
+    manifest_path = root / "mobius.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+      return None, False
+    with manifest_path.open("rb") as handle:
+      raw = handle.read(MANIFEST_MAX_BYTES + 1)
+    if len(raw) > MANIFEST_MAX_BYTES:
+      return None, False
+    declared = normalize_runtime_capabilities(json.loads(raw))
+  except (AppliedRuntimeUnavailable, OSError) as exc:
+    raise _RuntimeManifestUnavailable from exc
+  except (ValueError, TypeError, AttributeError):
+    return None, False
+  passive = declared.get(PASSIVE_BLOCK_CAPABILITY)
+  if not passive or passive["version"] != 1:
+    return None, False
+  ask = declared.get(PASSIVE_ASK_CAPABILITY)
+  return digest, bool(ask and ask["version"] == 1)
+
+
+def _granted(app: Any, capability: str) -> bool:
+  contract = getattr(app, "capability_contract", None)
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(capability) if isinstance(runtime, dict) else None
+  return isinstance(grant, dict) and type(grant.get("version")) is int and grant["version"] == 1
+
+
+def _passive_admission(app: Any) -> tuple[str | None, bool]:
+  if not _granted(app, PASSIVE_BLOCK_CAPABILITY):
+    return None, False
+  revision = getattr(app, "runtime_revision", None)
+  compiled = getattr(app, "compiled_path", None)
+  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
+      or not isinstance(compiled, str) or not compiled:
+    return None, False
+  try:
+    return _applied_passive_admission(int(app.id), revision, compiled)
+  except _RuntimeManifestUnavailable:
+    return None, False
+
+
+def passive_block_module_digest(app: Any) -> str | None:
+  """Admit passive execution only for accepted, applied opt-in app code.
+
+  Local Store capability acceptance may precede source Apply, so neither that
+  acceptance nor the editable manifest alone proves the served revision opted
+  in. Require the owner's live grant (read on every call, so revocation is
+  immediate) and the immutable applied declaration, and return the compiled
+  content address the frame verifies before evaluating module bytes.
+  """
+  return _passive_admission(app)[0]
+
+
+def passive_block_ask(app: Any) -> bool:
+  """Admit host-drawn asks on this app's passive blocks.
+
+  Exactly as for passive execution: the owner's live chat.blocks.ask grant,
+  the applied revision's own declaration, and passive admission itself.
+  """
+  digest, declared = _passive_admission(app)
+  return bool(digest) and declared and _granted(app, PASSIVE_ASK_CAPABILITY)

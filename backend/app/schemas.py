@@ -7,8 +7,8 @@ from typing import Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
-  BaseModel, ConfigDict, Field, computed_field, field_validator,
-  model_validator,
+  BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, computed_field,
+  field_validator, model_validator,
 )
 
 from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
@@ -22,6 +22,8 @@ class SetupRequest(BaseModel):
   # setup payloads before password hashing work. bcrypt receives a fixed-width
   # digest, so every character remains significant.
   password: str = Field(min_length=1, max_length=1024)
+  # One-time code from the server log / <data_dir>/setup-code (setup_code.py).
+  setup_code: str = Field(default="", max_length=64)
 
   @field_validator("username", mode="before")
   @classmethod
@@ -207,6 +209,36 @@ class AppUpdate(BaseModel):
     return value
 
 
+class UninstalledAppOut(BaseModel):
+  """An app in its recovery window: uninstalled, not yet deleted for good."""
+
+  id: int
+  name: str
+  slug: str
+  version: str | None = None
+  deleted_at: datetime
+  expires_at: datetime
+  # Time left in the window, measured on the server. A countdown runs from this
+  # rather than from expires_at so a device clock that is off cannot end it early.
+  seconds_left: float
+  # A small copy of the app's icon, sent here because the public icon route
+  # hides uninstalled apps on purpose.
+  icon_data_url: str | None = None
+  background_color: str | None = None
+  theme_color: str | None = None
+  # Where the app came from, so the Store can tell which of its pages is this app.
+  manifest_url: str | None = None
+  package_id: str | None = None
+
+  @computed_field
+  @property
+  def source_manifest(self) -> AppSourceManifest | None:
+    if not self.manifest_url:
+      return None
+    url, manifest_id = requested_manifest_source(self.manifest_url)
+    return None if manifest_id is None else AppSourceManifest(id=manifest_id, url=url)
+
+
 class AppOut(BaseModel):
   id: int
   name: str
@@ -293,6 +325,22 @@ class AppOut(BaseModel):
   capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
+
+  @computed_field
+  @property
+  def passive_block_module_digest(self) -> str | None:
+    """Pre-execution admission for this accepted applied bundle, or None."""
+    from app.app_capabilities import passive_block_module_digest
+
+    return passive_block_module_digest(self)
+
+  @computed_field
+  @property
+  def passive_block_ask(self) -> bool:
+    """Whether this app's passive blocks may offer a host-drawn ask."""
+    from app.app_capabilities import passive_block_ask
+
+    return passive_block_ask(self)
 
   @computed_field
   @property
@@ -825,6 +873,8 @@ class SendMessage(BaseModel):
   # Exact physical run shown by Resume; stale recovery controls cannot start
   # a new continuation after automatic recovery has already advanced it.
   resume_run_id: str | None = None
+  # Explicit, warned Continue anyway control for one storage-waiting run.
+  allow_low_storage: bool = False
   # Goal Resume names the durable obligation, not an unrelated chat tail.
   resume_goal_id: str | None = Field(default=None, min_length=1, max_length=64)
   resume_goal_revision: int | None = Field(default=None, ge=0)
@@ -839,9 +889,9 @@ class SendMessage(BaseModel):
   # never an auth boundary — a duplicate cid is treated as a duplicate
   # POST retry, not a security event.
   cid: str | None = None
-  # Internal UI hint: Stop can collapse already-queued messages and ask
-  # the backend to steer them into the live turn even when the chat's
-  # normal send-while-running behavior is queueing.
+  # Internal UI hint: the queue's Steer control asks the backend to steer
+  # already-queued messages into the live turn even when the chat's normal
+  # send-while-running behavior is queueing.
   force_steer: bool = False
   # A new composer message that should be durably reserved and steered in one
   # request. Unlike force_steer, this does not name an existing queued row:
@@ -880,11 +930,20 @@ class SendMessage(BaseModel):
   # The shell's one-tap Resume is a product action, not owner-authored prose.
   # The provider still needs a short prompt to open a new turn after the old
   # process has gone away, but persistence/rendering attribute that prompt as
-  # a continuation marker rather than a user bubble.
-  continuation: Literal["manual"] | None = None
+  # a continuation marker rather than a user bubble. "queue" is an empty send:
+  # it starts the next turn from the queued messages a Stop held.
+  continuation: Literal["manual", "queue"] | None = None
+  # (app_id, scope) when POST /api/app-chats/start sends this first turn. A
+  # private attribute, so request JSON can never set it; the send carries it
+  # onto the writer command that accepts the message (app_chat_scopes).
+  _scoped_start: tuple[int, str] | None = PrivateAttr(default=None)
 
   @model_validator(mode="after")
   def validate_continuation(self):
+    if self.allow_low_storage and (
+      self.continuation != "manual" or not self.resume_run_id
+    ):
+      raise ValueError("Continue anyway requires the exact storage-waiting run")
     goal_target = self.resume_goal_id is not None or self.resume_goal_revision is not None
     if goal_target and (
       self.resume_goal_id is None or self.resume_goal_revision is None
@@ -897,6 +956,8 @@ class SendMessage(BaseModel):
       and self.content.strip().lower() != "continue"
     ):
       raise ValueError("manual continuation does not accept message content")
+    if self.continuation == "queue" and (self.content.strip() or self.attachments):
+      raise ValueError("sending the queue does not accept message content")
     return self
 
 
@@ -928,6 +989,17 @@ class PushSubscribeRequest(BaseModel):
 
 class PushUnsubscribeRequest(BaseModel):
   endpoint: str
+
+
+class PushDeviceRequest(BaseModel):
+  """The FCM token from the mobile app's ``MobiusNative.registerPush()``.
+
+  FCM tokens are printable ASCII without spaces; this bounds what the relay is
+  handed without encoding today's token format. Other fields the app returns
+  (``platform``, APNs details) are ignored: the relay delivers through FCM.
+  """
+
+  token: str = Field(pattern=r"^[\x21-\x7e]{1,4096}$")
 
 
 class NotificationAction(BaseModel):
@@ -1130,18 +1202,17 @@ class ModelRegistryResponse(BaseModel):
 
 
 class ModelPrefsUpdate(BaseModel):
-  """`PATCH /api/owner/model-prefs` body.
+  """`PATCH /api/owner/model-prefs` body: only the models being changed.
 
-  `hidden_ids` replaces the persisted list verbatim — the modal
-  always sends the full set so partial-update merge logic isn't
-  needed. Passing an empty list clears all hidden entries (shows
-  everything). Unknown IDs are tolerated; they no-op until/unless
-  the registry surfaces them again.
+  `hidden` maps a model id to true (hide it from the picker) or false (show
+  it). Models not named keep their current visibility. Unknown ids are
+  tolerated; they no-op until/unless the registry surfaces them again.
   """
 
   model_config = ConfigDict(extra="forbid")
 
-  hidden_ids: list[str] = Field(default_factory=list)
+  # One Save of the picker modal names at most the whole registry.
+  hidden: dict[str, StrictBool] = Field(max_length=500)
 
 
 class NotificationOut(BaseModel):

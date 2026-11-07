@@ -10,6 +10,7 @@ projection. It never writes Chat.messages or Chat.pending_messages directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
@@ -27,7 +28,9 @@ from app import transcript_rows
 from app import auth, models
 from app.settled import run_settled
 from app.browser_access import BrowserLineage, require_live
-from app.continuations import HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON
+from app.continuations import (
+  HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON, has_runnable_pending,
+)
 from app.timeutil import now_naive_utc
 
 
@@ -197,13 +200,16 @@ def _attach_existing_delegation(
 
 def create_or_attach_delegation(
   db: Session, intent: DelegationIntent,
+  *, admit_child: Callable[[models.Delegation], None] | None = None,
 ) -> tuple[models.Delegation, bool]:
   """Persist one child intent idempotently under its parent logical run.
 
   Execution is intentionally separate: callers commit the control/chat rows
   here, then start the ordinary programmatic ChatRun.  A crash between those
   steps leaves a discoverable ``starting`` delegation that reconciliation can
-  safely start with the same immutable prompt.
+  safely start with the same immutable prompt. ``admit_child`` registers any
+  server-owned authorization in this same transaction before recovery can see
+  the child; it must not commit or start execution.
   """
   spawning_run = db.query(models.ChatRun).filter(
     models.ChatRun.chat_id == intent.parent_chat_id,
@@ -270,6 +276,9 @@ def create_or_attach_delegation(
   )
   db.add_all((child, row))
   try:
+    db.flush()
+    if admit_child is not None:
+      admit_child(row)
     db.commit()
   except IntegrityError:
     db.rollback()
@@ -280,6 +289,9 @@ def create_or_attach_delegation(
     if row is None:
       raise ValueError("different delegation claimed the task key")
     return _attach_existing_delegation(db, row, resolved_intent)
+  except BaseException:
+    db.rollback()
+    raise
   # Anchor the parent's live "helper working" row where the launch happened.
   from app.activity_position import record_activity_position
   record_activity_position(
@@ -3255,7 +3267,7 @@ def safe_parent_activity_startup_writer_orphan(
     or physical.status != "running"
     or physical.provider_execution_admitted is not False
     or chat.pending_question_id is not None
-    or bool(chat.pending_messages)
+    or has_runnable_pending(chat.pending_messages)
     or (chat.live_assistant or {}).get("id") != physical.id
     or bool((chat.live_assistant or {}).get("blocks") or [])
   ):
@@ -3416,7 +3428,7 @@ def _plan_result_steer(
       return None
     # Never jump ahead of owner-authored or other queued work. Sends queue
     # under the same chat queue lock the caller holds across this read.
-    if list(chat.pending_messages or []):
+    if has_runnable_pending(chat.pending_messages):
       return None
     # A result the live turn already admitted into its context latches only
     # at that turn's Finalize; steering it in again would be a duplicate.

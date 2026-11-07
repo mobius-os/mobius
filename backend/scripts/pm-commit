@@ -6,7 +6,19 @@
 #   pm-commit --from "$START_SHA" "message" -- path [path ...]
 
 set -euo pipefail
+# Fix the helper's own path before leaving the caller's directory: the
+# owner re-run below must find this same helper when root named it relatively.
+case "$0" in /*) SELF="$0" ;; *) SELF="$PWD/$0" ;; esac
 cd "${PM_COMMIT_ROOT:-/data}"
+
+# A plain root shell, such as a Recovery session, cannot commit here: Git
+# refuses a repository owned by another user ("dubious ownership"), and
+# trusting it as root would leave root-owned objects that break the owner's
+# later commits. Commit as the repository's owner instead.
+# Pass the resolved root on, so a relative one is not resolved a second time.
+if [ "$(id -u)" -eq 0 ] && [ "$(stat -c %u .)" -ne 0 ]; then
+  exec env PM_COMMIT_ROOT="$PWD" runuser -u "$(stat -c %U .)" -- "$SELF" "$@"
+fi
 
 DENY='^(agent-browser-profiles|compiled|logs|cron-logs|push|generated)(/|$)'
 

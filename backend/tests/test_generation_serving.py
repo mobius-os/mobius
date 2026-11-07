@@ -23,6 +23,7 @@ import pytest
 import app.main as main
 import app.frontend_watcher as fw
 from app.frontend_assets import reset_frontend_dir_cache
+from tests.shell_serving_helpers import assert_shell_served
 
 
 def _reset_memo():
@@ -72,13 +73,6 @@ def serving():
     _reset_memo()
 
 
-def _spa_active(client):
-  r = client.get("/")
-  return r.status_code == 200 and "text/html" in r.headers.get(
-    "content-type", "",
-  )
-
-
 # -- request-time asset resolution: dist -> attic -> 404 -----------------
 
 
@@ -91,8 +85,7 @@ def test_old_generation_asset_served_from_attic(client, serving):
     "export const gen = 'gen1';", encoding="utf-8",
   )
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
 
   # current generation from dist
   cur = client.get("/assets/index-gen2.js")
@@ -121,8 +114,7 @@ def test_old_generation_asset_served_from_attic(client, serving):
 def test_unknown_asset_returns_404_not_html(client, serving):
   _write_build(serving["live"], "gen2")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   for miss in ("/assets/index-doesnotexist.js", "/assets/nope.css",
                "/assets/deep/missing.js"):
     r = client.get(miss)
@@ -145,8 +137,7 @@ def test_push_worker_scope_never_resolves_to_a_document(client, serving):
   """
   _write_build(serving["live"], "gen2")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   for path in ("/shell/push", "/shell/push/", "/shell/push/anything"):
     r = client.get(path)
     assert r.status_code == 404, path
@@ -173,14 +164,64 @@ def test_traversal_attempts_rejected(serving):
   assert main._resolve_asset_file("") is None
 
 
+@pytest.mark.parametrize("live_build", [True, False], ids=["live", "baked-floor"])
+@pytest.mark.parametrize("escape", [
+  "..%2fsentinel-secret.txt",
+  "%2e%2e/sentinel-secret.txt",
+  "%2e%2e%2fsentinel-secret.txt",
+  "vendor/..%2f..%2fsentinel-secret.txt",
+])
+def test_spa_fallback_never_serves_files_outside_the_build(
+  client, serving, live_build, escape,
+):
+  """The unauthenticated catch-all must not read files beside the build.
+
+  Starlette percent-decodes the path parameter, so ``..%2f`` reaches the
+  handler as ``../``; before containment this returned any readable file,
+  including the JWT signing key.
+  """
+  root = serving["live"] if live_build else serving["baked"]
+  if live_build:
+    _write_build(root, "TRAVERSAL")
+  # A real subdirectory, so the OS can walk `vendor/..` exactly as it would in
+  # an image build that ships /vendor.
+  (root / "vendor").mkdir(exist_ok=True)
+  _reset_memo()
+  assert main._resolve_static_dir() == root
+  outside = [root.parent / "sentinel-secret.txt", root.parent.parent / "sentinel-secret.txt"]
+  for path in outside:
+    path.write_text("SENTINEL-SECRET", encoding="utf-8")
+    serving["created_baked"].append(path)
+  served = client.get("/" + escape)
+  assert "SENTINEL-SECRET" not in served.text
+  assert served.headers.get("content-type", "").startswith("text/html") \
+    or served.status_code == 404
+  if live_build:
+    # Legitimate files inside the build keep serving.
+    assert client.get("/sw.js").status_code == 200
+
+
+def test_contained_file_rejects_escapes_and_accepts_inner_files(tmp_path):
+  root = tmp_path / "build"
+  (root / "vendor" / "lib@1").mkdir(parents=True)
+  (root / "vendor" / "lib@1" / "a.js").write_text("x", encoding="utf-8")
+  (root / "vendor" / "lib").symlink_to("lib@1")  # image-style relative alias
+  (tmp_path / "secret").write_text("s", encoding="utf-8")
+  assert main._contained_file(root, "vendor/lib/a.js") is not None
+  assert main._contained_file(root, "../secret") is None
+  assert main._contained_file(root, "vendor/../../secret") is None
+  assert main._contained_file(root, str(tmp_path / "secret")) is None
+  assert main._contained_file(root, "") is None
+  assert main._contained_file(root, "a\x00b") is None
+
+
 # -- request-time SPA/static-dir resolution: no restart needed -----------
 
 
 def test_dist_appearing_after_boot_is_served_without_restart(client, serving):
   # "boot": no live dist -> the baked floor serves.
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   assert main._resolve_static_dir() == main._baked_dir
   boot = client.get("/")
   assert boot.status_code == 200
@@ -205,8 +246,7 @@ def test_baked_floor_served_when_dist_incomplete(client, serving):
   live.mkdir(parents=True, exist_ok=True)
   (live / "index.html").write_text("<title>INCOMPLETE</title>", encoding="utf-8")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   assert main._resolve_static_dir() == main._baked_dir
   r = client.get("/")
   assert r.status_code == 200

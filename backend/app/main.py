@@ -36,9 +36,13 @@ from sqlalchemy import inspect as inspect_database
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
-from app.chat_logging import get_logger as get_chat_logger
+from app.chat_logging import (
+  get_logger as get_chat_logger,
+  install_platform_warning_log,
+)
 from app.config import get_settings
 from app.database import (
+  CHECKOUT_WARN_SECONDS,
   Base,
   IntegerOutOfRange,
   SessionLocal,
@@ -73,7 +77,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models, tracing
+from app import activity, models, stall_recorder, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -99,7 +103,9 @@ from app.routes import (
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
+  location_router,
   screen_control_router,
+  shared_folders_router,
   public_apps_router,
   public_storage_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
@@ -277,6 +283,7 @@ def _assert_provider_defaults(provider_names) -> None:
 @asynccontextmanager
 async def lifespan(app):
   _log = logging.getLogger(__name__)
+  install_platform_warning_log()
   record_memory_checkpoint("lifespan_start")
   # Before anything is spawned: no agent or tool may inherit server secrets.
   from app.config import withhold_server_secrets_from_children
@@ -764,6 +771,34 @@ class _SecurityHeadersMiddleware:
       raise
 
 
+class _RequestLabel:
+  """``METHOD /route/{template}`` for database holds, resolved lazily because
+  routing has not run when the request arrives.
+
+  Tasks the request starts inherit this label and can outlive it, so the
+  label settles to a string when the request ends and drops the scope (and
+  with it the request's headers).
+  """
+
+  __slots__ = ("_scope", "_text")
+
+  def __init__(self, scope):
+    self._scope = scope
+    self._text: str | None = None
+
+  def __call__(self) -> str:
+    # A task's hold can end on a worker thread while the request settles on
+    # the loop: read the scope once, since ``settle`` sets the text first.
+    scope = self._scope
+    if scope is None:
+      return self._text
+    return f'{scope.get("method", "?")} {activity.route_template(scope)}'
+
+  def settle(self) -> None:
+    self._text = self()
+    self._scope = None
+
+
 class _DatabaseRequestContextMiddleware:
   """Attributes connection checkout time to the owning HTTP request."""
 
@@ -773,16 +808,13 @@ class _DatabaseRequestContextMiddleware:
   async def __call__(self, scope, receive, send):
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
-    label = f'{scope.get("method", "?")} {scope.get("path", "/")}'
+    label = _RequestLabel(scope)
     token = set_database_request_label(label)
     try:
       return await self.app(scope, receive, send)
     finally:
       reset_database_request_label(token)
-
-
-def _matched_route(scope) -> str:
-  return getattr(scope.get("route"), "path", None) or "<unmatched>"
+      label.settle()
 
 
 class _RequestErrorTelemetryMiddleware:
@@ -791,8 +823,8 @@ class _RequestErrorTelemetryMiddleware:
   Successful requests do no logging or aggregation. For failures, the activity
   module keeps bounded in-memory minute counters and writes compact summaries,
   so a retry loop remains observable without amplifying its CPU or disk cost.
-  FastAPI leaves the matched route template and path params in the ASGI scope;
-  those templates contain no user paths or query values.
+  The route template (``activity.route_template``) carries no user paths or
+  query values.
 
   Unhandled exceptions also leave their traceback in the chat log (uvicorn's
   own report reaches only the container's stdout), once per route and
@@ -835,12 +867,12 @@ class _RequestErrorTelemetryMiddleware:
     except Exception as exc:
       status = status or 500
       self._log_traceback(
-        f"{scope.get('method', '?')} {_matched_route(scope)}", exc,
+        f"{scope.get('method', '?')} {activity.route_template(scope)}", exc,
       )
       raise
     finally:
       if status is not None and status >= 400:
-        route = _matched_route(scope)
+        route = activity.route_template(scope)
         raw_app_id = (scope.get("path_params") or {}).get("app_id")
         try:
           app_id = int(raw_app_id) if raw_app_id is not None else None
@@ -1026,6 +1058,10 @@ app.add_middleware(_DatabaseServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
+# Opt-in like tracing (tracing.json "stall_log"); outermost when on, so a
+# request's time to its response start includes every layer. A request is
+# late on the same measure as a long database hold.
+stall_recorder.install(app, request_seconds=CHECKOUT_WARN_SECONDS)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)
@@ -1055,10 +1091,12 @@ app.include_router(connectors_public_router)
 app.include_router(app_chat_router)
 app.include_router(notify_router)
 app.include_router(screen_control_router)
+app.include_router(shared_folders_router)
 app.include_router(proxy_router)
 app.include_router(public_storage_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
+app.include_router(location_router)
 app.include_router(connect_router)
 app.include_router(browser_access_router)
 app.include_router(client_error_router)
@@ -1260,6 +1298,9 @@ def _served_platform_identity(
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "applied_upstream_sha": None,
          "image_build_applied": False, "baked_sha": None}
+  image_build_sha = str(image_build_sha or "").strip().lower()
+  if not re.fullmatch(r"[0-9a-f]{40}", image_build_sha):
+    out["image_build_applied"] = None  # unstamped, as platform status reports
   try:
     sentinel = Path(
       os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
@@ -1298,12 +1339,6 @@ def _served_platform_identity(
         value = upstream.stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", value):
           out["applied_upstream_sha"] = value
-          normalized_build = str(image_build_sha or "").strip().lower()
-          if re.fullmatch(r"[0-9a-f]{40}", normalized_build):
-            contains_build = _git(
-              "merge-base", "--is-ancestor", normalized_build, value,
-            )
-            out["image_build_applied"] = contains_build.returncode == 0
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:
@@ -1311,6 +1346,11 @@ def _served_platform_identity(
                  if ln.strip() and not ln.rstrip().endswith(".baked-sha")
                  and not ln.startswith("?? .")]
         out["platform_dirty"] = bool(dirty)
+      from app.platform_update import serves_image_release
+
+      out["image_build_applied"] = serves_image_release(
+        repo, out["served_sha"], image_build_sha,
+      )
     except Exception:
       pass
   return out
@@ -1497,16 +1537,29 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
     pass
   roots.append(_baked_dir / "assets")  # per-request corruption/boot floor
   for root in roots:
-    try:
-      root_r = root.resolve()
-      target = (root_r / asset_path).resolve()
-    except OSError:
-      continue
-    if target == root_r or root_r not in target.parents:
-      continue  # the dir itself, or a `..` traversal escaping the root
-    if target.is_file():
+    target = _contained_file(root, asset_path)
+    if target is not None:
       return target
   return None
+
+
+def _contained_file(root: Path, rel_path: str) -> Path | None:
+  """Return the existing file ``rel_path`` names strictly inside ``root``.
+
+  Every public static lookup joins a request-controlled path to a directory,
+  and Starlette has already percent-decoded it (``..%2f`` arrives as ``../``).
+  Resolving both sides and requiring ``root`` as an ancestor is what keeps an
+  unauthenticated request from reading arbitrary files such as the signing key.
+  The directory itself, an escape, and a miss all return None.
+  """
+  try:
+    root_r = root.resolve()
+    target = (root_r / rel_path).resolve()
+  except (OSError, ValueError):
+    return None
+  if target == root_r or root_r not in target.parents:
+    return None
+  return target if target.is_file() else None
 
 
 # Root-served worker scripts: `sw.js` caches the shell, `sw-push.js` owns Web
@@ -1959,16 +2012,14 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
         headers={"Cache-Control": "no-cache, must-revalidate"},
       )
 
-    file = static_dir / path
-    if not file.is_file() and static_dir != _baked_dir and path != "index.html":
+    file = _contained_file(static_dir, path)
+    if file is None and static_dir != _baked_dir and path != "index.html":
       # A complete live build can still omit an image-installed vendor asset,
       # or a new public file until that build refreshes. Pick the baked copy
       # before response policy so executable fallbacks cannot bypass the cache
       # and Range invariants enforced below.
-      baked = _baked_dir / path
-      if baked.is_file():
-        file = baked
-    if file.is_file() and path != "index.html":
+      file = _contained_file(_baked_dir, path)
+    if file is not None and path != "index.html":
       # The service worker MUST be served with `Cache-Control:
       # no-cache` so the browser revalidates it on every page load.
       # Without this header the browser caches sw.js by HTTP

@@ -373,6 +373,12 @@ async def restart_this_worker(
   if not _claim_in_process_restart():
     return
 
+  # An approved restart of source that passed its startup check is an explicit
+  # retry: a commit that boot set aside for not finishing its start gets new
+  # boots.
+  from app.platform_boot import forget_unready_boots
+  forget_unready_boots()
+
   from app import chat
 
   pid = os.getpid()

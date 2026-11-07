@@ -114,6 +114,12 @@ test('an embedded transcript view may only open a conversation or an app', () =>
   assert.equal(seen.length, 2)
 })
 
+test('inline sessions are opt-in and never apply to link-only blocks', () => {
+  assert.equal(appBlockFromToken(token({ ...base, interaction: 'inline' })).session, true)
+  assert.equal(appBlockFromToken(token(base)).session, false)
+  assert.equal(appBlockFromToken(token({ ...base, inline: false, interaction: 'inline' })).session, false)
+})
+
 test('invalid facts never take a valid fact\'s slot', () => {
   const block = appBlockFromToken(token({ ...base, facts: [...Array(8).fill({ label: '', value: 'x' }), { label: 'Kept', value: 'yes' }] }))
   assert.deepEqual(block.facts, [{ label: 'Kept', value: 'yes' }])
@@ -163,4 +169,15 @@ test('a malformed block never throws; wrong-typed fields fall back to a code blo
   }
   assert.equal(appBlockFromToken(token({ ...base, app: ['example'] })), null, 'an array app is not a slug')
   assert.equal(appBlockFromToken(token({ ...base, height: 300 })).height, 300)
+})
+
+test('only a JSON false for expand turns the inline view off; sessions are unaffected', () => {
+  assert.equal(appBlockFromToken(token(base)).expand, true)
+  assert.equal(appBlockFromToken(token({ ...base, expand: false })).expand, false)
+  for (const value of ['false', 0, null, {}, [], 'no']) {
+    assert.equal(appBlockFromToken(token({ ...base, expand: value })).expand, true, JSON.stringify(value))
+  }
+  const session = appBlockFromToken(token({ ...base, expand: false, interaction: 'inline', action: { label: 'Publish', intent: 'send:all' } }))
+  assert.equal(session.session, true)
+  assert.deepEqual(session.action, { label: 'Publish', intent: 'send:all' })
 })

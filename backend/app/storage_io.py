@@ -6,6 +6,7 @@ files — otherwise a seed would be written non-atomically and a concurrent read
 could observe it torn.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import HTTPException, Request
+
+from app.path_utils import NAME_MAX_BYTES
 
 # Hard cap on a single storage object — enforced on BOTH the PUT request body
 # and the file served back. Möbius runs on a memory-tight host (recurring OOM),
@@ -66,14 +69,16 @@ def rmtree_strict(path: Path) -> None:
     raise OSError(f"failed to remove {path}")
 
 
-def file_version_token(file_path: Path) -> str:
+def file_version_token(
+  file_path: Path, *, stat_result: os.stat_result | None = None,
+) -> str:
   """Returns an opaque version token for a storage file.
 
-  The storage route computes this only for callers that opt into CAS/version
-  headers. mtime_ns + size is cheap, stable enough under the per-app write
-  lock, and changes after atomic_write's os.replace() installs the new inode.
+  mtime_ns + size changes after atomic_write installs the new inode. A reader
+  serving an opened file supplies its fstat result so its bytes and validator
+  describe the same version even when the pathname is replaced concurrently.
   """
-  st = file_path.stat()
+  st = stat_result if stat_result is not None else file_path.stat()
   return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
 
 
@@ -152,8 +157,14 @@ def atomic_write(
   # collide on the temp file itself. mkstemp creates 0600, so private callers
   # never expose a secret before replacement; callers that need world-readable
   # output keep the 0644 default.
+  # Reserve two dots, eight random characters and '.tmp' within NAME_MAX.
+  # Truncation affects only the disposable name, never the owner's target.
+  # Drop a partial UTF-8 character rather than emitting a broken temp name.
+  temp_stem = os.fsencode(file_path.name)[:NAME_MAX_BYTES - 14].decode(
+    "utf-8", errors="ignore",
+  ) or "write"
   fd, tmp = tempfile.mkstemp(
-    dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp"
+    dir=file_path.parent, prefix=f".{temp_stem}.", suffix=".tmp"
   )
   try:
     with os.fdopen(fd, "wb") as f:
@@ -241,7 +252,8 @@ def app_dir_usage(app_dir: Path) -> int:
 # Content-Type sidecars live in a meta tree PARALLEL to the storage tree, never
 # inside it — so a `<path>.json` of stored MIME can't leak into an app's own
 # listing or be edited/served as if it were app data. The layout mirrors the
-# storage path: `<data_dir>/.storage-meta/apps/<id>/<path>.json`.
+# storage path: `<data_dir>/.storage-meta/apps/<id>/<path>.json`, with bounded
+# hashed basenames only when appending '.json' would exceed NAME_MAX.
 _META_DIRNAME = ".storage-meta"
 
 
@@ -250,11 +262,19 @@ def _meta_path(data_dir: str, scope_rel: Path, rel: str) -> Path:
 
   `scope_rel` is the storage scope relative to data_dir (e.g. `apps/7` or
   `shared`); `rel` is the file's path within that scope. The sidecar is the
-  same relative path under the parallel meta root, with `.json` appended — so
-  it round-trips one-to-one with the file and is trivially locatable on read,
-  write, and delete.
+  same relative path under the parallel meta root, with `.json` appended.
+  Preserve that layout for existing owner metadata. A valid file basename
+  may leave no room for the suffix; only those names use a SHA-256 basename
+  prefixed by `:mime-` in the SAME mirrored parent. The colon is outside
+  the storage API's path alphabet, so neither an owner file's sidecar nor
+  an owner folder's mirrored subtree can alias it. Folder moves/deletes work on
+  the mirrored subtree without a second metadata root or index.
   """
-  return Path(data_dir) / _META_DIRNAME / scope_rel / (rel + ".json")
+  relative = Path(rel)
+  name = relative.name + ".json"
+  if len(os.fsencode(name)) > NAME_MAX_BYTES:
+    name = ":mime-" + hashlib.sha256(os.fsencode(relative.name)).hexdigest()
+  return Path(data_dir) / _META_DIRNAME / scope_rel / relative.parent / name
 
 
 def write_content_type(

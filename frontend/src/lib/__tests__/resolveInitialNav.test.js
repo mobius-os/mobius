@@ -135,3 +135,12 @@ test('canvas chatId falls back to stored home chat when the source carries none'
   assert.equal(r.chatId, null)
   assert.equal(r.seedHome, true)
 })
+
+test('an explicit result launch overrides a stale claimed reload and seeds HOME', () => {
+  const result = resolveInitialNav({
+    deepLink: { view: 'artifact', projectId: 'p', artifactId: 'site' },
+    shellReload: { activeView: 'settings', destinationClaimed: true },
+    storedChatId: 'home',
+  })
+  assert.deepEqual(result, { view: 'artifact', appId: null, chatId: 'home', seedHome: true })
+})

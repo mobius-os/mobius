@@ -2302,6 +2302,83 @@ def test_failed_api_attempts_surface_as_one_error_not_prose():
   assert terminal["error"] == "API Error: flagged.\n\nRequest ID: req_2"
 
 
+def _refusal_attempt(request_id: str) -> AssistantMessage:
+  return AssistantMessage(
+    content=[TextBlock(text=f"API Error: flagged.\n\nRequest ID: {request_id}")],
+    model="<synthetic>",
+    error="invalid_request",
+    stop_reason="refusal",
+  )
+
+
+def _error_result(*, is_error: bool = True, stop_reason=None) -> ResultMessage:
+  return ResultMessage(
+    subtype="success",
+    duration_ms=20,
+    duration_api_ms=15,
+    is_error=is_error,
+    num_turns=1,
+    session_id="sess-1",
+    stop_reason=stop_reason,
+    total_cost_usd=0.0,
+    result="API Error: flagged." if is_error else "done",
+  )
+
+
+def test_refused_turn_is_marked_from_the_provider_signal_not_its_wording():
+  """The CLI's result may omit the stop reason; the root attempt's own
+  `refusal` stop reason still identifies the turn as a provider refusal."""
+  bus = _Bus()
+  state: dict = {}
+  session_id, _ = dispatch_sdk_message(
+    _refusal_attempt("req_1"), bus, None, usage_state=state,
+  )
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, session_id, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is True
+
+
+def test_refusal_cleared_by_a_later_successful_root_call():
+  bus = _Bus()
+  state: dict = {}
+  dispatch_sdk_message(_refusal_attempt("req_1"), bus, None, usage_state=state)
+  dispatch_sdk_message(AssistantMessage(
+    content=[TextBlock(text="Recovered answer.")],
+    model="claude-opus-5-5",
+    stop_reason="end_turn",
+  ), bus, None, usage_state=state)
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, None, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is False
+
+
+def test_a_sub_agent_refusal_does_not_mark_the_root_turn():
+  bus = _Bus()
+  state: dict = {}
+  sub_agent = _refusal_attempt("req_1")
+  sub_agent.parent_tool_use_id = "toolu_task"
+  dispatch_sdk_message(sub_agent, bus, None, usage_state=state)
+  _, terminal = dispatch_sdk_message(
+    _error_result(stop_reason=None), bus, None, usage_state=state,
+  )
+  assert terminal["provider_refusal"] is False
+
+
+def test_other_failures_and_clean_turns_are_not_refusals():
+  bus = _Bus()
+  _, failed = dispatch_sdk_message(
+    _error_result(stop_reason="end_turn"), bus, None, usage_state={},
+  )
+  _, clean = dispatch_sdk_message(
+    _error_result(is_error=False, stop_reason="refusal"), bus, None,
+    usage_state={"refused": True},
+  )
+  assert failed["provider_refusal"] is False
+  assert clean["provider_refusal"] is False
+
+
 def test_failed_api_call_keeps_the_last_real_context_size():
   """The CLI's synthetic error message carries zeroed usage. It is not a
   model call, so neither the live meter nor the saved context size may
@@ -3505,6 +3582,18 @@ async def test_native_prompt_hook_refuses_work_after_card_or_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_queued_prompt_gate_fails_closed_and_tool_result_hooks_stay_permissive(monkeypatch):
+  """A failing Stop/card gate refuses the prompt; a failing card-end hook must
+  not turn the saved card's completed tool call into an error result."""
+  clients = _install_fake_client(monkeypatch)
+  await _run_turn("prompt-gate-fail-closed")
+  hooks = clients[0].options.hooks
+  assert [m.on_failure for m in hooks["UserPromptSubmit"]] == ["block"]
+  for event in ("PostToolUse", "PreCompact", "Stop"):
+    assert all(m.on_failure is None for m in hooks[event]), event
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("replayed", [False, True])
 async def test_ambiguous_native_write_retains_uuid_until_receipt_or_terminal(monkeypatch, replayed):
   from app import chat_event_sink
@@ -3679,3 +3768,98 @@ async def test_cancel_during_turn_teardown_still_disconnects_and_unregisters(mon
     await asyncio.wait_for(task, timeout=2)
   assert clients[0].disconnected
   assert runners.get_handle("teardown-cancel-chat", RunnerKind.CLAUDE_SDK) is None
+
+
+# The owner reads only text blocks. This is the stored shape of a reply whose
+# answer lived only in its thinking: a closing line after a checkpoint.
+_ANSWER_ONLY_IN_THINKING = [
+  {"type": "thinking", "content": "Checking the deploy log for the failure."},
+  {"type": "text", "content": "I'll check the deploy log before answering."},
+  {"type": "tool", "tool": "Bash", "status": "done"},
+  {"type": "thinking", "content": "Confirmed: the deploy failed because the "
+   "build ran out of memory while bundling the frontend. " * 10},
+  {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"},
+  {"type": "text", "content": "Nothing has been changed."},
+]
+
+
+def test_answer_check_flags_an_answer_written_only_in_thinking():
+  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
+
+  assert _answer_may_be_only_in_thinking(_ANSWER_ONLY_IN_THINKING)
+  # The CLI's final message may not have reached the sink yet; a short one
+  # does not hide the problem.
+  assert _answer_may_be_only_in_thinking(
+    _ANSWER_ONLY_IN_THINKING[:-1], "Nothing has been changed.",
+  )
+
+
+def test_answer_check_leaves_ordinary_replies_alone():
+  from app.claude_sdk_runner import _answer_may_be_only_in_thinking
+
+  answered = [*_ANSWER_ONLY_IN_THINKING, {
+    "type": "text",
+    "content": "The deploy failed: the build ran out of memory. " * 10,
+  }]
+  assert not _answer_may_be_only_in_thinking(answered)
+  # An answer the stream reader has not dispatched yet still counts.
+  assert not _answer_may_be_only_in_thinking(
+    _ANSWER_ONLY_IN_THINKING, answered[-1]["content"],
+  )
+  # A short answer after brief reasoning is a normal short reply.
+  assert not _answer_may_be_only_in_thinking([
+    {"type": "thinking", "content": "Simple greeting."},
+    {"type": "text", "content": "Hi!"},
+  ])
+  for malformed in (None, "blocks", [None, {"type": "thinking", "content": 5}]):
+    assert not _answer_may_be_only_in_thinking(malformed)
+
+
+async def _fire_stop_hook(options, **overrides) -> dict:
+  hook_input = {"hook_event_name": "Stop", "stop_hook_active": False}
+  hook_input.update(overrides)
+  return await options.hooks["Stop"][0].hooks[0](hook_input, None, {})
+
+
+@pytest.mark.asyncio
+async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = list(_ANSWER_ONLY_IN_THINKING)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_stop_hook(self.options))
+      # The agent's own continuation writes the answer, and a second Stop from
+      # any cause never loops back into the check.
+      decisions.append(await _fire_stop_hook(self.options, stop_hook_active=True))
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-chat", bc=bus)
+
+  assert result["error"] is None
+  assert decisions[0] == {
+    "decision": "block", "reason": claude_sdk_runner._ANSWER_CHECK_REASON,
+  }
+  assert "only in your thinking" in decisions[0]["reason"]
+  assert decisions[1:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch):
+  decisions: list[dict] = []
+  bus = _CardBus()
+  bus.assistant_blocks = list(_ANSWER_ONLY_IN_THINKING)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      await _fire_card_end_hook(self.options)
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _tool_boundary_interrupt_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-card-chat", bc=bus)
+
+  assert decisions == [{"continue_": True}]

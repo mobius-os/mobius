@@ -42,7 +42,7 @@ test('closing and reopening GitHub discards disconnect confirmation', async t =>
   await tick(20)
   findButton(view.result.current, 'Disconnect…').props.onClick()
   assert.ok(findButton(view.result.current, 'Disconnect'))
-  findNode(view.result.current, node => node.props?.className === 'settings__account-link').props.onClick()
+  findNode(view.result.current, node => node.props?.className === 'settings-item').props.onClick()
   view.rerender(props)
   assert.ok(findButton(view.result.current, 'Disconnect…'))
   assert.ok(!findButton(view.result.current, 'Disconnect'))
@@ -89,7 +89,7 @@ test('private-access removal guides GitHub revocation and reconnects with public
   assert.match(JSON.stringify(view.result.current), /github.com\/settings\/applications/)
   await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
   assert.equal(requestedPrivate, false)
-  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Off"/)
   assert.ok(!findButton(view.result.current, 'Remove private access…'))
 })
 
@@ -107,7 +107,7 @@ test('private-access removal does not claim success if GitHub grants private sco
   findButton(view.result.current, 'Remove private access…').props.onClick()
   await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
   assert.match(JSON.stringify(view.result.current), /GitHub still granted private-repository access/)
-  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Active"/)
 })
 
 test('public-only connection can request private access and shows the granted result', async t => {
@@ -123,10 +123,10 @@ test('public-only connection can request private access and shows the granted re
   const view = renderConnection()
   t.after(() => view.unmount())
   await tick(20)
-  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Off"/)
   await findButton(view.result.current, 'Enable private repositories').props.onClick()
   assert.equal(requestedPrivate, true)
-  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Active"/)
 })
 
 for (const connected of [false, true]) {

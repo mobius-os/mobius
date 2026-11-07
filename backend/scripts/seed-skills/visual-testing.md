@@ -14,6 +14,16 @@ and visible evidence.
 For an already-open page (`--current-page`) or a specific output path, use the
 helper itself: `bash "$SCRIPTS_DIR/agent-screenshot.sh" [--current-page] <route> <out.png>`.
 
+This chat's own `agent-browser` commands and these captures share one browser
+session. The platform launches the turn's browser with the same settings the
+helper uses at the owner's viewport, so you can open a page, interact with it,
+and then capture it with `--current-page`. Do not change `AGENT_BROWSER_*`
+variables or `MOBIUS_SCREENSHOT_REAL_BROWSER` on commands for this chat's
+session: a command with different launch settings restarts that browser on a
+blank page, and the prepared state is lost. A separate named session, like the
+full-Chrome recipe below, is unaffected. A `--current-page` capture of a blank page fails
+immediately with that message.
+
 `preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it
 for those two common cases. `preview_app.sh` is readiness-gated and uses
 ephemeral content-only mode: it waits for the real post-render frame-mounted
@@ -32,6 +42,29 @@ bash "$SCRIPTS_DIR/agent-screenshot.sh" --current-page <route> <out.png>
 Do **not** fall back to raw `agent-browser screenshot` for a Möbius comparison;
 that bypasses the real display density, exact-font readiness, freshness, and
 atomic-output checks. Raw capture remains appropriate for non-Möbius pages.
+
+**Capture the "before" first.** Before you edit anything people can see,
+capture the state you are about to change, at the owner's viewport and at
+390 px wide, straight into this chat's media folder. A pull request for a
+visible change needs that before/after pair, and once the edit is live there is
+no cheap way back: the helper captures only the build being served. If the edit
+already landed without a before shot, do not rebuild an older tree, stand up a
+proxy, or upload images yourself. Say in the pull request body that the before
+screenshot is missing, and describe the earlier state in words.
+
+The helper always applies `$VIEWPORT_WIDTH`/`$VIEWPORT_HEIGHT`, including on
+`--current-page`, so a manual `agent-browser set viewport` is overwritten. To
+capture a different width, override the environment variables for that one
+invocation (`VIEWPORT_WIDTH=390 VIEWPORT_HEIGHT=844 bash
+"$SCRIPTS_DIR/agent-screenshot.sh" …`). The helper's auth probe requires the
+server to be reachable: it cannot capture while the backend is down, by design.
+
+Font fidelity: if the container's fontconfig lacks a sans-serif alias (a fresh
+container before setup restores it), generic `sans-serif`/`system-ui` stacks
+resolve to a monospace face in captures even though the owner's devices render
+them correctly. When verifying typography, put a concrete proportional family
+(for example `'Liberation Sans', Arial`) ahead of the generics, or check
+`fc-match sans-serif` before trusting the rendered face.
 
 Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" "$VIEWPORT_PIXEL_RATIO"` (the helper sets the complete geometry for you; needed when driving raw non-Möbius pages), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
@@ -58,7 +91,13 @@ you create yourself.
 
 For textboxes, use `fill @eN "value"` directly. Do not split that into
 `click`, `Control+A`, and a selector-less `type`; the extra commands add
-round-trips and the final `type` has no target. Batch independent operations
+round-trips and the final `type` has no target. **The Möbius chat composer is
+the exception:** it places the caret at the end on focus and keeps a persisted
+draft, so `fill` appends to the existing text and an empty `fill` does not
+clear it. Drive the composer with `click @eN`, then `press Control+a`, then
+`type` the new text (or `press Backspace` to clear). When a test needs a pause,
+a bare leading `sleep N` is refused in this environment — use
+`python3 -c "import time; time.sleep(N)"`. Batch independent operations
 with stable selectors, then take one verification snapshot. A sequence of
 React toggles is not independent when each click changes labels, disabled
 states, or the rendered control tree: keep it in one shell tool call, but
@@ -91,6 +130,19 @@ The frame context scopes refs and snapshots, not everything:
 - Raw `mouse` commands use page coordinates and do reach the app, but
   `get box` inside the frame reports frame-relative coordinates. Passing those
   to `mouse move` misses the target.
+- Ref-based `click`/`hover @eN` inside an app iframe can also miss: the
+  computed point is shifted by the iframe's own page offset at wide viewports,
+  so the click is refused as "covered by" another element (including a
+  frame-internal overlay such as a modal sheet's scrim) or lands on the wrong
+  element — even after a `✓ Done`. Prefer `focus @eN` + `press Enter`/`Space`
+  for buttons and `fill`/`select` for inputs when interacting inside an app
+  iframe; use pointer clicks there only when a keyboard path genuinely cannot
+  trigger the behavior.
+- To scroll, use `scroll <dir>` or `scrollintoview <sel>`; `mouse wheel`
+  dispatches at (0,0) regardless of any prior `mouse move`, so it scrolls the
+  page, not the element under the pointer. For an inner scroller that neither
+  command reaches, dispatch a CDP `Input.dispatchMouseEvent` wheel at the
+  element's coordinates via `get cdp-url`.
 
 For press-and-hold or drag, let a ref place the pointer, then press:
 
@@ -113,6 +165,13 @@ by that snapshot is preferable to a 25-second timeout.
 
 Session gotchas:
 
+- **The default session uses a persistent per-chat browser profile**, so
+  in-page UI state — open disclosures, scroll positions, entered drafts —
+  survives from earlier turns and sessions. A control may already be in the
+  state a fresh page would not have, and a blind first click toggles it the
+  wrong way. Read the control's current state from a snapshot (for example
+  `aria-expanded`) before toggling or measuring, rather than assuming the
+  pristine default.
 - **With agent-browser 0.38+, surviving elements keep their `@eN` refs across same-document changes.** Replaced elements and navigated documents/frames invalidate refs. Take a fresh snapshot after a transition rather than assuming the old target survived. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
 - **`✓ Done` only confirms dispatch, not state change** — the CLI returns it the instant the command reaches Chromium, not after the UI changed. Verify with `snapshot` or a screenshot after any click meant to transition UI.
 - **Keep screenshots purposeful** — retain the first useful render, a materially changed or error state, and the final evidence. A loader, drawer transition, or near-identical recapture is not a partner-visible milestone.
@@ -139,6 +198,23 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 **If you've seen the app working, the partner should too.** Embed first renders (even broken ones — they let the partner redirect early), major visual changes, working interactions, and especially error/unexpected-state screenshots. Near-identical verification frames can be skipped (judgment call). For structural questions ("does button X exist?"), `snapshot` is enough.
 
 **When the partner reported the bug, reproduce THEIR exact conditions — a proxy that passes is not "fixed."** A headless screenshot settles the DOM but can't exercise a device/PWA-only failure (mobile keyboard, OS gesture bar, scroll-pin, a stale service-worker bundle across a rebuild); `agent-browser` scrolls programmatically, not like a thumb. A happy-path render also doesn't prove a data-driven app is fine — the defect usually lives on the empty/partial/error path (an all-or-nothing fetch that blanks the view). Most *data*-state failures you CAN reproduce headlessly, by seeding that empty/partial/error state first and then screenshotting; only the genuinely device-only classes need their device. When it is one of those, say what you verified and what still needs their device — and don't write "fixed" (a local "tests green" is not "validated").
+
+## Light and dark
+
+An app must read in both themes, but captures render the owner's current
+theme only, and there is no ephemeral theme switch yet. Do not flip the
+owner's theme to check the other mode: the toggle is a saved owner setting
+that reaches their other sessions. Browser colour-scheme emulation
+(`--color-scheme`, `set media`) is not a substitute either: the shell and app
+frames follow the owner's saved mode, not the OS preference.
+
+Check the other theme from source instead: every UI colour comes from a theme
+token, coloured text and labelled fills use the colour roles the component
+catalog shows (`var(--accent-text, var(--accent))`,
+`var(--accent-fill, var(--accent))`), and no hardcoded chrome colour assumes
+one mode (derive a custom domain palette from the tokens, for example with
+`color-mix()` against `--bg` or `--text`). In the closeout, say which theme
+was rendered and that the other was checked in source only.
 
 ## Efficient inspection with agent-browser 0.38+
 

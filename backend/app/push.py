@@ -2,10 +2,12 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -146,6 +148,37 @@ class _PreparedPush:
   notification_id: str
   payload: dict
   subscriptions: tuple[dict, ...]
+  # Native push devices (Möbius mobile app): {"id", "token", "registered_at"}.
+  devices: tuple[dict, ...] = ()
+
+
+# APNs caps a collapse id at 64 bytes; FCM accepts the same key.
+_COLLAPSE_KEY_MAX_BYTES = 64
+_RELAY_BATCH = 100
+
+
+def _collapse_key(tag: str | None, notification_id: str) -> str:
+  key = tag or notification_id
+  if len(key.encode()) <= _COLLAPSE_KEY_MAX_BYTES:
+    return key
+  return "c:" + hashlib.sha256(key.encode()).hexdigest()[:_COLLAPSE_KEY_MAX_BYTES - 2]
+
+
+# The relay accepts data values up to 2048 characters and the whole message up
+# to 4 KB. Measuring the URL as encoded JSON bytes keeps room for the title even
+# when the target is multibyte or needs escaping.
+_TAP_URL_MAX_BYTES = 2048
+
+
+def _tap_url(target: str | None) -> str:
+  """The phone opens this on tap: always a page of this installation."""
+  origin = get_settings().frontend_origin.rstrip("/")
+  if (
+    not isinstance(target, str) or not target.startswith("/") or target.startswith("//")
+    or len(json.dumps(origin + target, ensure_ascii=False).encode()) > _TAP_URL_MAX_BYTES
+  ):
+    target = "/shell/"
+  return origin + target
 
 
 def _prepare_owner_notification(
@@ -309,6 +342,17 @@ def _prepare_owner_notification(
       .all()
     )
   ]
+  devices = [
+    {"id": device_id, "token": token, "registered_at": registered_at}
+    for device_id, token, registered_at in (
+      db.query(
+        models.PushDevice.id, models.PushDevice.token,
+        models.PushDevice.registered_at,
+      )
+      .filter(models.PushDevice.owner_id == owner_id)
+      .all()
+    )
+  ]
   # Web Push is remote I/O and may wait on several endpoints. Copy the four
   # scalar fields we need, then release the checkout before delivery. If stale
   # subscriptions are found, delivery opens a fresh short cleanup transaction.
@@ -317,11 +361,26 @@ def _prepare_owner_notification(
     notification_id=notification_id,
     payload=payload,
     subscriptions=tuple(subscriptions),
+    devices=tuple(devices),
   )
 
 
+# Phone sends go through the identity broker and the mobius.you relay and can
+# take tens of seconds when either is slow. They run here, off the caller's
+# thread, so no notification producer (sync or async) waits on the relay.
+_NATIVE_SENDS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="native-push")
+
+
+def _send_native_later(prepared: _PreparedPush) -> None:
+  _NATIVE_SENDS.submit(_deliver_native_and_clean, prepared)
+
+
 def _deliver_prepared_push(prepared: _PreparedPush) -> None:
-  """Perform remote delivery from scalar data; safe to call in a worker."""
+  """Perform remote delivery from scalar data; safe to call in a worker.
+
+  Web Push is delivered before this returns; phone sends are handed to the
+  native-push workers.
+  """
   stale_ids = []
   for sub in prepared.subscriptions:
     sub_info = {
@@ -335,6 +394,9 @@ def _deliver_prepared_push(prepared: _PreparedPush) -> None:
     except Exception:
       logger.exception("push delivery failed for sub %s", sub["id"][:8])
 
+  if prepared.devices:
+    _send_native_later(prepared)
+
   if stale_ids:
     from app.database import SessionLocal
     with SessionLocal() as cleanup_db:
@@ -342,6 +404,62 @@ def _deliver_prepared_push(prepared: _PreparedPush) -> None:
         models.PushSubscription.id.in_(stale_ids)
       ).delete(synchronize_session=False)
       cleanup_db.commit()
+
+
+def _deliver_native_and_clean(prepared: _PreparedPush) -> None:
+  """Send to the owner's phones, then forget the ones the relay reports dead."""
+  try:
+    stale_devices = _deliver_native(prepared)
+    if not stale_devices:
+      return
+    from app.database import SessionLocal
+    with SessionLocal() as cleanup_db:
+      for device in stale_devices:
+        # A phone that registered again while the send was in flight has a
+        # fresh relay binding; keep it.
+        cleanup_db.query(models.PushDevice).filter(
+          models.PushDevice.id == device["id"],
+          models.PushDevice.registered_at == device["registered_at"],
+        ).delete(synchronize_session=False)
+      cleanup_db.commit()
+  except Exception:
+    logger.exception("native push delivery failed for notification %s", prepared.notification_id[:8])
+
+
+def _deliver_native(prepared: _PreparedPush) -> list[dict]:
+  """Send to the owner's phones through the relay; returns the dead devices.
+
+  Like Web Push there is no retry: a failed send leaves the notification in
+  the owner's history. Logs name device ids only, never tokens or content.
+  """
+  devices = prepared.devices
+  if not devices:
+    return []
+  from app import push_relay
+
+  payload = prepared.payload
+  stale = []
+  for start in range(0, len(devices), _RELAY_BATCH):
+    batch = devices[start:start + _RELAY_BATCH]
+    try:
+      statuses = push_relay.send(
+        [device["token"] for device in batch],
+        title=payload["title"],
+        body=payload["body"] or "",
+        data={"url": _tap_url(payload["target"]), "notificationId": prepared.notification_id},
+        collapse_key=_collapse_key(payload["tag"], prepared.notification_id),
+      )
+    except push_relay.RelayError as exc:
+      logger.warning(
+        "native push to %d device(s) failed: %s", len(batch), exc.code,
+      )
+      continue
+    for device, status in zip(batch, statuses):
+      if status == "invalid_token":
+        stale.append(device)
+      elif status != "ok":
+        logger.warning("native push to device %s: %s", device["id"][:8], status)
+  return stale
 
 
 def notify_owner(

@@ -28,7 +28,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.13.0"
+SERVER_VERSION = "1.14.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -46,11 +46,25 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
-SAVED_CARD_TERMINAL_INSTRUCTION = (
+_CARD_ENDS_TURN = (
   "This tool call ends the turn: nothing after the card reaches the owner "
-  "until they reply. Put the explanation and closeout in visible reply text "
-  "first; the owner never sees thinking."
+  "until they reply."
 )
+SAVED_CARD_TERMINAL_INSTRUCTION = (
+  f"{_CARD_ENDS_TURN} Put your closing message in `message`: what you did, "
+  "where things stand, what it decides."
+)
+SECRET_CARD_TERMINAL_INSTRUCTION = (
+  f"{_CARD_ENDS_TURN} Just before this call, write your closing message: "
+  "what you did, where things stand, what it decides."
+)
+CARD_MESSAGE_PROPERTY = {
+  "type": "string", "maxLength": 20000,
+  "description": (
+    "Markdown closing message of the turn, shown to the owner above the "
+    "card. Any text before this call is at most a one-sentence lead-in."
+  ),
+}
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
@@ -627,9 +641,11 @@ def _call_read_goal(arguments: dict[str, Any]) -> dict:
 
 def _call_request_approval(arguments: dict[str, Any]) -> dict:
   if not {"question", "options", "work_key"}.issubset(arguments) or not set(arguments).issubset(
-    {"question", "options", "work_key"}
+    {"question", "options", "work_key", "message"}
   ):
-    raise ValueError("request_approval needs question, options, and work_key")
+    raise ValueError(
+      "request_approval needs question, options, and work_key, and may take message"
+    )
   try:
     return _APPROVALS.request_approval(**arguments)
   except SystemExit as exc:
@@ -637,8 +653,8 @@ def _call_request_approval(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_question(arguments: dict[str, Any]) -> dict:
-  if set(arguments) != {"questions"}:
-    raise ValueError("request_question needs questions")
+  if "questions" not in arguments or not set(arguments).issubset({"questions", "message"}):
+    raise ValueError("request_question needs questions and may take message")
   try:
     return _APPROVALS.request_question(**arguments)
   except SystemExit as exc:
@@ -646,10 +662,10 @@ def _call_request_question(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_restart(arguments: dict[str, Any]) -> dict:
-  if arguments:
-    raise ValueError("request_restart takes no arguments")
+  if not set(arguments).issubset({"message"}):
+    raise ValueError("request_restart takes only message")
   try:
-    return _APPROVALS.request_restart()
+    return _APPROVALS.request_restart(**arguments)
   except SystemExit as exc:
     raise RuntimeError(str(exc)) from exc
 
@@ -1346,23 +1362,31 @@ _TOOL_DEFINITIONS = {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
       "Save this chat's continuity note. Every field is optional: title "
-      "renames the chat (a name the owner chose always wins), chat_summary "
-      "replaces its short Summary, and digest_entry appends one entry to its "
-      "cumulative Digest. Default to one concise changes-only save per substantive "
-      "turn; save earlier before handoffs, owner-input cards, restarts, or "
-      "risky/long work that needs a recovery checkpoint. Omit unchanged title "
-      "and chat_summary; do not repeat saved facts or raw tool output. Omitted fields "
-      "stay unchanged. If a save fails, read the note before retrying so an entry "
-      "is not added twice."
+      "sets the Chat name (a name the owner chose always wins), chat_summary replaces "
+      "the Chat summary, and digest_entry appends one entry to the Full digest. "
+      "Write the chat_summary as two short, connected paragraphs: whole-chat purpose "
+      "and important earlier outcomes, then the recent phase and open work in "
+      "that context, not just the last turn. Abstract older detail without "
+      "losing unresolved threads. Digest entries are a brief handoff in plain, "
+      "complete sentences: decisions, verified outcomes, corrections and open "
+      "work a successor needs, not an execution diary. Leave out commands, test "
+      "counts, log locations, hashes, paths and run or helper ids unless a later "
+      "step needs that exact identifier. Default to one concise changes-only "
+      "digest entry per substantive turn; save earlier before handoffs, "
+      "owner-input cards, restarts, or risky/long work that needs a recovery "
+      "checkpoint. Omit unchanged title and chat_summary; do not repeat saved facts "
+      "or raw tool output. Omitted fields stay unchanged. If a save fails, read "
+      "the note before retrying so an entry is not added twice."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
       "properties": {
-        "title": {"type": "string", "maxLength": 200},
+        "title": {"type": "string", "maxLength": 200,
+                  "description": "Chat name. Replace only when the main topic changes; owner naming wins."},
         "chat_summary": {"type": "string",
-                         "description": "Short overview of the whole chat; replaces the previous one."},
+                         "description": "Chat summary. Replace both short paragraphs coherently: whole-chat context, then connected recent phase."},
         "digest_entry": {"type": "string",
-                         "description": "New facts since the last save; appended to the cumulative Digest."},
+                         "description": "Full digest entry. Append what changed as a brief plain-prose handoff; omit routine steps, counts, logs and identifiers a later step does not need."},
       },
     },
   },
@@ -1527,6 +1551,7 @@ _TOOL_DEFINITIONS = {
             "required": ["label", "description"], "additionalProperties": False,
           },
         },
+        "message": CARD_MESSAGE_PROPERTY,
       },
       "required": ["question", "options", "work_key"], "additionalProperties": False,
     },
@@ -1544,11 +1569,12 @@ _TOOL_DEFINITIONS = {
       "and continuation. One later ready restart resumes every still-registered "
       "chat for its own verification; the platform admits one restart per worker. "
       f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "Put all explanation and closeout before this call. Choosing Restart now is "
+      "Choosing Restart now is "
       "handled by the platform without waking an agent to issue the command."
     ),
     "inputSchema": {
-      "type": "object", "properties": {}, "additionalProperties": False,
+      "type": "object", "properties": {"message": CARD_MESSAGE_PROPERTY},
+      "additionalProperties": False,
     },
   },
   REQUEST_QUESTION_TOOL: {
@@ -1560,7 +1586,7 @@ _TOOL_DEFINITIONS = {
       "The saved card blocks further work until the owner answers or Stops; "
       "it returns a receipt, NOT an answer. "
       f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "Finish useful preparation, explanation, and closeout before this call. "
+      "Finish useful preparation before this call. "
       "Do not guess, poll or keep a process waiting. "
       "Answers normally resume the chat, including after restart; explicit close choices do not. Prefer this "
       "over provider-native questions in live owner chats. Use request_approval "
@@ -1596,7 +1622,7 @@ _TOOL_DEFINITIONS = {
             }},
           },
         },
-      }},
+      }, "message": CARD_MESSAGE_PROPERTY},
     },
   },
   SCREENSHOT_TOOL: {
@@ -1664,7 +1690,9 @@ _TOOL_DEFINITIONS = {
       "the owner just asked to open that exact item. kind settings is always "
       "foreground and instead takes the owner to Settings, focused on section "
       "id ai-providers, "
-      "background-agents, github or models (omit id for Settings itself); use "
+      "background-agents, github, models, mobius-account (the Möbius account "
+      "page) or mobius-models (Möbius credit and models) (omit id for Settings "
+      "itself); use "
       "it when they asked to see it or accepted your offer to open it. It only "
       "navigates: signing in, entering credentials and every other change "
       "there stay their own taps. It is live-only and never stored, so pair "
@@ -1694,8 +1722,8 @@ _TOOL_DEFINITIONS = {
       "and no agent credentials, must not log or persist the values, and its "
       "output is discarded. preset owner_credentials asks for the owner's "
       "sign-in change instead. Returns a receipt, NOT the values. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "Put explanation and closeout before this call. Never in background work."
+      f"{SECRET_CARD_TERMINAL_INSTRUCTION} "
+      "Never in background work."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,

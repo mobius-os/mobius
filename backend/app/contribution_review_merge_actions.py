@@ -25,7 +25,7 @@ async def dispatch_merge(gh, cwd, target, repo, checks, authorize, method=None):
   try:
     if checks.get("isMergeQueueEnabled") is True:
       receipt = await settled.run_settled(reviews.enqueue, gh, cwd, target)
-      return DispatchResult.confirmed({"state": "queued", "queue_entry_id": receipt["id"]})
+      return DispatchResult.confirmed({"state": "queued", **reviews.queue_receipt(receipt)})
     receipt = await settled.run_settled(reviews.perform_merge, gh, cwd, target, repo, method)
     if receipt.get("merged") is False:
       raise NotDispatched("GitHub refused the merge request without applying it.")
@@ -74,7 +74,7 @@ async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
   if entry:
     await asyncio.to_thread(reviews.assert_current_base, gh, cwd, target)  # unsettled: read-only (GitHub target base)
     authorize()
-    reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "queued", "queue_entry_id": entry["id"]})
+    reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "queued", **reviews.queue_receipt(entry)})
     return
   blocker = reviews.merge_blocker(target, repo, pull, checks)
   if blocker:

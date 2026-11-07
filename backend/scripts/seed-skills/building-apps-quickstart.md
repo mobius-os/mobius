@@ -103,10 +103,22 @@ const CSS = `
 ```
 
 Use Möbius theme variables (`--bg`, `--surface`, `--surface-2`, `--text`,
-`--muted`, `--border`, `--accent`, `--font`). Add a short app-specific prefix
-to classes. Prefer CSS classes over inline style objects except for truly
-computed values. Use generic interface icons from the OpenAI Apps SDK UI rather
-than Lucide, hand-drawn SVG, emoji, or text characters:
+`--muted`, `--border`, `--accent`, `--font`). Colour roles keep text and
+labels readable in both modes:
+
+- Coloured text (links, status labels, small accents) uses `--accent-text`,
+  `--danger-text`, `--green-text` or `--warning-text`; each reads on `--bg`,
+  `--surface` and `--surface-2`.
+- A filled button or badge uses `--accent-fill` (hover/pressed
+  `--accent-fill-hover`), `--danger-fill` or `--green-fill`, labelled with
+  `--accent-fg`.
+- `--accent`, `--danger`, `--green` and `--warning` stay for dots, borders,
+  focus rings and `color-mix()` washes, not small text or labelled fills.
+
+Add a short app-specific prefix to classes. Prefer CSS classes over inline
+style objects except for truly computed values. Use generic interface icons
+from the OpenAI Apps SDK UI rather than Lucide, hand-drawn SVG, emoji, or text
+characters:
 
 ```jsx
 import { Plus, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'
@@ -120,6 +132,23 @@ For an ordinary app, make one strong visual decision—a calm breathing orb, a
 bright decision wheel, a tactile stack of cards—then support it with restrained
 chrome. Visual richness should come from hierarchy, composition, motion, and
 state feedback, not extra screens.
+
+A few defaults keep every app readable and operable:
+
+- **Type floor:** meaning-bearing text (labels, status, metadata, controls) is
+  at least 12px. Dense domain UI such as instrument scales, map labels or
+  chart ticks may go smaller; name that exception in a CSS comment and check
+  it at rendered size.
+- **Input semantics:** give each field the `type`, `inputMode`,
+  `enterKeyHint` and `autoComplete` its meaning implies (for example
+  `inputMode="decimal"` for an amount, `autoComplete="off"` for a search box),
+  and keep focusable fields at 16px.
+- **Reduced motion:** under `prefers-reduced-motion: reduce`, replace movement
+  with an instant or opacity change, including JS-driven animation.
+- **Modals:** focus moves in and stays, Escape and Back close, and focus
+  returns to the opener (catalog Sheet).
+- **Dates and times:** format with `Intl` in the viewer's locale and time zone
+  rather than a hardcoded locale.
 
 The manifest should truthfully describe the local app. A typical private app
 uses:
@@ -214,12 +243,25 @@ const value = await store.get('state.json')       // parsed JSON or null
 await store.set('state.json', nextValue)          // value itself; no envelope
 ```
 
+**JSON documents go to keys ending `.json`** — the body IS the document, no
+envelope. Writing a JSON object to any other extension is rejected with a 400
+(text files take a raw `text/*` body or the `{"content": "..."}` envelope), so
+a wrong extension silently loses nothing only because the server refuses it:
+name the key `.json` from the start.
+
 Handle storage failure visibly and keep a usable in-memory fallback. Subscribe
-when an already-open app must repaint after agent or cross-frame writes:
+so the open app repaints after its own writes from other views:
 
 ```js
 const unsubscribe = store.subscribe('state.json', setValue)
 ```
+
+A subscription fires for this app's own `set`/`remove` and when its own queued
+writes sync — **not** for a write made outside the running app (an agent chat
+turn, a cron job). A view showing externally-written data must re-read with
+`get()` when it becomes visible, plus a modest interval while visible; the
+re-read also notifies subscribers when the server value changed (see
+`building-apps.md`).
 
 Do not probe guessed keys. If records are split across keys, keep an explicit
 index or use `store.list()` for best-known display. If behavior depends on
@@ -229,10 +271,10 @@ defaults, or deleting records—switch to `building-apps.md` and use
 empty. Do not use `localStorage`, IndexedDB, native `alert`/`confirm`/`prompt`,
 or owner credentials.
 
-If the app polls, animates, or plays audio, pause that work while
-`window.mobius.visible` is false and resume it from
-`window.mobius.onVisibilityChange(cb)`: hidden apps stay loaded, and
-`document.hidden` alone does not see them (see `building-apps.md`).
+Hidden apps stay loaded. Möbius pauses their sound and reports the page as
+hidden, but timers keep running: pause polling, animation, and game clocks
+while `window.mobius.visible` is false and resume them from
+`window.mobius.onVisibilityChange(cb)` (see `building-apps.md`).
 
 ### 5. Verify the rendered app without exploring the whole shell
 
@@ -271,8 +313,13 @@ isolated browser session; it does not mark onboarding complete.
 
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
-changes on small screens. Keep only screenshots that show a useful distinct
-state—never a loader, drawer transition, or redundant verification frame.
+changes on small screens. For a height-sensitive app (an instrument, game,
+canvas or fixed-height workspace), also check a short landscape viewport such
+as 844×390 and confirm the core controls stay reachable. Make sure the app
+reads in both light and dark themes; `visual-testing.md` says how to check the
+other theme without changing the owner's. Keep only screenshots that show a
+useful distinct state—never a loader, drawer transition, or redundant
+verification frame.
 
 The default visual-test budget for an ordinary one-screen app is:
 

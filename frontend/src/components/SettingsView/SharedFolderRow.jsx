@@ -1,0 +1,105 @@
+/* One shared folder in Settings: its state, a one-tap fix when needed, and Manage (pause, remove). */
+import { useState } from 'react'
+import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
+import StatusDot from '../ui/StatusDot.jsx'
+import {
+  reconnectFolder, removeFolder, setFolderPaused,
+} from '../../lib/sharedFolders/folderActions.js'
+import { rightsLabel } from './sharedFolderLabels.js'
+
+const STATUS = {
+  ready: { color: '--green-text', label: 'Ready' },
+  paused: { color: '--muted', label: 'Paused' },
+  needs_permission: { color: '--accent-text', label: 'Needs your OK' },
+  needs_pick: { color: '--accent-text', label: 'Pick again to share' },
+}
+
+// A folder this browser remembers is the normal case and needs no note.
+function subtitle(folder) {
+  const rights = rightsLabel(folder)
+  if (folder.native) return `${rights} · Remembered in the Möbius app`
+  return folder.access === 'visit' ? `${rights} · Until you leave Möbius` : rights
+}
+
+export default function SharedFolderRow({ folder, report, onPickAgain }) {
+  const [open, setOpen] = useState(false)
+  // The phone app cannot be asked again; its fix is picking the folder anew.
+  const state = folder.native && folder.state === 'needs_permission' ? 'needs_pick' : folder.state
+  const status = STATUS[state] || STATUS.paused
+  return (
+    <ProviderRow
+      name={folder.name}
+      connected
+      subtitle={subtitle(folder)}
+      statusNode={<StatusDot color={status.color}>{status.label}</StatusDot>}
+      detailNode={<FolderPrompt folder={folder} report={report} onPickAgain={onPickAgain} />}
+      actionLabel="Manage"
+      expanded={open}
+      onToggleExpand={() => setOpen(value => !value)}
+    >
+      <ManagePanel folder={folder} report={report} />
+    </ProviderRow>
+  )
+}
+
+/** The single action that makes an unready folder usable again. */
+function FolderPrompt({ folder, report, onPickAgain }) {
+  const prompts = {
+    // requestPermission needs this tap's activation: call it directly.
+    needs_permission: folder.native ? {
+      text: 'The Möbius app can no longer open this folder.',
+      label: 'Pick again',
+      run: async () => report(await reconnectFolder(folder.id)),
+    } : {
+      text: 'The browser asks again after you close Möbius.',
+      label: 'Reconnect',
+      run: async () => report(await reconnectFolder(folder.id)),
+    },
+    needs_pick: { text: 'This browser forgets the folder when you leave.', label: 'Pick again', run: onPickAgain },
+    paused: {
+      text: 'Agents cannot use this folder now.',
+      label: 'Resume',
+      run: async () => report(await setFolderPaused(folder.id, false)),
+    },
+  }
+  const prompt = prompts[folder.state]
+  if (!prompt) return null
+  return (
+    <div className="shared-folders__prompt">
+      <span className="shared-folders__prompt-text">{prompt.text}</span>
+      <button type="button" className="settings__btn settings__btn--sm" onClick={() => { void prompt.run() }}>
+        {prompt.label}
+      </button>
+    </div>
+  )
+}
+
+function ManagePanel({ folder, report }) {
+  const [confirming, setConfirming] = useState(false)
+  return (
+    <div className="shared-folders__manage">
+      {confirming ? (
+        <div className="shared-folders__confirm">
+          <p className="settings__subtext">Stop sharing “{folder.name}”? The folder and its files stay on your device.</p>
+          <div className="settings__confirm">
+            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => setConfirming(false)}>Cancel</button>
+            <button type="button" className="settings__btn settings__btn--sm" onClick={async () => report(await removeFolder(folder.id))}>Remove</button>
+          </div>
+        </div>
+      ) : (
+        <div className="shared-folders__manage-actions">
+          <button
+            type="button"
+            className="settings__btn settings__btn--outline settings__btn--sm"
+            onClick={async () => report(await setFolderPaused(folder.id, !folder.paused))}
+          >
+            {folder.paused ? 'Resume' : 'Pause'}
+          </button>
+          <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => setConfirming(true)}>
+            Remove
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}

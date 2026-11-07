@@ -8,6 +8,11 @@ being external attackers reaching the public HTTPS endpoint.
 
 - **Authentication:** bcrypt-12 password hashing, HS256 JWT (30-day expiry),
   rate-limited login (5/min per IP + global backoff after 10 failures).
+- **First-owner setup:** a self-hosted instance with no owner requires a
+  one-time setup code, printed to the server log and stored in
+  `<data_dir>/setup-code` (mode 0600), so reaching the URL first cannot claim
+  it. The code is deleted when the owner is created. Managed deployments bind
+  their owner through managed sign-in instead.
 - **PKCE OAuth:** Server-side token exchange for CLI provider auth.
   No client-side token exposure.
 - **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
@@ -65,6 +70,22 @@ These are intentional design decisions appropriate for a single-owner app:
   evolve, and there is no synchronous `/api/ai` surface.
 - **`unsafe-inline` in style-src CSP:** Required for server-injected theme
   CSS. The owner controls the theme content.
+- **Phone notification content passes through mobius.you:** Web Push payloads
+  are end-to-end encrypted to the browser, but native push to the Möbius mobile
+  app is not. To reach a phone, each notification's title and text pass in
+  plaintext through the mobius.you push relay and then Google's or Apple's push
+  service; mobius.you stores none of it (only a keyed hash of each phone's
+  token and which installation owns it). Whether a phone gets notifications is
+  that phone's own notification setting for the app; Möbius has no switch of
+  its own, and the owner can disconnect a phone through `DELETE
+  /api/push/devices/{id}`. The last installation to register a phone owns it,
+  so a phone signed in to two installations gets notifications only from the
+  most recent one. The same rule means a linked installation that obtained
+  another phone's push token could take it over and show it arbitrary text;
+  tokens are not exposed outside the phone and its own installation, the relay
+  rate-limits and can revoke each installation, and the mobile app must open a
+  notification's tap link only when it is on the origin of the Möbius it is
+  signed in to, so a taken-over phone can be shown text but not sent elsewhere.
 - **90-day service token:** The app-job supervisor reads it only to mint a
   short-lived app token; job scripts do not inherit it. It is stored at
   `/data/service-token.txt` (chmod 600, mobius user only).

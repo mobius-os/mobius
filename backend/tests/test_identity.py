@@ -302,19 +302,17 @@ def test_mobius_model_switch_defaults_on_and_can_be_changed_without_account(
   from app.config import get_settings
   from app import providers
 
+  # The owner (Settings) and an app holding the identity grant (installed
+  # Möbius · You copies) share the switch; other apps may not touch it.
   granted = _app_auth(client, auth, granted=True)
   denied = _app_auth(client, auth, granted=False)
-  with SessionLocal() as session:
-    row = next(app for app in session.query(models.App).all()
-               if (app.capability_contract or {}).get("data", {}).get("identity_manage") is True)
-    row.capability_contract = {**row.capability_contract, "model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  assert client.get("/api/auth/providers/mobius/enabled", headers=auth).json() == {
+    "enabled": True,
+  }
   assert client.get("/api/auth/providers/mobius/enabled", headers=denied).status_code == 403
+  assert client.patch(
+    "/api/auth/providers/mobius/enabled", headers=denied, json={"enabled": False},
+  ).status_code == 403
   assert client.get("/api/auth/providers/mobius/enabled", headers=granted).json() == {
     "enabled": True,
   }
@@ -712,31 +710,9 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   connect = client.post("/api/identity/railway/connect/start", headers=granted)
-  created = client.post(
-    "/api/identity/railway/deployments",
-    json={
-      "name": "Writing room",
-      "managed_auth": True,
-      "cpu": None,
-      "memory_mb": None,
-      "volume_mb": None,
-      "update_policy": "manual",
-      "region": "europe-west4-drams3a",
-      "workspace_id": "ws_personal",
-    },
-    headers=granted,
-  )
   renamed = client.patch(
     "/api/identity/railway/deployments/mob_example",
     json={"name": "Writing room"},
-    headers=granted,
-  )
-  deleted = client.delete(
-    "/api/identity/railway/deployments/mob_example", headers=granted,
-  )
-  storage = client.patch(
-    "/api/identity/railway/deployments/mob_example/storage",
-    json={"volume_mb": 2048},
     headers=granted,
   )
   updates = client.patch(
@@ -744,78 +720,20 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
     json={"update_policy": "manual"},
     headers=granted,
   )
-  invalid_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Wrong region", "region": "unknown", "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-  without_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Legacy request", "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-  null_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "No preference", "region": None, "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-
   assert connect.status_code == 200
   assert connect.json()["authorization_url"].startswith("https://www.mobius.you/")
-  assert created.status_code == 202
-  assert invalid_region.status_code == 422
-  assert without_region.status_code == 202
-  assert null_region.status_code == 202
   assert renamed.status_code == 200
-  assert deleted.status_code == 202
-  assert storage.status_code == 200
   assert updates.status_code == 202
   assert calls == [
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {
-        "name": "Writing room",
-        "managed_auth": True,
-        "cpu": None,
-        "memory_mb": None,
-        "volume_mb": None,
-        "update_policy": "manual",
-        "region": "europe-west4-drams3a",
-        "workspace_id": "ws_personal",
-      },
-    ),
     (
       "PATCH",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
       {"name": "Writing room"},
     ),
     (
-      "DELETE",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
-      None,
-    ),
-    (
-      "PATCH",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/storage",
-      {"volume_mb": 2048},
-    ),
-    (
       "PATCH",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example/updates",
       {"update_policy": "manual"},
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {"name": "Legacy request", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {"name": "No preference", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
   ]
 
@@ -868,43 +786,242 @@ class _Upstream:
     return self._payload
 
 
-def test_railway_create_forwards_its_stripped_workspace(client, auth, monkeypatch):
+@pytest.mark.parametrize(("method", "path"), [
+  ("POST", "/api/identity/railway/deployments"),
+  ("POST", "/api/identity/railway/deployments/mob_example/retry"),
+  ("DELETE", "/api/identity/railway/deployments/mob_example"),
+  ("PATCH", "/api/identity/railway/deployments/mob_example/compute"),
+  ("PATCH", "/api/identity/railway/deployments/mob_example/storage"),
+  ("POST", "/api/identity/railway/deployments/mob_example/recovery"),
+  ("POST", "/api/identity/railway/deployments/mob_example/confirm-absent"),
+  ("POST", "/api/identity/railway/disconnect"),
+])
+def test_owner_only_deployment_actions_are_sent_to_the_account_website(
+  client, auth, monkeypatch, method, path,
+):
+  # Anything inside Möbius can call these routes (the agent, an app, root), and
+  # they reach every deployment the owner has, so Möbius never performs them.
   granted, calls = _linked_railway_bridge(
     client, auth, monkeypatch,
     lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
   )
-  response = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Team box", "workspace_id": "  ws_team  "},
-    headers=granted,
+  response = client.request(
+    method, path, headers=granted,
+    json={"name": "Team box", "workspace_id": "ws_team", "volume_mb": 2048,
+          "confirmed_absent": True},
   )
 
-  assert response.status_code == 202
-  assert [call[2] for call in calls] == [
-    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
-     "volume_mb": None, "workspace_id": "ws_team"},
-  ]
+  assert response.status_code == 409
+  detail = response.json()["detail"]
+  assert detail["code"] == "confirm_on_account"
+  assert detail["confirm_url"] == "https://www.mobius.you/dashboard"
+  assert "mobius.you" in detail["message"]
+  assert calls == []
 
 
-@pytest.mark.parametrize("body", [
-  {"name": "Missing"},
-  {"name": "Null", "workspace_id": None},
-  {"name": "Blank", "workspace_id": "   "},
-  {"name": "Long", "workspace_id": "w" * 129},
+@pytest.mark.parametrize("status, access", [
+  (200, "available"), (401, "signed_out"), (403, "reconnect"),
+  (503, "unavailable"),
 ])
-def test_railway_create_without_a_valid_workspace_is_refused_before_the_bridge(
-  client, auth, monkeypatch, body,
+def test_linked_railway_dashboard_is_opt_in_in_every_access_state(
+  client, auth, monkeypatch, status, access,
 ):
   granted, calls = _linked_railway_bridge(
     client, auth, monkeypatch,
-    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
+    lambda *_: _Upstream(status, {"connection": None, "instances": []}),
   )
-  response = client.post(
-    "/api/identity/railway/deployments", json=body, headers=granted,
-  )
+  expected = {"railway_access": access, "connection": None, "instances": []}
+  for query in ("", "?dashboard=0", "?dashboard=true", "?dashboard=1"):
+    response = client.get("/api/identity/railway" + query, headers=granted)
+    assert response.status_code == 200
+    assert response.json() == {
+      **expected,
+      **({"dashboard_url": "https://www.mobius.you/dashboard"}
+         if query == "?dashboard=1" else {}),
+    }
+  assert all(call[:2] == (
+    "GET", "https://www.mobius.you/api/account/v1/railway",
+  ) for call in calls)
 
-  assert response.status_code == 422
-  assert calls == []
+
+def test_signed_out_railway_dashboard_uses_configured_account_not_request_origin(
+  client, auth, monkeypatch,
+):
+  from app.config import get_settings
+
+  monkeypatch.setattr(get_settings(), "mobius_account_origin", "https://account.example")
+  granted = _app_auth(client, auth, granted=True, railway_granted=True)
+  response = client.get(
+    "/api/identity/railway?dashboard=1&dashboard_url=https://untrusted.example",
+    headers={**granted, "Host": "untrusted.example"},
+  )
+  assert response.status_code == 200
+  assert response.json() == {
+    "railway_access": "signed_out", "connection": None, "instances": [],
+    "dashboard_url": "https://account.example/dashboard",
+  }
+
+
+@pytest.mark.parametrize("status, access", [(200, "available"), (503, "unavailable")])
+def test_managed_railway_dashboard_uses_issuer_even_when_inventory_unavailable(
+  client, auth, monkeypatch, status, access,
+):
+  from app.config import get_settings
+  from app.routes import identity
+
+  granted = _app_auth(client, auth, granted=True, railway_granted=True)
+  settings = get_settings()
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "https://issuer.example")
+  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
+  calls = []
+
+  async def managed_response(method, path, **_kwargs):
+    calls.append((method, path))
+    return _Upstream(status, {"connection": None, "instances": []})
+
+  monkeypatch.setattr(identity, "_managed_response", managed_response)
+  expected = {"railway_access": access, "connection": None, "instances": []}
+  assert client.get("/api/identity/railway", headers=granted).json() == expected
+  response = client.get("/api/identity/railway?dashboard=1", headers=granted)
+  assert response.status_code == 200
+  assert response.json() == {**expected, "dashboard_url": "https://issuer.example/dashboard"}
+  assert calls == [("GET", "/api/instance/v1/railway")] * 2
+
+
+@pytest.mark.parametrize("field", ["mobius_account_origin", "mobius_sso_issuer"])
+@pytest.mark.parametrize("origin", [
+  "https://user:password@account.example", "https://account.example/path",
+  "https://account.example?next=other", "https://account.example#other",
+  "javascript:alert(1)", "//account.example", "http://account.example",
+  "https://account.example:invalid",
+])
+def test_dashboard_account_settings_reject_unsafe_origins(field, origin):
+  from app.config import Settings
+
+  values = {"mobius_sso_instance_id": "mob_managed",
+            "mobius_sso_issuer": "https://issuer.example", field: origin}
+  with pytest.raises(ValueError):
+    Settings(**values)
+
+
+def test_railway_read_opt_ins_do_not_grant_railway_permission(client, auth):
+  identity_only = _app_auth(client, auth, granted=True)
+  for path in (
+    "/api/identity/railway?dashboard=1",
+    "/api/identity/railway/deployments/mob_example/metrics?cost=1",
+  ):
+    assert client.get(path, headers=identity_only).status_code == 403
+
+
+def _railway_metrics():
+  return {
+    "runtime": {"status_label": "Active", "region_label": "Europe",
+                "latest_deployment_at": "2026-01-01", "data_status": "available"},
+    "cpu": {"label": "0.1 vCPU", "limit_label": "2 vCPU", "percent": "5"},
+    "memory": {"label": "256 MB", "limit_label": "4096 MB", "percent": "6"},
+    "volume": {"used_label": "1 GB", "allocated_label": "5 GB", "percent": "20"},
+    "network": {"rx_label": "1 MB", "tx_label": "2 MB", "percent": "1"},
+  }
+
+
+def _railway_cost(**changes):
+  return {"heading": "$3 estimated this month", "note": "Estimate, not an invoice.",
+          "percent": "60", **changes}
+
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("with_cost", [False, True])
+def test_railway_metrics_cost_opt_in_forwards_and_preserves_older_services(
+  client, auth, monkeypatch, managed, with_cost,
+):
+  from app.config import get_settings
+  from app.routes import identity
+
+  public = _railway_metrics()
+
+  def respond(_method, url):
+    return _Upstream(200, {
+      **public,
+      **({"cost": _railway_cost(raw_cost={"usd": 3}, future="private")}
+         if url.endswith("?cost=1") and with_cost else {}),
+    })
+
+  if managed:
+    granted = _app_auth(client, auth, granted=True, railway_granted=True)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mobius_sso_issuer", "https://issuer.example")
+    monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
+    calls = []
+
+    async def managed_response(method, path, **kwargs):
+      calls.append((method, path, kwargs.get("json")))
+      return respond(method, path)
+
+    monkeypatch.setattr(identity, "_managed_response", managed_response)
+    upstream = "/api/instance/v1/railway/instances/mob_example/metrics"
+  else:
+    granted, calls = _linked_railway_bridge(client, auth, monkeypatch, respond)
+    upstream = "https://www.mobius.you/api/account/v1/railway/instances/mob_example/metrics"
+
+  path = "/api/identity/railway/deployments/mob_example/metrics"
+  for query in ("", "?cost=0", "?cost=true", "?cost=1"):
+    response = client.get(path + query, headers=granted)
+    assert response.status_code == 200
+    assert response.json() == {
+      **public, **({"cost": _railway_cost()} if query == "?cost=1" and with_cost else {}),
+    }
+  assert calls == [
+    ("GET", upstream, None), ("GET", upstream, None),
+    ("GET", upstream, None), ("GET", upstream + "?cost=1", None),
+  ]
+
+
+@pytest.mark.parametrize("cost", [
+  None, [], "raw", 0, {}, {"heading": "missing fields"},
+  _railway_cost(heading=4), _railway_cost(note=False), _railway_cost(percent=None),
+  _railway_cost(heading="h" * 201), _railway_cost(note="n" * 361),
+  _railway_cost(percent="p" * 41),
+])
+def test_railway_metrics_rejects_malformed_or_oversized_cost(cost):
+  from app.routes.identity import _railway_metrics_contract
+
+  with pytest.raises(HTTPException) as exc:
+    _railway_metrics_contract({**_railway_metrics(), "cost": cost}, include_cost=True)
+  assert exc.value.status_code == 502
+
+
+def test_railway_metrics_projects_only_bounded_display_cost():
+  from app.routes.identity import _railway_metrics_contract
+
+  cost = _railway_cost(heading="😀" * 200, note="n" * 360, percent="p" * 40)
+  payload = {**_railway_metrics(), "cost": {**cost, "raw_cost": {"usd": 99}}}
+  assert _railway_metrics_contract(payload, include_cost=True) == {
+    **_railway_metrics(), "cost": cost,
+  }
+  assert "raw_cost" in payload["cost"]
+
+
+@pytest.mark.parametrize("include_cost", [False, True])
+@pytest.mark.parametrize("section", ["runtime", "cpu", "memory", "volume", "network"])
+def test_railway_metrics_cost_does_not_relax_runtime_contract(include_cost, section):
+  from app.routes.identity import _railway_metrics_contract
+
+  payload = _railway_metrics()
+  payload[section]["extra"] = "private"
+  with pytest.raises(HTTPException):
+    _railway_metrics_contract(payload, include_cost=include_cost)
+
+
+def test_railway_metrics_without_opt_in_keeps_exact_old_contract():
+  from app.routes.identity import _railway_metrics_contract
+
+  assert _railway_metrics_contract(_railway_metrics()) == _railway_metrics()
+  for extra in ({"cost": _railway_cost()}, {"raw_cost": {"usd": 3}}):
+    with pytest.raises(HTTPException):
+      _railway_metrics_contract({**_railway_metrics(), **extra})
+    if "raw_cost" in extra:
+      with pytest.raises(HTTPException):
+        _railway_metrics_contract({**_railway_metrics(), **extra}, include_cost=True)
 
 
 def _workspace_plans(**changes):
@@ -1160,11 +1277,6 @@ def test_linked_railway_deletion_recovery_requires_fresh_bounded_state(
   diagnosis = client.get(
     "/api/identity/railway/deployments/mob_example/deletion", headers=granted,
   )
-  rejected = client.post(
-    "/api/identity/railway/deployments/mob_example/confirm-absent",
-    json={"confirmed_absent": False},
-    headers=granted,
-  )
   confirmed = client.post(
     "/api/identity/railway/deployments/mob_example/confirm-absent",
     json={"confirmed_absent": True},
@@ -1174,19 +1286,15 @@ def test_linked_railway_deletion_recovery_requires_fresh_bounded_state(
   assert diagnosis.status_code == 200
   assert diagnosis.json()["state"] == "missing_unconfirmed"
   assert diagnosis.json()["can_confirm_absent"] is True
-  assert rejected.status_code == 422
-  assert confirmed.status_code == 200
-  assert confirmed.json()["instance"]["status"] == "deleted"
+  # Diagnosis stays readable; confirming the project is gone (which forgets the
+  # deployment) is finished on the account website.
+  assert confirmed.status_code == 409
+  assert confirmed.json()["detail"]["code"] == "confirm_on_account"
   assert calls == [
     (
       "GET",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example/deletion",
       None,
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/confirm-absent",
-      {"confirmed_absent": True},
     ),
   ]
 

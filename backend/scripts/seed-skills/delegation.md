@@ -37,6 +37,15 @@ Start independent helpers together when their file scopes do not overlap.
 Serialize shared writes and integration. Helpers use the existing durable chat
 and recovery system, not a separate execution lane.
 
+**All helpers share one small container.** Whatever `nproc` claims, the cgroup
+quota is about 4 CPUs, 1000 process/thread ids, and ~4 GB of memory for the
+platform and every running chat together — and Python's `os.cpu_count()`
+reports the misleading host number. Parallel helpers doing light work are
+fine; several helpers each running a test suite, build, or browser at once can
+exhaust the pid or memory limit and restart the instance. Serialize heavy
+test, build, and browser work across helpers, and fan out only the cheap
+read/analyze stages.
+
 ## Receive and assess results
 
 Results arrive in the parent chat automatically. Never poll or sleep waiting

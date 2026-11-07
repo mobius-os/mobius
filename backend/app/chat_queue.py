@@ -7,7 +7,7 @@ append (POST /messages), cancel (DELETE /pending), and promote
 DB serialization authority is the single-writer actor (C2), NOT this
 lock. Every JSON-blob read-modify-write now runs as a writer-actor
 command (`AppendPending` / `CancelPending` / `PromotePending` /
-`ClearPending`) on the actor's one thread, so the lost-update race the
+`HoldPending`) on the actor's one thread, so the lost-update race the
 lock used to guard is closed at the source — the actor is the sole
 runtime mutator of the blob.
 
@@ -226,6 +226,8 @@ async def promote_pending_messages_locked(
   run_token: str,
   ending_status: str = "completed",
   ending_run_token: str = "",
+  owner_send: bool = False,
+  restore_archived: bool = False,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -269,6 +271,8 @@ async def promote_pending_messages_locked(
       run_token=run_token,
       ending_status=ending_status,
       ending_run_token=ending_run_token,
+      owner_send=owner_send,
+      restore_archived=restore_archived,
     )
   )
   result = await await_ack(ack)
@@ -421,6 +425,9 @@ async def drain_and_release(
         # FinishRun preserves an open question marker when one exists.
         await finish_run_strict(
           chat_id, ending_run_token, "interrupted",
+          end_reason=(
+            "activation" if hold.reason == "activation" else "owner_input"
+          ),
         )
         discard_starting(chat_id)
         forget_chat(chat_id)

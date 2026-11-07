@@ -18,6 +18,7 @@ it cannot use either path as a general GitHub write proxy.
 """
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -30,13 +31,14 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -47,6 +49,7 @@ from app import (
   app_git,
   contribution_assignments,
   contribution_runtime,
+  contribution_screenshots,
   contribution_staging,
   fs_locks,
   github_auth,
@@ -88,23 +91,30 @@ from app.github_checks import (
 from app.github_contribution_contract import COAUTHOR_TRAILER as _COAUTHOR_TRAILER
 from app.github_contribution_contract import GITHUB_LOGIN as _GITHUB_LOGIN
 from app.github_contribution_contract import coauthor_trailer_required
+from app.github_connection import has_full_pr_access
 from app.github_contribution_git import (
   _git,
   _gh,
   _validate_repo_slug,
   _validate_branch,
+  _authoritative_upstream_branch_sha,
   _git_env,
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
-  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
+  opens_new_standalone_pr,
+  reviewed_base_is_sole_merge_base,
   _merge_error_patch,
   _record_patch_with,
   _normalize_head_attribution,
   _assert_head_attribution,
+  commit_identity_mismatch,
+  head_attribution_matches,
+  publishes_to_target_repository,
+  upstream_push_permission,
   _upstream_default_branch,
   _assert_upstream_push_permission,
   _upstream_branch_sha,
@@ -119,6 +129,7 @@ from app.github_contribution_git import (
 from app.storage_io import atomic_write
 from app.github_contributions import (
   ContributionSubmitError,
+  RETIRED_CHAT_REVIEW_SUBMITTER,
   _CONTRIBUTION_ID,
   _require_github_access_principal,
   _validate_submit_app,
@@ -133,6 +144,7 @@ from app.github_contributions import (
   _reviewed_source_identity,
   _personal_publication_input,
   _personal_publication_input_sha256,
+  _UNSETTLED_PUSH_STAGES,
   _record_pending_equivalence,
   _record_pending_equivalence_locked,
   _merged_upstream_sha,
@@ -170,7 +182,9 @@ from app.github_contributions import (
   _reviewed_pr_labels,
   _apply_reviewed_pr_labels,
   _authoritative_public_reconciliation,
+  observe_publication_effect,
   _exact_reviewed_pr_text,
+  assert_publishable_review_text,
   _find_existing_pr,
   _existing_branch_pr,
   _is_transient_push_error,
@@ -191,6 +205,7 @@ from app.deps import (
   get_agent_run_principal,
   get_principal,
   require_installation_owner_control,
+  require_account_owner_control,
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
@@ -226,7 +241,9 @@ def _read_personal_attempt(
     return None
   if not isinstance(raw, dict):
     return None
-  signature = str(raw.get("hmac_sha256") or "")
+  signature = raw.get("hmac_sha256")
+  if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+    return None
   expected = _signed_personal_attempt(raw).get("hmac_sha256")
   if (
     raw.get("version") != 1
@@ -254,7 +271,7 @@ def _cleanup_durable_complete_attempt(
   receipt = _read_personal_attempt(
     record_path, app_id=app_id, record_id=record_id,
   )
-  if not receipt or receipt.get("phase") != "complete":
+  if not receipt or receipt.get("observation_settlement") is not None or receipt.get("phase") != "complete":
     return False
   patch = receipt.get("record_patch")
   if not isinstance(patch, dict):
@@ -278,12 +295,20 @@ def _cleanup_durable_complete_attempt(
 
 
 def _personal_action_identity_matches(prior: object, current: dict) -> bool:
-  """Match v11 actions and narrowly migrate v10 Autopilot run identities."""
+  """Match v11 actions and narrowly migrate older recorded identities.
+
+  v10 Autopilot actions carried a run id, and actions recorded before #1741
+  named the retired chat review card as submitter. Neither changes what the
+  action publishes.
+  """
   if prior == current:
     return True
+  if not isinstance(prior, dict):
+    return False
+  if prior.get("submitter") == RETIRED_CHAT_REVIEW_SUBMITTER:
+    return {key: value for key, value in prior.items() if key != "submitter"} == current
   if (
     current.get("action") != "autopilot_update"
-    or not isinstance(prior, dict)
     or prior.get("action") != "autopilot_update"
     or not str(prior.get("run_id") or "")
   ):
@@ -464,6 +489,11 @@ class _PersonalAttemptOwner:
       self.app_id, self.record_id,
     )
     receipt = self.receipt()
+    if receipt is not None and receipt.get("observation_settlement") is not None:
+      raise ContributionSubmitError(
+        "An observed outcome is awaiting local settlement. Refresh Contribute; do not repeat its public action.",
+        status_code=409, code="observation_settlement_pending",
+      )
     if receipt is not None:
       return
     # A matching complete receipt remains this exact action's durable public
@@ -701,7 +731,7 @@ def _personal_resume_allowed(
     return False
   current = _read_record(record_path)
   patch = receipt.get("record_patch")
-  if receipt.get("action_input") != action_input:
+  if not _personal_action_identity_matches(receipt.get("action_input"), action_input):
     raise HTTPException(
       status_code=409,
       detail="Another exact publication attempt still needs reconciliation.",
@@ -710,15 +740,7 @@ def _personal_resume_allowed(
     claim_input = receipt.get("claim_input")
     if not isinstance(claim_input, dict):
       raise HTTPException(status_code=409, detail="The recovery receipt is incomplete.")
-    preclaim_input = receipt.get("preclaim_input")
-    expected_candidates = [{**claim_input, **patch, "status": "prepared"}]
-    if isinstance(preclaim_input, dict):
-      expected_candidates.append(preclaim_input)
-    current_sha = _personal_publication_input_sha256(current)
-    if current_sha not in {
-      _personal_publication_input_sha256(candidate)
-      for candidate in expected_candidates
-    }:
+    if not _receipt_claims_prepared(receipt, current):
       raise HTTPException(
         status_code=409,
         detail="The contribution changed after its public attempt was recorded.",
@@ -742,6 +764,137 @@ def _personal_resume_allowed(
       ),
     )
   return True
+
+
+def _receipt_claims_prepared(receipt: dict, record: dict) -> bool:
+  """Whether prepared ``record`` is still the proposal ``receipt`` claimed.
+
+  A failed claim returns to prepared with the receipt's patch applied, or the
+  record was never rewritten from its pre-claim input. Either can replay.
+  """
+  claim = receipt.get("claim_input")
+  patch = receipt.get("record_patch")
+  candidates = [receipt.get("preclaim_input")]
+  if isinstance(claim, dict):
+    candidates.append({
+      **claim, **(patch if isinstance(patch, dict) else {}),
+      "status": "prepared",
+    })
+  current = _personal_publication_input_sha256(record)
+  return any(
+    isinstance(candidate, dict)
+    and _personal_publication_input_sha256(candidate) == current
+    for candidate in candidates
+  )
+
+
+# Signed phases that precede the attempt's PR create or update call. The
+# first two precede any branch push or PR write; their public effects (a
+# fork, uploaded screenshots) leave no branch or PR to reconcile. A push's
+# public effect, on a new branch or an open PR, is visible from the branch tip
+# GitHub reports.
+_NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
+
+
+class _ClaimDryRun(Exception):
+  """Stops a claim at its first write, after every check that can refuse it."""
+
+
+def _stop_before_claim_write(*_args) -> None:
+  raise _ClaimDryRun
+
+
+async def _retire_superseded_attempts(
+  db: Session, approval: dict, claim: Callable[..., object],
+) -> None:
+  """Retire the attempts one publication supersedes once nothing refuses it.
+
+  ``approval`` holds the caller's ``_assert_confirmed_publication`` arguments
+  and ``claim`` its claim call. When a record has a superseded attempt, both
+  run first under the app lock, the claim stopped before its first write, so
+  a Send that any check refuses leaves every receipt in place and makes no
+  GitHub read. The caller repeats both under the lock that covers its claim.
+  """
+  app_id = approval["app_id"]
+  async with fs_locks.app_storage_lock(app_id):
+    superseded = [
+      record_id for record_id in approval["record_ids"]
+      if _superseded_attempt(app_id, record_id) is not None
+    ]
+    if not superseded:
+      return
+    _assert_confirmed_publication(db, **approval)
+    try:
+      claim(before_claim_write=_stop_before_claim_write)
+    except _ClaimDryRun:
+      pass
+    db.close()
+  for record_id in superseded:
+    await _retire_superseded_attempt(app_id, record_id)
+
+
+def _superseded_attempt(
+  app_id: int, record_id: str,
+) -> tuple[Path, dict, dict] | None:
+  """Under the app lock, a signed attempt a newer prepared review may retire."""
+  record_path, _ = _record_paths(app_id, record_id)
+  receipt = _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  )
+  if receipt is None:
+    return None
+  # The owning route reports a missing or unreadable record itself.
+  record = _read_record(record_path)
+  if (
+    record.get("status") != "prepared"
+    or receipt.get("observation_settlement") is not None
+    or receipt.get("phase")
+    not in _NO_EFFECT_ATTEMPT_PHASES | _UNSETTLED_PUSH_STAGES
+    or _receipt_claims_prepared(receipt, record)
+  ):
+    return None
+  return record_path, record, receipt
+
+
+async def _retire_superseded_attempt(app_id: int, record_id: str) -> None:
+  """Drop a signed pre-PR attempt that GitHub proves a newer review supersedes.
+
+  A receipt exists so the exact claimed action can be replayed and
+  reconciled. Once the record is restaged or re-reviewed, that action can
+  never replay, yet its receipt refused every later Send, so one interrupted
+  push left the record unsendable for good. Whether that push landed is
+  visible from the branch tip. When the tip is still the pre-push commit, or
+  exactly the receipt's head, the old attempt leaves nothing a new
+  publication must reconcile, and that publication still makes its own
+  leased, authoritative GitHub reads (including the open PR's head for an
+  update). Anything else (an unreadable tip, a moved branch, a phase after
+  the push) keeps the receipt.
+  """
+  async with fs_locks.app_storage_lock(app_id):
+    superseded = _superseded_attempt(app_id, record_id)
+  if superseded is None:
+    return
+  record_path, record, receipt = superseded
+  if receipt["phase"] in _UNSETTLED_PUSH_STAGES:
+    request = receipt.get("effective_request")
+    if not isinstance(request, dict) or request.get("action") != "push":
+      return
+    try:
+      actual = await asyncio.to_thread(  # unsettled: read-only (branch tip)
+        _authoritative_upstream_branch_sha,
+        Path(get_settings().data_dir),
+        _validate_repo_slug(request.get("head_repository")),
+        _validate_branch(request.get("branch")),
+      )
+    except (ContributionSubmitError, OSError, subprocess.SubprocessError):
+      return
+    if actual not in {request.get("expected_remote_sha"), request.get("head_sha")}:
+      return
+  async with fs_locks.app_storage_lock(app_id):
+    if _read_record(record_path) == record and _read_personal_attempt(
+      record_path, app_id=app_id, record_id=record_id,
+    ) == receipt:
+      _remove_personal_attempt(app_id, record_id)
 
 
 def _assert_active_stack_attempts_current(
@@ -833,6 +986,14 @@ def _assert_confirmed_publication(
   )
 
 
+class ContributionScreenshotItem(BaseModel):
+  """One PNG the description shows as ``![alt](screenshot:NAME)``."""
+
+  name: str
+  path: str
+  alt: str
+
+
 class ContributionStageBody(BaseModel):
   """What an agent supplies to stage a review branch; Git supplies the rest.
 
@@ -860,6 +1021,8 @@ class ContributionStageBody(BaseModel):
   labels: list[str] | None = None
   prior_work: dict | None = None
   coauthor_trailer: Literal[False] | None = None
+  # Replaces the attached screenshots; [] removes them, None keeps them.
+  screenshots: list[ContributionScreenshotItem] | None = None
 
 
 class ContributionReviewBody(BaseModel):
@@ -959,7 +1122,7 @@ _ready_action_locks: "WeakValueDictionary[str, asyncio.Lock]" = (
 
 
 def _ready_action_lock(app_id: int, record_id: str) -> asyncio.Lock:
-  """Serialize one record's Ready/recovery lifecycle in this worker.
+  """Serialize one record's public action and observation in this worker.
 
   Möbius serves one uvicorn worker, so this closes the only live overlap: a
   second request must not observe the saved claim while the first request is
@@ -975,11 +1138,43 @@ def _ready_action_lock(app_id: int, record_id: str) -> asyncio.Lock:
   return lock
 
 
+def _release_publication_auth_session(db: Session = Depends(get_db)):
+  # Auth dependencies run before action admission. A queued action must not
+  # reserve their database connection while another sender is on the network.
+  db.close()
+
+
 async def _serialize_ready_action(app_id: int, record_id: str):
   async with _ready_action_lock(app_id, record_id):
     yield
 
 
+@asynccontextmanager
+async def _publication_action_locks(app_id: int, record_ids: list[str]):
+  # Every public owner and the observer use this same order, before storage or
+  # source locks. CAS alone cannot see a sender between its effect and write.
+  async with AsyncExitStack() as locks:
+    for record_id in sorted(set(record_ids)):
+      await locks.enter_async_context(_ready_action_lock(app_id, record_id))
+    yield
+
+
+async def _serialize_stack_action(app_id: int, request: Request):
+  # Read only the lock keys here; the owning route retains all admission and
+  # exact confirmation validation. Never acquire a partial or duplicate set.
+  try:
+    payload = await request.json()
+    record_ids = payload.get("record_ids") if isinstance(payload, dict) else None
+  except ValueError:
+    record_ids = None
+  if (
+    not isinstance(record_ids, list) or not 2 <= len(record_ids) <= 12
+    or any(not isinstance(value, str) or not _CONTRIBUTION_ID.fullmatch(value)
+           for value in record_ids)
+  ):
+    raise HTTPException(status_code=400, detail="Choose a complete PR stack.")
+  async with _publication_action_locks(app_id, record_ids):
+    yield
 
 
 _REVIEW_STATUS_MESSAGES = {
@@ -990,6 +1185,7 @@ _REVIEW_STATUS_MESSAGES = {
   "branch_moved": (
     "The staged branch moved after this review was prepared."
   ),
+  "missing_branch": "The staged branch is no longer in the checkout.",
   "missing_diff_hash": (
     "This older review does not have the fingerprint needed for safe sending."
   ),
@@ -1008,6 +1204,15 @@ _REVIEW_STATUS_MESSAGES = {
     "This no longer merges cleanly with the branch it targets, so it has to "
     "be refreshed before it can be sent."
   ),
+  "upstream_base_moved": (
+    "The branch it targets does not have this review's base as its only merge "
+    "base, so GitHub would not show the reviewed diff. It has to be refreshed "
+    "before it can be sent."
+  ),
+  "upstream_merge_unavailable": (
+    "Whether this still merges with the branch it targets could not be "
+    "checked locally."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -1022,8 +1227,53 @@ _REVIEW_STATUS_MESSAGES = {
   "source_provenance_mismatch": (
     "The installed source no longer proves that it contains this reviewed change."
   ),
+  "missing_commits": (
+    "The reviewed commits are no longer in the staged checkout."
+  ),
+  "github_reconnect": (
+    "Reconnect GitHub with full pull request access before sending this."
+  ),
+  "commit_identity_mismatch": (
+    "The reviewed commit's author or committer is not the connected GitHub "
+    "account, and it is published directly to the target repository. The "
+    "agent must recommit it with the connected identity and stage it again."
+  ),
+  "publication_destination_unavailable": (
+    "GitHub could not confirm where this would be published, so its commit "
+    "identity could not be checked. Try again."
+  ),
+  "invalid_pr_text": (
+    "The reviewed title or description cannot be published on GitHub exactly "
+    "as written."
+  ),
+  "review_refresh_needed": (
+    "This update no longer carries the exact public title and description it "
+    "was reviewed against."
+  ),
+  "screenshot_invalid": (
+    "The description's screenshot references do not match the attached "
+    "screenshots."
+  ),
+  "screenshot_changed": (
+    "An attached screenshot is missing or changed since it was reviewed."
+  ),
+  "screenshot_update_unsupported": (
+    "Screenshots cannot be sent with an update to an open pull request."
+  ),
+  "screenshot_body_too_large": (
+    "With its screenshot links, this description exceeds GitHub's size limit."
+  ),
   "review_unavailable": "This review could not be verified locally.",
 }
+# Codes a later check can clear without a new review; every other problem
+# needs a refresh.
+_UNAVAILABLE_REVIEW_CODES = frozenset({
+  "review_unavailable", "github_reconnect",
+  "publication_destination_unavailable",
+})
+# Account readiness, not a defect in the reviewed candidate: a verdict may be
+# recorded while it is unresolved, and the card stays unsendable until it is.
+_ACCOUNT_REVIEW_CODES = frozenset({"github_reconnect"})
 
 _PUBLICATION_STATUS_MESSAGES = {
   "ready": "The target repository still has the reviewed default-branch head.",
@@ -1047,7 +1297,9 @@ def _review_status_problem(
 ) -> dict:
   return {
     "id": record_id,
-    "state": "needs_refresh",
+    "state": (
+      "unavailable" if code in _UNAVAILABLE_REVIEW_CODES else "needs_refresh"
+    ),
     "code": code,
     "message": _REVIEW_STATUS_MESSAGES.get(
       code,
@@ -1209,17 +1461,146 @@ def _publication_status(
   }
 
 
+@dataclass(frozen=True)
+class _ReviewDestination:
+  """Whether Send would push one review's commit directly to its target.
+
+  Resolved before any lock is taken, because a new standalone PR needs a
+  GitHub permission read; ``binding`` names the account, target and exact
+  reviewed candidate it was resolved for. ``direct`` is ``None`` when GitHub
+  could not answer.
+  """
+
+  binding: tuple
+  direct: bool | None
+
+
+def _review_destination_binding(record: dict, github_state: dict) -> tuple:
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  return (
+    str(github_state.get("login") or ""),
+    str(github_state.get("user_id") or ""),
+    str(plan.get("repo") or record.get("repo") or ""),
+    str(plan.get("action") or ""),
+    str(record.get("head_repository") or plan.get("head_repository") or ""),
+    isinstance(plan.get("stack"), dict),
+    str(plan.get("head_sha") or record.get("head_sha") or ""),
+    str(plan.get("diff_sha256") or ""),
+  )
+
+
+def _review_publishes_directly(
+  record: dict,
+  login: str,
+  push_permission: Callable[[], bool | None],
+) -> bool | None:
+  """Send's destination policy for one prepared review (``None``: unknown)."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  try:
+    upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+    existing_head_repository = (
+      _validate_repo_slug(
+        record.get("head_repository") or plan.get("head_repository")
+      )
+      if plan.get("action") == "pr_update" else None
+    )
+  except ContributionSubmitError:
+    return None
+  # Stack routes push every layer to the target with an explicit base branch.
+  return publishes_to_target_repository(
+    upstream_repo,
+    login,
+    direct_base=isinstance(plan.get("stack"), dict),
+    existing_head_repository=existing_head_repository,
+    push_permission=push_permission,
+  )
+
+
+def _commit_identity_matches(
+  repo: Path, revision: str, author_name: str, author_email: str,
+) -> bool:
+  fields = app_git._run(
+    repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", revision,
+    read_only=True,
+  ).stdout.rstrip("\n").split("\x00")
+  if len(fields) != 4:
+    raise ValueError("unexpected commit metadata")
+  return head_attribution_matches(
+    dict(zip(
+      ("author_name", "author_email", "committer_name", "committer_email"),
+      fields,
+    )),
+    author_name=author_name,
+    author_email=author_email,
+  )
+
+
+def _resolve_review_destinations(
+  records: list[dict], github_state: dict,
+) -> dict[str, _ReviewDestination]:
+  """Read where Send would publish each review; call it outside every lock.
+
+  Only a commit whose identity differs from the connected account needs the
+  answer, and only a new standalone PR needs GitHub to give it, at most once
+  per target repository in one call. Every failure of that read (timeout,
+  missing ``gh``, error exit, malformed output) is an unknown destination,
+  never an error. Nothing is forked, pushed or uploaded.
+  """
+  login = str(github_state.get("login") or "")
+  try:
+    author_name, author_email = _connected_git_identity(github_state, login)
+  except ContributionSubmitError:
+    return {}
+  if not has_full_pr_access(github_state.get("scopes")):
+    return {}  # The inspector asks to reconnect before any identity verdict.
+  permissions: dict[str, bool | None] = {}
+  destinations: dict[str, _ReviewDestination] = {}
+  for record in records:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    try:
+      repo = _safe_repo_path(plan.get("repo_path"))
+      upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+      head = str(plan.get("head_sha") or record.get("head_sha") or "")
+      if _commit_identity_matches(repo, head, author_name, author_email):
+        continue
+    except ContributionSubmitError:
+      continue
+    except (
+      OSError, subprocess.SubprocessError, RuntimeError, ValueError, UnicodeError,
+    ):
+      # The locked inspection owns this checkout's verdict.
+      continue
+
+    def push_permission(repo=repo, upstream_repo=upstream_repo) -> bool | None:
+      key = upstream_repo.casefold()
+      if key not in permissions:
+        try:
+          permissions[key] = upstream_push_permission(repo, upstream_repo)
+        except (OSError, subprocess.SubprocessError):
+          permissions[key] = None
+      return permissions[key]
+
+    destinations[str(record.get("id") or "")] = _ReviewDestination(
+      binding=_review_destination_binding(record, github_state),
+      direct=_review_publishes_directly(record, login, push_permission),
+    )
+  return destinations
+
+
 def _inspect_prepared_review(
   record: dict,
   diff_path: Path,
   github_state: dict,
+  destination: _ReviewDestination | None = None,
 ) -> dict:
   """Read-only local preflight for one prepared review.
 
-  This deliberately stops before every remote/network check. Its job is to
-  catch local drift while the owner is reviewing the card, rather than after
-  they press the public Send action. The submit endpoint remains authoritative
-  and repeats these checks before any push.
+  It catches, while the owner is reviewing the card, the local candidate
+  defects Send would refuse before its first public step: drift, the commit
+  trailer and identity, and text or screenshots GitHub cannot publish
+  exactly. It never contacts GitHub; ``destination`` carries the one remote
+  fact the identity rule needs, resolved before any lock. The submit endpoint
+  remains authoritative and repeats these checks before any push.
   """
   record_id = str(record.get("id") or "")
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else None
@@ -1249,20 +1630,25 @@ def _inspect_prepared_review(
     if base_oid is None or head_oid is None:
       raise ContributionSubmitError(
         "The reviewed commits are no longer available locally.",
-        code="review_unavailable",
+        code="missing_commits",
       )
     ancestry = app_git._run(
       repo, "merge-base", "--is-ancestor", base_oid, head_oid,
       check=False, read_only=True,
     )
-    if ancestry.returncode != 0:
+    if ancestry.returncode not in (0, 1):
+      return _review_status_problem(record_id, code="review_unavailable")
+    if ancestry.returncode == 1:
       raise ContributionSubmitError(
         "The reviewed branch is no longer based on its recorded parent.",
         code="invalid_ancestry",
       )
-    actual_head = app_git._run(
-      repo, "rev-parse", branch, read_only=True,
-    ).stdout.strip()
+    # A deleted branch is permanent drift, not a transient read failure.
+    actual_head = app_git._resolve_commit(
+      repo, f"refs/heads/{branch}", read_only=True,
+    )
+    if actual_head is None:
+      return _review_status_problem(record_id, code="missing_branch")
     if actual_head != head_oid:
       raise ContributionSubmitError(
         "This branch changed after review.", code="branch_moved",
@@ -1270,7 +1656,7 @@ def _inspect_prepared_review(
     expected_diff = str(plan.get("diff_sha256") or "")
     try:
       stored_diff = diff_path.read_bytes()
-    except OSError as exc:
+    except FileNotFoundError as exc:
       raise ContributionSubmitError(
         "The reviewed diff is missing.", code="missing_diff",
       ) from exc
@@ -1281,7 +1667,9 @@ def _inspect_prepared_review(
     branch_diff = app_git._canonical_diff(
       repo, base_oid, head_oid, read_only=True,
     )
-    if branch_diff is None or hashlib.sha256(branch_diff).hexdigest() != expected_diff:
+    if branch_diff is None:
+      return _review_status_problem(record_id, code="review_unavailable")
+    if hashlib.sha256(branch_diff).hexdigest() != expected_diff:
       raise ContributionSubmitError(
         "The reviewed diff does not match the branch.", code="diff_mismatch",
       )
@@ -1300,24 +1688,51 @@ def _inspect_prepared_review(
     # mirror the Send downgrade here rather than reporting it as not ready.
     _publication_source_mode(record, _assert_pending_equivalence_preflight)
 
-    stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
-    if stack and login and _GITHUB_LOGIN.match(login):
-      author_name, author_email = _connected_git_identity(github_state, login)
-      attribution = app_git._run(
-        repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", branch,
-        read_only=True,
-      ).stdout.rstrip("\n").split("\x00")
-      if attribution != [author_name, author_email, author_name, author_email]:
-        raise ContributionSubmitError(
-          "This PR stack was prepared with a different commit identity."
+    assert_publishable_review_text(
+      record, diff_path, login=login if _GITHUB_LOGIN.match(login) else None,
+    )
+    # Disconnected preparation stays private and unsendable; the connected
+    # account decides both Send's readiness and the identity it publishes.
+    if login:
+      try:
+        author_name, author_email = _connected_git_identity(github_state, login)
+      except ContributionSubmitError:
+        return _review_status_problem(record_id, code="github_reconnect")
+      if not has_full_pr_access(github_state.get("scopes")):
+        return _review_status_problem(record_id, code="github_reconnect")
+      if not _commit_identity_matches(
+        repo, head_oid, author_name, author_email,
+      ):
+        # A fork publication normalizes its one commit before push; a direct
+        # one publishes it as reviewed.
+        direct = (
+          destination.direct
+          if destination is not None
+          and destination.binding
+          == _review_destination_binding(record, github_state)
+          else _review_publishes_directly(record, login, lambda: None)
         )
+        if direct is None:
+          return _review_status_problem(
+            record_id, code="publication_destination_unavailable",
+          )
+        if direct:
+          raise commit_identity_mismatch()
     # Last, because it is the only verdict here that is not about the staged
     # checkout: the source can match its review exactly and still be
     # unmergeable. A dirty or moved checkout is the more urgent thing to say,
     # so those are reported first.
     upstream_sha = str(record.get("last_submit_upstream_sha") or "")
-    if _GIT_SHA.match(upstream_sha):
+    if _GIT_SHA.match(upstream_sha) and opens_new_standalone_pr(plan):
+      # Mirror Send: a new standalone PR opens, even over an overlap, only
+      # while GitHub would show exactly its reviewed diff.
+      if not reviewed_base_is_sole_merge_base(
+        lambda *args: app_git._run(repo, *args, check=False, read_only=True),
+        upstream_sha, head_oid, base_oid,
+      ):
+        return _review_status_problem(record_id, code="upstream_base_moved")
+    elif _GIT_SHA.match(upstream_sha):
       merge_preview = app_git.preview_merge_refs(repo, upstream_sha, branch)
       if merge_preview is None:
         raise ContributionSubmitError(
@@ -1327,9 +1742,11 @@ def _inspect_prepared_review(
       if merge_preview.status == "conflict":
         return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
+    # Domain validation is actionable even when older validators lack a code.
+    # Only an explicit unavailable verdict (or the I/O catch below) is transient.
     return _review_status_problem(
       record_id,
-      code=exc.code or "review_unavailable",
+      code=exc.code or "invalid_plan",
       detail=exc.message,
     )
   except (
@@ -1348,6 +1765,7 @@ async def _inspect_prepared_review_locked(
   record: dict,
   diff_path: Path,
   github_state: dict,
+  destination: _ReviewDestination | None = None,
 ) -> dict:
   """Inspect one review while holding every repository its proof reads."""
   record_id = str(record.get("id") or "")
@@ -1379,6 +1797,7 @@ async def _inspect_prepared_review_locked(
       record,
       diff_path,
       github_state,
+      destination,
     )
 
 
@@ -1486,6 +1905,14 @@ async def contribution_review_status(
             detail=exc.message,
           )
 
+  destinations = await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+    _resolve_review_destinations,
+    [
+      record for record in prepared
+      if str(record.get("id") or "") not in structural_problems
+    ],
+    github_state,
+  )
   results = []
   for record in prepared:
     record_id = str(record.get("id") or "")
@@ -1497,6 +1924,7 @@ async def contribution_review_status(
       record,
       diff_path,
       github_state,
+      destinations.get(record_id),
     ))
 
   # Local validity is deliberately complete before this remote read. No DB,
@@ -1549,6 +1977,7 @@ async def contribution_review_status(
     "records": results,
     "ready": sum(item["state"] == "ready" for item in results),
     "needs_refresh": sum(item["state"] == "needs_refresh" for item in results),
+    "unavailable": sum(item["state"] == "unavailable" for item in results),
     "publication": {
       "ready": sum(
         item["publication"]["state"] == "ready" for item in results
@@ -1730,7 +2159,23 @@ _STAGEABLE_STATUSES = frozenset(("prepared", "open", "draft"))
 _SOURCE_SYNC_RESERVE = 1024
 _STAGE_CLEARED_FIELDS = (
   "last_submit_error", "last_submit_error_code", "last_submit_error_detail",
+  "last_submit_upstream_conflict",
 )
+
+
+def _clear_superseded_push_stage(record: dict) -> None:
+  """Drop an unsettled push journal for a head this record no longer sends.
+
+  The journal can settle only its own head, so once restaging moves the
+  reviewed head it would lock the card for good. The signed attempt receipt,
+  not this app-writable journal, keeps guarding Send until GitHub resolves it.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  if (
+    record.get("last_submit_stage") in _UNSETTLED_PUSH_STAGES
+    and record.get("last_submit_push_sha") != plan.get("head_sha")
+  ):
+    record.pop("last_submit_stage")
 
 
 def _stage_error(exc: ContributionSubmitError) -> HTTPException:
@@ -1805,6 +2250,7 @@ def _stage_inputs(
     action = "pr_update"
   if action == "pr_update" and (
     body.title is not None or body.body_draft is not None
+    or body.screenshots
   ):
     raise ContributionSubmitError(
       "An open pull request's title and description are edited on GitHub "
@@ -1868,12 +2314,17 @@ def _stage_record(
   body: ContributionStageBody,
   inputs: dict,
   principal: Principal,
-) -> tuple[dict, contribution_staging.StagedCandidate]:
-  """Build the staged record from Git; the caller holds every lock."""
+) -> tuple[dict, contribution_staging.StagedCandidate, list[bytes]]:
+  """Build the staged record from Git; the caller holds every lock.
+
+  Also returns the checked bytes of newly attached screenshots, which the
+  caller stores only once the whole record has passed its checks.
+  """
   repo_path = inputs["repo_path"]
   candidate = contribution_staging.derive_candidate(
     repo_path, inputs["branch"], inputs["base_ref"],
   )
+  screenshot_bytes: list[bytes] = []
   live = inputs["live"]
   if live is not None:
     _assert_reviewed_update_contains_live_head(
@@ -1894,6 +2345,18 @@ def _stage_record(
   if live is not None:
     plan["title"], plan["body_draft"] = live["title"], live["body"]
     plan["pr_metadata"] = {"old_title": live["title"], "old_body": live["body"]}
+    plan.pop("screenshots", None)
+  elif body.screenshots is not None:
+    plan["screenshots"], screenshot_bytes = contribution_screenshots.read(
+      [item.model_dump() for item in body.screenshots],
+      str(plan.get("body_draft") or ""),
+    )
+  else:
+    contribution_screenshots.check_references(
+      contribution_screenshots.plan_entries(plan), str(plan.get("body_draft") or ""),
+    )
+  if not contribution_screenshots.plan_entries(plan):
+    plan.pop("screenshots", None)
   source_repo = inputs["source_repo"]
   plan.update({
     "action": inputs["action"],
@@ -1925,6 +2388,7 @@ def _stage_record(
     record["chat_ids"] = [*chat_ids, source_chat]
   for field in _STAGE_CLEARED_FIELDS:
     record.pop(field, None)
+  _clear_superseded_push_stage(record)
   _exact_reviewed_pr_text(record)
   _reviewed_pr_labels(plan)
   message = _git(repo_path, "log", "-1", "--format=%B", candidate.head_sha).stdout
@@ -1947,7 +2411,7 @@ def _stage_record(
       code="record_too_large",
     )
   record["source_sync"] = _track_live_source(previous, record, source_repo)
-  return record, candidate
+  return record, candidate, screenshot_bytes
 
 
 def _track_live_source(previous: dict | None, record: dict, source: Path) -> dict:
@@ -2067,14 +2531,68 @@ async def stage_contribution(
       for lock_path in sorted({str(inputs["repo_path"]), str(inputs["source_repo"])}):
         await source_locks.enter_async_context(fs_locks.source_dir_lock(lock_path))
       try:
-        record, candidate = await settled.run_settled(
+        record, candidate, screenshot_bytes = await settled.run_settled(
           _stage_record, record_id, previous, body, inputs, principal,
         )
       except ContributionSubmitError as exc:
         raise _stage_error(exc) from exc
+      contribution_screenshots.store(record_path, screenshot_bytes)
       atomic_write(diff_path, candidate.diff)
       _write_record(record_path, record)
-  return {"record": record, "source_sync": record["source_sync"]}
+      contribution_screenshots.prune(
+        record_path, contribution_screenshots.plan_entries(record["plan"]),
+      )
+  response = {"record": record, "source_sync": record["source_sync"]}
+  if record.get("status") == "prepared":
+    # The same proof a verdict needs, so the preparing agent learns of a
+    # blocker (such as a commit identity Send cannot publish) at staging.
+    github_state = github_auth.read_state() or {}
+    destination = (await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+      _resolve_review_destinations, [record], github_state,
+    )).get(record_id)
+    response["review_status"] = await _inspect_prepared_review_locked(
+      record, diff_path, github_state, destination,
+    )
+  return response
+
+
+@router.get("/contributions/{app_id}/{record_id}/screenshots/{name}")
+@_limiter.limit("120/minute")
+async def contribution_screenshot(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  name: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """One attached screenshot of a prepared PR, exactly as it was approved."""
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  if not _CONTRIBUTION_ID.fullmatch(record_id):
+    raise HTTPException(status_code=422, detail="Invalid contribution id.")
+  record_path, _ = _record_paths(app_id, record_id)
+  async with fs_locks.app_storage_lock(app_id):
+    plan = _read_record(record_path).get("plan")
+    entries = contribution_screenshots.plan_entries(
+      plan if isinstance(plan, dict) else {},
+    )
+    entry = next(
+      (item for item in entries if isinstance(item, dict) and item.get("name") == name),
+      None,
+    )
+    if entry is None:
+      raise HTTPException(status_code=404, detail="Screenshot not found.")
+    try:
+      data = contribution_screenshots.approved_bytes(record_path, entry)
+    except ContributionSubmitError as exc:
+      raise HTTPException(status_code=404, detail=exc.message) from exc
+  return Response(
+    content=data, media_type="image/png",
+    # Keyed by name, which a restage can point at new bytes: never let a
+    # cached copy stand in for the image the owner is approving.
+    headers={"Cache-Control": "no-store"},
+  )
 
 
 @router.post(
@@ -2094,8 +2612,9 @@ async def record_contribution_review(
 
   The verdict names the head and diff the reviewer read; a moved candidate is
   refused rather than inheriting it. ``all_clear`` additionally requires the
-  same local freshness proof the review card shows, so a verdict never marks
-  a checkout that Send would refuse.
+  same local proof the review card shows, so a verdict never marks a
+  candidate that Send would refuse. Where Send would publish it is resolved
+  before the storage lock and bound to the exact candidate and account.
   """
   _validate_submit_app(app_id, principal, db)
   if not _CONTRIBUTION_ID.fullmatch(record_id):
@@ -2103,6 +2622,13 @@ async def record_contribution_review(
   db.close()
   record_path, diff_path = _record_paths(app_id, record_id)
   github_state = github_auth.read_state() or {}
+  destination = None
+  if body.state == "all_clear":
+    async with fs_locks.app_storage_lock(app_id):
+      snapshot = _read_record(record_path)
+    destination = (await asyncio.to_thread(  # unsettled: read-only (commit identity and GitHub push permission)
+      _resolve_review_destinations, [snapshot], github_state,
+    )).get(record_id)
   async with fs_locks.app_storage_lock(app_id):
     record = _read_record(record_path)
     plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -2127,8 +2653,13 @@ async def record_contribution_review(
         },
       )
     if body.state == "all_clear":
-      status = await _inspect_prepared_review_locked(record, diff_path, github_state)
-      if status["state"] != "ready":
+      status = await _inspect_prepared_review_locked(
+        record, diff_path, github_state, destination,
+      )
+      if (
+        status["state"] != "ready"
+        and status["code"] not in _ACCOUNT_REVIEW_CODES
+      ):
         raise HTTPException(
           status_code=409,
           detail={"message": status["message"], "code": status["code"]},
@@ -2482,11 +3013,246 @@ async def retired_chat_contribution_route(
   })
 
 
+def _observation_digest(value: object) -> str:
+  return hashlib.sha256(json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+  ).encode("utf-8")).hexdigest()
+
+
+def _assert_no_observation_settlement(app_id: int, record_ids: list[str]) -> None:
+  """A saved observed outcome is applied before any new public action."""
+  for record_id in record_ids:
+    path, _ = _record_paths(app_id, record_id)
+    receipt = _read_personal_attempt(path, app_id=app_id, record_id=record_id)
+    if receipt is not None and receipt.get("observation_settlement") is not None:
+      raise HTTPException(
+        status_code=409,
+        detail="An observed outcome is awaiting local settlement. Refresh Contribute before a new public action.",
+      )
+
+
+def _observation_claim_matches(record: dict, attempt: dict) -> bool:
+  claim = attempt.get("claim_input")
+  patch = attempt.get("record_patch")
+  action = attempt.get("action_input")
+  if (
+    not isinstance(claim, dict) or not isinstance(patch, dict)
+    or not isinstance(action, dict)
+    or attempt.get("claim_sha256") != _personal_publication_input_sha256(claim)
+    or record.get("status") not in {"prepared", "submitting", "open", "draft", "merged", "closed"}
+  ):
+    return False
+  plan = claim.get("plan")
+  plan_action = plan.get("action") if isinstance(plan, dict) else None
+  if action.get("action") not in {
+    "pr": {"submit", "submit_stack"},
+    "pr_update": {"update_existing", "update_stack"},
+  }.get(plan_action, set()):
+    return False
+  # Failure marking returns submitting -> prepared. Successful owner writes
+  # may have completed before receipt retirement. No other reviewed field may
+  # drift: compare both the exact claim and its signed normalization patch.
+  current = _personal_publication_input(record)
+  current["status"] = claim.get("status")
+  candidates = [claim, {**claim, **patch}]
+  request = attempt.get("effective_request")
+  if (attempt.get("phase") == "complete" and isinstance(request, dict)
+      and request.get("url") and request.get("number")):
+    # The owner may have saved its successful ledger row and crashed before
+    # retiring the receipt. Its exact signed response names these two derived
+    # fields even when record_patch does not; remote proof is still required.
+    candidates.append({**claim, **patch, "url": request["url"], "number": request["number"]})
+  return any(current == _personal_publication_input(candidate) for candidate in candidates)
+
+
+def _observed_pr_record(record: dict, attempt: dict, result: dict) -> dict:
+  patch = attempt.get("record_patch") or {}
+  allowed = {
+    "plan", "head_sha", "head_repository", "last_submit_stage",
+    "last_submit_push_sha", "last_submit_base_branch", "last_submit_upstream_branch",
+    "last_submit_upstream_sha", "last_pushed_branch", "last_successor_base_branch",
+    "last_submit_screenshots",
+  }
+  now = _now_iso()
+  submitted = (attempt.get("action_input") or {}).get("action") in {"submit", "submit_stack"}
+  settled = {
+    **record, **{key: value for key, value in patch.items() if key in allowed},
+    "url": result["url"], "number": result["number"],
+    "status": result["status"], "publication_stage": result["publication_stage"],
+    "head_repository": result["head_repository"],
+    "last_submit_push_sha": result["head_sha"], "last_submit_stage": "pushed",
+    "last_submit_base_branch": result["base_branch"], "updated_at": now,
+  }
+  if result.get("labels_requested"):
+    settled["last_submit_labels_requested"] = result["labels_requested"]
+    settled["last_submit_labels_applied"] = result["labels_applied"]
+    settled.pop("last_submit_labels_note", None)
+  if submitted:
+    settled["submitted_at"] = record.get("submitted_at") or now
+  else:
+    settled["last_updated_pr_at"] = now
+  if result["status"] in {"merged", "closed"}:
+    settled.setdefault(f"{result['status']}_at", now)
+  for key in ("last_submit_error", "last_submit_error_detail", "last_submit_error_code"):
+    settled.pop(key, None)
+  if submitted and "last_submit_upstream_conflict" in patch:
+    settled["last_submit_upstream_conflict"] = patch["last_submit_upstream_conflict"]
+  else:
+    settled.pop("last_submit_upstream_conflict", None)
+  return settled
+
+
+def _observation_journal(attempt: dict) -> tuple[dict, dict] | None:
+  journal = attempt.get("observation_settlement")
+  if not isinstance(journal, dict):
+    return None
+  before, after = journal.get("before"), journal.get("after")
+  if (not isinstance(before, dict) or not isinstance(after, dict)
+      or before.get("id") != attempt.get("record_id")
+      or after.get("id") != attempt.get("record_id")):
+    return None
+  return before, after
+
+
+def _observation_unapplied(record: dict, attempt: dict) -> bool:
+  """Allow fresh proof, not journal deletion, after a benign local edit.
+
+  Every effect-bearing field must still equal its pre-write value. A partial
+  write or reviewed-input change remains a conflict. The old signed journal
+  stays on disk throughout the fresh remote read.
+  """
+  journal = _observation_journal(attempt)
+  if journal is None:
+    return False
+  before, after = journal
+  missing = object()
+  effects = {key for key in before.keys() | after.keys()
+             if key != "updated_at" and before.get(key, missing) != after.get(key, missing)}
+  return (
+    all(record.get(key, missing) == before.get(key, missing) for key in effects)
+    and _personal_publication_input(record) == _personal_publication_input(before)
+  )
+
+
+def _finish_observation_settlement(
+  app_id: int, record_id: str, attempt: dict,
+) -> dict | None:
+  """Replay only a server-signed local write, never a public operation.
+
+  The journal is saved in the receipt before the ledger write, so a crash
+  between them resumes here. A replaced receipt or an unrelated ledger edit
+  is never retired or overwritten. Caller holds the action and storage locks.
+  """
+  journal = _observation_journal(attempt)
+  record_path, _ = _record_paths(app_id, record_id)
+  if journal is None or _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  ) != attempt:
+    return None
+  before, after = journal
+  current = _read_record(record_path)
+  if current != before and current != after:
+    return None
+  if current != after:
+    _write_record(record_path, after)
+  _remove_personal_attempt(app_id, record_id)
+  return after
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/observe",
+  dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)],
+)
+async def observe_contribution_publication(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Observe an existing signed effect, and persist only its exact outcome.
+
+  No request supplies a plan, target, action or approval. An absent/partial
+  proof is not proof of no effect and never reopens public admission.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  record_path, _ = _record_paths(app_id, record_id)
+  if (await request.body()).strip() not in {b"", b"{}"}:
+    raise HTTPException(status_code=400, detail="Observation takes no action inputs.")
+
+  def response(outcome: str, record: dict, message: str) -> dict:
+    return {"outcome": outcome, "records": [record], "message": message}
+
+  # Every sender of this record holds its action lock from admission to its
+  # ledger write, and it alone spans the remote reads below: no database,
+  # source-dir or app-storage lease is retained during GitHub I/O.
+  async with _ready_action_lock(app_id, record_id):
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      record = _read_record(record_path)
+      if record.get("type") != "pr" or record.get("submission_mode") == "mobius-bot":
+        return response("not_eligible", record, "This record is not a personal publication attempt. No no-effect conclusion was made.")
+      attempt = _read_personal_attempt(record_path, app_id=app_id, record_id=record_id)
+      if attempt is None:
+        return response("unavailable", record, "No valid signed publication attempt is available. This does not prove nothing was sent.")
+      if (attempt.get("action_input") or {}).get("action") == "autopilot_update":
+        # Autopilot's round recovery owns this receipt: its retry records the
+        # pushed head in the grant, and the receipt is its only witness.
+        return response("not_eligible", record, "Autopilot recovers its own update; checking never settles or retires it.")
+      if attempt.get("observation_settlement") is not None:
+        settled = _finish_observation_settlement(app_id, record_id, attempt)
+        if settled is not None:
+          return response("settled", settled, "The observed outcome is saved.")
+        if not _observation_unapplied(record, attempt):
+          return response("changed", record, "The saved settlement no longer matches the ledger.")
+      if not _observation_claim_matches(record, attempt):
+        return response("changed", record, "The signed publication claim no longer matches this review.")
+      snapshot = _observation_digest([record, attempt])
+    actor = _observation_digest(github_auth.read_state())
+    try:
+      proof = await asyncio.to_thread(  # unsettled: read-only (GitHub publication observation)
+        observe_publication_effect, record, attempt,
+      )
+    except (ContributionSubmitError, OSError, subprocess.SubprocessError, ValueError, TypeError):
+      proof = {"outcome": "unavailable", "message": "GitHub could not confirm this publication. Its attempt remains locked."}
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      current = _read_record(record_path)
+      if (
+        _observation_digest([current, _read_personal_attempt(
+          record_path, app_id=app_id, record_id=record_id,
+        )]) != snapshot
+        or _observation_digest(github_auth.read_state()) != actor
+      ):
+        return response("changed", current, "The publication or GitHub connection changed during observation; no result was saved.")
+      if proof["outcome"] != "settled":
+        return response(proof["outcome"], current, proof["message"])
+      settled_attempt = _signed_personal_attempt({
+        **attempt, "observation_settlement": {
+          "before": current,
+          "after": _observed_pr_record(current, attempt, proof["result"]),
+        },
+      })
+      atomic_write(
+        contribution_runtime.personal_attempt_path(app_id, record_id),
+        json.dumps(settled_attempt, ensure_ascii=False, separators=(",", ":")),
+      )
+      saved = _finish_observation_settlement(app_id, record_id, settled_attempt)
+      if saved is None:
+        return response("changed", current, "The settlement changed before its ledger write.")
+      return response("settled", saved, "The exact publication outcome is saved.")
+
+
 @router.post(
   "/contributions/{app_id}/{record_id}/submit",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -2517,12 +3283,19 @@ async def submit_contribution(
   # connection. The nonce is rechecked inside the lock before the claim.
   submitter = body.submitter if body is not None else "contribute-button"
   db.close()
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=[record_id],
+    confirmed=confirmed, stack=False, phase_actions=frozenset({"pr"}),
+    submitter=submitter,
+  )
+  claim = functools.partial(
+    _claim_record, app_id=app_id, record_id=record_id, db=db,
+    expected_nonce=expected_nonce, submitter=submitter, confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=[record_id], confirmed=confirmed, stack=False,
-      phase_actions=frozenset({"pr"}), submitter=submitter,
-    )
+    _assert_no_observation_settlement(app_id, [record_id])
+    _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit",
       "publication_stage": (
@@ -2539,15 +3312,8 @@ async def submit_contribution(
       app_id=app_id, action_input=action_input,
     )
 
-    claimed, record_path, diff_path = _claim_record(
-      app_id=app_id,
-      record_id=record_id,
-      db=db,
-      expected_nonce=expected_nonce,
-      submitter=submitter,
-      allow_personal_resume=allow_resume,
-      before_claim_write=own_claim,
-      confirmed=confirmed,
+    claimed, record_path, diff_path = claim(
+      allow_personal_resume=allow_resume, before_claim_write=own_claim,
     )
     attempt_owner = attempt_owners[record_id]
     publication_record = attempt_owner.recovery_record(claimed)
@@ -2737,7 +3503,8 @@ async def submit_contribution(
   "/contributions/{app_id}/{record_id}/ready",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
     Depends(_serialize_ready_action),
   ],
 )
@@ -2759,6 +3526,7 @@ async def mark_contribution_ready(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _claimed, record_path, target, mode = _claim_personal_pr_ready(
       app_id=app_id,
       record_id=record_id,
@@ -2837,7 +3605,7 @@ async def mark_contribution_ready(
           "This draft already has auto-merge enabled. Ready could merge it immediately, so nothing was changed.",
           code="ready_auto_merge_enabled",
         )
-      await asyncio.to_thread(
+      await settled.run_settled(
         _mark_personal_pr_ready,
         target,
         node_id=str(live["node_id"]),
@@ -2934,7 +3702,9 @@ def _prepared_existing_pr_target(record: dict) -> tuple[str, int, str, str]:
   "/contributions/{app_id}/{record_id}/update-existing",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -2974,12 +3744,20 @@ async def update_existing_contribution(
     body.submitter if body is not None else "contribute-update-button"
   )
   db.close()
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=[record_id],
+    confirmed=confirmed, stack=False, phase_actions=frozenset({"pr_update"}),
+    submitter=submitter,
+  )
+  claim = functools.partial(
+    _claim_record, app_id=app_id, record_id=record_id, db=db,
+    expected_nonce=expected_nonce, submitter=submitter,
+    expected_action="pr_update", confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=[record_id], confirmed=confirmed, stack=False,
-      phase_actions=frozenset({"pr_update"}), submitter=submitter,
-    )
+    _assert_no_observation_settlement(app_id, [record_id])
+    _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_existing"}
     existing_record_path, _ = _record_paths(app_id, record_id)
     allow_resume = _personal_resume_allowed(
@@ -2990,16 +3768,8 @@ async def update_existing_contribution(
       app_id=app_id, action_input=action_input,
     )
 
-    claimed, record_path, diff_path = _claim_record(
-      app_id=app_id,
-      record_id=record_id,
-      db=db,
-      expected_nonce=expected_nonce,
-      submitter=submitter,
-      expected_action="pr_update",
-      allow_personal_resume=allow_resume,
-      before_claim_write=own_claim,
-      confirmed=confirmed,
+    claimed, record_path, diff_path = claim(
+      allow_personal_resume=allow_resume, before_claim_write=own_claim,
     )
     attempt_owner = attempt_owners[record_id]
     publication_record = attempt_owner.recovery_record(claimed)
@@ -3371,7 +4141,7 @@ async def contribution_assignees(
 
 @router.post(
   "/contributions/{app_id}/assign-review",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("10/minute")
 async def assign_contribution_review(
@@ -3425,7 +4195,9 @@ async def assign_contribution_review(
   "/contributions/{app_id}/update-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -3468,12 +4240,31 @@ async def update_contribution_stack(
   phase_actions = frozenset({"pr_update"})
   submitter = "contribute-stack-update-button"
   db.close()
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=body.record_ids,
+    confirmed=confirmed, stack=True, phase_actions=phase_actions,
+    submitter=submitter,
+  )
+  claim = functools.partial(
+    _claim_stack_records,
+    app_id=app_id,
+    record_ids=body.record_ids,
+    db=db,
+    expected_nonce=expected_nonce,
+    # Public parents may retain their original `pr` provenance. They are
+    # validated but never claimed; every private layer must still be an
+    # explicitly reviewed `pr_update`.
+    allowed_actions=_PREPARED_PR_ACTIONS,
+    prepared_actions=phase_actions,
+    deferred_prepared_actions=frozenset({"pr"}),
+    submitter=submitter,
+    already_detail="Every PR in this stack already has the reviewed update.",
+    confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=body.record_ids, confirmed=confirmed, stack=True,
-      phase_actions=phase_actions, submitter=submitter,
-    )
+    _assert_no_observation_settlement(app_id, body.record_ids)
+    _assert_confirmed_publication(db, **approval)
     action_input = {"action": "update_stack", "record_ids": body.record_ids}
     for cleanup_id in body.record_ids:
       cleanup_path, _ = _record_paths(app_id, cleanup_id)
@@ -3488,22 +4279,7 @@ async def update_contribution_stack(
       app_id=app_id, action_input=action_input,
     )
 
-    rows = _claim_stack_records(
-      app_id=app_id,
-      record_ids=body.record_ids,
-      db=db,
-      expected_nonce=expected_nonce,
-      # Public parents may retain their original `pr` provenance. They are
-      # validated but never claimed; every private layer must still be an
-      # explicitly reviewed `pr_update`.
-      allowed_actions=_PREPARED_PR_ACTIONS,
-      prepared_actions=phase_actions,
-      deferred_prepared_actions=frozenset({"pr"}),
-      submitter=submitter,
-      already_detail="Every PR in this stack already has the reviewed update.",
-      before_claim_write=own_stack_claim,
-      confirmed=confirmed,
-    )
+    rows = claim(before_claim_write=own_stack_claim)
     for row in rows:
       if row["record"].get("status") == "submitting":
         row["record"] = attempt_owners[
@@ -3764,7 +4540,9 @@ async def update_contribution_stack(
   "/contributions/{app_id}/submit-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -3790,12 +4568,20 @@ async def submit_contribution_stack(
   phase_actions = frozenset({"pr"})
   submitter = "contribute-stack-button"
   db.close()
+  approval = dict(
+    app_id=app_id, expected_nonce=expected_nonce, record_ids=body.record_ids,
+    confirmed=confirmed, stack=True, phase_actions=phase_actions,
+    submitter=submitter,
+  )
+  claim = functools.partial(
+    _claim_stack_records, app_id=app_id, record_ids=body.record_ids, db=db,
+    expected_nonce=expected_nonce, allowed_actions=_PREPARED_PR_ACTIONS,
+    prepared_actions=phase_actions, submitter=submitter, confirmed=confirmed,
+  )
+  await _retire_superseded_attempts(db, approval, claim)
   async with fs_locks.app_storage_lock(app_id):
-    _assert_confirmed_publication(
-      db, app_id=app_id, expected_nonce=expected_nonce,
-      record_ids=body.record_ids, confirmed=confirmed, stack=True,
-      phase_actions=phase_actions, submitter=submitter,
-    )
+    _assert_no_observation_settlement(app_id, body.record_ids)
+    _assert_confirmed_publication(db, **approval)
     action_input = {
       "action": "submit_stack", "record_ids": body.record_ids,
       "publication_stage": body.publication_stage,
@@ -3813,17 +4599,7 @@ async def submit_contribution_stack(
       app_id=app_id, action_input=action_input,
     )
 
-    rows = _claim_stack_records(
-      app_id=app_id,
-      record_ids=body.record_ids,
-      db=db,
-      expected_nonce=expected_nonce,
-      allowed_actions=_PREPARED_PR_ACTIONS,
-      prepared_actions=phase_actions,
-      submitter=submitter,
-      before_claim_write=own_stack_claim,
-      confirmed=confirmed,
-    )
+    rows = claim(before_claim_write=own_stack_claim)
     for row in rows:
       if row["record"].get("status") == "submitting":
         row["record"] = attempt_owners[
@@ -3994,7 +4770,9 @@ async def submit_contribution_stack(
   "/contributions/{app_id}/land-stack",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_stack_action),
   ],
 )
 @_limiter.limit("5/minute")
@@ -4015,6 +4793,7 @@ async def land_contribution_stack(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, body.record_ids)
     rows, landing_mode = _claim_stack_landing(
       app_id=app_id,
       record_ids=body.record_ids,
@@ -4872,7 +5651,8 @@ async def _autopilot_escalate_and_notify(
       title=_HUMAN_REQUIRED_TITLE,
       body=f"{title} — {attention['message']}",
       source_type="app", source_id=str(app_id),
-      target=f"/shell/?app={app_id}",
+      # Open the escalated contribution itself, not the app's front page.
+      target=f"/shell/?app={app_id}&intent=review:{record_id}",
     )
   except Exception:
     log.warning("human_required notify failed %s/%s", app_id, record_id,
@@ -4884,7 +5664,7 @@ async def _autopilot_escalate_and_notify(
   "/contributions/{app_id}/{record_id}/respond",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("10/minute")
@@ -5083,7 +5863,7 @@ def _autopilot_round_brief(
   "/contributions/{app_id}/{record_id}/reply",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("30/minute")
@@ -5441,7 +6221,7 @@ async def autopilot_escalate(
   "/contributions/{app_id}/{record_id}/autopilot",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("20/minute")
@@ -5556,7 +6336,9 @@ def _completed_autopilot_update_result(
   "/contributions/{app_id}/{record_id}/update",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
+    Depends(_release_publication_auth_session),
+    Depends(_serialize_ready_action),
   ],
 )
 @_limiter.limit("10/minute")
@@ -5593,6 +6375,7 @@ async def autopilot_update(
   action_input = _autopilot_update_action_input(row, body)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    _assert_no_observation_settlement(app_id, [record_id])
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
     record = _read_record(record_path)

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app import (
   app_git,
+  contribution_screenshots,
   contribution_staging,
   fs_locks,
   github_auth,
@@ -71,6 +72,12 @@ _PERSONAL_PUBLIC_INPUT_FIELDS = (
 log = logging.getLogger(__name__)
 
 _PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
+# GitHub counts description characters, not UTF-8 bytes.
+GITHUB_BODY_MAX_CHARS = 65_536
+# The chat review card stopped being a publication surface in #1741. Claims
+# and signed receipts written before that still name it; their exact action
+# resumes under the Contribute control that remains.
+RETIRED_CHAT_REVIEW_SUBMITTER = "chat-review-card"
 
 
 def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
@@ -95,17 +102,19 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     raise ContributionSubmitError(
       "This prepared PR has a title GitHub cannot publish exactly. Ask the "
       "agent to prepare a nonblank single-line title without surrounding "
-      "whitespace."
+      "whitespace.",
+      code="invalid_pr_text",
     )
   if (
     not isinstance(body, str)
     or not body.strip()
     or "\x00" in body
-    or len(body.encode("utf-8")) > 65_536
+    or len(body) > GITHUB_BODY_MAX_CHARS
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "
-      "agent to prepare a nonblank body within GitHub's size limit."
+      "agent to prepare a nonblank body within GitHub's size limit.",
+      code="invalid_pr_text",
     )
   return title, body
 
@@ -1429,7 +1438,7 @@ def _claim_record(
     allow_personal_resume
     and record.get("status") == "submitting"
     and expected_action in _PREPARED_PR_ACTIONS
-    and record.get("submitter") == submitter
+    and record.get("submitter") in (submitter, RETIRED_CHAT_REVIEW_SUBMITTER)
   )
   if (
     record.get("status") != "prepared"
@@ -2099,6 +2108,9 @@ def _mark_submit_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # Only the Send that opened this PR over an overlap may say it conflicts.
+  if not (record_patch or {}).get("last_submit_upstream_conflict"):
+    next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2139,6 +2151,8 @@ def _mark_existing_pr_update_success(
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
   next_record.pop("last_submit_error_code", None)
+  # An update publishes only after it merges cleanly with upstream.
+  next_record.pop("last_submit_upstream_conflict", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2394,6 +2408,33 @@ def _find_existing_pr(
     if attempt + 1 < _PR_VISIBILITY_RETRIES:
       time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
   return None
+
+
+def _recovered_upstream_overlap(
+  repo: Path, record: dict, branch: str, head_sha: str,
+) -> dict:
+  """The upstream overlap a recovered new PR opened over, as Send records it.
+
+  A retry that completes an earlier attempt's PR returns before the merge
+  preflight. The flag describes what that PR opened over, so this rechecks the
+  exact upstream tip the earlier attempt preflighted and recorded with its
+  pushed branch, not today's upstream. The check is advisory: an unknown
+  answer (that tip no longer available locally, or git refusing, timing out
+  or failing to start) records no flag, and the already-public PR's recovery
+  never fails on it.
+  """
+  upstream_branch = str(record.get("last_submit_upstream_branch") or "")
+  upstream_sha = str(record.get("last_submit_upstream_sha") or "").lower()
+  if (
+    not _BRANCH_NAME.fullmatch(upstream_branch)
+    or not _GIT_SHA.fullmatch(upstream_sha)
+  ):
+    return {}
+  try:
+    merge = _git_ops.merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+    return {}
+  return _git_ops.upstream_overlap_patch(merge, head_sha)
 
 
 def _authoritative_public_reconciliation(
@@ -2705,6 +2746,282 @@ def _reviewed_existing_pr_metadata(record: dict) -> tuple[str, str]:
   return title, body
 
 
+def observe_publication_effect(record: dict, attempt: dict) -> dict:
+  """Read, but never complete, one signed personal publication's remote effect.
+
+  The caller verifies the receipt signature, claim/action identity, and ledger
+  snapshot. This layer independently binds its effect request to the signed
+  claim and derived patch. A missing/partial read is never a no-effect proof.
+  Only the owning route may persist ``result`` and retire that same receipt.
+  """
+  def answer(outcome: str, message: str, result: dict | None = None) -> dict:
+    value = {"outcome": outcome, "message": message}
+    if result is not None:
+      value["result"] = result
+    return value
+
+  pending = lambda why: answer("pending", why)
+  changed = lambda why: answer("changed", why)
+  unavailable = lambda why: answer("unavailable", why)
+  claim = attempt.get("claim_input") if isinstance(attempt, dict) else None
+  patch = attempt.get("record_patch") if isinstance(attempt, dict) else None
+  request = attempt.get("effective_request") if isinstance(attempt, dict) else None
+  if not all(isinstance(v, dict) for v in (record, claim, patch, request)):
+    return unavailable("The signed publication effect witness is incomplete.")
+  # The receipt may carry a server-derived normalized head. It may not replace
+  # the reviewed routing target or be inferred from a later mutable card.
+  candidate = {**claim, **patch}
+  old_plan = claim.get("plan") if isinstance(claim.get("plan"), dict) else {}
+  plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+  if (any(candidate.get(k) != claim.get(k) for k in ("id", "type", "repo"))
+      or any(plan.get(k) != old_plan.get(k) for k in ("action", "repo", "base_branch"))
+      or record.get("id") != claim.get("id")
+      or record.get("type") != "pr"):
+    return changed("The publication receipt no longer names this reviewed PR.")
+  action = plan.get("action")
+  if action not in {"pr", "pr_update"}:
+    return unavailable("This publication action has no read-only PR proof.")
+  phase = attempt.get("phase")
+  effect = request.get("action")
+  valid_effects = {
+    "pr": {"branch_published": {"create_pr"},
+           "pr_ambiguous": {"create_pr"}, "complete": {"create_pr", "reconcile_pr"}},
+    "pr_update": {
+      "push_pending": {"push", "advance_successor_branch"},
+      "push_ambiguous": {"push", "advance_successor_branch"},
+      "branch_published": {"push", "advance_successor_branch"},
+      "pr_ambiguous": {"retarget_successor_pr", "reconcile_pr", "advance_successor"},
+      "complete": {"reconcile_pr", "retarget_successor_pr", "advance_successor", "update_pr"},
+    },
+  }
+  if effect not in valid_effects[action].get(phase, set()):
+    return unavailable("This receipt does not witness a completed PR effect phase.")
+  try:
+    repo_name = _git_ops._validate_repo_slug(plan.get("repo") or claim.get("repo"))
+    branch = _git_ops._validate_branch(plan.get("branch") or claim.get("branch"))
+    head_repo = _git_ops._validate_repo_slug(
+      request.get("head_repository") or candidate.get("head_repository")
+    )
+    head_sha = str(patch.get("head_sha") or plan.get("head_sha") or "").lower()
+    if not _GIT_SHA.fullmatch(head_sha):
+      raise ValueError("missing reviewed head")
+    base = _git_ops._validate_branch(
+      (plan.get("successor") or {}).get("base_branch")
+      if isinstance(plan.get("successor"), dict)
+      else ((plan["stack"].get("base_branch")
+             if isinstance(plan.get("stack"), dict)
+             and plan["stack"].get("parent_record_id") else None)
+            or candidate.get("last_submit_base_branch")
+            or plan.get("base_branch") or request.get("base_branch"))
+    )
+    # `gh api` is repository-independent. A staged checkout may already have
+    # been removed after an ambiguous public effect; never require or inspect
+    # it to prove remote facts. Use the configured data root only as process cwd.
+    repo = Path(get_settings().data_dir)
+  except (ContributionSubmitError, TypeError, ValueError, AttributeError):
+    return unavailable("The signed publication target is incomplete.")
+  if (request.get("repo") != repo_name or request.get("branch") != branch
+      or request.get("head_repository") != head_repo
+      or str(request.get("head_sha") or "").lower() != head_sha):
+    return changed("The signed effect does not match the reviewed publication head.")
+  successor = plan.get("successor") if isinstance(plan.get("successor"), dict) else None
+  if successor:
+    try:
+      journal = _merged_parent_successor_plan(candidate)
+    except ContributionSubmitError:
+      return changed("The reviewed successor witness is incomplete.")
+    if (effect not in {"advance_successor_branch", "retarget_successor_pr", "advance_successor"}
+        or request.get("target_base_branch") not in (None, journal["target_base_branch"])
+        or request.get("previous_head_sha") not in (None, journal["old_head_sha"])):
+      return changed("The signed successor effect differs from its reviewed target.")
+    if effect == "advance_successor" and (
+        request.get("number") != claim.get("number")
+        or request.get("successor") != successor
+        or patch.get("last_submit_push_sha") != head_sha):
+      return unavailable("The successor receipt lacks its exact pushed-head witness.")
+    if effect == "retarget_successor_pr" and (
+        request.get("number") != claim.get("number")
+        or request.get("base_branch") != journal["target_base_branch"]):
+      return changed("The signed retarget differs from its reviewed successor.")
+    base = journal["target_base_branch"]
+  elif request.get("base_branch") != base:
+    return changed("The signed effect has a different PR base.")
+  raw_number = claim.get("number") if action == "pr_update" else request.get("number")
+  if action == "pr_update" and (not isinstance(raw_number, int) or isinstance(raw_number, bool) or raw_number < 1):
+    return unavailable("The update has no exact signed PR number.")
+  if raw_number is not None and (not isinstance(raw_number, int) or isinstance(raw_number, bool) or raw_number < 1):
+    return changed("The signed PR number is invalid.")
+  if action == "pr_update" and request.get("number") not in (None, raw_number):
+    return changed("The signed update targets a different PR number.")
+  if request.get("url") is not None and raw_number is not None and request.get("url") != f"https://github.com/{repo_name}/pull/{raw_number}":
+    return changed("The signed effect has a different PR URL.")
+  if action == "pr" and phase == "complete" and raw_number is None:
+    return unavailable("The complete receipt omitted the PR number.")
+  try:
+    title, body = _exact_reviewed_pr_text(candidate)
+    if action == "pr_update":
+      _reviewed_existing_pr_metadata(candidate)
+  except ContributionSubmitError:
+    return changed("The exact reviewed PR text witness is incomplete.")
+  body = _published_pr_body(plan, body, patch, branch)
+  if body is None:
+    return unavailable("The signed screenshot publication witness is incomplete.")
+  if action == "pr" and effect == "create_pr" and (
+      request.get("title") != title or request.get("body") != body):
+    return changed("The create request differs from the reviewed PR text.")
+
+  def branch_tip(owner_repo: str, name: str) -> object:
+    """A read tip, or ``None`` when absent or unreadable: never no-effect proof."""
+    try:
+      reply = _git_ops._gh(
+        repo, "api", f"repos/{owner_repo}/git/ref/heads/{quote(name, safe='')}",
+        check=False,
+      )
+      data = json.loads(reply.stdout or "null") if reply.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+      return None
+    tip = data.get("object") if isinstance(data, dict) else None
+    return tip.get("sha") if isinstance(tip, dict) else None
+
+  # A branch read is a *positive* effect witness, not a PR witness. In
+  # particular, an empty pull list or 404 cannot prove a create never ran.
+  branch_sha = branch_tip(head_repo, branch)
+  if branch_sha is not None and not _GIT_SHA.fullmatch(str(branch_sha)):
+    return unavailable("GitHub returned an incomplete branch witness.")
+
+  try:
+    if raw_number is None:
+      owner = head_repo.split("/", 1)[0]
+      listing = _git_ops._gh(
+        repo, "api", f"repos/{repo_name}/pulls?state=all&head={quote(owner + ':' + branch, safe='')}&per_page=100",
+        check=False,
+      )
+      if listing.returncode != 0:
+        return unavailable("GitHub did not confirm the created pull request.")
+      rows = json.loads(listing.stdout or "null")
+      if not isinstance(rows, list):
+        return unavailable("GitHub returned an incomplete PR list.")
+      exact = [row for row in rows if isinstance(row, dict)
+               and isinstance(row.get("number"), int)
+               and not isinstance(row.get("number"), bool)
+               and row.get("html_url") == f"https://github.com/{repo_name}/pull/{row['number']}"
+               and isinstance(row.get("head"), dict)
+               and row["head"].get("ref") == branch]
+      if len(exact) != 1:
+        return pending("The branch is published, but its exact PR is not confirmed.")
+      raw_number = exact[0]["number"]
+    live_response = _git_ops._gh(repo, "api", f"repos/{repo_name}/pulls/{raw_number}", check=False)
+    if live_response.returncode != 0:
+      return unavailable("GitHub has not confirmed the exact pull request.")
+    live = json.loads(live_response.stdout or "null")
+  except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+    return unavailable("GitHub PR observation is unavailable.")
+  if not isinstance(live, dict):
+    return unavailable("GitHub returned an incomplete pull request.")
+  head = live.get("head") if isinstance(live.get("head"), dict) else {}
+  remote_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+  remote_base = live.get("base") if isinstance(live.get("base"), dict) else {}
+  base_repo = remote_base.get("repo") if isinstance(remote_base.get("repo"), dict) else {}
+  url = f"https://github.com/{repo_name}/pull/{raw_number}"
+  if (live.get("number") != raw_number or live.get("html_url") != url
+      or remote_repo.get("full_name") != head_repo or head.get("ref") != branch
+      or head.get("sha") != head_sha or base_repo.get("full_name") != repo_name
+      or live.get("title") != title
+      or live.get("body") != body):
+    return changed("The public PR identity or text differs from the signed review.")
+  if remote_base.get("ref") != base:
+    return pending("The public PR has the reviewed head but not the reviewed base.")
+  terminal_merge = (
+      live.get("state") == "closed"
+      and isinstance(live.get("merged_at"), str) and live["merged_at"]
+      and _GIT_SHA.fullmatch(str(live.get("merge_commit_sha") or ""))
+  )
+  terminal_closed = (
+      live.get("state") == "closed"
+      and not live.get("merged_at")
+      and isinstance(live.get("closed_at"), str) and live["closed_at"]
+  )
+  if branch_sha is not None and branch_sha != head_sha and not (terminal_merge or terminal_closed):
+    return changed("The public branch does not have the signed reviewed head.")
+  if branch_sha is None and not (terminal_merge or terminal_closed):
+    return unavailable("GitHub did not confirm the published branch or terminal PR.")
+  if successor:
+    base_sha = branch_tip(repo_name, base)
+    if base_sha is None:
+      return unavailable("GitHub did not confirm the successor target-base tip.")
+    if base_sha != journal["target_base_sha"]:
+      return changed("The successor target base moved from its reviewed witness.")
+  elif isinstance(plan.get("stack"), dict) and plan["stack"].get("parent_record_id"):
+    reviewed_parent_sha = str(plan.get("base_sha") or "").lower()
+    if not _GIT_SHA.fullmatch(reviewed_parent_sha):
+      return unavailable("The linked child lacks its reviewed parent-base commit.")
+    base_sha = branch_tip(repo_name, base)
+    if base_sha is None:
+      return unavailable("GitHub did not confirm the linked parent-base tip.")
+    if base_sha != reviewed_parent_sha:
+      return changed("The linked parent base moved from its reviewed commit.")
+  labels = _reviewed_pr_labels(plan)
+  observed_labels = []
+  if labels:
+    try:
+      labels_response = _git_ops._gh(repo, "api", f"repos/{repo_name}/issues/{raw_number}/labels", check=False)
+      live_labels = json.loads(labels_response.stdout or "null") if labels_response.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+      live_labels = None
+    if not isinstance(live_labels, list):
+      return unavailable("GitHub did not confirm the requested PR labels.")
+    if any(not isinstance(value, dict) or not isinstance(value.get("name"), str)
+           for value in live_labels):
+      return unavailable("GitHub returned an incomplete PR label witness.")
+    actual_labels = {value["name"].casefold(): value["name"] for value in live_labels}
+    if any(label.casefold() not in actual_labels for label in labels):
+      return pending("The PR exists, but requested labels are not all confirmed.")
+    # The sender also resolves reviewed names case-insensitively to GitHub's
+    # canonical spelling. Observe that same identity, never reapply a label.
+    observed_labels = [actual_labels[label.casefold()] for label in labels]
+  state = live.get("state")
+  if state not in {"open", "closed"} or not isinstance(live.get("draft"), bool):
+    return unavailable("GitHub returned an incomplete PR lifecycle.")
+  if state == "closed" and not (terminal_merge or terminal_closed):
+    return unavailable("GitHub did not confirm an exact terminal PR identity.")
+  if live.get("merged_at") and (state != "closed" or not _GIT_SHA.fullmatch(str(live.get("merge_commit_sha") or ""))):
+    return changed("GitHub returned an inconsistent merge identity.")
+  status = "merged" if live.get("merged_at") else ("closed" if state == "closed" else ("draft" if live["draft"] else "open"))
+  return answer("settled", "GitHub confirmed the exact reviewed publication.", {
+    "url": url, "number": raw_number, "head_repository": head_repo,
+    "publication_stage": "draft" if live["draft"] else "ready",
+    "status": status, "head_sha": head_sha, "base_branch": base,
+    **({"labels_requested": labels, "labels_applied": observed_labels} if labels else {}),
+  })
+
+
+def _published_pr_body(plan: dict, body: str, patch: dict, branch: str) -> str | None:
+  """The reviewed body exactly as Send published it, derived read-only.
+
+  Send pins each reviewed screenshot reference to its uploaded commit before
+  it creates the PR, and signs that asset repository and commit into the
+  attempt's record patch. ``None`` means that witness is incomplete; nothing
+  is uploaded or relaxed to fill it in.
+  """
+  entries = contribution_screenshots.plan_entries(plan)
+  if not entries:
+    return body
+  witness = patch.get("last_submit_screenshots")
+  if not isinstance(witness, dict):
+    return None
+  commit = str(witness.get("commit") or "")
+  if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+    return None
+  try:
+    return contribution_screenshots.resolve_body(
+      body, entries,
+      assets_repo=_git_ops._validate_repo_slug(witness.get("repo")),
+      commit=commit, branch=branch,
+    )
+  except (ContributionSubmitError, KeyError, TypeError):
+    return None
+
+
 def _assert_reviewed_existing_pr_metadata(
   record: dict, *, live_title: object, live_body: object,
 ) -> str:
@@ -2950,7 +3267,6 @@ def _inspect_personal_pr_ready_target(target: PersonalReadyTarget) -> dict:
       or live.get("html_url") != target.url
       or head_repo.get("full_name") != target.head_repository
       or head.get("ref") != target.head_branch
-      or str(head.get("sha") or "").lower() != target.head_sha
       or base_repo.get("full_name") != target.repo
       or base.get("ref") != target.base_branch
       or not node_id
@@ -2958,6 +3274,14 @@ def _inspect_personal_pr_ready_target(target: PersonalReadyTarget) -> dict:
     ):
       raise ContributionSubmitError(
         "The live pull request no longer matches the exact reviewed Ready action. Nothing was changed.",
+        code="ready_target_changed",
+      )
+    if str(head.get("sha") or "").lower() != target.head_sha:
+      raise ContributionSubmitError(
+        "This pull request changed on GitHub after it was reviewed. Its latest "
+        "commit is no longer the one you approved, for example because Update "
+        "branch added a merge commit. Nothing was changed. Ask your agent to "
+        "prepare it again so the new commit is reviewed.",
         code="ready_target_changed",
       )
     return {
@@ -3407,6 +3731,152 @@ def _recover_normalized_attribution(
   return _git_ops._head_sha_patch(record, old_head, current_head)
 
 
+def _check_screenshot_body(
+  body: str,
+  screenshots: list[dict],
+  *,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  record_patch: dict,
+) -> None:
+  """Refuse, before any upload, a description its pinned links make too big."""
+  owner, name = upstream_repo.split("/", 1)
+  # A fork normally shares the target's name, and the placeholder is the
+  # longest commit id.
+  likely_repo = (
+    upstream_repo if owner.casefold() == login.casefold() else f"{login}/{name}"
+  )
+  longest = contribution_screenshots.resolve_body(
+    body, screenshots, assets_repo=likely_repo, commit="0" * 64, branch=branch,
+  )
+  if len(longest) > GITHUB_BODY_MAX_CHARS:
+    raise ContributionSubmitError(
+      "With its screenshot links, this description exceeds GitHub's size "
+      "limit. Ask the agent to shorten it. Nothing was sent.",
+      code="screenshot_body_too_large", record_patch=record_patch,
+    )
+
+
+def assert_publishable_review_text(
+  record: dict, diff_path: Path, *, login: str | None,
+) -> None:
+  """Local review-time proof that Send can publish this record's text exactly.
+
+  Read-only and offline: the same validators Send runs on the title, body,
+  existing-PR witness and attached screenshots, so a review that passes them
+  is not refused for its text at Send. ``login`` is the connected account, if
+  any; without one the screenshot links' length cannot be bounded yet.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  _title, body = _exact_reviewed_pr_text(record)
+  is_update = plan.get("action") == "pr_update"
+  if is_update:
+    _reviewed_existing_pr_metadata(record)
+  screenshots = contribution_screenshots.plan_entries(plan)
+  if not screenshots:
+    return
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here.",
+      code="screenshot_update_unsupported",
+    )
+  contribution_screenshots.check_references(screenshots, body)
+  contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  if login:
+    _check_screenshot_body(
+      body, screenshots,
+      upstream_repo=_git_ops._validate_repo_slug(
+        plan.get("repo") or record.get("repo")
+      ),
+      login=login,
+      branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+      record_patch={},
+    )
+
+
+def _publish_reviewed_screenshots(
+  record: dict,
+  diff_path: Path,
+  repo: Path,
+  screenshots: list[dict],
+  body: str,
+  *,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  author: tuple[str, str],
+  is_update: bool,
+  record_patch: dict,
+) -> tuple[str, dict, str]:
+  """Upload a new PR's approved screenshots and pin its description to them.
+
+  Runs before the branch push, so a failed upload leaves nothing public but
+  the images. The images go to the owner's own repository: the target when
+  the owner owns it, otherwise the owner's fork, never a shared repository
+  the owner can merely push to. Returns the pinned body, the record patch and
+  the repository that hosts the images.
+  """
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here. Nothing was sent.",
+      code="screenshot_update_unsupported", record_patch=record_patch,
+    )
+  try:
+    # The entries come from the app-writable record: check their shape and
+    # bytes before anything reads them.
+    contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  except ContributionSubmitError as exc:
+    raise _git_ops._merge_error_patch(exc, record_patch) from exc
+  _check_screenshot_body(
+    body, screenshots, upstream_repo=upstream_repo, login=login,
+    branch=branch, record_patch=record_patch,
+  )
+  owns_target = upstream_repo.split("/", 1)[0].casefold() == login.casefold()
+  try:
+    try:
+      assets_repo = (
+        upstream_repo if owns_target
+        else _ensure_owner_fork_remote(repo, upstream_repo, login)
+      )
+    except ContributionSubmitError as exc:
+      raise ContributionSubmitError(
+        "Screenshots are hosted in your own fork, and it could not be "
+        "prepared (the repository may not allow forks). Ask the agent to "
+        "prepare this PR without screenshots. Nothing was sent.",
+        code="screenshot_upload_failed", detail=exc.message[:400],
+      ) from exc
+    prior = record.get("last_submit_screenshots")
+    prior = prior if isinstance(prior, dict) else {}
+    commit = contribution_screenshots.publish(
+      diff_path.with_suffix(".json"), screenshots,
+      assets_repo=assets_repo, branch=branch, author=author,
+      reuse_commit=(
+        str(prior.get("commit") or "") or None
+        if prior.get("repo") == assets_repo else None
+      ),
+    )
+    resolved = contribution_screenshots.resolve_body(
+      body, screenshots, assets_repo=assets_repo, commit=commit, branch=branch,
+    )
+    # The early check guessed the fork's name; a renamed fork links longer.
+    if len(resolved) > GITHUB_BODY_MAX_CHARS:
+      raise ContributionSubmitError(
+        f"The screenshots were uploaded to {assets_repo}, but with their "
+        "links this description exceeds GitHub's size limit. Ask the agent "
+        "to shorten it. The code was not sent.",
+        code="screenshot_body_too_large",
+      )
+  except ContributionSubmitError as exc:
+    raise _git_ops._merge_error_patch(exc, record_patch) from exc
+  record_patch = _git_ops._record_patch_with(record_patch, {
+    "last_submit_screenshots": {"repo": assets_repo, "commit": commit},
+  })
+  return resolved, record_patch, assets_repo
+
+
 def _submit_prepared_pr(
   record: dict,
   diff_path: Path,
@@ -3548,19 +4018,15 @@ def _submit_prepared_pr(
       record, diff_path, repo, branch,
     )
     _git_ops._assert_coauthor_trailer(repo, branch, record)
-    if existing_head_repository is not None:
-      # Updating a known PR is not the same routing decision as creating a new
-      # one. Its live identity fixes the destination repository regardless of
-      # generic upstream permission discovered for the connected account.
-      same_repo_submission = (
-        existing_head_repository.casefold() == upstream_repo.casefold()
-      )
-    else:
-      same_repo_submission = bool(
-        direct_base
-        or upstream_repo.split("/", 1)[0].casefold() == login.casefold()
-        or _git_ops._has_upstream_push_permission(repo, upstream_repo)
-      )
+    same_repo_submission = bool(_git_ops.publishes_to_target_repository(
+      upstream_repo,
+      login,
+      direct_base=bool(direct_base),
+      existing_head_repository=existing_head_repository,
+      push_permission=lambda: _git_ops._has_upstream_push_permission(
+        repo, upstream_repo,
+      ),
+    ))
     if same_repo_submission:
       _git_ops._assert_head_attribution(
         repo,
@@ -3624,6 +4090,10 @@ def _submit_prepared_pr(
         else None
       )
     )
+    new_standalone_pr = _git_ops.opens_new_standalone_pr(
+      plan, existing_pr_number=expected_existing_pr_number,
+      direct_base=direct_base,
+    )
     recovery = _authoritative_public_reconciliation(
       record,
       base_branch=str(recorded_base or "") or None,
@@ -3636,10 +4106,11 @@ def _submit_prepared_pr(
       expected_head_repository=existing_head_repository,
     )
     if recovery is not None and recovery.pr_url is not None:
+      pushed_head = str(plan.get("head_sha") or "").lower()
       pushed_patch = _git_ops._record_patch_with(record_patch, {
         "head_repository": recovery.head_repository,
         "last_submit_stage": "pushed",
-        "last_submit_push_sha": str(plan.get("head_sha") or "").lower(),
+        "last_submit_push_sha": pushed_head,
         "last_submit_base_branch": str(recorded_base or ""),
         "last_pushed_branch": (
           branch if same_repo_submission else f"{login}:{branch}"
@@ -3657,7 +4128,7 @@ def _submit_prepared_pr(
         "url": recovery.pr_url,
         "head_repository": recovery.head_repository,
         "branch": branch,
-        "head_sha": str(plan.get("head_sha") or "").lower(),
+        "head_sha": pushed_head,
         "base_branch": str(recorded_base or ""),
         "labels": _reviewed_pr_labels(plan),
       }
@@ -3667,7 +4138,13 @@ def _submit_prepared_pr(
         recovery.pr_number,
         _reviewed_pr_labels(plan),
       )
-      completed_patch = _git_ops._record_patch_with(pushed_patch, label_patch)
+      overlap_patch = (
+        _recovered_upstream_overlap(repo, record, branch, pushed_head)
+        if new_standalone_pr else {}
+      )
+      completed_patch = _git_ops._record_patch_with(
+        _git_ops._record_patch_with(pushed_patch, overlap_patch), label_patch,
+      )
       if attempt_event is not None:
         attempt_event(
           "complete", reconcile_request, completed_patch,
@@ -3693,7 +4170,17 @@ def _submit_prepared_pr(
       )
 
     try:
-      merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      merge_patch = (
+        _git_ops.upstream_merge_for_new_pr(
+          repo, upstream_repo, branch, expected_base,
+          str(record_patch.get("head_sha") or expected_head),
+        )
+        if new_standalone_pr else
+        _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+      )
+      # A conflict is true of the PR only once it opens, so a failed later step
+      # never leaves it on the still-prepared record.
+      upstream_conflict = merge_patch.pop("last_submit_upstream_conflict", None)
       record_patch = _git_ops._record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _git_ops._merge_error_patch(exc, record_patch) from exc
@@ -3839,10 +4326,24 @@ def _submit_prepared_pr(
         return None
 
     if same_repo_submission:
+      # Before anything is uploaded, including screenshots.
       try:
         _git_ops._assert_upstream_push_permission(repo, upstream_repo)
       except ContributionSubmitError as exc:
         raise _git_ops._merge_error_patch(exc, record_patch) from exc
+
+    screenshot_repo = None
+    screenshots = contribution_screenshots.plan_entries(plan)
+    if screenshots:
+      body, record_patch, screenshot_repo = _publish_reviewed_screenshots(
+        record, diff_path, repo, screenshots, body,
+        upstream_repo=upstream_repo, login=login, branch=branch,
+        author=(author_name, author_email),
+        is_update=expected_existing_pr_number is not None,
+        record_patch=record_patch,
+      )
+
+    if same_repo_submission:
       push_remote = f"https://github.com/{upstream_repo}.git"
       published_repo = upstream_repo
       record_patch = _git_ops._record_patch_with(record_patch, {
@@ -3943,6 +4444,10 @@ def _submit_prepared_pr(
     else:
       if public_branch_recovery:
         fork_slug = recovery.head_repository
+      elif screenshot_repo is not None:
+        # This is not the owner's repository, so the screenshot upload just
+        # resolved the same fork remote.
+        fork_slug = screenshot_repo
       else:
         try:
           fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
@@ -4249,10 +4754,10 @@ def _submit_prepared_pr(
               _reviewed_pr_labels(plan),
             )
             completed_patch = _git_ops._record_patch_with(
-              _git_ops._record_patch_with(
-                pushed_patch,
-                {"publication_stage": confirmed_existing[1]},
-              ),
+              _git_ops._record_patch_with(pushed_patch, {
+                "publication_stage": confirmed_existing[1],
+                "last_submit_upstream_conflict": upstream_conflict,
+              }),
               label_patch,
             )
             if attempt_event is not None:
@@ -4324,9 +4829,10 @@ def _submit_prepared_pr(
       _reviewed_pr_labels(plan),
     )
     completed_patch = _git_ops._record_patch_with(
-      _git_ops._record_patch_with(
-        pushed_patch, {"publication_stage": confirmed_stage},
-      ),
+      _git_ops._record_patch_with(pushed_patch, {
+        "publication_stage": confirmed_stage,
+        "last_submit_upstream_conflict": upstream_conflict,
+      }),
       label_patch,
     )
     if attempt_event is not None:
@@ -4429,6 +4935,16 @@ def _preflight_prepared_stack(
       _git_ops._git(repo, "checkout", "-q", branch)
       _git_ops._assert_clean_worktree(repo)
       _git_ops._assert_fresh(record, row["diff_path"], repo, branch)
+      screenshots = contribution_screenshots.plan_entries(plan)
+      contribution_screenshots.verify(
+        Path(row["diff_path"]).with_suffix(".json"), screenshots,
+      )
+      if screenshots:
+        _check_screenshot_body(
+          _exact_reviewed_pr_text(record)[1], screenshots,
+          upstream_repo=upstream_repo, login=login, branch=branch,
+          record_patch={},
+        )
       _git_ops._assert_coauthor_trailer(repo, branch, record)
       # This runs under the complete review/source lock set acquired by the
       # route. It is the last local-source boundary before any stack layer can
@@ -4448,6 +4964,23 @@ def _preflight_prepared_stack(
     finally:
       if checkout_back:
         _git_ops._git(repo, "checkout", "-q", checkout_back, check=False)
+
+  # Every layer passed its local proof. Host every layer's screenshots now, so
+  # an unforkable or private repository stops the stack before any branch is
+  # public; each layer's own Send then finds its images already there.
+  for row in sendable:
+    record = row["record"]
+    plan = record.get("plan") or {}
+    screenshots = contribution_screenshots.plan_entries(plan)
+    if screenshots:
+      _publish_reviewed_screenshots(
+        record, Path(row["diff_path"]), _safe_repo_path(plan.get("repo_path")),
+        screenshots, _exact_reviewed_pr_text(record)[1],
+        upstream_repo=upstream_repo, login=login,
+        branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+        author=(author_name, author_email),
+        is_update=plan.get("action") == "pr_update", record_patch={},
+      )
 
 
 def _push_stack_tip_with_lease(

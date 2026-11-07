@@ -55,3 +55,27 @@ for (const page of ['account', 'provider']) {
     })
   }
 }
+
+for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-models', 'mobius']]) {
+  test(`Settings request for ${section} opens its page instead of focusing the overview`, t => {
+    const frames = new Map()
+    const oldRaf = globalThis.requestAnimationFrame
+    const oldCancel = globalThis.cancelAnimationFrame
+    globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
+    globalThis.cancelAnimationFrame = id => frames.delete(id)
+    t.after(() => {
+      if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
+      if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
+    })
+    let detailPage = 'codex'
+    const view = renderHook(({ focusTarget }) => {
+      const setupFocusRefs = useRef({})
+      useSettingsFocus({ focusTarget, providerReady: true, detailPage, setDetailPage: next => { detailPage = next },
+        setManageModelsProvider: () => {}, setupFocusRefs, setAttentionSection: () => {} })
+    }, { focusTarget: null })
+    t.after(() => view.unmount())
+    view.rerender({ focusTarget: { section, nonce: 1 } })
+    assert.equal(detailPage, page)
+    assert.equal(frames.size, 0)
+  })
+}

@@ -1,0 +1,334 @@
+/**
+ * App blocks in assistant replies, end to end through the real app frame,
+ * AppCanvas and transcript renderer, with the in-repo fixture app
+ * tests/fixtures/app-block-session.jsx (applied for real; only the chat
+ * transcript is mocked).
+ *
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-blocks.spec.mjs
+ */
+import { readFileSync } from 'node:fs'
+import { expect, test } from '@playwright/test'
+import { applyApp } from './app-source.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+
+const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const CHAT_ID = '70000000-0000-4000-8000-00000000a7b1'
+const FIXTURE = readFileSync(new URL('./fixtures/app-block-session.jsx', import.meta.url), 'utf8')
+const PASSIVE = { 'chat.blocks.passive': { version: 1 } }
+
+test.use({ serviceWorkers: 'block' })
+
+const fence = value => '```mobius-app\n' + JSON.stringify(value) + '\n```'
+
+async function ownerToken(page) {
+  await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  expect(token).toBeTruthy()
+  return token
+}
+
+async function installFixtures(page, request) {
+  const token = await ownerToken(page)
+  const session = await applyApp(request, token, { slug: 'e2e-block-session', name: 'Block Session',
+    jsxSource: FIXTURE, capabilities: PASSIVE })
+  // Same admitted capability, but the module does not export appBlockSessions.
+  const plain = await applyApp(request, token, { slug: 'e2e-block-plain', name: 'Block Plain',
+    jsxSource: FIXTURE.replace('export const appBlockSessions = true', ''), capabilities: PASSIVE })
+  expect(session.app.passive_block_module_digest).toMatch(/^[a-f0-9]{64}$/)
+  return { session: session.app, plain: plain.app }
+}
+
+async function openTranscript(page, { assistant, user = 'Show me' }) {
+  await page.route(/\/api\/chats(?:\?.*)?$/, route => route.request().method() !== 'GET' ? route.fallback()
+    : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
+      id: CHAT_ID, title: 'App block fixture', created_at: '2026-10-23T00:00:00Z', updated_at: '2026-10-23T00:00:00Z',
+      activity_at: '2026-10-23T00:00:00Z', pinned_at: null, created_by_app_id: null, has_messages: true, running: false,
+    }]) }))
+  await page.route(new RegExp(`/api/chats/${CHAT_ID}(?:\\?.*)?$`), route => route.request().method() !== 'GET'
+    ? route.fallback()
+    : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      messages: [
+        { role: 'user', content: user, ts: 1700000000000, blocks: [] },
+        { role: 'assistant', content: assistant, ts: 1700000000001, blocks: [] },
+      ],
+      total: 2, offset: 0, ...runtimeSnapshot(),
+    }) }))
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => route.fulfill({ status: 204, body: '' }))
+  // Fixture installation has already persisted a workspace. An explicit chat
+  // destination overrides that workspace; the legacy active-chat key does not.
+  await page.goto(`${BASE}/shell/?chat=${CHAT_ID}`, { waitUntil: 'domcontentloaded' })
+  return page.locator('[data-chat-surface="painted"]')
+}
+
+/** The hidden session document, located through its own log element. */
+async function sessionFrame(page) {
+  let found = null
+  await expect.poll(async () => {
+    for (const frame of page.frames()) {
+      if (await frame.locator('#block-log').count().catch(() => 0)) { found = frame; return true }
+    }
+    return false
+  }).toBe(true)
+  return found
+}
+
+/** A scroll command can be reversed before the host observes a list edge.
+ * Keep each end of the app's rows intersecting through a render opportunity
+ * before returning to Confirm. */
+async function seeConfirmationEnds(block) {
+  for (const edge of ['is-start', 'is-end']) {
+    const node = block.locator(`.md-app-block__list-edge.${edge}`)
+    await node.scrollIntoViewIfNeeded()
+    await expect(node).toBeInViewport()
+    await node.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  }
+}
+
+/** Include container reflow in failures of the action's same-slot contract. */
+async function actionLayout(action) {
+  return action.evaluate(button => Object.fromEntries([
+    ['action', button], ['footer', button.closest('footer')],
+    ['block', button.closest('.md-app-block')],
+    ['text', button.closest('.chat__text--assistant')],
+  ].map(([name, element]) => [name, element?.getBoundingClientRect().toJSON() ?? null])))
+}
+
+test('a static block renders only in the reply and opens the app view on request', async ({ page, request }) => {
+  const { session } = await installFixtures(page, request)
+  const block = { app: 'e2e-block-session', intent: 'open:item-7', title: 'Fixture item',
+    facts: [{ label: 'Repository', value: 'fixture/repo' }], badges: [{ label: 'Ready', tone: 'success' }] }
+  const chat = await openTranscript(page, { assistant: fence(block), user: fence({ ...block, title: 'Owner pasted' }) })
+  const rendered = chat.locator('.md-app-block')
+  await expect(rendered).toHaveCount(1)
+  await expect(rendered).toContainText('Fixture item')
+  await expect(chat.locator('pre').filter({ hasText: 'Owner pasted' })).toHaveCount(1)
+  await expect(rendered.locator('iframe')).toHaveCount(0)
+  await rendered.getByRole('button', { name: 'Show details here' }).click()
+  const view = page.frameLocator('.md-app-block__view iframe.canvas--live')
+  await expect(view.locator('#fixture-intent')).toHaveText('open:item-7')
+  // A transcript view is never the shell's navigation target for its app.
+  await expect(page.locator(`iframe[data-app-id="${session.id}"]`)).toHaveCount(0)
+})
+
+test('a passive session drives an in-place Confirm through the real frame protocol', async ({ page, request }) => {
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:batch',
+    title: 'Ready to send', interaction: 'inline', badges: [{ label: 'Saved claim', tone: 'success' }],
+    action: { label: 'Send all', intent: 'send-batch:sel-1' } }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  const before = await actionLayout(action)
+  const box = before.action
+  const frame = await sessionFrame(page)
+  const log = frame.locator('#block-log')
+  const sessionId = await log.getAttribute('data-session')
+  const generation = Number(await log.getAttribute('data-generation'))
+  expect(sessionId).toBeTruthy()
+
+  // The click that would follow a double-click: the moment the button reads
+  // Confirm, it is disabled (not yet armed) and a click sends nothing.
+  // A page-side observer clicks in the same task Confirm appears, so runner
+  // speed can never turn this into a deliberate click after arming.
+  const drawn = block.evaluate(section => new Promise(resolve => {
+    const observer = new MutationObserver(() => {
+      const button = section.querySelector('footer .md-app-block__action')
+      if (button?.textContent !== 'Confirm') return
+      observer.disconnect()
+      const disabled = button.disabled
+      button.click()
+      resolve(disabled)
+    })
+    observer.observe(section, { subtree: true, childList: true, characterData: true })
+  }))
+  const beforeClick = await actionLayout(action)
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  expect(await drawn).toBe(true)
+  await expect(confirm).toHaveText('Confirm')
+  await expect(block.getByRole('button', { name: 'Not now' })).toBeVisible()
+  expect((await log.textContent()).split('\n').filter(line => line.endsWith(' confirm'))).toHaveLength(0)
+  // Same size, same place: Confirm replaces the action in its slot.
+  const after = await actionLayout(confirm)
+  const confirmBox = after.action
+  expect(Math.round(confirmBox.width)).toBe(Math.round(box.width))
+  expect(Math.round(confirmBox.height)).toBe(Math.round(box.height))
+  expect(Math.abs(confirmBox.x + confirmBox.width - (box.x + box.width)),
+    `Action slot layout: ${JSON.stringify({ before, beforeClick, after })}`).toBeLessThan(2)
+  // The app's list is the block's rows, with no explanation added around it.
+  await expect(block.locator('.md-app-block__items > li')).toHaveCount(12)
+  await expect(block.locator('.md-app-block__items > li').first()).toContainText('fixture/repo: Change one')
+  await expect(block).not.toContainText('comes from')
+  await expect(block).not.toContainText('From this conversation')
+  await expect(block.locator('.md-app-block__badge')).toHaveCount(0)
+
+  // The twelve rows may extend past the viewport even on desktop.
+  // Check the in-place geometry above before scrolling through them.
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+
+  // Foreign or stale-generation messages never reach the app's own listener.
+  await page.evaluate(({ sessionId, generation }) => {
+    const iframe = [...document.querySelectorAll('.md-app-block__session-host iframe')][0]
+    for (const message of [
+      { type: 'moebius:app-block-action', sessionId: 'foreign', generation, key: 'send-batch:sel-1', event: 'confirm', nonce: 'f1' },
+      { type: 'moebius:app-block-action', sessionId, generation: generation - 1, key: 'send-batch:sel-1', event: 'confirm', nonce: 'f2' },
+    ]) iframe.contentWindow.postMessage(message, '*')
+  }, { sessionId, generation })
+
+  // Two clicks in the same task, before any acknowledgement can arrive,
+  // send exactly one Confirm.
+  await confirm.evaluate(button => { button.click(); button.click() })
+  await expect(block.locator('.md-app-block__summary')).toHaveText('Sent 1')
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Send all')
+  await expect(block.locator('footer .md-app-block__pill')).toHaveText('Sent')
+  // The app's live title replaces the saved one once it reports.
+  await expect(block.locator('header strong')).toHaveText('1 sent')
+  const lines = (await log.textContent()).split('\n')
+  expect(lines.filter(line => line.endsWith(' confirm'))).toHaveLength(1)
+  expect(lines.some(line => line.includes('foreign'))).toBe(false)
+  expect(lines.every(line => !line.includes('moebius:app-block-action') || line.includes(` ${generation} `))).toBe(true)
+
+  // The hidden document's navigation request was refused.
+  expect(page.url()).not.toContain('fixture-hidden-navigation')
+})
+
+test('with the action at the bottom edge, Confirm arms only after the first row above it has been on screen', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:batch',
+    title: 'Ready to send', interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' } }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  await action.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  // The rows are drawn above the footer: the last one sits beside Confirm,
+  // the first is above the viewport.
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(block.locator('.md-app-block__list-edge.is-end')).toBeInViewport()
+  await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
+  // Long past the delay, the unseen start keeps Confirm disabled.
+  await page.waitForTimeout(1200)
+  await expect(confirm).toBeDisabled()
+  // Scroll up through the rows to the first, then back down to Confirm.
+  await seeConfirmationEnds(block)
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  await expect(block.locator('.md-app-block__summary')).toHaveText('Sent 1')
+})
+
+test('a list replaced after Confirm armed must have its own ends seen (no borrowed intersection)', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:swap',
+    title: 'Swapping list', interaction: 'inline', action: { label: 'Send all', intent: 'swap:sel-1' } }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  // One target: both its ends are on screen, so Confirm arms.
+  await expect(confirm).toHaveText('Confirm')
+  await expect(confirm).toBeEnabled()
+  // The app replaces it with 256 targets while the old row was visible.
+  await expect(block.locator('.md-app-block__items > li')).toHaveCount(256)
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
+  await page.waitForTimeout(900)
+  await expect(confirm).toBeDisabled()
+  const frame = await sessionFrame(page)
+  await confirm.evaluate(button => button.click())
+  await page.waitForTimeout(200)
+  expect((await frame.locator('#block-log').textContent()).split('\n').filter(line => line.endsWith(' confirm'))).toHaveLength(0)
+  // Scrolling to the new ends and back arms it.
+  await seeConfirmationEnds(block)
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(confirm).toBeEnabled()
+})
+
+test('at 390 px, a 512-character confirmation label and value wrap inside the block', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:long',
+    title: 'Long fact', interaction: 'inline', action: { label: 'Send', intent: 'long:one' } }) })
+  const block = chat.locator('.md-app-block')
+  await block.locator('footer .md-app-block__action').click()
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Confirm')
+  const fact = block.locator('.md-app-block__items .md-app-block__facts > div').first()
+  const boxes = await fact.evaluate(div => {
+    const box = node => node.getBoundingClientRect().toJSON()
+    return { block: box(div.closest('.md-app-block')), label: box(div.querySelector('dt')), value: box(div.querySelector('dd')) }
+  })
+  for (const cell of ['label', 'value']) {
+    expect(boxes[cell].left, JSON.stringify(boxes)).toBeGreaterThanOrEqual(boxes.block.left)
+    expect(boxes[cell].right, JSON.stringify(boxes)).toBeLessThanOrEqual(boxes.block.right)
+  }
+  await expect(fact.locator('dd')).toContainText('ACTUAL TARGET')
+})
+
+test('a document reload discards idle controls until the new document reports', async ({ page, request }) => {
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:one',
+    title: 'Reload me', interaction: 'inline', action: { label: 'Send', intent: 'send:one' } }) })
+  const block = chat.locator('.md-app-block')
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Send')
+  // An idle Confirm belongs to its document; a reload must not carry it over.
+  await block.locator('footer .md-app-block__action').click()
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Confirm')
+  const frame = await sessionFrame(page)
+  const before = Number(await frame.locator('#block-log').getAttribute('data-generation'))
+  await frame.evaluate(() => location.reload())
+  await expect(block.getByRole('button', { name: 'Confirm' })).toHaveCount(0)
+  const next = await sessionFrame(page)
+  await expect.poll(async () => Number(await next.locator('#block-log').getAttribute('data-generation').catch(() => before)))
+    .toBeGreaterThan(before)
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Send')
+  await block.locator('footer .md-app-block__action').click()
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Confirm')
+})
+
+test('an admitted module without session support falls back to a fresh visible view', async ({ page, request }) => {
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-plain', intent: 'open:plain',
+    title: 'Plain app', interaction: 'inline', action: { label: 'Review', intent: 'review:plain' } }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.getByRole('button', { name: 'Review' })
+  await expect(action).toBeVisible()
+  await expect(block.locator('.md-app-block__session-host')).toHaveCount(0)
+  await action.click()
+  const view = page.frameLocator('.md-app-block__view iframe.canvas--live')
+  await expect(view.locator('#fixture-intent')).toHaveText('review:plain')
+})
+
+test('row titles and result links are 44px targets, and row fact labels stay visible by default', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:rows', title: 'Two rows',
+    interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Row one', intent: 'open:r1', facts: [{ label: 'From account', value: 'Alice' }] },
+      { title: 'Row two', intent: 'open:r2', facts: [{ label: 'To account', value: 'Bob' }] }] }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  const height = locator => locator.evaluate(node => node.getBoundingClientRect().height)
+  for (const title of await block.locator('.md-app-block__item-title').all()) expect(await height(title)).toBeGreaterThanOrEqual(44)
+  // Without the value-only opt-in, a sighted reader sees each label.
+  const label = block.locator('.md-app-block__facts dt').first()
+  await expect(label).toHaveText('From account')
+  expect(await label.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(20)
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  const links = block.locator('.md-app-block__item-state .md-app-block__link')
+  await expect(links).toHaveCount(2)
+  for (const link of await links.all()) expect(await height(link)).toBeGreaterThanOrEqual(44)
+})

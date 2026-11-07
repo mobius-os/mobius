@@ -2604,6 +2604,8 @@ def test_mark_ready_recovery_releases_a_changed_live_target(
 
   assert response.status_code == 409, response.text
   assert response.json()["detail"]["code"] == "ready_target_changed"
+  # A moved head says what happened instead of a generic mismatch.
+  assert "changed on GitHub after it was reviewed" in response.text
   stored = json.loads(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
      "contributions" / f"{record['id']}.json").read_text()
@@ -3184,6 +3186,24 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     github_contributions._git_ops._resolve_reviewed_commit(
       tmp_path, reviewed, "head sha",
     )
+
+
+def test_missing_trailer_on_a_github_made_commit_says_github_added_it(
+  monkeypatch,
+):
+  """Update branch commits lack the trailer; the refusal names that cause."""
+  outputs = {"%B": "Merge branch 'main' into fix/demo\n",
+             "%ce": "noreply@github.com\n"}
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, **_kwargs: _cp(outputs[args[2].split("=", 1)[1]]),
+  )
+  with pytest.raises(ContributionSubmitError) as exc:
+    github_contributions._git_ops._assert_coauthor_trailer(
+      Path("/unused"), "fix/demo", None,
+    )
+  assert exc.value.code == "missing_coauthor"
+  assert "added on GitHub" in str(exc.value)
 
 
 def test_coauthor_trailer_is_required_unless_the_reviewed_plan_opts_out(
@@ -4843,6 +4863,91 @@ def test_submit_route_resumes_signed_public_phase_without_republishing(
   ).exists()
 
 
+def test_submit_route_resumes_a_receipt_recorded_before_the_chat_card_retired(
+  client, owner_token, monkeypatch,
+):
+  """A pre-#1741 claim named the chat review card; its exact action still resumes."""
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "route-restart-retired-submitter"
+  head = "a" * 40
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  record = {
+    "id": record_id, "type": "pr", "status": "submitting",
+    "repo": "mobius-os/app-demo", "branch": "fix/restart",
+    "submitter": "chat-review-card",
+    "quality_review": _all_clear_review(head),
+    "plan": {
+      "action": "pr", "repo": "mobius-os/app-demo",
+      "repo_path": str(repo), "branch": "fix/restart",
+      "base_sha": "b" * 40, "head_sha": head,
+      "diff_sha256": "c" * 64, "title": "Restart safe",
+      "body_draft": "Exact body",
+    },
+  }
+  record["personal_submit_input_sha256"] = (
+    github_contributions._personal_publication_input_sha256(record)
+  )
+  _write_contribution(app_id, record_id, record, "reviewed")
+  record_path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  owner = github_routes._PersonalAttemptOwner(
+    app_id=app_id, record_id=record_id, record_path=record_path,
+    claimed=record, action_input={
+      "action": "submit", "publication_stage": "draft", "autopilot": False,
+      "submitter": "chat-review-card",
+    },
+  )
+  patch = {
+    "last_submit_stage": "pushed", "last_submit_push_sha": head,
+    "head_repository": "octocat/app-demo",
+  }
+  owner.event("branch_published", {
+    "action": "reconcile_pr", "head_sha": head,
+    "head_repository": "octocat/app-demo", "branch": "fix/restart",
+  }, patch)
+
+  monkeypatch.setattr(
+    github_routes, "_assert_personal_publication_source", lambda *_args: "exact",
+  )
+  monkeypatch.setattr(github_routes, "_equivalence_source_repo", lambda _r: None)
+  monkeypatch.setattr(
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: None,
+  )
+  seen = []
+
+  def reconcile(recovered, _diff, **kwargs):
+    seen.append(kwargs["prior_attempt_phase"])
+    return (
+      "https://github.com/mobius-os/app-demo/pull/92", 92,
+      {**patch, "url": "https://github.com/mobius-os/app-demo/pull/92",
+       "number": 92},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", reconcile)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200, response.text
+  assert seen == ["branch_published"]
+  assert response.json()["record"]["number"] == 92
+
+
+def test_retired_submitter_migration_never_matches_a_different_action():
+  legacy = {"action": "update_existing", "submitter": "chat-review-card"}
+  assert github_routes._personal_action_identity_matches(
+    legacy, {"action": "update_existing"},
+  )
+  assert not github_routes._personal_action_identity_matches(
+    legacy, {"action": "submit", "publication_stage": "draft", "autopilot": False},
+  )
+
+
 def test_submit_route_armed_receipt_does_not_bypass_reverted_source(
   client, owner_token, monkeypatch,
 ):
@@ -5397,10 +5502,16 @@ def test_autopilot_update_rechecks_current_source_before_push(
   ).exists()
 
 
+@pytest.mark.parametrize("observe_between", [False, True])
 def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
-  client, owner_token, monkeypatch,
+  client, owner_token, monkeypatch, observe_between,
 ):
-  """A lost push response saves its head and retries without orphaning the PR."""
+  """A lost push response saves its head and retries without orphaning the PR.
+
+  Read-only observation never settles or retires the Autopilot receipt, even
+  when GitHub shows the exact pushed PR: the round's own retry is what
+  records the pushed head in its grant.
+  """
   from app import contribution_autopilot
   from app.database import SessionLocal
 
@@ -5409,7 +5520,7 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
     client, owner_token, github_access=True,
   )
   repo, record, diff_text = _prepared_real_review(
-    app_id, "autopilot-ambiguous-retry",
+    app_id, f"autopilot-ambiguous-retry-{int(observe_between)}",
   )
   record.update({
     "status": "open",
@@ -5483,7 +5594,9 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
       }
       _kwargs["attempt_event"](
         "branch_published",
-        {"action": "push", "head_sha": record["plan"]["head_sha"]},
+        {"action": "push", "repo": record["repo"], "head_repository": "octocat/app-demo",
+         "branch": record["branch"], "head_sha": record["plan"]["head_sha"],
+         "base_branch": "main"},
         patch,
       )
       raise ContributionSubmitError(
@@ -5517,6 +5630,30 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
   )
   assert saved["last_submit_push_sha"] == record["plan"]["head_sha"]
 
+  receipt_path = github_routes.contribution_runtime.personal_attempt_path(
+    app_id, record["id"],
+  )
+  if observe_between:
+    receipt = receipt_path.read_bytes()
+    before = json.loads(receipt)
+    assert before["phase"] == "branch_published"
+    exact_pr = {
+      "number": 58, "html_url": record["url"], "state": "open", "draft": True,
+      "title": record["plan"]["title"], "body": record["plan"]["body_draft"],
+      "head": {"ref": record["branch"], "sha": record["plan"]["head_sha"],
+               "repo": {"full_name": "octocat/app-demo"}},
+      "base": {"ref": "main", "repo": {"full_name": record["repo"]}},
+    }
+    monkeypatch.setattr("app.github_contribution_git._gh", lambda _repo, *args, **_kw: _cp(
+      json.dumps({"object": {"sha": record["plan"]["head_sha"]}} if "/git/ref/" in args[1] else exact_pr)))
+    observed = client.post(
+      f"/api/github/contributions/{app_id}/{record['id']}/observe",
+      headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert observed.status_code == 200, observed.text
+    assert observed.json()["outcome"] == "not_eligible", observed.json()["message"]
+    assert receipt_path.read_bytes() == receipt
+
   _remove_reviewed_change_from_source(record)
   second = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update",
@@ -5526,6 +5663,13 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
 
   assert second.status_code == 200, second.text
   assert attempts == [None, record["plan"]["head_sha"]]
+  session = SessionLocal()
+  try:
+    row = contribution_autopilot.get_row(session, app_id, record["id"])
+    # The round itself recorded the pushed head; nothing else touched the grant.
+    assert row.round_head_sha == record["plan"]["head_sha"]
+  finally:
+    session.close()
 
 
 def test_review_status_shows_a_diverged_projection_as_sendable(
@@ -5602,6 +5746,8 @@ def test_review_status_shows_a_diverged_projection_as_sendable(
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
+      "title": "Resolved projection",
+      "body_draft": "Resolved projection body.",
       "branch": "fix/resolved",
       "repo_path": str(review),
       "base_sha": base,
@@ -5639,9 +5785,9 @@ def test_review_status_releases_db_before_git_inspection(
   observed = []
   original = github_routes._inspect_prepared_review
 
-  def inspect(record, diff_path, github_state):
+  def inspect(record, *args):
     observed.append(checked_out_connections())
-    return original(record, diff_path, github_state)
+    return original(record, *args)
 
   monkeypatch.setattr(github_routes, "_inspect_prepared_review", inspect)
   response = client.get(
@@ -5953,7 +6099,7 @@ def test_review_status_keeps_recent_stack_together_past_filename_scan_cap(
   monkeypatch.setattr(
     github_routes,
     "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
+    lambda record, *_args: {
       "id": record["id"], "state": "ready", "code": "ready",
       "message": "Still matches the exact source you reviewed.",
     },
@@ -6017,7 +6163,7 @@ def test_review_status_accepts_reviewed_updates_for_an_existing_pr_stack(
   monkeypatch.setattr(
     github_routes,
     "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
+    lambda record, *_args: {
       "id": record["id"], "state": "ready", "code": "ready",
       "message": "Still matches the exact source you reviewed.",
     },
@@ -6053,9 +6199,9 @@ def test_addressed_review_status_ignores_unrelated_git_and_preserves_publication
     assert path.stem != "unrelated-heavy"
     return original_read(path)
 
-  async def inspect(record, diff_path, state):
+  async def inspect(record, *args):
     seen.append(record["id"])
-    return await original(record, diff_path, state)
+    return await original(record, *args)
 
   async def heads(_token, _query, _variables):
     return {"repo0": {"defaultBranchRef": {
@@ -6411,7 +6557,9 @@ def _cp(stdout="", stderr="", returncode=0):
 _UPSTREAM_SHA = "d" * 40
 
 
-def _submit_preflight_response(args, *, merge_conflict: bool = False):
+def _submit_preflight_response(
+  args, *, merge_conflict: bool = False, merge_base: str | None = "b" * 40,
+):
   if (
     len(args) >= 3 and
     args[:2] == ("rev-parse", "--verify") and
@@ -6428,6 +6576,10 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
     return _cp(_UPSTREAM_SHA + "\n")
   if args[:1] == ("merge-tree",):
     return _cp(returncode=1 if merge_conflict else 0)
+  if args[:2] == ("merge-base", "--all") and merge_base is not None:
+    # A new standalone PR proves its reviewed base is still the sole merge
+    # base with upstream, so GitHub shows exactly the reviewed diff.
+    return _cp(merge_base + "\n")
   return None
 
 
@@ -7896,6 +8048,13 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     },
   )
   monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
     "app.github_contributions._ensure_owner_fork_remote",
     lambda *_args, **_kwargs: "octocat/app-demo-1",
   )
@@ -9047,6 +9206,10 @@ def test_submit_contribution_stack_publishes_uninstalled_layers(
     "app.github_contribution_git._assert_merges_with_upstream",
     lambda *_args: {},
   )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args: {},
+  )
   submitted = []
 
   def submit(candidate, _diff_path, **_kwargs):
@@ -9092,6 +9255,10 @@ def test_submit_contribution_stack_publishes_a_child_absent_from_source(
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args: {},
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args: {},
   )
   submitted = []
@@ -9495,6 +9662,13 @@ def test_push_permission_uses_same_repo_branch_without_fork(
       "last_submit_upstream_sha": base,
     },
   )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
   pushes = []
   monkeypatch.setattr(
     "app.github_contributions._push_branch",
@@ -9710,6 +9884,13 @@ def _existing_fork_submission(tmp_path, monkeypatch):
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: {
       "last_submit_upstream_branch": "main",
       "last_submit_upstream_sha": base,
@@ -10311,6 +10492,12 @@ def test_exact_existing_pr_retry_reconciles_before_duplicate_branch_guard(
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: pytest.fail(
+      "an already-public exact PR must reconcile before current upstream fetch"
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: pytest.fail(
       "an already-public exact PR must reconcile before current upstream fetch"
     ),
@@ -11526,9 +11713,12 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
   assert not any(call[:1] == ("push",) for call in git_calls)
 
 
-def test_submit_contribution_rejects_unmergeable_branch_before_push(
+def test_submit_contribution_rejects_overlap_when_reviewed_base_left_upstream(
   client, owner_token, monkeypatch,
 ):
+  """A new PR may open over an upstream overlap only when GitHub would show
+  exactly the reviewed diff; a reviewed base that is no longer on upstream
+  still refuses before anything is pushed."""
   _write_token(login="octocat")
   _allow_synthetic_source_provenance(monkeypatch)
   app_id, _ = _app_token(client, owner_token, github_access=True)
@@ -11563,8 +11753,12 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
 
   def fake_git(repo_path, *args, check=True):
     git_calls.append(args)
-    if (preflight := _submit_preflight_response(args, merge_conflict=True)) is not None:
+    if (preflight := _submit_preflight_response(
+      args, merge_conflict=True, merge_base=None,
+    )) is not None:
       return preflight
+    if args[:2] == ("merge-base", "--all"):
+      return _cp("c" * 40 + "\n")
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):
@@ -11607,6 +11801,7 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
   assert r.status_code == 409
   detail = r.json()["detail"]
   assert "no longer merges cleanly" in detail["message"]
+  assert detail["code"] == "upstream_conflict"
   assert detail["record"]["status"] == "prepared"
   assert detail["record"]["last_submit_upstream_branch"] == "main"
   assert detail["record"]["last_submit_upstream_sha"] == _UPSTREAM_SHA
@@ -14129,6 +14324,22 @@ def _record_upstream(app_id, record_id, sha):
   path.write_text(json.dumps(stored))
 
 
+def _as_existing_pr_update(app_id, record_id):
+  """An update to an open PR keeps the clean-merge gate; a new standalone PR
+  may open over an overlap (see test_contribution_upstream_conflict_publication)."""
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  stored = json.loads(path.read_text())
+  stored["plan"]["action"] = "pr_update"
+  stored["plan"]["pr_metadata"] = {
+    "old_title": stored["plan"]["title"],
+    "old_body": stored["plan"]["body_draft"],
+  }
+  path.write_text(json.dumps(stored))
+
+
 def test_review_status_reports_a_branch_that_no_longer_merges(
   client, owner_token,
 ):
@@ -14140,6 +14351,7 @@ def test_review_status_reports_a_branch_that_no_longer_merges(
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   repo, _record, _diff = _prepared_real_review(app_id, "conflicted")
+  _as_existing_pr_update(app_id, "conflicted")
   headers = {"Authorization": f"Bearer {app_token}"}
 
   assert client.get(
@@ -14173,6 +14385,7 @@ def test_refreshing_the_branch_clears_the_conflict_with_nothing_to_reset(
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   repo, _record, _diff = _prepared_real_review(app_id, "healing")
+  _as_existing_pr_update(app_id, "healing")
   headers = {"Authorization": f"Bearer {app_token}"}
   upstream = _conflicting_upstream_commit(repo, "export default 9\n")
   _record_upstream(app_id, "healing", upstream)
@@ -14348,6 +14561,13 @@ def _successor_submission(tmp_path, monkeypatch, *, stack=None):
   )
   monkeypatch.setattr(
     "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "last_submit_upstream_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git.upstream_merge_for_new_pr",
     lambda *_args, **_kwargs: {
       "last_submit_upstream_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
       "last_submit_upstream_sha": _SUCCESSOR_TARGET_BASE_SHA,
@@ -16078,3 +16298,329 @@ def test_single_claim_rechecks_the_confirmed_proposal_before_writing(
   assert raised.value.detail["not_attempted"] is True
   assert armed == []
   assert _record_bytes(app_id, [record_id]) == before
+
+
+@pytest.mark.parametrize("failure", ["read", "diff", "ancestry"])
+def test_review_status_unavailable_is_not_evidence_of_source_drift(
+  client, owner_token, monkeypatch, failure,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, f"unavailable-source-{failure}")
+  if failure == "diff":
+    monkeypatch.setattr(app_git, "_canonical_diff", lambda *a, **kw: None)
+  else:
+    original = app_git._run
+    def fail_read(repo, *args, **kwargs):
+      if failure == "read" and args[0] == "status":
+        raise OSError("temporary read failure")
+      if failure == "ancestry" and args[:2] == ("merge-base", "--is-ancestor"):
+        return subprocess.CompletedProcess(args, 128, "", "read failed")
+      return original(repo, *args, **kwargs)
+    monkeypatch.setattr(app_git, "_run", fail_read)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200
+  data = response.json()
+  assert data["needs_refresh"] == data["ready"] == 0
+  assert data["unavailable"] == 1
+  assert data["records"][0] == {
+    "id": f"unavailable-source-{failure}", "state": "unavailable",
+    "code": "review_unavailable",
+    "message": "This review could not be verified locally.",
+    "publication": {
+      "state": "unavailable", "code": "publication_unavailable",
+      "message": "GitHub freshness could not be checked right now.",
+    },
+  }
+
+
+@pytest.mark.parametrize("failure,code", [
+  ("missing", "missing_checkout"), ("invalid", "invalid_checkout"),
+  ("dirty", "working_changes"), ("missing_diff", "missing_diff"),
+  ("invalid_branch", "invalid_plan"), ("missing_commits", "missing_commits"),
+  ("deleted_branch", "missing_branch"),
+])
+def test_review_status_permanent_and_proven_drift_are_not_transient(
+  client, owner_token, failure, code,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  repo, record, _diff = _prepared_real_review(app_id, f"specific-source-{failure}")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  if failure == "missing":
+    shutil.rmtree(repo / ".git")
+  elif failure == "invalid":
+    record["plan"]["repo_path"] = "/outside-durable-roots"
+  elif failure == "missing_diff":
+    diff_path.unlink()
+  elif failure == "invalid_branch":
+    record["plan"]["branch"] = "not a valid branch"
+  elif failure == "missing_commits":
+    record["plan"]["head_sha"] = "f" * 40
+  elif failure == "deleted_branch":
+    branch = record["plan"]["branch"]
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "-q", "-D", branch], check=True)
+  else:
+    (repo / "index.jsx").write_text("owner changed this\n")
+  verdict = asyncio.run(
+    github_routes._inspect_prepared_review_locked(record, diff_path, {}),
+  )
+  assert verdict["state"] == "needs_refresh"
+  assert verdict["code"] == code
+  assert verdict["message"] == github_routes._REVIEW_STATUS_MESSAGES[code]
+
+
+def test_review_status_asks_to_reconnect_for_an_unusable_github_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "reconnect-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, {"login": "octocat", "user_id": "not-a-number"},
+  )
+  assert verdict == {
+    "id": "reconnect-source", "state": "unavailable", "code": "github_reconnect",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["github_reconnect"],
+  }
+
+
+def _connected_state(login: str, user_id: int) -> dict:
+  return {
+    "login": login, "user_id": user_id, "scopes": ["public_repo", "workflow"],
+  }
+
+
+def test_review_status_names_a_stack_commit_identity_mismatch(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-source")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  # The staged commits are octocat's; the connected account is now hubot.
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("hubot", 7),
+  )
+  assert verdict == {
+    "id": "identity-source", "state": "needs_refresh",
+    "code": "commit_identity_mismatch",
+    "message": github_routes._REVIEW_STATUS_MESSAGES["commit_identity_mismatch"],
+  }
+
+
+# ── Connected-account avatar ────────────────────────────────────────────────
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+@pytest.fixture
+def _fresh_avatar_cache():
+  from app.routes import github_access
+  github_access._avatar_cache.clear()
+  yield
+  github_access._avatar_cache.clear()
+
+
+def test_avatar_serves_only_the_connected_login_same_origin(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  _write_token(login="octocat")
+  requests = []
+
+  def handler(request):
+    requests.append(request)
+    return httpx.Response(200, headers={"content-type": "image/png"}, content=_PNG)
+
+  _install_mock_transport(monkeypatch, handler)
+  response = client.get("/api/github/avatar/octocat", headers=auth)
+  assert response.status_code == 200
+  assert response.headers["content-type"] == "image/png"
+  assert response.headers["x-content-type-options"] == "nosniff"
+  assert response.content == _PNG
+  assert [str(r.url) for r in requests] == [
+    "https://avatars.githubusercontent.com/octocat?s=96",
+  ]
+  # The image request is anonymous: the GitHub token never leaves for it.
+  assert "authorization" not in {k.lower() for k in requests[0].headers}
+  # A second read is served from the short hold, not refetched.
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 200
+  assert len(requests) == 1
+
+
+def test_avatar_address_follows_the_connected_account(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  # The browser caches the image by its address, so another account's address
+  # must never answer with this one's photo (or fetch that account's).
+  _write_token(login="octocat")
+  _install_mock_transport(monkeypatch, lambda request: pytest.fail("only the connected login is fetched"))
+  assert client.get("/api/github/avatar/hubot", headers=auth).status_code == 404
+  assert client.get("/api/github/avatar/Octocat", headers=auth).status_code == 404
+
+
+def test_avatar_is_absent_without_a_connection(client, auth, monkeypatch, _fresh_avatar_cache):
+  _install_mock_transport(monkeypatch, lambda request: pytest.fail("no fetch without a login"))
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 404
+
+
+@pytest.mark.parametrize("upstream", [
+  httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>"),
+  httpx.Response(302, headers={"location": "https://example.com/x.png"}),
+  httpx.Response(200, headers={"content-type": "image/png"}, content=b"x" * (512 * 1024 + 1)),
+])
+def test_avatar_refuses_non_images_redirects_and_oversize(
+  client, auth, monkeypatch, _fresh_avatar_cache, upstream,
+):
+  _write_token(login="octocat")
+  _install_mock_transport(monkeypatch, lambda request: upstream)
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 502
+
+
+def test_avatar_stops_reading_an_oversize_image_at_the_cap(
+  client, auth, monkeypatch, _fresh_avatar_cache,
+):
+  # An endless body is refused once it passes the cap, never read to the end.
+  sent = 0
+
+  async def endless():
+    nonlocal sent
+    while True:
+      sent += 64 * 1024
+      yield b"x" * (64 * 1024)
+
+  _write_token(login="octocat")
+  _install_mock_transport(
+    monkeypatch,
+    lambda request: httpx.Response(200, headers={"content-type": "image/png"}, content=endless()),
+  )
+  assert client.get("/api/github/avatar/octocat", headers=auth).status_code == 502
+  assert sent <= 512 * 1024 + 64 * 1024
+
+
+def test_review_status_accepts_a_stack_commit_with_the_connected_identity(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "identity-match")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["stack"] = {"position": 1}
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("octocat", 42),
+  )
+  assert verdict["state"] == "ready", verdict
+
+
+def test_review_status_asks_to_reconnect_without_full_pr_access(
+  client, owner_token,
+):
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "partial-scopes")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path,
+    {"login": "octocat", "user_id": 42, "scopes": ["public_repo"]},
+  )
+  assert (verdict["state"], verdict["code"]) == ("unavailable", "github_reconnect")
+
+
+@pytest.mark.parametrize("head_repository,expected", [
+  ("mobius-os/app-demo", "commit_identity_mismatch"),
+  ("hubot/app-demo", "ready"),
+])
+def test_review_status_follows_an_existing_prs_head_repository(
+  client, owner_token, head_repository, expected,
+):
+  """An update publishes where its PR lives, whatever the account may push."""
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(
+    app_id, f"existing-head-{expected.replace('_', '-')}",
+  )
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  record["plan"]["action"] = "pr_update"
+  record["plan"]["pr_metadata"] = {
+    "old_title": record["plan"]["title"],
+    "old_body": record["plan"]["body_draft"],
+  }
+  record["head_repository"] = head_repository
+  verdict = github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("hubot", 7),
+  )
+  assert verdict["code"] == expected
+
+
+def test_send_refuses_a_direct_commit_after_the_account_changed_since_review(
+  client, owner_token, monkeypatch,
+):
+  """Review saw a matching account; Send sees another one and stops cleanly."""
+  from app import github_contributions
+
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  repo, record, _diff = _prepared_real_review(app_id, "account-switch")
+  _, diff_path = github_routes._record_paths(app_id, record["id"])
+  assert github_routes._inspect_prepared_review(
+    record, diff_path, _connected_state("octocat", 42),
+  )["state"] == "ready"
+  head_before = subprocess.check_output(
+    ["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True,
+  ).strip()
+
+  _write_token(login="hubot", user_id=7)
+  monkeypatch.setattr(
+    "app.github_contribution_git._has_upstream_push_permission",
+    lambda *_args: True,
+  )
+  for name in (
+    "_ensure_owner_fork_remote", "_push_branch", "_push_topic_branch",
+    "_authoritative_public_reconciliation",
+  ):
+    monkeypatch.setattr(
+      github_contributions, name,
+      lambda *_a, **_k: pytest.fail("nothing may be published or read"),
+    )
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._submit_prepared_pr(record, diff_path)
+  assert caught.value.code == "commit_identity_mismatch"
+  assert "stack" not in caught.value.message.lower()
+  assert subprocess.check_output(
+    ["git", "rev-parse", "fix/demo-review"], cwd=repo, text=True,
+  ).strip() == head_before
+
+
+def test_review_status_keeps_other_targets_when_one_destination_read_fails(
+  client, owner_token, monkeypatch,
+):
+  from app import github_contribution_git as git_ops
+
+  _write_token(login="hubot", user_id=7)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, "timed-out-target")
+  _prepared_real_review(app_id, "fork-target")
+  path = github_routes._record_paths(app_id, "fork-target")[0]
+  stored = json.loads(path.read_text())
+  stored["repo"] = stored["plan"]["repo"] = "mobius-os/app-other"
+  path.write_text(json.dumps(stored))
+
+  def gh(_repo, *args, **_kwargs):
+    if args[1] == "repos/mobius-os/app-demo":
+      raise subprocess.TimeoutExpired(["gh", *args], 90)
+    return subprocess.CompletedProcess(args, 0, "false\n", "")
+
+  monkeypatch.setattr(git_ops, "_gh", gh)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200, response.text
+  verdicts = {row["id"]: row["code"] for row in response.json()["records"]}
+  assert verdicts == {
+    "timed-out-target": "publication_destination_unavailable",
+    "fork-target": "ready",
+  }

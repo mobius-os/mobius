@@ -40,8 +40,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation (chatEntryFrame); only the composer may reveal early',
+    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,[\s\S]*cachedFrame: \(initialEntryPhase === 'cached' \|\| initialEntryPhase === 'stream-catchup'\)\s*&& revealed,/,
+    'a coordinate-validated cache, idle or mid-reply, presents before runtime confirmation (chatEntryFrame); an unvalidated frame waits, and Send stays blocked either way',
   )
   assert.match(
     chatView,
@@ -300,7 +300,7 @@ test('only the painted workspace world can expose its handoff layers', () => {
 
 test('app-supplied drafts update retained composers as well as remounted chats', () => {
   assert.match(shell,
-    /navToRef\.current\('chat', \{ chatId: request\.chatId \}\)[\s\S]*requestComposer\(request\.chatId, \{ draft: draftText \}\)/,
+    /navToRef\.current\('chat', \{ chatId: request\.chatId \}\)[\s\S]*if \(draft !== undefined\) requestComposer\(request\.chatId, \{ draft \}\)/,
     'the open-chat handoff must target the live composer after navigation')
   assert.match(chatView,
     /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
@@ -390,13 +390,13 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.equal(selectedChatHandoffs.length, 2,
     'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
   assert.match(shell,
-    /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
+    /const reserveTouchComposer = useCallback[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\?\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)[\s\S]*composerDraftWantsKeyboard\(saved\) && reserveTouchComposer\(chatId, saved\)/,
     'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
   assert.match(shell,
     /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*focusSelectedChatComposer\(route\.chatId\)/,
     'Back and Forward must use the same destination-composer focus handoff')
   assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
-  assert.match(shell, /beforeRestoreRouteRef,\s*navigationStorage:[\s\S]*?routePath:[\s\S]*?\}\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*beforeDrawerOpenRef,\s*navigationStorage:[\s\S]*?routePath:[\s\S]*?\}\)/)
   assert.match(
     navigationSource,
     /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
@@ -405,7 +405,7 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(
     navigationSource,
     /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
-    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+    'both explicit and Back-driven drawer closes must consult the prior keyboard state',
   )
 })
 
@@ -428,6 +428,8 @@ test('every outgoing chat-entry surface becomes neutral until the atomic swap', 
   )
   const openingCover = ruleBody('.shell__chat-view--held::after')
   assert.match(openingCover, /content:\s*"Opening chat\\2026"/)
+  assert.match(openingCover, /color:\s*transparent;[\s\S]*animation:\s*shell-opening-label 0s linear 400ms forwards/,
+    'a quick swap stays a quiet neutral surface; the label appears only when opening is slow')
   assert.match(openingCover, /background:\s*var\(--bg\)/,
     'the selected chat waits behind one opaque neutral surface')
   assert.match(

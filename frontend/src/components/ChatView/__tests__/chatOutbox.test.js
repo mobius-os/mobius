@@ -431,6 +431,63 @@ test('one transport failure preserves order and stops the drain burst', async ()
   assert.equal((await list()).length, 2)
 })
 
+test('readiness loss during the IndexedDB claim leaves a local message editable and cancellable', async t => {
+  await enqueue({ chatId: 'c1', cid: 'paused', body: { content: 'not sent', cid: 'paused' } })
+  let ready = true
+  let closedAtRead = false
+  const originalGet = IDBObjectStore.prototype.get
+  const get = t.mock.method(IDBObjectStore.prototype, 'get', function(key) {
+    const request = originalGet.call(this, key)
+    if (key === 'paused' && !closedAtRead) {
+      request.addEventListener('success', () => {
+        closedAtRead = true
+        ready = false
+      }, { once: true })
+    }
+    return request
+  })
+  const delivered = []
+  await drainOutbox({
+    principalKey: currentPrincipalKey(),
+    canDeliver: () => ready,
+    deliver: async record => { delivered.push(record.cid); return 'delivered' },
+  })
+  get.mock.restore()
+  assert.equal(closedAtRead, true, 'readiness closes after the initial admission check')
+  assert.deepEqual(delivered, [])
+  assert.equal((await list())[0].dispatchStarted, false)
+  const owner = { chatId: 'c1', principalKey: currentPrincipalKey() }
+  assert.equal((await editLocalIntent('paused', { ...owner, content: 'revised' })).status, 'saved')
+  assert.equal((await cancelLocalIntent('paused', owner)).status, 'cancelled')
+})
+
+test('readiness loss after a committed claim never restores proof of no dispatch', async () => {
+  await enqueue({ chatId: 'c1', cid: 'uncertain', body: { content: 'keep exact intent', cid: 'uncertain' } })
+  let ready = true
+  const unsubscribe = subscribeOutboxChanges(change => {
+    if (change.record?.cid === 'uncertain' && change.record.dispatchStarted) ready = false
+  })
+  const posts = []
+  try {
+    await drainOutbox({
+      principalKey: currentPrincipalKey(),
+      canDeliver: () => ready,
+      deliver: async record => {
+        if (!ready) return 'retry' // The hook retains its last-moment POST gate.
+        posts.push(record.cid)
+        return 'delivered'
+      },
+    })
+  } finally {
+    unsubscribe()
+  }
+  assert.deepEqual(posts, [])
+  assert.equal((await list())[0].dispatchStarted, true)
+  const owner = { chatId: 'c1', principalKey: currentPrincipalKey() }
+  assert.equal((await cancelLocalIntent('uncertain', owner)).status, 'uncertain')
+  assert.equal((await editLocalIntent('uncertain', { ...owner, content: 'replacement' })).status, 'uncertain')
+})
+
 test('an interactively held intent keeps its chat out of the drain until released', async () => {
   const release = holdInteractiveDispatch('held1')
   // Distinct enqueue times, so the drain's createdAt order is the send order.

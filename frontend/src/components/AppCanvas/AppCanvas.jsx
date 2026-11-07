@@ -2,13 +2,13 @@ import {
   forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo,
   useReducer, useRef, useState,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -22,7 +22,7 @@ import {
   cacheAppToken, readAppFrameStorage, readCachedAppToken,
   isSharedVirtualStorageKey,
 } from '../../lib/appFrameStorage.js'
-import { immersiveLifecycleValue } from '../../lib/immersive.js'
+import { createImmersiveLifecycle } from '../../lib/immersive.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
@@ -51,6 +51,9 @@ import {
   serveStorageRpc,
 } from './appFrameProtocol.js'
 import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
+import {
+  blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
+} from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import { finishAppFileExport } from '../../lib/appFileExport.js'
 import {
@@ -64,9 +67,14 @@ function appFrameRequestUrl(appId, version, frameRev) {
     + (frameRev ? `-${frameRev}` : '')
 }
 
+// Label ink on the app's own manifest colour (always #rrggbb): white while it
+// keeps 3:1, the rule the theme's --accent-fg uses, else a near-black.
 function fileExportInk(color) {
-  const contrast = contrastingAccentFg(color)
-  return contrast === '#000000' ? '#172008' : contrast || undefined
+  if (!/^#[0-9a-f]{6}$/i.test(color || '')) return undefined
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#172008'
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {
@@ -126,9 +134,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      the iframe sits at its 10s loading-timeout.
 //
 //   Managed app lifecycle: {type: 'moebius:managed-app-event',
-//       event: {type: 'app_updated', appId}}       parent → frame
-//      Every completion is sent to frames with reviewed manage_apps.
-//      appId is always the updated app's id as a string. Apps listen directly
+//       event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}   parent → frame
+//      Every such event is sent to frames with reviewed manage_apps.
+//      appId is always the affected app's id as a string. Apps listen directly
 //      on window; the frame host does not handle or replay this message.
 //
 //   Module broker: {type:'moebius:module-request', requestId, appId, retry}
@@ -151,7 +159,7 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      live visible frame → shell confirmation → own storage file download.
 //      The app supplies no app id or token; result is file-export-result.
 //
-//   2. {type: 'moebius:frame-mounted', appId}              frame → parent
+//   2. {type: 'moebius:frame-mounted', appId, supportsAppBlocks} frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
 //      stable DOM ref in app-frame.html — NOT right after
 //      `createRoot.render()` returns, which only schedules the render). The
@@ -186,9 +194,15 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      scrim but synchronously cancels any Android compositor scroll already in
 //      flight. Hidden/incoming frames receive false too.
 //
-//   3c. {type: 'moebius:frame-visibility', visible, navigationReady} parent → frame
+//   3c. {type: 'moebius:frame-visibility', visible, covered, navigationReady,
+//        backgroundPlayback} parent → frame
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
+//      app-frame.html turns visible:false into a hidden page and holds the
+//      sound and animation frames of the app and every document it nests,
+//      unless backgroundPlayback says the document owns an open media session
+//      (deliberate playback the drawer still controls). covered holds the same
+//      work while the modal drawer is over a frame that stays painted.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -230,6 +244,16 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      AppCanvas keeps the destination covered until that acknowledgement, so
 //      a direct link never flashes the app's home screen first.
 //
+//   6b. moebius:app-block-init / app-block-action / app-block-state
+//      Optional transcript block session (building-apps.md "Passive block
+//      sessions"). frame-init carries the `blockSession` envelope stamped with
+//      the document generation; frame-mounted (`blockGeneration`) and every
+//      app-block-state must name that exact generation, or they are dropped;
+//      each owner event is posted once, to the generation it was dispatched for. It grants no app authority.
+//      moebius:app-block-refresh {sessionId, generation, reason} is a host
+//      hint to re-read (a turn settled in this chat, the tab became visible),
+//      posted once per hint to the generation it was raised for.
+//
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
 //      Exact-frame binding, reviewed declarations, lifecycle, errors, events,
@@ -269,10 +293,14 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      validation provide the trust boundary.
 //
 // Host-level messages (attributed and narrowed here, outcomes owned by the
-// `onHostRequest` callback):
+// `onHostRequest` callback; only the live document of a visible canvas may
+// make them, never a hidden passive or buffered frame):
 //   - {type: 'moebius:new-chat', draft?}                     frame → host
 //     (always an editable draft; see appHostRequest)
 //   - {type: 'moebius:open-chat', chatId, draft?}            frame → host
+//   - {type: 'moebius:open-existing-chat', requestId, chatId, draft?}
+//     → {type: 'moebius:open-chat-result', requestId, ok, result: {outcome}}
+//     (that exact chat or an outcome, never a new-chat fallback)
 //   - {type: 'moebius:open-app', appId, intent?}             frame → host
 //   - {type: 'moebius:open-settings', section?}              frame → host
 // App crashes are separately attributed here and sent to `onAppError`.
@@ -418,11 +446,17 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the scrim, but compositor momentum inside its iframe must be cancelled so
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
+  // The modal drawer is opening or open over this frame. It stays painted and
+  // honestly not hidden, but app-frame.html holds its sound and animation
+  // frames, the same as leaving does.
+  covered = false,
   // Whether this canvas's live frame is the app's shell navigation target:
   // `data-app-id` (below) and the app's saved shell location. An embedded
   // transcript view of the same app neither restores nor overwrites that place.
   navigationTarget = true,
   pendingIntent = null,
+  // Optional transcript block session (see 6b above).
+  blockSession = null, blockEvent = null, blockRefresh = null, onBlockState, onBlockCapability,
   shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
@@ -565,6 +599,29 @@ const AppCanvas = forwardRef(function AppCanvas({
   // an older destination from uncovering a newer handoff.
   const pendingIntentRef = useRef(pendingIntent)
   pendingIntentRef.current = pendingIntent
+  const blockSessionRef = useRef(blockSession)
+  blockSessionRef.current = blockSession
+  const onBlockStateRef = useRef(onBlockState)
+  onBlockStateRef.current = onBlockState
+  const onBlockCapabilityRef = useRef(onBlockCapability)
+  onBlockCapabilityRef.current = onBlockCapability
+  const blockDocumentsRef = useRef(null)
+  blockDocumentsRef.current ??= createBlockDocuments()
+  const sentBlockNonceRef = useRef(null)
+  const sentBlockRefreshRef = useRef(null)
+  const reportedBlockRef = useRef(null)
+  const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
+  // Tell the block host about the live document's negotiation once per
+  // (generation, support); a new generation is a reset of all prior state.
+  function publishBlockCapability(version) {
+    const blockDocument = blockDocumentsRef.current.get(version)
+    const reported = reportedBlockRef.current
+    if (!blockSessionRef.current || !blockDocument || blockDocument.supported == null
+        || (reported?.generation === blockDocument.generation && reported.supported === blockDocument.supported)) return
+    reportedBlockRef.current = { generation: blockDocument.generation, supported: blockDocument.supported }
+    onBlockCapabilityRef.current?.(blockDocument.supported, {
+      generation: blockDocument.generation, reset: reported?.generation !== blockDocument.generation })
+  }
   const storageHost = useMemo(() => createAppStorageHost({
     appId,
     getCurrentToken: () => hostTokenRef.current,
@@ -625,6 +682,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the promoted frame's recorded intent so an immersive game stays immersive
   // across a rebuild without a chrome flash.
   const frameImmersiveRef = useRef(new Map())
+  // Decides which recorded requests reach Shell live or on a lifecycle
+  // transition; see createImmersiveLifecycle for the one-visit rules.
+  const immersiveLifecycleRef = useRef(null)
+  if (!immersiveLifecycleRef.current) immersiveLifecycleRef.current = createImmersiveLifecycle()
   // A STABLE callback-ref per version. React only invokes a callback ref when
   // its identity changes, so caching one per version means a frame's ref never
   // churns across re-renders (a churning ref would delete+re-add the Map entry
@@ -665,6 +726,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           loadedDocsRef.current.delete(v)
           frameNavRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
+          blockDocumentsRef.current.delete(v)
           cache.delete(v)
         }
       }
@@ -690,6 +752,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   navigationTargetRef.current = navigationTarget
   const frameVisibleRef = useRef(frameVisible)
   frameVisibleRef.current = frameVisible
+  // Assigned once sendVisibility is declared; the message handler calls it by
+  // ref so it never enters that effect's dependency list.
+  const resyncBackgroundPlaybackRef = useRef(() => {})
   function finishFileExport(request, result) {
     finishAppFileExport({ request, pendingRef: pendingFileExportRef, setPending: setPendingFileExport, result })
   }
@@ -831,6 +896,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         bg: eff?.bg ?? theme?.bg,
         storage: readAppFrameStorage(appId, undefined, appSlug),
         capabilityContract,
+        blockSession: blockSessionEnvelope(blockSessionRef.current, blockDocumentsRef.current.get(v)?.generation),
         navLocation: appNavLocationStore(navigationTargetRef.current)
           .read(appId, frameNavRef.current.get(v)?.instanceId),
       },
@@ -879,11 +945,13 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (swap.incomingVersion == null) return
     const v = swap.incomingVersion
+    // A mounted successor held back by block-session retention is not hung.
+    if (blockSessionRef.current && blockDocumentsRef.current.get(v)?.supported != null) return
     const id = setTimeout(() => {
       dispatchSwap({ type: 'incoming-timeout', version: v })
     }, INCOMING_SWAP_TIMEOUT_MS)
     return () => clearTimeout(id)
-  }, [swap.incomingVersion])
+  }, [swap.incomingVersion, blockDocumentRevision])
 
   // Single message listener for BOTH buffered frames. Registered once per appId
   // mount (deliberately minimal deps: it reads live state through refs +
@@ -930,6 +998,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       const srcVersion = attributedFrameVersion(framesRef.current, e.source)
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
 
+      if (msg.type === 'moebius:app-block-state') {
+        forwardBlockState({ message: msg, session: blockSessionRef.current,
+          document: blockDocumentsRef.current.get(srcVersion), isLive: srcVersion === liveVersionRef.current,
+          onState: onBlockStateRef.current })
+        return
+      }
+
       if (msg.type === 'moebius:module-request') {
         serveModuleRequest({
           message: msg, source: e.source, appId, frameVersion: srcVersion,
@@ -954,8 +1029,17 @@ const AppCanvas = forwardRef(function AppCanvas({
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
+        // A session canvas trusts only the report of the document it loaded last.
+        if (blockSessionRef.current && !blockDocumentsRef.current.mounted(srcVersion, msg)) return
         const nav = frameNavRef.current.get(srcVersion)
         if (nav) nav.mounted = true
+        if (blockSessionRef.current) {
+          setBlockDocumentRevision(value => value + 1)
+          if (srcVersion === liveVersionRef.current) publishBlockCapability(srcVersion)
+          // The outgoing document may still own an active or unknown
+          // operation; a successor cannot take that over just by mounting.
+          else if (blockSessionRef.current?.retain) return
+        }
         dispatchSwap({ type: 'frame-mounted', version: srcVersion })
         return
       }
@@ -1019,7 +1103,12 @@ const AppCanvas = forwardRef(function AppCanvas({
         // harmless presentation hint the frame may choose.
         const mode = msg.mode === 'bar' ? 'bar' : 'full'
         frameImmersiveRef.current.set(srcVersion, { value, mode })
-        if (srcVersion === liveVersionRef.current && activeRef.current) {
+        if (immersiveLifecycleRef.current.frameRequested({
+          version: srcVersion,
+          liveVersion: liveVersionRef.current,
+          active: activeRef.current,
+          frameVisible: frameVisibleRef.current,
+        })) {
           onImmersive?.(appId, value, mode)
         }
         return
@@ -1109,11 +1198,19 @@ const AppCanvas = forwardRef(function AppCanvas({
         if (mediaEvent.event === 'close') {
           if (currentSessionId !== mediaEvent.sessionId) return
           frameMediaSessionRef.current.delete(srcVersion)
+          // backgroundPlayback just flipped true -> false; re-send the
+          // visibility verdict so a hidden frame drops its exemption now.
+          resyncBackgroundPlaybackRef.current(srcVersion)
           onMediaSessionRef.current?.(appId, mediaEvent)
           return
         }
         if (mediaEvent.event === 'update' && currentSessionId !== mediaEvent.sessionId) return
+        const hadSession = frameMediaSessionRef.current.has(srcVersion)
         frameMediaSessionRef.current.set(srcVersion, mediaEvent.sessionId)
+        // A session that opens while the frame is hidden flips backgroundPlayback
+        // false -> true; re-send so the frame exempts its deliberate playback
+        // instead of staying held until the next show/hide.
+        if (!hadSession) resyncBackgroundPlaybackRef.current(srcVersion)
         const source = e.source
         onMediaSessionRef.current?.(appId, mediaEvent, (action) => {
           if (!['play', 'pause', 'stop', 'cycle-speed'].includes(action)) return false
@@ -1155,7 +1252,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       // attribution and wire-format narrowing here, beside every other frame
       // request, so no host needs to rediscover iframe identity.
       const hostRequest = appHostRequest(msg)
-      if (hostRequest && onHostRequest) {
+      if (hostRequest) {
         const responseTarget = e.source
         const responseOrigin = e.origin === 'null' ? '*' : e.origin
         const respond = (payload) => {
@@ -1163,10 +1260,24 @@ const AppCanvas = forwardRef(function AppCanvas({
         }
         const responseType = hostRequest.type === 'moebius:chat-control'
           ? 'moebius:chat-control-result'
+          : hostRequest.type === 'moebius:open-chat' ? 'moebius:open-chat-result'
           : 'moebius:projects-result'
         const fallbackError = hostRequest.type === 'moebius:chat-control'
           ? 'Chat control failed.'
+          : hostRequest.type === 'moebius:open-chat' ? 'Opening the conversation failed.'
           : 'Projects request failed.'
+        // A hidden transcript or session document runs without an owner
+        // gesture on screen. Ordinary shell apps keep their background reads.
+        if (!hostRequestAllowed({ sourceVersion: srcVersion, liveVersion: liveVersionRef.current,
+          visible: visibleRef.current,
+          transcript: !navigationTargetRef.current || blockSessionRef.current != null })
+          || !onHostRequest) {
+          if (hostRequest.requestId) {
+            respond({ type: responseType, requestId: hostRequest.requestId, ok: false,
+              error: 'A hidden app view cannot open or change anything. Open the app and try again.' })
+          }
+          return
+        }
         try {
           const outcome = onHostRequest(appId, hostRequest)
           if (hostRequest.requestId) {
@@ -1394,22 +1505,23 @@ const AppCanvas = forwardRef(function AppCanvas({
   // Real-time immersive messages are forwarded in onMessage above. Lifecycle
   // replay is intentionally narrower: leaving releases; returning to the same
   // cached frame does NOT resurrect its old request; only a newly promoted
-  // frame may replay the intent it posted while hidden. This makes the shell's
-  // Exit choice survive app switches while preserving seamless in-place app
-  // updates. The pure helper keeps that policy regression-testable.
-  const immersiveLifecycleRef = useRef(null)
+  // frame, or a request made during this showing, may replay. This makes the
+  // shell's Exit choice survive app switches while preserving seamless
+  // in-place app updates. The pure helper keeps that policy regression-testable.
   useEffect(() => {
     if (!appId) return
-    const current = { appId, liveVersion: swap.liveVersion, active }
     const intent = frameImmersiveRef.current.get(swap.liveVersion)
-    const value = immersiveLifecycleValue(
-      immersiveLifecycleRef.current,
-      current,
+    const value = immersiveLifecycleRef.current.transition(
+      { appId, liveVersion: swap.liveVersion, active },
       intent?.value,
     )
-    immersiveLifecycleRef.current = current
     if (value !== null) onImmersive?.(appId, value, intent?.mode)
   }, [appId, swap.liveVersion, active, onImmersive])
+
+  // A request made while shown lasts only for that showing.
+  useEffect(() => {
+    if (!frameVisible) immersiveLifecycleRef.current.frameHidden()
+  }, [frameVisible])
 
   // Unmount/eviction is a hard release even when no active-state render landed.
   useEffect(() => () => { onImmersive?.(appId, false) }, [appId, onImmersive])
@@ -1451,6 +1563,43 @@ const AppCanvas = forwardRef(function AppCanvas({
       nonce: pendingIntent.nonce,
     })
   }, [swap.liveLoaded, swap.liveVersion, pendingIntent])
+
+  // Promote a mounted successor once no block session retains the outgoing
+  // document, and report the live document's negotiation to the block host.
+  useLayoutEffect(() => {
+    if (!blockSession) return
+    const incoming = swap.incomingVersion
+    if (incoming != null && !blockSession.retain
+        && blockDocumentsRef.current.get(incoming)?.supported != null) {
+      dispatchSwap({ type: 'frame-mounted', version: incoming })
+    }
+    publishBlockCapability(swap.liveVersion)
+  }, [swap.liveVersion, swap.incomingVersion, blockSession, blockDocumentRevision])
+
+  // Block-session init carries no action; it repeats only when the session
+  // envelope changes or a newly promoted document needs it.
+  useEffect(() => {
+    if (!blockSession || !swap.liveLoaded) return
+    const blockDocument = blockDocumentsRef.current.get(swap.liveVersion)
+    const envelope = blockDocument?.supported === true ? blockSessionEnvelope(blockSession, blockDocument.generation) : null
+    if (envelope) postToFrame(swap.liveVersion, { type: 'moebius:app-block-init', ...envelope })
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockDocumentRevision])
+  useEffect(() => {
+    if (!swap.liveLoaded) return
+    const message = blockEventDelivery({ session: blockSession, event: blockEvent,
+      document: blockDocumentsRef.current.get(swap.liveVersion), sentNonce: sentBlockNonceRef.current })
+    if (!message) return
+    sentBlockNonceRef.current = message.nonce
+    postToFrame(swap.liveVersion, message)
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockEvent, blockDocumentRevision])
+  useEffect(() => {
+    if (!swap.liveLoaded) return
+    const message = blockRefreshDelivery({ session: blockSession, refresh: blockRefresh,
+      document: blockDocumentsRef.current.get(swap.liveVersion), sentSeq: sentBlockRefreshRef.current })
+    if (!message) return
+    sentBlockRefreshRef.current = blockRefresh.seq
+    postToFrame(swap.liveVersion, message)
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockRefresh, blockDocumentRevision])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
@@ -1519,11 +1668,14 @@ const AppCanvas = forwardRef(function AppCanvas({
   // shell ancestor — which does NOT change the nested iframe's
   // document.visibilityState (no visibilitychange/blur/pagehide fires). So an
   // app that plays audio or animates keeps running after you navigate away
-  // (the reported "music keeps playing after exiting" bug). Posting the verdict
-  // lets an app pause on `visible:false` and resume on `visible:true`. The
-  // native Page Visibility API still covers real tab-hide (it propagates to
-  // same-origin child frames), so the two compose: an app is foreground only
-  // when it's the active canvas AND the tab is visible.
+  // (the reported "music keeps playing after exiting" bug). app-frame.html
+  // turns this verdict into the standard Page Visibility state and pauses the
+  // document's Web Audio and media elements, so its sound stops without
+  // Möbius-specific app code. `backgroundPlayback` exempts a document with an open media
+  // session from that forced pause: its playback is deliberate and stays
+  // controllable from the drawer. The native Page Visibility API still covers
+  // real tab-hide, so the two compose: an app is foreground only when it's
+  // the active canvas AND the tab is visible.
   //
   // Double-buffer routing: only the LIVE frame ever receives the real verdict.
   // A buffered incoming frame is invisible by construction, so it gets an
@@ -1536,14 +1688,29 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, {
       type: 'moebius:frame-visibility',
       visible,
+      covered,
       // Restoration that needs a new history entry waits for pane focus.
       navigationFocused: activeRef.current,
       // A chat handoff can keep pixels foreground after logical navigation ends.
       navigationReady: visible && visibleRef.current
         && v === liveVersionRef.current && swap.liveLoaded
         && frameNavRef.current.get(v)?.mounted === true,
+      backgroundPlayback: frameMediaSessionRef.current.has(v),
     })
   }
+
+  // backgroundPlayback only rides along a frame-visibility message. When a media
+  // session opens or closes, the per-frame flag changes but no show/hide flip
+  // follows, so a hidden live frame would keep its stale hold-or-exempt state.
+  // Re-send the current verdict (with the updated flag) to the live frame. The
+  // message handler reaches this through a ref so it stays out of that effect's
+  // dependency list, like the other handler callbacks.
+  function resyncBackgroundPlayback(v) {
+    if (v === liveVersionRef.current && loadedDocsRef.current.has(v)) {
+      sendVisibility(v, frameVisibleRef.current)
+    }
+  }
+  resyncBackgroundPlaybackRef.current = resyncBackgroundPlayback
 
   function sendInteractivity(v, enabled, frameIsVisible = frameVisibleRef.current) {
     postToFrame(v, {
@@ -1572,7 +1739,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, visible, active, swap.liveVersion, swap.liveLoaded])
+  }, [frameVisible, covered, visible, active, swap.liveVersion, swap.liveLoaded])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then
@@ -1809,6 +1976,16 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
     const instanceId = frameNavRef.current.get(v)?.instanceId
     frameNavRef.current.set(v, { instanceId })
+    // onLoad always denotes a new document, even when its version survives.
+    const blockDocument = blockDocumentsRef.current.load(v)
+    if (v === liveVersionRef.current && reportedBlockRef.current && blockSessionRef.current) {
+      reportedBlockRef.current = { generation: blockDocument.generation, supported: null }
+      // Commit the block host's reset before this document's init: otherwise
+      // React batching would hand the new document the old document's retain.
+      flushSync(() => {
+        onBlockCapabilityRef.current?.(null, { generation: blockDocument.generation, reset: true })
+      })
+    }
     loadedDocsRef.current.add(v)
     sendInit(v)
     sendOnlineStatus(v)
@@ -1874,9 +2051,13 @@ const AppCanvas = forwardRef(function AppCanvas({
             // reaches only this frame and what it nests. An explicit
             // `fullscreen` entry overrides `allowFullScreen`, so it needs `*`
             // too. `clipboard-write` stays bare because apps copy through the
-            // host clipboard broker. Pointer lock is a sandbox flag in the
-            // frame's response CSP (backend `app_frame_csp`), not a feature.
-            allow="clipboard-write; fullscreen *; gamepad *"
+            // host clipboard broker. The motion sensors (accelerometer,
+            // gyroscope, magnetometer) let `devicemotion` and
+            // `deviceorientation` events reach the app; unlike camera and
+            // location they carry no shell-owned permission grant. Pointer
+            // lock is a sandbox flag in the frame's response CSP (backend
+            // `app_frame_csp`), not a feature.
+            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />

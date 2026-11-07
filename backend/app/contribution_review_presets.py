@@ -62,17 +62,23 @@ OPTION_KEYS = frozenset((*PROMPT_KEYS, "fix_prompt", "max_rounds", "autopilot", 
 MAX_PROMPT_BYTES = 16_384
 
 
-def presets() -> dict:
+def presets(*, mode: str = "review") -> dict:
   """Return fresh, JSON-serializable defaults for the owner-facing editor."""
-  return {
+  defaults = {
     "review_prompt": REVIEW_PROMPT,
     "merge_prompt": MERGE_PROMPT,
     "mandatory_instructions": MANDATORY_INSTRUCTIONS,
   }
+  if mode == "review_fix_merge":
+    defaults.update(fix_prompt=FIX_PROMPT, max_rounds=None)
+  return defaults
 
 
-def resolve_options(db, options: dict | None = None, *, choice: dict | None = None) -> dict:
-  """Freeze only prompts this review-only layer actually executes."""
+def resolve_options(db, options: dict | None = None, *, choice: dict | None = None,
+                    mode: str = "review") -> dict:
+  """Freeze only options executed by the selected workflow mode."""
+  if mode not in {"review", "review_merge", "review_fix_merge"}:
+    raise ValueError("invalid review mode")
   if options is None:
     options = {}
   if not isinstance(options, dict):
@@ -81,9 +87,9 @@ def resolve_options(db, options: dict | None = None, *, choice: dict | None = No
   if unknown:
     raise ValueError(f"unknown review option: {sorted(unknown)[0]}")
 
-  defaults = presets()
+  defaults = presets(mode=mode)
   resolved = {}
-  for key in PROMPT_KEYS:
+  for key in (*PROMPT_KEYS, *(("fix_prompt",) if mode == "review_fix_merge" else ())):
     value = options.get(key, defaults[key])
     if not isinstance(value, str) or not value.strip():
       raise ValueError(f"{key} must be non-empty text")
@@ -91,10 +97,15 @@ def resolve_options(db, options: dict | None = None, *, choice: dict | None = No
     if len(encoded) > MAX_PROMPT_BYTES:
       raise ValueError(f"{key} exceeds {MAX_PROMPT_BYTES} UTF-8 bytes")
     resolved[key] = value
-  if "fix_prompt" in options and options["fix_prompt"] != FIX_PROMPT:
-    raise ValueError("fix_prompt is not supported by this review-only workflow")
-  if options.get("max_rounds") is not None:
-    raise ValueError("max_rounds is not supported by this review-only workflow")
+  # review/review_merge accept the no-op values main always accepted (the
+  # Contribute app sends max_rounds: null); they are never frozen.
+  if mode != "review_fix_merge" and (
+      ("fix_prompt" in options and options["fix_prompt"] != FIX_PROMPT)
+      or options.get("max_rounds") is not None):
+    raise ValueError("fix_prompt and max_rounds are not supported outside review_fix_merge mode")
+  max_rounds = options.get("max_rounds") if mode == "review_fix_merge" else None
+  if max_rounds is not None and (type(max_rounds) is not int or max_rounds < 1):
+    raise ValueError("max_rounds must be null or a positive integer")
   if options.get("autopilot", False) is not False:
     raise ValueError("autopilot is not supported by this review-only workflow")
 
@@ -105,6 +116,7 @@ def resolve_options(db, options: dict | None = None, *, choice: dict | None = No
   mandatory = POST_REVIEW_INSTRUCTIONS if post_review else MANDATORY_INSTRUCTIONS
   return {
     **resolved,
+    **({"max_rounds": max_rounds} if mode == "review_fix_merge" else {}),
     **({"post_review": True} if post_review else {}),
     "mandatory_instructions": mandatory,
     "choice": choice,

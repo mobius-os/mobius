@@ -13,6 +13,7 @@ you'd otherwise add a column for, use per-app storage at
 separate encrypted app-secrets API.
 """
 
+import logging
 import secrets
 import json
 import uuid
@@ -23,6 +24,7 @@ from sqlalchemy import (
   Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, text,
   true,
 )
+from sqlalchemy import inspect as sa_inspect
 
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import column_property, deferred, relationship
@@ -270,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -284,6 +289,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
@@ -510,6 +520,11 @@ class ChatRun(Base):
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+  # Why an "interrupted" run ended (RUN_END_REASONS below). Observational
+  # only: no lifecycle decision reads it, so it can explain a run without
+  # changing what "interrupted" means to Goals, Waits or question parking.
+  # NULL on other statuses and on rows interrupted before 0098_run_end_reason.
+  end_reason = Column(String(32), nullable=True, default=None)
   # One-shot platform-authored intent identity for a planned restart. It only
   # authorizes replay when the frozen supervisor's root-owned boot ledger binds
   # the same nonce + exact run id to the current boot.
@@ -933,6 +948,37 @@ def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
   ))
 
 
+# Every way a run can end as "interrupted". Keep this the single vocabulary so
+# a report can group by it.
+RUN_END_REASONS = frozenset((
+  "owner_input",          # turn ended to wait on a saved owner card
+  "activation",           # turn ended for an approved restart/activation
+  "restart_drain",        # a planned restart drained the live turn
+  "server_restart",       # the server stopped mid-turn (found on boot)
+  "superseded",           # a new turn started while this row was still open
+  "provider_switch",      # a provider handoff retired the run
+  "dependency_withdrawn", # its Goal dependency result was withdrawn
+  "chat_deleted",         # the chat was deleted mid-turn
+  "recovered",            # the turn wedged and was closed by recovery
+))
+
+
+def _warn_unexplained_interruption(_mapper, _connection, run) -> None:
+  """Make a new interrupted path that forgot its reason visible in the log.
+
+  Only the transition counts: rows interrupted before end_reason existed stay
+  NULL and may still be updated for unrelated reasons without a warning.
+  """
+  if run.status != "interrupted" or run.end_reason in RUN_END_REASONS:
+    return
+  if sa_inspect(run).attrs.status.history.has_changes():
+    logging.getLogger(__name__).warning(
+      "run %s interrupted without a known end_reason (%r)", run.id, run.end_reason,
+    )
+
+
+event.listen(ChatRun, "before_insert", _warn_unexplained_interruption)
+event.listen(ChatRun, "before_update", _warn_unexplained_interruption)
 event.listen(ChatRun, "after_insert", _append_agent_lifecycle_run_update)
 event.listen(ChatRun, "after_update", _append_agent_lifecycle_run_update)
 event.listen(ChatRun, "before_delete", _append_agent_lifecycle_run_tombstone)
@@ -1862,6 +1908,46 @@ class ChatAppArtifact(Base):
   seen_at = Column(DateTime, nullable=True, default=None)
 
 
+class AppChatScopeStart(Base):
+  """The one first turn an app's scoped handoff may admit for a scope.
+
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
+
+  Admission is recorded here too, not inferred from the chat alone: an owner
+  Stop or queued-message removal can leave an admitted chat with no messages,
+  queue, or run, and a replay must still find it started.
+  """
+
+  __tablename__ = "app_chat_scope_starts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  scope = Column(String(160), primary_key=True)
+  # The chat this scope admitted; NULL only when cancelled before admission.
+  chat_id = Column(String(64), nullable=True)
+  # Set once by the app's cancellation; a cancelled scope never admits a turn.
+  cancelled_at = Column(DateTime, nullable=True)
+  # Set once, in the chat writer commit that accepted the chat's first turn
+  # (see app_chat_scopes); never cleared.
+  admitted_at = Column(DateTime, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (
+    CheckConstraint(
+      "chat_id IS NOT NULL OR cancelled_at IS NOT NULL",
+      name="ck_app_chat_scope_starts_outcome",
+    ),
+    CheckConstraint(
+      "admitted_at IS NULL OR (chat_id IS NOT NULL AND cancelled_at IS NULL)",
+      name="ck_app_chat_scope_starts_admitted",
+    ),
+  )
+
+
 class PushSubscription(Base):
   """Browser push subscription for Web Push delivery."""
 
@@ -1873,6 +1959,31 @@ class PushSubscription(Base):
   p256dh = Column(Text, nullable=False)
   auth = Column(Text, nullable=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class PushDevice(Base):
+  """A phone running the Möbius mobile app that receives native push.
+
+  The shell registers the FCM token from ``MobiusNative.registerPush()``
+  through ``PUT /api/push/devices`` on every load. Like a ``PushSubscription``,
+  a device receives every owner notification. Delivery goes through the
+  mobius.you push relay (``app.push_relay``), so this installation holds no
+  FCM credential. A token the relay reports invalid is deleted.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "push_devices"
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  token = Column(Text, nullable=False, unique=True)
+  # Changes on every registration, so cleanup after a send can tell whether
+  # the phone registered again while that send was in flight.
+  registered_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class Notification(Base):
@@ -2338,3 +2449,76 @@ class ChatTranscriptDamage(Base):
   raw = Column(LargeBinary, nullable=False)
   error = Column(Text, nullable=False)
   recorded_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationPosition(Base):
+  """One device location fix uploaded by the native mobile app's web view.
+
+  The native app hands positions to the top-frame page through
+  ``window.MobiusNative``; the page is the only route to the server, so it
+  queues fixes and POSTs them to ``/api/location/batch``. Positions arrive in
+  batches, out of order, and a rare batch can be delivered twice — so storage
+  is idempotent on ``(owner_id, device_id, device_timestamp_ms)``. The device
+  fix time is the identity key, not arrival order.
+
+  ``device_id`` is optional; it defaults to the empty string rather than NULL
+  so the uniqueness key stays well-defined (SQLite treats NULLs as distinct,
+  which would defeat deduplication for the common single-device case). All
+  fields the device could not determine are stored as NULL, except latitude
+  and longitude, which a stored fix always has.
+
+  This is a new table, so ``create_all`` adds it to existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "location_positions"
+  __table_args__ = (
+    UniqueConstraint(
+      "owner_id", "device_id", "device_timestamp_ms",
+      name="uq_location_owner_device_ts",
+    ),
+    Index("ix_location_owner_ts", "owner_id", "device_timestamp_ms"),
+  )
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  # Opaque client-chosen device identifier; "" when the page did not supply one.
+  device_id = Column(String(128), nullable=False, default="", server_default="")
+  # Milliseconds since the epoch, from the device's location fix. The dedup key.
+  device_timestamp_ms = Column(Integer, nullable=False)
+  latitude = Column(Float, nullable=False)
+  longitude = Column(Float, nullable=False)
+  accuracy = Column(Float, nullable=True)
+  altitude = Column(Float, nullable=True)
+  speed = Column(Float, nullable=True)
+  heading = Column(Float, nullable=True)
+  # When this server received and stored the fix; distinct from the fix time so
+  # delayed offline uploads cannot be mistaken for when the device was there.
+  received_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationTrackingDevice(Base):
+  """Whether one phone is tracking, and its options, as that phone reported.
+
+  Each phone writes only its own row when tracking starts, stops, or changes
+  pace, so other surfaces (a viewer on a laptop) can show the current state:
+  tracking is on when any phone's row says so. A row never starts or stops a
+  phone; each phone resumes only its own tracking after a reload in the same
+  app session. ``reported_at`` is the phone's own clock when it decided the
+  change, so a slower, older report cannot overwrite a newer one.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "location_tracking_devices"
+
+  owner_id = Column(Integer, ForeignKey("owner.id"), primary_key=True)
+  # The same opaque phone id the phone stamps on its uploaded fixes.
+  device_id = Column(String(128), primary_key=True)
+  enabled = Column(Boolean, nullable=False, default=False, server_default=false())
+  # The phone's last startLocation options: {background, interval, distance}.
+  # JSON so option shape can grow without a migration.
+  options_json = Column(JSON, nullable=False, default=dict)
+  # Milliseconds since the epoch on the phone when it made this change.
+  reported_at_ms = Column(Integer, nullable=False)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)

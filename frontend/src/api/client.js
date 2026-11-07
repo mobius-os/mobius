@@ -310,7 +310,16 @@ function clearOwnerClientState({ preserveChatOutbox }) {
       : [clearChatOutbox()]),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     delDatabase('mobius-listings', 'directory listing cache').catch(() => {}),
+    // Folder permissions this owner granted must not carry over to a later
+    // owner signing in on the same browser.
+    delDatabase('mobius-shared-folders', 'shared folders').catch(() => {}),
     wipeSwCaches().catch(() => {}),
+    // Queued precise positions and this phone's tracking state are owner data:
+    // stop recording and erase them. Loaded lazily — the controller itself
+    // imports this module.
+    import('../lib/nativeLocation.js')
+      .then((m) => m.endLocationSession())
+      .catch(() => {}),
   ])
 }
 
@@ -473,6 +482,11 @@ async function ownerSessionConfirmedInvalid(ownerToken) {
   }
 }
 
+// A FormData body must let the browser write its own multipart boundary.
+function jsonContentType(body) {
+  return body instanceof FormData ? {} : { 'Content-Type': 'application/json' }
+}
+
 export async function apiFetch(path, options = {}) {
   if (sharedBrowserEnabled) {
     // An API operation belongs to the authority that initiated it, even if
@@ -498,7 +512,7 @@ export async function apiFetch(path, options = {}) {
       assertAuthority()
       return fetch(`${BASE}/api${guestPath}`, {
         ...options, credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
+        headers: { ...jsonContentType(options.body), ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
       })
     }
     const tokenAtSend = sharedBrowserToken
@@ -517,7 +531,7 @@ export async function apiFetch(path, options = {}) {
     return response
   }
   const headers = {
-    'Content-Type': 'application/json',
+    ...jsonContentType(options.body),
     ...getAuthHeaders(options.headers),
   }
   const sentCredential = Object.entries(headers).some(
@@ -978,6 +992,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    // A new chat continuing this one through the reply stored as
+    // `throughId`; answers the same shape as `create`.
+    branch: (chatId, throughId) => listAffectingMutation(
+      'chats', `/chats/${encodeURIComponent(chatId)}/branch`, {
+        method: 'POST',
+        body: JSON.stringify({ through_id: throughId }),
+      },
+    ),
     send: (chatId, payload, options = {}) => apiFetch(`/chats/${encodeURIComponent(chatId)}/messages`, {
       ...options,
       method: 'POST',
@@ -1127,6 +1149,8 @@ export const api = {
   },
   apps: {
     list: (options = {}) => apiFetch('/apps/', options),
+    // Apps in their 7-day recovery window (undo with `recover`, below).
+    uninstalled: (options = {}) => apiFetch('/apps/uninstalled', options),
     chatArtifacts: (chatId, options = {}) => apiFetch(
       `/apps/chat-artifacts/${encodeURIComponent(chatId)}`,
       options,
@@ -1228,6 +1252,11 @@ export const api = {
         method: 'POST',
         body: payload ? JSON.stringify(payload) : undefined,
       },
+    ),
+    // Erases an uninstalled app now instead of at the end of its 7-day window.
+    // Final: there is no recover afterwards.
+    deletePermanently: (appId) => apiFetch(
+      `/apps/${appId}/permanent`, { method: 'DELETE' },
     ),
     // Wipes the app's runtime storage back to empty while KEEPING it
     // installed — distinct from `remove` (which tombstones the whole app).
@@ -1464,9 +1493,13 @@ export const api = {
     // (pdfjs for latex, and the shell fetching + inlining a website into a
     // sandboxed srcDoc). The owner token is NEVER placed in a URL a sandboxed
     // artifact could read from window.location.
+    // `no-cache` revalidates every read: a rebuild rewrites the same output
+    // path, and the response carries no Cache-Control, so the browser's
+    // heuristic cache otherwise keeps showing the previous build after reload.
+    // An unchanged file still costs only a 304.
     artifactOutput: (projectId, artifactId, path, { signal } = {}) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
-      { signal },
+      { signal, cache: 'no-cache' },
     ),
   },
   sharedApps: {
@@ -1588,9 +1621,14 @@ export const api = {
   owner: {
     modelPrefs: {
       get: () => apiFetch('/owner/model-prefs'),
-      save: (hiddenIds) => apiFetch('/owner/model-prefs', {
+      // `hidden` maps only the changed model ids to true (hide) or false
+      // (show); the server applies them to the owner's list and answers with
+      // the whole list. Callers save through modelQueries.prefs.saveChanges,
+      // which orders saves and owns the cache.
+      update: (hidden, { timeoutMs } = {}) => apiFetch('/owner/model-prefs', {
         method: 'PATCH',
-        body: JSON.stringify({ hidden_ids: hiddenIds }),
+        body: JSON.stringify({ hidden }),
+        timeoutMs,
       }),
     },
     walkthrough: {
@@ -1615,19 +1653,16 @@ export const api = {
     // as theme.css.reset-bak-<unix-ts> for rollback. Used by the
     // `?reset-theme=1` URL-parameter recovery flow in useTheme.
     reset: () => apiFetch('/theme/reset', { method: 'POST' }),
+    // The light/dark switch: the server rewrites theme.css for `mode` and
+    // returns the theme it now serves, shaped like `get`.
+    setMode: (mode) => apiFetch('/theme/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
   },
   storage: {
     shared: {
-      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
-      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
       getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
-      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
-        method: 'PUT',
-        body: JSON.stringify({ content: JSON.stringify(mode) }),
-      }),
     },
   },
   notify: {
@@ -1655,6 +1690,22 @@ export const api = {
       `/screen-control/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' },
     ),
+  },
+  sharedFolders: {
+    list: () => apiFetch('/shared-folders'),
+    report: (subscriptionId, body) => apiFetch(
+      `/shared-folders/devices/${encodeURIComponent(subscriptionId)}`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+    respond: (body) => apiFetch('/shared-folders/responses', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+    // Stop on every device at once; no ids means every shared folder.
+    pause: (folderIds = null) => apiFetch('/shared-folders/pause', {
+      method: 'POST',
+      body: JSON.stringify(folderIds ? { folderIds } : {}),
+    }),
   },
   events: {
     // `keepalive` lets the report sent as the page hides outlive the page
@@ -1752,5 +1803,18 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify(payload),
     }),
+    // Native push for the Möbius mobile app (lib/nativePush.js).
+    devices: {
+      register: (payload) => apiFetch('/push/devices', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+      forget: (payload) => apiFetch('/push/devices', {
+        method: 'DELETE',
+        body: JSON.stringify(payload),
+        // Sign-out reloads the page right after; let the request finish.
+        keepalive: true,
+      }),
+    },
   },
 }

@@ -1,14 +1,19 @@
 """Shared app instances pin builds and keep membership separate from source."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Barrier
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import models, shared_app_state
 from app.config import get_settings
+from app.deps import SharedAppPrincipal
+from app.routes import shared_apps
 from app.shared_app_retention import purge_expired_shared_apps
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
@@ -164,6 +169,98 @@ def test_shared_state_allows_independent_paths_without_global_conflicts(client, 
     "board.json": ["card"], "settings.json": {"compact": True},
   }
   assert set(state["versions"]) == {"board.json", "settings.json"}
+
+
+def test_shared_state_snapshot_cursor_cannot_skip_a_write_after_reading_values(
+  client, auth, db, monkeypatch,
+):
+  project, _output = _built_project(client, auth, db)
+  instance = _create_instance(client, auth, project.id)
+  row = db.get(models.SharedAppInstance, instance["id"])
+  principal = SharedAppPrincipal(owner=db.query(models.Owner).first(), role="owner")
+  first = shared_app_state.write_state(
+    db, row, principal, path="board.json", value=["first"],
+    delete=False, expected_version=None,
+  )
+  lock = shared_app_state.state_lock(str(row.id))
+  subsequent = {}
+
+  @contextmanager
+  def write_after_snapshot_unlock(instance_id):
+    assert instance_id == str(row.id)
+    with lock:
+      yield
+    # Deterministically admit a writer at the first lock-release boundary.
+    # It must remain discoverable from the returned snapshot's cursor.
+    if not subsequent:
+      subsequent["started"] = True
+      subsequent.update(shared_app_state.write_state(
+        db, row, principal, path="board.json", value=["second"],
+        delete=False, expected_version=first["version"],
+      ))
+
+  monkeypatch.setattr(shared_app_state, "state_lock", write_after_snapshot_unlock)
+  snapshot = shared_apps.get_shared_app_state(str(row.id), principal, db)
+
+  assert snapshot["values"] == {"board.json": ["first"]}
+  assert snapshot["versions"] == {"board.json": first["version"]}
+  assert snapshot["cursor"] == first["change_id"]
+  changes = shared_app_state.list_changes(db, row, snapshot["cursor"])
+  assert [item["id"] for item in changes["changes"]] == [subsequent["change_id"]]
+
+
+@pytest.mark.parametrize(("path", "canonical"), [
+  ("./board.json", "board.json"),
+  ("folder/./board.json", "folder/board.json"),
+  ("folder//board.json", "folder/board.json"),
+  ("folder/board.json/", "folder/board.json"),
+  ("", "board.json"),
+  (".", "board.json"),
+  ("folder/.", "folder"),
+])
+@pytest.mark.parametrize("delete", [False, True])
+def test_shared_state_rejects_path_aliases_before_mutating_state_or_changes(
+  client, auth, db, path, canonical, delete,
+):
+  project, _output = _built_project(client, auth, db)
+  instance = _create_instance(client, auth, project.id)
+  row = db.get(models.SharedAppInstance, instance["id"])
+  principal = SharedAppPrincipal(owner=db.query(models.Owner).first(), role="owner")
+  saved = shared_app_state.write_state(
+    db, row, principal, path=canonical, value={"kept": True},
+    delete=False, expected_version=None,
+  )
+
+  with pytest.raises(HTTPException) as rejected:
+    shared_app_state.write_state(
+      db, row, principal, path=path, value={"not": "saved"}, delete=delete,
+      expected_version=saved["version"],
+    )
+
+  assert rejected.value.status_code == 400
+  assert rejected.value.detail == "Invalid shared app data path."
+  snapshot = shared_apps.get_shared_app_state(str(row.id), principal, db)
+  assert snapshot["values"] == {canonical: {"kept": True}}
+  assert snapshot["versions"] == {canonical: saved["version"]}
+  assert snapshot["cursor"] == saved["change_id"]
+  assert db.query(models.SharedAppChange).filter_by(instance_id=row.id).count() == 1
+
+
+def test_shared_state_canonical_nested_key_round_trips_through_api(client, auth, db):
+  project, _output = _built_project(client, auth, db)
+  instance = _create_instance(client, auth, project.id)
+  base = f"/api/shared-apps/{instance['id']}"
+  path = "folder/board.json"
+  saved = client.put(
+    f"{base}/state/{path}", headers=auth,
+    json={"value": {"kept": True}},
+  )
+  assert saved.status_code == 200, saved.text
+  snapshot = client.get(f"{base}/state", headers=auth).json()
+  assert snapshot["values"] == {path: {"kept": True}}
+  assert snapshot["versions"] == {path: saved.json()["version"]}
+  changes = client.get(f"{base}/changes?after=0", headers=auth).json()
+  assert [item["path"] for item in changes["changes"]] == [path]
 
 
 def test_shared_state_beneath_a_value_is_rejected_without_changing_it(client, auth, db):
