@@ -1145,10 +1145,8 @@ function AccountSection({ identity, intent, onIntent, onDisconnected, dashboard 
  * The Möbius account page inside Settings. `active` is true while the page is
  * visible; it refreshes the account on return and pauses live polling when
  * hidden. The parent owns the page header (see useMobiusAccountSummary).
- * `onSignedIn` runs after a sign-in here, so Settings can apply the same
- * first-connection defaults Claude and Codex get.
  */
-export default function MobiusAccountPage({ active = true, onOpenModels = null, onSignedIn = null }) {
+export default function MobiusAccountPage({ active = true, onOpenModels = null }) {
   const queryClient = useQueryClient()
   const identityQuery = mobiusAccountQueries.identity.useQuery()
   const identity = identityQuery.data
@@ -1168,11 +1166,6 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null, 
     wasActiveRef.current = active
   }, [active, intent, queryClient])
 
-  const refreshProviders = useCallback(() => {
-    authQueries.provider.statuses.invalidate(queryClient)
-    modelQueries.registry.invalidate(queryClient)
-  }, [queryClient])
-
   const setIdentity = useCallback(next => {
     queryClient.setQueryData(mobiusAccountQueries.identity.key, next)
   }, [queryClient])
@@ -1180,17 +1173,12 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null, 
   const signedIn = useCallback(next => {
     setIntent(null)
     void mobiusAccountQueries.signedIn(queryClient, next)
-    refreshProviders()
-    onSignedIn?.()
-  }, [queryClient, refreshProviders, onSignedIn])
+  }, [queryClient])
 
   const disconnected = useCallback(reconnecting => {
     setIntent(reconnecting ? 'signin-again' : null)
-    queryClient.removeQueries({ queryKey: [...mobiusAccountQueries.key, 'railway'] })
-    queryClient.removeQueries({ queryKey: [...mobiusAccountQueries.key, 'agent'] })
-    void mobiusAccountQueries.invalidate(queryClient)
-    refreshProviders()
-  }, [queryClient, refreshProviders])
+    void mobiusAccountQueries.signedOut(queryClient)
+  }, [queryClient])
 
   if (!identity) {
     if (identityQuery.isPending) {

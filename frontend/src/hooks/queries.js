@@ -99,9 +99,9 @@ async function fetchProviderUsage(provider) {
   return jsonOrThrow(res, 'provider usage fetch failed:')
 }
 
-// The Möbius credit meter is the owner's account balance; the server refuses
-// it to a shared-browser guest, so no surface (Settings, the composer meter, a
-// limit card) asks for it there.
+// The Möbius credit meter is the owner's account balance, so no surface
+// (Settings, the composer meter, a limit card) asks for it in a shared-browser
+// guest session. (The matching server-side refusal lands separately, in #2075.)
 const ownerOnlyUsage = provider => provider === 'mobius' && isSharedBrowserAuth()
 
 function useProviderUsageQuery(provider, { enabled = true } = {}) {
@@ -453,14 +453,28 @@ export function hiddenChanges(fromIds, toIds) {
   return changes
 }
 
-// Saves still on the wire across every editor. Only the last one to settle
-// may replace the cache with the server's list, so an earlier answer never
-// briefly undoes a later change that is still shown optimistically.
-let prefsSavesInFlight = 0
+// Picker visibility saves from every editor (Settings switches, Manage
+// models) reach the server one at a time, in the order they were made, so two
+// quick taps on one switch never land out of order. Only the newest save may
+// replace the cache with the server's list, so an earlier answer never briefly
+// undoes a later change still shown optimistically. Each save is time-boxed so
+// one stuck request cannot hold back every later save for the page's life.
+const MODEL_PREFS_SAVE_TIMEOUT_MS = 15_000
+let latestPrefsSave = Promise.resolve(null)
+
+async function sendModelPrefsChanges(changes) {
+  try {
+    const res = await api.owner.modelPrefs.update(changes, { timeoutMs: MODEL_PREFS_SAVE_TIMEOUT_MS })
+    const saved = res.ok ? await res.json() : null
+    return Array.isArray(saved?.hidden_ids) ? saved.hidden_ids : null
+  } catch {
+    return null
+  }
+}
 
 /**
  * Shows `changes` (`{ id: hidden }`) at once and saves only them. Resolves
- * true when the server applied them. After the last save settles the cache
+ * true when the server applied them. After the newest save settles the cache
  * holds the server's list: its answer, or a fresh read after a failure.
  */
 async function saveModelPrefsChanges(queryClient, changes) {
@@ -474,20 +488,14 @@ async function saveModelPrefsChanges(queryClient, changes) {
     }
     return { hidden_ids: [...hidden] }
   })
-  prefsSavesInFlight += 1
-  let saved = null
-  try {
-    const res = await api.owner.modelPrefs.update(changes)
-    if (res.ok) saved = await res.json()
-  } catch {
-    saved = null
-  }
-  prefsSavesInFlight -= 1
-  if (!prefsSavesInFlight) {
-    if (Array.isArray(saved?.hidden_ids)) queryClient.setQueryData(modelPrefsKey, { hidden_ids: saved.hidden_ids })
+  const save = latestPrefsSave.then(() => sendModelPrefsChanges(changes))
+  latestPrefsSave = save
+  const hiddenIds = await save
+  if (latestPrefsSave === save) {
+    if (hiddenIds) queryClient.setQueryData(modelPrefsKey, { hidden_ids: hiddenIds })
     else void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
   }
-  return Array.isArray(saved?.hidden_ids)
+  return Boolean(hiddenIds)
 }
 
 function modelPrefsQueryOptions({ enabled = true } = {}) {

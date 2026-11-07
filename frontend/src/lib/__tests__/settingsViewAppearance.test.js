@@ -197,7 +197,7 @@ test('provider usage is read for connected providers on the overview and only th
 })
 
 test('the Möbius account lives in Settings, with no hand-off to an app', () => {
-  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} onSignedIn=\{onMobiusSignedIn\} \/>/)
+  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} \/>/)
   assert.match(view, /onClick=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}/)
   assert.match(view, /useMobiusAccountSummary\(\)/)
   assert.doesNotMatch(view, /onOpenApp\?\.\('identity'\)|openMobiusYou|Möbius · You|Möbius account<\/strong>/)

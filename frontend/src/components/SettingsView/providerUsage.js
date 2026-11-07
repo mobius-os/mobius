@@ -277,13 +277,18 @@ export function rowUsage(snapshot) {
   return null
 }
 
-/** "54036.32 credits" → "54,036 credits"; anything unexpected is shown as given. */
+/**
+ * "54036.32 credits" → "54,036 credits", "0.42 credits" → "0.4 credits": whole
+ * credits from 10 up, one decimal below, and a positive balance never reads as
+ * 0 ("<0.1 credits"). Anything unexpected is shown as given.
+ */
 export function formatCreditBalance(value) {
   if (typeof value !== 'string' || !value.trim()) return ''
   const match = value.trim().match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/)
   if (!match) return value.trim()
   const amount = Number(match[1])
   if (!Number.isFinite(amount)) return value.trim()
-  const formatted = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(amount)
+  const format = new Intl.NumberFormat(undefined, { maximumFractionDigits: Math.abs(amount) < 10 ? 1 : 0 })
+  const formatted = amount > 0 && amount < 0.05 ? `<${format.format(0.1)}` : format.format(amount)
   return match[2] ? `${formatted} ${match[2]}` : formatted
 }

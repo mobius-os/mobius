@@ -13,7 +13,7 @@ function client(hiddenIds) {
 function serve(t, handler) {
   const sent = []
   t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
-    const request = { url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null }
+    const request = { url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null, signal: init.signal }
     sent.push(request)
     return handler(request)
   })
@@ -64,6 +64,25 @@ test('a failed save marks the list for a fresh read from the server', async t =>
   assert.equal(await modelQueries.prefs.saveChanges(queryClient, { a: false }), false)
   // Any open editor refetches the owner's real list instead of keeping the guess.
   assert.equal(queryClient.getQueryState(modelQueries.prefs.key).isInvalidated, true)
+})
+
+test('a stuck save gives up after its deadline, so later saves still reach the server', async t => {
+  const queryClient = client([])
+  const sent = serve(t, request => request.body?.hidden.a
+    ? new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(request.signal.reason)))
+    : json({ hidden_ids: [] }))
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const stuck = modelQueries.prefs.saveChanges(queryClient, { a: true })
+  const later = modelQueries.prefs.saveChanges(queryClient, { a: false })
+  for (let i = 0; i < 5; i += 1) await Promise.resolve()
+  assert.equal(sent.length, 1)
+  t.mock.timers.tick(15_000)
+  assert.equal(await stuck, false)
+  assert.equal(await later, true)
+  // (A timed-out request also asks the connectivity probe to check the server.)
+  const saves = sent.filter(request => request.method === 'PATCH')
+  assert.deepEqual(saves.map(request => request.body), [{ hidden: { a: true } }, { hidden: { a: false } }])
+  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: [] })
 })
 
 test('Manage models saves the difference between the saved and edited lists', () => {

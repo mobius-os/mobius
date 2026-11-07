@@ -130,22 +130,12 @@ export default function ManageModelsModal({
   const handleSave = useCallback(async () => {
     setSaving(true)
     setError('')
-    try {
-      const res = await api.owner.modelPrefs.update(hiddenChanges(persistedHidden, draftHidden))
-      if (!res.ok) {
-        setError('Could not save preferences. Try again.')
-        return
-      }
-      // The answer is the owner's whole list, including changes made
-      // elsewhere; the picker reads it through the same cache key.
-      const saved = await res.json()
-      queryClient.setQueryData(modelQueries.prefs.key, { hidden_ids: saved?.hidden_ids || [] })
-      onClose()
-    } catch {
-      setError('Network error.')
-    } finally {
-      setSaving(false)
-    }
+    // The shared save path orders this after any Settings switch still on the
+    // wire and leaves the server's whole list in the picker's cache.
+    const saved = await modelQueries.prefs.saveChanges(queryClient, hiddenChanges(persistedHidden, draftHidden))
+    setSaving(false)
+    if (saved) onClose()
+    else setError('Could not save preferences. Try again.')
   }, [draftHidden, persistedHidden, queryClient, onClose])
 
   // Force-refresh registry — bypasses the 5-minute server cache so

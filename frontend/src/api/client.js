@@ -896,8 +896,6 @@ export async function probeDeletion(path) {
   }
 }
 
-let modelPrefsWrites = Promise.resolve()
-
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.
@@ -1625,16 +1623,13 @@ export const api = {
       get: () => apiFetch('/owner/model-prefs'),
       // `hidden` maps only the changed model ids to true (hide) or false
       // (show); the server applies them to the owner's list and answers with
-      // the whole list. Saves go one at a time so two quick taps on the same
-      // switch can never land out of order.
-      update: (hidden) => {
-        const send = modelPrefsWrites.then(() => apiFetch('/owner/model-prefs', {
-          method: 'PATCH',
-          body: JSON.stringify({ hidden }),
-        }))
-        modelPrefsWrites = send.catch(() => {})
-        return send
-      },
+      // the whole list. Callers save through modelQueries.prefs.saveChanges,
+      // which orders saves and owns the cache.
+      update: (hidden, { timeoutMs } = {}) => apiFetch('/owner/model-prefs', {
+        method: 'PATCH',
+        body: JSON.stringify({ hidden }),
+        timeoutMs,
+      }),
     },
     walkthrough: {
       get: () => apiFetch('/owner/walkthrough'),

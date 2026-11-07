@@ -10,6 +10,7 @@ import { settingsQueries } from '../../hooks/queries.js'
 import ProviderUsage from '../../components/SettingsView/ProviderUsage.jsx'
 import {
   clampUsagePercent,
+  formatCreditBalance,
   formatPlanName,
   formatUsagePercent,
   formatTrialTimeLeft,
@@ -207,4 +208,15 @@ test('Claude banked resets require a current provider offer and confirmation', (
   assert.match(usageView, /resets\.nextCreditResetsLeft \|\| null/)
   assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId, expectedResetsLeft\)/)
   assert.match(settingsView, /onRedeemClaudeReset: handleRedeemClaudeReset/)
+})
+
+test('a credit balance keeps enough precision that a small balance is never shown as none', () => {
+  assert.equal(formatCreditBalance('54036.32 credits'), '54,036 credits')
+  assert.equal(formatCreditBalance('12.6 credits'), '13 credits')
+  assert.equal(formatCreditBalance('0.42 credits'), '0.4 credits')
+  assert.equal(formatCreditBalance('9.94 credits'), '9.9 credits')
+  assert.equal(formatCreditBalance('0.04 credits'), '<0.1 credits')
+  assert.equal(formatCreditBalance('0 credits'), '0 credits')
+  assert.equal(formatCreditBalance('-0.4 credits'), '-0.4 credits')
+  assert.equal(formatCreditBalance('lots'), 'lots')
 })

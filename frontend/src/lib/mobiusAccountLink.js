@@ -2,7 +2,8 @@
 import { accountLinkCompletion, accountLinkRegistration } from './accountLinkBroker.js'
 import { mobiusAccessRequest, retryableAccessError } from './mobiusAccount.js'
 
-// The flow (see the Möbius · You ACCOUNT_LINK_FLOW contract):
+// The flow, whose server half is /link/start and /link/complete in
+// backend/app/routes/identity.py:
 //  1. A blank popup opens synchronously inside the click; a blocked popup stops
 //     before any link attempt exists.
 //  2. POST /api/identity/link/start creates state + PKCE server-side and

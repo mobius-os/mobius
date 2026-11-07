@@ -1,6 +1,7 @@
 /* Cached Möbius account reads (identity, model access, picker visibility, Railway inventory) and the cheap summary Settings shows on its Accounts row. */
 import { useQuery } from '@tanstack/react-query'
 import { isSharedBrowserAuth } from '../api/client.js'
+import { authQueries, modelQueries } from './queries.js'
 import useAuthedImageUrl from './useAuthedImageUrl.js'
 import { accountState, mobiusAccessRequest } from '../lib/mobiusAccount.js'
 
@@ -60,18 +61,36 @@ function useRailwayQuery({ enabled = true, refetchInterval = false } = {}) {
   })
 }
 
+function refreshProviders(queryClient) {
+  void authQueries.provider.statuses.invalidate(queryClient)
+  void modelQueries.registry.invalidate(queryClient)
+}
+
 export const mobiusAccountQueries = {
   key: rootKey,
   identity: { key: identityKey, useQuery: useIdentityQuery },
   agent: { key: agentKey, useQuery: useAgentQuery },
   visibility: { key: visibilityKey, useQuery: useVisibilityQuery },
   railway: { key: railwayKey, useQuery: useRailwayQuery },
-  /** Show the identity a sign-in just returned and re-read the rest of the account. */
+  /**
+   * Show the identity a sign-in just returned and re-read the rest of the
+   * account, plus the provider status and model list the account changes, so
+   * every sign-in surface (Settings, the first-run guide) leaves the picker
+   * current.
+   */
   signedIn: (queryClient, identity) => {
     queryClient.setQueryData(identityKey, identity)
+    refreshProviders(queryClient)
     return queryClient.invalidateQueries({ queryKey: rootKey, predicate: query => query.queryKey[1] !== 'account' })
   },
-  /** Re-read everything account-shaped, e.g. after signing in or out. */
+  /** Forget the signed-out account's deployments and agent, then re-read the rest. */
+  signedOut: queryClient => {
+    queryClient.removeQueries({ queryKey: railwayKey })
+    queryClient.removeQueries({ queryKey: agentKey })
+    refreshProviders(queryClient)
+    return queryClient.invalidateQueries({ queryKey: rootKey })
+  },
+  /** Re-read everything account-shaped, e.g. when the account page is shown again. */
   invalidate: queryClient => queryClient.invalidateQueries({ queryKey: rootKey }),
 }
 
