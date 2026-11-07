@@ -411,8 +411,8 @@ def test_conflict_serves_old_and_flags(clone_env):
 
 def test_conflict_flags_newer_updates_when_origin_advances(clone_env):
   """A pinned conflict reports ``newer_updates_available`` once origin/main moves
-  past the version it is pinned to, so Settings can offer one combined
-  review+resolve instead of forcing a resolve per stacked release."""
+  past the version it is pinned to, so Settings can suggest cancelling it and
+  reviewing the latest instead of resolving a stale release."""
   origin, platform = clone_env
   _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
@@ -429,6 +429,24 @@ def test_conflict_flags_newer_updates_when_origin_advances(clone_env):
 
   status = pu.platform_status(platform)
   assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
+  assert status["newer_updates_available"] is True
+
+
+def test_prepared_update_flags_newer_when_origin_advances(clone_env):
+  """A prepared (finish-stage) update, not just a conflict, reports
+  ``newer_updates_available`` once origin/main moves past the release it is
+  pinned to, so Settings can suggest cancelling it and reviewing the latest."""
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert pu.unfinished_update(platform)["stage"] == "finish"
+  assert pu.platform_status(platform)["newer_updates_available"] is False
+
+  _advance_origin(origin, edits={"docs/RELEASE.md": "later\n"}, msg="later deploy")
+  _git(platform, "fetch", "-q", "origin")
+
+  status = pu.platform_status(platform)
+  assert status["unfinished_update"]["stage"] == "finish"
   assert status["newer_updates_available"] is True
 
 
@@ -2425,7 +2443,7 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   ).stdout.strip()
   assert status["installed_release_sha"] == installed
   assert status["recorded_upstream_sha"] == installed
-  # This field is deliberately about releases stacked behind a conflict, not
+  # This field is about releases stacked behind an in-flight update, not
   # ordinary update availability. ``available`` is the ordinary signal.
   assert status["newer_updates_available"] is False
   # A check only advances remote-tracking refs — the served tree is NOT mutated.

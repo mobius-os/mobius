@@ -381,10 +381,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # Conflict-only backlog signal. This remains false outside ``state ==
-  # "conflict"`` even when ``available`` is true. While resolving a conflict it
-  # becomes true when origin/main advances past the pinned release, letting
-  # Settings offer one combined review+resolve instead of one per release.
+  # Backlog signal for an in-flight update: true when ``unfinished_update``
+  # is pinned to a release (resolving, prepared/finishing or settling) and
+  # the selected release strictly descends it. It stays false for an ordinary
+  # ``available`` update with nothing in flight: that release is itself the
+  # thing to apply. Settings uses it to suggest cancelling the stale update
+  # and reviewing the latest instead; nothing switches automatically.
   # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
@@ -5745,18 +5747,18 @@ def platform_status(
   current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
   blocker = restart_blocker(repo)
+  # Newer releases stacked up behind the update in flight wait until it
+  # finishes or is cancelled; ``target`` is the last-fetched selected release.
+  pending = unfinished_update(repo)
+  pinned = pending["target_sha"] if pending else None
+  newer_available = bool(
+    target and pinned and target != pinned
+    and _is_ancestor(repo, pinned, target)
+  )
 
   if conflict:
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
-    # `target` is the last-fetched origin/main. If it strictly descends the
-    # version this conflict is pinned to, newer releases stacked up behind it.
-    # They wait until this one finishes (see ``unfinished_update``).
-    conflict_target = flag.get("upstream")
-    newer_available = bool(
-      target and conflict_target and target != conflict_target
-      and _is_ancestor(repo, conflict_target, target)
-    )
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
@@ -5776,7 +5778,7 @@ def platform_status(
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
       recovery_refs=recovery_refs,
-      unfinished_update=unfinished_update(repo),
+      unfinished_update=pending,
       local_overlay=local_overlay_summary(repo, local=local, target=target),
       restart_blocker=blocker,
       )
@@ -5821,11 +5823,11 @@ def platform_status(
     current_build_committed_at=current_build_committed_at,
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
-    newer_updates_available=False,
+    newer_updates_available=newer_available,
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
     recovery_refs=recovery_refs,
-    unfinished_update=unfinished_update(repo),
+    unfinished_update=pending,
     local_overlay=local_overlay_summary(repo, local=local, target=target),
     restart_blocker=blocker,
   )
