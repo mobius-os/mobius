@@ -756,15 +756,16 @@ class ClaudeProvider(BaseProvider):
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
-    if not creds.exists():
+    try:
+      raw = _read_claude_credentials(creds) if creds.exists() else {}
+    except (OSError, ValueError):  # also an int past Python's digit limit
+      raw = None
+    if isinstance(raw, dict) and "claudeAiOauth" not in raw:
+      # No file, or one a disconnect left with only MCP sign-ins.
       return (
         "Not signed in. Open Settings and connect "
         "under AI provider."
       )
-    try:
-      raw = json.loads(creds.read_text())
-    except (json.JSONDecodeError, OSError, UnicodeError):
-      raw = None
     oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
     if isinstance(oauth, dict):
       access_token = oauth.get("accessToken")
@@ -1716,9 +1717,10 @@ _CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
 # The CLI treats a stored sign-in end more than this far before the access
 # token's own expiry as stale and reports no end at all.
 _CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
-# The top-level credential keys that belong to one Claude account: the CLI's
-# own sign-in removes exactly these, so a new sign-in never inherits another
-# account's, and keeps the rest (such as mcpOAuth).
+# The top-level credential keys that belong to one Claude account. The CLI's
+# own sign-in removes exactly these and keeps the rest (such as mcpOAuth), so
+# a new sign-in never inherits another account's; a Möbius disconnect removes
+# the same set. (The CLI's logout deletes the whole file, MCP sign-ins too.)
 _CLAUDE_ACCOUNT_KEYS = (
   "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
   "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
@@ -1729,15 +1731,14 @@ _CLAUDE_ACCOUNT_KEYS = (
 def _finite_number(value: Any) -> float | None:
   """A stored time or duration, or None unless it is a finite non-bool number.
 
-  Python ints are exact and always finite (math.isfinite would overflow on
-  one beyond float range), so they are returned as they are."""
-  if isinstance(value, bool):
+  An int is returned exact, unless it is beyond float range: the CLI reads
+  that as Infinity, and callers compare it with the float clock."""
+  if isinstance(value, bool) or not isinstance(value, (int, float)):
     return None
-  if isinstance(value, int):
-    return value
-  if isinstance(value, float) and math.isfinite(value):
-    return value
-  return None
+  try:
+    return value if math.isfinite(value) else None
+  except OverflowError:
+    return None
 
 
 def _claude_login_end_ms(value: Any) -> float | None:
@@ -1783,11 +1784,12 @@ def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
 
   A new sign-in needs an access token, a refresh token and an `expires_in`
   that ends after now and within the latest sign-in end the CLI accepts. A
-  refresh needs only an access token: Anthropic has already rotated the
-  single-use refresh token, so its response is always kept. Like the CLI, a
-  refresh without a `refresh_token` keeps the stored one, and an unusable
-  `expires_in` saves the tokens with the access token already expired, so
-  the next use refreshes again.
+  refresh needs an access token; one without is refused, so the next turn
+  fails and asks the owner to reconnect. Otherwise its response is kept, since Anthropic has already
+  rotated the single-use refresh token: like the CLI, a refresh without a
+  `refresh_token` keeps the stored one, and an unusable `expires_in` saves
+  the tokens with the access token already expired, so the next use
+  refreshes again.
 
   The sign-in end follows the CLI: a new sign-in records the response's
   `refresh_token_expires_in` (and no end, rather than the CLI's 30-day
@@ -1847,17 +1849,16 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   if not creds_path.exists():
     raise RuntimeError("claude credentials missing")
-  raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
+  oauth = _read_claude_credentials(creds_path).get("claudeAiOauth")
   if not isinstance(oauth, dict):
     raise RuntimeError("claude credentials malformed")
   return creds_path, oauth
 
 
-def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
-  """Persist a claudeAiOauth block, or remove it when oauth is None,
-  in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
-  leave a truncated file the chat path then reads).
+def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
+  """Persist a claudeAiOauth block in the CLI's expected shape (atomic
+  tmp+rename so a crash mid-write can't leave a truncated file the chat path
+  then reads).
 
   Writing it back is the point of refreshing here: the chat runner and the
   CLI read the same file, so a refresh on the registry path also un-expires
@@ -1872,13 +1873,8 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
   try:
     raw = _read_claude_credentials(creds_path)
   except (OSError, ValueError):
-    if oauth is None:
-      raise  # Disconnect must not discard unrelated, unreadable credentials.
     raw = {}
-  if oauth is None:
-    raw.pop("claudeAiOauth", None)
-  else:
-    raw["claudeAiOauth"] = oauth
+  raw["claudeAiOauth"] = oauth
   _replace_claude_credentials(creds_path, raw)
 
 
@@ -1909,8 +1905,13 @@ def write_claude_sign_in(creds_path: Path, tokens: Any) -> str:
 
 
 def _read_claude_credentials(creds_path: Path) -> dict:
-  """The credentials file as an object; raises OSError or ValueError."""
-  raw = json.loads(creds_path.read_text())
+  """The credentials file as an object; raises OSError or ValueError, the
+  latter for anything json.loads cannot read (including a too-deeply nested
+  file, which it reports as RecursionError)."""
+  try:
+    raw = json.loads(creds_path.read_text())
+  except RecursionError as exc:
+    raise ValueError("Claude credentials are nested too deeply") from exc
   if not isinstance(raw, dict):
     raise ValueError("Claude credentials are not an object")
   return raw
@@ -1938,6 +1939,11 @@ def _replace_claude_credentials(creds_path: Path, raw: dict) -> None:
 async def disconnect_provider(data_dir: str, provider_id: str) -> None:
   """Remove only the local provider sign-in, not configuration or MCP access.
 
+  A Claude disconnect removes every account-bound key (_CLAUDE_ACCOUNT_KEYS),
+  so no trusted-device token or account id stays on disk, and keeps the rest
+  such as MCP sign-ins (the CLI's own logout deletes the whole file). An
+  unreadable credentials file raises rather than being discarded.
+
   Already-running SDKs may retain their session; this is not remote token
   revocation. Login cancellation belongs to the auth route. The Claude lock
   prevents an in-flight model-registry refresh from restoring removed tokens.
@@ -1946,7 +1952,10 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
     async with _claude_refresh_lock:
       path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
       if path.exists():
-        _write_claude_oauth(path, None)
+        raw = _read_claude_credentials(path)
+        for key in _CLAUDE_ACCOUNT_KEYS:
+          raw.pop(key, None)
+        _replace_claude_credentials(path, raw)
   elif provider_id == "codex":
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   else:
@@ -2060,10 +2069,14 @@ def claude_login_expires_at(data_dir: str) -> str | None:
   except (OSError, RuntimeError, ValueError):
     return None
   end = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
-  access = _finite_number(oauth.get("expiresAt"))
   if not oauth.get("refreshToken") or end is None:
     return None
-  if access is not None and access - end > _CLAUDE_LOGIN_END_STALE_MS:
+  # Compare the raw stored expiry, as the CLI does: a value beyond float
+  # range is Infinity there and marks the end stale. Python compares an int
+  # with a float exactly, so this cannot overflow.
+  access = oauth.get("expiresAt")
+  if (isinstance(access, (int, float)) and not isinstance(access, bool)
+      and access > end + _CLAUDE_LOGIN_END_STALE_MS):
     return None
   ended = datetime.fromtimestamp(end / 1000, timezone.utc)
   return ended.isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -2073,8 +2086,7 @@ def claude_organization_uuid(data_dir: str) -> str:
   """Return the connected Claude organization identity, never its secrets."""
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   try:
-    raw = json.loads(creds_path.read_text())
-    value = raw.get("organizationUuid") if isinstance(raw, dict) else None
+    value = _read_claude_credentials(creds_path).get("organizationUuid")
     parsed = uuid.UUID(value) if isinstance(value, str) else None
   except (OSError, ValueError, AttributeError) as exc:
     raise RuntimeError("Claude organization identity is unavailable") from exc
