@@ -464,8 +464,22 @@ test('no rows and no visible action fold the block to one line, with a jump only
   const html = appRowsView(fields, { onJump: () => {} })
   assert.match(html, /<section class="md-app-block md-app-block--folded" aria-label="Continued below">/)
   assert.match(html, /<button type="button" class="md-app-block__jump">Jump to latest<svg/)
-  assert.doesNotMatch(html, /<footer>|md-app-block__items|Saved row/)
+  assert.doesNotMatch(html, /<footer>|md-app-block__items|Saved row|md-app-block__open/, 'one quiet line: the jump replaces the open link')
   assert.doesNotMatch(appRowsView(fields), /md-app-block__jump/)
+  assert.match(appRowsView(fields), /md-app-block__open/, 'the newest folded block keeps its open link')
   assert.doesNotMatch(appRowsView({ ...fields, actions: [{ key: 'send-batch:sel-1', label: 'Send all' }] }), /md-app-block--folded/,
     'a visible action keeps the block open')
+})
+
+test('jumping to the newest block moves focus there, without animation for reduced motion', async () => {
+  const { jumpTo } = await import('../markdown/PassiveAppBlock.jsx')
+  const calls = []
+  const node = { attrs: {}, hasAttribute(name) { return name in this.attrs }, setAttribute(name, value) { this.attrs[name] = value },
+    scrollIntoView: options => calls.push(['scroll', options.behavior]), focus: options => calls.push(['focus', options.preventScroll]) }
+  const previous = globalThis.window
+  globalThis.window = { matchMedia: query => ({ matches: query.includes('reduce') }) }
+  try { jumpTo(node) } finally { globalThis.window = previous }
+  assert.deepEqual(calls, [['scroll', 'auto'], ['focus', true]])
+  assert.equal(node.attrs.tabindex, '-1')
+  jumpTo(null)
 })

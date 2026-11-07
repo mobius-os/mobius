@@ -527,9 +527,11 @@ intent against your own data before you build a confirmation, and build that
 confirmation list from your data, never from the block.
 
 `context` is attested by the chat host, never read from the block:
-`{chatId, latest}` when the block is in a chat transcript, otherwise `null`.
-`chatId` is the chat the block is rendered in, and `latest` is whether it is
-that chat's newest block with the same app and block `intent`; it changes to
+`{chatId, latest, intent}` when the block is in a chat transcript, otherwise
+`null`. `chatId` is the chat the block is rendered in, `intent` the block's own
+parsed intent, and `latest` is whether it is that chat's newest block with the
+same app and that `intent` (check `intent` before relying on `latest` as
+"newest of my kind": a block printed with another intent is its own group); it changes to
 `false` (in a new `app-block-init`) as soon as a newer one appears. Use
 `chatId` to scope what the block shows to that chat's own data, so a block
 printed in one chat can never act on another chat's records; use `latest` to
@@ -615,7 +617,8 @@ included.
   without rows. Omit `rows` to keep the saved items; `[]` shows none. With no
   rows, no visible action and no `summary`, the block folds to one quiet line
   (your `title`, for example "Continued below"); when it is not the chat's
-  newest block of its kind, that line offers "Jump to latest".
+  newest block of its kind, that line offers "Jump to latest" (which moves
+  focus to the newest block) in place of its open link.
 - `itemFacts: "values"`: the same value-only row facts as the block's
   `item_facts`, for rows whose values read on their own. Confirmation rows
   keep their labels.

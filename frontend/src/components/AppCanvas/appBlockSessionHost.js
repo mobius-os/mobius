@@ -39,7 +39,8 @@ export function blockSessionEnvelope(session, generation) {
     features: Array.isArray(session.features) ? session.features : [],
     checkpoint: session.checkpoint ?? null, retain: session.retain === true,
     recoveryError: session.recoveryError ?? null,
-    ...(session.context ? { context: { chatId: session.context.chatId, latest: session.context.latest !== false } } : {}) }
+    ...(session.context ? { context: { chatId: session.context.chatId, latest: session.context.latest !== false,
+      intent: typeof session.context.intent === 'string' ? session.context.intent : '' } } : {}) }
 }
 
 /** Whether app-reported state may reach the block host: it must come from

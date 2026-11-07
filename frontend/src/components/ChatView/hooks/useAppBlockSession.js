@@ -117,11 +117,14 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   // chat's newest block of its app and intent. Never read from block JSON.
   const chatId = typeof context?.chatId === 'string' && context.chatId ? context.chatId : null
   const latest = context?.latest !== false
+  // `intent` names the group `latest` is computed in: this block's app and
+  // its parsed block intent.
+  const blockIntent = block.intent
   const blockSession = useMemo(() => ({
     sessionId, actions, items, features: SESSION_FEATURES, retain: retained, recoveryError,
     checkpoint: checkpointId ? { id: checkpointId, data: checkpointData } : null,
-    ...(chatId ? { context: { chatId, latest } } : {}),
-  }), [sessionId, actions, items, retained, recoveryError, checkpointId, checkpointData, chatId, latest])
+    ...(chatId ? { context: { chatId, latest, intent: blockIntent } } : {}),
+  }), [sessionId, actions, items, retained, recoveryError, checkpointId, checkpointData, chatId, latest, blockIntent])
 
   // A refresh hint reaches only a document that is mounted and supported when
   // the hint is raised; a document that loads later reads on its own start.

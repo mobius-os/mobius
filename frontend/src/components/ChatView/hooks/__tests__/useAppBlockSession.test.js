@@ -495,12 +495,13 @@ test('the session init carries the parsed item intents, in card order, intents o
 
 test('the envelope carries the host-attested chat context and follows the newest-block verdict', () => {
   const h = renderObserved({ block, near: true, context: { chatId: 'chat-1', latest: true } })
-  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: true })
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: true, intent: 'open:a' },
+    'the context names the block intent its newest-block verdict is computed for')
   assert.ok(h.result.current.blockSession.features.includes('rows-v2'))
   const before = h.result.current.blockSession
   h.rerender({ block, near: true, context: { chatId: 'chat-1', latest: false } })
   assert.notEqual(h.result.current.blockSession, before, 'a changed verdict is a new envelope, so init is posted again')
-  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: false })
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: false, intent: 'open:a' })
   h.rerender({ block, near: true, context: null })
   assert.equal('context' in h.result.current.blockSession, false, 'outside a chat there is no context')
   h.rerender({ block, near: true, context: { chatId: '', latest: true } })

@@ -84,9 +84,9 @@ test('an ordinary shell app keeps its background host requests while another vie
 test('the envelope carries only the host-attested chat context, normalized', () => {
   const session = { sessionId: 's', actions: [], items: [], features: ['row-state', 'rows-v2'] }
   assert.equal('context' in blockSessionEnvelope(session, 4), false, 'no context outside a chat')
-  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1', latest: false, extra: 'x' } }, 4).context,
-    { chatId: 'chat-1', latest: false })
-  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1' } }, 4).context, { chatId: 'chat-1', latest: true })
+  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1', latest: false, intent: 'chat:x', extra: 'x' } }, 4).context,
+    { chatId: 'chat-1', latest: false, intent: 'chat:x' })
+  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1' } }, 4).context, { chatId: 'chat-1', latest: true, intent: '' })
 })
 
 test('a refresh hint reaches only the document generation it was raised for, once', () => {

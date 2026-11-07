@@ -125,6 +125,16 @@ function SessionHost({ app, session }) {
   </div>
 }
 
+/** Bring the newest block into view and move keyboard focus to it, without
+ *  animation when the reader prefers reduced motion. */
+export function jumpTo(node) {
+  if (!node) return
+  const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  node.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+  if (!node.hasAttribute('tabindex')) node.setAttribute('tabindex', '-1')
+  node.focus({ preventScroll: true })
+}
+
 export const ADMISSION_WITHDRAWN = name =>
   `${name} can no longer run in this chat. Open ${name} to check the result of the last action before trying again.`
 
@@ -158,7 +168,7 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
-    onJump={chat.context?.latest === false ? () => chat.newestNode()?.scrollIntoView({ block: 'center', behavior: 'smooth' }) : null}>
+    onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>
 }

@@ -145,8 +145,9 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
       <Badges badges={block.badges} />
       {folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
         Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null}
-      <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
-        Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>
+      {/* A folded line that jumps to its newest sibling needs no second link. */}
+      {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
+        Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
     </header>
     {/* While the rows are the app's confirmation or its own rows, nothing is
         added around them. A live title is the app's; saved rows are still the

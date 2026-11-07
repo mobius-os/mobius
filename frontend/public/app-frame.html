@@ -1023,7 +1023,7 @@
     //  11. transcript block session (building-apps.md "Passive block
     //      sessions"): frame-init may carry blockSession {sessionId,
     //      generation, actions, items, features, checkpoint, retain,
-    //      recoveryError, context}. `context` {chatId, latest} is attested by
+    //      recoveryError, context}. `context` {chatId, latest, intent} is attested by
     //      the chat host, never by block JSON. Only a
     //      server-admitted revision whose bytes match _FRAME_PASSIVE_BLOCK_DIGEST
     //      and whose module exports `appBlockSessions = true` mounts; it gets
@@ -1525,7 +1525,8 @@
         items: Array.isArray(session.items) ? session.items : [],
         features: Array.isArray(session.features) ? session.features : [],
         context: session.context && typeof session.context.chatId === 'string'
-          ? Object.freeze({ chatId: session.context.chatId, latest: session.context.latest !== false }) : null,
+          ? Object.freeze({ chatId: session.context.chatId, latest: session.context.latest !== false,
+            intent: typeof session.context.intent === 'string' ? session.context.intent : '' }) : null,
         checkpoint: session.checkpoint || null,
         retain: session.retain === true,
         recoveryError: session.recoveryError || null,

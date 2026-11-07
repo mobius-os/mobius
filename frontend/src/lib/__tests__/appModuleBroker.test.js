@@ -263,8 +263,8 @@ test('the app block-session handle mirrors the init envelope and stamps its own 
 })
 
 test('a refresh hint reaches the app only for this session and generation, and the handle carries the host context', () => {
-  const on = blockSessionFrame({ session: { sessionId: 's', generation: 3, actions: [], context: { chatId: 'chat-1', latest: false, extra: 1 } } })
-  assert.deepEqual(on.api.context, { chatId: 'chat-1', latest: false })
+  const on = blockSessionFrame({ session: { sessionId: 's', generation: 3, actions: [], context: { chatId: 'chat-1', latest: false, intent: 'chat:x', extra: 1 } } })
+  assert.deepEqual(on.api.context, { chatId: 'chat-1', latest: false, intent: 'chat:x' })
   assert.ok(Object.isFrozen(on.api.context))
   assert.equal(on.makeApi({ sessionId: 's', generation: 1 }).context, null, 'no host context outside a chat')
   assert.equal(on.makeApi({ sessionId: 's', generation: 1, context: { chatId: 7 } }).context, null)

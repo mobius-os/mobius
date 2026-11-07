@@ -139,5 +139,4 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
   color:var(--accent-text, var(--accent)); font:inherit; font-size:13px; font-weight:600; white-space:nowrap; cursor:pointer; }
 .md-app-block__jump:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__jump:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-.md-app-block--folded .md-app-block__jump + .md-app-block__open { margin-left:0; }
 .md-app-block--folded .md-app-block__jump { margin-left:auto; }
