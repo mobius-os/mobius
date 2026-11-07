@@ -775,7 +775,9 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   assert "trial" not in app_body["mobius"]
 
   # A shared-browser guest uses the same models, but not the owner's credit.
+  from app import models
   from app.browser_access import BrowserLineage, redeem_invitation
+  from app.database import SessionLocal
   from tests.browser_access_fixtures import link_grant
   with SessionLocal() as session:
     owner = session.query(models.Owner).one()
