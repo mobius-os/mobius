@@ -1100,9 +1100,9 @@ def _host_options(
       stderr=capture_stderr,
       hooks={
         # PreToolUse owns dispatch identity, built-in-tool denial and each
-        # helper's env file, so a hook that raises or times out (an identity
-        # that never settles) must block the call, not run it unscoped. Every
-        # no-opinion path returns {}: under "block" a None return also blocks.
+        # helper's env file, so a hook that raises or returns no valid
+        # decision must block the call, not run it unscoped (a timeout already
+        # blocks). Every no-opinion path returns {}, since None now blocks.
         # The post-tool and lifecycle hooks below stay permissive on purpose:
         # failing them closed would misreport a tool that already ran.
         "PreToolUse": [HookMatcher(

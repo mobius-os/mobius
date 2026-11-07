@@ -1507,7 +1507,8 @@ async def run_claude_sdk_turn(
       "stderr": _capture_stderr,
       "hooks": {
         # The queued-prompt gate keeps Stop and a saved owner card final, so a
-        # failure refuses the prompt rather than letting it start new work.
+        # hook that raises or returns no valid decision refuses the prompt
+        # rather than letting it start new work.
         # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
         # one closed would turn a completed tool (even the saved card itself)
         # into an error result, inviting a duplicate.

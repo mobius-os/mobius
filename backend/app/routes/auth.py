@@ -720,13 +720,9 @@ async def _provider_signin_changed(provider_id: str) -> None:
   Every sign-in and sign-out ends here, so no picker keeps the offline fallback
   cached before connecting (or live models cached before disconnecting).
   """
-  from app.providers import PROVIDERS, ClaudeProvider, forget_provider_models
+  from app.providers import forget_provider_models
   from app.provider_usage import forget_provider_usage
   forget_provider_usage(provider_id, get_settings().data_dir)
-  provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, ClaudeProvider):
-    # A new sign-in has its own expiry; sign-out has none.
-    provider.forget_account_reads()
   await forget_provider_models(provider_id)
   get_system_broadcast().publish({
     "type": "model_providers_changed", "provider": provider_id,
@@ -771,9 +767,10 @@ def _write_credentials(token_data: dict) -> None:
     "scopes": token_data.get("scope", "").split(),
     "email": email,
   }
-  # The sign-in's hard end, stored the way the CLI's own login stores it. The
-  # CLI reports it as `loginExpiresAt` and check_auth honors it; refreshes keep
-  # it, since renewing does not move that date. Absent stays absent.
+  # The sign-in's hard end, in the field the CLI reports as `loginExpiresAt`
+  # and check_auth honors; refreshes keep it. When the response has no
+  # refresh_token_expires_in, Möbius leaves it absent (unknown) rather than
+  # assuming the CLI's 30-day default.
   refresh_expires_in = token_data.get("refresh_token_expires_in")
   if (isinstance(refresh_expires_in, (int, float))
       and not isinstance(refresh_expires_in, bool) and refresh_expires_in > 0):
@@ -940,14 +937,8 @@ async def providers_status(
       except Exception:
         out[pid]["trial"] = None
     if pid == "claude" and error is None and is_owner_caller:
-      try:
-        out[pid]["login_expires_at"] = await run_in_threadpool(
-          provider.login_expires_at, data_dir,
-        )
-      except Exception as exc:
-        # The status output names the account; log only the failure kind.
-        log.info("claude sign-in expiry unavailable: %s", type(exc).__name__)
-        out[pid]["login_expires_at"] = None
+      from app.providers import claude_login_expires_at
+      out[pid]["login_expires_at"] = claude_login_expires_at(data_dir)
   return out
 
 

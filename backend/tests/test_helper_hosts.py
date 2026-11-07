@@ -1017,7 +1017,7 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
 
 
 def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tmp_path):
-  """A raising or timed-out identity/env hook must block, not run unscoped."""
+  """A raising or invalid identity/env hook must block, not run unscoped."""
   from contextlib import ExitStack
   from types import SimpleNamespace
 
