@@ -1992,6 +1992,7 @@ def serves_image_release(
   if activation is None:
     activation = _platform_activation_impact(
       repo, served_to_head=_activation_paths_between(repo, served_sha, head),
+      read_host=True,
     )
   return activation["level"] == platform_activation.ActivationLevel.LIVE.value
 
@@ -4942,12 +4943,14 @@ def _working_overlay_commit(repo: Path, parent: str, tree: str) -> str:
 
 
 def _record_update_activation(
-  repo: Path, head: str | None, target: str | None,
+  repo: Path, head: str | None, target: str | None, *, read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Record what the running process still owes for the release at ``head``.
 
   Compare what this process imported to the new head, not only the incoming
   target: local commits made while uvicorn ran are part of the same remainder.
+  The marker always records host work; ``read_host`` (the owner's Apply
+  response) only discounts certified host work in the returned impact.
   """
   served = _served_platform_sha()
   changed_paths = _activation_paths_between(repo, served, head)
@@ -4963,7 +4966,7 @@ def _record_update_activation(
       upstream_sha=target, repo=repo,
     )
   return _platform_activation_impact(
-    repo, served_to_head=changed_paths, release=release,
+    repo, served_to_head=changed_paths, release=release, read_host=read_host,
   )
 
 
@@ -6375,7 +6378,7 @@ def _apply_platform_update_sync(
       chat_id: str | None = None
 
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
-        return _record_update_activation(repo, head, res.target_sha)
+        return _record_update_activation(repo, head, res.target_sha, read_host=True)
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)

@@ -2232,6 +2232,27 @@ def test_a_host_binding_ends_only_with_proof_the_request_cannot_run(
 
 
 @pytest.mark.asyncio
+async def test_a_bound_replacement_may_run_until_its_end_is_proven(
+  tmp_path, monkeypatch,
+):
+  control, inbox = _install_control(tmp_path, monkeypatch)
+  nonce = "e" * 32
+  record = {**_prepared_record("c" * 40), "operation": None}
+  monkeypatch.setattr(dc.platform_update, "read_prepared_update", lambda: record)
+  assert await dc.bound_replacement_may_run() is False  # nothing bound
+
+  record["operation"] = {"controller": "host", "id": nonce}
+  (control / "status.json").write_text(
+    json.dumps({"state": "preparing", "request_nonce": nonce}), encoding="utf-8",
+  )
+  assert await dc.bound_replacement_may_run() is True
+  (control / "status.json").write_text(
+    json.dumps({"state": "failed", "request_nonce": nonce}), encoding="utf-8",
+  )
+  assert await dc.bound_replacement_may_run() is False
+
+
+@pytest.mark.asyncio
 async def test_seeing_nothing_running_does_not_release_a_host_binding(
   tmp_path, monkeypatch, bound_operations,
 ):

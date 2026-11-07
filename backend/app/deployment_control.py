@@ -812,6 +812,14 @@ async def _binding_ended(operation: dict) -> bool:
   return True
 
 
+async def bound_replacement_may_run() -> bool:
+  """Whether the prepared update's bound replacement may still start or
+  succeed. Cancelling refuses exactly then: ``release_ended_binding`` frees
+  only a binding whose replacement provably ended."""
+  operation = await asyncio.to_thread(_bound_operation)
+  return operation is not None and not await _binding_ended(operation)
+
+
 async def release_ended_binding() -> None:
   """Before cancelling a prepared update, release a binding whose
   replacement provably ended. Anything short of that proof keeps it, and

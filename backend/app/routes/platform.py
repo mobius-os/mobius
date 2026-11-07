@@ -121,6 +121,18 @@ def _with_stall(read_status, **kwargs) -> PlatformStatus:
     return platform_update.with_update_stall(db, status)
 
 
+async def _with_cancel_proof(status: PlatformStatus) -> PlatformStatus:
+  """Offer Cancel only when cancelling can succeed. The updater alone cannot
+  tell whether a bound replacement ended; the deployment controller can."""
+  pending = status.get("unfinished_update")
+  if (
+    pending and pending["cancellable"]
+    and await deployment_control.bound_replacement_may_run()
+  ):
+    status["unfinished_update"] = {**pending, "cancellable": False}
+  return status
+
+
 @router.get("/status")
 async def get_platform_status(
   _: models.Owner = Depends(get_current_owner),
@@ -137,11 +149,13 @@ async def get_platform_status(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
+      return await _with_cancel_proof(await asyncio.to_thread(
         _with_stall, platform_update.platform_status,
         target_sha=release["build_sha"],
-      )
-    return await asyncio.to_thread(_with_stall, platform_update.platform_status)
+      ))
+    return await _with_cancel_proof(
+      await asyncio.to_thread(_with_stall, platform_update.platform_status),
+    )
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -169,11 +183,13 @@ async def check_platform_updates(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
+      return await _with_cancel_proof(await asyncio.to_thread(
         platform_update.check_for_updates,
         target_sha=release["build_sha"],
-      )
-    return await asyncio.to_thread(platform_update.check_for_updates)
+      ))
+    return await _with_cancel_proof(
+      await asyncio.to_thread(platform_update.check_for_updates),
+    )
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,

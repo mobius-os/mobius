@@ -4119,6 +4119,66 @@ def test_review_asks_the_host_about_the_exact_incoming_release(
   )["level"] != "host_maintenance"
 
 
+def test_rebuild_request_and_finish_review_use_the_host_certification(
+  clone_env, monkeypatch,
+):
+  """The reviewed rebuild request, the finish review of a prepared update and
+  the Apply response judge a helper-raising release by the evidence the owner
+  reviewed: a certified host leaves only the image replacement, so dispatch is
+  not refused as external activation. The marker still records the work."""
+  from app import deployment_control
+
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: "self_hosted")
+  origin, platform = clone_env
+  current = _served_sha(platform)
+  marker = "deployment/self-hosted-helper.required"
+  target = _advance_origin(origin, edits={
+    "Dockerfile": "FROM official-new\n", marker: "99\n",
+  })
+  _git(platform, "fetch", "origin")
+  certified = []
+  monkeypatch.setattr(
+    deployment_control, "host_helper_meets_release",
+    lambda release=None, repo=None: bool(certified),
+  )
+
+  def reviewed():
+    preview = pu.platform_update_preview(platform, target_sha=target)
+    return pu.reviewed_container_rebuild_plan(
+      repo=platform, plan_id=preview["plan_id"], current_sha=current,
+      target_sha=target, image_digest=None,
+    )
+
+  def finish_review():
+    record = {
+      "state": "prepared", "snapshot": current, "prepared": target,
+      "target": target, "image_digest": None, "requires_image": True,
+      "local_tests": None,
+    }
+    with monkeypatch.context() as m:
+      m.setattr(pu, "read_prepared_update", lambda: record)
+      return pu.prepared_update_preview(platform)["activation"]
+
+  plan = reviewed()
+  assert platform_activation.requires_agent_activation(plan["activation"])
+  assert "host_maintenance" in finish_review()["required_actions"]
+
+  certified.append(True)
+  plan = reviewed()
+  assert plan["activation"]["required_actions"] == ["image_rebuild"]
+  assert plan["incoming_activation"]["required_actions"] == ["image_rebuild"]
+  assert not platform_activation.requires_agent_activation(plan["activation"])
+  assert finish_review()["required_actions"] == ["image_rebuild"]
+
+  # The Apply response discounts certified host work; the marker keeps it.
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(current + "\n")
+  head = _local_commit(platform, edits={marker: "99\n"})
+  impact = pu._record_update_activation(platform, head, current, read_host=True)
+  assert "host_maintenance" not in impact["required_actions"]
+  assert marker in pu._read_activation_marker()["paths"]
+
+
 def test_boot_and_record_paths_never_read_host_helper_evidence(
   clone_env, monkeypatch,
 ):
@@ -5398,7 +5458,7 @@ async def test_apply_keeps_cross_process_lock_through_final_progress(
   # Keep its real flock and durable progress writes; isolate unrelated work so
   # bounded event waits contain a broken handshake, not a full update's runtime.
   monkeypatch.setattr(pu, "_reconcile_under_lock", reconciled)
-  monkeypatch.setattr(pu, "_record_update_activation", lambda *_args:
+  monkeypatch.setattr(pu, "_record_update_activation", lambda *_args, **_kw:
     platform_activation.classify_activation([]))
   monkeypatch.setattr(pu, "_refresh_git_hooks", lambda *_args: None)
   monkeypatch.setattr(pu, "_set_update_progress", paused_progress)
