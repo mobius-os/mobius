@@ -849,6 +849,29 @@ reaches the server again. An admitted module that does not export
 the block falls back to an explicit, visible open. That verdict belongs to one
 applied revision; after an update the block negotiates again.
 
+`chat.blocks.ask` v1 extends an admitted passive session with one more
+host-drawn control. The app reports only references (`{id, code, rev}`, 1 to
+12, strict ASCII patterns; `rev` is a lower-case hex token naming the reported
+state) to things the chat's agent should fix. The host draws its own **Fix in
+chat** button, and when the owner presses it, the host sends an owner message
+written entirely by the host: a fixed sentence naming the app, then one
+`<app slug> · <id> · <code>` line per reference. The app supplies no words,
+receives no event, and the press causes no app effect. The host draws an ask
+only on the newest block of its app and intent in the chat the transcript
+attests, never while an action is confirming or busy or during recovery. The
+message's client id is a hash of the chat, the block's saved content and the
+sorted references with their revisions, with no clock in it, so the server's
+existing duplicate-message check posts the same ref set about the same state
+once across retries (including after a lost acknowledgement), reloads, devices
+and concurrent taps; a new `rev` makes a new ask possible. The block identity
+is its saved content, not its occurrence: identical blocks in one chat share
+one ask. It is a deduplication key and grants nothing. The host does not attest
+that a reference exists or that its code is accurate; it is the app's report.
+Admission mirrors passive execution: `AppOut.passive_block_ask` is true only
+when the owner's live grant exists, the immutable applied manifest declares it
+and passive execution itself is admitted. Only then does the session list
+`ask-v1` in its features. Declaring it is a reviewable widening.
+
 Each frame document has a host-assigned generation, echoed by the frame in
 `frame-mounted` and every `app-block-state`. Negotiation, reported state
 and owner events are bound to it; a reload or version promotion resets idle
