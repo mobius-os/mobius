@@ -178,10 +178,10 @@ def test_loop_stall_is_logged_with_what_blocked_it(tmp_path):
     json.loads(line)
     for line in (tmp_path / "logs" / "stalls.jsonl").read_text().splitlines()
   ]
-  stalls = [e for e in events if e["kind"] == "loop_stall"]
-  assert stalls and stalls[0]["ms"] >= 300
+  # The deliberate block; a loaded runner may add short stalls of its own.
+  (stall,) = [e for e in events if e["kind"] == "loop_stall" and e["ms"] >= 300]
   snapshots = {e["snapshot_id"]: e for e in events if e["kind"] == "snapshot"}
-  snapshot = snapshots[stalls[0]["snapshot"]]
+  snapshot = snapshots[stall["snapshot"]]
   assert any(
     "_block_the_loop" in frame
     for thread in snapshot["busy"] for frame in thread["stack"]
