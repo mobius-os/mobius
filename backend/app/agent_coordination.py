@@ -1297,10 +1297,10 @@ def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
 def _prune_direct_inboxes(
   db: Session, network: CoordinationScope, recipients: list[str],
 ) -> None:
-  # A queued delivery receipt does not prove consumption. Revocation notes
-  # backed by the durable outbox must not disappear under ordinary inbox
-  # retention while their former executor is behind a lifecycle barrier.
+  # Protect pending obligations from ordinary inbox retention. Once closed,
+  # the peer note follows normal retention; its outbox history is kept.
   revocation = db.query(models.AgentWorkClaimRevocation).filter(
+    models.AgentWorkClaimRevocation.outcome.is_(None),
     models.AgentCoordinationMessage.from_run_id == (
       literal("work-claim:") + models.AgentWorkClaimRevocation.claim_id
     ),
@@ -1642,7 +1642,7 @@ async def deliver_work_claim_revocation(
   stage_retire_obsolete_transfer_notices(db, claim_id=notice.claim_id)
   db.commit()
   db.refresh(notice)
-  if notice.outcome is not None or notice.delivered_at is not None:
+  if notice.outcome is not None:
     return PeerDeliveryResult(steered=[], woken=[], queued=[])
   recipient = notice.recipient_chat_id
   if recipient not in _agent_chat_ids(db, {recipient}):
@@ -1680,7 +1680,7 @@ async def recover_work_claim_revocations() -> None:
     try:
       with SessionLocal() as db:
         notice = db.get(models.AgentWorkClaimRevocation, identity)
-        if notice is not None and notice.outcome is None and notice.delivered_at is None:
+        if notice is not None and notice.outcome is None:
           await deliver_work_claim_revocation(db, notice)
     except Exception:
       log.warning("claim revocation delivery failed claim=%s revision=%s",

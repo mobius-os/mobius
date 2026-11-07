@@ -1886,7 +1886,6 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0099_app_chat_scope_starts",
     "0100_chat_branch_origin",
     "0101_claim_revocation_outbox",
-    "0102_claim_revocation_outcomes",
   ]
   assert second == first
 

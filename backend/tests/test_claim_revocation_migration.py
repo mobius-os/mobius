@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session
 
 from app import models, schema_migrations as migrations
@@ -25,10 +25,15 @@ def test_revocation_outbox_converges_from_fresh_and_frozen_release(tmp_path, sou
     history = migrations.schema_migration_history(eng)
     migrations.run_migrations(eng)
     assert migrations.schema_migration_history(eng) == history
-    assert {"0101_claim_revocation_outbox", "0102_claim_revocation_outcomes"} <= {
-      row["version"] for row in history
-    }
+    assert "0101_claim_revocation_outbox" in {row["version"] for row in history}
+    assert not any(row["version"] == "0102_claim_revocation_outcomes" for row in history)
     assert migrations.mapped_schema_gaps(eng) == []
+    columns = {column["name"] for column in inspect(eng).get_columns("agent_work_claim_revocations")}
+    assert {"outcome", "closed_at"} <= columns
+    assert "delivered_at" not in columns
+    assert {index["name"] for index in inspect(eng).get_indexes("agent_work_claim_revocations")} == {
+      "ix_agent_work_claim_revocations_outcome",
+    }
   finally:
     eng.dispose()
 
@@ -70,11 +75,12 @@ def test_upgrade_backfills_pending_notices_even_after_finish_or_release(tmp_path
     migrations._add_claim_revocation_outbox(eng)
     # Migration retries cannot overwrite a durable snapshot or receipt.
     with eng.begin() as conn:
-      conn.execute(text("UPDATE agent_work_claim_revocations SET delivered_at='2026-02-01' "
-                        "WHERE claim_id='pending'"))
+      conn.execute(text("UPDATE agent_work_claim_revocations "
+                        "SET outcome='delivered', closed_at='2026-02-01' WHERE claim_id='pending'"))
+      conn.execute(text("UPDATE agent_work_claim_revocations "
+                        "SET outcome='superseded', closed_at='2026-02-02' WHERE claim_id='released'"))
       conn.execute(text("UPDATE agent_work_claims SET takeover_reason='later mutable reason'"))
     migrations._add_claim_revocation_outbox(eng)
-    migrations._add_claim_revocation_outcomes(eng)
     with Session(eng) as db:
       rows = db.query(models.AgentWorkClaimRevocation).order_by(
         models.AgentWorkClaimRevocation.claim_id,
@@ -82,7 +88,9 @@ def test_upgrade_backfills_pending_notices_even_after_finish_or_release(tmp_path
       assert [row.claim_id for row in rows] == ["completed", "pending", "released"]
       assert all(row.revision == 2 and row.recipient_chat_id == "old" for row in rows)
       assert all("previous executor" in row.body for row in rows)
-      assert next(row for row in rows if row.claim_id == "pending").delivered_at is not None
+      outcomes = {row.claim_id: row.outcome for row in rows}
+      assert outcomes == {"completed": None, "pending": "delivered", "released": "superseded"}
+      assert all(row.closed_at is not None for row in rows if row.outcome is not None)
   finally:
     eng.dispose()
 
@@ -107,62 +115,7 @@ def test_interrupted_backfill_retries_before_recording_the_migration(tmp_path, m
     assert migrations.schema_migration_history(eng) == []
     migrations.run_migrations(eng)
     assert [row["version"] for row in migrations.schema_migration_history(eng)] == [version]
-    migrations._add_claim_revocation_outcomes(eng)
     with Session(eng) as db:
       assert db.query(models.AgentWorkClaimRevocation).count() == 3
-  finally:
-    eng.dispose()
-
-
-def test_outcome_upgrade_preserves_delivery_and_non_delivery_closures(tmp_path):
-  eng = create_engine(f"sqlite:///{tmp_path / 'outcomes.db'}")
-  try:
-    _legacy_claims(eng)
-    migrations._add_claim_revocation_outbox(eng)
-    with eng.begin() as conn:
-      conn.execute(text("UPDATE agent_work_claim_revocations SET delivered_at='2026-02-01' "
-                        "WHERE claim_id='pending'"))
-    migrations._add_claim_revocation_outcomes(eng)
-    with eng.begin() as conn:
-      conn.execute(text("UPDATE agent_work_claim_revocations SET outcome='superseded' "
-                        "WHERE claim_id='released'"))
-    migrations._add_claim_revocation_outcomes(eng)
-    with Session(eng) as db:
-      rows = {row.claim_id: row for row in db.query(models.AgentWorkClaimRevocation).all()}
-      assert rows['pending'].outcome == 'delivered'
-      assert rows['pending'].delivered_at is not None
-      assert rows['released'].outcome == 'superseded'
-      assert rows['released'].delivered_at is None
-      assert rows['completed'].outcome is None
-  finally:
-    eng.dispose()
-
-
-def test_interrupted_outcome_backfill_retries_before_ledger_completion(tmp_path, monkeypatch):
-  eng = create_engine(f"sqlite:///{tmp_path / 'interrupted-outcomes.db'}")
-  try:
-    _legacy_claims(eng)
-    migrations._add_claim_revocation_outbox(eng)
-    with eng.begin() as conn:
-      conn.execute(text("UPDATE agent_work_claim_revocations SET delivered_at='2026-02-01' "
-                        "WHERE claim_id='pending'"))
-    version = "0102_claim_revocation_outcomes"
-    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", (
-      (version, migrations._add_claim_revocation_outcomes),
-    ))
-
-    def fail_backfill(_conn, _cursor, statement, _params, _context, _many):
-      if statement.startswith("UPDATE agent_work_claim_revocations SET outcome"):
-        raise RuntimeError("interrupted outcome backfill")
-
-    event.listen(eng, "before_cursor_execute", fail_backfill)
-    with pytest.raises(RuntimeError, match="interrupted outcome backfill"):
-      migrations.run_migrations(eng)
-    event.remove(eng, "before_cursor_execute", fail_backfill)
-    assert migrations.schema_migration_history(eng) == []
-    migrations.run_migrations(eng)
-    assert [row["version"] for row in migrations.schema_migration_history(eng)] == [version]
-    with Session(eng) as db:
-      assert db.get(models.AgentWorkClaimRevocation, ('pending', 2)).outcome == 'delivered'
   finally:
     eng.dispose()

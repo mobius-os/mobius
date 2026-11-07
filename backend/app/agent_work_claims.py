@@ -308,6 +308,7 @@ def claim_work(
   db.refresh(row)
   previous_follow_status = _stage_goal_owner_change(db, row, previous=previous,
     previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
+  stage_retire_obsolete_transfer_notices(db, claim_id=row.id)
   db.add(models.AgentWorkClaimRevocation(
     claim_id=row.id, revision=previous_revision + 1,
     acquisition_id=row.acquisition_id, owner_id=owner_id,
@@ -415,7 +416,8 @@ def stage_release_claims_for_chat(
   """
   _unresolved_transfer_notices(db).filter(
     models.AgentWorkClaimRevocation.recipient_chat_id == chat_id,
-  ).update({models.AgentWorkClaimRevocation.outcome: "recipient_deleted"},
+  ).update({models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+            models.AgentWorkClaimRevocation.closed_at: now_naive_utc()},
            synchronize_session=False)
   released = [
     settled for row in _open_claims_for_chat(db, chat_id)
@@ -617,7 +619,6 @@ def finish_work(
 def _unresolved_transfer_notices(db: Session):
   return db.query(models.AgentWorkClaimRevocation).filter(
     models.AgentWorkClaimRevocation.outcome.is_(None),
-    models.AgentWorkClaimRevocation.delivered_at.is_(None),
   )
 
 
@@ -632,9 +633,6 @@ def _superseded_revocation():
   return select(models.AgentWorkClaim.id).where(
     models.AgentWorkClaim.id == models.AgentWorkClaimRevocation.claim_id,
     models.AgentWorkClaim.owner_chat_id == models.AgentWorkClaimRevocation.recipient_chat_id,
-    models.AgentWorkClaim.acquisition_id.is_distinct_from(
-      models.AgentWorkClaimRevocation.acquisition_id,
-    ),
     models.AgentWorkClaim.revision > models.AgentWorkClaimRevocation.revision,
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
@@ -647,10 +645,12 @@ def stage_retire_obsolete_transfer_notices(db: Session, *, claim_id: str | None 
   if claim_id is not None:
     query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
   query.filter(_deleted_revocation_recipient()).update(
-    {models.AgentWorkClaimRevocation.outcome: "recipient_deleted"}, synchronize_session=False,
+    {models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
   )
   query.filter(_superseded_revocation()).update(
-    {models.AgentWorkClaimRevocation.outcome: "superseded"}, synchronize_session=False,
+    {models.AgentWorkClaimRevocation.outcome: "superseded",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
   )
 
 
@@ -673,8 +673,8 @@ def acknowledge_transfer_notice(
   This is a delivery-path receipt, not evidence the former executor stopped.
   """
   changed = db.query(models.AgentWorkClaimRevocation).filter_by(
-    claim_id=claim_id, revision=revision, delivered_at=None, outcome=None,
-  ).update({models.AgentWorkClaimRevocation.delivered_at: now_naive_utc(),
+    claim_id=claim_id, revision=revision, outcome=None,
+  ).update({models.AgentWorkClaimRevocation.closed_at: now_naive_utc(),
             models.AgentWorkClaimRevocation.outcome: "delivered"},
            synchronize_session=False)
   # Retain the last-transfer projection for existing claim readers. Recovery

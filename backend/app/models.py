@@ -1707,9 +1707,10 @@ class AgentWorkClaimRevocation(Base):
   recipient_chat_id = Column(String(64), nullable=False)
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
-  delivered_at = Column(DateTime, nullable=True, index=True)
+  # Outcome is the state; the timestamp records when that outcome was stored.
   # NULL is owed; closure need not mean a notice was delivered.
   outcome = Column(String(32), nullable=True, index=True)
+  closed_at = Column(DateTime, nullable=True)
 
 
 class AgentWorkInterest(Base):

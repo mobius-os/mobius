@@ -1967,7 +1967,7 @@ def test_reacquisition_does_not_deliver_the_new_owners_old_revocation(
   notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
   db.refresh(notice)
   assert notice.outcome == "superseded"
-  assert notice.delivered_at is None
+  assert notice.closed_at is not None
 
 
 @pytest.mark.parametrize("requester", ["current_owner", "observer"])

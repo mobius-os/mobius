@@ -1505,7 +1505,7 @@ def test_each_transfer_commits_its_own_former_executor_obligation(db):
   assert [(row.revision, row.recipient_chat_id, row.sender_chat_id)
           for row in notices] == [(2, first.id, second.id), (3, second.id, third.id)]
   assert all(row.acquisition_id == initial["acquisition_id"] for row in notices)
-  assert all(row.delivered_at is None for row in notices)
+  assert all(row.closed_at is None for row in notices)
   assert db.query(models.AgentCoordinationMessage).count() == 0
 
 
@@ -1552,7 +1552,7 @@ def test_finish_release_and_reacquisition_preserve_older_revocations(db, release
     superseded = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
     db.refresh(superseded)
     assert superseded.outcome == "superseded"
-    assert superseded.delivered_at is None
+    assert superseded.closed_at is not None
   assert db.query(models.AgentWorkClaimRevocation).count() == 2
 
 
@@ -1617,20 +1617,20 @@ async def test_recovery_retains_unreachable_owner_without_blocking_other_notices
   assert calls.count(second.id) == 1
 
 
-@pytest.mark.asyncio
-async def test_queued_revocation_cannot_be_pruned_before_the_former_owner_reads_it(
-  db, monkeypatch,
-):
+@pytest.mark.parametrize("closed", [False, True])
+def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypatch, closed):
   from app import agent_coordination as coordination
+  from app.agent_work_claims import acknowledge_transfer_notice
 
   owner, first, second, third, initial = _unnotified_transfer_chain(db)
-
-  async def queued(**kwargs):
-    return coordination.PeerDeliveryResult(steered=[], woken=[], queued=kwargs["recipients"])
-
-  monkeypatch.setattr(coordination, "deliver_peer_recipients", queued)
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  coordination.send_work_claim_transfer_notice(
+    db, owner_id=owner.id, claim_id=notice.claim_id, revision=notice.revision,
+    sender_chat_id=notice.sender_chat_id, recipients=[notice.recipient_chat_id], body=notice.body,
+  )
+  if closed:
+    acknowledge_transfer_notice(db, claim_id=notice.claim_id, revision=notice.revision)
   monkeypatch.setattr(coordination, "MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
-  await coordination.recover_work_claim_revocations()
   for index in range(2):
     coordination.send_agent_message(
       owner_id=owner.id, sender_chat_id=third.id, sender_run_id="claim-run-third",
@@ -1639,13 +1639,11 @@ async def test_queued_revocation_cannot_be_pruned_before_the_former_owner_reads_
     )
   db.expire_all()
   inbox = db.query(models.AgentCoordinationMessage).filter_by(to_chat_id=first.id).all()
-  assert len(inbox) == 2  # One bounded ordinary note plus the durable revocation.
-  assert {row.body for row in inbox} == {
-    f"Work claim {initial['work_key']} transferred to {second.id}: "
-    "The previous executor handed over the action. "
-    f"(acquisition {initial['acquisition_id']}, transfer revision 2)",
-    "Ordinary later note 1",
-  }
+  assert {row.body for row in inbox} == (
+    {"Ordinary later note 1"} if closed else {notice.body, "Ordinary later note 1"}
+  )
+  # Mailbox retention never erases the immutable obligation/closure history.
+  assert db.query(models.AgentWorkClaimRevocation).count() == 2
 
 
 @pytest.mark.asyncio
@@ -1666,7 +1664,7 @@ async def test_deleted_recipient_closes_without_a_delivery_receipt(db, monkeypat
   notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
   db.refresh(notice)
   assert notice.outcome == "recipient_deleted"
-  assert notice.delivered_at is None
+  assert notice.closed_at is not None
   current = claim_work(db, owner_id=owner.id, chat_id=third.id,
                        run_id="claim-run-third", work_key=initial["work_key"],
                        summary="Inspect after deletion")
@@ -1686,7 +1684,7 @@ def test_chat_deletion_closes_its_revocations_in_the_deletion_transaction(db):
   notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
   db.refresh(notice)
   assert notice.outcome == "recipient_deleted"
-  assert notice.delivered_at is None
+  assert notice.closed_at is not None
   assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [second.id]
 
 
@@ -1713,4 +1711,76 @@ async def test_recovery_retires_a_legacy_notice_for_the_current_new_acquisition(
   db.refresh(notice)
   assert recipients == [second.id]
   assert notice.outcome == "superseded"
-  assert notice.delivered_at is None
+  assert notice.closed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_handback_supersedes_earlier_notice_in_the_ownership_transaction(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second = _fixture(db)
+  key = "platform:test:direct-handback"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+  moved = claim_work(db, owner_id=owner.id, chat_id=second.id,
+                     run_id="claim-run-second", work_key=key, summary="Continue",
+                     takeover_reason="The first owner handed over this action.",
+                     expected_owner_chat_id=first.id)
+  returned = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                        run_id="claim-run-first", work_key=key, summary="Take it back",
+                        takeover_reason="The second owner handed the same action back.",
+                        expected_owner_chat_id=second.id)
+  assert initial["acquisition_id"] == moved["acquisition_id"] == returned["acquisition_id"]
+  # Inspect the committed source before any recovery or recipient delivery.
+  obsolete = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  assert obsolete.outcome == "superseded"
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [second.id]
+  deliveries = []
+
+  async def unreachable(**kwargs):
+    deliveries.extend(kwargs["recipients"])
+    return PeerDeliveryResult(steered=[], woken=[], queued=[], unreachable=kwargs["recipients"])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", unreachable)
+  await recover_work_claim_revocations()
+  db.refresh(obsolete)
+  assert deliveries == [second.id]
+  assert obsolete.outcome == "superseded"
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [3]
+
+
+def test_failed_handback_preserves_the_prior_notice_and_owner(db):
+  from sqlalchemy import event
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second = _fixture(db)
+  key = "platform:test:failed-handback"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+  claim_work(db, owner_id=owner.id, chat_id=second.id,
+             run_id="claim-run-second", work_key=key, summary="Continue",
+             takeover_reason="The first owner handed over this action.",
+             expected_owner_chat_id=first.id)
+
+  def fail_new_obligation(_conn, _cursor, statement, _params, _context, _many):
+    if statement.startswith("INSERT INTO agent_work_claim_revocations"):
+      raise RuntimeError("new handback obligation could not persist")
+
+  event.listen(db.bind, "before_cursor_execute", fail_new_obligation)
+  try:
+    with pytest.raises(RuntimeError, match="could not persist"):
+      claim_work(db, owner_id=owner.id, chat_id=first.id,
+                 run_id="claim-run-first", work_key=key, summary="Take it back",
+                 takeover_reason="The second owner handed the same action back.",
+                 expected_owner_chat_id=second.id)
+  finally:
+    event.remove(db.bind, "before_cursor_execute", fail_new_obligation)
+  db.expire_all()
+  claim = db.get(models.AgentWorkClaim, initial["id"])
+  assert (claim.owner_chat_id, claim.revision) == (second.id, 2)
+  prior = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  assert prior.outcome is None and prior.closed_at is None
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [2]
+  assert db.get(models.AgentWorkClaimRevocation, (initial["id"], 3)) is None
+  assert db.query(models.GoalDependency).one().target_chat_id == second.id
