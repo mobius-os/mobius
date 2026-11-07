@@ -22,6 +22,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, StrictInt
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app import models, provider_usage, providers
@@ -482,26 +483,31 @@ def update_model_prefs(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ) -> dict:
-  """Replaces the owner's model-picker preferences.
+  """Applies per-model picker visibility changes and returns the full list.
 
-  `hidden_ids` is set verbatim — the modal always sends the full
-  desired set so a partial-update merge isn't needed. Stale IDs
-  (referring to models no longer in the registry) are tolerated:
-  they sit in the prefs harmlessly until the next save trims them.
+  `hidden` maps a model id to whether it is hidden. Changes apply to the
+  owner's effective list (the curated default set when nothing is saved), so
+  a client never sends, and so can never clobber, models it did not touch.
+  The result is always saved explicitly. Stale ids are tolerated: they sit in
+  the prefs harmlessly.
   """
-  # Deduplicate while preserving order — the order isn't load-
-  # bearing for filtering but a stable list reads better in any
-  # debug surface.
-  seen: set[str] = set()
-  cleaned: list[str] = []
-  for entry in body.hidden_ids:
-    if entry in seen:
-      continue
-    seen.add(entry)
-    cleaned.append(entry)
-  owner.model_prefs_json = {"hidden_ids": cleaned}
+  # Two saves in flight (two Settings pages, the picker modal) must each apply
+  # to the other's result. SQLite's BEGIN IMMEDIATE takes the write lock
+  # before the read, so this read-modify-write cannot interleave; the commit
+  # ends the request's previous implicit transaction first, as in
+  # reviewer_automation.
   db.commit()
-  return {"hidden_ids": cleaned}
+  db.execute(text("BEGIN IMMEDIATE"))
+  db.refresh(owner)
+  hidden = list(providers.hidden_model_ids(owner.model_prefs_json))
+  for model_id, hide in body.hidden.items():
+    if hide and model_id not in hidden:
+      hidden.append(model_id)
+    elif not hide and model_id in hidden:
+      hidden.remove(model_id)
+  owner.model_prefs_json = {"hidden_ids": hidden}
+  db.commit()
+  return {"hidden_ids": hidden}
 
 
 @owner_router.get("/walkthrough")

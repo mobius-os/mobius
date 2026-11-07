@@ -145,7 +145,14 @@ async function stubIdentity(page, identity) {
   })
 }
 
-const linked = handle => ({ account_mode: 'linked', profile: { handle, display_name: 'Ada', avatar_url: null } })
+// The full validated shape the shell's account parser accepts (lib/mobiusAccount.js parseIdentity).
+const linked = handle => ({
+  account_mode: 'linked',
+  account_unavailable: false,
+  member_since: null,
+  deployments: [{ id: 'local', name: 'My Möbius', status: 'Active', url: 'http://localhost:8000', region: null, current: true }],
+  profile: { user_id: 'u1', email: 'ada@example.com', handle, avatar_url: null },
+})
 
 test('an owner who arrives with a handle is welcomed back and can skip to agent setup', async ({ page }) => {
   await stubIdentity(page, linked('ada'))

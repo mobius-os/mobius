@@ -117,9 +117,14 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
       : !platform ? 'Checking update status…' : platformUpdateStatusLabel(platform)
 
   return (
-    <section className="settings__section platform-updates" aria-labelledby="platform-updates-title">
+    <section className="settings-group" aria-labelledby="platform-updates-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 id="platform-updates-title" className="settings-group__title">Updates</h2>
+        </div>
+      </div>
+      <div className="settings-card platform-updates">
       <div className="platform-updates__heading">
-        <h2 id="platform-updates-title" className="platform-updates__title">Updates</h2>
         <p className="platform-updates__status" role="status">{status}</p>
       </div>
       <div className="platform-updates__actions">
@@ -216,6 +221,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
           resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} onRefreshReview={update.clearError} applyProgress={update.progress} />
       )}
+      </div>
     </section>
   )
 }

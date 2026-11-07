@@ -21,7 +21,7 @@ def test_mobius_insufficient_credits_code_does_not_claim_a_balance_or_trial():
 
   assert "insufficient_credits" in message
   assert "maximum request cost" not in message
-  assert "[Open Möbius · You](/shell/?app=identity)" in message
+  assert "[Open Settings](/shell/?settings=mobius-models)" in message
   assert "trial" not in message.lower()
 
 
@@ -36,7 +36,7 @@ def test_mobius_max_request_cost_reason_takes_priority_over_generic_code():
 
   assert "not enough credits for the maximum request cost" in message
   assert "(insufficient_credits)" not in message
-  assert "[Open Möbius · You](/shell/?app=identity)" in message
+  assert "[Open Settings](/shell/?settings=mobius-models)" in message
   assert "trial" not in message.lower()
 
 

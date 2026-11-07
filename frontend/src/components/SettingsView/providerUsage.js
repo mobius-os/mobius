@@ -1,14 +1,16 @@
 /* Pure display helpers for compact provider-plan usage snapshots. */
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
-export function formatPlanStatus(label) {
+/** A plan label as a page subtitle: "Max plan" → "Max plan", "Pro" → "Pro plan"; empty stays empty. */
+export function formatPlanName(label) {
   const value = typeof label === 'string' ? label.trim() : ''
   const name = value.replace(/\s+plan$/i, '').trim()
+  if (!name) return ''
   // Codex's account protocol exposes this internal tier name rather than a
   // customer-facing plan label. Keep the verified Business family, not the
   // implementation suffix.
-  if (/^Self Serve Business Prolite$/i.test(name)) return 'Plan: Business'
-  return `Plan: ${name || 'Unknown'}`
+  if (/^Self Serve Business Prolite$/i.test(name)) return 'Business plan'
+  return `${name} plan`
 }
 
 export function formatUsageObservedAt(value) {
@@ -233,4 +235,60 @@ export function providerAllowanceSummary(provider, allowance, now = new Date()) 
     ].filter(Boolean).join(' · ')
   }
   return allowance?.label || 'Usage'
+}
+
+/** Amber from 75% and red from 90%, so a limit that is close earns attention. */
+export function usageTone(percent) {
+  const value = clampUsagePercent(percent)
+  if (value >= 90) return 'danger'
+  if (value >= 75) return 'warning'
+  return ''
+}
+
+// The overview row shows the allowance people plan around: the week when the
+// plan has one, otherwise the 5-hour window, otherwise prepaid credit.
+const ROW_USAGE = [
+  { kind: 'weekly', label: 'Week', noun: 'weekly usage' },
+  { kind: 'five_hour', label: '5 h', noun: '5-hour usage' },
+  { kind: 'api_credits', label: 'Credit', noun: 'of credit used' },
+]
+
+/** The single usage figure for a provider's top-level Settings row, or null. */
+export function rowUsage(snapshot) {
+  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
+  for (const { kind, label, noun } of ROW_USAGE) {
+    const window = snapshot.windows.find(candidate => candidate?.kind === kind)
+    if (!window || window.used_percent == null) continue
+    const used = Number(window.used_percent)
+    if (!Number.isFinite(used)) continue
+    const percent = clampUsagePercent(used)
+    const reset = formatUsageReset(window.resets_at)
+    return {
+      kind,
+      label,
+      percent,
+      summary: [
+        `${formatUsagePercent(percent)}% ${noun}`,
+        reset,
+        snapshot.stale === true ? 'last available reading' : '',
+      ].filter(Boolean).join(' · '),
+    }
+  }
+  return null
+}
+
+/**
+ * "54036.32 credits" → "54,036 credits", "0.42 credits" → "0.4 credits": whole
+ * credits from 10 up, one decimal below, and a positive balance never reads as
+ * 0 ("<0.1 credits"). Anything unexpected is shown as given.
+ */
+export function formatCreditBalance(value) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  const match = value.trim().match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/)
+  if (!match) return value.trim()
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount)) return value.trim()
+  const format = new Intl.NumberFormat(undefined, { maximumFractionDigits: Math.abs(amount) < 10 ? 1 : 0 })
+  const formatted = amount > 0 && amount < 0.05 ? `<${format.format(0.1)}` : format.format(amount)
+  return match[2] ? `${formatted} ${match[2]}` : formatted
 }

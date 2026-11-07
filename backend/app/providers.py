@@ -14,6 +14,9 @@ used by chat turns, model pickers, and background agents:
     runner) reuses one helper from `codex_appserver.py`
     (`_extract_bash_command`); the provider itself shapes credentials + env.
 
+`MobiusProvider` serves the platform-owned Möbius subscription catalogue
+(`mobius_models.json`) through the local identity broker; it needs no app.
+
 `AppModelProvider` binds one installed app's reviewed Responses endpoint and
 model list. New Responses-compatible services need a manifest declaration and
 an app-owned setup UI, not another platform runner or picker branch.
@@ -332,11 +335,9 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
 
 
 def known_model_ids(provider_id: str) -> list[str]:
-  """Built-in fallback IDs or an installed app's accepted model IDs."""
+  """Built-in fallback IDs, the Möbius catalogue, or an app's accepted IDs."""
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    return [model["id"] for model in provider.declaration["models"]]
-  if isinstance(provider, AppModelProvider):
+  if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return [model["id"] for model in provider.declaration["models"]]
   return KNOWN_MODELS.get(provider_id, [])
 
@@ -1010,14 +1011,23 @@ def _write_responses_catalog(
   atomic_write(path, json.dumps({"models": catalog}))
 
 
-class MobiusProvider(BaseProvider):
-  """Protected local-broker transport for an accepted app declaration."""
+def _load_mobius_model_catalogue() -> dict[str, Any]:
+  """The platform-owned Möbius subscription catalogue (mobius_models.json).
 
-  name = "Möbius"
+  It has the same shape as an app manifest's ``model_provider`` block so the
+  Codex catalog writer and model registry treat both alike. The platform owns
+  it because the subscription and account are platform features: the
+  provider must exist whether or not any app is installed.
+  """
+  return json.loads(Path(__file__).with_name("mobius_models.json").read_text())
+
+
+class MobiusProvider(BaseProvider):
+  """Protected local-broker transport for the platform's Möbius catalogue."""
+
   cli_cmd = "codex"
   auth_dir = "mobius"
   runtime_kind = "codex_sdk"
-  switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
 
   # Account reads sit on every provider-status and auth decision, and the
   # balance is a remote round trip (0.3-0.8 s). Successful reads are held
@@ -1028,31 +1038,22 @@ class MobiusProvider(BaseProvider):
   BALANCE_HOLD_SECONDS = 60.0
 
   def __init__(self):
-    self.declaration: dict[str, Any] | None = None
-    self.app_id: int | None = None
+    # Named like AppModelProvider.declaration because it has the same shape.
+    self.declaration: dict[str, Any] = _load_mobius_model_catalogue()
+    self.name = self.declaration["name"]
+    self.switch_efforts = frozenset(
+      effort for model in self.declaration["models"]
+      for effort in model.get("effort_levels", [])
+    ) or frozenset({"low", "medium", "high"})
     self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
     self._held_generation = 0
     self._held_lock = threading.Lock()
 
-  def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
-    if self.app_id == app_id and self.declaration == declaration:
-      return
-    self.app_id = app_id
-    self.declaration = declaration
-    self.forget_account_reads()
-    self.name = declaration["name"] if declaration else "Möbius"
-    self.switch_efforts = (
-      frozenset(
-        effort for model in declaration["models"]
-        for effort in model.get("effort_levels", [])
-      ) or frozenset({"low", "medium", "high"})
-    ) if declaration else frozenset({"minimal", "low", "medium", "high", "max"})
-
   async def fetch_models(self, data_dir: str) -> list[Any]:
-    # Accepted app declarations are authoritative for every Responses
-    # connection. A broker's live list may use a different product alias from
-    # a stable saved-chat model ID; filtering it here would hide that model.
-    return self.declaration["models"] if self.declaration else []
+    # The catalogue is authoritative, as app declarations are for every
+    # Responses connection. A broker's live list may use a different product
+    # alias from a stable saved-chat model ID; filtering it would hide that.
+    return self.declaration["models"]
 
   @staticmethod
   def _catalog_path() -> Path:
@@ -1100,31 +1101,26 @@ class MobiusProvider(BaseProvider):
     )
 
   def check_auth(self, data_dir: str) -> str | None:
-    if not self.declaration:
-      return "Install Möbius · You to use these models."
     if not provider_enabled(data_dir, "mobius"):
-      return "This model provider is turned off in its app."
+      return "Möbius models are turned off in Settings."
     try:
       if self._identity().get("linked") is True:
         return None
     except Exception:
       pass
-    return (
-      "Your Möbius subscription is not linked. Sign in from Möbius · You "
-      "to activate your trial."
-    )
+    return "Sign in to your Möbius account in Settings to use Möbius models."
 
   def codex_config_overrides(self, catalog_path: Path | None = None) -> list[str]:
     quote = json.dumps
-    if catalog_path is None and self.declaration:
+    if catalog_path is None:
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"] if self.declaration else "evolve")}',
+      f'model={quote(self.declaration["default_model"])}',
       'model_provider="mobius_trial"',
-      f"model_catalog_json={quote(str(catalog_path or self._catalog_path()))}",
+      f"model_catalog_json={quote(str(catalog_path))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
-      f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"] if self.declaration else "http://127.0.0.1:8765/v1")}',
+      f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"])}',
       'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
       'model_providers.mobius_trial.wire_api="responses"',
       "model_providers.mobius_trial.supports_standalone_web_search=true",
@@ -1170,10 +1166,8 @@ class MobiusProvider(BaseProvider):
       env[key] = ""
     config_dir = Path(data_dir) / "cli-auth" / "mobius"
     config_dir.mkdir(parents=True, exist_ok=True)
-    catalog_path = self._catalog_path()
-    if self.declaration:
-      catalog_path = config_dir / "catalog.json"
-      _write_responses_catalog(catalog_path, self.declaration, broker=True)
+    catalog_path = config_dir / "catalog.json"
+    _write_responses_catalog(catalog_path, self.declaration, broker=True)
     atomic_write(
       config_dir / "config.toml",
       "\n".join(self.codex_config_overrides(catalog_path)) + "\n",
@@ -1271,6 +1265,9 @@ PROVIDERS: dict[str, BaseProvider] = {
   "codex": CodexProvider(),
 }
 
+DEFAULT_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
+DEFAULT_BACKGROUND_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
+
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
 
@@ -1350,23 +1347,12 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
-  native_match = next(((app_id, declaration) for app_id, declaration in declarations
-                       if declaration.get("transport") == "identity_broker"), None)
-  native_id, native = native_match if native_match else (None, None)
-  mobius = PROVIDERS["mobius"]
-  if isinstance(mobius, MobiusProvider) and (mobius.app_id != native_id or mobius.declaration != native):
-    mobius.set_declaration(native_id, native)
-    _model_registry_cache.pop("mobius", None)
-  if native:
-    DEFAULT_MODELS["mobius"] = native["default_model"]
-    DEFAULT_BACKGROUND_MODELS["mobius"] = native["default_model"]
-  else:
-    DEFAULT_MODELS.pop("mobius", None)
-    DEFAULT_BACKGROUND_MODELS.pop("mobius", None)
-  claimed_models = {mid for key, ids in KNOWN_MODELS.items() if key != "mobius" for mid in ids}
-  if native:
-    claimed_models.update(model["id"] for model in native["models"])
+  claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
+  claimed_models.update(known_model_ids("mobius"))
   for app_id, declaration in declarations:
+    # Installed Möbius · You copies still declare the broker transport; the
+    # platform's own catalogue is the Möbius provider, so the declaration is
+    # inert rather than a second app-NNN provider (see manifest_contract).
     if declaration.get("transport") == "identity_broker":
       continue
     provider_id = f"app-{app_id}"
@@ -1399,8 +1385,7 @@ def _apply_app_model_declarations(
 def provider_selectable(data_dir: str, provider_id: str) -> bool:
   """Whether a registered provider has an active, declared model connection."""
   provider = PROVIDERS.get(provider_id)
-  return (provider is not None and provider_enabled(data_dir, provider_id)
-          and (not isinstance(provider, MobiusProvider) or provider.declaration is not None))
+  return provider is not None and provider_enabled(data_dir, provider_id)
 
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"
@@ -1408,7 +1393,7 @@ DEFAULT_PROVIDER = "claude"
 # When the stored provider is still the historical default but is not
 # authenticated, prefer a connected provider over showing a dead default.
 # Codex is first because the setup wizard leads with it for new installs.
-# The app-owned subscription never silently replaces a user's connected coding
+# The Möbius subscription never silently replaces a user's connected coding
 # provider. It remains selectable whenever its own credential preflight passes.
 CONNECTED_DEFAULT_ORDER = ("codex", "claude")
 
@@ -1638,9 +1623,7 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   the same dict shape the route layer's Pydantic serialization would
   produce."""
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    return _live_model_entries(provider_id, provider.declaration["models"])
-  if isinstance(provider, AppModelProvider):
+  if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return _live_model_entries(provider_id, provider.declaration["models"])
   return [
     {
