@@ -507,6 +507,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   monkeypatch.delenv("MOBIUS_COORDINATION_ENABLED", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   initialized = control._dispatch_message({
     "jsonrpc": "2.0",
@@ -678,6 +680,8 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 1, "method": "tools/list",
