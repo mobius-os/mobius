@@ -22,9 +22,9 @@ def provider_home(tmp_path, monkeypatch):
     home.mkdir(parents=True)
     (home / 'config.toml').write_text('keep configuration')
   (tmp_path / 'cli-auth/claude/.credentials.json').write_text(json.dumps({
+    **{key: {'synthetic': 'account'} for key in providers._CLAUDE_ACCOUNT_KEYS},
     'claudeAiOauth': {'accessToken': 'synthetic-token'},
     'mcpOAuth': {'server': 'synthetic-mcp'},
-    'organizationUuid': 'keep-organization',
   }))
   (tmp_path / 'cli-auth/codex/auth.json').write_text('{"tokens": "synthetic"}')
   (tmp_path / 'chat.txt').write_text('keep chat')
@@ -37,9 +37,13 @@ def test_disconnect_removes_only_selected_signin_and_is_idempotent(client, auth,
     response = client.post(f'/api/auth/provider/{provider}/disconnect', headers=auth)
     assert response.status_code == 200, response.text
   claude = json.loads((provider_home / 'cli-auth/claude/.credentials.json').read_text())
-  assert ('claudeAiOauth' in claude) == (provider != 'claude')
-  assert claude['mcpOAuth'] == {'server': 'synthetic-mcp'}
-  assert claude['organizationUuid'] == 'keep-organization'
+  # Like the CLI's logout, every account-bound key goes: an organization id
+  # that survived would let usage controls address the old account after a
+  # different sign-in. MCP access and other keys stay.
+  if provider == 'claude':
+    assert claude == {'mcpOAuth': {'server': 'synthetic-mcp'}}
+  else:
+    assert set(claude) == {*providers._CLAUDE_ACCOUNT_KEYS, 'mcpOAuth'}
   assert (provider_home / 'cli-auth/codex/auth.json').exists() == (provider != 'codex')
   for pid in ('claude', 'codex'):
     assert (provider_home / f'cli-auth/{pid}/config.toml').read_text() == 'keep configuration'

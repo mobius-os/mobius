@@ -69,6 +69,45 @@ def test_a_login_end_the_cli_rejects_does_not_block_refresh(tmp_path, end):
   assert ClaudeProvider().check_auth(data_dir) is None
 
 
+# JSON numbers beyond float range are Infinity to the CLI, so a corrupt stored
+# time is no time at all rather than an exact Python int that overflows
+# against the float clock.
+HUGE_TIMES = [
+  {"expiresAt": 10**400},
+  {"expiresAt": 0, "refreshTokenExpiresAt": 10**400},
+  {"expiresAt": 10**400, "refreshTokenExpiresAt": 10**400},
+]
+
+
+@pytest.mark.parametrize("times", HUGE_TIMES)
+def test_a_time_beyond_float_range_is_no_time_and_the_sign_in_can_refresh(tmp_path, times):
+  data_dir = _store(tmp_path, {"accessToken": "a", "refreshToken": "r", **times})
+  assert ClaudeProvider().check_auth(data_dir) is None
+  assert claude_login_expires_at(data_dir) is None
+
+
+def test_status_asks_to_reconnect_for_a_huge_access_expiry_without_a_refresh_token(
+  client, auth, monkeypatch, tmp_path,
+):
+  from app.config import get_settings
+
+  monkeypatch.setattr(get_settings(), "data_dir", _store(tmp_path, {
+    "accessToken": "a", "expiresAt": 10**400,
+  }))
+  response = client.get("/api/auth/providers/status", headers=auth)
+  assert response.status_code == 200
+  claude = response.json()["claude"]
+  assert claude["configured"] is False
+  assert "reconnect" in claude["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_huge_access_expiry_refreshes_instead_of_failing(tmp_path, monkeypatch):
+  data_dir = _store(tmp_path, {"accessToken": "old", "refreshToken": "r", "expiresAt": 10**400})
+  _serve_token_response(monkeypatch, {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600})
+  assert await providers.claude_access_token(data_dir) == "a2"
+
+
 def test_a_passed_login_end_blocks_refresh(tmp_path):
   data_dir = _store(tmp_path, {
     "accessToken": "a", "refreshToken": "r", "expiresAt": 0,

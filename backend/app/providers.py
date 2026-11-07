@@ -1717,8 +1717,8 @@ _CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
 # token's own expiry as stale and reports no end at all.
 _CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
 # The top-level credential keys that belong to one Claude account: the CLI's
-# own sign-in removes exactly these, so a new sign-in never inherits another
-# account's, and keeps the rest (such as mcpOAuth).
+# own sign-in and logout remove exactly these, so a new sign-in never
+# inherits another account's, and keep the rest (such as mcpOAuth).
 _CLAUDE_ACCOUNT_KEYS = (
   "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
   "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
@@ -1729,15 +1729,14 @@ _CLAUDE_ACCOUNT_KEYS = (
 def _finite_number(value: Any) -> float | None:
   """A stored time or duration, or None unless it is a finite non-bool number.
 
-  Python ints are exact and always finite (math.isfinite would overflow on
-  one beyond float range), so they are returned as they are."""
-  if isinstance(value, bool):
+  An int is returned exact, unless it is beyond float range: the CLI reads
+  that as Infinity, and callers compare it with the float clock."""
+  if isinstance(value, bool) or not isinstance(value, (int, float)):
     return None
-  if isinstance(value, int):
-    return value
-  if isinstance(value, float) and math.isfinite(value):
-    return value
-  return None
+  try:
+    return value if math.isfinite(value) else None
+  except OverflowError:
+    return None
 
 
 def _claude_login_end_ms(value: Any) -> float | None:
@@ -1783,11 +1782,12 @@ def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
 
   A new sign-in needs an access token, a refresh token and an `expires_in`
   that ends after now and within the latest sign-in end the CLI accepts. A
-  refresh needs only an access token: Anthropic has already rotated the
-  single-use refresh token, so its response is always kept. Like the CLI, a
-  refresh without a `refresh_token` keeps the stored one, and an unusable
-  `expires_in` saves the tokens with the access token already expired, so
-  the next use refreshes again.
+  refresh needs an access token; one without is refused (the owner then
+  reconnects). Otherwise its response is kept, since Anthropic has already
+  rotated the single-use refresh token: like the CLI, a refresh without a
+  `refresh_token` keeps the stored one, and an unusable `expires_in` saves
+  the tokens with the access token already expired, so the next use
+  refreshes again.
 
   The sign-in end follows the CLI: a new sign-in records the response's
   `refresh_token_expires_in` (and no end, rather than the CLI's 30-day
@@ -1854,10 +1854,10 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   return creds_path, oauth
 
 
-def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
-  """Persist a claudeAiOauth block, or remove it when oauth is None,
-  in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
-  leave a truncated file the chat path then reads).
+def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
+  """Persist a claudeAiOauth block in the CLI's expected shape (atomic
+  tmp+rename so a crash mid-write can't leave a truncated file the chat path
+  then reads).
 
   Writing it back is the point of refreshing here: the chat runner and the
   CLI read the same file, so a refresh on the registry path also un-expires
@@ -1872,13 +1872,8 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
   try:
     raw = _read_claude_credentials(creds_path)
   except (OSError, ValueError):
-    if oauth is None:
-      raise  # Disconnect must not discard unrelated, unreadable credentials.
     raw = {}
-  if oauth is None:
-    raw.pop("claudeAiOauth", None)
-  else:
-    raw["claudeAiOauth"] = oauth
+  raw["claudeAiOauth"] = oauth
   _replace_claude_credentials(creds_path, raw)
 
 
@@ -1938,6 +1933,11 @@ def _replace_claude_credentials(creds_path: Path, raw: dict) -> None:
 async def disconnect_provider(data_dir: str, provider_id: str) -> None:
   """Remove only the local provider sign-in, not configuration or MCP access.
 
+  Like the CLI's logout, a Claude disconnect removes every account-bound key
+  (_CLAUDE_ACCOUNT_KEYS), so a later sign-in cannot inherit the old
+  account's organization, and keeps the rest. An unreadable credentials file
+  raises rather than being discarded.
+
   Already-running SDKs may retain their session; this is not remote token
   revocation. Login cancellation belongs to the auth route. The Claude lock
   prevents an in-flight model-registry refresh from restoring removed tokens.
@@ -1946,7 +1946,10 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
     async with _claude_refresh_lock:
       path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
       if path.exists():
-        _write_claude_oauth(path, None)
+        raw = _read_claude_credentials(path)
+        for key in _CLAUDE_ACCOUNT_KEYS:
+          raw.pop(key, None)
+        _replace_claude_credentials(path, raw)
   elif provider_id == "codex":
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   else:
