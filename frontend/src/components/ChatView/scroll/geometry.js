@@ -306,9 +306,17 @@ export function modeForInlineEditorReveal({
 
 
 /** Return the hold that makes a question answer grow UPWARD, like the
- * composer: when the answer's card sits at the bottom of the usable viewport,
- * the editor's bottom edge keeps its on-screen position as it grows or
- * shrinks by `growth` client pixels and the conversation above it moves.
+ * composer: when the answer's card sat at the bottom of the usable viewport,
+ * the editor's bottom edge ends where it was before the field grew or shrank
+ * by `growth` client pixels, and the conversation above it moves.
+ *
+ * The target is derived from `scrollTopBefore`, the scroll position read
+ * before the edit changed the field, never by adding `growth` to the current
+ * scrollTop: by the time the resize is observed the browser may already have
+ * moved the viewport (a deletion at the physical tail clamps scrollTop, and a
+ * native caret reveal scrolls a growing field), and that movement is part of
+ * the same edit. Without a pre-edit position (a resize no input drove) no
+ * hold applies.
  *
  * "At the bottom" means the card's lower edge was within `bottomBand` of the
  * usable bottom, or beneath the overlaid composer (an open phone keyboard), and
@@ -321,12 +329,14 @@ export function modeForInlineEditorGrowth({
   scrollEl,
   editor,
   growth,
+  scrollTopBefore,
   visibleTop,
   visibleBottom,
   bottomBand,
 }) {
   if (!scrollEl || !editor
       || !Number.isFinite(growth) || Math.abs(growth) <= 0.5
+      || !Number.isFinite(scrollTopBefore)
       || !Number.isFinite(visibleTop)
       || !Number.isFinite(visibleBottom)
       || visibleBottom <= visibleTop) return null
@@ -336,19 +346,23 @@ export function modeForInlineEditorGrowth({
   if (!Number.isFinite(editorRect?.bottom) || !Number.isFinite(cardRect?.bottom)) {
     return null
   }
-  const editorBottomBefore = editorRect.bottom - growth
-  const cardBottomBefore = cardRect.bottom - growth
+  const space = captureLayoutSpace(scrollEl)
+  // Undo both parts of the edit to find the on-screen position before it: the
+  // field's own size change and whatever the browser already scrolled.
+  const clientShiftSinceEdit = (scrollEl.scrollTop - scrollTopBefore) * space.zoom
+  const editorBottomBefore = editorRect.bottom + clientShiftSinceEdit - growth
+  const cardBottomBefore = cardRect.bottom + clientShiftSinceEdit - growth
   if (editorBottomBefore < visibleTop || editorBottomBefore > visibleBottom + 0.5) {
     return null
   }
   if (cardBottomBefore < visibleBottom - bottomBand) return null
 
-  const layoutDelta = clientLengthToLayout(growth, captureLayoutSpace(scrollEl))
+  const layoutDelta = clientLengthToLayout(growth, space)
   if (!Number.isFinite(layoutDelta)) return null
   const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight)
   const targetScrollTop = Math.min(
     maxScrollTop,
-    Math.max(0, scrollEl.scrollTop + layoutDelta),
+    Math.max(0, scrollTopBefore + layoutDelta),
   )
   if (Math.abs(targetScrollTop - scrollEl.scrollTop) <= 0.5) return null
   return _anchorModeForRow(
