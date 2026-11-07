@@ -115,19 +115,52 @@ def test_guest_and_apps_working_for_them_cannot_use_the_owners_mobius_account(ht
     guest_answer = https.get(path, headers=guest)
     assert guest_answer.status_code == owner_answer.status_code != 403, path
     assert guest_answer.json() == owner_answer.json(), path
+  # A guest's app with the identity grant resolves handles like the owner's app.
+  handle = "/api/identity/handles/someone"
+  owner_app_answer = https.get(handle, headers=app_bearer(auth))
+  guest_app_answer = https.get(handle, headers=app_bearer(guest))
+  assert guest_app_answer.status_code == owner_app_answer.status_code != 403
+  assert guest_app_answer.json() == owner_app_answer.json()
 
 
-def test_guest_cannot_read_or_change_the_owners_github_connection(https, auth):
+def test_guest_cannot_read_or_change_the_owners_github_connection(https, auth, db):
   _, token, _ = invite(https)
   guest = {"Authorization": "Bearer " + token}
+  github_app = models.App(
+    name="GitHub", slug="github-app", github_connect=True,
+    source_dir=str(Path(get_settings().data_dir) / "github-app"),
+  )
+  db.add(github_app); db.commit()
+  minted = https.post("/api/auth/app-token", json={"app_id": github_app.id}, headers=guest)
+  assert minted.status_code == 200, minted.text
+  guest_app = {"Authorization": "Bearer " + minted.json()["token"]}
+  for headers in (guest, guest_app):
+    for method, path in (
+      ("get", "/api/github/status"), ("post", "/api/github/connect/start"),
+      ("post", "/api/github/connect/poll"), ("post", "/api/github/connect/cancel"),
+      ("delete", "/api/github/connect"),
+    ):
+      response = getattr(https, method)(path, headers=headers)
+      assert response.status_code == 403, (path, response.text)
+  assert https.get("/api/github/status", headers=auth).status_code == 200
+
+
+def test_guest_cannot_use_the_owners_store_identity_but_can_record_installs(https, auth):
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  app_path = "/api/community/apps/app_guest_probe"
   for method, path in (
-    ("get", "/api/github/status"), ("post", "/api/github/connect/start"),
-    ("post", "/api/github/connect/poll"), ("post", "/api/github/connect/cancel"),
-    ("delete", "/api/github/connect"),
+    ("get", "/api/community/identity"), ("get", "/api/community/github-status"),
+    ("put", f"{app_path}/review"), ("post", f"{app_path}/withdraw"),
+    ("post", "/api/community/publications/github"),
   ):
     response = getattr(https, method)(path, headers=guest)
     assert response.status_code == 403, (path, response.text)
-  assert https.get("/api/github/status", headers=auth).status_code == 200
+  # Recording an install keeps a revision cached, as a guest's local install
+  # may; it fails here only on the missing body, never on who is asking.
+  install = https.post(f"{app_path}/revisions/rev_guest_probe/installs", headers=guest)
+  assert install.status_code != 403, install.text
+  assert https.get("/api/community/github-status", headers=auth).status_code == 200
 
 
 def test_logout_ends_only_that_browser_not_other_recipient_or_owner(https, auth):

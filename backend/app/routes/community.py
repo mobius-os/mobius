@@ -45,7 +45,8 @@ from app.deps import (
   Principal, get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_manage_apps,
-  reject_cross_site, require_nondelegated_owner_control,
+  reject_cross_site, require_account_owner, require_account_owner_control,
+  require_nondelegated_owner_control,
 )
 
 
@@ -81,8 +82,9 @@ def _store_github_owner_control(
   owner: models.Owner = Depends(_store_github_owner),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Require explicit owner confirmation without dropping Store app grants."""
-  require_nondelegated_owner_control(principal)
+  """Publish under the owner's GitHub and Möbius identity: the owner (or a
+  Store app acting for them) confirms it, never a helper or a guest."""
+  require_account_owner_control(principal)
   return owner
 
 
@@ -90,7 +92,19 @@ def _store_owner_control(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Protect public expression while preserving the Store app capability."""
+  """Protect public expression under the owner's identity (reviews,
+  withdrawals) while preserving the Store app capability."""
+  require_account_owner_control(principal)
+  return owner
+
+
+def _store_install_control(
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Record an install a guest may make too (it keeps the installed revision
+  in the release cache); only delegated helpers are refused, as for local
+  installs."""
   require_nondelegated_owner_control(principal)
   return owner
 
@@ -452,14 +466,19 @@ async def _github_json(
   return payload, response.status_code
 
 
-@router.get("/identity")
+def _account_owner(principal: Principal = Depends(get_principal)) -> None:
+  """The Store identity is the owner's account, never a guest's."""
+  require_account_owner(principal)
+
+
+@router.get("/identity", dependencies=[Depends(_account_owner)])
 async def community_identity(
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ) -> JSONResponse:
   return await _request("GET", "/identity")
 
 
-@router.get("/github-status")
+@router.get("/github-status", dependencies=[Depends(_account_owner)])
 async def community_github_status(
   _: models.Owner = Depends(_store_github_owner),
 ) -> dict[str, str | bool]:
@@ -467,7 +486,8 @@ async def community_github_status(
 
   Connection setup and credential details remain owned by Contribute. The
   Store inherits the already-reviewed local authority without receiving the
-  token, OAuth controls, scopes, or resumable device-flow state.
+  token, OAuth controls, scopes, or resumable device-flow state. It is the
+  owner's account, so never a guest's.
   """
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
@@ -1162,7 +1182,7 @@ async def record_community_install(
   app_id: str,
   revision_id: str,
   body: InstallReceiptIn,
-  _: models.Owner = Depends(_store_owner_control),
+  _: models.Owner = Depends(_store_install_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   """Keep one exact installed revision available in the Host release cache."""

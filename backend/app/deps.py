@@ -1267,12 +1267,21 @@ def get_owner_or_app_with_connect_manage(
 
 
 def require_account_owner(principal: Principal) -> None:
-  """The owner's own Möbius account (profile, sign-in email, deployments and
-  credit) is theirs alone, like their own device: never readable or
-  changeable by a shared-browser guest or work it started, whatever
-  workspace access the guest holds."""
+  """The owner's own accounts (the Möbius account's profile, sign-in email,
+  deployments and credit; the GitHub connection; their public Store
+  identity) are theirs alone, like their own device: the API never serves
+  them to a shared-browser guest or work it started, whatever workspace
+  access the guest holds."""
   if acts_for_guest(principal):
-    raise HTTPException(403, "Only the installation owner can use this Möbius account.")
+    raise HTTPException(403, "Only the installation owner can use this account.")
+
+
+def require_account_owner_control(principal: Principal) -> None:
+  """``require_account_owner`` for changes, which a delegated helper may not
+  make either. Deliberately independent of how much workspace access a guest
+  holds, unlike ``require_installation_owner_control``."""
+  require_nondelegated_owner_control(principal)
+  require_account_owner(principal)
 
 
 def get_owner_or_app_with_identity_manage(
@@ -1391,7 +1400,7 @@ def get_owner_or_app_with_github_connect(
 
   The connection is the owner's credential: neither a delegated helper nor a
   shared-browser guest, or work it started, may read or change it."""
-  require_installation_owner_control(principal)
+  require_account_owner_control(principal)
   owner = principal.owner
   if principal.app_id is None:
     db.close()
