@@ -212,6 +212,14 @@
 
 /* A reply is one conversation item; source rows keep their anchors and
    compact block spacing without cancelling the surrounding conversation gap. */
+/* Replies and agent activity rows in one stretch (an answered card, a wait or
+   a helper result between them is hidden) read as one response: they sit as
+   close as rows within a reply, not a conversation gap apart. The Thinking
+   row a new turn shows before its reply exists sits where that reply will. */
+.chat__list > :is(.chat__reply, .chat__msg--peer)
+  + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply) {
+  margin-block-start: calc(8px - 24px);
+}
 .chat__reply-rows { list-style: none; padding: 0; margin: 0; }
 .chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__markdown-copy-surface:empty)) {
   margin-top: 8px;

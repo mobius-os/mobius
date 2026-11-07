@@ -20,7 +20,7 @@ const vite = await createSsrRenderServer({
       ? 'export default { sanitize: value => String(value) }' : null }],
 })
 after(() => vite.close())
-const { default: Reply, agentStretchStart } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
+const { default: Reply, agentStretches } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
@@ -44,7 +44,7 @@ function renderReply(messages, props = {}) {
     { value: { tools: new Map(), positions: new Map() } },
     createElement(Reply, {
       replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
-      useDbActivePayload: true, chatId: 'fixture', footer: 'settled',
+      useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
       stretchStartKey: group.rows[0].key, stretchCopyable: replyProse(messages).length > 0,
       ...props,
     })))
@@ -73,22 +73,29 @@ test('the footer retains its accessible semantics', () => {
   assert.doesNotMatch(row, /aria-hidden/)
 })
 
-test('a stretch runs back past hidden carriers to where the owner last spoke', () => {
+test('a stretch runs across hidden carriers and ends where the owner speaks', () => {
   const reply = (id, extra = {}) => ({ role: 'assistant', id, ts: turn.ts, blocks: [{ type: 'text', content: id }], ...extra })
   const owner = { role: 'user', content: 'Next', ts: turn.ts }
   const answered = { role: 'user', content: 'Answer', hidden: true, kind: 'continuation', ts: turn.ts }
-  const start = messages => {
-    const groups = assistantReplyGroups(messages)
-    const last = groups.get(messages.length - 1)
-    return messages[agentStretchStart(messages, groups, last).start].id
-  }
-  assert.equal(start([reply('a'), answered, reply('b')]), 'a',
+  const stretches = messages => [...agentStretches(messages, assistantReplyGroups(messages))]
+    .map(([end, groups]) => [messages[end.start].id, groups.map(group => messages[group.start].id)])
+  assert.deepEqual(stretches([reply('a'), answered, reply('b')]), [['b', ['a', 'b']]],
     'an answered card is not the owner speaking')
-  assert.equal(start([reply('a'), answered, reply('b'), owner, reply('c')]), 'c')
-  assert.equal(start([owner, reply('a')]), 'a')
-  // ChatView appends the live reply as a placeholder group; it belongs to
-  // the same stretch as the replies before it.
-  assert.equal(start([reply('a'), answered, { role: 'assistant', id: 'live', blocks: [] }]), 'a')
+  assert.deepEqual(stretches([reply('a'), answered, reply('b'), owner, reply('c')]),
+    [['b', ['a', 'b']], ['c', ['c']]])
+  assert.deepEqual(stretches([owner, reply('a'), owner]), [['a', ['a']]])
+  // ChatView appends the live reply as a placeholder group; it extends the
+  // stretch of the replies before it.
+  assert.deepEqual(stretches([reply('a'), answered, { role: 'assistant', id: 'live', blocks: [] }]),
+    [['live', ['a', 'live']]])
+})
+
+test('a stretch lists its References once, after its last reply', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  assert.doesNotMatch(renderReply([sourced], { stretchSourceRows: null }), /chat__sources/,
+    'a reply inside a stretch lists none')
+  assert.match(renderReply([turn], { stretchSourceRows: [sourced] }), /References/,
+    'the stretch’s last reply lists the sources of the replies before it')
 })
 
 test('while the agent works the footer line is reserved but empty', () => {

@@ -119,19 +119,17 @@ export function renderedReplyClipboard(replyElement, rowKeys, parts) {
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
 }
 
-/** The whole stretch's clipboard payload: `prefix`, the Markdown of any part
- *  that began before the loaded history page (copied as its source, like a
- *  card), then every reply from the one whose first row is `startKey` through
- *  `lastReply` (the reply holding the footer), in transcript order, as each
- *  registered its prose. Null when nothing in it is copyable or a part is not
- *  rendered. */
-export function renderedStretchClipboard(lastReply, startKey, prefix = '') {
+/** The whole stretch's clipboard payload: every reply from the one whose
+ *  first row is `startKey` through `lastReply` (the reply holding the footer),
+ *  in transcript order, as each registered its prose. Null when nothing in it
+ *  is copyable or a part is not rendered. */
+export function renderedStretchClipboard(lastReply, startKey) {
   const replies = Array.from(lastReply?.closest('.chat__list')?.querySelectorAll('li.chat__reply') || [])
   const end = replies.indexOf(lastReply)
   if (end < 0) return null
   const start = replies.findIndex(reply => reply.dataset.replyKey === startKey)
-  const markdown = prefix ? [prefix] : []
-  const plain = prefix ? [prefix] : []
+  const markdown = []
+  const plain = []
   for (const reply of replies.slice(start >= 0 && start <= end ? start : end, end + 1)) {
     const prose = replyProseByElement.get(reply)
     if (!prose?.parts.length) continue

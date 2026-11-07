@@ -70,14 +70,18 @@ test('the chat has one reply footer, on the reply at its very end', () => {
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /footer=\{group === footerGroup \? \(turnActive \? 'working' : 'settled'\) : null\}/,
-    'only the last reply holds the footer; a new turn empties it')
+  assert.match(chatView, /const footerState = !turnActive \? 'settled' : showActiveAssistantSurface \? 'working' : null/,
+    'answering or sending clears the footer at once; the live reply reserves its line again')
+  assert.match(chatView, /footer=\{group === footerGroup \? footerState : null\}/,
+    'only the last reply holds the footer')
+  assert.match(chatView, /stretchSourceRows=\{group === footerGroup && turnActive \? null : stretchSourceRows\.get\(group\) \|\| null\}/,
+    'the latest stretch’s References leave with its footer while the agent works')
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
 })
 
 test('ChatView gives the footer the start of the agent’s stretch to copy from', () => {
-  assert.match(chatView, /agentStretchStart\(peerTimeline\.messages, replyGroups, footerGroup\)/)
+  assert.match(chatView, /const first = stretches\.get\(footerGroup\)\?\.\[0\]/)
   assert.match(chatView, /stretchStartKey=\{group === footerGroup \? footerStretch\?\.startKey : undefined\}/)
 })
 
@@ -116,4 +120,15 @@ test('a copy that fails says so instead of silently doing nothing', () => {
   assert.match(copyButton, /setCopyState\(copied \? 'copied' : 'failed'\)/)
   assert.match(copyButton, /role="status" aria-live="polite"/,
     'the outcome is announced, like tool-output copy')
+})
+
+test('replies in one agent stretch sit as close as rows within a reply', () => {
+  // An answered card, wait or helper result between two replies is hidden, so
+  // the replies are adjacent; the conversation gap belongs between speakers.
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(css, /\.chat__list > :is\(\.chat__reply, \.chat__msg--peer\)\s*\+ :is\(\.chat__reply, \.chat__msg--peer, \.chat__msg--pending-reply\) \{\s*margin-block-start: calc\(8px - 24px\);/)
+  // The Thinking row a new turn shows first sits where its reply will, so
+  // the swap does not move the transcript.
+  assert.match(chatView, /<li className="chat__msg chat__msg--assistant chat__msg--pending-reply">/)
+  assert.match(css, /\.chat__reply-rows > \.chat__msg \+ \.chat__msg[^{]*\{\s*margin-top: 8px;/)
 })
