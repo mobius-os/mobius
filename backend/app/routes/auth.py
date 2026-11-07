@@ -910,6 +910,8 @@ async def providers_status(
   and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
   read failed) are therefore attached only for a true owner caller, so an app
   or chat-embed principal sees the same availability fields without them.
+  `login_expires_at` is an upper bound: the CLI treats the stored end as a
+  window, so the sign-in can end up to three days before it.
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
@@ -938,7 +940,9 @@ async def providers_status(
         out[pid]["trial"] = None
     if pid == "claude" and error is None and is_owner_caller:
       from app.providers import claude_login_expires_at
-      out[pid]["login_expires_at"] = claude_login_expires_at(data_dir)
+      out[pid]["login_expires_at"] = await run_in_threadpool(
+        claude_login_expires_at, data_dir,
+      )
   return out
 
 

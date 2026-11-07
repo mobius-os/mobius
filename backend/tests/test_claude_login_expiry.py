@@ -43,9 +43,72 @@ def test_login_end_is_read_from_the_stored_sign_in(tmp_path):
   {"refreshToken": "r", "refreshTokenExpiresAt": "2026-11-06"},
   # The CLI treats an end more than three days before the access expiry as stale.
   {"refreshToken": "r", "expiresAt": END_MS + 3 * DAY_MS + 1, "refreshTokenExpiresAt": END_MS},
+  # The CLI accepts only an end between 2025-01-01 and ten years from now.
+  {"refreshToken": "r", "refreshTokenExpiresAt": 0},
+  {"refreshToken": "r", "refreshTokenExpiresAt": 1735689600000 - 1},
+  {"refreshToken": "r", "refreshTokenExpiresAt": time.time() * 1000 + 3651 * DAY_MS},
+  {"refreshToken": "r", "refreshTokenExpiresAt": 1e20},
+  {"refreshToken": "r", "refreshTokenExpiresAt": float("inf")},
+  {"refreshToken": "r", "refreshTokenExpiresAt": float("nan")},
 ])
 def test_login_end_is_unknown_without_a_usable_stored_date(tmp_path, oauth):
   assert claude_login_expires_at(_store(tmp_path, oauth)) is None
+
+
+@pytest.mark.parametrize("end", [float("inf"), float("nan")])
+def test_a_non_finite_login_end_cannot_refresh(tmp_path, end):
+  data_dir = _store(tmp_path, {
+    "accessToken": "a", "refreshToken": "r", "expiresAt": 0, "refreshTokenExpiresAt": end,
+  })
+  assert ClaudeProvider().check_auth(data_dir) is not None
+
+
+def test_owner_status_reports_no_login_end_for_an_unusable_stored_date(
+  client, auth, monkeypatch, tmp_path,
+):
+  from app.config import get_settings
+
+  monkeypatch.setattr(get_settings(), "data_dir", _store(tmp_path, {
+    "accessToken": "a", "refreshToken": "r",
+    "expiresAt": time.time() * 1000 + DAY_MS, "refreshTokenExpiresAt": 1e20,
+  }))
+  response = client.get("/api/auth/providers/status", headers=auth)
+  assert response.status_code == 200
+  assert response.json()["claude"]["login_expires_at"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_in_days,lifetime,expected_in_days", [
+  (30, 7 * 86400, 7),  # a shorter sign-in from the refresh wins
+  (5, 7 * 86400, 5),  # a refresh never moves the end later
+  (5, None, 5),
+  (5, 0, 5),
+  (5, -86400, 5),
+  (5, float("inf"), 5),
+  (None, 7 * 86400, None),  # no stored end: the CLI records none either
+])
+async def test_refresh_keeps_the_earlier_login_end(monkeypatch, stored_in_days, lifetime, expected_in_days):
+  import httpx
+
+  body = {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600}
+  if lifetime is not None:
+    body["refresh_token_expires_in"] = lifetime
+  original = httpx.AsyncClient
+  monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(
+    # Raw JSON, since httpx refuses to encode the non-finite case itself.
+    transport=httpx.MockTransport(lambda request: httpx.Response(200, content=json.dumps(body))),
+    **kwargs,
+  ))
+  now_ms = int(time.time() * 1000)
+  oauth = {"accessToken": "a", "refreshToken": "r", "expiresAt": now_ms}
+  if stored_in_days is not None:
+    oauth["refreshTokenExpiresAt"] = now_ms + stored_in_days * DAY_MS
+  refreshed = await providers._refresh_claude_access_token(oauth)
+  if expected_in_days is None:
+    assert "refreshTokenExpiresAt" not in refreshed
+  else:
+    end = refreshed["refreshTokenExpiresAt"] - now_ms
+    assert expected_in_days * DAY_MS <= end <= expected_in_days * DAY_MS + 5000
 
 
 def test_login_end_is_unknown_without_credentials(tmp_path):
