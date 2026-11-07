@@ -958,6 +958,7 @@ RUN_END_REASONS = frozenset((
   "superseded",           # a new turn started while this row was still open
   "provider_switch",      # a provider handoff retired the run
   "dependency_withdrawn", # its Goal dependency result was withdrawn
+  "wait_withdrawn",       # its never-admitted Wait follow-up was withdrawn
   "chat_deleted",         # the chat was deleted mid-turn
   "recovered",            # the turn wedged and was closed by recovery
 ))

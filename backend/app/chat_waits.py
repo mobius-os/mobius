@@ -407,7 +407,9 @@ def wait_withdrawal_outcome(db: Session, row: models.ChatWait) -> dict:
     if token not in carriers and row.id not in (ids or ()):
       continue
     attempted = True
-    if status not in _TERMINAL_RUN_STATUSES:
+    # A resolved provider-limit pause stays parked_notified: its physical
+    # attempt is over even if the logical task still needs a later turn.
+    if status not in _TERMINAL_RUN_STATUSES and status != "parked_notified":
       detail = (
         "A receiving turn has not ended. Use Stop if it is running, or resolve its recovery "
         "state, before withdrawing future delivery. Earlier provider input and tool effects cannot be undone."

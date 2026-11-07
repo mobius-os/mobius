@@ -1494,12 +1494,15 @@ requeue a notice cleared by Stop; Goal-owned results remain blocked by their
 Goal's hold. The ordinary Wait cancel action withdraws armed monitors and
 fired-but-unreceived follow-ups through the chat writer, ordered with provider
 admission and success receipts. It returns `withdrawn` before any attempt, or
-`withdrawn_after_attempt` when every admitting run has terminally ended without a
-successful receipt. The latter stops future delivery; it never retracts earlier
+`withdrawn_after_attempt` when every admitting attempt has ended without a
+successful receipt, including resolved provider-limit pauses (`parked_notified`).
+The latter stops future delivery; it never retracts earlier
 provider input or tool effects. A live or unresolved admitting run returns
 `not_withdrawable`; an existing receipt returns `already_delivered`. The read-side
 `can_withdraw` projection shares this eligibility check, but the writer rechecks
-it at mutation. Delivered history stays unchanged and Restart-activation Waits
+it at mutation. Withdrawal also interrupts exact never-admitted Wait carriers
+and clears their live-message pointers in the same transaction, without stopping
+unrelated turns. Delivered history stays unchanged and Restart-activation Waits
 remain card-owned. Do not broaden Stop silently while cleaning up the
 implementation.
 

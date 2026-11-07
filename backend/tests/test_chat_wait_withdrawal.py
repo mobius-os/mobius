@@ -45,6 +45,62 @@ def _receipt(chat, run, wait):
     run_token=run.id, wait_results=(wait.id,)))
 
 
+def _direct_carrier(db, chat, wait, suffix=""):
+  token = "wait-resume-" + wait.id + suffix
+  source_id = "source-" + wait.id
+  db.add(models.ChatRun(id=source_id, chat_id=chat.id, status="completed",
+    provider="claude", provider_execution_admitted=False))
+  db.commit()
+  result = get_writer().submit(StartContinuation(chat_id=chat.id,
+    root_run_id=source_id, run_token=token, cid="wait-result-" + wait.id,
+    message_kind="wait_result", content="Synthetic result", reason="wait_result",
+    hidden=True)).result(timeout=5)
+  assert isinstance(result, dict)
+  db.expire_all()
+  assert chat.live_assistant["id"] == chat.active_assistant_message_id == token
+  assert get_writer()._run_token_owner[chat.id] == token
+  return db.get(models.ChatRun, token)
+
+
+@pytest.mark.parametrize("suffix", ["", ".retry"])
+def test_withdrawal_retires_never_admitted_carrier_and_its_live_message(client, auth, db, chat, suffix):
+  wait = _wait(db, chat)
+  carrier = _direct_carrier(db, chat, wait, suffix)
+  assert carrier.status == "running" and carrier.provider_execution_admitted is False
+  assert _cancel(client, auth, wait)["disposition"] == "withdrawn"
+  db.expire_all()
+  assert carrier.status == "interrupted" and carrier.end_reason == "wait_withdrawn"
+  assert carrier.ended_at is not None and carrier.provider_execution_admitted is False
+  assert chat.live_assistant is None and chat.active_assistant_message_id is None
+  assert chat.id not in get_writer()._run_token_owner
+  with pytest.raises(_PersistFailed, match="run is not eligible"):
+    _admit(chat, carrier, wait).result(timeout=5)
+
+
+def test_withdrawal_keeps_an_unrelated_running_turn_and_live_message(client, auth, db, chat):
+  wait = _wait(db, chat)
+  other = _wait(db, chat)
+  carrier = _direct_carrier(db, chat, other)
+  assert _cancel(client, auth, wait)["disposition"] == "withdrawn"
+  db.expire_all()
+  assert carrier.status == "running" and carrier.ended_at is None
+  assert chat.live_assistant["id"] == chat.active_assistant_message_id == carrier.id
+  assert get_writer()._run_token_owner[chat.id] == carrier.id
+
+
+@pytest.mark.parametrize("admitted", [True, None])
+def test_refused_withdrawal_keeps_live_admitted_carrier_and_its_message(client, auth, db, chat, admitted):
+  wait = _wait(db, chat)
+  carrier = _direct_carrier(db, chat, wait)
+  carrier.provider_execution_admitted = admitted
+  db.commit()
+  assert _cancel(client, auth, wait)["disposition"] == "not_withdrawable"
+  db.expire_all()
+  assert carrier.status == "running" and carrier.ended_at is None
+  assert chat.live_assistant["id"] == chat.active_assistant_message_id == carrier.id
+  assert get_writer()._run_token_owner[chat.id] == carrier.id
+
+
 @pytest.mark.parametrize("status", ["armed", "met", "expired", "failed"])
 def test_cancel_withdraws_armed_or_owed_result_and_is_idempotent(client, auth, db, chat, status):
   wait = _wait(db, chat, status)
@@ -93,12 +149,16 @@ def test_cancel_after_selection_but_before_provider_entry_refuses_stale_prompt(
   run = _receiver(db, chat, "wait-resume-" + wait.id if carrier == "direct" else "ordinary")
   assert chat_waits.owed_wait_results(db, chat.id, "", run_id=run.id)[1] == (wait.id,)
   assert _cancel(client, auth, wait)["disposition"] == "withdrawn"
-  with pytest.raises(_PersistFailed, match="Wait (continuation|result) is no longer receivable"):
+  refusal = "run is not eligible" if carrier == "direct" else "Wait result is no longer receivable"
+  with pytest.raises(_PersistFailed, match=refusal):
     _admit(chat, run, wait).result(timeout=5)
   with pytest.raises(_PersistFailed, match="admitted run not found"):
     _receipt(chat, run, wait).result(timeout=5)
   db.expire_all()
-  assert not db.get(models.ChatRun, run.id).provider_execution_admitted
+  db.refresh(run)
+  assert not run.provider_execution_admitted
+  assert run.status == ("interrupted" if carrier == "direct" else "running")
+  assert run.end_reason == ("wait_withdrawn" if carrier == "direct" else None)
   assert db.get(models.ChatWait, wait.id).result_disposition == "withdrawn"
   assert db.get(models.ChatWait, wait.id).received_run_id is None
 
@@ -185,7 +245,10 @@ def test_provider_entry_then_cancel_then_receipt_keep_truthful_order(db, chat):
   assert final["result_disposition"] == "delivered"
 
 
-@pytest.mark.parametrize("status", ["running", "parked", "unknown", "failed", "interrupted", "completed", "stopped"])
+@pytest.mark.parametrize("status", [
+  "running", "parked", "resume_pending", "unknown", "failed", "interrupted",
+  "completed", "stopped", "parked_notified",
+])
 @pytest.mark.parametrize("admitted", [True, None])
 def test_only_live_or_unknown_admitting_carriers_refuse_future_withdrawal(
   client, auth, db, chat, status, admitted,
@@ -195,7 +258,7 @@ def test_only_live_or_unknown_admitting_carriers_refuse_future_withdrawal(
   run.status = status
   run.provider_execution_admitted = admitted
   db.commit()
-  terminal = status in {"failed", "interrupted", "completed", "stopped"}
+  terminal = status in {"failed", "interrupted", "completed", "stopped", "parked_notified"}
   result = _cancel(client, auth, wait)
   assert result["disposition"] == ("withdrawn_after_attempt" if terminal else "not_withdrawable")
   assert not result["can_withdraw"]
@@ -237,13 +300,17 @@ def test_writer_withdrawal_cannot_cross_chat_or_restart_card_ownership(db, chat)
 def test_failed_withdrawal_commit_does_not_report_or_publish_success(db, chat, monkeypatch):
   from app import chat_writer
   wait = _wait(db, chat)
+  carrier = _direct_carrier(db, chat, wait)
   published = []
   monkeypatch.setattr(chat_waits, "_broadcast_changed", published.append)
   monkeypatch.setattr(chat_writer, "_commit_or_rollback", lambda session: session.rollback() or False)
   with pytest.raises(_PersistFailed, match="WithdrawWait did not persist"):
     get_writer().submit(chat_writer.WithdrawWait(chat_id=chat.id, wait_id=wait.id)).result(timeout=5)
-  db.refresh(wait)
+  db.expire_all()
   assert wait.result_disposition is None and wait.cancelled_at is None
+  assert carrier.status == "running" and carrier.ended_at is None
+  assert chat.live_assistant["id"] == chat.active_assistant_message_id == carrier.id
+  assert get_writer()._run_token_owner[chat.id] == carrier.id
   assert published == []
 
 
@@ -262,14 +329,16 @@ def test_promoted_wait_notice_is_still_withdrawable_before_provider_entry(client
   assert _cancel(client, auth, wait)["disposition"] == "withdrawn"
   # Even if prompt construction now finds no owed IDs, the promoted raw
   # notice cannot slip through provider admission under a provisional ID.
-  with pytest.raises(_PersistFailed, match="Wait continuation is no longer receivable"):
+  with pytest.raises(_PersistFailed, match="run is not eligible"):
     writer.submit(AdmitProviderExecution(chat_id=chat.id,
       run_token=token)).result(timeout=5)
   db.expire_all()
-  assert db.get(models.ChatRun, token).provider_execution_admitted is False
+  carrier = db.get(models.ChatRun, token)
+  assert carrier.provider_execution_admitted is False
+  assert carrier.status == "interrupted" and carrier.end_reason == "wait_withdrawn"
 
 
-@pytest.mark.parametrize("status", ["failed", "interrupted", "completed", "stopped"])
+@pytest.mark.parametrize("status", ["failed", "interrupted", "completed", "stopped", "parked_notified"])
 def test_withdraw_after_ended_attempt_stops_injection_into_the_next_ordinary_turn(
   client, auth, db, chat, status,
 ):
