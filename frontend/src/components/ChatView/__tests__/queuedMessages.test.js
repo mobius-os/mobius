@@ -91,6 +91,14 @@ test('held rows never claim to send after a running turn', () => {
   assert.doesNotMatch(html, /aria-label="Send queued messages"/)
 })
 
+test('a shared-browser guest sees the held queue waiting for the owner, with no send', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), sharedGuest: true,
+  }))
+  assert.match(html, /Waiting for the owner to send/)
+  assert.doesNotMatch(html, /aria-label="Send queued messages"/)
+})
+
 test('the strip counts the draft\'s files, which stay with the draft', () => {
   assert.equal(composerDraftPreview('Then deploy it', 2), 'Then deploy it · 2 files')
   assert.equal(composerDraftPreview('', 1), '1 file')

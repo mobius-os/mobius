@@ -269,6 +269,7 @@ def test_call_tells_the_app_a_helper_called_and_whether_it_may_write(
   assert actors == [{
     "scope": "owner", "app_id": None, "app_slug": None,
     "delegated": True, "access": scope,
+    "delegation_id": "helper", "delegation_chat": "child",
   }]
 
 

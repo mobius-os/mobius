@@ -4578,7 +4578,8 @@ export default function ChatView({
       forgetAllSendIntents()
 
       let stoppedCleanly = false
-      let heldQueue = null
+      // The server's queue as of the latest runtime read after a Stop request.
+      let serverQueue = null
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
@@ -4622,15 +4623,13 @@ export default function ChatView({
           break
         }
         const confirmation = await confirmStopIdle()
+        if (Array.isArray(confirmation.pending)) serverQueue = confirmation.pending
         stoppedCleanly = stopConfirmedIdle({
           stopSucceeded: requestSucceeded,
           confirmRunning: confirmation.running,
           confirmFailed: confirmation.failed,
         })
-        if (stoppedCleanly) {
-          heldQueue = confirmation.pending
-          break
-        }
+        if (stoppedCleanly) break
         if (!shouldRetryStopAfterConfirm({
           requestSucceeded,
           confirmRunning: confirmation.running,
@@ -4640,14 +4639,18 @@ export default function ChatView({
         }
       }
 
+      // The server settles the queue (owner rows held, other rows dropped)
+      // before it interrupts the turn, so it has settled it even when the
+      // interrupt failed. Show its queue either way: an idle one lets the
+      // composer offer to send the held rows, and a turn still running must
+      // not keep promising rows that no longer send after it.
+      if (!serverQueue) serverQueue = (await confirmStopIdle()).pending
+      if (Array.isArray(serverQueue)) pendingQueue.hydrate(serverQueue)
       // The SDK interrupt timed out (handle.stop()'s 2s bound — see
       // claude_sdk_runner.stop): the runner is still alive and the backend
       // left the registry entry + broadcast intact for the runner's own
-      // teardown. Keep the stream attached; the queue is untouched.
+      // teardown. Keep the stream attached.
       if (!stoppedCleanly) return
-      // The idle runtime read after Stop carries the held queue, so the
-      // composer can offer to send it.
-      if (Array.isArray(heldQueue)) pendingQueue.hydrate(heldQueue)
       dispatchQuestionFollowHandoff({ type: 'cancelled' })
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
@@ -5048,10 +5051,13 @@ export default function ChatView({
   // Fast-forward is stricter: it appears only when the click can actually
   // steer a live turn with server-confirmed pending rows. Optimistic rows stay
   // visible in the tray but do not expose an inert fast-forward button.
+  // A held queue reads the same to everyone viewing the chat; only the owner
+  // may send it (the server refuses a shared-browser guest).
+  const sharedGuest = isSharedBrowserAuth()
   const queueHeld = queueAwaitsOwnerSend({
     turnActive, pendingMessages: pendingQueue.pendingMessages,
-    sharedGuest: isSharedBrowserAuth(),
   })
+  const sendHeldQueue = queueHeld && !sharedGuest ? handleSendQueue : undefined
   const composerBusy = turnActive || (pendingQueue.pendingMessages.length > 0 && !queueHeld)
   // A connection failure owns the action slot until Retry succeeds. Keep both
   // the visible fast-forward affordance and its keyboard shortcut inert while
@@ -5886,9 +5892,9 @@ export default function ChatView({
   useLayoutEffect(() => {
     committedReplyGroupsRef.current = { chatId, groups: replyGroups }
   }, [chatId, replyGroups])
-  // Activity projection is a transcript-source commit too: peer rows may
-  // arrive after the first reveal without changing message count. Keep all
-  // source handoffs in the controller's same pre-paint transaction.
+  // Source handoffs can change geometry without changing message count.
+  // Synchronize those commits here; the controller's ResizeObserver owns live
+  // reveal and intrinsic growth without a second layout pass per text frame.
   useLayoutEffect(() => {
     reapplyActiveMode()
   }, [catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
@@ -6422,7 +6428,8 @@ export default function ChatView({
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
-            onSendHeld={queueHeld ? handleSendQueue : undefined}
+            sharedGuest={sharedGuest}
+            onSendHeld={sendHeldQueue}
           />
         <CompactionProgress
           progress={compactionProgress}
@@ -6461,7 +6468,7 @@ export default function ChatView({
           onManualVoiceEdit={acceptManualEdit}
           onToggleVoice={toggleVoice}
           onStop={stopComposerWork}
-          onSendQueue={queueHeld ? handleSendQueue : undefined}
+          onSendQueue={sendHeldQueue}
           onSteer={handleSteer}
           canSteer={canSteer}
           showSteer={showSteer}

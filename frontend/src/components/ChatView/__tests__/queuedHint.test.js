@@ -44,3 +44,11 @@ test('with held and new rows the caption tells them apart', () => {
     '1 waiting for you; the rest send after this turn')
   assert.equal(queuedHint({ turnActive: false, held: 1, total: 2 }), '1 waiting for you')
 })
+
+
+test('a shared-browser guest is told the owner sends the held rows', () => {
+  assert.equal(queuedHint({ turnActive: false, held: 2, total: 2, sharedGuest: true }),
+    'Waiting for the owner to send')
+  assert.equal(queuedHint({ turnActive: true, held: 1, total: 2, sharedGuest: true }),
+    '1 waiting for the owner; the rest send after this turn')
+})

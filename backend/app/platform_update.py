@@ -381,10 +381,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # Conflict-only backlog signal. This remains false outside ``state ==
-  # "conflict"`` even when ``available`` is true. While resolving a conflict it
-  # becomes true when origin/main advances past the pinned release, letting
-  # Settings offer one combined review+resolve instead of one per release.
+  # Backlog signal for an in-flight update: true when ``unfinished_update``
+  # is pinned to a release (resolving, prepared/finishing or settling) and
+  # the selected release strictly descends it. It stays false for an ordinary
+  # ``available`` update with nothing in flight: that release is itself the
+  # thing to apply. Settings uses it to suggest cancelling the stale update
+  # and reviewing the latest instead; nothing switches automatically.
   # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
@@ -1829,8 +1831,12 @@ def reviewed_container_rebuild_plan(
     base = _git(
       "merge-base", current_sha, target_sha, repo=repo, check=False,
     ).stdout.strip() or current_sha
-    incoming_activation = _incoming_activation_impact(repo, base, target_sha)
-    activation = _owed_activation(repo, base, target_sha)
+    # The owner reviewed this with the host's evidence; the request is
+    # judged by the same evidence, never on a boot path.
+    incoming_activation = _incoming_activation_impact(
+      repo, base, target_sha, read_host=True,
+    )
+    activation = _owed_activation(repo, base, target_sha, read_host=True)
     return PlatformReviewedRebuild(
       target_sha=target_sha,
       image_digest=image_digest,
@@ -1986,6 +1992,7 @@ def serves_image_release(
   if activation is None:
     activation = _platform_activation_impact(
       repo, served_to_head=_activation_paths_between(repo, served_sha, head),
+      read_host=True,
     )
   return activation["level"] == platform_activation.ActivationLevel.LIVE.value
 
@@ -2113,31 +2120,65 @@ def _without_python_inputs_installed_for(
   return [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
 
 
+def _without_certified_host_helper(
+  repo: Path, paths: list[str], release: str | None,
+) -> list[str]:
+  """Drop the helper migration marker once the host has done that work.
+
+  Reinstalling the helper is host work the container cannot perform, but the
+  host's root-owned status certifies the protocol its last completed install
+  provides, the same evidence that gates replacement dispatch. Status or a
+  requirement that cannot be read keeps the work owed.
+
+  Only owner-facing status and reviews ask (``read_host=True``). Boot, record
+  and finalize paths never do: they run from the image's boot closure, which
+  does not include deployment_control, and the marker must keep recording
+  the requirement anyway.
+  """
+  marker = platform_activation.HOST_HELPER_REQUIREMENT_PATH
+  if marker not in paths:
+    return paths
+  from app import deployment_control  # it imports this module
+
+  release = release or _contained_official_source(repo)
+  if not deployment_control.host_helper_meets_release(release, repo):
+    return paths
+  return [path for path in paths if path != marker]
+
+
 def _incoming_activation_impact(
   repo: Path,
   before: str | None,
   target_sha: str | None,
+  *,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
-  """Classify target work that is not already proven active in this image."""
-  return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(
-      repo, _activation_paths_between(repo, before, target_sha), target_sha,
-    ),
+  """Classify target work that is not already proven active in this image.
+  ``read_host`` also discounts host work the host certifies as done."""
+  paths = _without_python_inputs_installed_for(
+    repo, _activation_paths_between(repo, before, target_sha), target_sha,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, target_sha)
+  return platform_activation.classify_activation(paths)
 
 
 def _owed_activation(
   repo: Path, before: str, target: str, *, release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Everything the running process owes once it serves ``target``: its
   still-pending activation plus the changes from ``before``. Image work is
   judged against the official ``release`` ``target`` carries (``target``
-  itself unless it is a prepared local revision on top of one)."""
+  itself unless it is a prepared local revision on top of one). ``read_host``
+  (reviews only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, release=release or target,
     additional_served_paths=_activation_paths_between(repo, before, target),
   )
   owed_paths = _without_python_inputs_installed_for(repo, paths, target)
+  if read_host:
+    owed_paths = _without_certified_host_helper(repo, owed_paths, release or target)
   return platform_activation.classify_activation(
     owed_paths,
     served_restart_paths=served_restart,
@@ -2414,10 +2455,15 @@ def _platform_activation_impact(
   *,
   served_to_head: list[str] | None = None,
   release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
+  """What the running process still owes. ``read_host`` (status and reviews
+  only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, served_to_head=served_to_head, release=release,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, release)
   return platform_activation.classify_activation(
     paths, served_restart_paths=served_restart,
   )
@@ -2429,7 +2475,9 @@ def _complete_boot_activation(repo: Path) -> None:
   A fresh server always satisfies ``server_restart``.  A new image identity
   that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
-  cannot observe or control those external planes.
+  cannot observe or control those external planes. The marker keeps the
+  helper requirement; only status and reviews discount it against the host's
+  certified helper (``_without_certified_host_helper``), never this boot step.
   """
   marker = _read_activation_marker()
   if not marker:
@@ -4895,12 +4943,14 @@ def _working_overlay_commit(repo: Path, parent: str, tree: str) -> str:
 
 
 def _record_update_activation(
-  repo: Path, head: str | None, target: str | None,
+  repo: Path, head: str | None, target: str | None, *, read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Record what the running process still owes for the release at ``head``.
 
   Compare what this process imported to the new head, not only the incoming
   target: local commits made while uvicorn ran are part of the same remainder.
+  The marker always records host work; ``read_host`` (the owner's Apply
+  response) only discounts certified host work in the returned impact.
   """
   served = _served_platform_sha()
   changed_paths = _activation_paths_between(repo, served, head)
@@ -4916,7 +4966,7 @@ def _record_update_activation(
       upstream_sha=target, repo=repo,
     )
   return _platform_activation_impact(
-    repo, served_to_head=changed_paths, release=release,
+    repo, served_to_head=changed_paths, release=release, read_host=read_host,
   )
 
 
@@ -5719,7 +5769,7 @@ def platform_status(
   if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
     rolled_back = False
     rollback = None
-  activation = _platform_activation_impact(repo)
+  activation = _platform_activation_impact(repo, read_host=True)
   activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
@@ -5745,18 +5795,18 @@ def platform_status(
   current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
   blocker = restart_blocker(repo)
+  # Newer releases stacked up behind the update in flight wait until it
+  # finishes or is cancelled; ``target`` is the last-fetched selected release.
+  pending = unfinished_update(repo)
+  pinned = pending["target_sha"] if pending else None
+  newer_available = bool(
+    target and pinned and target != pinned
+    and _is_ancestor(repo, pinned, target)
+  )
 
   if conflict:
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
-    # `target` is the last-fetched origin/main. If it strictly descends the
-    # version this conflict is pinned to, newer releases stacked up behind it.
-    # They wait until this one finishes (see ``unfinished_update``).
-    conflict_target = flag.get("upstream")
-    newer_available = bool(
-      target and conflict_target and target != conflict_target
-      and _is_ancestor(repo, conflict_target, target)
-    )
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
@@ -5776,7 +5826,7 @@ def platform_status(
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
       recovery_refs=recovery_refs,
-      unfinished_update=unfinished_update(repo),
+      unfinished_update=pending,
       local_overlay=local_overlay_summary(repo, local=local, target=target),
       restart_blocker=blocker,
       )
@@ -5821,11 +5871,11 @@ def platform_status(
     current_build_committed_at=current_build_committed_at,
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
-    newer_updates_available=False,
+    newer_updates_available=newer_available,
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
     recovery_refs=recovery_refs,
-    unfinished_update=unfinished_update(repo),
+    unfinished_update=pending,
     local_overlay=local_overlay_summary(repo, local=local, target=target),
     restart_blocker=blocker,
   )
@@ -5937,7 +5987,9 @@ def prepared_update_preview(
     return None
   current = _update_source_tip(repo)
   activation = _with_prepared_image_requirement(
-    _incoming_activation_impact(repo, record["snapshot"], record["prepared"]),
+    _incoming_activation_impact(
+      repo, record["snapshot"], record["prepared"], read_host=True,
+    ),
     record,
   )
   preview = empty_platform_update_preview(
@@ -6117,7 +6169,7 @@ def _platform_update_preview_unlocked(
       current_sha=local_sha, target_sha=target,
       image_digest=image_digest,
     )
-    activation = _platform_activation_impact(repo, release=target)
+    activation = _platform_activation_impact(repo, release=target, read_host=True)
     if local_sha and target and activation["level"] != "live":
       preview.update(
         state=_state_for_activation(activation).value,
@@ -6172,7 +6224,9 @@ def _platform_update_preview_unlocked(
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
-  incoming_activation = _incoming_activation_impact(repo, base, target)
+  incoming_activation = _incoming_activation_impact(
+    repo, base, target, read_host=True,
+  )
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     actionable=True, operation="update",
@@ -6324,7 +6378,7 @@ def _apply_platform_update_sync(
       chat_id: str | None = None
 
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
-        return _record_update_activation(repo, head, res.target_sha)
+        return _record_update_activation(repo, head, res.target_sha, read_host=True)
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
@@ -6364,7 +6418,7 @@ def _apply_platform_update_sync(
         raise PlatformUpdateError(res.error or res.status)
 
       if res.status in {"conflict", "rolled_back"}:
-        activation = _platform_activation_impact(repo)
+        activation = _platform_activation_impact(repo, read_host=True)
 
       final_phase = (
         PlatformUpdatePhase.BLOCKED

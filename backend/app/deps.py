@@ -106,6 +106,8 @@ class Principal:
   embed_role: str | None = None
   operations: frozenset[str] = frozenset()
   delegation_id: str | None = None
+  # Restrictive provenance, not the chat/run identity of an app caller.
+  delegation_chat: str | None = None
   app_is_service: bool = False
   # Signed supervised-job identity/grant; never copied into frame bearers.
   app_job_secrets: frozenset[str] = frozenset()
@@ -742,9 +744,12 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
-    chat_id=payload.get("agent_chat") or payload.get("delegation_chat"),
-    run_id=payload.get("agent_run"),
+    # App tokens retain the initiating helper's restrictions, never its agent
+    # identity. Consumers of chat_id/run_id must not mistake an app for it.
+    chat_id=(payload.get("agent_chat") or payload.get("delegation_chat")) if app_id is None else None,
+    run_id=payload.get("agent_run") if app_id is None else None,
     delegation_id=payload.get("delegation_id"),
+    delegation_chat=payload.get("delegation_chat"),
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
     app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
@@ -924,7 +929,11 @@ def get_delegation_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve owner/app plus the route-confined delegated-child bearer."""
+  """Resolve owner/app plus the route-confined delegated-child bearer.
+
+  An app carrying a helper's lineage is restricted by it, not authorized to
+  observe or drive that helper's children. Refuse it across this route family.
+  """
   owner, payload = _resolve_owner(token, db)
   if payload.get("scope") == "delegation":
     delegation_id = payload.get("delegation_id")
@@ -942,7 +951,13 @@ def get_delegation_principal(
       chat_id=str(chat_id), delegation_id=str(delegation_id),
       browser=BrowserLineage.from_claims(payload),
     )
-  return _generic_principal(owner, payload, db)
+  principal = _generic_principal(owner, payload, db)
+  if principal.scope == "app" and principal.delegation_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegated app tokens cannot act as helper agents.",
+    )
+  return principal
 
 
 def get_chat_view_principal(
