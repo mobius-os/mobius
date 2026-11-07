@@ -3470,6 +3470,13 @@
   display: block;
 }
 
+/* An extreme-aspect image (see attachmentThumbFit.js) shows whole: its
+   centre crop can be blank. Applies to pending and sent squares alike. */
+.chat__attach-card-thumb[data-fit="contain"],
+.chat__attach-thumb[data-fit="contain"] {
+  object-fit: contain;
+}
+
 .chat__attach-card-icon {
   width: 30px;
   height: 36px;
