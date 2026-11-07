@@ -262,3 +262,118 @@ def _as_update(app_id, record, diff, monkeypatch):
     "title": record["plan"]["title"], "body": record["plan"]["body_draft"],
   })
   monkeypatch.setattr(routes, "_assert_reviewed_update_contains_live_head", lambda *_a: None)
+
+
+def _screenshot_review(app_id, record_id):
+  _repo, record, diff = _prepared_real_review(app_id, record_id)
+  record["plan"]["screenshots"] = [{"name": "after.png", "sha256": "f" * 64, "alt": "After"}]
+  record["plan"]["body_draft"] += "\n\n![After](screenshot:after.png)"
+  _write_contribution(app_id, record["id"], record, diff)
+  return record
+
+
+def _known_after_upload(record, _diff, **_kwargs):
+  # The real sender raises this after the image push, while still armed
+  # (see test_a_failed_public_readback_follows_a_real_image_push).
+  from app.contribution_errors import ContributionSubmitError
+  raise ContributionSubmitError(
+    "The screenshots were uploaded, but GitHub does not serve them publicly. The code was not sent.",
+    code="screenshot_not_public",
+    record_patch={"last_submit_screenshots": {"repo": "octocat/app-demo", "commit": "c" * 40}},
+  )
+
+
+def test_known_screenshot_error_after_upload_is_unconfirmed_and_keeps_its_receipt(
+  client, owner_token, monkeypatch, events,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record = _screenshot_review(app_id, "known-screenshot")
+  _quiet_source(monkeypatch)
+  monkeypatch.setattr(routes, "_submit_prepared_pr", _known_after_upload)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 503, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "publication_unconfirmed"
+  assert detail["cause_code"] == "screenshot_not_public"
+  assert detail["message"] == routes._PUBLICATION_UNCONFIRMED  # never "not sent"
+  saved = detail["record"]
+  assert saved["last_submit_error_code"] == "publication_unconfirmed"
+  assert "screenshot_not_public" in saved["last_submit_error_detail"]
+  # The upload witness is kept so a later Send reuses the same images.
+  assert saved["last_submit_screenshots"]["commit"] == "c" * 40
+  path, _ = routes._record_paths(app_id, record["id"])
+  receipt = routes._read_personal_attempt(path, app_id=app_id, record_id=record["id"])
+  assert receipt is not None and receipt["phase"] == "armed"
+  [event] = events
+  assert event["certainty"] == "unknown" and event["code"] == "publication_unconfirmed"
+
+
+def test_known_error_without_any_possible_effect_keeps_its_precise_answer(
+  client, owner_token, monkeypatch, events,
+):
+  from app.contribution_errors import ContributionSubmitError
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_real_review(app_id, "known-plain")
+  _quiet_source(monkeypatch)
+  def refuse(*_a, **_k):
+    raise ContributionSubmitError("Upstream moved. Nothing was sent.", code="upstream_conflict")
+  monkeypatch.setattr(routes, "_submit_prepared_pr", refuse)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 409 and response.json()["detail"]["code"] == "upstream_conflict"
+  assert "cause_code" not in response.json()["detail"]
+  path, _ = routes._record_paths(app_id, record["id"])
+  assert routes._read_personal_attempt(path, app_id=app_id, record_id=record["id"]) is None
+  [event] = events
+  assert event["certainty"] == "none"
+
+
+@pytest.mark.parametrize("where", ["layer", "preflight"])
+def test_partial_stack_known_screenshot_error_keeps_every_possibly_public_layer(
+  client, owner_token, monkeypatch, events, where,
+):
+  """Stack Send hosts every layer's images before any push."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_ids, records = _prepared_new_stack(app_id, f"known-{where}")
+  shot = [{"name": "after.png", "sha256": "f" * 64, "alt": "After"}]
+  for record in records:
+    record["plan"]["screenshots"] = shot
+    record["plan"]["body_draft"] += "\n\n![After](screenshot:after.png)"
+    _write_contribution(app_id, record["id"], record, f"diff --git a/{record['id']} b/{record['id']}\n+reviewed\n")
+  _quiet_source(monkeypatch)
+  if where == "preflight":
+    monkeypatch.setattr(routes, "_preflight_prepared_stack", lambda *_a, **_k: _known_after_upload(None, None))
+    monkeypatch.setattr(routes, "_submit_prepared_pr", lambda *_a, **_k: pytest.fail("no layer is published"))
+  else:
+    monkeypatch.setattr(routes, "_preflight_prepared_stack", lambda *_a, **_k: None)
+    def publish(record, diff, **kwargs):
+      if record["id"] == record_ids[0]:
+        return "https://github.com/mobius-os/mobius/pull/41", 41, {}
+      return _known_after_upload(record, diff)
+    monkeypatch.setattr(routes, "_submit_prepared_pr", publish)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/submit-stack",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"record_ids": record_ids, "publication_stage": "draft"},
+  )
+  assert response.status_code == 503, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "publication_unconfirmed"
+  assert detail["cause_code"] == "screenshot_not_public"
+  kept = [routes._read_personal_attempt(routes._record_paths(app_id, rid)[0], app_id=app_id, record_id=rid)
+          for rid in record_ids]
+  if where == "layer":
+    assert kept[0] is None  # the settled parent is never reopened or replayed
+    assert kept[1]["phase"] == "armed"
+    assert [(e["certainty"]) for e in events] == ["effect", "unknown"]
+  else:
+    assert all(receipt["phase"] == "armed" for receipt in kept)
+    assert [(e["certainty"]) for e in events] == ["unknown", "unknown"]

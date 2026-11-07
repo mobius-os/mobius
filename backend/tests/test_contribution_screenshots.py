@@ -275,6 +275,18 @@ def test_send_stops_when_github_does_not_serve_the_images_publicly(fork):
   assert raised.value.code == "screenshot_not_public"
 
 
+def test_a_failed_public_readback_follows_a_real_image_push(fork):
+  """The known screenshot error is raised after the images are already public."""
+  with pytest.raises(ContributionSubmitError) as raised:
+    fork["publish"](read_public=lambda _url: None)
+  assert raised.value.code == "screenshot_not_public"
+  pushed = subprocess.run(
+    ["git", "rev-parse", "--verify", f"refs/heads/{shots.ASSETS_BRANCH}"],
+    cwd=fork["remote"], capture_output=True, text=True,
+  )
+  assert pushed.returncode == 0  # the upload landed before the error
+
+
 def test_an_open_pr_update_cannot_carry_screenshots(fork):
   with pytest.raises(ContributionSubmitError) as raised:
     _publish_reviewed_screenshots(

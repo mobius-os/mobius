@@ -895,6 +895,51 @@ def _retire_settled_attempt(owner: "_PersonalAttemptOwner") -> None:
                 owner.app_id, owner.record_id, exc_info=True)
 
 
+def _open_attempts(owners: dict) -> list["_PersonalAttemptOwner"]:
+  # Layers that already settled have no receipt and no outstanding effect.
+  return [owner for owner in owners.values() if _attempt_phase(owner) is not None]
+
+
+def _release_unpublished_attempts(owners: Iterable["_PersonalAttemptOwner"]) -> bool:
+  """The one rule for retiring receipts on a failed publication.
+
+  Only an armed attempt that cannot be public is released; every other
+  receipt stays for read-only observation. Returns whether all were released.
+  """
+  released = True
+  for owner in owners:
+    if owner.replay_phase() == "armed" and not _attempt_may_be_public(owner):
+      owner.settle()
+    else:
+      released = False
+  return released
+
+
+def _known_publication_failure(
+  owners: Iterable["_PersonalAttemptOwner"], exc: ContributionSubmitError,
+) -> tuple[ContributionSubmitError, str | None]:
+  """A known sender error, restated as unconfirmed if it may hide a public effect.
+
+  A known error raised before the signed push phases often says nothing was
+  sent, which holds only when the attempt is certainly unpublished: a new
+  PR's screenshots can be public while its receipt is still armed. Errors
+  from later phases are raised with the push already witnessed and say so
+  (for example, that the branch was pushed); they keep their own answer, and
+  their receipts are never released. The original code is kept as the cause,
+  and its record patch (such as an uploaded image witness) for the retry.
+  """
+  if not any(
+    _attempt_phase(owner) in _NO_EFFECT_ATTEMPT_PHASES and _attempt_may_be_public(owner)
+    for owner in owners
+  ):
+    return exc, None
+  cause = exc.code or "unrecorded"
+  return ContributionSubmitError(
+    _PUBLICATION_UNCONFIRMED, status_code=503, code="publication_unconfirmed",
+    detail=f"Cause: {cause}. {exc.detail}".strip(), record_patch=exc.record_patch,
+  ), cause
+
+
 def _log_open_attempt_outcomes(
   owners: Iterable["_PersonalAttemptOwner"], **fields,
 ) -> None:
@@ -3518,7 +3563,7 @@ async def submit_contribution(
           "contribution equivalence witness failed %s/%s",
           app_id, record_id, exc_info=True,
         )
-  except ContributionSubmitError as exc:
+  except ContributionSubmitError as raised:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
@@ -3534,6 +3579,7 @@ async def submit_contribution(
             "code": "publication_claim_changed",
           },
         ) from None
+      exc, cause = _known_publication_failure([attempt_owner], raised)
       record = _mark_submit_failure(
         app_id=app_id,
         record_path=record_path,
@@ -3545,8 +3591,7 @@ async def submit_contribution(
       _log_publication_outcome(
         attempt_owner, action="submit", status=exc.status_code, code=exc.code or "",
       )
-      if attempt_owner.replay_phase() == "armed":
-        attempt_owner.settle()
+      _release_unpublished_attempts([attempt_owner])
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -3554,6 +3599,7 @@ async def submit_contribution(
         "detail": exc.detail,
         "record": record,
         **({"code": exc.code} if exc.code else {}),
+        **({"cause_code": cause} if cause else {}),
       },
     )
   except Exception as exc:
@@ -3581,8 +3627,7 @@ async def submit_contribution(
         app_id=app_id, record_path=record_path, message=message, code=code,
       )
       _log_publication_outcome(attempt_owner, action="submit", status=status, code=code)
-      if attempt_owner.replay_phase() == "armed" and not _attempt_may_be_public(attempt_owner):
-        attempt_owner.settle()
+      _release_unpublished_attempts([attempt_owner])
     raise HTTPException(
       status_code=status,
       detail={"message": message, "record": record, "code": code},
@@ -4112,10 +4157,8 @@ async def update_existing_contribution(
             "code": "publication_claim_changed",
           },
         ) from None
-      _log_publication_outcome(
-        attempt_owner, action="update_existing", status=exc.status_code, code=exc.code or "",
-      )
       successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
+      cause = None
       if (
         successor
         and exc.code in {"update_unconfirmed", "landing_unconfirmed"}
@@ -4129,6 +4172,7 @@ async def update_existing_contribution(
           detail=exc.detail,
         )
       else:
+        exc, cause = _known_publication_failure([attempt_owner], exc)
         record = _mark_submit_failure(
           app_id=app_id,
           record_path=record_path,
@@ -4137,8 +4181,10 @@ async def update_existing_contribution(
           code=exc.code or "",
           detail=exc.detail,
         )
-        if attempt_owner.replay_phase() == "armed":
-          attempt_owner.settle()
+      _log_publication_outcome(
+        attempt_owner, action="update_existing", status=exc.status_code, code=exc.code or "",
+      )
+      _release_unpublished_attempts([attempt_owner])
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -4146,6 +4192,7 @@ async def update_existing_contribution(
         "detail": exc.detail,
         "record": record,
         **({"code": exc.code} if exc.code else {}),
+        **({"cause_code": cause} if cause else {}),
       },
     )
   except Exception as exc:
@@ -4186,9 +4233,8 @@ async def update_existing_contribution(
           app_id=app_id, record_path=record_path, message=message, code=code,
         )
       _log_publication_outcome(attempt_owner, action="update_existing", status=status, code=code)
-      if (not successor and attempt_owner.replay_phase() == "armed"
-          and not _attempt_may_be_public(attempt_owner)):
-        attempt_owner.settle()
+      if not successor:
+        _release_unpublished_attempts([attempt_owner])
     raise HTTPException(
       status_code=status,
       detail={"message": message, "record": record, "code": code},
@@ -4583,6 +4629,7 @@ async def update_contribution_stack(
               },
             ) from None
           _assert_active_stack_attempts_current(attempt_owners)
+          exc, cause = _known_publication_failure(_open_attempts(attempt_owners), exc)
           snapshots = _mark_stack_submit_failure(
             rows,
             exc.message,
@@ -4595,9 +4642,7 @@ async def update_contribution_stack(
             attempt_owners.values(), action=action_input["action"],
             status=exc.status_code, code=exc.code or "",
           )
-          for active_owner in attempt_owners.values():
-            if active_owner.replay_phase() == "armed":
-              active_owner.settle()
+          _release_unpublished_attempts(attempt_owners.values())
         raise HTTPException(
           status_code=exc.status_code,
           detail={
@@ -4606,6 +4651,7 @@ async def update_contribution_stack(
             "records": snapshots,
             "updated": updated_rows,
             **({"code": exc.code} if exc.code else {}),
+            **({"cause_code": cause} if cause else {}),
           },
         ) from exc
 
@@ -4671,6 +4717,7 @@ async def update_contribution_stack(
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
       _assert_active_stack_attempts_current(attempt_owners)
+      exc, cause = _known_publication_failure(_open_attempts(attempt_owners), exc)
       snapshots = _mark_stack_submit_failure(
         rows,
         exc.message,
@@ -4682,9 +4729,7 @@ async def update_contribution_stack(
         attempt_owners.values(), action=action_input["action"],
         status=exc.status_code, code=exc.code or "",
       )
-      for active_owner in attempt_owners.values():
-        if active_owner.replay_phase() == "armed":
-          active_owner.settle()
+      _release_unpublished_attempts(attempt_owners.values())
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -4693,6 +4738,7 @@ async def update_contribution_stack(
         "records": snapshots,
         "updated": updated_rows,
         **({"code": exc.code} if exc.code else {}),
+        **({"cause_code": cause} if cause else {}),
       },
     ) from exc
   except Exception as exc:
@@ -4712,9 +4758,7 @@ async def update_contribution_stack(
       _log_open_attempt_outcomes(
         open_owners, action=action_input["action"], status=status, code=code,
       )
-      for owner in open_owners:
-        if owner.replay_phase() == "armed" and not _attempt_may_be_public(owner):
-          owner.settle()
+      _release_unpublished_attempts(open_owners)
     raise HTTPException(
       status_code=status,
       detail={"message": message, "records": snapshots, "code": code, "updated": updated_rows},
@@ -4861,6 +4905,7 @@ async def submit_contribution_stack(
               },
             ) from None
           _assert_active_stack_attempts_current(attempt_owners)
+          exc, cause = _known_publication_failure(_open_attempts(attempt_owners), exc)
           snapshots = _mark_stack_submit_failure(
             rows,
             exc.message,
@@ -4873,9 +4918,7 @@ async def submit_contribution_stack(
             attempt_owners.values(), action=action_input["action"],
             status=exc.status_code, code=exc.code or "",
           )
-          for active_owner in attempt_owners.values():
-            if active_owner.replay_phase() == "armed":
-              active_owner.settle()
+          _release_unpublished_attempts(attempt_owners.values())
         raise HTTPException(
           status_code=exc.status_code,
           detail={
@@ -4884,6 +4927,7 @@ async def submit_contribution_stack(
             "records": snapshots,
             "submitted": submitted_urls,
             **({"code": exc.code} if exc.code else {}),
+            **({"cause_code": cause} if cause else {}),
           },
         ) from exc
 
@@ -4925,6 +4969,7 @@ async def submit_contribution_stack(
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
       _assert_active_stack_attempts_current(attempt_owners)
+      exc, cause = _known_publication_failure(_open_attempts(attempt_owners), exc)
       snapshots = _mark_stack_submit_failure(
         rows,
         exc.message,
@@ -4936,9 +4981,7 @@ async def submit_contribution_stack(
         attempt_owners.values(), action=action_input["action"],
         status=exc.status_code, code=exc.code or "",
       )
-      for active_owner in attempt_owners.values():
-        if active_owner.replay_phase() == "armed":
-          active_owner.settle()
+      _release_unpublished_attempts(attempt_owners.values())
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -4946,6 +4989,7 @@ async def submit_contribution_stack(
         "detail": exc.detail,
         "records": snapshots,
         **({"code": exc.code} if exc.code else {}),
+        **({"cause_code": cause} if cause else {}),
       },
     ) from exc
   except Exception as exc:
@@ -4964,9 +5008,7 @@ async def submit_contribution_stack(
       _log_open_attempt_outcomes(
         open_owners, action=action_input["action"], status=status, code=code,
       )
-      for owner in open_owners:
-        if owner.replay_phase() == "armed" and not _attempt_may_be_public(owner):
-          owner.settle()
+      _release_unpublished_attempts(open_owners)
     raise HTTPException(
       status_code=status,
       detail={"message": message, "records": snapshots, "code": code},
@@ -6821,9 +6863,7 @@ async def autopilot_update(
       # ``armed`` precedes the signed push_pending phase, so nothing public
       # happened. Any later phase may have pushed: report unknown (null) and
       # let the agent read the public head rather than assume either way.
-      unpublished = attempt_owner.replay_phase() == "armed"
-      if unpublished:
-        attempt_owner.settle()
+      unpublished = _release_unpublished_attempts([attempt_owner])
       raise HTTPException(
         status_code=exc.status_code,
         detail={
