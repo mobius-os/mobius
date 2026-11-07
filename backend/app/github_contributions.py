@@ -2857,16 +2857,18 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
     return changed("The signed effect has a different PR URL.")
   if action == "pr" and phase == "complete" and raw_number is None:
     return unavailable("The complete receipt omitted the PR number.")
-  if action == "pr" and effect == "create_pr" and (
-      request.get("title") != plan.get("title")
-      or request.get("body") != plan.get("body_draft")):
-    return changed("The create request differs from the reviewed PR text.")
   try:
     title, body = _exact_reviewed_pr_text(candidate)
     if action == "pr_update":
       _reviewed_existing_pr_metadata(candidate)
   except ContributionSubmitError:
     return changed("The exact reviewed PR text witness is incomplete.")
+  body = _published_pr_body(plan, body, patch, branch)
+  if body is None:
+    return unavailable("The signed screenshot publication witness is incomplete.")
+  if action == "pr" and effect == "create_pr" and (
+      request.get("title") != title or request.get("body") != body):
+    return changed("The create request differs from the reviewed PR text.")
 
   def branch_tip(owner_repo: str, name: str) -> object:
     """A read tip, or ``None`` when absent or unreadable: never no-effect proof."""
@@ -2991,6 +2993,33 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
     "status": status, "head_sha": head_sha, "base_branch": base,
     **({"labels_requested": labels, "labels_applied": observed_labels} if labels else {}),
   })
+
+
+def _published_pr_body(plan: dict, body: str, patch: dict, branch: str) -> str | None:
+  """The reviewed body exactly as Send published it, derived read-only.
+
+  Send pins each reviewed screenshot reference to its uploaded commit before
+  it creates the PR, and signs that asset repository and commit into the
+  attempt's record patch. ``None`` means that witness is incomplete; nothing
+  is uploaded or relaxed to fill it in.
+  """
+  entries = contribution_screenshots.plan_entries(plan)
+  if not entries:
+    return body
+  witness = patch.get("last_submit_screenshots")
+  if not isinstance(witness, dict):
+    return None
+  commit = str(witness.get("commit") or "")
+  if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+    return None
+  try:
+    return contribution_screenshots.resolve_body(
+      body, entries,
+      assets_repo=_git_ops._validate_repo_slug(witness.get("repo")),
+      commit=commit, branch=branch,
+    )
+  except (ContributionSubmitError, KeyError, TypeError):
+    return None
 
 
 def _assert_reviewed_existing_pr_metadata(

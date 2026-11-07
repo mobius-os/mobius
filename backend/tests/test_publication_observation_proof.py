@@ -359,3 +359,51 @@ def test_linked_child_wrong_signed_parent_ref_rejected(monkeypatch):
     "parent_record_id": "parent", "base_branch": "parent-branch"})
   proof_remote(monkeypatch, parent_ref="parent-branch", parent_sha=OLD)
   assert proof.observe_publication_effect(record, attempt)["outcome"] == "changed"
+
+
+SHOT = {"name": "after.png", "sha256": "f" * 64, "alt": "After"}
+RAW_BODY = "Exact body\n\n![After](screenshot:after.png)"
+
+
+def _screenshot_fixture(phase="pr_ambiguous", witness=True):
+  record, attempt = fixture(phase=phase)
+  record["plan"].update(body_draft=RAW_BODY, screenshots=[SHOT])
+  resolved = proof.contribution_screenshots.resolve_body(
+    RAW_BODY, [SHOT], assets_repo="owner/repo", commit="e" * 40, branch="topic",
+  )
+  attempt["effective_request"]["body"] = resolved
+  if witness:
+    attempt["record_patch"] = {"last_submit_screenshots": {"repo": "owner/repo", "commit": "e" * 40}}
+  return record, attempt, resolved
+
+
+def test_screenshot_pr_settles_against_its_signed_resolved_body(monkeypatch):
+  """Send publishes pinned image links, not the reviewed placeholders."""
+  record, attempt, resolved = _screenshot_fixture()
+  assert "screenshot:after.png" not in resolved
+  proof_remote(monkeypatch, live_patch={"body": resolved})
+  assert proof.observe_publication_effect(record, attempt)["outcome"] == "settled"
+  # A complete receipt saved before its ledger write is the same exact proof.
+  record, attempt, resolved = _screenshot_fixture("complete")
+  attempt["effective_request"].update(number=7, url="https://github.com/owner/repo/pull/7")
+  proof_remote(monkeypatch, live_patch={"body": resolved})
+  assert proof.observe_publication_effect(record, attempt)["outcome"] == "settled"
+
+
+@pytest.mark.parametrize("damage,expected", [
+  ("live-raw", "changed"), ("live-other-commit", "changed"),
+  ("request-raw", "changed"), ("no-witness", "unavailable"), ("bad-commit", "unavailable"),
+])
+def test_screenshot_body_mismatch_or_missing_witness_never_settles(monkeypatch, damage, expected):
+  record, attempt, resolved = _screenshot_fixture(witness=damage != "no-witness")
+  live_body = resolved
+  if damage == "live-raw":
+    live_body = RAW_BODY
+  elif damage == "live-other-commit":
+    live_body = resolved.replace("e" * 40, "d" * 40)
+  elif damage == "request-raw":
+    attempt["effective_request"]["body"] = RAW_BODY
+  elif damage == "bad-commit":
+    attempt["record_patch"]["last_submit_screenshots"]["commit"] = "not-a-commit"
+  proof_remote(monkeypatch, live_patch={"body": live_body})
+  assert proof.observe_publication_effect(record, attempt)["outcome"] == expected

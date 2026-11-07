@@ -554,3 +554,40 @@ def test_unapplied_journal_reproves_same_attempt_and_preserves_local_edits(clien
     if damage != 'replacement': assert receipt_path(f).read_bytes()==receipt_before
     if damage in {'head','partial'}: assert not calls
 
+
+
+@pytest.mark.parametrize("phase", ["pr_ambiguous", "complete"])
+def test_lost_screenshot_create_reply_settles_and_keeps_its_asset_witness(client, observation, phase):
+  f = observation
+  from app import contribution_screenshots
+  shot = {"name": "after.png", "sha256": "f" * 64, "alt": "After"}
+  raw = "Exact body\n\n![After](screenshot:after.png)"
+  witness = {"repo": "fork/demo", "commit": "e" * 40}
+  resolved = contribution_screenshots.resolve_body(
+    raw, [shot], assets_repo="fork/demo", commit="e" * 40, branch="topic",
+  )
+  claim = copy.deepcopy(f["record"])
+  for key in ("last_submit_error", "last_submit_error_code", "last_submit_error_detail"):
+    claim.pop(key)
+  claim.update(status="submitting")
+  claim["plan"].update(body_draft=raw, screenshots=[shot])
+  routes._write_record(f["path"], claim)
+  owner = routes._PersonalAttemptOwner(app_id=f["app_id"], record_id=claim["id"], record_path=f["path"],
+    claimed=claim, action_input={"action": "submit", "publication_stage": "draft"})
+  patch = {**f["patch"], "last_submit_screenshots": witness, "publication_stage": "draft"}
+  effect = {**f["effect"], "body": resolved}
+  if phase == "complete":
+    effect.update(url=f["live"]["html_url"], number=7)
+  owner.event(phase, effect, patch)
+  if phase == "complete":
+    # The sender saved its successful row and crashed before retiring the receipt.
+    routes._mark_submit_success(record_path=f["path"], record=claim,
+                                pr_url=f["live"]["html_url"], number=7, record_patch=patch)
+  else:
+    routes._write_record(f["path"], {**claim, **patch, "status": "prepared"})
+  f["live"]["body"] = resolved
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "settled", body
+  saved = body["records"][0]
+  assert saved["number"] == 7 and saved["last_submit_screenshots"] == witness
+  assert not receipt_path(f).exists()

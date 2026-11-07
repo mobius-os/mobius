@@ -3070,6 +3070,7 @@ def _observed_pr_record(record: dict, attempt: dict, result: dict) -> dict:
     "plan", "head_sha", "head_repository", "last_submit_stage",
     "last_submit_push_sha", "last_submit_base_branch", "last_submit_upstream_branch",
     "last_submit_upstream_sha", "last_pushed_branch", "last_successor_base_branch",
+    "last_submit_screenshots",
   }
   now = _now_iso()
   submitted = (attempt.get("action_input") or {}).get("action") in {"submit", "submit_stack"}
