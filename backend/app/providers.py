@@ -756,15 +756,16 @@ class ClaudeProvider(BaseProvider):
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
-    if not creds.exists():
+    try:
+      raw = _read_claude_credentials(creds) if creds.exists() else {}
+    except (OSError, ValueError):  # also an int past Python's digit limit
+      raw = None
+    if isinstance(raw, dict) and "claudeAiOauth" not in raw:
+      # No file, or one a disconnect left with only MCP sign-ins.
       return (
         "Not signed in. Open Settings and connect "
         "under AI provider."
       )
-    try:
-      raw = _read_claude_credentials(creds)
-    except (OSError, ValueError):  # also an int past Python's digit limit
-      raw = None
     oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
     if isinstance(oauth, dict):
       access_token = oauth.get("accessToken")
@@ -1716,9 +1717,10 @@ _CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
 # The CLI treats a stored sign-in end more than this far before the access
 # token's own expiry as stale and reports no end at all.
 _CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
-# The top-level credential keys that belong to one Claude account: the CLI's
-# own sign-in and logout remove exactly these, so a new sign-in never
-# inherits another account's, and keep the rest (such as mcpOAuth).
+# The top-level credential keys that belong to one Claude account. The CLI's
+# own sign-in removes exactly these and keeps the rest (such as mcpOAuth), so
+# a new sign-in never inherits another account's; a Möbius disconnect removes
+# the same set. (The CLI's logout deletes the whole file, MCP sign-ins too.)
 _CLAUDE_ACCOUNT_KEYS = (
   "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
   "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
@@ -1847,8 +1849,7 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   if not creds_path.exists():
     raise RuntimeError("claude credentials missing")
-  raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
+  oauth = _read_claude_credentials(creds_path).get("claudeAiOauth")
   if not isinstance(oauth, dict):
     raise RuntimeError("claude credentials malformed")
   return creds_path, oauth
@@ -1904,8 +1905,13 @@ def write_claude_sign_in(creds_path: Path, tokens: Any) -> str:
 
 
 def _read_claude_credentials(creds_path: Path) -> dict:
-  """The credentials file as an object; raises OSError or ValueError."""
-  raw = json.loads(creds_path.read_text())
+  """The credentials file as an object; raises OSError or ValueError, the
+  latter for anything json.loads cannot read (including a too-deeply nested
+  file, which it reports as RecursionError)."""
+  try:
+    raw = json.loads(creds_path.read_text())
+  except RecursionError as exc:
+    raise ValueError("Claude credentials are nested too deeply") from exc
   if not isinstance(raw, dict):
     raise ValueError("Claude credentials are not an object")
   return raw
@@ -1933,10 +1939,10 @@ def _replace_claude_credentials(creds_path: Path, raw: dict) -> None:
 async def disconnect_provider(data_dir: str, provider_id: str) -> None:
   """Remove only the local provider sign-in, not configuration or MCP access.
 
-  Like the CLI's logout, a Claude disconnect removes every account-bound key
-  (_CLAUDE_ACCOUNT_KEYS), so a later sign-in cannot inherit the old
-  account's organization, and keeps the rest. An unreadable credentials file
-  raises rather than being discarded.
+  A Claude disconnect removes every account-bound key (_CLAUDE_ACCOUNT_KEYS),
+  so no trusted-device token or account id stays on disk, and keeps the rest
+  such as MCP sign-ins (the CLI's own logout deletes the whole file). An
+  unreadable credentials file raises rather than being discarded.
 
   Already-running SDKs may retain their session; this is not remote token
   revocation. Login cancellation belongs to the auth route. The Claude lock
@@ -2080,8 +2086,7 @@ def claude_organization_uuid(data_dir: str) -> str:
   """Return the connected Claude organization identity, never its secrets."""
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   try:
-    raw = json.loads(creds_path.read_text())
-    value = raw.get("organizationUuid") if isinstance(raw, dict) else None
+    value = _read_claude_credentials(creds_path).get("organizationUuid")
     parsed = uuid.UUID(value) if isinstance(value, str) else None
   except (OSError, ValueError, AttributeError) as exc:
     raise RuntimeError("Claude organization identity is unavailable") from exc

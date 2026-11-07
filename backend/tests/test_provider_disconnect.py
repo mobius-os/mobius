@@ -37,9 +37,9 @@ def test_disconnect_removes_only_selected_signin_and_is_idempotent(client, auth,
     response = client.post(f'/api/auth/provider/{provider}/disconnect', headers=auth)
     assert response.status_code == 200, response.text
   claude = json.loads((provider_home / 'cli-auth/claude/.credentials.json').read_text())
-  # Like the CLI's logout, every account-bound key goes: an organization id
-  # that survived would let usage controls address the old account after a
-  # different sign-in. MCP access and other keys stay.
+  # Every account-bound key goes, so no trusted-device token or account id
+  # stays on disk; MCP access and other keys stay. (The CLI's own logout
+  # deletes the whole file.)
   if provider == 'claude':
     assert claude == {'mcpOAuth': {'server': 'synthetic-mcp'}}
   else:

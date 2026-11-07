@@ -104,6 +104,28 @@ def test_a_time_past_pythons_digit_limit_reads_as_no_sign_in(client, auth, monke
   assert response.json()["claude"]["configured"] is False
 
 
+def test_a_too_deeply_nested_file_reads_as_unreadable(client, auth, monkeypatch, tmp_path):
+  from app.config import get_settings
+
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text('{"claudeAiOauth": ' + "[" * 100_000 + "]" * 100_000 + "}")
+  assert ClaudeProvider().check_auth(str(tmp_path)) is not None
+  assert claude_login_expires_at(str(tmp_path)) is None
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  response = client.get("/api/auth/providers/status", headers=auth)
+  assert response.status_code == 200
+  assert response.json()["claude"]["configured"] is False
+
+
+@pytest.mark.parametrize("left", [{}, {"mcpOAuth": {"server": "s"}}])
+def test_a_disconnected_file_reads_as_not_signed_in(tmp_path, left):
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text(json.dumps(left))
+  assert ClaudeProvider().check_auth(str(tmp_path)).startswith("Not signed in.")
+
+
 def test_a_huge_access_expiry_marks_the_login_end_stale_like_the_cli(tmp_path):
   # The CLI reads 10**400 as Infinity, which is more than three days past
   # any end, so it reports no end; Möbius must not show a date either.
