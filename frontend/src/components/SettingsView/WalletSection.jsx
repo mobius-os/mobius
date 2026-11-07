@@ -1,11 +1,4 @@
-/**
- * Credits for a Möbius paired with a credits service: the wallet apps spend from.
- *
- * Presentational: the wallet's balance, activity and purchase terms arrive
- * from `useWallet`, and the rules worth testing live in lib/creditsWallet.js.
- * Money is shown as the service rendered it, never recomputed here.
- */
-
+/** The credits service's wallet for app purchases, distinct from model credit. */
 import { useState } from 'react'
 import { activityLabel, money } from '../../lib/creditsWallet.js'
 import './WalletSection.css'
@@ -27,74 +20,67 @@ export default function WalletSection({
 }) {
   const balance = summary?.balance
   const owed = typeof balance?.balance === 'string' && balance.balance.startsWith('-')
+  const notices = {
+    checking: 'Checking your payment…',
+    paid: 'Payment received. Your credits are in.',
+    late: "Stripe has not confirmed that payment yet. If you paid, your credits appear within a minute or two — please don't buy again.",
+    paused: 'Payment checking has stopped for now. If you paid, return to Settings to refresh your balance before buying again.',
+  }
 
   return (
-    <section className="settings__section credits">
-      <h2 className="settings__section-title">Credits</h2>
-
-      {balance ? (
-        <div className="credits__headline">
-          {owed ? (
-            <>
-              <span className="credits__owed">You owe {balance.balance.slice(1)}</span>
-              <span className="credits__unit">credits</span>
-            </>
-          ) : (
-            <>
-              <span className="credits__amount">{balance.available}</span>
-              <span className="credits__unit">credits available</span>
-            </>
-          )}
-          <span className="credits__forever">
-            Kept by {summary.service_host}. Apps that charge per use spend from
-            this balance. Credits never expire.
-          </span>
+    <section className="settings-group" aria-labelledby="settings-credits-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-credits-title">Credits wallet</h2>
+          <p className="settings-group__desc">Pays for apps that charge per use.</p>
         </div>
-      ) : (
-        <p className="credits__quiet">
-          {summary?.error?.message
-            ? `Your balance could not be read just now: ${summary.error.message}`
-            : 'Your balance could not be read just now. Try again in a moment.'}
-        </p>
-      )}
-
-      {notice === 'checking' && (
-        <p className="credits__settling">Checking your payment…</p>
-      )}
-      {notice === 'paid' && (
-        <p className="credits__settling">Payment received. Your credits are in.</p>
-      )}
-      {notice === 'late' && (
-        <p className="credits__settling">
-          Stripe has not confirmed that payment yet. If you paid, your credits
-          appear within a minute or two — please don't buy again.
-        </p>
-      )}
-      {refusal && <p className="credits__refusal" role="alert">{refusal}</p>}
-
-      {balance && terms?.amounts_cents?.length ? (
-        // Keyed by pairing: a choice or waiver made for one service's terms
-        // never carries over to another's.
-        <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} />
-      ) : null}
+      </div>
+      <div className="settings-list">
+        <div className="settings-item">
+          <div className="settings-item__body">
+            <span className="settings-item__title settings-item__title--wrap">
+              {balance
+                ? owed ? `You owe ${balance.balance.slice(1)} credits` : `${balance.available} credits available`
+                : 'Balance unavailable'}
+            </span>
+            <span className="settings-item__sub settings-item__sub--wrap">
+              {balance
+                ? `Kept by ${summary.service_host}. Credits never expire.`
+                : summary?.error?.message
+                  ? `Your balance could not be read just now: ${summary.error.message}`
+                  : 'Your balance could not be read just now. Try again in a moment.'}
+            </span>
+          </div>
+          {owed && <span className="settings-item__trail"><span className="settings-badge settings-badge--warning">Owed</span></span>}
+        </div>
+        {balance && terms?.amounts_cents?.length ? (
+          // A choice or waiver for one service never carries over to another.
+          <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} />
+        ) : null}
+      </div>
+      {notices[notice] && <p className="settings-message" role="status">{notices[notice]}</p>}
+      {refusal && <p className="settings-message settings-message--error" role="alert">{refusal}</p>}
 
       {activity?.length ? (
-        <div className="credits__activity">
-          <h3 className="credits__activity-title">Recent activity</h3>
-          <ul>
+        <section className="settings-group" aria-labelledby="settings-credits-activity">
+          <div className="settings-group__head">
+            <h3 className="settings-group__title" id="settings-credits-activity">Recent activity</h3>
+          </div>
+          <div className="settings-list" role="list">
             {activity.map(entry => (
-              <li key={entry.id}>
-                <span className="credits__activity-what">{activityLabel(entry)}</span>
-                <span className="credits__activity-when">{when(entry.at)}</span>
-                <span className={`credits__activity-amount${String(entry.amount).startsWith('-') ? '' : ' credits__activity-amount--in'}`}>
+              <div className="settings-item" role="listitem" key={entry.id}>
+                <span className="settings-item__body">
+                  <span className="settings-item__title">{activityLabel(entry)}</span>
+                  <span className="settings-item__sub">{when(entry.at)}</span>
+                </span>
+                <span className={`settings-item__trail credits__activity-amount${String(entry.amount).startsWith('-') ? '' : ' credits__activity-amount--in'}`}>
                   {String(entry.amount).startsWith('-') ? entry.amount : `+${entry.amount}`}
                 </span>
-              </li>
+              </div>
             ))}
-          </ul>
-        </div>
+          </div>
+        </section>
       ) : null}
-
     </section>
   )
 }
@@ -111,24 +97,27 @@ function WalletBuyForm({ terms, busy, onBuy }) {
   }
 
   return (
-    <form className="credits__buy-form" onSubmit={submit}>
-      <div className="credits__amounts" role="radiogroup" aria-label="Amount">
+    <form className="settings-item settings-item--block" onSubmit={submit}>
+      <div className="settings-actions" role="radiogroup" aria-label="Amount">
         {amounts.map(value => (
           <button
             key={value}
             type="button"
             role="radio"
             aria-checked={value === chosen}
-            className={`credits__amount-choice${value === chosen ? ' credits__amount-choice--on' : ''}`}
+            className={`settings__btn settings__btn--outline settings__btn--sm credits__amount-choice${value === chosen ? ' credits__amount-choice--on' : ''}`}
             onClick={() => setCents(value)}
           >
             {money(value, terms.currency)}
           </button>
         ))}
       </div>
-
+      <p className="settings-group__foot">
+        1 credit = {money(100, terms.currency)}. Paid securely through Stripe
+        {terms.stripe_mode === 'test' ? ' (test mode — no real money moves)' : ''}.
+      </p>
       {terms.waiver_required && (
-        <label className="credits__waiver">
+        <label className="credits__waiver settings-group__foot">
           <input
             name="waiver"
             type="checkbox"
@@ -138,15 +127,11 @@ function WalletBuyForm({ terms, busy, onBuy }) {
           <span>{WAIVER}</span>
         </label>
       )}
-
-      <button type="submit" className="credits__buy" disabled={busy} aria-busy={busy}>
-        {busy ? 'Finish in the Stripe window…' : `Buy ${money(chosen, terms.currency)} of credits`}
-      </button>
-
-      <p className="credits__terms">
-        1 credit = {money(100, terms.currency)}. Paid securely through Stripe
-        {terms.stripe_mode === 'test' ? ' (test mode — no real money moves)' : ''}.
-      </p>
+      <div className="settings-actions">
+        <button type="submit" className="settings__btn settings__btn--sm" disabled={busy} aria-busy={busy}>
+          {busy ? 'Finish in the Stripe window…' : `Buy ${money(chosen, terms.currency)} of credits`}
+        </button>
+      </div>
     </form>
   )
 }

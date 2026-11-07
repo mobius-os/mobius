@@ -104,3 +104,46 @@ test('purchase terms show only under the pairing they were read with', () => {
   assert.equal(termsFor({ ...TERMS }, { mode: 'customer', pairing: undefined }), null)
   assert.equal(termsFor(null, { mode: 'customer', pairing: 'p-old' }), null)
 })
+
+test('the wallet uses shared Settings groups, rows, badges and buttons', () => {
+  const html = render({ summary: { ...SUMMARY, balance: { balance: '-1.25' } } })
+  for (const className of ['settings-group', 'settings-group__title', 'settings-list',
+    'settings-item', 'settings-item__trail', 'settings-badge--warning', 'settings__btn']) {
+    assert.ok(html.includes(className), className)
+  }
+  assert.doesNotMatch(html, /settings__section/)
+  assert.match(html, /Credits wallet/)
+  assert.match(html, /Pays for apps that charge per use/)
+  assert.match(html, /You owe 1\.25 credits/)
+  assert.match(html, /name="waiver"/)
+  assert.match(html, /lose my right to cancel/)
+})
+
+test('wallet notices, refusals and unavailable balances remain readable', () => {
+  assert.match(render({ summary: { error: { message: 'Offline' } } }), /Offline/)
+  for (const notice of ['checking', 'paid', 'late', 'paused']) {
+    assert.match(render({ notice }), /role="status"/)
+  }
+  const refused = render({ refusal: 'Please accept the cancellation terms first.' })
+  assert.match(refused, /role="alert"/)
+  assert.match(refused, /Please accept/)
+})
+
+test('a browser refusing opener access cannot throw or leave an unsafe window', t => {
+  let closed = false
+  const popup = { set opener(_value) { throw new Error('denied') }, close() { closed = true } }
+  withWindowOpen(t, popup)
+  assert.equal(openStripeWindow(), null)
+  assert.equal(closed, true)
+})
+
+test('settlement cancellation stops before the next read', async () => {
+  const controller = new AbortController()
+  let reads = 0
+  const status = await settleTopup('t', async () => {
+    reads += 1
+    return { status: 'pending' }
+  }, { signal: controller.signal, sleep: async () => { controller.abort() } })
+  assert.equal(status, 'pending')
+  assert.equal(reads, 1)
+})

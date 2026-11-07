@@ -9,23 +9,40 @@
 /** Statuses after which a purchase will not change again on its own. */
 const SETTLED = new Set(['paid', 'rejected', 'expired', 'needs_review'])
 
+function pause(ms, signal) {
+  return new Promise(resolve => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+    if (signal?.aborted) done()
+  })
+}
+
+
 /**
  * Wait for a purchase to settle after Stripe's window closes.
  *
  * Reading a purchase makes the service confirm its checkout with Stripe, so a
  * few reads are enough even before the webhook lands. Resolves to the last
  * status seen; `pending` means it had not settled yet, which is not a failure.
+ * The checkout lifecycle supplies a signal to stop reads and sleeps together.
  */
-export async function settleTopup(topupId, read, { attempts = 6, waitMs = 1_500, sleep } = {}) {
+export async function settleTopup(topupId, read, {
+  attempts = 6, waitMs = 1_500, sleep = pause, signal,
+} = {}) {
   let status = 'pending'
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let attempt = 0; attempt < attempts && !signal?.aborted; attempt += 1) {
     try {
       status = (await read(topupId))?.status || status
     } catch {
       // A read that fails says nothing about the payment; keep looking.
     }
-    if (SETTLED.has(status)) return status
-    if (attempt + 1 < attempts) await sleep(waitMs)
+    if (signal?.aborted || SETTLED.has(status)) return status
+    if (attempt + 1 < attempts) await sleep(waitMs, signal)
   }
   return status
 }
@@ -39,7 +56,13 @@ export async function settleTopup(topupId, read, { attempts = 6, waitMs = 1_500,
 export function openStripeWindow() {
   const popup = window.open('about:blank', 'mobius-stripe-checkout', 'width=560,height=780')
   if (!popup) return null
-  popup.opener = null
+  try {
+    popup.opener = null
+  } catch {
+    // Never navigate a window whose link back to Möbius could not be cut.
+    try { popup.close() } catch { /* The browser may deny this too. */ }
+    return null
+  }
   try {
     popup.document.title = 'Opening Stripe…'
     popup.document.body.innerHTML =

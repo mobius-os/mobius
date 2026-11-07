@@ -1,11 +1,18 @@
 // Settings → Credits across a re-pairing: purchase terms belong to one service.
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { __setRerender, renderHook as renderTestHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
 import { useWallet } from '../useWallet.js'
 
 const GBP = { currency: 'gbp', amounts_cents: [500], waiver_required: true }
 const USD = { currency: 'usd', amounts_cents: [1000, 2500], waiver_required: false }
+
+const mountedHooks = []
+function renderHook(...args) {
+  const hook = renderTestHook(...args)
+  mountedHooks.push(hook)
+  return hook
+}
 
 const saved = {}
 beforeEach(() => {
@@ -16,6 +23,7 @@ beforeEach(() => {
   globalThis.document = Object.assign(new EventTarget(), { visibilityState: 'visible' })
 })
 afterEach(() => {
+  for (const hook of mountedHooks.splice(0)) hook.unmount()
   for (const [key, descriptor] of Object.entries(saved)) {
     if (descriptor) Object.defineProperty(globalThis, key, descriptor)
     else delete globalThis[key]
@@ -36,7 +44,7 @@ function stubServer() {
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^.*\/api/, '')
     const body = init.body ? JSON.parse(init.body) : null
-    server.calls.push({ path, body })
+    server.calls.push({ path, body, signal: init.signal })
     if (path === '/identity/credits') {
       return json({ mode: 'customer', pairing: server.pairing, balance: { available: '1.00' } })
     }
@@ -47,6 +55,10 @@ function stubServer() {
       const early = answer()
       if (server.holdTerms) await server.holdTerms
       return json(server.readAfterHold ? answer() : early)
+    }
+    if (path.startsWith('/identity/credits/topups/')) {
+      if (server.holdStatus) await server.holdStatus
+      return json({ status: server.topupStatus || 'pending' })
     }
     if (path === '/identity/credits/topup') {
       if (body.pairing !== server.pairing) {
@@ -144,4 +156,121 @@ test('terms_that_failed_to_load_are_read_again_when_the_wallet_refreshes', async
   await tick()
   assert.equal(result.current.terms?.currency, 'gbp')
   assert.equal(result.current.terms?.pairing, 'p-old')
+})
+
+const flush = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve() }
+const CHECKOUT_LIMIT = 30 * 60 * 1_000
+
+async function checkoutHook(t) {
+  const server = stubServer()
+  const hook = renderHook(useWallet, { active: true })
+  await tick()
+  const popup = { opener: {}, closed: false, location: {}, document: { body: {} },
+    close() { this.closed = true } }
+  window.open = () => popup
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  const purchase = hook.result.current.buy({ amountCents: 500, waiverAccepted: true })
+  await flush()
+  assert.equal(hook.result.current.busy, true)
+  assert.match(popup.location.href, /^https:\/\/checkout\.stripe\.com\//)
+  return { server, hook, popup, purchase }
+}
+
+test('unmount removes the popup watcher and never writes state afterwards', async t => {
+  const { server, hook, popup, purchase } = await checkoutHook(t)
+  let watched = 0
+  Object.defineProperty(popup, 'closed', { get: () => { watched += 1; return false } })
+  t.mock.timers.tick(800)
+  assert.equal(watched, 1)
+  hook.unmount()
+  let updates = 0
+  __setRerender(() => { updates += 1 })
+  t.mock.timers.tick(CHECKOUT_LIMIT)
+  await purchase
+  assert.equal(watched, 1)
+  assert.equal(updates, 0)
+  assert.equal(server.calls.filter(c => c.path.includes('/topups/')).length, 0)
+  assert.equal(server.calls.find(c => c.path.endsWith('/topup')).signal.aborted, true)
+})
+
+test('unmount cancels settlement sleeps and stops all later polling', async t => {
+  const { server, hook, popup, purchase } = await checkoutHook(t)
+  popup.closed = true
+  t.mock.timers.tick(800)
+  await flush()
+  assert.equal(hook.result.current.notice, 'checking')
+  const reads = () => server.calls.filter(c => c.path.includes('/topups/'))
+  assert.equal(reads().length, 1)
+  hook.unmount()
+  let updates = 0
+  __setRerender(() => { updates += 1 })
+  await purchase
+  t.mock.timers.tick(CHECKOUT_LIMIT)
+  await flush()
+  assert.equal(reads().length, 1)
+  assert.equal(reads()[0].signal.aborted, true)
+  assert.equal(updates, 0)
+})
+
+test('checkout watching has a deadline and leaves a calm notice', async t => {
+  const { server, hook, purchase } = await checkoutHook(t)
+  t.mock.timers.tick(CHECKOUT_LIMIT)
+  await purchase
+  assert.equal(hook.result.current.busy, false)
+  assert.equal(hook.result.current.notice, 'paused')
+  assert.equal(hook.result.current.refusal, null)
+  assert.equal(server.calls.filter(c => c.path.includes('/topups/')).length, 0)
+})
+
+test('the same deadline covers an in-flight settlement read', async t => {
+  const { server, hook, popup, purchase } = await checkoutHook(t)
+  let release
+  server.holdStatus = new Promise(resolve => { release = resolve })
+  popup.closed = true
+  t.mock.timers.tick(800)
+  await flush()
+  const poll = server.calls.find(c => c.path.includes('/topups/'))
+  assert.ok(poll)
+  t.mock.timers.tick(CHECKOUT_LIMIT - 800)
+  assert.equal(poll.signal.aborted, true)
+  assert.equal(hook.result.current.notice, 'paused')
+  assert.equal(hook.result.current.busy, false)
+  server.topupStatus = 'paid'
+  release() // Even a transport that delivers after cancellation cannot write state.
+  await purchase
+  assert.equal(hook.result.current.notice, 'paused')
+  assert.equal(server.calls.filter(c => c.path.includes('/topups/')).length, 1)
+})
+
+test('a summary arriving after unmount cannot update state or start more reads', async () => {
+  let release
+  const held = new Promise(resolve => { release = resolve })
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    await held
+    return json({ mode: 'customer', pairing: 'p-old' })
+  }
+  const hook = renderHook(useWallet, { active: true })
+  hook.unmount()
+  let updates = 0
+  __setRerender(() => { updates += 1 })
+  release()
+  await tick()
+  assert.equal(updates, 0)
+  assert.equal(calls, 1)
+})
+
+test('a paid checkout refreshes the balance and releases its lifecycle', async t => {
+  const { server, hook, popup, purchase } = await checkoutHook(t)
+  server.topupStatus = 'paid'
+  popup.closed = true
+  t.mock.timers.tick(800)
+  await purchase
+  await flush()
+  assert.equal(hook.result.current.notice, 'paid')
+  assert.equal(hook.result.current.busy, false)
+  assert.equal(server.calls.filter(c => c.path === '/identity/credits').length, 2)
+  t.mock.timers.tick(CHECKOUT_LIMIT)
+  assert.equal(hook.result.current.notice, 'paid')
 })
