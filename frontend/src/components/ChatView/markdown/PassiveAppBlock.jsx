@@ -1,7 +1,7 @@
 /* Passive block session: a hidden, inert instance of an admitted app reports
    current state while the block is near the viewport; the host draws every
    control. See building-apps.md "Passive block sessions". */
-import { Suspense, useEffect, useId, useState } from 'react'
+import { Suspense, useCallback, useEffect, useId, useState } from 'react'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
 import { sessionSnapshot } from './appBlockSession.js'
@@ -9,6 +9,7 @@ import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, Stat
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
 import { passiveBlockMode } from './blockOwnership.js'
+import { appBlockChatKey, useAppBlockChat } from './appBlockChat.js'
 
 export { passiveBlockMode }
 
@@ -91,7 +92,7 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
  *  block's only rows, with one Not now/Confirm (sessionSnapshot), and
  *  `listEdgeRefs` observes the list's two ends. */
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
-  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', children = null }) {
+  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', onJump = null, children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
   // A hidden action leaves no control, so its footer is not drawn either.
   const actionFor = target => target && !actionState(target.intent)?.hidden
@@ -101,7 +102,7 @@ export function PassiveBlockView({ block, app, state, locked, confirmArmed = fal
   const snapshot = sessionSnapshot(block, state)
   const count = snapshot.confirmation ? snapshot.items.length : 0
   return <AppBlockLayout block={snapshot} app={app} onInternalNav={onInternalNav}
-    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs}>
+    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs} onJump={onJump}>
     {/* Always present, so the polite announcement is heard when the rows change. */}
     <p className="md-app-block__sr-only" role="status">
       {count ? `${app.name} lists ${count} ${count === 1 ? 'item' : 'items'} to confirm.` : state?.title || ''}</p>
@@ -118,7 +119,7 @@ function SessionHost({ app, session }) {
       <AppCanvas appId={app.id} appName={app.name} appSlug={app.slug} version={appFrameVersion(app)}
         storageGeneration={app.storage_generation} offlineCapable={app.offline_capable === true}
         capabilityContract={app.capability_contract || null} active={false} visible={false} interactive={false}
-        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event}
+        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event} blockRefresh={session.blockRefresh}
         onBlockState={session.onBlockState} onBlockCapability={session.onBlockCapability} />
     </Suspense>
   </div>
@@ -128,7 +129,12 @@ export const ADMISSION_WITHDRAWN = name =>
   `${name} can no longer run in this chat. Open ${name} to check the result of the last action before trying again.`
 
 export default function PassiveAppBlock({ block, app, onInternalNav, admitted = true }) {
-  const [sectionRef, { near, distance }] = useNearViewport()
+  const [nearRef, { near, distance }] = useNearViewport()
+  // The transcript attests which chat this block is in and whether it is that
+  // chat's newest block of its app and intent; the block's JSON cannot.
+  const chat = useAppBlockChat(appBlockChatKey(block))
+  const chatRef = chat.ref
+  const sectionRef = useCallback(node => { nearRef(node); chatRef(node) }, [nearRef, chatRef])
   // Observers follow the committed showing (set after it renders).
   const [showing, setShowing] = useState(null)
   const [confirmRef, confirmView] = useOnScreen(showing)
@@ -141,7 +147,7 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
   const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
-    confirmView, listStartView, listEndView, admitted })
+    confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
@@ -151,7 +157,8 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   return <PassiveBlockView block={block} app={app} state={session.state} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
-    confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}>
+    confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
+    onJump={chat.context?.latest === false ? () => chat.newestNode()?.scrollIntoView({ block: 'center', behavior: 'smooth' }) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>
 }

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  acceptsBlockState, blockEventDelivery, blockSessionEnvelope, createBlockDocuments, hostRequestAllowed,
+  acceptsBlockState, blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, hostRequestAllowed,
 } from '../../components/AppCanvas/appBlockSessionHost.js'
 
 test('every frame load is a new, never-reused document generation', () => {
@@ -79,4 +79,26 @@ test('an ordinary shell app keeps its background host requests while another vie
   assert.equal(hostRequestAllowed({ sourceVersion: 'v1', liveVersion: 'v1', visible: true, transcript: false }), true)
   assert.equal(hostRequestAllowed({ sourceVersion: 'v2', liveVersion: 'v1', visible: false, transcript: false }), false,
     'a buffered successor is still refused')
+})
+
+test('the envelope carries only the host-attested chat context, normalized', () => {
+  const session = { sessionId: 's', actions: [], items: [], features: ['row-state', 'rows-v2'] }
+  assert.equal('context' in blockSessionEnvelope(session, 4), false, 'no context outside a chat')
+  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1', latest: false, extra: 'x' } }, 4).context,
+    { chatId: 'chat-1', latest: false })
+  assert.deepEqual(blockSessionEnvelope({ ...session, context: { chatId: 'chat-1' } }, 4).context, { chatId: 'chat-1', latest: true })
+})
+
+test('a refresh hint reaches only the document generation it was raised for, once', () => {
+  const session = { sessionId: 's' }
+  const document = { generation: 7, supported: true }
+  const refresh = { seq: 3, reason: 'turn', sessionId: 's', generation: 7 }
+  assert.deepEqual(blockRefreshDelivery({ session, refresh, document, sentSeq: null }),
+    { type: 'moebius:app-block-refresh', sessionId: 's', generation: 7, reason: 'turn' })
+  assert.equal(blockRefreshDelivery({ session, refresh, document, sentSeq: 3 }), null, 'sent once')
+  assert.equal(blockRefreshDelivery({ session, refresh, document: { generation: 8, supported: true }, sentSeq: null }), null,
+    'a reloaded document never receives an earlier document\'s hint')
+  assert.equal(blockRefreshDelivery({ session, refresh, document: { generation: 7, supported: false }, sentSeq: null }), null)
+  assert.equal(blockRefreshDelivery({ session: { sessionId: 'other' }, refresh, document, sentSeq: null }), null)
+  assert.equal(blockRefreshDelivery({ session, refresh: null, document, sentSeq: null }), null)
 })

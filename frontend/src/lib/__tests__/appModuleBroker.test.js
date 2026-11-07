@@ -262,6 +262,20 @@ test('the app block-session handle mirrors the init envelope and stamps its own 
   assert.equal(on.makeApi({ sessionId: 's' }), null, 'an envelope without a generation is not a session')
 })
 
+test('a refresh hint reaches the app only for this session and generation, and the handle carries the host context', () => {
+  const on = blockSessionFrame({ session: { sessionId: 's', generation: 3, actions: [], context: { chatId: 'chat-1', latest: false, extra: 1 } } })
+  assert.deepEqual(on.api.context, { chatId: 'chat-1', latest: false })
+  assert.ok(Object.isFrozen(on.api.context))
+  assert.equal(on.makeApi({ sessionId: 's', generation: 1 }).context, null, 'no host context outside a chat')
+  assert.equal(on.makeApi({ sessionId: 's', generation: 1, context: { chatId: 7 } }).context, null)
+  const refresh = { type: 'moebius:app-block-refresh', sessionId: 's', generation: 3, reason: 'turn' }
+  assert.deepEqual(on.send({ ...refresh, generation: 2 }), { handled: true, stopped: true })
+  assert.deepEqual(on.send({ ...refresh, sessionId: 'other' }), { handled: true, stopped: true })
+  assert.deepEqual(on.send(refresh, { not: 'the parent' }), { handled: true, stopped: true })
+  assert.deepEqual(on.send(refresh), { handled: true, stopped: false })
+  assert.deepEqual(on.appListener, [refresh])
+})
+
 function renderAppMount({ supportsAppBlocks = true, currentBlockSession = null } = {}) {
   let tree
   const render = frameScope(['renderMountedComponent'], {
