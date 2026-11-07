@@ -1416,6 +1416,153 @@ def get_owner_or_app_with_location_history_read(
   )
 
 
+def get_credits_reader(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Who may see the owner's credits: the balance, earnings and history.
+
+  The owner, or an app holding the reviewed ``credits_manage`` grant; never a
+  shared-browser guest or work a guest started, since these are the
+  installation owner's private finances. Every credits route that reads the
+  owner's account uses this or ``get_credits_controller``, so the grant and the
+  guest refusal cannot be applied one without the other.
+  """
+  if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can see their credits.")
+  return _require_credits_manage(principal, db)
+
+
+def get_credits_controller(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Who may move the owner's credits: pair, buy, fund, publish, withdraw.
+
+  As ``get_credits_reader``, and never a delegated helper either: these are
+  installation-owner controls (``require_installation_owner_control``).
+  """
+  require_installation_owner_control(principal)
+  return _require_credits_manage(principal, db)
+
+
+def _require_credits_manage(principal: Principal, db: Session) -> models.Owner:
+  """The owner, or a Store app's accepted ``credits_manage`` contract.
+
+  The owner's credits are money at the paired credits service. That is its own
+  critical grant, never implied by ``identity_manage``, whose consent covers
+  only the sign-in link. Like that grant it lives in the accepted capability
+  contract, so an app version that stops declaring it loses access on the next
+  request.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if _contract_data(app).get("credits_manage") is True:
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.credits_manage=true in its manifest "
+      "to see or manage your credits."
+    ),
+  )
+
+
+def _contract_data(app: models.App) -> dict:
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data")
+  return data if isinstance(data, dict) else {}
+
+
+def _require_credits_app_consent(app: models.App) -> None:
+  """Local manifests never self-grant access to the owner's credits.
+
+  Use the same Store/consent boundary as first-open approval, not package
+  identity: local apply can copy these permissions into a contract without
+  ever showing the owner a consent card.
+  """
+  if not app_consent.gated(app) or app_consent.status(app) != "accepted":
+    raise HTTPException(
+      status_code=403,
+      detail="App credits permissions need an installed Store app with accepted consent.",
+    )
+
+
+def spend_credits_targets(app: models.App) -> list[str]:
+  """The ``"<seller>/<app>"`` entries the owner allowed this app to pay for."""
+  targets = _contract_data(app).get("spend_credits")
+  return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
+
+
+def get_credits_spender(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.App:
+  """The paying app: its own service, with a reviewed ``spend_credits`` grant.
+
+  A charge spends the owner's money, so only the app's reviewed backend may
+  make one: never its browser frame, which untrusted page content can drive,
+  and never a public invocation (``get_principal`` refuses that scope), whose
+  caller is a visitor. A service a shared-browser guest or delegated helper
+  invoked is refused too: neither may spend the installation owner's credits.
+  Only consent-gated Store apps qualify. The route then refuses a seller the
+  accepted grant does not name.
+  """
+  require_nondelegated_owner_control(principal)
+  if principal.app_id is None or not principal.app_is_service:
+    raise HTTPException(
+      status_code=403,
+      detail="Only an app's own service can spend credits for the owner.",
+    )
+  if principal.browser is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner's own use of an app can spend their credits.",
+    )
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if not spend_credits_targets(app):
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "This app needs permissions.spend_credits in its manifest, listing the "
+        "\"<seller>/<app>\" it pays for, to spend credits."
+      ),
+    )
+  return app
+
+
+def get_credits_price_reader(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or a consented Store app's credits-management/spending grant.
+
+  A paying app reads the seller's published price to show the owner before it
+  charges. Prices are public at the credits service, so reading one grants no
+  spending or account authority and needs no credits-management grant.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail="This app needs permissions.spend_credits in its manifest to read credit prices.",
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
