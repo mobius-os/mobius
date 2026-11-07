@@ -108,15 +108,15 @@ test('a lost acknowledgement retried later, on another device with another clock
     const first = askChat(flaky)
     first.place(KEY, card, node(1))
     assert.equal(await first.ask(KEY, card, request), false, 'the server took it, but the answer was lost')
-    assert.equal(first.askState(KEY), 'ready')
+    assert.equal(first.askState(request), 'ready')
     Date.now = () => Date.parse('2026-11-07T11:00:00.000Z')
     assert.equal(await first.ask(KEY, card, request), true, 'the retry is recognised')
-    assert.equal(first.askState(KEY), 'already', 'and said truthfully')
+    assert.equal(first.askState(request), 'already', 'and said truthfully')
     Date.now = () => Date.parse('2026-11-08T03:17:00.000Z') // another device, skewed clock
     const other = askChat(send)
     other.place(KEY, card, node(1))
     assert.equal(await other.ask(KEY, card, request), true)
-    assert.equal(other.askState(KEY), 'already')
+    assert.equal(other.askState(request), 'already')
   } finally { Date.now = realNow }
   assert.equal(posted.size, 1)
 })
@@ -129,15 +129,15 @@ test('reloads, tabs and concurrent taps of one state post once; a new revision c
   const results = await Promise.all([...views.map(chat => chat.ask(KEY, card, request)), views[0].ask(KEY, card, request)])
   assert.deepEqual(results, [true, true, true, false], 'the same view refuses a second tap while sending')
   assert.equal(posted.size, 1)
-  assert.deepEqual(views.map(chat => chat.askState(KEY)).sort(), ['already', 'already', 'asked'])
+  assert.deepEqual(views.map(chat => chat.askState(request)).sort(), ['already', 'already', 'asked'])
   views[0].turnSettled()
-  assert.equal(views[0].askState(KEY), 'ready')
+  assert.equal(views[0].askState(request), 'ready')
   assert.equal(await views[0].ask(KEY, card, request), true)
-  assert.equal(views[0].askState(KEY), 'already', 'an unchanged state is never asked twice')
+  assert.equal(views[0].askState(request), 'already', 'an unchanged state is never asked twice')
   views[0].turnSettled()
   const restaged = { ...request, refs: [REFS[0], { ...REFS[1], rev: 'c'.repeat(40) }] }
   assert.equal(await views[0].ask(KEY, card, restaged), true)
-  assert.equal(views[0].askState(KEY), 'asked')
+  assert.equal(views[0].askState(restaged), 'asked')
   assert.equal(posted.size, 2)
 })
 
@@ -155,7 +155,7 @@ test('a failed send frees the button', async () => {
   const card = {}
   chat.place(KEY, card, node(1))
   assert.equal(await chat.ask(KEY, card, request), false)
-  assert.equal(chat.askState(KEY), 'ready')
+  assert.equal(chat.askState(request), 'ready')
   const refused = askChat(async () => false)
   refused.place(KEY, card, node(1))
   assert.equal(await refused.ask(KEY, card, request), false)
@@ -167,13 +167,53 @@ test('one view shows the tapped card as sending, then asked until a turn settles
   const card = {}
   chat.place(KEY, card, node(1))
   const pending = chat.ask(KEY, card, request)
-  assert.equal(chat.askState(KEY), 'sending')
+  assert.equal(chat.askState(request), 'sending')
   while (!release) await new Promise(resolve => setTimeout(resolve, 0))
   release(true)
   assert.equal(await pending, true)
-  assert.equal(chat.askState(KEY), 'asked')
+  assert.equal(chat.askState(request), 'asked')
   chat.turnSettled()
-  assert.equal(chat.askState(KEY), 'ready')
+  assert.equal(chat.askState(request), 'ready')
+})
+
+test('a late acknowledgement after its turn settled leaves no receipt (review repro)', async () => {
+  let release
+  const chat = askChat(() => new Promise(resolve => { release = resolve }))
+  const card = {}
+  chat.place(KEY, card, node(1))
+  const pending = chat.ask(KEY, card, request)
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0))
+  chat.turnSettled() // the queued ask's turn ran and ended before its POST answered
+  assert.equal(chat.askState(request), 'sending', 'still in flight')
+  release(true)
+  assert.equal(await pending, true)
+  assert.equal(chat.askState(request), 'ready', 'the expired receipt is not reinstated')
+})
+
+test('a receipt belongs to its ask: a new revision or a newer card is not locked by it', async () => {
+  const { posted, send } = server()
+  const chat = askChat(send)
+  const [older, newer] = [{}, {}]
+  chat.place(KEY, older, node(1))
+  assert.equal(await chat.ask(KEY, older, request), true)
+  assert.equal(chat.askState(request), 'asked')
+  const restaged = { ...request, refs: [REFS[0], { ...REFS[1], rev: 'c'.repeat(40) }] }
+  assert.equal(chat.askState(restaged), 'ready', 'a new rev starts ready')
+  assert.equal(await chat.ask(KEY, older, restaged), true)
+  chat.place(KEY, newer, node(2))
+  const newerCard = { ...request, fingerprint: `${FINGERPRINT}-newer` }
+  assert.equal(chat.askState(newerCard), 'ready', 'a newer card in the group starts ready')
+  assert.equal(await chat.ask(KEY, newer, newerCard), true)
+  assert.equal(posted.size, 3)
+  // While one ask is in flight, another ask is not blocked by it.
+  let release
+  const slow = askChat(async (message, options) => { await new Promise(resolve => { release = resolve }); return send(message, options) })
+  slow.place(KEY, newer, node(1))
+  const first = slow.ask(KEY, newer, { ...request, refs: [{ ...REFS[0], rev: 'd'.repeat(40) }] })
+  assert.equal(slow.askState(request), 'ready')
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0))
+  release()
+  assert.equal(await first, true)
 })
 
 test('only the newest card of its key may ask', async () => {
@@ -194,7 +234,7 @@ test('the block hook exposes its own card ask', async () => {
   let seen = null
   const Probe = () => { seen = useAppBlockChat(KEY); return null }
   renderToStaticMarkup(createElement(AppBlockChatContext.Provider, { value: chat }, createElement(Probe)))
-  assert.equal(seen.askState(), 'ready')
+  assert.equal(seen.askState(request), 'ready')
   renderToStaticMarkup(createElement(Probe))
   assert.equal(await seen.ask(request), false, 'outside a chat nothing can be asked')
   assert.equal(posted.size, 0)

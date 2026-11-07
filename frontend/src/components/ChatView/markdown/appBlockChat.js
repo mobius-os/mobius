@@ -17,8 +17,9 @@
    repeated id as the same message, so a retry, a reload, a second tab or a
    concurrent tap of the same ask about the same state posts it once; a
    changed state (a new `rev`) can be asked about again. Nothing here counts
-   or remembers sends for safety; `pending` only shows the tapped card's
-   state. */
+   or remembers sends for safety: the in-flight set and the receipts only
+   say what one ask's button shows, and both belong to that exact ask
+   (askIdentity), never to a card or its group. */
 import { createContext, useContext, useLayoutEffect, useState, useSyncExternalStore } from 'react'
 
 export const REFRESH_REASONS = Object.freeze(['turn', 'visible'])
@@ -28,6 +29,11 @@ export const REFRESH_REASONS = Object.freeze(['turn', 'visible'])
  *  chat share their asks, which is intended. It grants nothing. */
 export const blockFingerprint = block => JSON.stringify([block.app, block.intent, block.title,
   (block.items || []).map(item => item.intent), [block.action, ...(block.items || []).map(item => item.action)].filter(Boolean).map(action => action.intent)])
+
+/** One ask's identity in this chat: its block content and its references
+ *  with their revisions, in any order. askCid hashes the same inputs. */
+export const askIdentity = (fingerprint, refs) => JSON.stringify([fingerprint,
+  refs.map(ref => JSON.stringify([ref.id, ref.code, ref.rev])).sort()])
 
 /** The deterministic client message id of one ask: the same chat, block
  *  content and references with their revisions (in any order) always give
@@ -46,10 +52,13 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
   const groups = new Map() // key -> Map(id -> { node, superseded })
   const listeners = new Set()
   let refresh = { seq: 0, reason: '' }
-  // Per card key: 'sending' until the send settles, then 'asked' (it was
-  // posted) or 'already' (the server already had it) until a turn here
-  // settles. Presentation only: the message id is what dedupes.
-  const pending = new Map()
+  // By ask identity: the asks whose send is in flight, and the answered
+  // ones ('asked': posted, 'already': the server already had it) until a
+  // turn here settles. `turns` counts settled turns, so an acknowledgement
+  // that arrives after a turn settled leaves no receipt behind.
+  const inFlight = new Set()
+  const receipts = new Map()
+  let turns = 0
   let askVersion = 0
   const notify = () => listeners.forEach(listener => listener())
   const changed = () => { askVersion += 1; notify() }
@@ -91,29 +100,37 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
       refresh = { seq: refresh.seq + 1, reason }
       notify()
     },
-    /** A turn in this chat settled (visible or not): every card's answered
-     *  ask is over, so its control comes back unless askState still limits it. */
+    /** A turn in this chat settled (visible or not): every answered ask is
+     *  over, so its control comes back. An ask still in flight stays so;
+     *  its late acknowledgement records nothing (see ask). */
     turnSettled() {
-      let cleared = false
-      for (const [key, state] of pending) if (state !== 'sending') { pending.delete(key); cleared = true }
-      if (cleared) changed()
+      turns += 1
+      if (receipts.size) { receipts.clear(); changed() }
     },
-    /** One card's ask control: `ready`, `sending`, `asked` or `already`. */
-    askState(key) { return pending.get(key) || 'ready' },
-    /** Send one card's ask (`message` with the id from `fingerprint` and
-     *  `refs`) as an owner message, if that card is still the newest of its
-     *  key and not already sending. Resolves to whether it was accepted.
-     *  `send` resolves to true, 'duplicate' (the server already had this
-     *  id) or false. */
+    /** One ask's control: `ready`, `sending`, `asked` or `already`, for the
+     *  ask `{fingerprint, refs}` (a changed ask starts from `ready`). */
+    askState({ fingerprint, refs }) {
+      const identity = askIdentity(fingerprint, refs)
+      return inFlight.has(identity) ? 'sending' : receipts.get(identity) || 'ready'
+    },
+    /** Send one ask (`message` with the id from `fingerprint` and `refs`) as
+     *  an owner message, if its card is still the newest of its key and the
+     *  same ask is not already in flight. Resolves to whether it was
+     *  accepted. `send` resolves to true, 'duplicate' (the server already
+     *  had this id) or false. */
     async ask(key, id, { message, fingerprint, refs }) {
-      if (!send || typeof message !== 'string' || !message || !chat.latest(key, id) || pending.get(key) === 'sending') return false
-      pending.set(key, 'sending')
+      const identity = askIdentity(fingerprint, refs)
+      if (!send || typeof message !== 'string' || !message || !chat.latest(key, id) || inFlight.has(identity)) return false
+      inFlight.add(identity)
+      const turn = turns
       changed()
       let result = false
       try { result = await send(message, { cid: await askCid(chatId, fingerprint, refs) }) } catch { result = false }
+      inFlight.delete(identity)
       const ok = result === true || result === 'duplicate'
-      if (ok) pending.set(key, result === true ? 'asked' : 'already')
-      else pending.delete(key)
+      // A turn that settled while this was in flight may have been its own
+      // answer: record nothing, so no expired receipt outlives it.
+      if (ok && turn === turns) receipts.set(identity, result === true ? 'asked' : 'already')
       changed()
       return ok
     },
@@ -135,8 +152,9 @@ const noSubscribe = () => () => {}
 /** This block's place in its chat: `{ context, refresh, newestNode, ref,
  *  askState, ask }`. `context` is `{ chatId, latest }`, or null outside a chat
  *  transcript (a preview, a test, a new chat with no id yet). `ref` is a
- *  callback ref for the block's section. `askState()` and `ask({message,
- *  fingerprint, refs})` are this block's card ask (createAppBlockChat). */
+ *  callback ref for the block's section. `askState({fingerprint, refs})` and
+ *  `ask({message, fingerprint, refs})` are this block's card ask
+ *  (createAppBlockChat). */
 export function useAppBlockChat(key) {
   const chat = useContext(AppBlockChatContext)
   const [id] = useState(() => ({}))
@@ -153,7 +171,7 @@ export function useAppBlockChat(key) {
   useSyncExternalStore(chat ? chat.subscribe : noSubscribe, () => chat ? chat.askSnapshot() : 0, () => 0)
   const context = chat?.chatId ? { chatId: chat.chatId, latest } : null
   return { context, refresh, newestNode: () => chat?.newestNode(key) || null, ref: setNode,
-    askState: () => chat ? chat.askState(key) : 'ready',
+    askState: request => chat ? chat.askState(request) : 'ready',
     ask: request => chat ? chat.ask(key, id, request) : Promise.resolve(false) }
 }
 

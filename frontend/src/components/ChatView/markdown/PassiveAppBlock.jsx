@@ -203,7 +203,7 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
-    ask={ask ? <AskControl status={chat.askState()} locked={sessionLocked(session, admitted)}
+    ask={ask ? <AskControl status={chat.askState({ fingerprint: blockFingerprint(block), refs: ask.refs })} locked={sessionLocked(session, admitted)}
       onAsk={() => { void chat.ask({ message, fingerprint: blockFingerprint(block), refs: ask.refs }) }} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
