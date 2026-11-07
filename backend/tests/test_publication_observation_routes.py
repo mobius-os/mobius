@@ -603,3 +603,21 @@ def test_lost_screenshot_create_reply_settles_and_keeps_its_asset_witness(client
   saved = body["records"][0]
   assert saved["number"] == 7 and saved["last_submit_screenshots"] == witness
   assert not receipt_path(f).exists()
+
+
+@pytest.mark.parametrize("action", ["submit", "autopilot_update"])
+def test_only_ordinary_owner_receipts_settle_autopilot_keeps_its_own(client, observation, action):
+  """Autopilot's retry records the pushed head in its grant; its receipt is that witness."""
+  f = observation
+  receipt = json.loads(receipt_path(f).read_text())
+  receipt["action_input"] = {"action": action, **({} if action == "autopilot_update" else {"publication_stage": "draft"})}
+  receipt_path(f).write_text(json.dumps(routes._signed_personal_attempt(receipt)))
+  before, signed = f["path"].read_bytes(), receipt_path(f).read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  if action == "submit":
+    assert body["outcome"] == "settled", body
+    assert not receipt_path(f).exists()
+  else:
+    assert body["outcome"] == "not_eligible", body
+    assert f["path"].read_bytes() == before and receipt_path(f).read_bytes() == signed
+    assert f["calls"] == []  # nothing is read for a receipt it will never settle

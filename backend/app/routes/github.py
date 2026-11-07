@@ -3044,8 +3044,8 @@ def _observation_claim_matches(record: dict, attempt: dict) -> bool:
   plan = claim.get("plan")
   plan_action = plan.get("action") if isinstance(plan, dict) else None
   if action.get("action") not in {
-    "pr": {"submit", "submit_stack", "autopilot_update"},
-    "pr_update": {"update_existing", "update_stack", "autopilot_update"},
+    "pr": {"submit", "submit_stack"},
+    "pr_update": {"update_existing", "update_stack"},
   }.get(plan_action, set()):
     return False
   # Failure marking returns submitting -> prepared. Successful owner writes
@@ -3196,6 +3196,10 @@ async def observe_contribution_publication(
       attempt = _read_personal_attempt(record_path, app_id=app_id, record_id=record_id)
       if attempt is None:
         return response("unavailable", record, "No valid signed publication attempt is available. This does not prove nothing was sent.")
+      if (attempt.get("action_input") or {}).get("action") == "autopilot_update":
+        # Autopilot's round recovery owns this receipt: its retry records the
+        # pushed head in the grant, and the receipt is its only witness.
+        return response("not_eligible", record, "Autopilot recovers its own update; checking never settles or retires it.")
       if attempt.get("observation_settlement") is not None:
         settled = _finish_observation_settlement(app_id, record_id, attempt)
         if settled is not None:
