@@ -11,6 +11,7 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 const vite = await createSsrRenderServer()
 const { MobiusModelAccess } = await vite.ssrLoadModule('/src/components/SettingsView/MobiusAccountPage.jsx')
 const { mobiusAccountQueries } = await vite.ssrLoadModule('/src/hooks/mobiusAccountQueries.js')
+const { settingsQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 const { beginSharedBrowserAuth } = await vite.ssrLoadModule('/src/api/client.js')
 const { default: SettingsView } = await vite.ssrLoadModule('/src/components/SettingsView/SettingsView.jsx')
 after(() => vite.close())
@@ -76,6 +77,9 @@ function AccountReads() {
     agent: mobiusAccountQueries.agent.useQuery(),
     visibility: mobiusAccountQueries.visibility.useQuery(),
     railway: mobiusAccountQueries.railway.useQuery(),
+    // The Möbius credit meter Settings and the composer show.
+    mobiusUsage: settingsQueries.providerUsage.useQuery('mobius'),
+    claudeUsage: settingsQueries.providerUsage.useQuery('claude'),
   }
   return JSON.stringify(Object.fromEntries(Object.entries(reads).map(([name, read]) => [name, read.fetchStatus])))
 }
@@ -139,8 +143,13 @@ test('Möbius models turned off read as turned off, not as a signed-out account'
 })
 
 // Keep last: a shared-browser session cannot be ended within this process.
-test('a shared-browser guest never reads the owner’s Möbius account', () => {
-  assert.deepEqual(accountReads(), { identity: 'fetching', agent: 'fetching', visibility: 'fetching', railway: 'fetching' })
+test('a shared-browser guest never reads the owner’s Möbius account or credit', () => {
+  assert.deepEqual(accountReads(), {
+    identity: 'fetching', agent: 'fetching', visibility: 'fetching', railway: 'fetching', mobiusUsage: 'fetching', claudeUsage: 'fetching',
+  })
   beginSharedBrowserAuth()
-  assert.deepEqual(accountReads(), { identity: 'idle', agent: 'idle', visibility: 'idle', railway: 'idle' })
+  // A guest's own provider usage still loads; the owner's Möbius credit never does.
+  assert.deepEqual(accountReads(), {
+    identity: 'idle', agent: 'idle', visibility: 'idle', railway: 'idle', mobiusUsage: 'idle', claudeUsage: 'fetching',
+  })
 })

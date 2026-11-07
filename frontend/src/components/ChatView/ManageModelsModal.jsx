@@ -7,9 +7,10 @@
  * in the live registry, grouped by provider, with a per-row "show in
  * picker" toggle.
  *
- * Persistence shape:
+ * Persistence shape: Save sends only the models whose visibility changed,
  *   PATCH /api/owner/model-prefs
- *   body: { hidden_ids: ["claude-haiku-4-5-20251001", ...] }
+ *   body: { hidden: { "claude-haiku-4-5-20251001": true, ... } }
+ * so it never overwrites a change made elsewhere (e.g. a Settings switch).
  *
  * The picker filter is the SOURCE OF TRUTH for which models show up
  * in ChatSettingsPanel; this modal is the only place to edit it.
@@ -28,7 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { modelQueries } from '../../hooks/queries.js'
+import { hiddenChanges, modelQueries } from '../../hooks/queries.js'
 import { configuredProviderOrder } from '../../lib/providerAvailability.js'
 import './ManageModelsModal.css'
 
@@ -49,7 +50,9 @@ export default function ManageModelsModal({
   const registryQuery = modelQueries.registry.useQuery()
   const prefsQuery = modelQueries.prefs.useQuery()
   const registry = registryQuery.data
-  const persistedHidden = prefsQuery.data?.hidden_ids || []
+  const persistedHidden = useMemo(() => prefsQuery.data?.hidden_ids || [], [prefsQuery.data])
+  // An unreadable saved list is not the owner's state: nothing to edit or save.
+  const prefsUnavailable = !!prefsQuery.data?.unavailable
 
   // Local draft state — the modal commits on Save, not on every
   // toggle. This lets the user audit their changes and matches the
@@ -128,23 +131,22 @@ export default function ManageModelsModal({
     setSaving(true)
     setError('')
     try {
-      const res = await api.owner.modelPrefs.save([...draftHidden])
+      const res = await api.owner.modelPrefs.update(hiddenChanges(persistedHidden, draftHidden))
       if (!res.ok) {
         setError('Could not save preferences. Try again.')
         return
       }
-      // Invalidate both: registry doesn't change but prefs did, and
-      // the picker reads prefs to filter. Other components that
-      // consume prefs (none today; future surfaces) get the update
-      // through the same cache key.
-      modelQueries.prefs.invalidate(queryClient)
+      // The answer is the owner's whole list, including changes made
+      // elsewhere; the picker reads it through the same cache key.
+      const saved = await res.json()
+      queryClient.setQueryData(modelQueries.prefs.key, { hidden_ids: saved?.hidden_ids || [] })
       onClose()
     } catch {
       setError('Network error.')
     } finally {
       setSaving(false)
     }
-  }, [draftHidden, queryClient, onClose])
+  }, [draftHidden, persistedHidden, queryClient, onClose])
 
   // Force-refresh registry — bypasses the 5-minute server cache so
   // the owner can pull a just-released model on demand. The picker
@@ -247,6 +249,7 @@ export default function ManageModelsModal({
                             type="checkbox"
                             className="mmm-row__toggle"
                             checked={visible}
+                            disabled={prefsUnavailable}
                             onChange={() => toggle(m.id)}
                             aria-label={`${m.label} visible in chat picker`}
                           />
@@ -260,7 +263,11 @@ export default function ManageModelsModal({
           </div>
         </div>
 
-        {error && <p className="mmm__error" role="alert">{error}</p>}
+        {(error || prefsUnavailable) && (
+          <p className="mmm__error" role="alert">
+            {error || 'Could not load which models are shown. Try again later.'}
+          </p>
+        )}
 
         {pendingClose && (
           <div className="mmm__confirm" role="group" aria-label="Confirm discard">
@@ -306,7 +313,7 @@ export default function ManageModelsModal({
             type="button"
             className="mmm__btn"
             onClick={handleSave}
-            disabled={saving || !dirty}
+            disabled={saving || !dirty || prefsUnavailable}
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

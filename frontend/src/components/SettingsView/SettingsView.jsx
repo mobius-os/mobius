@@ -31,7 +31,7 @@ import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
-import { useMobiusAccountSummary } from '../../hooks/mobiusAccountQueries.js'
+import { mobiusAccountQueries, useMobiusAccountSummary } from '../../hooks/mobiusAccountQueries.js'
 import { formatPlanName, rowUsage } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
@@ -750,6 +750,12 @@ export default function SettingsView({
   const onCodexAuthDone = useCallback(() => {
     onProviderConnected('codex')
   }, [onProviderConnected])
+  // Signing in to Möbius connects its models like any other provider, unless
+  // the owner turned them off, in which case they cannot run background work.
+  const onMobiusSignedIn = useCallback(() => {
+    if (queryClient.getQueryData(mobiusAccountQueries.visibility.key) === false) return
+    onProviderConnected('mobius')
+  }, [onProviderConnected, queryClient])
 
   async function toggleTheme() {
     if (themeSwitching) return
@@ -919,7 +925,7 @@ export default function SettingsView({
         onBack={closeDetailPage}
       />
     )
-    detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+    detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} onSignedIn={onMobiusSignedIn} />
   } else if (sharedFoldersOpen) {
     subhead = <SettingsSubhead title="Shared folders" mark={<Folder width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = <SharedFoldersPage />

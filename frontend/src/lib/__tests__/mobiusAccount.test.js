@@ -120,7 +120,7 @@ async function failure(promise) {
 
 test('an unreachable account service is a retryable failure with a plain message', async t => {
   t.mock.method(globalThis, 'fetch', async () => { throw new TypeError('fetch failed') })
-  const error = await failure(mobiusAccessRequest('/api/identity'))
+  const error = await failure(mobiusAccessRequest('/identity'))
   assert.ok(error instanceof MobiusAccessError)
   assert.equal(error.status, 0)
   assert.match(error.message, /could not reach its account service/)
@@ -129,7 +129,7 @@ test('an unreachable account service is a retryable failure with a plain message
 
 test('a cancelled request stays a cancellation, not an account error', async t => {
   t.mock.method(globalThis, 'fetch', async () => { throw new DOMException('aborted', 'AbortError') })
-  const error = await failure(mobiusAccessRequest('/api/identity'))
+  const error = await failure(mobiusAccessRequest('/identity'))
   assert.equal(error.name, 'AbortError')
   assert.equal(error instanceof MobiusAccessError, false)
 })
@@ -137,7 +137,7 @@ test('a cancelled request stays a cancellation, not an account error', async t =
 test('a dashboard-only action carries its code and only a validated dashboard address', async t => {
   const detail = { code: ACCOUNT_CONFIRM_CODE, message: 'Confirm this on your account.', confirm_url: 'https://www.mobius.you/dashboard' }
   respond(t, 409, { detail })
-  let error = await failure(mobiusAccessRequest('/api/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
+  let error = await failure(mobiusAccessRequest('/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
   assert.equal(error.status, 409)
   assert.equal(error.code, ACCOUNT_CONFIRM_CODE)
   assert.equal(error.message, 'Confirm this on your account.')
@@ -145,36 +145,53 @@ test('a dashboard-only action carries its code and only a validated dashboard ad
   assert.equal(retryableAccessError(error), false)
 
   respond(t, 409, { detail: { ...detail, confirm_url: 'https://evil.example/phish' } })
-  error = await failure(mobiusAccessRequest('/api/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
+  error = await failure(mobiusAccessRequest('/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
   assert.equal(error.confirmUrl, '')
   // Another code never carries a dashboard address, even a valid one.
   respond(t, 409, { detail: { ...detail, code: 'other' } })
-  error = await failure(mobiusAccessRequest('/api/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
+  error = await failure(mobiusAccessRequest('/identity/railway/instances/mob_abc123', { method: 'DELETE' }))
   assert.equal(error.confirmUrl, '')
 })
 
 test('service errors keep their message, and an unreadable one gets a plain fallback', async t => {
   respond(t, 409, { detail: 'That handle is taken.' })
-  let error = await failure(mobiusAccessRequest('/api/identity/profile', { method: 'PATCH' }))
+  let error = await failure(mobiusAccessRequest('/identity/profile', { method: 'PATCH' }))
   assert.equal(error.message, 'That handle is taken.')
   assert.equal(error.code, '')
 
   respond(t, 502, '<html>Bad gateway</html>')
-  error = await failure(mobiusAccessRequest('/api/identity'))
+  error = await failure(mobiusAccessRequest('/identity'))
   assert.equal(error.status, 502)
   assert.equal(error.message, 'Your Möbius account is unavailable right now.')
   assert.equal(retryableAccessError(error), true)
 })
 
+test('account requests ride the shell API client: /api path, owner headers, no JSON type on an upload', async t => {
+  const sent = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    sent.push({ url: String(url), headers: init.headers, signal: init.signal })
+    return new Response(null, { status: 204 })
+  })
+  await mobiusAccessRequest('/identity/link', { method: 'DELETE' })
+  const body = new FormData()
+  body.append('avatar', new Blob(['png'], { type: 'image/png' }))
+  await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
+  assert.match(sent[0].url, /\/api\/identity\/link$/)
+  assert.equal(sent[0].headers['Content-Type'], 'application/json')
+  // The shell's deadline applies to every account request.
+  assert.ok(sent[0].signal instanceof AbortSignal)
+  assert.equal('Content-Type' in sent[1].headers, false)
+})
+
 test('known routes return their validated shape, whatever their query string', async t => {
   respond(t, 204)
-  assert.equal(await mobiusAccessRequest('/api/identity/link'), null)
+  assert.equal(await mobiusAccessRequest('/identity/link'), null)
   respond(t, 200, { railway_access: 'signed_out', connection: null, instances: [] })
-  assert.deepEqual(await mobiusAccessRequest('/api/identity/railway?dashboard=1'), {
+  assert.deepEqual(await mobiusAccessRequest('/identity/railway?dashboard=1'), {
     railway_access: 'signed_out', connection: null, instances: [], dashboard_url: '',
   })
   respond(t, 200, { railway_access: 'signed_out', connection: null, instances: [instance] })
-  await assert.rejects(mobiusAccessRequest('/api/identity/railway?dashboard=1'), /without account access/)
+  await assert.rejects(mobiusAccessRequest('/identity/railway?dashboard=1'), /without account access/)
 })
 
 test('web addresses must be https without credentials; plain HTTP only on this machine', () => {

@@ -850,19 +850,37 @@ def test_model_prefs_default_is_curated(client, auth):
   assert res.json() == {"hidden_ids": providers.hidden_model_ids(None)}
 
 
-def test_model_prefs_explicit_empty_is_distinct_from_missing(client, auth, db):
-  """Saving an empty hidden list opts into showing the whole registry."""
+def _hide(client, auth, changes):
+  return client.patch(
+    "/api/owner/model-prefs", json={"hidden": changes}, headers=auth,
+  )
+
+
+def test_model_prefs_change_applies_to_the_curated_default_set(client, auth, db):
+  """A first change edits the default hidden set; untouched defaults stay hidden."""
+  from app import models, providers
+
+  defaults = providers.hidden_model_ids(None)
+  assert len(defaults) >= 2
+  res = _hide(client, auth, {defaults[0]: False, "test-extra-model": True})
+  assert res.status_code == 200
+  expected = [*defaults[1:], "test-extra-model"]
+  assert res.json() == {"hidden_ids": expected}
+  owner = db.query(models.Owner).first()
+  assert owner.model_prefs_json == {"hidden_ids": expected}
+  assert client.get("/api/owner/model-prefs", headers=auth).json() == {
+    "hidden_ids": expected,
+  }
+
+
+def test_model_prefs_showing_every_default_saves_an_explicit_empty_set(client, auth, db):
+  """Showing every hidden model saves `[]`, distinct from missing prefs."""
   from app import models, providers
 
   owner = db.query(models.Owner).first()
   assert owner.model_prefs_json is None
-  assert providers.hidden_model_ids(owner.model_prefs_json)
-
-  res = client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": []},
-    headers=auth,
-  )
+  defaults = providers.hidden_model_ids(None)
+  res = _hide(client, auth, {model_id: False for model_id in defaults})
   assert res.status_code == 200
   assert res.json() == {"hidden_ids": []}
   db.refresh(owner)
@@ -872,75 +890,49 @@ def test_model_prefs_explicit_empty_is_distinct_from_missing(client, auth, db):
   }
 
 
-def test_model_prefs_roundtrip_dedupes(client, auth, db):
-  """PATCH stores hidden_ids verbatim (deduplicated, order-preserving)
-  and GET returns the same set."""
-  res = client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": [
-      "claude-haiku-4-5-20251001",
-      "gpt-5.4",
-      "claude-haiku-4-5-20251001",  # duplicate should drop
-    ]},
-    headers=auth,
-  )
-  assert res.status_code == 200
-  assert res.json()["hidden_ids"] == [
-    "claude-haiku-4-5-20251001", "gpt-5.4",
-  ]
-  res2 = client.get("/api/owner/model-prefs", headers=auth)
-  assert res2.json()["hidden_ids"] == [
-    "claude-haiku-4-5-20251001", "gpt-5.4",
-  ]
-  # Persisted on the Owner row.
-  from app import models
-  owner = db.query(models.Owner).first()
-  assert owner.model_prefs_json == {"hidden_ids": [
-    "claude-haiku-4-5-20251001", "gpt-5.4",
-  ]}
+def test_model_prefs_one_change_keeps_every_other_saved_choice(client, auth):
+  """Each save names only its models, so two pages cannot drop each other's changes."""
+  _hide(client, auth, {"page-a-model": True})
+  _hide(client, auth, {"page-b-model": True})
+  res = _hide(client, auth, {"page-a-model": False, "page-b-model": True})
+  assert "page-b-model" in res.json()["hidden_ids"]
+  assert "page-a-model" not in res.json()["hidden_ids"]
+  assert res.json()["hidden_ids"].count("page-b-model") == 1
+
+
+def test_model_prefs_concurrent_changes_all_land(client, auth):
+  """Simultaneous saves serialize their read-modify-write; none is lost."""
+  from concurrent.futures import ThreadPoolExecutor
+
+  ids = [f"concurrent-model-{n}" for n in range(8)]
+  with ThreadPoolExecutor(max_workers=8) as pool:
+    results = list(pool.map(lambda model_id: _hide(client, auth, {model_id: True}), ids))
+  assert all(r.status_code == 200 for r in results)
+  hidden = client.get("/api/owner/model-prefs", headers=auth).json()["hidden_ids"]
+  assert set(ids) <= set(hidden)
 
 
 def test_model_prefs_stale_id_tolerated(client, auth):
   """An ID that's not in the registry can still be stored; nothing
   errors. The picker handles stale IDs by silently not filtering
   what it can't find."""
-  res = client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": ["claude-fictitious-model-99"]},
-    headers=auth,
-  )
+  res = _hide(client, auth, {"claude-fictitious-model-99": True})
   assert res.status_code == 200
-  assert res.json()["hidden_ids"] == ["claude-fictitious-model-99"]
-
-
-def test_model_prefs_rejects_unknown_field(client, auth):
-  """ModelPrefsUpdate has extra='forbid' — a typo'd field 422s rather
-  than silently landing in the persisted prefs blob."""
-  res = client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": [], "sort_order": ["foo"]},
-    headers=auth,
-  )
-  assert res.status_code == 422
-
-
-def test_model_prefs_clear(client, auth, db):
-  """Empty list clears all hidden entries."""
-  client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": ["gpt-5.4"]},
-    headers=auth,
-  )
-  res = client.patch(
-    "/api/owner/model-prefs",
-    json={"hidden_ids": []},
-    headers=auth,
-  )
+  assert "claude-fictitious-model-99" in res.json()["hidden_ids"]
+  res = _hide(client, auth, {"claude-never-hidden-99": False})
   assert res.status_code == 200
-  assert res.json() == {"hidden_ids": []}
-  from app import models
-  owner = db.query(models.Owner).first()
-  assert owner.model_prefs_json == {"hidden_ids": []}
+
+
+def test_model_prefs_rejects_a_whole_list_or_unknown_field(client, auth):
+  """ModelPrefsUpdate has extra='forbid': the old whole-list body and typo'd
+  fields 422 rather than silently landing in the persisted prefs blob."""
+  for body in (
+    {"hidden_ids": []},
+    {"hidden": {}, "sort_order": ["foo"]},
+    {"hidden": {"gpt-5.4": "yes"}},
+  ):
+    res = client.patch("/api/owner/model-prefs", json=body, headers=auth)
+    assert res.status_code == 422, body
 
 
 def test_live_model_entries_trust_successful_provider_catalog():
@@ -1121,7 +1113,7 @@ def test_model_prefs_patch_rejects_cross_site_request(client, auth):
   PATCH should reject cross-site origin requests."""
   cross = client.patch(
     "/api/owner/model-prefs",
-    json={"hidden_ids": []},
+    json={"hidden": {}},
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403

@@ -1,5 +1,5 @@
 /* Owner-authenticated client for the local Möbius account bridge (/api/identity): validated identity, model access, Railway inventory and the presentation rules Settings › Möbius shows them with. */
-import { BASE, getAuthHeaders } from '../api/client.js'
+import { apiFetch } from '../api/client.js'
 
 // Identity bridge requests are owner actions, so they use the owner bearer
 // directly. Every response the page renders passes through a parser here:
@@ -39,6 +39,18 @@ const DELETE_CONFIRMATION_FALLBACK = (
 export const HANDLE_PATTERN = HANDLE
 export const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 export const AVATAR_MAX_BYTES = 5 * 1024 * 1024
+
+/** Why an avatar file would be refused before upload, or '' when it is fine. */
+export function avatarProblem(file) {
+  if (!AVATAR_TYPES.includes(file.type)) return 'Choose a JPEG, PNG or WebP image.'
+  if (file.size > AVATAR_MAX_BYTES) return 'Choose an image under 5 MB.'
+  return ''
+}
+
+/** The letter an avatar shows until (or instead of) its photo. */
+export function profileInitial(profile) {
+  return (profile?.handle || profile?.email || 'M').slice(0, 1).toUpperCase()
+}
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -497,27 +509,33 @@ export function meterPercent(value) {
 // ── Requests ──────────────────────────────────────────────────────────────
 
 const PARSERS = {
-  '/api/identity': parseIdentity,
-  '/api/identity/profile': parseIdentity,
-  '/api/identity/avatar': parseIdentity,
-  '/api/identity/link/complete': parseIdentity,
-  '/api/identity/agent': parseAgentAccess,
-  '/api/identity/agent/trial': parseAgentAccess,
-  '/api/identity/railway': parseRailway,
+  '/identity': parseIdentity,
+  '/identity/profile': parseIdentity,
+  '/identity/avatar': parseIdentity,
+  '/identity/link/complete': parseIdentity,
+  '/identity/agent': parseAgentAccess,
+  '/identity/agent/trial': parseAgentAccess,
+  '/identity/railway': parseRailway,
 }
 
+// Above the bridge's own 30 s ceiling for an account-service call, so the
+// server's answer, not this deadline, decides an ordinary slow request.
+const ACCOUNT_REQUEST_TIMEOUT_MS = 45_000
+
 /**
- * One owner-authenticated request to the local account bridge. Rejects with a
- * MobiusAccessError carrying the HTTP status (0 for a transport failure), the
- * service's error code and, for dashboard-only actions, the validated
- * dashboard address. Known routes return their validated shape.
+ * One owner-authenticated request to the local account bridge, through the
+ * shell's apiFetch (`path` is relative to /api). Rejects with a
+ * MobiusAccessError carrying the HTTP status (0 for a transport failure or
+ * timeout), the service's error code and, for dashboard-only actions, the
+ * validated dashboard address. A cancellation and an expired owner session
+ * keep apiFetch's own errors. Known routes return their validated shape.
  */
 export async function mobiusAccessRequest(path, options = {}) {
   let response
   try {
-    response = await fetch(`${BASE}${path}`, { ...options, headers: getAuthHeaders(options.headers) })
+    response = await apiFetch(path, { timeoutMs: ACCOUNT_REQUEST_TIMEOUT_MS, ...options })
   } catch (error) {
-    if (error?.name === 'AbortError') throw error
+    if (error?.name === 'AbortError' || error?.message === 'AUTH_EXPIRED') throw error
     throw new MobiusAccessError('This Möbius could not reach its account service. Check your connection and try again.')
   }
   if (response.status === 204) return null

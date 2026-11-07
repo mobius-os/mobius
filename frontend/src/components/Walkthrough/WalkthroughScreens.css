@@ -28,7 +28,6 @@
 .wt-btn:active:not(:disabled) { transform: scale(.97); }
 .wt-btn:disabled { opacity: .55; cursor: not-allowed; }
 .wt-btn--primary { border-color: var(--accent, #8b6cf7); color: var(--wt-on-accent); background: var(--accent, #8b6cf7); }
-.wt-btn--wide { width: 100%; }
 .wt-link { padding: 6px 4px; border: 0; color: var(--wt-accent-ink); background: none; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; min-height: 32px; }
 .wt-link:hover { text-decoration: underline; }
 .wt-note, .wt-success { margin: 14px 0 0; padding: 12px 14px; border-radius: 11px; background: color-mix(in srgb, var(--accent, #8b6cf7) 9%, transparent); font-size: 13px; line-height: 1.5; }

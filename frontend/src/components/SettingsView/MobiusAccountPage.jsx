@@ -20,9 +20,9 @@ import { authQueries, modelQueries } from '../../hooks/queries.js'
 import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
 import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
-  AVATAR_MAX_BYTES,
   AVATAR_TYPES,
   HANDLE_PATTERN,
+  avatarProblem,
   deploymentCanOpen,
   deploymentCanRecover,
   deploymentIsBuilding,
@@ -35,10 +35,12 @@ import {
   meterPercent,
   mobiusAccessRequest,
   parseDeploymentMetrics,
+  profileInitial,
   railwayAccountChanged,
   resourceSummary,
 } from '../../lib/mobiusAccount.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
+import { closeAuthWindow, navigateAuthWindow } from '../../utils/authWindow.js'
 import './SettingsPage.css'
 import './MobiusAccountPage.css'
 
@@ -54,16 +56,6 @@ const json = body => ({
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 })
-
-function avatarProblem(file) {
-  if (!AVATAR_TYPES.includes(file.type)) return 'Choose a JPEG, PNG or WebP image.'
-  if (file.size > AVATAR_MAX_BYTES) return 'Choose an image under 5 MB.'
-  return ''
-}
-
-function initial(profile) {
-  return (profile?.handle || profile?.email || 'M').slice(0, 1).toUpperCase()
-}
 
 function Spinner({ size = 14 }) {
   return <ArrowRotateCw className="mobius-account__spin" width={size} height={size} aria-hidden="true" />
@@ -321,7 +313,7 @@ function ProfileSection({ identity, onIdentity }) {
   const memberSince = formatMembershipMonth(identity.member_since)
 
   const saveHandle = async handle => {
-    onIdentity(await mobiusAccessRequest('/api/identity/profile', { method: 'PATCH', ...json({ handle }) }))
+    onIdentity(await mobiusAccessRequest('/identity/profile', { method: 'PATCH', ...json({ handle }) }))
   }
 
   const upload = async event => {
@@ -335,7 +327,7 @@ function ProfileSection({ identity, onIdentity }) {
     try {
       const body = new FormData()
       body.append('avatar', file)
-      const next = await mobiusAccessRequest('/api/identity/avatar', { method: 'POST', body })
+      const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
       // The account may keep the same avatar address for new bytes.
       forgetAuthedImage(AVATAR_PATH)
       onIdentity(next)
@@ -353,7 +345,7 @@ function ProfileSection({ identity, onIdentity }) {
         {profile.handle ? (
           <div className="settings-item">
             <span className="settings-item__icon settings-item__icon--round mobius-account__avatar">
-              {avatarUrl ? <img src={avatarUrl} alt="" /> : <span aria-hidden="true">{initial(profile)}</span>}
+              {avatarUrl ? <img src={avatarUrl} alt="" /> : <span aria-hidden="true">{profileInitial(profile)}</span>}
             </span>
             <span className="settings-item__body">
               <span className="settings-item__title">Photo</span>
@@ -417,7 +409,7 @@ function ModelVisibilityRow() {
     setSaving(true)
     setError('')
     try {
-      const result = await mobiusAccessRequest('/api/auth/providers/mobius/enabled', { method: 'PATCH', ...json({ enabled: next }) })
+      const result = await mobiusAccessRequest('/auth/providers/mobius/enabled', { method: 'PATCH', ...json({ enabled: next }) })
       queryClient.setQueryData(mobiusAccountQueries.visibility.key, result.enabled === true)
       authQueries.provider.statuses.invalidate(queryClient)
       modelQueries.registry.invalidate(queryClient)
@@ -466,7 +458,7 @@ function ModelAccessSection({ account, onSignIn = null }) {
     setActivating(true)
     setError('')
     try {
-      queryClient.setQueryData(mobiusAccountQueries.agent.key, await mobiusAccessRequest('/api/identity/agent/trial', { method: 'POST' }))
+      queryClient.setQueryData(mobiusAccountQueries.agent.key, await mobiusAccessRequest('/identity/agent/trial', { method: 'POST' }))
       authQueries.provider.statuses.invalidate(queryClient)
       setConfirming(false)
     } catch (activateError) {
@@ -674,7 +666,7 @@ function DeploymentMetrics({ instanceId, active }) {
       const request = new AbortController()
       controller = request
       try {
-        const body = await mobiusAccessRequest(`/api/identity/railway/deployments/${encodeURIComponent(instanceId)}/metrics?cost=1`, { signal: request.signal })
+        const body = await mobiusAccessRequest(`/identity/railway/deployments/${encodeURIComponent(instanceId)}/metrics?cost=1`, { signal: request.signal })
         if (!cancelled && !request.signal.aborted) { setMetrics(parseDeploymentMetrics(body)); setFailed(false) }
       } catch {
         if (!cancelled && !request.signal.aborted) setFailed(true)
@@ -882,20 +874,24 @@ function useRailwayConnect(onRailway) {
     setError('')
     ;(async () => {
       try {
-        const started = await mobiusAccessRequest('/api/identity/railway/connect/start', {
+        const started = await mobiusAccessRequest('/identity/railway/connect/start', {
           method: 'POST', signal: controller.signal, ...(replace ? json({ replace: true }) : {}),
         })
         let authorization = null
         try { authorization = new URL(started?.authorization_url) } catch { /* invalid below */ }
         if (authorization?.protocol !== 'https:') throw new Error('Möbius returned an invalid Railway sign-in address.')
-        popup.location.replace(authorization.href)
+        // navigateAuthWindow cuts the opener first, so Railway (or a page it
+        // redirects through) can never navigate this Möbius window.
+        if (!navigateAuthWindow(popup, authorization.href)) {
+          throw new Error('Railway connection was cancelled. Try again when you are ready.')
+        }
         const deadline = Date.now() + 10 * 60 * 1000
         while (!controller.signal.aborted && Date.now() < deadline) {
           await new Promise(resolve => setTimeout(resolve, 900))
           if (controller.signal.aborted) return
           let next = null
           try {
-            next = await mobiusAccessRequest('/api/identity/railway?dashboard=1', { signal: controller.signal })
+            next = await mobiusAccessRequest('/identity/railway?dashboard=1', { signal: controller.signal })
             onRailway(next)
           } catch { /* keep waiting; the popup decides */ }
           if (replace ? railwayAccountChanged(previousAccount, next) : next?.connection?.connected) return
@@ -909,7 +905,7 @@ function useRailwayConnect(onRailway) {
       } catch (connectError) {
         if (!controller.signal.aborted) setError(connectError.message)
       } finally {
-        try { popup.close() } catch { /* already closed */ }
+        closeAuthWindow(popup)
         if (abortRef.current === controller) abortRef.current = null
         if (!controller.signal.aborted) setConnecting(false)
       }
@@ -1008,7 +1004,7 @@ function DeploymentsSection({ identity, signedIn, active, railwayQuery, onReconn
   const canManage = railway?.railway_access === 'available' && Boolean(railway.connection?.connected)
 
   const rename = async (id, name) => {
-    await mobiusAccessRequest(`/api/identity/railway/deployments/${encodeURIComponent(id)}`, { method: 'PATCH', ...json({ name }) })
+    await mobiusAccessRequest(`/identity/railway/deployments/${encodeURIComponent(id)}`, { method: 'PATCH', ...json({ name }) })
     await railwayQuery.refetch()
   }
 
@@ -1095,7 +1091,7 @@ function AccountSection({ identity, intent, onIntent, onDisconnected, dashboard 
     setPending(true)
     setError('')
     try {
-      await mobiusAccessRequest('/api/identity/link', { method: 'DELETE' })
+      await mobiusAccessRequest('/identity/link', { method: 'DELETE' })
       onDisconnected(intent === 'reconnect')
     } catch (disconnectError) {
       setError(disconnectError.status === 502
@@ -1149,8 +1145,10 @@ function AccountSection({ identity, intent, onIntent, onDisconnected, dashboard 
  * The Möbius account page inside Settings. `active` is true while the page is
  * visible; it refreshes the account on return and pauses live polling when
  * hidden. The parent owns the page header (see useMobiusAccountSummary).
+ * `onSignedIn` runs after a sign-in here, so Settings can apply the same
+ * first-connection defaults Claude and Codex get.
  */
-export default function MobiusAccountPage({ active = true, onOpenModels = null }) {
+export default function MobiusAccountPage({ active = true, onOpenModels = null, onSignedIn = null }) {
   const queryClient = useQueryClient()
   const identityQuery = mobiusAccountQueries.identity.useQuery()
   const identity = identityQuery.data
@@ -1181,13 +1179,10 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
 
   const signedIn = useCallback(next => {
     setIntent(null)
-    setIdentity(next)
-    void queryClient.invalidateQueries({
-      queryKey: mobiusAccountQueries.key,
-      predicate: query => query.queryKey[1] !== 'account',
-    })
+    void mobiusAccountQueries.signedIn(queryClient, next)
     refreshProviders()
-  }, [queryClient, refreshProviders, setIdentity])
+    onSignedIn?.()
+  }, [queryClient, refreshProviders, onSignedIn])
 
   const disconnected = useCallback(reconnecting => {
     setIntent(reconnecting ? 'signin-again' : null)

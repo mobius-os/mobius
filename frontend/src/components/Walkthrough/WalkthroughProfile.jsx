@@ -1,85 +1,73 @@
 /* First-screen profile setup. A hosted or already-linked owner picks a handle
    and avatar right here; a self-hosted owner who has not linked yet signs in
    to their Möbius account in place, through the shell's account-link flow. */
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
-import { detailToMessage } from '../../lib/errorDetail.js'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
 import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
 import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import {
+  AVATAR_TYPES,
+  HANDLE_PATTERN,
+  avatarProblem,
+  mobiusAccessRequest,
+  profileInitial,
+} from '../../lib/mobiusAccount.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
 import { CheckIcon } from './WalkthroughIcons.jsx'
 import { returningHandle } from './returningOwner.js'
 
-const HANDLE_PATTERN = /^[a-z0-9_]{3,30}$/
-const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp']
-const AVATAR_MAX_BYTES = 5 * 1024 * 1024
-
-function avatarProblem(file) {
-  if (!AVATAR_TYPES.includes(file.type)) return 'Choose a JPEG, PNG, or WebP image.'
-  if (file.size > AVATAR_MAX_BYTES) return 'Choose an image under 5 MB.'
-  return ''
-}
-
 /* The owner's profile: { loading, error, identity, avatarUrl, editing, returning, claim, uploadAvatar, signedIn }.
-   `returning` is the handle of an owner who arrived with one, or null (see returningOwner.js).
+   It reads and writes the same validated account Settings › Möbius shows (mobiusAccountQueries), so the two
+   never disagree. `returning` is the handle of an owner who arrived with one, or null (see returningOwner.js).
    claim and uploadAvatar reject with a user-facing Error message; signedIn(identity) adopts a just-linked account. */
 export function useAccountProfile() {
   const queryClient = useQueryClient()
-  const [state, setState] = useState({ identity: null, loading: true, error: '' })
+  const query = mobiusAccountQueries.identity.useQuery()
+  // A failed refresh keeps a profile the owner already has here (for example one just signed in).
+  const identity = query.data || null
+  const error = !identity && query.isError ? 'Your profile is not available right now.' : ''
   // Set when this owner's first handle is claimed in the guide.
   const [claimedHere, setClaimedHere] = useState(false)
   const [editing, setEditing] = useState(false)
-  useEffect(() => {
-    const controller = new AbortController()
-    apiFetch('/identity', { signal: controller.signal, timeoutMs: 15_000 }).then(async response => {
-      if (!response.ok) throw new Error('Your profile is not available right now.')
-      setState({ identity: await response.json(), loading: false, error: '' })
-    }).catch(error => {
-      if (error.name === 'AbortError') return
-      // A late failure never replaces a profile the owner already has here (for example one just signed in).
-      setState(current => (current.identity
-        ? { ...current, loading: false }
-        : { identity: null, loading: false, error: error.message || 'Your profile is not available right now.' }))
-    })
-    return () => controller.abort()
-  }, [])
   // The same cached photo Settings shows; initials stand in until it loads.
-  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, state.identity?.profile?.avatar_url || '').url
-  // Settings › Möbius reads the same account; drop its cached copy whenever the guide changes it.
-  const setIdentity = identity => {
-    setState(current => ({ ...current, identity }))
-    void mobiusAccountQueries.invalidate(queryClient)
-  }
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, identity?.profile?.avatar_url || '').url
+  const setIdentity = next => queryClient.setQueryData(mobiusAccountQueries.identity.key, next)
 
   async function claim(handle) {
-    const response = await apiFetch('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }), timeoutMs: 20_000 })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(detailToMessage(data.detail, 'Could not claim that handle.'))
-    if (!state.identity?.profile?.handle) setClaimedHere(true)
-    setIdentity(data)
+    const next = await mobiusAccessRequest('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }) })
+    if (!identity?.profile?.handle) setClaimedHere(true)
+    setIdentity(next)
   }
   async function uploadAvatar(file) {
-    // multipart: the browser must set the Content-Type boundary, which apiFetch would override with JSON.
     const body = new FormData()
     body.append('avatar', file)
-    const response = await fetch(`${BASE}/api/identity/avatar`, { method: 'POST', headers: getAuthHeaders(), body })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(detailToMessage(data.detail, 'Could not update your avatar.'))
+    const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
     // The account may keep the same avatar address for new bytes.
     forgetAuthedImage(AVATAR_PATH)
-    setIdentity(data)
+    setIdentity(next)
   }
-  const returning = returningHandle({ handle: state.identity?.profile?.handle, claimedHere, editing })
-  return { ...state, avatarUrl, claimedHere, editing, setEditing, returning, claim, uploadAvatar, signedIn: setIdentity }
+  const returning = returningHandle({ handle: identity?.profile?.handle, claimedHere, editing })
+  return {
+    identity,
+    loading: !identity && query.isPending,
+    error,
+    avatarUrl,
+    claimedHere,
+    editing,
+    setEditing,
+    returning,
+    claim,
+    uploadAvatar,
+    signedIn: next => mobiusAccountQueries.signedIn(queryClient, next),
+  }
 }
 
-function Avatar({ url, name, busy, onPick }) {
+function Avatar({ url, profile, busy, onPick }) {
   const inputRef = useRef(null)
   return <div className="wt-avatar">
     <span className={`wt-avatar__face${busy ? ' is-busy' : ''}`} aria-hidden="true">
-      {url ? <img src={url} alt="" /> : <span>{(name || '?').slice(0, 1).toUpperCase()}</span>}
+      {url ? <img src={url} alt="" /> : <span>{profileInitial(profile)}</span>}
     </span>
     <button type="button" className="wt-avatar__edit" onClick={() => inputRef.current?.click()} disabled={busy} aria-label={url ? 'Change avatar' : 'Upload an avatar'}>
       <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>
@@ -174,7 +162,7 @@ export default function WalkthroughProfile({ controller }) {
     {showForm && <h3 className="wt-profile__title">Claim a handle and upload a picture <span>(optional)</span> to get started.</h3>}
     <div className="wt-profile__body">
     <div className="wt-profile__picture">
-      <Avatar url={avatarUrl} name={handle || profile.display_name} busy={uploading} onPick={pickAvatar} />
+      <Avatar url={avatarUrl} profile={profile} busy={uploading} onPick={pickAvatar} />
     </div>
     <div className="wt-profile__main">
       {showForm ? <form className="wt-handle" onSubmit={claim}>

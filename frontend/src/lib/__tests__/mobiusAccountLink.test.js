@@ -59,8 +59,8 @@ function setup(routes = {}) {
   const popup = fakePopup()
   const target = fakeWindow()
   const { request, calls } = fakeRequest({
-    '/api/identity/link/start': start,
-    '/api/identity/link/complete': linked,
+    '/identity/link/start': start,
+    '/identity/link/complete': linked,
     ...routes,
   })
   return { popup, target, request, calls, opened: () => popup }
@@ -84,12 +84,12 @@ test('the validated completion message finishes the link with code, state and at
   const run = linkMobiusAccount({ provider: 'apple', openWindow: opened, request, eventTarget: target, onCompleting: () => { completing += 1 }, closedPollMs: 5 })
   await tick(5)
   assert.equal(popup.navigatedTo, start.authorization_url)
-  assert.deepEqual(calls[0], { path: '/api/identity/link/start', method: 'POST', body: { provider: 'apple' } })
+  assert.deepEqual(calls[0], { path: '/identity/link/start', method: 'POST', body: { provider: 'apple' } })
   completion(target)
   const outcome = await run
   assert.deepEqual(outcome, { status: 'linked', identity: linked })
   assert.equal(completing, 1)
-  assert.deepEqual(calls[1], { path: '/api/identity/link/complete', method: 'POST', body: { code: CODE, state: STATE, attempt: ATTEMPT } })
+  assert.deepEqual(calls[1], { path: '/identity/link/complete', method: 'POST', body: { code: CODE, state: STATE, attempt: ATTEMPT } })
   assert.ok(popup.closeCalls >= 1)
   assert.equal(target.listening, 0)
 })
@@ -147,7 +147,7 @@ test('an attempt that outlives its local lifetime times out and cleans up', asyn
 
 test('a refused link start closes the popup and reports the service message', async () => {
   const { popup, target, request, calls, opened } = setup({
-    '/api/identity/link/start': () => { throw new MobiusAccessError('This Möbius is already linked.', 409) },
+    '/identity/link/start': () => { throw new MobiusAccessError('This Möbius is already linked.', 409) },
   })
   await assert.rejects(
     linkMobiusAccount({ provider: 'google', openWindow: opened, request, eventTarget: target }),
@@ -161,7 +161,7 @@ test('a refused link start closes the popup and reports the service message', as
 test('cancelling after the account approved does not abandon completion', async () => {
   let release
   const { target, request, opened, calls } = setup({
-    '/api/identity/link/complete': () => new Promise(resolve => { release = () => resolve(linked) }),
+    '/identity/link/complete': () => new Promise(resolve => { release = () => resolve(linked) }),
   })
   const controller = new AbortController()
   const run = linkMobiusAccount({ provider: 'google', signal: controller.signal, openWindow: opened, request, eventTarget: target, closedPollMs: 5 })
@@ -171,32 +171,32 @@ test('cancelling after the account approved does not abandon completion', async 
   controller.abort()
   release()
   assert.equal((await run).status, 'linked')
-  assert.equal(calls.at(-1).path, '/api/identity/link/complete')
+  assert.equal(calls.at(-1).path, '/identity/link/complete')
 })
 
 test('a lost completion response is resolved by re-reading the account before any retry', async () => {
   const { request, calls } = fakeRequest({
-    '/api/identity/link/complete': () => { throw new MobiusAccessError('offline', 0) },
-    '/api/identity': linked,
+    '/identity/link/complete': () => { throw new MobiusAccessError('offline', 0) },
+    '/identity': linked,
   })
   const payload = { code: CODE, state: STATE, attempt: ATTEMPT }
   assert.deepEqual(await completeAccountLink(payload, { request }), { status: 'linked', identity: linked })
-  assert.deepEqual(calls.map(call => call.path), ['/api/identity/link/complete', '/api/identity'])
+  assert.deepEqual(calls.map(call => call.path), ['/identity/link/complete', '/identity'])
 })
 
 test('an unconfirmed completion keeps the approval for a retry only when retrying can help', async () => {
   const payload = { code: CODE, state: STATE, attempt: ATTEMPT }
   const unconfirmed = fakeRequest({
-    '/api/identity/link/complete': () => { throw new MobiusAccessError('exchange unavailable', 502) },
-    '/api/identity': signedOut,
+    '/identity/link/complete': () => { throw new MobiusAccessError('exchange unavailable', 502) },
+    '/identity': signedOut,
   })
   const outcome = await completeAccountLink(payload, { request: unconfirmed.request })
   assert.equal(outcome.status, 'unconfirmed')
   assert.deepEqual(outcome.completion, payload)
 
   const refused = fakeRequest({
-    '/api/identity/link/complete': () => { throw new MobiusAccessError('That sign-in expired.', 400) },
-    '/api/identity': signedOut,
+    '/identity/link/complete': () => { throw new MobiusAccessError('That sign-in expired.', 400) },
+    '/identity': signedOut,
   })
   await assert.rejects(completeAccountLink(payload, { request: refused.request }), /expired/)
 })

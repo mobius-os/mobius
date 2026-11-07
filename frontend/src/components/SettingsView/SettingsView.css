@@ -32,31 +32,6 @@
   margin-bottom: 18px;
 }
 
-.settings__section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 17px;
-  margin-bottom: 10px;
-  scroll-margin-top: 24px;
-}
-
-.settings__section--compact {
-  padding: 13px 17px;
-}
-
-/* Light mode: cards in light mode lose almost all visible
-   separation from the bg because the surface↔bg contrast is
-   subtle (#f8f7f5 on #f0eeeb). A soft elevation shadow restores
-   the layered card feel from earlier iterations without making
-   the surface itself darker. Dark mode leaves cards flat — dark
-   surfaces don't need elevation. */
-[data-theme="light"] .settings__section {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 1px 3px rgba(0, 0, 0, 0.04);
-}
-
 .settings__subtext {
   font-size: 13px;
   color: var(--muted);
@@ -139,14 +114,6 @@
   }
 }
 
-.settings__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-width: 0;
-}
-
 .settings__appearance-toggle {
   flex-shrink: 0;
   box-sizing: border-box;
@@ -192,7 +159,6 @@
   cursor: wait;
 }
 
-.settings__section:focus,
 .settings-group:focus,
 .settings-bg-list:focus,
 .settings-github:focus {
@@ -456,23 +422,6 @@
   .settings__title {
     margin-bottom: 16px;
   }
-
-  .settings__section {
-    padding: 16px 14px;
-  }
-
-  .settings__section--compact {
-    padding: 12px 14px;
-  }
-
-  /* A label + trailing action that cannot both fit on one line stacks instead
-     of pushing past the pane edge; the action keeps its own left edge. */
-  .settings__row {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-
 }
 
 /* Account actions keep their explicit confirmation together. */

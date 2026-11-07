@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { api } from '../api/client.js'
+import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
 
@@ -99,11 +99,16 @@ async function fetchProviderUsage(provider) {
   return jsonOrThrow(res, 'provider usage fetch failed:')
 }
 
+// The Möbius credit meter is the owner's account balance; the server refuses
+// it to a shared-browser guest, so no surface (Settings, the composer meter, a
+// limit card) asks for it there.
+const ownerOnlyUsage = provider => provider === 'mobius' && isSharedBrowserAuth()
+
 function useProviderUsageQuery(provider, { enabled = true } = {}) {
   return useQuery({
     queryKey: providerUsageKey(provider),
     queryFn: () => fetchProviderUsage(provider),
-    enabled: enabled && Boolean(provider),
+    enabled: enabled && Boolean(provider) && !ownerOnlyUsage(provider),
     // A new chat or a return to Möbius must check the provider again. The
     // server coalesces probes, so this does not poll the rate-limited service.
     staleTime: 0,
@@ -422,17 +427,67 @@ function useModelRegistryQuery(options) {
 }
 
 async function fetchModelPrefs() {
-  // Resolve to an empty preference set only after spending the same bounded
-  // retry budget as registry reads. React Query cannot retry a resolved fallback.
+  // After the same bounded retry budget as registry reads, an unreadable
+  // preference set resolves to "hide nothing" so the chat picker still offers
+  // every model. `unavailable` tells editors this is not the saved state, so
+  // they never show it as such. React Query cannot retry a resolved fallback.
   for (let attempt = 0; attempt <= MODEL_READ_RETRY_COUNT; attempt += 1) {
     try {
       const res = await api.owner.modelPrefs.get()
       const data = await jsonOrThrow(res, 'model prefs fetch failed:')
       return { hidden_ids: data?.hidden_ids || [] }
     } catch {
-      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [] }
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], unavailable: true }
     }
   }
+}
+
+/** The per-model changes (`{ id: hidden }`) that turn one hidden list into another. */
+export function hiddenChanges(fromIds, toIds) {
+  const from = new Set(fromIds)
+  const to = new Set(toIds)
+  const changes = {}
+  for (const id of new Set([...from, ...to])) {
+    if (from.has(id) !== to.has(id)) changes[id] = to.has(id)
+  }
+  return changes
+}
+
+// Saves still on the wire across every editor. Only the last one to settle
+// may replace the cache with the server's list, so an earlier answer never
+// briefly undoes a later change that is still shown optimistically.
+let prefsSavesInFlight = 0
+
+/**
+ * Shows `changes` (`{ id: hidden }`) at once and saves only them. Resolves
+ * true when the server applied them. After the last save settles the cache
+ * holds the server's list: its answer, or a fresh read after a failure.
+ */
+async function saveModelPrefsChanges(queryClient, changes) {
+  // A read already in flight would land the list from before this change.
+  await queryClient.cancelQueries({ queryKey: modelPrefsKey })
+  queryClient.setQueryData(modelPrefsKey, (prev) => {
+    const hidden = new Set(prev?.hidden_ids || [])
+    for (const [id, hide] of Object.entries(changes)) {
+      if (hide) hidden.add(id)
+      else hidden.delete(id)
+    }
+    return { hidden_ids: [...hidden] }
+  })
+  prefsSavesInFlight += 1
+  let saved = null
+  try {
+    const res = await api.owner.modelPrefs.update(changes)
+    if (res.ok) saved = await res.json()
+  } catch {
+    saved = null
+  }
+  prefsSavesInFlight -= 1
+  if (!prefsSavesInFlight) {
+    if (Array.isArray(saved?.hidden_ids)) queryClient.setQueryData(modelPrefsKey, { hidden_ids: saved.hidden_ids })
+    else void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+  }
+  return Array.isArray(saved?.hidden_ids)
 }
 
 function modelPrefsQueryOptions({ enabled = true } = {}) {
@@ -778,6 +833,7 @@ export const modelQueries = {
     fetch: fetchModelPrefs,
     options: modelPrefsQueryOptions,
     useQuery: useModelPrefsQuery,
+    saveChanges: saveModelPrefsChanges,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },
 }

@@ -153,7 +153,7 @@ export function awaitAccountLinkCompletion({
  */
 export async function completeAccountLink(completion, { request = mobiusAccessRequest } = {}) {
   try {
-    const identity = await request('/api/identity/link/complete', {
+    const identity = await request('/identity/link/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(completion),
@@ -162,7 +162,7 @@ export async function completeAccountLink(completion, { request = mobiusAccessRe
   } catch (error) {
     let current = null
     try {
-      current = await request('/api/identity')
+      current = await request('/identity')
     } catch { /* keep the original completion error */ }
     if (current?.account_mode === 'linked' && !current.account_unavailable) {
       return { status: 'linked', identity: current }
@@ -196,7 +196,7 @@ export async function linkMobiusAccount({
   let attempt
   try {
     if (signal?.aborted) throw new AccountLinkError('cancelled')
-    attempt = parseLinkAttempt(await request('/api/identity/link/start', {
+    attempt = parseLinkAttempt(await request('/identity/link/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),

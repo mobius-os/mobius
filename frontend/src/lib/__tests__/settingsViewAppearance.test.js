@@ -197,7 +197,7 @@ test('provider usage is read for connected providers on the overview and only th
 })
 
 test('the Möbius account lives in Settings, with no hand-off to an app', () => {
-  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} \/>/)
+  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} onSignedIn=\{onMobiusSignedIn\} \/>/)
   assert.match(view, /onClick=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}/)
   assert.match(view, /useMobiusAccountSummary\(\)/)
   assert.doesNotMatch(view, /onOpenApp\?\.\('identity'\)|openMobiusYou|Möbius · You|Möbius account<\/strong>/)
@@ -206,8 +206,7 @@ test('the Möbius account lives in Settings, with no hand-off to an app', () => 
 test('provider-dependent model controls stay unavailable until connected', () => {
   // An unconnected provider page is only its Connection section.
   assert.match(providerPage, /if \(!configured\) return <>\{connectionSection\}\{access\}<\/>/)
-  assert.match(providerPage, /onClick=\{\(\) => setSheetOpen\(true\)\}\s*disabled=\{!configured\}/)
-  assert.match(providerPage, /<ChatModelsList provider=\{provider\} configured=\{configured\} \/>/)
+  assert.match(providerPage, /<ChatModelsList provider=\{provider\} \/>/)
   assert.doesNotMatch(providerPage, /ratesUrl|See current rates|Token rates are a reference/)
   assert.match(view, /configuredProviders=\{configuredProviders\}/)
 })

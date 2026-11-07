@@ -11,13 +11,13 @@ const { default: ChatModelsList } = await vite.ssrLoadModule('/src/components/Se
 const { modelQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 after(() => vite.close())
 
-function render({ registry, hidden = [], configured = true, provider = 'claude' }) {
+function render({ registry, hidden = [], prefs = { hidden_ids: hidden }, provider = 'claude' }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   try {
     client.setQueryData(modelQueries.registry.key, registry)
-    client.setQueryData(modelQueries.prefs.key, { hidden_ids: hidden })
+    client.setQueryData(modelQueries.prefs.key, prefs)
     return renderToStaticMarkup(createElement(QueryClientProvider, { client },
-      createElement(ChatModelsList, { provider, configured })))
+      createElement(ChatModelsList, { provider })))
   } finally {
     client.clear()
   }
@@ -35,11 +35,18 @@ test('each of this provider\'s models is listed with its picker switch state', (
   assert.doesNotMatch(html, /GPT-X/)
 })
 
-test('switches are locked until the provider is connected', () => {
-  const html = render({ registry, configured: false })
+test('an unreadable saved list locks the switches and says so instead of showing a wrong state', () => {
+  const html = render({ registry, prefs: { hidden_ids: [], unavailable: true } })
   const switches = html.match(/<button[^>]*role="switch"[^>]*>/g) || []
   assert.equal(switches.length, 2)
   for (const tag of switches) assert.match(tag, /disabled=""/)
+  assert.match(html, /role="alert"[^>]*>Could not load which models are shown\./)
+})
+
+test('a readable saved list leaves the switches usable', () => {
+  const html = render({ registry })
+  assert.doesNotMatch(html, /disabled=""/)
+  assert.doesNotMatch(html, /role="alert"/)
 })
 
 test('a provider with no models says so instead of rendering an empty card', () => {

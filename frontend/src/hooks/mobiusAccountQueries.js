@@ -12,11 +12,11 @@ const agentKey = [...rootKey, 'agent']
 const visibilityKey = [...rootKey, 'models-visible']
 const railwayKey = [...rootKey, 'railway']
 
-const fetchIdentity = ({ signal } = {}) => mobiusAccessRequest('/api/identity', { signal })
-const fetchAgent = ({ signal } = {}) => mobiusAccessRequest('/api/identity/agent', { signal })
-const fetchRailway = ({ signal } = {}) => mobiusAccessRequest('/api/identity/railway?dashboard=1', { signal })
+const fetchIdentity = ({ signal } = {}) => mobiusAccessRequest('/identity', { signal })
+const fetchAgent = ({ signal } = {}) => mobiusAccessRequest('/identity/agent', { signal })
+const fetchRailway = ({ signal } = {}) => mobiusAccessRequest('/identity/railway?dashboard=1', { signal })
 async function fetchVisibility({ signal } = {}) {
-  const body = await mobiusAccessRequest('/api/auth/providers/mobius/enabled', { signal })
+  const body = await mobiusAccessRequest('/auth/providers/mobius/enabled', { signal })
   if (typeof body?.enabled !== 'boolean') throw new Error('Möbius returned an invalid model setting.')
   return body.enabled
 }
@@ -66,6 +66,11 @@ export const mobiusAccountQueries = {
   agent: { key: agentKey, useQuery: useAgentQuery },
   visibility: { key: visibilityKey, useQuery: useVisibilityQuery },
   railway: { key: railwayKey, useQuery: useRailwayQuery },
+  /** Show the identity a sign-in just returned and re-read the rest of the account. */
+  signedIn: (queryClient, identity) => {
+    queryClient.setQueryData(identityKey, identity)
+    return queryClient.invalidateQueries({ queryKey: rootKey, predicate: query => query.queryKey[1] !== 'account' })
+  },
   /** Re-read everything account-shaped, e.g. after signing in or out. */
   invalidate: queryClient => queryClient.invalidateQueries({ queryKey: rootKey }),
 }

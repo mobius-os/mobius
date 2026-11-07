@@ -482,6 +482,11 @@ async function ownerSessionConfirmedInvalid(ownerToken) {
   }
 }
 
+// A FormData body must let the browser write its own multipart boundary.
+function jsonContentType(body) {
+  return body instanceof FormData ? {} : { 'Content-Type': 'application/json' }
+}
+
 export async function apiFetch(path, options = {}) {
   if (sharedBrowserEnabled) {
     // An API operation belongs to the authority that initiated it, even if
@@ -507,7 +512,7 @@ export async function apiFetch(path, options = {}) {
       assertAuthority()
       return fetch(`${BASE}/api${guestPath}`, {
         ...options, credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
+        headers: { ...jsonContentType(options.body), ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
       })
     }
     const tokenAtSend = sharedBrowserToken
@@ -526,7 +531,7 @@ export async function apiFetch(path, options = {}) {
     return response
   }
   const headers = {
-    'Content-Type': 'application/json',
+    ...jsonContentType(options.body),
     ...getAuthHeaders(options.headers),
   }
   const sentCredential = Object.entries(headers).some(
@@ -890,6 +895,8 @@ export async function probeDeletion(path) {
     return 'unknown'
   }
 }
+
+let modelPrefsWrites = Promise.resolve()
 
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
@@ -1608,10 +1615,18 @@ export const api = {
   owner: {
     modelPrefs: {
       get: () => apiFetch('/owner/model-prefs'),
-      save: (hiddenIds) => apiFetch('/owner/model-prefs', {
-        method: 'PATCH',
-        body: JSON.stringify({ hidden_ids: hiddenIds }),
-      }),
+      // `hidden` maps only the changed model ids to true (hide) or false
+      // (show); the server applies them to the owner's list and answers with
+      // the whole list. Saves go one at a time so two quick taps on the same
+      // switch can never land out of order.
+      update: (hidden) => {
+        const send = modelPrefsWrites.then(() => apiFetch('/owner/model-prefs', {
+          method: 'PATCH',
+          body: JSON.stringify({ hidden }),
+        }))
+        modelPrefsWrites = send.catch(() => {})
+        return send
+      },
     },
     walkthrough: {
       get: () => apiFetch('/owner/walkthrough'),

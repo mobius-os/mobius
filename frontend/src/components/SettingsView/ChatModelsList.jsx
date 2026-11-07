@@ -1,44 +1,30 @@
 /* One provider's chat models on its Settings page, each with a switch for whether it appears in the chat picker; changes save as you toggle. */
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
-import { api } from '../../api/client.js'
 import { modelQueries } from '../../hooks/queries.js'
-import { createLatestSaveQueue } from '../../lib/modelPrefsSaveQueue.js'
 
 /**
- * Picker visibility is one owner-wide list of hidden model ids
- * (PATCH /api/owner/model-prefs). Toggles show at once; createLatestSaveQueue
- * owns the intended list, sends it one save at a time, and restores the
- * server's confirmed list when a save fails with nothing newer pending. A
- * prefs read already in flight is cancelled first so it cannot land over the
- * toggle with the list from before it.
+ * Picker visibility is one owner-wide list of hidden model ids. Each switch
+ * shows its change at once and saves only that model
+ * (modelQueries.prefs.saveChanges), so a switch here can never overwrite a
+ * change made on another page. Rendered only for a connected provider. When
+ * the saved list could not be read, the switches stay off-limits rather than
+ * showing a state that is not the owner's.
  */
-export default function ChatModelsList({ provider, configured }) {
+export default function ChatModelsList({ provider }) {
   const queryClient = useQueryClient()
   const registryQuery = modelQueries.registry.useQuery()
   const prefsQuery = modelQueries.prefs.useQuery()
   const [error, setError] = useState('')
-  const queueRef = useRef(null)
-  if (!queueRef.current) {
-    queueRef.current = createLatestSaveQueue({
-      read: () => [...(queryClient.getQueryData(modelQueries.prefs.key)?.hidden_ids || [])],
-      show: hiddenIds => queryClient.setQueryData(modelQueries.prefs.key, { hidden_ids: hiddenIds }),
-      save: async hiddenIds => (await api.owner.modelPrefs.save(hiddenIds)).ok,
-      onResult: ok => setError(ok ? '' : 'Could not save that change. Try again.'),
-    })
-  }
   const models = Array.isArray(registryQuery.data?.[provider]) ? registryQuery.data[provider] : []
   const hidden = new Set(prefsQuery.data?.hidden_ids || [])
+  const unavailable = !!prefsQuery.data?.unavailable
 
   const setVisible = async (modelId, visible) => {
-    await queryClient.cancelQueries({ queryKey: modelQueries.prefs.key })
-    void queueRef.current.change((hiddenIds) => {
-      const next = new Set(hiddenIds)
-      if (visible) next.delete(modelId)
-      else next.add(modelId)
-      return [...next]
-    })
+    setError('')
+    const saved = await modelQueries.prefs.saveChanges(queryClient, { [modelId]: !visible })
+    setError(saved ? '' : 'Could not save that change. Try again.')
   }
 
   if (!models.length) {
@@ -46,15 +32,14 @@ export default function ChatModelsList({ provider, configured }) {
       <div className="settings-item">
         <span className="settings-item__body">
           <span className="settings-item__sub">
-            {registryQuery.isPending || prefsQuery.isPending
-              ? 'Loading models…'
-              : configured ? 'No chat models are available right now.' : 'Connect to see its chat models.'}
+            {registryQuery.isPending || prefsQuery.isPending ? 'Loading models…' : 'No chat models are available right now.'}
           </span>
         </span>
       </div>
     )
   }
 
+  const message = unavailable ? 'Could not load which models are shown. Try again later.' : error
   return (
     <>
       {models.map((model) => {
@@ -72,14 +57,14 @@ export default function ChatModelsList({ provider, configured }) {
                 className="settings-switch"
                 id={switchId}
                 checked={visible}
-                disabled={!configured || prefsQuery.isPending}
+                disabled={unavailable || prefsQuery.isPending}
                 onCheckedChange={(next) => setVisible(model.id, next)}
               />
             </span>
           </div>
         )
       })}
-      {error && <div className="settings-item-panel"><p className="settings-message settings-message--error" role="alert">{error}</p></div>}
+      {message && <div className="settings-item-panel"><p className="settings-message settings-message--error" role="alert">{message}</p></div>}
     </>
   )
 }

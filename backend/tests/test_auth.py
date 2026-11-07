@@ -1050,7 +1050,7 @@ def test_providers_models_respects_hidden_model_prefs(client, auth):
   r0 = client.patch(
     "/api/owner/model-prefs",
     headers=auth,
-    json={"hidden_ids": ["claude-opus-4-8", "gpt-5.5"]},
+    json={"hidden": {"claude-opus-4-8": True, "gpt-5.5": True}},
   )
   assert r0.status_code == 200, r0.text
 

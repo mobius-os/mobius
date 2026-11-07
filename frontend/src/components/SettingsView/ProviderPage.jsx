@@ -4,7 +4,7 @@ import ModelSheet from '../ui/ModelSheet.jsx'
 import ChatModelsList from './ChatModelsList.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 
-function BackgroundModel({ provider, info, models, configured, enabled, model, effort, onModelChange, onEffortChange }) {
+function BackgroundModel({ provider, info, models, enabled, model, effort, onModelChange, onEffortChange }) {
   const [sheetOpen, setSheetOpen] = useState(false)
   const Logo = info?.Logo
   const label = info?.label || provider
@@ -29,7 +29,7 @@ function BackgroundModel({ provider, info, models, configured, enabled, model, e
     key: provider,
     label,
     Logo,
-    models: configured ? models : [],
+    models,
   }]
 
   return (
@@ -39,7 +39,6 @@ function BackgroundModel({ provider, info, models, configured, enabled, model, e
         className={`settings-item settings-model-row${enabled ? '' : ' settings-model-row--off'}`}
         title={selectedModel || triggerLabel}
         onClick={() => setSheetOpen(true)}
-        disabled={!configured}
         aria-haspopup="dialog"
         aria-label={`${label} background model: ${triggerLabel}${effortLabel ? `, ${effortLabel} effort` : ''}`}
       >
@@ -75,7 +74,7 @@ function BackgroundModel({ provider, info, models, configured, enabled, model, e
         model={selectedModel}
         efforts={efforts}
         effort={effort}
-        configuredProviders={new Set(configured ? [provider] : [])}
+        configuredProviders={new Set([provider])}
         onEffortChange={onEffortChange}
         onPick={(pid, id, pickedModel) => {
           const nextEfforts = modelEfforts(efforts, pickedModel)
@@ -150,7 +149,6 @@ export default function ProviderPage({
             provider={provider}
             info={info}
             models={models}
-            configured={configured}
             enabled={enabled}
             model={model}
             effort={effort}
@@ -168,7 +166,7 @@ export default function ProviderPage({
           </div>
         </div>
         <div className="settings-list">
-          <ChatModelsList provider={provider} configured={configured} />
+          <ChatModelsList provider={provider} />
         </div>
       </section>
     </>
