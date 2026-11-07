@@ -3,31 +3,11 @@ import assert from 'node:assert/strict'
 
 import { classifyChatHandoff } from '../chatRuntimeCache.js'
 import {
-  helperPresentation,
   isResourcePause,
   resourcePausePresentation,
+  untilLabel,
   waitPresentation,
 } from '../waitingPresentation.js'
-
-test('idle waking helpers own one visible automatic Waiting handoff', () => {
-  const helpers = {
-    count: 2,
-    items: [
-      { task_key: 'review-copy', title: 'review-copy' },
-      { task_key: 'verify-build', title: 'verify-build' },
-    ],
-  }
-  assert.equal(classifyChatHandoff({ authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
-  assert.deepEqual(helperPresentation(helpers, { kind: 'automatic' }), {
-    count: 2,
-    tasks: ['review-copy', 'verify-build'],
-    summary: 'Waiting on 2 helpers',
-    owner: '2 helper agents',
-    automatic: true,
-    usage: 'Usage unknown',
-  })
-  assert.equal(helperPresentation(helpers, { kind: 'recovery' }).automatic, false)
-})
 
 test('declared waits stay compact and disclose ownership, deadline, and cost', () => {
   const presented = waitPresentation({
@@ -38,13 +18,27 @@ test('declared waits stay compact and disclose ownership, deadline, and cost', (
     next_check_at: '2026-09-02T12:30:00',
     last_checked_at: '2026-09-02T12:25:00',
     deadline_at: '2026-09-02T13:00:00',
-  })
+  }, Date.parse('2026-09-02T12:26:40Z'))
   assert.equal(presented.owner, 'GitHub merge queue')
-  assert.match(presented.checker, /Möbius · every 5 minutes · next at/)
+  assert.match(presented.summary, /^next check in 4 min · \S/)
+  assert.match(presented.checker, /^Möbius · every 5 minutes · next in 4 min · \S/)
   assert.match(presented.activity, /^3 checks · last at/)
-  assert.match(presented.timeout, /^This chat wakes to investigate at/)
+  assert.match(presented.timeout, /^This chat wakes to investigate in 34 min · \S/)
   assert.equal(presented.usage,
     'No model tokens while checking · one turn when it wakes')
+})
+
+test('wait countdowns read in calm whole units and never count past due', () => {
+  const now = Date.parse('2026-09-02T12:00:00Z')
+  assert.equal(untilLabel(null, now), null)
+  assert.equal(untilLabel('2026-09-02T11:59:00', now), 'now')
+  assert.equal(untilLabel('2026-09-02T12:00:30', now), 'in under a minute')
+  assert.equal(untilLabel('2026-09-02T12:02:01', now), 'in 3 min')
+  assert.equal(untilLabel('2026-09-02T14:00:00+00:00', now), 'in 2 h')
+  assert.equal(untilLabel('2026-09-02T14:05:00Z', now), 'in 2 h 5 min')
+  assert.equal(untilLabel('2026-09-05T12:00:00', now), 'in 3 days')
+  const timer = waitPresentation({ kind: 'timer', due_at: '2026-09-02T12:17:00' }, now)
+  assert.match(timer.summary, /^resumes in 17 min · \S/)
 })
 
 test('waits without timestamps keep their ordinary fallback labels', () => {
@@ -165,5 +159,4 @@ for (const kind of ['model_capacity', 'rate_limit', 'memory', 'storage']) {
 
 test('helper count alone cannot promise an automatic executor', () => {
   assert.equal(classifyChatHandoff({}), 'none')
-  assert.equal(helperPresentation({ count: 3 }).automatic, false)
 })

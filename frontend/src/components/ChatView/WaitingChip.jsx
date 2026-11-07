@@ -1,15 +1,54 @@
-/* WaitingChip renders bordered waits with their existing condition and recovery owners. */
+/* WaitingChip renders what this chat is still owed, above the composer: helpers, waits, and resource holds. */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import WaitingCard from './WaitingCard.jsx'
+import { HelperRow } from './HelperResultCard.jsx'
 import {
-  helperPresentation,
   resourcePausePresentation,
   waitPresentation,
 } from './waitingPresentation.js'
 
+// Countdowns read in whole minutes; a quarter-minute tick keeps them honest
+// without re-rendering the foot every second.
+const COUNTDOWN_TICK_MS = 15_000
+
+function useCountdownClock(active) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return undefined
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), COUNTDOWN_TICK_MS)
+    return () => clearInterval(id)
+  }, [active])
+  return now
+}
+
+// The exact check, hidden until asked for: commands are long and technical.
+function WaitCommand({ command }) {
+  const [shown, setShown] = useState(false)
+  const textRef = useRef(null)
+  // Above the composer the handoff stack scrolls inside itself; bring the
+  // revealed command into that stack's view. Only the stack moves, never the
+  // transcript.
+  useEffect(() => {
+    const text = textRef.current
+    const stack = text?.closest('.chat__waits')
+    if (!shown || !stack) return
+    const overflow = text.getBoundingClientRect().bottom - stack.getBoundingClientRect().bottom
+    if (overflow > 0) stack.scrollTop += overflow
+  }, [shown])
+  return <div className="chat__wait-command">
+    <button type="button" className="chat__wait-command-toggle" aria-expanded={shown}
+      onClick={() => setShown(value => !value)}>
+      {shown ? 'Hide' : 'Show'}
+    </button>
+    {shown && <pre ref={textRef} className="chat__wait-command-text"><code>{command}</code></pre>}
+  </div>
+}
+
 export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery }) {
-  const presentation = waitPresentation(wait)
+  const now = useCountdownClock(!wait.delivery_pending)
+  const presentation = waitPresentation(wait, now)
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState(null)
   const cancel = async () => {
@@ -52,34 +91,26 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
         { label: 'Activity', value: presentation.activity },
         { label: presentation.timeoutLabel, value: presentation.timeout },
         { label: 'Agent usage', value: presentation.usage },
+        ...(presentation.command ? [{ label: 'Command', value: <WaitCommand command={presentation.command} /> }] : []),
       ]}
     />
   )
 }
 
-function HelperCard({ backgroundHelpers, handoff, expanded, onToggle }) {
-  const presentation = helperPresentation(backgroundHelpers, handoff)
+// One row per helper, the same row the transcript shows at its launch, so a
+// tap opens that helper's conversation. Status only: the live step and clock
+// are not in this projection yet.
+function HelperList({ helpers, unlisted, automatic, chatId, onInternalNav }) {
   return (
-    <WaitingCard
-      expanded={expanded}
-      onToggle={onToggle}
-      ariaLabel="helper waiting details"
-      title={presentation.tasks.length ? presentation.tasks.join(', ') : undefined}
-      text={presentation.summary}
-      stateLabel={null}
-      meta={presentation.automatic ? 'resumes automatically' : null}
-      rows={[
-        {
-          label: 'Waiting on',
-          value: presentation.tasks.length
-            ? presentation.tasks.join(', ')
-            : 'Background helper work',
-        },
-        { label: 'Owner', value: presentation.owner },
-        { label: 'Next', value: presentation.automatic ? 'This chat resumes when they finish' : 'Waiting for the next step' },
-        { label: 'Agent usage', value: presentation.usage },
-      ]}
-    />
+    <section className="chat__wait-card chat__helper-list" aria-label="Helpers">
+      {helpers.map(helper => (
+        <HelperRow key={helper.delegation_id} event={helper} chatId={chatId} onInternalNav={onInternalNav} />
+      ))}
+      {unlisted > 0 && <p className="chat__helper-list-note">
+        {`and ${unlisted} more ${unlisted === 1 ? 'helper' : 'helpers'}`}
+      </p>}
+      {automatic && <p className="chat__helper-list-note">This chat resumes when they finish</p>}
+    </section>
   )
 }
 
@@ -107,15 +138,18 @@ function ResourceCard({ resourcePause, handoff, expanded, onToggle, onRevealReco
 
 export default function WaitingChip({
   waits = [],
-  backgroundHelpers,
+  helpers = [],
+  unlistedHelpers = 0,
   resourcePause,
   handoff = null,
+  chatId,
   onCancel,
   onRevealRecovery,
+  onInternalNav,
 }) {
-  const helperCount = Number(backgroundHelpers?.count) || 0
   const [expandedKey, setExpandedKey] = useState(null)
-  if (!waits.length && helperCount === 0 && !resourcePause) return null
+  const hasHelpers = helpers.length > 0 || unlistedHelpers > 0
+  if (!waits.length && !hasHelpers && !resourcePause) return null
 
   const toggle = key => setExpandedKey(current => current === key ? null : key)
   return (
@@ -129,12 +163,13 @@ export default function WaitingChip({
           onToggle={() => toggle('resource')}
         />
       )}
-      {helperCount > 0 && (
-        <HelperCard
-          backgroundHelpers={backgroundHelpers}
-          handoff={handoff}
-          expanded={expandedKey === 'helpers'}
-          onToggle={() => toggle('helpers')}
+      {hasHelpers && (
+        <HelperList
+          helpers={helpers}
+          unlisted={unlistedHelpers}
+          automatic={handoff?.kind === 'automatic'}
+          chatId={chatId}
+          onInternalNav={onInternalNav}
         />
       )}
       {waits.map(wait => (

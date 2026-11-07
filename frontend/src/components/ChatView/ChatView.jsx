@@ -1,4 +1,4 @@
-import { helpersOutsideGoal } from './goalHelpers.js'
+import { trayHelpers } from './goalHelpers.js'
 import { LocalAnswersContext } from './localAnswersContext.js'
 import {
   chatCompactingKind,
@@ -5800,7 +5800,12 @@ export default function ChatView({
     turnActive, hasPendingQuestion, hasPendingResume: !!pendingResumeBlock, chatHandoff,
   })
   const progressGoal = currentProgressGoal(goalPresentation, { turnActive })
-  const separateBackgroundHelpers = helpersOutsideGoal(backgroundHelpers, progressGoal)
+  const ownedHelpers = trayHelpers(backgroundHelpers, progressGoal)
+  // A resource or provider park is the idle chat's own hold; a running turn
+  // has already moved past it.
+  const footResourcePause = turnActive
+    ? null
+    : resourcePause || (modelCapacityPause || pendingLimitPark ? pendingResumeBlock : null)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
   // Goal ownership comes from authoritative runtime reconciliation, never
   // message text or a momentary browser transport signal.
@@ -6295,16 +6300,6 @@ export default function ChatView({
               </li>
             )
           })()}
-          {!hasPendingQuestion && !turnActive && (armedWaits.length > 0 || separateBackgroundHelpers.count > 0 || resourcePause || modelCapacityPause || pendingLimitPark) && <li className="chat__handoff-slot" data-key="current-waiting-handoff">
-            <WaitingChip
-              waits={armedWaits}
-              backgroundHelpers={separateBackgroundHelpers}
-              resourcePause={resourcePause || (modelCapacityPause || pendingLimitPark ? pendingResumeBlock : null)}
-              handoff={serverHandoff}
-              onCancel={handleCancelWait}
-              onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
-            />
-          </li>}
         </ul>
         </PeerTimelineContext.Provider>
         </LocalAnswersContext.Provider>
@@ -6317,8 +6312,8 @@ export default function ChatView({
       <div ref={footRef} className="chat__foot">
         {/* Foot order, top to bottom:
             floating actions overlay the transcript without joining the measured
-            footer; build-progress rail → connection/retry → queued messages →
-            composer remain in normal footer flow. The shell owns the one persistent
+            footer; build-progress rail → connection/retry → handoffs (helpers,
+            waits) → queued messages → composer remain in normal footer flow. The shell owns the one persistent
             offline explanation; the composer retains contextual send-failure copy.
             Transient trouble (a stream reattaching, an older page or activation
             that failed) recovers quietly with no note here. Only a state the
@@ -6406,6 +6401,23 @@ export default function ChatView({
           error={connectionError}
           onRetry={retry}
         />
+        {/* What this chat is still owed (helpers, armed waits, an idle
+            park) stays beside the composer through running turns. A saved
+            owner question outranks it, as it does the Goal helper headline,
+            and needs the room. Its height joins the measured foot. */}
+        {!hasPendingQuestion && (
+          <WaitingChip
+            waits={armedWaits}
+            helpers={ownedHelpers.rows}
+            unlistedHelpers={ownedHelpers.unlisted}
+            resourcePause={footResourcePause}
+            handoff={turnActive ? null : serverHandoff}
+            chatId={chatId}
+            onCancel={handleCancelWait}
+            onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
+            onInternalNav={internalNav}
+          />
+        )}
         <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={cid => {

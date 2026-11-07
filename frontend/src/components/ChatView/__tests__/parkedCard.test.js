@@ -619,7 +619,7 @@ test('resource parks appear in the standard Waiting surface', () => {
     'the durable tail pause must drive the live waiting presentation')
   assert.match(chatView, /classifyChatHandoff\(\{[\s\S]*resourcePause: pendingResumeBlock,[\s\S]*authoritativeHandoff: serverHandoff,[\s\S]*\}\)/,
     'resource waits must share the self-resuming handoff visibility rule')
-  assert.match(chatView, /<WaitingChip[\s\S]*resourcePause=\{resourcePause \|\| \(modelCapacityPause/,
+  assert.match(chatView, /const footResourcePause = turnActive[\s\S]*resourcePause \|\| \(modelCapacityPause[\s\S]*<WaitingChip[\s\S]*resourcePause=\{footResourcePause\}/,
     'the standard Waiting component must receive the resource handoff')
   assert.match(waitingChip, /function ResourceCard/,
     'the shared Waiting surface should explain resource ownership and wake-up')

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createElement as h } from 'react'
 import { renderToStaticMarkup as render } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
-import { goalHelpers, helpersOutsideGoal, goalHelperWaitingLabel } from '../goalHelpers.js'
+import { goalHelpers, trayHelpers, goalHelperWaitingLabel } from '../goalHelpers.js'
 import { progressRailViewModel } from '../goalProgress.js'
 import { goalContinuationHandoff } from '../chatHandoffPresentation.js'
 
@@ -12,7 +12,6 @@ after(() => vite.close())
 const load = async name => (await vite.ssrLoadModule(`/src/components/ChatView/${name}.jsx`)).default
 const Details = await load('GoalPlanDetails')
 const Rail = await load('ProgressRail')
-const Waiting = await load('WaitingChip')
 
 const child = {
   id: 'nested', task_key: 'private.internal.key', plan_task: 'check',
@@ -100,11 +99,24 @@ test('expanded helpers use plan titles and On hold, never task keys or provider 
   assert.doesNotMatch(html, /private\.|Codex|Claude|Paused/)
 })
 
-test('only exactly Goal-owned helpers fold; unrelated Goal B work and unprojected counts stay separate', () => {
-  const background = { count: 4, items: [{ id: 'parent' }, { id: 'nested' }, { id: 'goal-b-helper' }] }
-  assert.deepEqual(helpersOutsideGoal(background, goal), { count: 2, items: [{ id: 'goal-b-helper' }] })
-  assert.deepEqual(helpersOutsideGoal(background, null), background)
-  assert.deepEqual(helpersOutsideGoal({ count: 1, items: [{ id: 'parent' }] }, goal), { count: 0, items: [] })
+test('the helper list has each helper once: background helpers, then direct Goal helpers still owed', () => {
+  const background = { count: 2, items: [
+    { id: 'parent', task_key: 'private.parent.key', provider: 'claude', status: 'running' },
+    { id: 'goal-b-helper', task_key: 'other-goal', provider: 'codex', status: 'completed' },
+  ] }
+  const settled = { id: 'settled', task_key: 'done-already', status: 'completed', children: [] }
+  const asking = { id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input', children: [] }
+  const owned = structuredClone(goal)
+  owned.plan.delegations.push(settled, asking)
+  const { rows, unlisted } = trayHelpers(background, owned)
+  // A Goal helper the background list already has is not repeated; a settled
+  // Goal helper is history, and a nested helper belongs to its own parent.
+  assert.deepEqual(rows.map(row => row.delegation_id), ['parent', 'goal-b-helper', 'asking'])
+  assert.deepEqual(rows[2], { delegation_id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input' })
+  assert.equal(unlisted, 0)
+  assert.deepEqual(trayHelpers(null, null), { rows: [], unlisted: 0 })
+  // The server caps listed items; the rest are counted, never invented.
+  assert.equal(trayHelpers({ count: 20, items: background.items }, null).unlisted, 18)
 })
 
 test('helper counts never invent automatic wake ownership or optional recovery actions', () => {
@@ -118,9 +130,6 @@ test('helper counts never invent automatic wake ownership or optional recovery a
   assert.ok(goalContinuationHandoff(held))
   assert.equal(goalContinuationHandoff({ ...held, handoff: { kind: 'automatic' } }), null)
   assert.equal(goalContinuationHandoff({ ...held, handoff: { kind: 'owner_input' } }), null)
-  const backgroundHelpers = { count: 1, items: [{ id: 'other', task_key: 'secret' }] }
-  assert.doesNotMatch(render(h(Waiting, { backgroundHelpers, handoff: { kind: 'recovery' } })), /resumes automatically|secret/)
-  assert.match(render(h(Waiting, { backgroundHelpers, handoff: { kind: 'automatic' } })), /resumes automatically/)
 })
 
 

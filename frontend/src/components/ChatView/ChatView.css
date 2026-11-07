@@ -2419,8 +2419,7 @@
 .chat__foot .chat__progress-action,
 .chat__foot .chat__progress-clear,
 .chat__foot .chat__goal-plan,
-.chat__foot .chat__wait-summary,
-.chat__foot .chat__wait-cancel,
+.chat__foot .chat__waits,
 .chat__foot .chat__archived-restore,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
@@ -4215,12 +4214,6 @@
 }
 
 /* Waiting uses the same bordered surface as the Goal panel. */
-.chat__handoff-slot {
-  list-style: none;
-  padding: 0;
-  margin-top: 10px;
-}
-
 .chat__waits {
   max-width: 720px;
   margin: 0 auto var(--chat-foot-rail-gap);
@@ -4350,6 +4343,68 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   font-size: 13px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+/* In the foot the handoffs stack above the composer; past ~40% of the
+   viewport they scroll inside themselves so the composer keeps its room. The
+   foot's ResizeObserver already reserves whatever height they take. */
+.chat__foot .chat__waits {
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Cards keep their own height; the stack scrolls rather than squashing them. */
+.chat__foot .chat__waits > * {
+  flex-shrink: 0;
+}
+
+/* A wait's exact command, revealed on request: monospace, wrapped, and
+   scrollable when long. */
+.chat__wait-command-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text, var(--accent));
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat__wait-command-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.chat__wait-command-text {
+  margin: 6px 0 0;
+  max-height: 9em;
+  overflow: auto;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Helper rows reuse the transcript's helper row inside the waiting surface. */
+.chat__helper-list {
+  max-height: 156px; /* about four rows, then the list scrolls */
+  overflow-y: auto;
+  padding: 5px 8px 5px 12px;
+}
+
+.chat__helper-list .chat__subagents-list {
+  margin: 0;
+}
+
+.chat__helper-list-note {
+  margin: 2px 0 2px 16px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* Archived notice: the waiting-card shell with one Restore action. */

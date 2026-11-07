@@ -4,6 +4,7 @@ import { createElement as h } from 'react'
 import { renderToStaticMarkup as render } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 import { goalContinuationHandoff } from '../chatHandoffPresentation.js'
+import { renderWithModels } from './modelRegistryRender.js'
 
 const vite = await createSsrRenderServer()
 after(() => vite.close())
@@ -112,6 +113,22 @@ test('legacy receipt without a result or plan keeps the complete objective acces
   assert.doesNotMatch(html, /objective--preview|<details/)
 })
 
+test('an expanded command Wait offers its exact command behind a collapsed Command row', () => {
+  const command = "curl -fsS https://preview.test/healthz | grep -q ok"
+  const wait = { id: 'wait-c', kind: 'command', description: 'Preview responds', command, interval_secs: 300 }
+  const props = { onToggle: () => {}, onCancel: () => {} }
+  const collapsed = render(h(WaitCard, { ...props, expanded: false, wait }))
+  assert.doesNotMatch(collapsed, /Command|chat__wait-command/)
+  const expanded = render(h(WaitCard, { ...props, expanded: true, wait }))
+  assert.match(expanded, /<dt>Command<\/dt><dd><div class="chat__wait-command"><button type="button" class="chat__wait-command-toggle" aria-expanded="false">Show<\/button><\/div><\/dd>/)
+  // Hidden until asked for: the command text is not in the page yet.
+  assert.doesNotMatch(expanded, /preview\.test|<pre/)
+  for (const empty of [{ kind: 'timer' }, { kind: 'command', command: '   ' }]) {
+    const html = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, ...empty, command: empty.command ?? null } }))
+    assert.doesNotMatch(html, /<dt>Command/)
+  }
+})
+
 test('collapsed cancellable Wait exposes Stop while blocked delivery reveals its existing recovery', () => {
   const wait = { id: 'wait-a', kind: 'timer', description: 'Deployment ready' }
   const props = { expanded: false, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {} }
@@ -130,7 +147,6 @@ test('collapsed cancellable Wait exposes Stop while blocked delivery reveals its
 test('helper, condition and resource handoffs all use the established bordered Waiting card', async () => {
   const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
   for (const props of [
-    { backgroundHelpers: { count: 1, items: [{ task_key: 'review' }] } },
     { waits: [{ id: 'timer', kind: 'timer', description: 'Deployment ready' }] },
     { resourcePause: { pause: { kind: 'memory' } }, handoff: { kind: 'automatic', reason: 'memory' } },
     { resourcePause: { pause: { kind: 'model_capacity' } }, handoff: { kind: 'recovery' }, onRevealRecovery: () => {} },
@@ -141,15 +157,33 @@ test('helper, condition and resource handoffs all use the established bordered W
     assert.match(html, /aria-expanded="false"/)
     assert.doesNotMatch(html, /class="chat__handoff|Next move and details/)
   }
-  const helper = render(h(WaitingChip, {
-    backgroundHelpers: { count: 1, items: [] },
+})
+
+test('helpers are one openable row each, never a "Waiting on N helpers" count', async () => {
+  const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  const html = renderWithModels(h(WaitingChip, {
+    chatId: 'parent-chat',
+    helpers: [
+      { delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' },
+      { delegation_id: 'del-b', task_key: 'verify-build', provider: 'codex', status: 'needs_input' },
+    ],
     handoff: { kind: 'automatic', reason: 'helpers' },
   }))
-  assert.match(helper, /Waiting on 1 helper/)
-  assert.doesNotMatch(helper, /Waiting · Waiting/)
-  assert.match(helper, /aria-label="Expand helper waiting details: Waiting on 1 helper — resumes automatically"/)
-  const unowned = render(h(WaitingChip, { backgroundHelpers: { count: 1, items: [] } }))
-  assert.doesNotMatch(unowned, /resumes automatically/)
+  assert.match(html, /class="chat__wait-card chat__helper-list"/)
+  assert.equal((html.match(/chat__helper-row/g) || []).length, 2)
+  // Status only: the projection has no live step or start time to tick from.
+  assert.match(html, /aria-label="review-copy: Claude · Working\. Open its conversation"/)
+  assert.match(html, /aria-label="verify-build: Codex · Waiting for coordinating agent\. Open its conversation"/)
+  assert.doesNotMatch(html, /chat__subagent-elapsed|Waiting on \d helper|Usage unknown/)
+  const capped = renderWithModels(h(WaitingChip, {
+    chatId: 'parent-chat',
+    helpers: [{ delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' }],
+    unlistedHelpers: 3,
+  }))
+  assert.match(capped, /and 3 more helpers/)
+  // Only a server-owned automatic handoff may promise the chat resumes.
+  assert.match(html, /This chat resumes when they finish/)
+  assert.doesNotMatch(capped, /resumes/)
 })
 
 test('Waiting panel preserves expanded evidence, action errors and disabled state', () => {

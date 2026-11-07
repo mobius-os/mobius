@@ -17,15 +17,38 @@ export function goalHelpers(goal) {
   return helpers
 }
 
-/** Keep unrelated (or unproven) background work in its own Waiting panel. */
-export function helpersOutsideGoal(backgroundHelpers, goal) {
-  const owned = new Set(goalHelpers(goal).map(node => node.id))
-  const items = backgroundHelpers?.items || []
-  const matched = items.filter(item => owned.has(item.id)).length
-  return {
-    count: Math.max(0, (backgroundHelpers?.count || 0) - matched),
-    items: items.filter(item => !owned.has(item.id)),
+/**
+ * One row per helper this chat is still owed work from, for the foot's
+ * helper list: background helpers first (they own this chat's next wake),
+ * then this chat's own Goal helpers that are still working or asking their
+ * coordinating agent, each helper once. Rows carry only what both sources
+ * project (id, name, provider, status); a helper's live step and clock stay
+ * on its transcript row until one live projection carries them.
+ *
+ * Only direct helpers are listed: a nested helper's conversation belongs to
+ * the helper that started it, so it cannot be opened from this chat.
+ * `unlisted` counts background helpers the server capped out of `items`.
+ */
+export function trayHelpers(backgroundHelpers, goal) {
+  const rows = []
+  const seen = new Set()
+  const add = item => {
+    if (!item?.id || seen.has(item.id)) return
+    seen.add(item.id)
+    rows.push({
+      delegation_id: item.id,
+      task_key: item.task_key || item.title || null,
+      provider: item.provider || null,
+      status: item.status || null,
+    })
   }
+  const items = backgroundHelpers?.items || []
+  items.forEach(add)
+  ;(goal?.plan?.delegations || [])
+    .filter(node => isWorkingHelperStatus(node?.status) || isHelperAwaitingParent(node))
+    .forEach(add)
+  const unlisted = Math.max(0, (Number(backgroundHelpers?.count) || 0) - items.length)
+  return { rows, unlisted }
 }
 
 /**

@@ -84,10 +84,12 @@ test('the composer backdrop fills the safe area without moving controls into it'
 test('the durable-wait disclosure and cancel controls receive footer taps', () => {
   const foot = ruleBody('.chat__foot')
   assert.match(foot, /pointer-events:\s*none/)
+  // The handoff stack opts in as a whole: its wait controls, helper rows and
+  // revealed command all take taps, and the stack scrolls inside itself.
   assert.match(
     css,
-    /\.chat__foot \.chat__wait-summary,[\s\S]*?\.chat__foot \.chat__wait-cancel,[\s\S]*?\{\s*pointer-events:\s*auto;\s*\}/,
-    'the pointer-transparent footer must opt both wait controls back in',
+    /\.chat__foot \.chat__waits,[\s\S]*?\{\s*pointer-events:\s*auto;\s*\}/,
+    'the pointer-transparent footer must opt the wait controls back in',
   )
 })
 
