@@ -465,6 +465,11 @@ most 16384.
   reply.
   Every intent field has the same bound. A repeated item intent or badge
   label keeps only its first entry.
+- An item is drawn as its title over one quiet metadata line, its facts
+  joined by a dot, each with its visible label. `"item_facts": "values"` opts
+  the block in to value-only rows (labels kept for assistive technology); use
+  it only when every value reads on its own ("owner/repo", "3 files · +88
+  −21"). An app's confirmation rows always keep visible labels.
 - Every block links to `/shell/?app=<slug>&intent=<intent>`, and each item to
   its own intent. Nothing app-owned runs until the reader clicks the expand
   control or an action; the app's ordinary view then opens in the transcript
@@ -511,8 +516,8 @@ display. Never act, publish, or change state because of an intent at startup
 or on `app-block-init`; act only on an owner `confirm`, and check that
 request against your own data first.
 
-`props.blockSession` is `{sessionId, generation, actions, items, checkpoint,
-retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+`props.blockSession` is `{sessionId, generation, actions, items, features,
+checkpoint, retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
 `[{key, intent, label}]` and `key` is the action's intent, and `items` is
 `[{intent}]`: the block's item intents in card order, after the host's
 validation and deduplication (an empty array when the block lists no items).
@@ -524,7 +529,11 @@ window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
 - `{type:'moebius:app-block-init', sessionId, generation, actions, items,
-  checkpoint, retain, recoveryError}` when the session envelope changes.
+  features, checkpoint, retain, recoveryError}` when the session envelope
+  changes. `features` lists what this host draws beyond the original report
+  fields: `"row-state"` means `title`, `items`, `itemFacts`, `open` and the
+  `accent` tone below. Without it the host ignores them (and draws an `open`
+  action as an ordinary button), so keep your older presentation there.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -550,13 +559,38 @@ the frame's window, so the host cannot tell documents apart by sender: it drops
 any report with a missing, older or newer generation, acknowledgements
 included.
 
-- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, confirming?,
-  confirmation?, note?, tone?, status?, statusTone?, links?, badges?}`, one
-  per key from `actions` (a key you do not report stays "Loading…"; use
-  `hidden: true` to remove its control). Unknown keys are dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
+- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, open?,
+  confirming?, confirmation?, note?, tone?, status?, statusTone?, links?,
+  badges?}`, one per key from `actions` (a key you do not report stays
+  "Loading…"; use `hidden: true` to remove its control). Unknown keys are
+  dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
   `links` are up to 12 `{label, url}` with uncredentialed `https:` URLs; tones
-  are `neutral|success|attention|danger`; `badges` replaces the block's saved
-  badges for that action (omit to keep them, `[]` to clear them).
+  are `neutral|success|attention|danger|accent`; `badges` replaces the block's saved
+  badges for that action (omit to keep them, `[]` to clear them). `status` is
+  drawn as a small pill in its tone and `note` as one plain line beside the
+  control, never in a warning colour. `busy` adds a spinner to the disabled
+  control. `open: true` turns the control into a link that opens the block in
+  your app (the block's own intent) with `label` as its text; it sends no
+  event, so use it when nothing can be done from the chat. It is ignored while
+  the action is confirming.
+- `title` (120): plain text that replaces the block's saved title while your
+  document reports, for a header that says what happened ("3 pull requests
+  opened"). It is your app's framing, not something the host verified, and it
+  stays while a confirmation is open. The caption then reads "Rows from this
+  conversation", because the rows are still the block's. Omit it or send `''`
+  to keep the saved title.
+- `itemFacts: "values"`: the same value-only row facts as the block's
+  `item_facts`, for rows whose values read on their own. Confirmation rows
+  keep their labels.
+- `items`: up to 12 `{intent, status?, statusTone?, busy?, note?, links?}`,
+  live state for the block's listed rows, matched by the row's `intent` (the
+  intents in `blockSession.items`); unknown intents are dropped and the first
+  report for an intent wins. `status` (40) is a pill with `statusTone`, `busy`
+  adds a spinner to it, `note` (200) is one short plain line under the row,
+  and `links` are up to 2 `{label (40), url}` with uncredentialed `https:`
+  URLs, opened outside Möbius. Row state is decoration only: it adds no
+  control, is hidden while a confirmation owns the block, and is dropped while
+  the block is held for recovery.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
