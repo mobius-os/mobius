@@ -81,11 +81,13 @@ bots, send messages or make paid calls.
 
 ### Paying for priced calls with credits
 
-The owner pairs this Möbius with a credits service using the owner-only
+The owner, or an installed Store app with accepted `credits_manage` consent
+(including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned. The paired service keeps the owner's credits, never this
-Möbius's database. For now, app credits permissions work only for installed
-Store apps with accepted owner consent. Owner-built local apps cannot use
+control is planned. Shared-browser guests and delegated helpers cannot pair.
+The paired service keeps the owner's credits, never this Möbius's database.
+For now, app credits permissions work only for installed Store apps with
+accepted owner consent. Owner-built local apps cannot use
 `credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
 their account, price and charge requests receive 403.
 
@@ -102,16 +104,17 @@ or its slug when no package id is recorded) as `buyer_app`. The service reads th
 published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
 price it showed the owner. Retrying the same idempotency key charges once;
 the key is scoped to the paying app before it reaches the service, so two apps
-that pick the same key never replay each other's charge. A 503 means the
-service could not be reached or did not answer in time, so the charge may have
-been made: retry with the same idempotency key, never a new one.
-Refusals keep the service's `detail.code` and fields (`not_paired`,
+that pick the same key never replay each other's charge. An upstream 5xx,
+transport failure or unreadable receipt on `/charges` answers 503
+`charge_outcome_unknown`: the charge may have been made. Retry with the same
+idempotency key, never a new one. The client never retries automatically.
+Other refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
 `key_spend_cap`). `not_paired` means the owner has not connected credits yet.
 A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
-and an address that is not a credits service 502 `not_found`, so neither reads as the caller's own
-sign-in failing. Balance, history and purchase reads refuse a shared-browser
-guest.
+and an address that is not a credits service answers 502 `not_found`, so
+neither reads as the caller's own sign-in failing.
+Balance, history and purchase reads refuse a shared-browser guest.
 
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing

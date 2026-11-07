@@ -241,6 +241,69 @@ def test_goal_returns_exact_held_work_keys_and_completion_settles_only_named_wor
   assert claims["test:another-goal"].released_at is None
 
 
+def test_completion_keys_match_settlement_scope_without_claiming_goal_less_work(
+  client, owner_token, db,
+):
+  from app.agent_work_claims import completable_claim_keys
+  from app.chat_writer import create_chat
+
+  _, chat_id = _active_goal(client, owner_token, db)
+  owner_id = db.query(models.Owner.id).scalar()
+  db.add(create_chat(id="peer-chat", title="Peer", messages=[]))
+  now = datetime.now(UTC)
+  cases = [
+    ("goal", chat_id, "goal-1", None, None),
+    ("goal-less", chat_id, None, None, None),
+    ("unnamed-goal-less", chat_id, None, None, None),
+    ("other-goal", chat_id, "retained-goal", None, None),
+    ("peer-goal-less", "peer-chat", None, None, None),
+    ("peer-goal", "peer-chat", "goal-1", None, None),
+    ("completed-goal", chat_id, "goal-1", now, None),
+    ("released-goal", chat_id, "goal-1", None, now),
+    ("completed-goal-less", chat_id, None, now, None),
+    ("released-goal-less", chat_id, None, None, now),
+  ]
+  for name, owner_chat_id, goal_id, completed_at, released_at in cases:
+    db.add(models.AgentWorkClaim(
+      id="claim-" + name, owner_id=owner_id, work_key="test:" + name, summary=name,
+      owner_chat_id=owner_chat_id, owner_goal_id=goal_id,
+      owner_run_id="goal-root", completed_at=completed_at, released_at=released_at,
+    ))
+  db.commit()
+
+  read = _update(client, db, chat_id, {})
+  assert read.status_code == 200, read.text
+  summary = read.json()["goal"]
+  eligible = {"test:goal", "test:goal-less", "test:unnamed-goal-less"}
+  assert summary["held_work_keys"] == ["test:goal"]
+  assert summary["completable_work_keys"] == sorted(eligible)
+  assert set(summary["completable_work_keys"]) == completable_claim_keys(
+    db, chat_id=chat_id, goal_id="goal-1",
+  )
+  for key in {"test:" + case[0] for case in cases} - eligible:
+    refused = _update(client, db, chat_id, {
+      "complete": True, "finished_claims": [key],
+    })
+    assert refused.status_code == 422, refused.text
+    assert "Not an open work claim" in refused.json()["detail"]["message"]
+
+  finished = _update(client, db, chat_id, {
+    "complete": True, "finished_claims": ["test:goal", "test:goal-less"],
+  })
+  assert finished.status_code == 200, finished.text
+  assert finished.json()["goal"]["held_work_keys"] == []
+  assert finished.json()["goal"]["completable_work_keys"] == ["test:unnamed-goal-less"]
+  db.expire_all()
+  claims = {row.work_key: row for row in db.query(models.AgentWorkClaim).all()}
+  for key in ("test:goal", "test:goal-less"):
+    assert claims[key].completed_at is not None
+    assert claims[key].released_at is None
+  for key in ("test:unnamed-goal-less", "test:other-goal", "test:peer-goal-less", "test:peer-goal"):
+    assert claims[key].completed_at is None
+    assert claims[key].released_at is None
+  assert claims["test:goal-less"].owner_goal_id is None
+
+
 
 
 def test_the_final_task_edit_and_completion_can_share_one_call(

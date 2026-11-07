@@ -34,8 +34,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 import httpx
@@ -45,6 +46,10 @@ from app.config import get_settings
 
 TIMEOUT_SECONDS = 20.0
 KEY_PREFIX = "mbc_"
+# The credits service's account handles, priced-action slugs and UUID ids.
+_HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
+_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
+_TOPUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 class CreditsUnavailable(Exception):
@@ -171,6 +176,14 @@ def _paired() -> dict:
   return credentials
 
 
+def _charge_outcome_unknown() -> CreditsUnavailable:
+  # A server/transport failure or unreadable receipt can follow a committed
+  # charge. Never present it as a refusal or retry it with a different key.
+  return CreditsUnavailable(
+    "The charge outcome is unknown. Retry with the same idempotency key.",
+    status=503, code="charge_outcome_unknown")
+
+
 def _call(method: str, path: str, credentials: dict, payload: dict | None = None) -> dict:
   url = f"{credentials['operator_url']}/api/billing/{path}"
   try:
@@ -182,12 +195,16 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
   except httpx.InvalidURL as error:
     raise CreditsUnavailable("That does not look like a web address.", status=422) from error
   except httpx.HTTPError as error:
+    if path == "charges":
+      raise _charge_outcome_unknown() from error
     host = urlsplit(credentials["operator_url"]).hostname
     raise CreditsUnavailable(f"Could not reach {host}.", status=503) from error
   try:
     body = response.json()
   except ValueError:
     body = None
+  if path == "charges" and response.status_code >= 500:
+    raise _charge_outcome_unknown()
   if response.status_code >= 400:
     # The service refuses with {"detail": {"code", "message", ...}}.
     detail = body.get("detail") if isinstance(body, dict) else None
@@ -208,6 +225,8 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
       message or f"The credits service answered HTTP {response.status_code}.",
       status=response.status_code, code=code, extra=extra)
   if not isinstance(body, dict):
+    if path == "charges":
+      raise _charge_outcome_unknown()
     raise CreditsUnavailable("The credits service sent something unreadable.")
   return body
 
@@ -310,9 +329,18 @@ def start_topup(amount_cents: int, waiver_accepted: bool,
           "topup_id": started.get("topup_id")}
 
 
+def _path_piece(value: str, pattern: re.Pattern[str]) -> str:
+  # Quoting alone leaves . and .. intact; httpx collapses those path segments,
+  # letting a public price read reach another endpoint with the owner's key.
+  if not pattern.fullmatch(value):
+    raise CreditsUnavailable(
+      "That credits handle, slug or id is not valid.", status=422, code="invalid_name")
+  return value
+
+
 def read_topup(topup_id: str) -> dict:
   """A purchase's state; reading it confirms a paid checkout with Stripe."""
-  return _call("GET", f"topups/{quote(topup_id, safe='')}", _paired())
+  return _call("GET", f"topups/{_path_piece(topup_id, _TOPUP_ID)}", _paired())
 
 
 def purchase_terms() -> dict:
@@ -333,16 +361,16 @@ def fund_models(amount_micro: int, idempotency_key: str) -> dict:
 
 
 def prices(seller: str, app: str | None = None) -> dict:
-  path = f"prices/{quote(seller, safe='')}"
-  if app:
-    path += f"?app_slug={quote(app, safe='')}"
+  path = f"prices/{_path_piece(seller, _HANDLE)}"
+  if app is not None:
+    path += f"?app_slug={_path_piece(app, _SLUG)}"
   return _call("GET", path, _paired())
 
 
 def publish_price(app: str, action: str, price_micro: int,
                   description: str | None, enabled: bool) -> dict:
   """Set what one action of the owner's app costs other people."""
-  path = f"priced-actions/{quote(app, safe='')}/{quote(action, safe='')}"
+  path = f"priced-actions/{_path_piece(app, _SLUG)}/{_path_piece(action, _SLUG)}"
   return _call("PUT", path, _paired(), {
     "price_micro": int(price_micro), "description": description, "enabled": enabled})
 

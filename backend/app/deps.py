@@ -738,6 +738,10 @@ def get_principal(
 def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Principal:
   if payload.get("scope") not in (None, "app"):
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
+  # A partial signed lineage cannot be forwarded without either a mint-time
+  # error or dropping the caller's restrictions. Refuse it at resolution.
+  if (payload.get("delegation_id") is None) != (payload.get("delegation_chat") is None):
+    raise HTTPException(status_code=401, detail="Incomplete delegation lineage.")
   app_id = _enforce_app_scope(payload, db)
   return Principal(
     owner=owner,
@@ -844,7 +848,7 @@ def get_owner_or_delegated_owner_for_app_token(
   already presents (scoped to one app), and a delegated helper can already read
   that app's frame/module/storage with its owner-scoped bearer. So a delegated
   child is admitted here — unlike ``get_current_owner_for_lifecycle_control`` —
-  but the caller MUST forward ``principal.delegation_id``/``principal.chat_id``
+  but the caller MUST forward ``principal.delegation_id``/``principal.delegation_chat``
   into ``auth.create_app_token`` so the down-scoped token stays a delegated
   bearer. Without that lineage a child could launder its inherited access into a
   CLEAN app credential and bypass the delegation boundary that
