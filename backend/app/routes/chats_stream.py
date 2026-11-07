@@ -135,9 +135,11 @@ def _input_must_queue(
     steer into a dying runner could start provider work mid-shutdown.
   - An approved typed restart wait (unfinished work A): later input B is
     durable but cannot be promoted until the ready-boot continuation owns A.
-  - A provider-limit park that resumes by itself: the owner's input waits for
-    the resumed turn rather than spending a new attempt or disabling the
-    automatic recovery. The explicit Resume control (`manual`) bypasses it.
+  - A provider-limit park that resumes by itself: input waits for the
+    resumed turn rather than spending a new attempt or disabling the
+    automatic recovery. That includes the owner typing in a chat embedded in
+    an app (which carries the app's id); only an app's own sends skip it. The
+    explicit Resume control (`manual`) bypasses it.
 
   The typed send and the owner's empty send (`_send_queue`) share this one
   admission rule.
@@ -147,7 +149,8 @@ def _input_must_queue(
     is_draining()
     or activation_barrier_wait_id(db, chat_id) is not None
     or (
-      principal.app_id is None and not manual
+      (principal.app_id is None or is_owner_input_principal(principal))
+      and not manual
       and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
     )
   )

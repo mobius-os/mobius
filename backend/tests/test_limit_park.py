@@ -857,6 +857,62 @@ def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
   ]
 
 
+@pytest.mark.parametrize("send", ["empty", "typed"])
+def test_the_owner_typing_in_an_embedded_chat_waits_behind_a_future_limit_park(
+  db, monkeypatch, send,
+):
+  """An embedded chat's principal carries its app's id, yet it is the owner
+  typing: that input waits for the park like the owner's own, rather than
+  spending a provider attempt the way only an app's own send may."""
+  from app import schemas
+  from app.deps import Principal
+  from app.routes import chats_stream
+  cid = f"park-embedded-owner-{send}"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  _seed_run(
+    cid, f"rt-park-embedded-{send}", status="parked",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+    park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  owner = db.query(models.Owner).first()
+  embedded = Principal(
+    owner=owner, app_id=42, scope="chat_embed", chat_id=cid,
+    embed_instance_id="frame", operations=("chat:send",),
+  )
+  app_send = Principal(owner=owner, app_id=42)
+  assert chats_stream._input_must_queue(db, cid, embedded) is True
+  assert chats_stream._input_must_queue(db, cid, app_send) is False, (
+    "an app's own send keeps its exemption"
+  )
+  db.expire_all()
+  chat = db.get(models.Chat, cid)
+
+  async def post():
+    if send == "empty":
+      return await chats_stream._send_queue(cid, db, embedded, False)
+    body = schemas.SendMessage(content="from the embed", cid="embedded-typed")
+    return await chats_stream._send_message_locked(body, cid, embedded, db, chat, False)
+
+  response = asyncio.run(post())
+
+  assert response.status_code == 202
+  assert scheduled == []
+  assert _run_row(f"rt-park-embedded-{send}")["status"] == "parked"
+
+
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
   client, auth, db, monkeypatch,
 ):
