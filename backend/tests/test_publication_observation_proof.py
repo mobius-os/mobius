@@ -68,7 +68,7 @@ def github_reads(monkeypatch, *, head=HEAD, base="main", title="Exact title", la
   return calls
 
 
-def test_no_number_create_needs_exact_remote_pr_and_labels(monkeypatch):
+def test_no_number_create_needs_exact_remote_pr_but_not_its_labels(monkeypatch):
   record, attempt = fixture(labels=["ready"])
   calls = github_reads(monkeypatch, labels=["ready"])
   result = proof.observe_publication_effect(record, attempt)
@@ -77,7 +77,10 @@ def test_no_number_create_needs_exact_remote_pr_and_labels(monkeypatch):
   assert result["result"]["status"] == "open"
   assert len(calls) == 4
   github_reads(monkeypatch, labels=[])
-  assert proof.observe_publication_effect(record, attempt)["outcome"] == "pending"
+  result = proof.observe_publication_effect(record, attempt)
+  assert result["outcome"] == "settled", result
+  assert result["result"]["labels_applied"] == []
+  assert result["result"]["labels_missing"] == ["ready"]
 
 
 def test_known_update_requires_signed_head_not_old_public_head(monkeypatch):
@@ -105,7 +108,7 @@ def test_no_pre_effect_or_unavailable_read_is_success(monkeypatch):
 def test_wrong_base_or_text_cannot_settle(monkeypatch):
   record, attempt = fixture()
   github_reads(monkeypatch, base="old")
-  assert proof.observe_publication_effect(record, attempt)["outcome"] == "pending"
+  assert proof.observe_publication_effect(record, attempt)["outcome"] == "changed"
   github_reads(monkeypatch, title="Changed")
   assert proof.observe_publication_effect(record, attempt)["outcome"] == "changed"
 
@@ -268,7 +271,9 @@ def test_terminal_deleted_branch_requires_exact_terminal_identity(monkeypatch, l
   ("branch429", "unavailable"), ("timeout", "unavailable"),
   ("pr403", "unavailable"), ("pr404", "unavailable"),
   ("pr429", "unavailable"), ("malformed", "unavailable"),
-  ("emptylist", "pending"),
+  ("emptylist", "pending"), ("otherhead", "pending"),
+  ("emptylist-branch404", "unavailable"), ("emptylist-branchmoved", "changed"),
+  ("badlist", "unavailable"), ("twoprs", "unavailable"),
 ])
 def test_remote_unavailable_and_branch_only_never_settle(monkeypatch, variant, expected):
   record, attempt = fixture()
@@ -283,11 +288,26 @@ def test_remote_unavailable_and_branch_only_never_settle(monkeypatch, variant, e
   elif variant == "malformed":
     kwargs["malformed"] = "pr"
     attempt["effective_request"]["number"] = 7
-  elif variant == "emptylist":
+  elif variant.startswith("emptylist"):
     kwargs["list_rows"] = []
+    kwargs.update({"-branch404": {"branch_code": 404},
+                   "-branchmoved": {"branch": OLD}}.get(variant[9:], {}))
+  elif variant == "otherhead":
+    stale = {"number": 3, "html_url": "https://github.com/owner/repo/pull/3",
+             "head": {"ref": "topic", "sha": OLD}}
+    kwargs["list_rows"] = [stale]
+  elif variant == "badlist":
+    kwargs["list_rows"] = {"message": "not a list"}
+  elif variant == "twoprs":
+    row = {"html_url": "https://github.com/owner/repo/pull/{}", "head": {"ref": "topic", "sha": HEAD}}
+    kwargs["list_rows"] = [{**row, "number": n, "html_url": row["html_url"].format(n)} for n in (7, 8)]
   proof_remote(monkeypatch, **kwargs)
   result = proof.observe_publication_effect(record, attempt)
   assert result["outcome"] == expected
+  # Only an exact pushed branch with no PR is the branch-only phase; a pushed
+  # branch is never reported as a sent PR, and nothing here creates one.
+  assert (result.get("effect") == "branch_published") is (expected == "pending")
+  assert "result" not in result
 
 
 def test_linked_child_requires_current_exact_reviewed_parent_sha(monkeypatch):
@@ -303,14 +323,23 @@ def test_linked_child_requires_current_exact_reviewed_parent_sha(monkeypatch):
   assert proof.observe_publication_effect(record, attempt)["outcome"] == "unavailable"
 
 
-def test_requested_labels_require_positive_read_and_application(monkeypatch):
+@pytest.mark.parametrize("labels,code,applied,missing,note", [
+  (["Ready", "reviewed"], 0, ["Ready", "reviewed"], None, False),
+  (["ready"], 0, ["ready"], ["reviewed"], True),
+  ((), 403, [], None, True),
+  ((), 0, [], ["ready", "reviewed"], True),
+])
+def test_labels_are_nonfatal_metadata_like_send(monkeypatch, labels, code, applied, missing, note):
+  """A missing or unreadable label never strands an exact published PR."""
   record, attempt = fixture(labels=["ready", "reviewed"])
-  proof_remote(monkeypatch, labels=["ready", "reviewed"])
-  assert proof.observe_publication_effect(record, attempt)["outcome"] == "settled"
-  proof_remote(monkeypatch, labels=["ready"])
-  assert proof.observe_publication_effect(record, attempt)["outcome"] == "pending"
-  proof_remote(monkeypatch, labels_code=403)
-  assert proof.observe_publication_effect(record, attempt)["outcome"] == "unavailable"
+  calls = proof_remote(monkeypatch, labels=labels, labels_code=code)
+  result = proof.observe_publication_effect(record, attempt)
+  assert result["outcome"] == "settled", result
+  assert result["result"]["labels_requested"] == ["ready", "reviewed"]
+  assert result["result"]["labels_applied"] == applied
+  assert result["result"].get("labels_missing") == missing
+  assert ("labels_note" in result["result"]) is note
+  assert sum("/labels" in call for call in calls) == 1  # read only, never reapplied
 
 
 @pytest.mark.parametrize("action,phase,effect", [
@@ -359,3 +388,18 @@ def test_linked_child_wrong_signed_parent_ref_rejected(monkeypatch):
     "parent_record_id": "parent", "base_branch": "parent-branch"})
   proof_remote(monkeypatch, parent_ref="parent-branch", parent_sha=OLD)
   assert proof.observe_publication_effect(record, attempt)["outcome"] == "changed"
+
+
+@pytest.mark.parametrize("live,status", [
+  ({}, "open"),
+  ({"draft": True}, "draft"),
+  ({"state": "closed", "closed_at": "2026-01-01T00:00:00Z"}, "closed"),
+  ({"state": "closed", "merged_at": "2026-01-01T00:00:00Z", "merge_commit_sha": BASE}, "merged"),
+])
+def test_exact_update_after_lost_push_reply_settles_its_live_lifecycle(monkeypatch, live, status):
+  """A disconnect after an accepted push settles to GitHub's exact lifecycle."""
+  record, attempt = fixture("pr_update", "push_ambiguous")
+  proof_remote(monkeypatch, live_patch=live)
+  result = proof.observe_publication_effect(record, attempt)
+  assert result["outcome"] == "settled", result
+  assert result["result"]["status"] == status and result["result"]["number"] == 7

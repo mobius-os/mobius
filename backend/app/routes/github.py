@@ -29,7 +29,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +45,7 @@ from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only, selectinload
 
 from app import (
+  activity,
   app_git,
   contribution_assignments,
   contribution_runtime,
@@ -786,6 +787,77 @@ def _receipt_claims_prepared(receipt: dict, record: dict) -> bool:
 # public effect, on a new branch or an open PR, is visible from the branch tip
 # GitHub reports.
 _NO_EFFECT_ATTEMPT_PHASES = frozenset({"armed", "normalizing"})
+_PUBLICATION_UNCONFIRMED = (
+  "GitHub did not confirm whether this publication completed. It may already "
+  "be public; check its outcome before sending it again."
+)
+
+
+def _log_publication_event(
+  app_id: int, record_id: str, claim_sha256: object, *, action: str,
+  phase: str | None, code: str, status: int, certainty: str,
+) -> None:
+  """Record one content-free publication outcome at a route boundary.
+
+  The attempt id is a stable, non-secret digest shared by one claim's sender
+  and observer. No public text, patch, path, credential or Git output is
+  recorded.
+  """
+  activity.log_event(
+    "contribution_publication_outcome", app_id=app_id,
+    attempt_id=hashlib.sha256(
+      f"{app_id}:{record_id}:{claim_sha256}".encode("utf-8"),
+    ).hexdigest()[:16],
+    action=action, phase=phase or "", code=code, status=status, certainty=certainty,
+  )
+
+
+def _attempt_phase(owner: "_PersonalAttemptOwner") -> str | None:
+  """The signed phase of an owner's retained receipt, whatever the ledger says."""
+  receipt = _read_personal_attempt(
+    owner.record_path, app_id=owner.app_id, record_id=owner.record_id,
+  )
+  return str(receipt.get("phase") or "") if receipt else None
+
+
+def _log_publication_outcome(
+  owner: "_PersonalAttemptOwner", *, action: str, status: int, code: str = "",
+  settled_effect: bool = False,
+) -> None:
+  """One event per sender attempt outcome; certainty follows its signed phase."""
+  phase = "complete" if settled_effect else _attempt_phase(owner)
+  _log_publication_event(
+    owner.app_id, owner.record_id, owner.claim_sha256,
+    action=action, phase=phase, code=code, status=status,
+    certainty=(
+      "effect" if settled_effect
+      else "none" if phase in _NO_EFFECT_ATTEMPT_PHASES
+      else "unknown"
+    ),
+  )
+
+
+def _log_open_attempt_outcomes(
+  owners: Iterable["_PersonalAttemptOwner"], **fields,
+) -> None:
+  # A layer that already settled logged its own outcome; never count it twice.
+  for owner in owners:
+    if _attempt_phase(owner) is not None:
+      _log_publication_outcome(owner, **fields)
+
+
+def _unexpected_publication_failure(
+  owners: list["_PersonalAttemptOwner"], refused: str,
+) -> tuple[str, str, int]:
+  """Map an unexpected exception by signed phase, never by its text.
+
+  Only attempts still before their first public effect make a definite
+  refusal. Any later phase may already be public, so it is reported as
+  unconfirmed for read-only observation, not as a failure to resend.
+  """
+  if all(_attempt_phase(owner) in _NO_EFFECT_ATTEMPT_PHASES for owner in owners):
+    return refused, "publication_failed", 500
+  return _PUBLICATION_UNCONFIRMED, "publication_unconfirmed", 503
 
 
 class _ClaimDryRun(Exception):
@@ -2864,7 +2936,11 @@ def _observed_pr_record(record: dict, attempt: dict, result: dict) -> dict:
   if result.get("labels_requested"):
     settled["last_submit_labels_requested"] = result["labels_requested"]
     settled["last_submit_labels_applied"] = result["labels_applied"]
-    settled.pop("last_submit_labels_note", None)
+    for key in ("note", "missing"):
+      if f"labels_{key}" in result:
+        settled[f"last_submit_labels_{key}"] = result[f"labels_{key}"]
+      else:
+        settled.pop(f"last_submit_labels_{key}", None)
   if submitted:
     settled["submitted_at"] = record.get("submitted_at") or now
   else:
@@ -2959,8 +3035,22 @@ async def observe_contribution_publication(
   if (await request.body()).strip() not in {b"", b"{}"}:
     raise HTTPException(status_code=400, detail="Observation takes no action inputs.")
 
-  def response(outcome: str, record: dict, message: str) -> dict:
-    return {"outcome": outcome, "records": [record], "message": message}
+  def response(
+    outcome: str, record: dict, message: str, attempt: dict | None = None,
+    effect: str | None = None,
+  ) -> dict:
+    value = {"outcome": outcome, "records": [record], "message": message}
+    if attempt is not None:
+      # Exact, content-free context for a handoff; never a retry permission.
+      request = attempt.get("effective_request")
+      value["attempt"] = {
+        "action": (attempt.get("action_input") or {}).get("action"),
+        "phase": attempt.get("phase"),
+        "effect": request.get("action") if isinstance(request, dict) else None,
+      }
+    if effect is not None:
+      value["effect"] = effect
+    return value
 
   # Every sender of this record holds its action lock from admission to its
   # ledger write, and it alone spans the remote reads below: no database,
@@ -2980,9 +3070,9 @@ async def observe_contribution_publication(
         if settled is not None:
           return response("settled", settled, "The observed outcome is saved.")
         if not _observation_unapplied(record, attempt):
-          return response("changed", record, "The saved settlement no longer matches the ledger.")
+          return response("changed", record, "The saved settlement no longer matches the ledger.", attempt)
       if not _observation_claim_matches(record, attempt):
-        return response("changed", record, "The signed publication claim no longer matches this review.")
+        return response("changed", record, "The signed publication claim no longer matches this review.", attempt)
       snapshot = _observation_digest([record, attempt])
     actor = _observation_digest(github_auth.read_state())
     try:
@@ -3001,9 +3091,9 @@ async def observe_contribution_publication(
         )]) != snapshot
         or _observation_digest(github_auth.read_state()) != actor
       ):
-        return response("changed", current, "The publication or GitHub connection changed during observation; no result was saved.")
+        return response("changed", current, "The publication or GitHub connection changed during observation; no result was saved.", attempt)
       if proof["outcome"] != "settled":
-        return response(proof["outcome"], current, proof["message"])
+        return response(proof["outcome"], current, proof["message"], attempt, proof.get("effect"))
       settled_attempt = _signed_personal_attempt({
         **attempt, "observation_settlement": {
           "before": current,
@@ -3016,7 +3106,12 @@ async def observe_contribution_publication(
       )
       saved = _finish_observation_settlement(app_id, record_id, settled_attempt)
       if saved is None:
-        return response("changed", current, "The settlement changed before its ledger write.")
+        return response("changed", current, "The settlement changed before its ledger write.", attempt)
+      _log_publication_event(
+        app_id, record_id, attempt.get("claim_sha256"), action="observe",
+        phase=str(attempt.get("phase") or ""), code="observed_settled",
+        status=200, certainty="effect",
+      )
       return response("settled", saved, "The exact publication outcome is saved.")
 
 
@@ -3169,6 +3264,9 @@ async def submit_contribution(
         code=exc.code or "",
         detail=exc.detail,
       )
+      _log_publication_outcome(
+        attempt_owner, action="submit", status=exc.status_code, code=exc.code or "",
+      )
       if attempt_owner.replay_phase() == "armed":
         attempt_owner.settle()
     raise HTTPException(
@@ -3182,7 +3280,6 @@ async def submit_contribution(
     )
   except Exception as exc:
     log.exception("Contribution submit failed for %s/%s", app_id, record_id)
-    message = "Could not submit this PR. Leave feedback so your agent can retry."
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
@@ -3198,14 +3295,19 @@ async def submit_contribution(
             "code": "publication_claim_changed",
           },
         ) from None
-      record = _mark_submit_failure(
-        app_id=app_id, record_path=record_path, message=message,
+      message, code, status = _unexpected_publication_failure(
+        [attempt_owner],
+        "Could not submit this PR. Leave feedback so your agent can retry.",
       )
+      record = _mark_submit_failure(
+        app_id=app_id, record_path=record_path, message=message, code=code,
+      )
+      _log_publication_outcome(attempt_owner, action="submit", status=status, code=code)
       if attempt_owner.replay_phase() == "armed":
         attempt_owner.settle()
     raise HTTPException(
-      status_code=500,
-      detail={"message": message, "record": record},
+      status_code=status,
+      detail={"message": message, "record": record, "code": code},
     ) from exc
 
   async with fs_locks.app_storage_lock(app_id):
@@ -3231,6 +3333,7 @@ async def submit_contribution(
       number=number,
       record_patch=record_patch,
     )
+    _log_publication_outcome(attempt_owner, action="submit", status=200, settled_effect=True)
     attempt_owner.settle()
 
   # Stamp the autopilot grant AFTER the PR is durably open. The grant is the
@@ -3730,6 +3833,9 @@ async def update_existing_contribution(
             "code": "publication_claim_changed",
           },
         ) from None
+      _log_publication_outcome(
+        attempt_owner, action="update_existing", status=exc.status_code, code=exc.code or "",
+      )
       successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
       if (
         successor
@@ -3765,11 +3871,6 @@ async def update_existing_contribution(
     )
   except Exception as exc:
     log.exception("Contribution update failed for %s/%s", app_id, record_id)
-    message = (
-      "GitHub did not confirm whether this reviewed successor update completed."
-      if successor else
-      "Could not update this pull request. Nothing else was published."
-    )
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
@@ -3785,25 +3886,32 @@ async def update_existing_contribution(
             "code": "publication_claim_changed",
           },
         ) from None
-      record = (
-        _note_submit_unconfirmed(
+      if successor:
+        # Its state machine owns two public mutations and keeps the claim.
+        message, code, status = (
+          "GitHub did not confirm whether this reviewed successor update completed.",
+          "update_unconfirmed", 503,
+        )
+        record = _note_submit_unconfirmed(
           record_path=record_path,
           message=message,
           record_patch={},
-          code="update_unconfirmed",
+          code=code,
           detail="The exact public pull request state must be checked again.",
         )
-        if successor else
-        _mark_submit_failure(
-          app_id=app_id,
-          record_path=record_path,
-          message=message,
+      else:
+        message, code, status = _unexpected_publication_failure(
+          [attempt_owner], "Could not update this pull request. Nothing was published.",
         )
-
-      )
+        record = _mark_submit_failure(
+          app_id=app_id, record_path=record_path, message=message, code=code,
+        )
+      _log_publication_outcome(attempt_owner, action="update_existing", status=status, code=code)
+      if not successor and attempt_owner.replay_phase() == "armed":
+        attempt_owner.settle()
     raise HTTPException(
-      status_code=500,
-      detail={"message": message, "record": record},
+      status_code=status,
+      detail={"message": message, "record": record, "code": code},
     ) from exc
 
   async with fs_locks.app_storage_lock(app_id):
@@ -3828,6 +3936,9 @@ async def update_existing_contribution(
       pr_url=pr_url,
       number=number,
       record_patch=record_patch,
+    )
+    _log_publication_outcome(
+      attempt_owner, action="update_existing", status=200, settled_effect=True,
     )
     attempt_owner.settle()
 
@@ -4197,6 +4308,10 @@ async def update_contribution_stack(
             code=exc.code or "",
             detail=exc.detail,
           )
+          _log_open_attempt_outcomes(
+            attempt_owners.values(), action=action_input["action"],
+            status=exc.status_code, code=exc.code or "",
+          )
           for active_owner in attempt_owners.values():
             if active_owner.replay_phase() == "armed":
               active_owner.settle()
@@ -4232,6 +4347,9 @@ async def update_contribution_stack(
           pr_url=pr_url,
           number=number,
           record_patch=record_patch,
+        )
+        _log_publication_outcome(
+          attempt_owner, action=action_input["action"], status=200, settled_effect=True,
         )
         attempt_owner.settle()
       updated_rows.append({
@@ -4277,6 +4395,10 @@ async def update_contribution_stack(
         code=exc.code or "",
         detail=exc.detail,
       )
+      _log_open_attempt_outcomes(
+        attempt_owners.values(), action=action_input["action"],
+        status=exc.status_code, code=exc.code or "",
+      )
       for active_owner in attempt_owners.values():
         if active_owner.replay_phase() == "armed":
           active_owner.settle()
@@ -4292,15 +4414,27 @@ async def update_contribution_stack(
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack update failed for app %s", app_id)
-    message = "Could not update this PR stack. Every untouched layer remains privately prepared."
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
       _assert_active_stack_attempts_current(attempt_owners)
-      snapshots = _mark_stack_submit_failure(rows, message)
+      open_owners = [
+        owner for owner in attempt_owners.values() if _attempt_phase(owner) is not None
+      ]
+      message, code, status = _unexpected_publication_failure(
+        open_owners,
+        "Could not update this PR stack. Every untouched layer remains privately prepared.",
+      )
+      snapshots = _mark_stack_submit_failure(rows, message, code=code)
+      _log_open_attempt_outcomes(
+        open_owners, action=action_input["action"], status=status, code=code,
+      )
+      for owner in open_owners:
+        if owner.replay_phase() == "armed":
+          owner.settle()
     raise HTTPException(
-      status_code=500,
-      detail={"message": message, "records": snapshots, "updated": updated_rows},
+      status_code=status,
+      detail={"message": message, "records": snapshots, "code": code, "updated": updated_rows},
     ) from exc
 
   async with fs_locks.app_storage_lock(app_id):
@@ -4452,6 +4586,10 @@ async def submit_contribution_stack(
             code=exc.code or "",
             detail=exc.detail,
           )
+          _log_open_attempt_outcomes(
+            attempt_owners.values(), action=action_input["action"],
+            status=exc.status_code, code=exc.code or "",
+          )
           for active_owner in attempt_owners.values():
             if active_owner.replay_phase() == "armed":
               active_owner.settle()
@@ -4488,6 +4626,9 @@ async def submit_contribution_stack(
           number=number,
           record_patch=record_patch,
         )
+        _log_publication_outcome(
+          attempt_owner, action=action_input["action"], status=200, settled_effect=True,
+        )
         attempt_owner.settle()
       submitted_urls.append({
         "id": opened.get("id"),
@@ -4508,6 +4649,10 @@ async def submit_contribution_stack(
         code=exc.code or "",
         detail=exc.detail,
       )
+      _log_open_attempt_outcomes(
+        attempt_owners.values(), action=action_input["action"],
+        status=exc.status_code, code=exc.code or "",
+      )
       for active_owner in attempt_owners.values():
         if active_owner.replay_phase() == "armed":
           active_owner.settle()
@@ -4522,15 +4667,26 @@ async def submit_contribution_stack(
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack submit failed for app %s", app_id)
-    message = "Could not submit this PR stack. Leave feedback so your agent can retry."
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
       _assert_active_stack_attempts_current(attempt_owners)
-      snapshots = _mark_stack_submit_failure(rows, message)
+      open_owners = [
+        owner for owner in attempt_owners.values() if _attempt_phase(owner) is not None
+      ]
+      message, code, status = _unexpected_publication_failure(
+        open_owners, "Could not submit this PR stack. Leave feedback so your agent can retry.",
+      )
+      snapshots = _mark_stack_submit_failure(rows, message, code=code)
+      _log_open_attempt_outcomes(
+        open_owners, action=action_input["action"], status=status, code=code,
+      )
+      for owner in open_owners:
+        if owner.replay_phase() == "armed":
+          owner.settle()
     raise HTTPException(
-      status_code=500,
-      detail={"message": message, "records": snapshots},
+      status_code=status,
+      detail={"message": message, "records": snapshots, "code": code},
     ) from exc
 
   async with fs_locks.app_storage_lock(app_id):
