@@ -6285,6 +6285,12 @@ export default function ChatView({
                   chatId={chatId}
                   messageKey={dataKey}
                 />
+                {/* The agent is mid-step and reads this at its next step
+                    boundary, so new work keeps appearing above the row until
+                    then. Say so, or a delivered message reads as ignored. */}
+                <span className="chat__steer-pending-note">
+                  Agent will read this after its current step
+                </span>
                 <MessageMetaRow
                   timestamp={reservedSteerMessage.ts || null}
                   copy={copyText ? () => ({ plainText: copyText }) : null}

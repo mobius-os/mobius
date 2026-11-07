@@ -393,6 +393,13 @@
 .chat__msg:focus { outline: none; }
 
 .chat__msg--user { align-items: flex-end; }
+/* A mid-turn message waiting for the agent's next step boundary. */
+.chat__steer-pending-note {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+}
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
