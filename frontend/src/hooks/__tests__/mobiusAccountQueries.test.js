@@ -100,3 +100,25 @@ test('any identity read refreshes the saved summary, with Settings not open', as
   assert.equal(savedSummary(queryClient)?.handle, 'owner')
   assert.equal(savedSummary(queryClient).avatar, avatarKey(accountWithPhoto()))
 })
+
+test('an account read still under way cannot overwrite a handle saved after it started', async t => {
+  const queryClient = seeded()
+  setShimQueryClient(queryClient)
+  let answerRead = null
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    if (init.method === 'PATCH') return Response.json({ ...accountWithPhoto(), profile: { ...accountWithPhoto().profile, handle: 'new_handle' } })
+    return new Promise((resolve, reject) => {
+      answerRead = () => resolve(Response.json({ ...accountWithPhoto(), profile: { ...accountWithPhoto().profile, handle: 'old_handle' } }))
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    })
+  })
+  const view = renderHook(() => mobiusAccountQueries.identity.useQuery())
+  t.after(() => view.unmount())
+  for (let i = 0; i < 50 && !answerRead; i += 1) await tick(5)
+  assert.ok(answerRead, 'the account read started')
+  await mobiusAccountQueries.saveHandle(queryClient, 'new_handle')
+  answerRead()
+  await tick(20)
+  assert.equal(queryClient.getQueryData(mobiusAccountQueries.identity.key).profile.handle, 'new_handle')
+  assert.equal(savedSummary(queryClient).handle, 'new_handle')
+})

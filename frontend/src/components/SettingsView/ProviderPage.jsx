@@ -117,7 +117,14 @@ export default function ProviderPage({
   const details = signInNotice
     ? [{
         label: 'Sign-in',
-        value: <span className="settings-badge settings-badge--warning" title={signInNotice.title}>{signInNotice.label}</span>,
+        // The date is visible text, not a hover title, so touch screens and
+        // screen readers reach it too.
+        value: (
+          <span className="settings-signin-notice">
+            <span className="settings-badge settings-badge--warning">{signInNotice.label}</span>
+            <span className="settings-signin-notice__when">{signInNotice.title}</span>
+          </span>
+        ),
       }, ...connectionDetails]
     : connectionDetails
   const connectionSection = connection && (

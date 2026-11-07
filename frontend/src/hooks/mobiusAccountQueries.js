@@ -70,6 +70,14 @@ function rememberIdentity(queryClient, identity) {
 
 const setIdentity = (queryClient, identity) => queryClient.setQueryData(identityKey, rememberIdentity(queryClient, identity))
 
+// A sign-in's or an edit's answer is newer than any account read still under
+// way: cancel those first (as saveModelPrefsChanges does), so an older answer
+// cannot land after it and overwrite the account and its saved summary.
+async function acceptIdentity(queryClient, identity) {
+  await queryClient.cancelQueries({ queryKey: identityKey })
+  setIdentity(queryClient, identity)
+}
+
 export const mobiusAccountQueries = {
   key: rootKey,
   identity: { key: identityKey, useQuery: useIdentityQuery },
@@ -81,8 +89,8 @@ export const mobiusAccountQueries = {
    * every sign-in surface (Settings, the first-run guide) leaves the picker
    * current.
    */
-  signedIn: (queryClient, identity) => {
-    setIdentity(queryClient, identity)
+  signedIn: async (queryClient, identity) => {
+    await acceptIdentity(queryClient, identity)
     refreshProviders(queryClient)
     return queryClient.invalidateQueries({ queryKey: rootKey, predicate: query => query.queryKey[1] !== 'account' })
   },
@@ -100,7 +108,7 @@ export const mobiusAccountQueries = {
    * cache the account's answer, and reject with a user-facing message.
    */
   saveHandle: async (queryClient, handle) => {
-    setIdentity(queryClient, await mobiusAccessRequest('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }) }))
+    await acceptIdentity(queryClient, await mobiusAccessRequest('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }) }))
   },
   /** Upload a new photo (already checked with avatarProblem). */
   uploadAvatar: async (queryClient, file) => {
@@ -109,7 +117,7 @@ export const mobiusAccountQueries = {
     const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
     // The account may keep the same avatar address for new bytes.
     forgetAuthedImage(AVATAR_PATH)
-    setIdentity(queryClient, next)
+    await acceptIdentity(queryClient, next)
   },
 }
 

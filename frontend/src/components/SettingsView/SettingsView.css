@@ -434,3 +434,7 @@
 
 /* Keep full action labels intact without changing the shared provider layout. */
 .settings .provider-row__action { white-space: nowrap; }
+
+/* A provider page's sign-in notice: the badge, then when the sign-in may end. */
+.settings-signin-notice { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.settings-signin-notice__when { color: var(--muted); font-size: 13px; }

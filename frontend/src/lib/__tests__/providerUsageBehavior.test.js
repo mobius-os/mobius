@@ -286,9 +286,11 @@ function claudePage(props) {
 test('the provider page lists the sign-in notice first in its Connection section', () => {
   const now = new Date()
   const near = claudePage({ signInNotice: signInExpiryNotice(inDays(5.5), now) })
-  assert.match(near, /Sign-in<\/span><\/span><span class="settings-item__value"><span class="settings-badge settings-badge--warning" title="May end by [^"]+">Reconnect within 3 days</)
+  // The date is visible text beside the badge, not only a hover title.
+  assert.match(near, /Sign-in<\/span><\/span><span class="settings-item__value"><span class="settings-signin-notice"><span class="settings-badge settings-badge--warning">Reconnect within 3 days<\/span><span class="settings-signin-notice__when">May end by [^<]+</)
+  assert.doesNotMatch(near, /title="May end by/)
   assert.ok(near.indexOf('Sign-in') < near.indexOf('Version'))
-  assert.match(claudePage({ signInNotice: signInExpiryNotice(inDays(-1), now) }), /title="Reported to end [^"]+">Reconnect now</)
+  assert.match(claudePage({ signInNotice: signInExpiryNotice(inDays(-1), now) }), />Reconnect now<\/span><span class="settings-signin-notice__when">Reported to end [^<]+</)
   const quiet = claudePage({ signInNotice: signInExpiryNotice(inDays(30), now) })
   assert.doesNotMatch(quiet, /Sign-in|Reconnect/)
   assert.match(quiet, /Version/)
