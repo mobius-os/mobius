@@ -1439,7 +1439,7 @@ def _seed_idle_parent_wake_root(
 def test_direct_send_to_delegation_child_is_rejected(
   client, owner_token, db,
 ):
-  _, child_id, _ = _seed_delegation(db, suffix="send-gate")
+  parent_id, child_id, _ = _seed_delegation(db, suffix="send-gate")
 
   response = client.post(
     f"/api/chats/{child_id}/messages",
@@ -1448,7 +1448,27 @@ def test_direct_send_to_delegation_child_is_rejected(
   )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "delegation_managed"
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  # The refusal names the helper and its parent so the composer can link back,
+  # never the retired "evaluator chat ... parent workflow" wording.
+  assert detail["message"] == "This is a helper's chat. Message it from its parent chat."
+  assert detail["parent_chat_id"] == parent_id
+  assert "evaluator" not in response.text
+
+
+def test_ordinary_chat_send_is_not_delegation_managed(
+  client, owner_token, db,
+):
+  parent_id, _child, _ = _seed_delegation(db, suffix="send-gate-parent")
+
+  response = client.post(
+    f"/api/chats/{parent_id}/messages",
+    json={"content": "A parent chat still accepts owner messages."},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert "delegation_managed" not in response.text
 
 
 def _capture_activity_starts(monkeypatch):

@@ -196,17 +196,30 @@ async def _send_queue(
   })
 
 
-def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Return whether a parent delegation owns this chat's send lifecycle.
+def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
+  """The parent chat whose delegation owns this chat's send lifecycle, if any.
 
   Keep the send gate beside the route that enforces it. Delegation policy
   loading is intentionally a separate concern and may evolve independently;
   this guard only needs the durable ownership row already available through
   the request session.
   """
-  return db.query(models.Delegation.id).filter(
+  return db.query(models.Delegation.parent_chat_id).filter(
     models.Delegation.child_chat_id == chat_id,
-  ).first() is not None
+  ).limit(1).scalar()
+
+
+def _delegation_managed_conflict(parent_chat_id: str) -> HTTPException:
+  # A helper chat is messaged through its parent (message_agent), never
+  # directly, so the refusal names that route and where to find it.
+  return HTTPException(
+    status_code=409,
+    detail={
+      "code": "delegation_managed",
+      "message": "This is a helper's chat. Message it from its parent chat.",
+      "parent_chat_id": parent_chat_id,
+    },
+  )
 
 
 def _pending_question_open_conflict() -> HTTPException:
@@ -1122,14 +1135,9 @@ async def _send_message_impl(
         "message": "Clear the Goal from its confirmed × control instead.",
       },
     )
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(managing_parent)
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -1491,14 +1499,9 @@ async def _send_message_locked(
     return duplicate
   await sweep_expired_uploads(db, chat, attachment_names(body.attachments))
 
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(managing_parent)
 
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
