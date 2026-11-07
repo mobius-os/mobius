@@ -305,6 +305,60 @@ export function modeForInlineEditorReveal({
 }
 
 
+/** Return the hold that makes a question answer grow UPWARD, like the
+ * composer: when the answer's card sits at the bottom of the usable viewport,
+ * the editor's bottom edge keeps its on-screen position as it grows or
+ * shrinks by `growth` client pixels and the conversation above it moves.
+ *
+ * "At the bottom" means the card's lower edge was within `bottomBand` of the
+ * usable bottom, or beneath the overlaid composer (an open phone keyboard), and
+ * the editor's own bottom edge was visible. A card higher up still grows down
+ * into the room below it, and a reader holding the card out of view is not
+ * moved; both keep the ordinary caret reveal. Returns null when no hold
+ * applies. Like `modeForInlineEditorReveal`, it derives the target without
+ * writing it. */
+export function modeForInlineEditorGrowth({
+  scrollEl,
+  editor,
+  growth,
+  visibleTop,
+  visibleBottom,
+  bottomBand,
+}) {
+  if (!scrollEl || !editor
+      || !Number.isFinite(growth) || Math.abs(growth) <= 0.5
+      || !Number.isFinite(visibleTop)
+      || !Number.isFinite(visibleBottom)
+      || visibleBottom <= visibleTop) return null
+  const card = editor.closest?.('[data-question-id]')
+  const editorRect = editor.getBoundingClientRect?.()
+  const cardRect = card?.getBoundingClientRect?.()
+  if (!Number.isFinite(editorRect?.bottom) || !Number.isFinite(cardRect?.bottom)) {
+    return null
+  }
+  const editorBottomBefore = editorRect.bottom - growth
+  const cardBottomBefore = cardRect.bottom - growth
+  if (editorBottomBefore < visibleTop || editorBottomBefore > visibleBottom + 0.5) {
+    return null
+  }
+  if (cardBottomBefore < visibleBottom - bottomBand) return null
+
+  const layoutDelta = clientLengthToLayout(growth, captureLayoutSpace(scrollEl))
+  if (!Number.isFinite(layoutDelta)) return null
+  const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight)
+  const targetScrollTop = Math.min(
+    maxScrollTop,
+    Math.max(0, scrollEl.scrollTop + layoutDelta),
+  )
+  if (Math.abs(targetScrollTop - scrollEl.scrollTop) <= 0.5) return null
+  return _anchorModeForRow(
+    scrollEl,
+    _topmostVisibleMsg(scrollEl, targetScrollTop),
+    targetScrollTop,
+  )
+}
+
+
 /** Create a settled anchor with the latest real conversation content at the
  * viewport bottom. This is a one-time restoration target, NOT FOLLOW_BOTTOM:
  * later streaming/layout growth cannot drag the reader after return. */
@@ -568,6 +622,20 @@ export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
   if (mode.key === caretAnchor.key
       && Math.abs(mode.offset - caretAnchor.offset) <= 0.5) return mode
   return caretAnchor
+}
+
+
+/** Which modes adopt an upward-growth hold while the owner types an answer.
+ * An ordinary reading hold and a settled send pin do: the owner is writing at
+ * the bottom and the card must not slide under the composer. FOLLOW_BOTTOM
+ * already keeps the tail, which is the same upward growth. An armed pin keeps
+ * its reservation handoff to FOLLOW_BOTTOM, and the question-submission
+ * overlay keeps its frozen position. */
+export function modeForQuestionEditorGrowth(mode, growthHold = null) {
+  if (!growthHold) return mode
+  if (mode?.kind === 'ANCHOR_AT' && !isQuestionSubmissionMode(mode)) return growthHold
+  if (mode?.kind === 'PIN_USER_MSG' && !mode.followWhenFilled) return growthHold
+  return mode
 }
 
 

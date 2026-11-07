@@ -90,8 +90,10 @@ import {
   applyMode,
   contentHoldModeFromScroll,
   isQuestionSubmissionMode,
+  modeForInlineEditorGrowth,
   modeForInlineEditorReveal,
   modeForQuestionEditingViewportChange,
+  modeForQuestionEditorGrowth,
   nextPinViewportHeight,
   physicalBottomAnchorModeFromScroll,
   topRevealAnchorMode,
@@ -124,7 +126,6 @@ import {
   readerScrollEscapeDirection,
   scrollAuthorityAllowsCommit,
   settledPinMode,
-  resizeReappliesMode,
   shouldPinSend,
   terminalLayoutAuthority,
 } from './scroll/policy.js'
@@ -1374,11 +1375,14 @@ export default function useScrollMode({
 
     /** Keep the focused answer fully visible above the overlaid composer, then
      * record that exact position as the ordinary reading hold. Keyboard resize,
-     * native caret movement, and field growth all use this one operation. */
+     * native caret movement, and field growth all use this one operation.
+     * `growth` (client px) is the field's own size change in this layout pass:
+     * at the bottom of the chat it grows upward, like the composer. */
     function revealFocusedQuestionEditor(event, {
       editor = focusedQuestionEditor(),
       nativePositionAlreadyApplied = false,
       authorityVersion = currentAuthority(),
+      growth = 0,
     } = {}) {
       if (!editor
           || focusedQuestionEditor() !== editor
@@ -1390,16 +1394,30 @@ export default function useScrollMode({
         scrollRect?.bottom ?? Infinity,
         footRect?.top ?? Infinity,
       )
-      const revealAnchor = modeForInlineEditorReveal({
+      const growthHold = modeForInlineEditorGrowth({
         scrollEl,
         editor,
+        growth,
         visibleTop,
         visibleBottom,
+        bottomBand: FOLLOW_STICK_BAND_PX,
       })
-      const nextMode = modeForQuestionEditingViewportChange(
-        modeRef.current,
-        revealAnchor || anchorModeFromScroll(scrollEl),
-      )
+      const holdsGrowth = growthHold !== null
+        && modeForQuestionEditorGrowth(modeRef.current, growthHold) === growthHold
+      const revealAnchor = holdsGrowth
+        ? growthHold
+        : modeForInlineEditorReveal({
+            scrollEl,
+            editor,
+            visibleTop,
+            visibleBottom,
+          })
+      const nextMode = holdsGrowth
+        ? growthHold
+        : modeForQuestionEditingViewportChange(
+            modeRef.current,
+            revealAnchor || anchorModeFromScroll(scrollEl),
+          )
       if (nextMode === modeRef.current) {
         if (nativePositionAlreadyApplied
             && modeRef.current?.kind === 'ANCHOR_AT'
@@ -1602,15 +1620,27 @@ export default function useScrollMode({
     let pendingInlineEditorInput = null
     let inlineEditorRaf = 0
     let observedQuestionEditor = null
+    // Client height at the previous observer pass, so a resize knows how much
+    // the field itself grew. Null until the first observation of this editor.
+    let observedQuestionEditorHeight = null
 
     const questionEditorResized = entries => entries.some(
       entry => entry.target === observedQuestionEditor,
     )
+    // Read inside the observer callback, where layout is already current.
+    const questionEditorGrowth = () => {
+      const height = observedQuestionEditor?.getBoundingClientRect?.().height
+      if (!Number.isFinite(height)) return 0
+      const previous = observedQuestionEditorHeight
+      observedQuestionEditorHeight = height
+      return Number.isFinite(previous) ? height - previous : 0
+    }
 
     const observeQuestionEditor = (editor) => {
       if (!isQuestionEditor(editor) || observedQuestionEditor === editor) return
       if (observedQuestionEditor) ro.unobserve?.(observedQuestionEditor)
       observedQuestionEditor = editor
+      observedQuestionEditorHeight = null
       ro.observe(editor, { box: 'border-box' })
     }
 
@@ -1618,6 +1648,7 @@ export default function useScrollMode({
       if (observedQuestionEditor !== editor) return
       ro.unobserve?.(editor)
       observedQuestionEditor = null
+      observedQuestionEditorHeight = null
     }
 
     const captureInlineEditorInput = (event) => {
@@ -1660,8 +1691,8 @@ export default function useScrollMode({
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
-    //                   glued to the tail (except the reader's own typing in
-    //                   the inline answer editor; see resizeReappliesMode).
+    //                   glued to the tail; the reader's own answer typing
+    //                   therefore grows upward, like the composer.
     //   ANCHOR_AT     — during the reveal window, re-applied every firing
     //                   (lazy renderers — KaTeX, highlight.js, markdown
     //                   re-wrap — settle in the first ~1s and shift the
@@ -1684,10 +1715,14 @@ export default function useScrollMode({
       // performs one authoritative spacer + mode pass after reader ownership
       // ends.
       if (!layoutOwnsScroll(authorityVersion)) {
+        // Growth painted under the reader's gesture is not held later: the
+        // next observation starts a fresh baseline instead of replaying it.
+        if (editorResized) observedQuestionEditorHeight = null
         deferLayoutUntilReaderYields(authorityVersion)
         requestRevealOnQuiet()
         return
       }
+      const editorGrowth = editorResized ? questionEditorGrowth() : 0
       const previousViewportH = observedScrollViewportRef.current.height
       const previousViewportW = observedScrollViewportRef.current.width
       const currentViewportH = scrollEl.clientHeight
@@ -1713,7 +1748,7 @@ export default function useScrollMode({
         })
         if (editorResized) revealFocusedQuestionEditor(
           'layout:question-edit-resize',
-          { nativePositionAlreadyApplied: true, authorityVersion },
+          { nativePositionAlreadyApplied: true, authorityVersion, growth: editorGrowth },
         )
         requestRevealOnQuiet()
         return
@@ -1732,16 +1767,16 @@ export default function useScrollMode({
         // every late renderer or font swap becomes a visible jump.
         || (k === 'ANCHOR_AT' && !revealedRef.current)
       ) {
-        if (resizeReappliesMode(k, { editorResized })) {
-          writeMode(
-            scrollEl,
-            modeRef.current,
-            k === 'FOLLOW_BOTTOM'
-              ? 'layout:follow-live-tail'
-              : 'layout:restore-anchor',
-            authorityVersion,
-          )
-        }
+        // Answer typing is followed too: at the tail the field grows upward
+        // like the composer instead of sliding the card under it.
+        writeMode(
+          scrollEl,
+          modeRef.current,
+          k === 'FOLLOW_BOTTOM'
+            ? 'layout:follow-live-tail'
+            : 'layout:restore-anchor',
+          authorityVersion,
+        )
       } else if (k === 'PIN_USER_MSG') {
         // Repair only a shifted row or a previously clamped target that has
         // become reachable. The predicate deliberately gates on the target,
@@ -1754,7 +1789,7 @@ export default function useScrollMode({
       }
       if (editorResized) revealFocusedQuestionEditor(
         'layout:question-edit-resize',
-        { nativePositionAlreadyApplied: true, authorityVersion },
+        { nativePositionAlreadyApplied: true, authorityVersion, growth: editorGrowth },
       )
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
