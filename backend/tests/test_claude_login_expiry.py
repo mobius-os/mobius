@@ -86,6 +86,34 @@ def test_a_time_beyond_float_range_is_no_time_and_the_sign_in_can_refresh(tmp_pa
   assert claude_login_expires_at(data_dir) is None
 
 
+def test_a_time_past_pythons_digit_limit_reads_as_no_sign_in(client, auth, monkeypatch, tmp_path):
+  from app.config import get_settings
+
+  # json.loads refuses an int longer than 4300 digits with a plain ValueError.
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text(
+    '{"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": '
+    + "9" * 5000 + "}}"
+  )
+  assert ClaudeProvider().check_auth(str(tmp_path)) is not None
+  assert claude_login_expires_at(str(tmp_path)) is None
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  response = client.get("/api/auth/providers/status", headers=auth)
+  assert response.status_code == 200
+  assert response.json()["claude"]["configured"] is False
+
+
+def test_a_huge_access_expiry_marks_the_login_end_stale_like_the_cli(tmp_path):
+  # The CLI reads 10**400 as Infinity, which is more than three days past
+  # any end, so it reports no end; Möbius must not show a date either.
+  data_dir = _store(tmp_path, {
+    "accessToken": "a", "refreshToken": "r", "expiresAt": 10**400,
+    "refreshTokenExpiresAt": END_MS,
+  })
+  assert claude_login_expires_at(data_dir) is None
+
+
 def test_status_asks_to_reconnect_for_a_huge_access_expiry_without_a_refresh_token(
   client, auth, monkeypatch, tmp_path,
 ):

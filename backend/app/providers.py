@@ -762,8 +762,8 @@ class ClaudeProvider(BaseProvider):
         "under AI provider."
       )
     try:
-      raw = json.loads(creds.read_text())
-    except (json.JSONDecodeError, OSError, UnicodeError):
+      raw = _read_claude_credentials(creds)
+    except (OSError, ValueError):  # also an int past Python's digit limit
       raw = None
     oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
     if isinstance(oauth, dict):
@@ -1782,8 +1782,8 @@ def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
 
   A new sign-in needs an access token, a refresh token and an `expires_in`
   that ends after now and within the latest sign-in end the CLI accepts. A
-  refresh needs an access token; one without is refused (the owner then
-  reconnects). Otherwise its response is kept, since Anthropic has already
+  refresh needs an access token; one without is refused, so the next turn
+  fails and asks the owner to reconnect. Otherwise its response is kept, since Anthropic has already
   rotated the single-use refresh token: like the CLI, a refresh without a
   `refresh_token` keeps the stored one, and an unusable `expires_in` saves
   the tokens with the access token already expired, so the next use
@@ -2063,10 +2063,14 @@ def claude_login_expires_at(data_dir: str) -> str | None:
   except (OSError, RuntimeError, ValueError):
     return None
   end = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
-  access = _finite_number(oauth.get("expiresAt"))
   if not oauth.get("refreshToken") or end is None:
     return None
-  if access is not None and access - end > _CLAUDE_LOGIN_END_STALE_MS:
+  # Compare the raw stored expiry, as the CLI does: a value beyond float
+  # range is Infinity there and marks the end stale. Python compares an int
+  # with a float exactly, so this cannot overflow.
+  access = oauth.get("expiresAt")
+  if (isinstance(access, (int, float)) and not isinstance(access, bool)
+      and access > end + _CLAUDE_LOGIN_END_STALE_MS):
     return None
   ended = datetime.fromtimestamp(end / 1000, timezone.utc)
   return ended.isoformat(timespec="seconds").replace("+00:00", "Z")
