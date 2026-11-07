@@ -822,13 +822,17 @@ def _update_command(base: str, platform: str | None = None) -> str:
   # supply a different (older) release. The command runs in the machine's own
   # shell, so a Windows machine gets the PowerShell form.
   if _is_windows_platform(platform):
+    # Same shape as the pairing bootstrap: a failed or partial download stops
+    # the command instead of running a truncated or stale runner.
     return (
-      f"$r = Join-Path ([IO.Path]::GetTempPath()) 'mobius-connect-runner.py'; "
-      f"curl.exe -fsSL \"{base}/api/connect/runner\" -o $r; "
-      f"if (Get-Command py -ErrorAction SilentlyContinue) "
-      f"{{ py -3 $r --url \"{base}\" --install }} "
-      f"else {{ python $r --url \"{base}\" --install }}; "
-      f"Remove-Item -Force -ErrorAction SilentlyContinue $r"
+      "& { $ErrorActionPreference = 'Stop'; "
+      "$r = Join-Path ([IO.Path]::GetTempPath()) "
+      "('mobius-connect-' + [guid]::NewGuid().ToString('N') + '.py'); "
+      f"try {{ Invoke-WebRequest -UseBasicParsing -Uri \"{base}/api/connect/runner\" -OutFile $r; "
+      "if (Get-Command py -ErrorAction SilentlyContinue) "
+      f"{{ & py -3 $r --url \"{base}\" --install }} "
+      f"else {{ & python $r --url \"{base}\" --install }} }} "
+      "finally { Remove-Item -Force -ErrorAction SilentlyContinue $r } }"
     )
   return (
     f'curl -fsSL "{base}/api/connect/runner" '

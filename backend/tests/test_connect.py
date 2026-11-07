@@ -156,8 +156,14 @@ def test_windows_machine_gets_a_powershell_install_and_update(client, auth):
   assert client.get("/api/connect/w/nope").status_code == 404
 
   update = connect_routes._update_command("https://railway.example", "Windows 11")
-  assert "curl.exe -fsSL" in update and "| python3" not in update
+  assert "| python3" not in update
   assert '--url "https://railway.example" --install' in update
+  # A failed or partial download must stop the update, never run a truncated
+  # or stale runner left in a shared temporary path.
+  assert "$ErrorActionPreference = 'Stop'" in update
+  assert "Invoke-WebRequest" in update and "curl.exe" not in update
+  assert "NewGuid()" in update and "finally" in update
+  assert update.index("Invoke-WebRequest") < update.index("--install")
   assert connect_routes._update_command("https://railway.example", "Linux 6.1") == (
     connect_routes._update_command("https://railway.example")
   )
