@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { FileDocument } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
-import { mediaTokenParam } from '../../api/mediaToken.js'
+import { mediaTokenParam, openMediaLink } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 import DocumentAttachment from './DocumentAttachment.jsx'
 import { ExpandableImage } from './markdown/InlineContent.jsx'
@@ -96,9 +96,12 @@ export default function Attachments({ attachments, chatId, mediaDimensions }) {
         const identity = documentAttachmentIdentity(f, chatId)
         const previewOpen = expandedNames.has(identity)
         const canPreview = generatedFileCanPreview(f)
-        const href = tokenParam ? `${BASE}/api/chats/${encodeURIComponent(chatId)}/${
+        const path = `/api/chats/${encodeURIComponent(chatId)}/${
           isGenerated ? 'generated-files' : 'uploads'
-        }/${encodeURIComponent(f.name)}${tokenParam}${canPreview && !hasChatPreview ? '&preview=true' : ''}` : ''
+        }/${encodeURIComponent(f.name)}`
+        const query = canPreview && !hasChatPreview ? '&preview=true' : ''
+        const download = isGenerated && !canPreview ? f.name : undefined
+        const href = tokenParam ? `${BASE}${path}${tokenParam}${query}` : ''
         const content = (
           <>
             <FileDocument width={12} height={12} aria-hidden="true" />
@@ -128,9 +131,11 @@ export default function Attachments({ attachments, chatId, mediaDimensions }) {
             key={i}
             className="chat__attach-file"
             href={href}
-            download={isGenerated && !canPreview ? f.name : undefined}
+            download={download}
             target="_blank"
             rel="noopener noreferrer"
+            // The token in href expires 15 minutes after render; open with a valid one.
+            onClick={event => openMediaLink(event, chatId, path, { query, download })}
           >
             {content}
           </a>
