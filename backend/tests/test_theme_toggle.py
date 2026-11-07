@@ -293,6 +293,17 @@ def test_the_root_keeps_its_order_and_every_line():
     assert "--accent: #00ffff;" in persisted
 
 
+def test_a_block_in_a_custom_property_value_stays_in_its_declaration():
+  css = ":root { --bg: #ffffff; --foo: {a:b; c:d}; --bar: 1px; }\n"
+  assert theme.scan_root_declarations(css) == {"--bg": "#ffffff", "--foo": "{a:b; c:d}", "--bar": "1px"}
+  assert theme._infer_theme_mode(css) == "light"
+  there, _ = toggle_once(css, "light")
+  back, _ = toggle_once(there, "dark")
+  for persisted in (there, back):
+    assert "--foo: {a:b; c:d};" in persisted and "--bar: 1px;" in persisted
+    assert theme.scan_root_declarations(persisted)["--bar"] == "1px"
+
+
 def test_deep_nesting_is_read_without_recursion():
   depth = 3000
   css = ":root { --bg: #ffffff; }\n" + ".a { " * depth + "--deep: 1px; " + "} " * depth

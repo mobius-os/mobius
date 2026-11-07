@@ -672,6 +672,7 @@ def theme_role_vars(
 
 
 _DECLARATION_RE = re.compile(r"(--[\w-]+|-?[A-Za-z_][\w-]*)[ \t\n\r\f]*:(.*)", re.S)
+_CUSTOM_VALUE_HEAD_RE = re.compile(r"--[\w-]+[ \t\n\r\f]*:")
 _IMPORTANT_RE = re.compile(r"![ \t\n\r\f]*important$", re.I)
 _URL_OPEN_RE = re.compile(r"url\(\s*(?=[^\s\"'])", re.I)
 
@@ -768,11 +769,13 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
   braces do not balance; the nodes are then a best effort (an unclosed rule
   is dropped, a stray `}` ends a node of its own), which only the
   leading-statement reader relies on.  Text after the last `;` or `}` at a
-  level is not a node."""
+  level is not a node.  A `{}` block in a custom property's value
+  (`--x: {a: b};`) belongs to that declaration, not a nested rule."""
   text, mask, ok = _lex_theme_css(css)
   levels: list[list[_CssNode]] = [[]]
   opened: list[tuple[str, int]] = []
   segment = 0
+  value_depth = 0  # brace depth inside a custom property's value
 
   def head_at(end: int) -> tuple[str, int]:
     raw = text[segment:end]
@@ -780,6 +783,12 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
     return head, segment + len(raw) - len(raw.lstrip(_CSS_WS))
 
   for i, ch in enumerate(mask):
+    if value_depth:
+      value_depth += {"{": 1, "}": -1}.get(ch, 0)
+      continue
+    if ch == "{" and _CUSTOM_VALUE_HEAD_RE.match(head_at(i)[0]):
+      value_depth = 1
+      continue
     if ch == "{":
       opened.append(head_at(i))
       levels.append([])
@@ -803,7 +812,7 @@ def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
     else:
       continue
     segment = i + 1
-  return levels[0], ok and not opened
+  return levels[0], ok and not opened and not value_depth
 
 
 def _declaration(node: "_CssNode") -> tuple[str, str] | None:
