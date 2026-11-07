@@ -5,12 +5,12 @@ import { Suspense, useCallback, useEffect, useId, useState } from 'react'
 import { Chat } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
-import { askMessage, passiveAskAllowed, sessionSnapshot } from './appBlockSession.js'
+import { ASK_LABEL, askMessage, passiveAskAllowed, sessionSnapshot } from './appBlockSession.js'
 import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, StatusPill } from './AppBlockParts.jsx'
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
 import { passiveBlockMode } from './blockOwnership.js'
-import { appBlockChatKey, useAppBlockChat } from './appBlockChat.js'
+import { appBlockChatKey, blockFingerprint, useAppBlockChat } from './appBlockChat.js'
 
 export { passiveBlockMode }
 
@@ -97,14 +97,14 @@ export function blockAsk({ state, admitted, allowed, context }) {
     ? state.ask : null
 }
 
-const ASK_LABELS = { sending: 'Asking…', asked: 'Asked', limited: 'Asked' }
-const ASK_WAIT = { sending: 'Sending it to this chat.', asked: 'Sent to this chat. It comes back when the reply is done.',
-  limited: 'This chat has had several of these requests in the last hour. Try again later.' }
+const ASK_LABELS = { sending: 'Asking…', asked: 'Asked' }
+const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', asked: 'The request is in this chat.' }
 
-/** The host's ask control (`ask-v1`): one tap sends `message` into this chat
- *  as the owner's own visible message. It sends the app no event. `status` is
- *  the chat's verdict for this card and message (appBlockChat.js askState). */
-export function AskControl({ ask, status, locked, onAsk }) {
+/** The host's ask control (`ask-v1`): its label is the host's, and one tap
+ *  sends the host-written request (askMessage) into this chat as the owner's
+ *  own visible message. It sends the app no event. `status` is the chat's
+ *  state for this card (appBlockChat.js askState). */
+export function AskControl({ status, locked, onAsk }) {
   const waitingId = useId()
   const waiting = status !== 'ready'
   return <span className="md-app-block__controls">
@@ -112,7 +112,7 @@ export function AskControl({ ask, status, locked, onAsk }) {
       aria-describedby={waiting ? waitingId : undefined} onClick={onAsk}>
       {status === 'sending' ? <span className="md-app-block__spinner" aria-hidden="true" />
         : <Chat width={16} height={16} aria-hidden="true" />}
-      {ASK_LABELS[status] || ask.label}</button>
+      {ASK_LABELS[status] || ASK_LABEL}</button>
     {waiting ? <span id={waitingId} className="md-app-block__sr-only">{ASK_WAIT[status]}</span> : null}
   </span>
 }
@@ -202,8 +202,8 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
-    ask={ask ? <AskControl ask={ask} status={chat.askState(message)} locked={sessionLocked(session, admitted)}
-      onAsk={() => { void chat.ask(message) }} /> : null}
+    ask={ask ? <AskControl status={chat.askState()} locked={sessionLocked(session, admitted)}
+      onAsk={() => { void chat.ask({ message, fingerprint: blockFingerprint(block), refs: ask.refs }) }} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>

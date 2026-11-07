@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  ASK_LIMIT, ASK_REPEAT_MS, ASK_WINDOW_MS, AppBlockChatContext, appBlockChatKey, createAppBlockChat, useAppBlockChat,
+  ASK_PERIOD_MS, AppBlockChatContext, appBlockChatKey, askCid, blockFingerprint, createAppBlockChat, useAppBlockChat,
 } from '../markdown/appBlockChat.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 
@@ -73,84 +73,87 @@ test('the block\'s own JSON cannot supply a chat context', () => {
 })
 
 // ---- Card asks (ask-v1).
-function askChat(results = []) {
-  const sends = []
-  let clock = 1_000_000
-  const chat = createAppBlockChat('chat-1', { now: () => clock,
-    send: async (message, options) => { sends.push({ message, ...options }); const next = results.shift(); if (next instanceof Error) throw next; return next ?? true } })
-  return { chat, sends, tick: ms => { clock += ms } }
-}
 const KEY = 'contribute\nchat:contributions'
+const REFS = [{ id: 'b-1', code: 'needs_review' }, { id: 'a-1', code: 'upstream_conflict' }]
+const FINGERPRINT = blockFingerprint(appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+  app: 'contribute', intent: 'chat:contributions', title: 'Cards', interaction: 'inline', items: [{ title: 'A', intent: 'review:a-1' }],
+  action: { label: 'Contribute', intent: 'chat-send:a-1' } }) }))
+const request = { message: 'Please fix', fingerprint: FINGERPRINT, refs: REFS }
+// The server's existing duplicate check, as the chat's sender sees it: a
+// repeated client id is the same message, posted once.
+function server() {
+  const posted = new Map()
+  return { posted, send: async (message, { cid }) => { if (!posted.has(cid)) posted.set(cid, message); return true } }
+}
+function askChat(send, clock = { at: Date.parse('2026-11-07T10:15:00Z') }) {
+  return { chat: createAppBlockChat('chat-1', { send, now: () => clock.at }), clock }
+}
 
-test('one tap sends one owner message; the card waits until a turn settles', async () => {
-  const { chat, sends } = askChat()
+test('the ask id depends only on the chat, the block, the sorted refs and the clock hour', async () => {
+  const at = Date.parse('2026-11-07T10:15:00Z')
+  const id = await askCid('chat-1', FINGERPRINT, REFS, at)
+  assert.match(id, /^ask-[0-9a-f]{32}$/)
+  assert.equal(await askCid('chat-1', FINGERPRINT, [...REFS].reverse(), at + 30 * 60 * 1000), id)
+  for (const other of [await askCid('chat-2', FINGERPRINT, REFS, at), await askCid('chat-1', `${FINGERPRINT}x`, REFS, at),
+    await askCid('chat-1', FINGERPRINT, REFS.slice(1), at), await askCid('chat-1', FINGERPRINT, REFS, at + ASK_PERIOD_MS)]) {
+    assert.notEqual(other, id)
+  }
+})
+
+test('a reload, a second tab, a retry or concurrent taps post the same ask once', async () => {
+  const { posted, send } = server()
+  const views = [askChat(send).chat, askChat(send).chat, askChat(send).chat] // three views of one chat
+  const card = {}
+  for (const chat of views) chat.place(KEY, card, node(1))
+  const results = await Promise.all([...views.map(chat => chat.ask(KEY, card, request)), views[0].ask(KEY, card, request)])
+  assert.deepEqual(results, [true, true, true, false], 'the same view refuses a second tap while sending')
+  assert.equal(posted.size, 1)
+  views[0].turnSettled()
+  assert.equal(await views[0].ask(KEY, card, request), true, 'the button comes back after the turn, and the server still dedupes')
+  assert.equal(posted.size, 1)
+  const failing = askChat(async () => { throw new Error('offline') }).chat
+  failing.place(KEY, card, node(1))
+  assert.equal(await failing.ask(KEY, card, request), false)
+  assert.equal(failing.askState(KEY), 'ready', 'a failed send frees the button; the retry carries the same id')
+})
+
+test('one view shows the tapped card as sending, then asked until a turn settles', async () => {
+  let release
+  const { chat } = askChat(() => new Promise(resolve => { release = resolve }))
   const card = {}
   chat.place(KEY, card, node(1))
-  const first = chat.ask(KEY, card, 'Fix it')
-  assert.equal(chat.askState(KEY, 'Fix it'), 'sending')
-  assert.equal(await chat.ask(KEY, card, 'Fix it'), false, 'a second tap while sending sends nothing')
-  assert.equal(await first, true)
-  assert.equal(chat.askState(KEY, 'Fix it'), 'asked')
-  assert.equal(await chat.ask(KEY, card, 'Another reason'), false, 'one ask per card until the turn settles')
+  const pending = chat.ask(KEY, card, request)
+  assert.equal(chat.askState(KEY), 'sending')
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0))
+  release(true)
+  assert.equal(await pending, true)
+  assert.equal(chat.askState(KEY), 'asked')
   chat.turnSettled()
-  assert.equal(chat.askState(KEY, 'Fix it'), 'asked', 'the same message is not sent again soon')
-  assert.equal(chat.askState(KEY, 'Another reason'), 'ready')
-  assert.deepEqual(sends.map(send => send.message), ['Fix it'])
+  assert.equal(chat.askState(KEY), 'ready')
 })
 
 test('only the newest card of its key may ask', async () => {
-  const { chat, sends } = askChat()
+  const { posted, send } = server()
+  const { chat } = askChat(send)
   const [older, newer] = [{}, {}]
   chat.place(KEY, older, node(1))
   chat.place(KEY, newer, node(2))
-  assert.equal(await chat.ask(KEY, older, 'Fix it'), false)
-  assert.equal(await chat.ask(KEY, newer, 'Fix it'), true)
-  assert.equal(sends.length, 1)
-  assert.equal(await createAppBlockChat('chat-1').ask(KEY, {}, 'No sender'), false)
-})
-
-test('the same message waits ten minutes, and a chat takes six asks an hour', async () => {
-  const { chat, tick } = askChat()
-  const card = {}
-  chat.place(KEY, card, node(1))
-  await chat.ask(KEY, card, 'Fix it')
-  chat.turnSettled()
-  tick(ASK_REPEAT_MS - 1)
-  assert.equal(chat.askState(KEY, 'Fix it'), 'asked')
-  tick(1)
-  assert.equal(chat.askState(KEY, 'Fix it'), 'ready')
-  for (let i = 1; i < ASK_LIMIT; i++) { assert.equal(await chat.ask(KEY, card, `Reason ${i}`), true); chat.turnSettled() }
-  assert.equal(chat.askState(KEY, 'Reason 99'), 'limited')
-  assert.equal(await chat.ask(KEY, card, 'Reason 99'), false)
-  tick(ASK_WINDOW_MS)
-  assert.equal(chat.askState(KEY, 'Reason 99'), 'ready')
-})
-
-test('a failed send frees the card and a retry reuses its identity, so a send that did arrive is not doubled', async () => {
-  const { chat, sends } = askChat([false, new Error('offline'), true])
-  const card = {}
-  chat.place(KEY, card, node(1))
-  assert.equal(await chat.ask(KEY, card, 'Fix it'), false)
-  assert.equal(chat.askState(KEY, 'Fix it'), 'ready')
-  assert.equal(await chat.ask(KEY, card, 'Fix it'), false)
-  assert.equal(await chat.ask(KEY, card, 'Fix it'), true)
-  assert.equal(new Set(sends.map(send => send.cid)).size, 1)
-  assert.ok(sends[0].cid)
-  chat.turnSettled()
-  assert.equal(await chat.ask(KEY, card, 'Other'), true)
-  assert.notEqual(sends.at(-1).cid, sends[0].cid, 'another message is another identity')
+  assert.equal(await chat.ask(KEY, older, request), false)
+  assert.equal(await chat.ask(KEY, newer, request), true)
+  assert.equal(posted.size, 1)
+  assert.equal(await createAppBlockChat('chat-1').ask(KEY, {}, request), false, 'no sender, no ask')
 })
 
 test('the block hook exposes its own card ask', async () => {
-  const { chat, sends } = askChat()
+  const { posted, send } = server()
+  const { chat } = askChat(send)
   let seen = null
   const Probe = () => { seen = useAppBlockChat(KEY); return null }
   renderToStaticMarkup(createElement(AppBlockChatContext.Provider, { value: chat }, createElement(Probe)))
-  assert.equal(seen.askState('Fix it'), 'ready')
+  assert.equal(seen.askState(), 'ready')
   renderToStaticMarkup(createElement(Probe))
-  assert.equal(seen.askState('Fix it'), 'limited', 'outside a chat nothing can be asked')
-  assert.equal(await seen.ask('Fix it'), false)
-  assert.equal(sends.length, 0)
+  assert.equal(await seen.ask(request), false, 'outside a chat nothing can be asked')
+  assert.equal(posted.size, 0)
 })
 
 test('the chat sends a card ask as an owner message that leaves the composer\'s draft alone', async () => {

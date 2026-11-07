@@ -10,17 +10,31 @@
    older one. The transcript is not virtualized: the newest messages are
    always mounted, so the newest block is always among the registered ones.
 
-   It also owns this chat's card asks (`ask-v1`): one owner tap sends the
-   host-built message through `send` as an ordinary owner message. One ask per
-   card is in flight at a time (until the next turn here settles), the same
-   message is not sent again within ASK_REPEAT_MS, and the chat takes at most
-   ASK_LIMIT asks per ASK_WINDOW_MS. */
+   It also sends this chat's card asks (`ask-v1`): one owner tap sends the
+   host-built message through `send` as an ordinary owner message, with a
+   client message id derived from the chat, the block, its references and
+   the hour (askCid). The server already treats a repeated id as the same
+   message, so a retry, a reload, a second tab or a concurrent tap of the same
+   ask posts it at most once that hour. Nothing here counts or remembers sends
+   for safety; `pending` only shows the tapped card as waiting. */
 import { createContext, useContext, useLayoutEffect, useState, useSyncExternalStore } from 'react'
 
 export const REFRESH_REASONS = Object.freeze(['turn', 'visible'])
-export const ASK_REPEAT_MS = 10 * 60 * 1000
-export const ASK_WINDOW_MS = 60 * 60 * 1000
-export const ASK_LIMIT = 6
+export const ASK_PERIOD_MS = 60 * 60 * 1000
+
+/** What makes one block itself, for its asks: its app, intent, title and the
+ *  intents it lists and acts on, as the transcript printed them. */
+export const blockFingerprint = block => JSON.stringify([block.app, block.intent, block.title,
+  (block.items || []).map(item => item.intent), [block.action, ...(block.items || []).map(item => item.action)].filter(Boolean).map(action => action.intent)])
+
+/** The deterministic client message id of one ask: the same chat, block,
+ *  references (in any order) and hour always give the same id. */
+export async function askCid(chatId, fingerprint, refs, at) {
+  const sorted = refs.map(ref => `${ref.id}\n${ref.code}`).sort()
+  const input = JSON.stringify(['ask-v1', chatId, fingerprint, sorted, Math.floor(at / ASK_PERIOD_MS)])
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return `ask-${[...new Uint8Array(digest)].slice(0, 16).map(byte => byte.toString(16).padStart(2, '0')).join('')}`
+}
 
 const follows = (node, other) => Boolean(node && other
   && node.compareDocumentPosition(other) & 4 /* Node.DOCUMENT_POSITION_FOLLOWING */)
@@ -29,17 +43,12 @@ export function createAppBlockChat(chatId, { send = null, now = () => Date.now()
   const groups = new Map() // key -> Map(id -> { node, superseded })
   const listeners = new Set()
   let refresh = { seq: 0, reason: '' }
-  // Card asks: `pending` per card key ('sending' until the send settles, then
-  // 'asked' until a turn settles), and every accepted ask's message, identity
-  // and time. A message whose send failed keeps its identity, so tapping again
-  // lets the server recognise a send that did arrive.
+  // Per card key: 'sending' until the send settles, then 'asked' until a
+  // turn here settles. Presentation only: the message id is what dedupes.
   const pending = new Map()
-  let sent = []
-  const attempts = new Map() // message -> cid of its last unconfirmed send
   let askVersion = 0
   const notify = () => listeners.forEach(listener => listener())
   const changed = () => { askVersion += 1; notify() }
-  const recent = () => { sent = sent.filter(entry => now() - entry.at < ASK_WINDOW_MS); return sent }
   function recompute(key) {
     const group = groups.get(key)
     if (!group) return
@@ -85,33 +94,19 @@ export function createAppBlockChat(chatId, { send = null, now = () => Date.now()
       for (const [key, state] of pending) if (state === 'asked') { pending.delete(key); cleared = true }
       if (cleared) changed()
     },
-    /** What one card's ask control may do now with this exact message:
-     *  `ready`, `sending`, `asked` (in flight, or the same message was sent
-     *  recently) or `limited` (this chat's hourly limit is reached). */
-    askState(key, message) {
-      const state = pending.get(key)
-      if (state) return state
-      const list = recent()
-      if (list.some(entry => entry.message === message && now() - entry.at < ASK_REPEAT_MS)) return 'asked'
-      return list.length >= ASK_LIMIT ? 'limited' : 'ready'
-    },
-    /** Send one card's ask as an owner message, if that card is still the
-     *  newest of its key and askState allows it. Resolves to whether it was
-     *  sent. */
-    async ask(key, id, message) {
-      if (!send || typeof message !== 'string' || !message || !chat.latest(key, id)
-        || chat.askState(key, message) !== 'ready') return false
+    /** One card's ask control: `ready`, `sending` or `asked`. */
+    askState(key) { return pending.get(key) || 'ready' },
+    /** Send one card's ask (`message` with the id from `fingerprint` and
+     *  `refs`) as an owner message, if that card is still the newest of its
+     *  key and not already sending. Resolves to whether it was accepted. */
+    async ask(key, id, { message, fingerprint, refs }) {
+      if (!send || typeof message !== 'string' || !message || !chat.latest(key, id) || pending.get(key) === 'sending') return false
       pending.set(key, 'sending')
-      const cid = attempts.get(message) || (globalThis.crypto?.randomUUID?.() ?? `ask-${now()}-${Math.random().toString(36).slice(2)}`)
-      attempts.set(message, cid)
       changed()
       let ok = false
-      try { ok = (await send(message, { cid })) === true } catch { ok = false }
-      if (ok) {
-        attempts.delete(message)
-        sent = [...recent(), { message, at: now() }]
-        pending.set(key, 'asked')
-      } else pending.delete(key)
+      try { ok = (await send(message, { cid: await askCid(chatId, fingerprint, refs, now()) })) === true } catch { ok = false }
+      if (ok) pending.set(key, 'asked')
+      else pending.delete(key)
       changed()
       return ok
     },
@@ -133,8 +128,8 @@ const noSubscribe = () => () => {}
 /** This block's place in its chat: `{ context, refresh, newestNode, ref,
  *  askState, ask }`. `context` is `{ chatId, latest }`, or null outside a chat
  *  transcript (a preview, a test, a new chat with no id yet). `ref` is a
- *  callback ref for the block's section. `askState(message)` and
- *  `ask(message)` are this block's card ask (createAppBlockChat). */
+ *  callback ref for the block's section. `askState()` and `ask({message,
+ *  fingerprint, refs})` are this block's card ask (createAppBlockChat). */
 export function useAppBlockChat(key) {
   const chat = useContext(AppBlockChatContext)
   const [id] = useState(() => ({}))
@@ -151,8 +146,8 @@ export function useAppBlockChat(key) {
   useSyncExternalStore(chat ? chat.subscribe : noSubscribe, () => chat ? chat.askSnapshot() : 0, () => 0)
   const context = chat?.chatId ? { chatId: chat.chatId, latest } : null
   return { context, refresh, newestNode: () => chat?.newestNode(key) || null, ref: setNode,
-    askState: message => chat ? chat.askState(key, message) : 'limited',
-    ask: message => chat ? chat.ask(key, id, message) : Promise.resolve(false) }
+    askState: () => chat ? chat.askState(key) : 'ready',
+    ask: request => chat ? chat.ask(key, id, request) : Promise.resolve(false) }
 }
 
 export const appBlockChatKey = block => `${block.app}\n${block.intent}`

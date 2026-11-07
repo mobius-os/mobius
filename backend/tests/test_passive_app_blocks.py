@@ -142,6 +142,7 @@ def test_ask_is_its_own_reviewable_widening_whose_text_says_it_sends_a_message()
   assert diff_contracts(both, passive)["widens"] is False
   description = RUNTIME_CAPABILITY_DEFINITIONS[ASK]["description"]
   assert "press" in description and "your message" in description and "exact message" in description
+  assert "cannot choose the wording" in description
 
 
 def test_ask_needs_the_grant_the_applied_declaration_and_passive_admission(client, auth, db):

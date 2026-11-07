@@ -12,7 +12,7 @@ export const SESSION_LIMITS = Object.freeze({
   confirmationItems: 256, confirmationFacts: 8, confirmationText: 512,
   title: 120, items: 12, itemStatus: 40, itemNote: 200, itemLinks: 2, itemLinkLabel: 40,
   rows: 12, rowTitle: 120, rowMeta: 160,
-  askLabel: 24, askText: 400, askRefs: 12,
+  askRefs: 12,
 })
 const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'accent'])
 /** What this host draws from a session report beyond the original fields,
@@ -119,37 +119,33 @@ export function sessionRows(value, app) {
   return rows
 }
 
-/* An ask's words become an owner message, so they must read the same to the
-   owner and the agent: one plain line, with nothing a chat message renders or
-   hides (markup, links, mentions, the transcript's hidden blocks) and no
-   control or direction characters. */
-const ASK_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff<>[\]{}`*_~#|\\@]|:\/\/|www\./i
-const askText = (value, max) => typeof value === 'string' && value.length >= 1 && value.length <= max
-  && value === value.trim() && !value.startsWith('/') && !ASK_UNSAFE.test(value)
-// The host's own control words are never an ask's label.
-const ASK_RESERVED = /^(confirm|not now)$/i
+/* An ask (`ask-v1`) names what the app flagged; it carries no words of the
+   app's own. The host writes the whole owner message from a fixed template
+   and these references, so what is sent is predictable and identical for the
+   owner and the agent. */
+export const ASK_LABEL = 'Fix in chat'
 const ASK_REF_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-const ASK_REF_CODE = /^[a-z][a-z0-9_]{0,47}$/
+const ASK_REF_CODE = /^[a-z][a-z0-9_]{1,47}$/
 
-/** A request the owner can send to this chat's agent with one tap (`ask-v1`):
- *  `{label, text, refs: [{id, code}]}`. Like a confirmation it is never
- *  shortened: any invalid part rejects the whole ask (null). */
+/** `{refs: [{id, code}]}` with 1 to 12 references, or null. Any invalid
+ *  reference rejects the whole ask; repeats collapse. */
 export function sessionAsk(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || !askText(value.label, SESSION_LIMITS.askLabel) || ASK_RESERVED.test(value.label) || !askText(value.text, SESSION_LIMITS.askText)
     || !Array.isArray(value.refs) || value.refs.length < 1 || value.refs.length > SESSION_LIMITS.askRefs) return null
   const refs = []
   for (const ref of value.refs) {
-    if (!ASK_REF_ID.test(ref?.id ?? '') || !ASK_REF_CODE.test(ref?.code ?? '')) return null
+    if (typeof ref?.id !== 'string' || typeof ref.code !== 'string'
+      || !ASK_REF_ID.test(ref.id) || !ASK_REF_CODE.test(ref.code)) return null
     if (!refs.some(seen => seen.id === ref.id && seen.code === ref.code)) refs.push({ id: ref.id, code: ref.code })
   }
-  return { label: value.label, text: value.text, refs }
+  return { refs }
 }
 
-/** The owner message an ask sends: the app's text, then one host-written line
- *  per reference naming the app, the record and the reason. */
+/** The owner message an ask sends, written entirely by the host: one fixed
+ *  sentence naming the app, then one line per reference. */
 export function askMessage(app, ask) {
-  return [ask.text, '', ...ask.refs.map(ref => `\`${app} · ${ref.id} · ${ref.code}\``)].join('\n')
+  return [`Please fix what the ${app} card in this chat flagged:`, '',
+    ...ask.refs.map(ref => `\`${app} · ${ref.id} · ${ref.code}\``)].join('\n')
 }
 
 /** Parse one app-block-state message for this session, its known action keys

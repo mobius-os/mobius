@@ -311,18 +311,19 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "default_limits": {},
     "hard_limits": {},
   },
-  # Lets a passive chat block offer a host-drawn button that sends a fixed,
-  # plain request from the app into that chat as the owner's own message.
-  # Only for an app also admitted to chat.blocks.passive.
+  # Lets a passive chat block offer a host-drawn "Fix in chat" button that
+  # sends a host-written request naming what the app flagged into that chat
+  # as the owner's own message. Only for an app also admitted to
+  # chat.blocks.passive.
   "chat.blocks.ask": {
     "version": 1,
     "kind": "session",
     "title": "Ask this chat's agent from its chat blocks",
     "description": (
-      "Show a button on this app's chat blocks that, when you press it, "
-      "sends a short request from the app into that chat as your message, "
-      "so the agent can fix what the block shows. You see the exact message "
-      "in the chat."
+      "Show a Fix in chat button on this app's chat blocks. When you press "
+      "it, Möbius sends your message to that chat asking its agent to fix "
+      "the items the block names. The app cannot choose the wording, and you "
+      "see the exact message in the chat."
     ),
     "risk": "messages",
     "lifecycle": "passive_frame",

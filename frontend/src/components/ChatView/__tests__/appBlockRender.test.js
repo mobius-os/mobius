@@ -485,32 +485,30 @@ test('jumping to the newest block moves focus there, without animation for reduc
 })
 
 // ---- ask-v1: the host's ask replaces the block's controls.
-const fixAsk = { label: 'Fix in chat', text: 'Fix “Row”: upstream moved.', refs: [{ id: 'row-1', code: 'upstream_conflict' }] }
+const fixAsk = { refs: [{ id: 'row-1', code: 'upstream_conflict' }] }
 const askView = (status, fields = {}) => {
   const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
     action: { label: 'Send all', intent: 'send-batch:sel-1' }, items: [{ title: 'Saved', intent: 'open:a', action: { label: 'Send', intent: 'send:a' } }] }) })
   const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', label: 'Open Example', open: true },
-    { key: 'send:a', label: 'Send' }], rows: [{ title: 'Row', pill: 'Conflicts', tone: 'attention' }], ask: fixAsk, ...fields },
+    { key: 'send:a', label: 'Send' }], rows: [{ title: 'Row', pill: 'Conflicts', tone: 'attention' }], ask: { ...fixAsk, label: 'Show details' }, ...fields },
   's', new Set(['send-batch:sel-1', 'send:a']), new Set(['open:a']), 'example', { ask: true })
   return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {},
-    ask: status ? createElement(AskControl, { ask: state.ask, status, locked: false, onAsk() {} }) : null }))
+    ask: status ? createElement(AskControl, { status, locked: false, onAsk() {} }) : null }))
 }
 
-test('a drawn ask is the block\'s one action: the app\'s own controls are not drawn beside it', () => {
+test('a drawn ask is the block\'s one action, with the host\'s own label; the app\'s controls are not drawn beside it', () => {
   const html = askView('ready')
   assert.equal((html.match(/class="md-app-block__action/g) || []).length, 1)
   assert.match(html, /<footer><span class="md-app-block__controls"><button type="button" class="md-app-block__action is-ask"><svg[^>]*>.*<\/svg>Fix in chat<\/button><\/span><\/footer>/)
-  assert.doesNotMatch(html, /Open Example|>Send</)
+  assert.doesNotMatch(html, /Open Example|>Send<|Show details/)
   assert.match(html, /is-attention">Conflicts</)
   assert.match(askView(null), /Open Example/, 'without an ask the app action stays')
 })
 
 test('after a tap the ask waits, and says why only to assistive technology', () => {
   assert.match(askView('sending'), /is-ask" disabled="" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Asking…/)
-  const asked = askView('asked')
-  assert.match(asked, /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">Sent to this chat\./)
-  assert.match(askView('limited'), /disabled=""[^>]*>.*Asked<\/button><span[^>]*>This chat has had several/)
-  const locked = renderToStaticMarkup(createElement(AskControl, { ask: fixAsk, status: 'ready', locked: true, onAsk() {} }))
+  assert.match(askView('asked'), /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">The request is in this chat\./)
+  const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
 })
 
