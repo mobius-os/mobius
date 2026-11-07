@@ -1,8 +1,11 @@
 /* Signing in to or out of the Möbius account, from any surface, refreshes the provider status and model list the picker reads. */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { setTimeout as tick } from 'node:timers/promises'
 import { QueryClient } from '@tanstack/react-query'
-import { mobiusAccountQueries } from '../mobiusAccountQueries.js'
+import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { setShimQueryClient } from '../../lib/__tests__/react-query-shim.mjs'
+import { accountSummary, avatarKey, mobiusAccountQueries } from '../mobiusAccountQueries.js'
 import { authQueries, modelQueries } from '../queries.js'
 
 function seeded() {
@@ -34,4 +37,99 @@ test('a sign-out forgets the account deployments and refreshes provider status a
   assert.equal(queryClient.getQueryState(mobiusAccountQueries.agent.key), undefined)
   assert.equal(stale(queryClient, authQueries.provider.statuses.key), true)
   assert.equal(stale(queryClient, modelQueries.registry.key), true)
+})
+
+test('a handle saved from either the guide or Settings becomes the cached account', async t => {
+  const queryClient = seeded()
+  const sent = []
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    sent.push({ url: String(url), method: init.method, body: JSON.parse(init.body) })
+    return Response.json({
+      account_mode: 'linked',
+      account_unavailable: false,
+      profile: { user_id: 'u1', email: 'owner@example.test', handle: 'new_handle', avatar_url: null },
+      deployments: [{ id: 'local', name: 'Test Möbius', status: 'Active', url: 'https://test.example', current: true }],
+    })
+  })
+  await mobiusAccountQueries.saveHandle(queryClient, 'new_handle')
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].url, /\/api\/identity\/profile$/)
+  assert.equal(sent[0].method, 'PATCH')
+  assert.deepEqual(sent[0].body, { handle: 'new_handle' })
+  assert.equal(queryClient.getQueryData(mobiusAccountQueries.identity.key).profile.handle, 'new_handle')
+})
+
+const AVATAR_ADDRESS = 'https://photos.example/a/owner-1.png'
+const accountWithPhoto = (address = AVATAR_ADDRESS) => ({
+  account_mode: 'linked',
+  account_unavailable: false,
+  profile: { user_id: 'u1', email: 'owner@example.test', handle: 'owner', avatar_url: address },
+  deployments: [{ id: 'local', name: 'Test Möbius', status: 'Active', url: 'https://test.example', current: true }],
+})
+const savedSummary = queryClient => queryClient.getQueryData(['identity-summary'])
+
+test('the photo is keyed by a fingerprint of its address, which is never kept itself', () => {
+  const key = avatarKey(accountWithPhoto())
+  assert.match(key, /^avatar-[0-9a-z]+$/)
+  assert.equal(avatarKey(accountWithPhoto()), key)
+  assert.notEqual(avatarKey(accountWithPhoto('https://photos.example/a/owner-2.png')), key)
+  assert.equal(avatarKey(accountWithPhoto(null)), '')
+  assert.equal(avatarKey(null), '')
+  const summary = accountSummary(accountWithPhoto())
+  assert.equal(summary.avatar, key)
+  assert.doesNotMatch(JSON.stringify(summary), /photos\.example|owner@example|Test Möbius/)
+})
+
+test('a sign-out replaces the saved summary, so a reload never paints the old handle', async t => {
+  const queryClient = seeded()
+  t.mock.method(globalThis, 'fetch', async () => Response.json(accountWithPhoto()))
+  await mobiusAccountQueries.saveHandle(queryClient, 'owner')
+  assert.equal(savedSummary(queryClient).handle, 'owner')
+  // The account read that follows the sign-out fails.
+  t.mock.method(globalThis, 'fetch', async () => { throw new TypeError('offline') })
+  await mobiusAccountQueries.signedOut(queryClient)
+  assert.deepEqual(savedSummary(queryClient), { status: 'signed_out', mode: 'signed_out', handle: null, avatar: '' })
+})
+
+test('a handle saved from the guide also refreshes the saved Settings summary', async t => {
+  const queryClient = seeded()
+  t.mock.method(globalThis, 'fetch', async () => Response.json(accountWithPhoto()))
+  await mobiusAccountQueries.saveHandle(queryClient, 'owner')
+  assert.deepEqual(savedSummary(queryClient), {
+    status: 'linked', mode: 'linked', handle: 'owner', avatar: avatarKey(accountWithPhoto()),
+  })
+})
+
+test('any identity read refreshes the saved summary, with Settings not open', async t => {
+  const queryClient = seeded()
+  setShimQueryClient(queryClient)
+  t.mock.method(globalThis, 'fetch', async () => Response.json(accountWithPhoto()))
+  // The first-run guide reads the identity; nothing renders the Settings row.
+  const view = renderHook(() => mobiusAccountQueries.identity.useQuery())
+  t.after(() => view.unmount())
+  for (let i = 0; i < 50 && !savedSummary(queryClient); i += 1) await tick(5)
+  assert.equal(savedSummary(queryClient)?.handle, 'owner')
+  assert.equal(savedSummary(queryClient).avatar, avatarKey(accountWithPhoto()))
+})
+
+test('an account read still under way cannot overwrite a handle saved after it started', async t => {
+  const queryClient = seeded()
+  setShimQueryClient(queryClient)
+  let answerRead = null
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    if (init.method === 'PATCH') return Response.json({ ...accountWithPhoto(), profile: { ...accountWithPhoto().profile, handle: 'new_handle' } })
+    return new Promise((resolve, reject) => {
+      answerRead = () => resolve(Response.json({ ...accountWithPhoto(), profile: { ...accountWithPhoto().profile, handle: 'old_handle' } }))
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    })
+  })
+  const view = renderHook(() => mobiusAccountQueries.identity.useQuery())
+  t.after(() => view.unmount())
+  for (let i = 0; i < 50 && !answerRead; i += 1) await tick(5)
+  assert.ok(answerRead, 'the account read started')
+  await mobiusAccountQueries.saveHandle(queryClient, 'new_handle')
+  answerRead()
+  await tick(20)
+  assert.equal(queryClient.getQueryData(mobiusAccountQueries.identity.key).profile.handle, 'new_handle')
+  assert.equal(savedSummary(queryClient).handle, 'new_handle')
 })

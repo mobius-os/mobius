@@ -10,7 +10,7 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 // Render the real section with real React and a seeded account cache.
 const vite = await createSsrRenderServer()
 const { MobiusModelAccess } = await vite.ssrLoadModule('/src/components/SettingsView/MobiusAccountPage.jsx')
-const { mobiusAccountQueries } = await vite.ssrLoadModule('/src/hooks/mobiusAccountQueries.js')
+const { mobiusAccountQueries, useMobiusAccountSummary } = await vite.ssrLoadModule('/src/hooks/mobiusAccountQueries.js')
 const { settingsQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 const { beginSharedBrowserAuth } = await vite.ssrLoadModule('/src/api/client.js')
 const { default: SettingsView } = await vite.ssrLoadModule('/src/components/SettingsView/SettingsView.jsx')
@@ -75,7 +75,6 @@ function AccountReads() {
   const reads = {
     identity: mobiusAccountQueries.identity.useQuery(),
     agent: mobiusAccountQueries.agent.useQuery(),
-    visibility: mobiusAccountQueries.visibility.useQuery(),
     railway: mobiusAccountQueries.railway.useQuery(),
     // The Möbius credit meter Settings and the composer show.
     mobiusUsage: settingsQueries.providerUsage.useQuery('mobius'),
@@ -90,7 +89,7 @@ test('a ready trial is offered behind a confirmation, never activated on sight',
   const html = render([
     [mobiusAccountQueries.identity.key, linked],
     [mobiusAccountQueries.agent.key, { ...available, trial: { state: 'ready' }, balance: { available_units: 0 } }],
-    [mobiusAccountQueries.visibility.key, true],
+    [['auth', 'providers', 'status'], { mobius: { available: true } }],
   ])
   assert.match(html, />Activate…<\/button>/)
   assert.doesNotMatch(html, />Activate trial</)
@@ -99,7 +98,7 @@ test('a ready trial is offered behind a confirmation, never activated on sight',
 test('signed-out model access offers sign-in through the account page', () => {
   const html = render([
     [mobiusAccountQueries.identity.key, { account_mode: 'signed_out', account_unavailable: false, profile: null, deployments: [] }],
-    [mobiusAccountQueries.visibility.key, true],
+    [['auth', 'providers', 'status'], { mobius: { available: true } }],
   ], { onSignIn: () => {} })
   assert.match(html, />Sign in<\/button>/)
   assert.match(html, /Show Möbius models in pickers/)
@@ -110,13 +109,22 @@ test('used-up credit is called out instead of showing a zero balance', () => {
   const html = render([
     [mobiusAccountQueries.identity.key, linked],
     [mobiusAccountQueries.agent.key, { ...available, trial: { state: 'expired' }, balance: { available_units: 0 } }],
-    [mobiusAccountQueries.visibility.key, true],
+    [['auth', 'providers', 'status'], { mobius: { available: true } }],
   ])
   assert.match(html, /No credit/)
 })
 
+test('the picker switch shows provider status, so a change made elsewhere shows here too', () => {
+  const switchFor = available => render([
+    [mobiusAccountQueries.identity.key, linked],
+    [['auth', 'providers', 'status'], { mobius: { available } }],
+  ]).match(/<button[^>]*id="mobius-models-visible"[^>]*>/)[0]
+  assert.match(switchFor(true), /aria-checked="true"/)
+  assert.match(switchFor(false), /aria-checked="false"/)
+})
+
 test('while the account is still loading the section waits quietly instead of asking to sign in', () => {
-  const html = render([[mobiusAccountQueries.visibility.key, true]], { onSignIn: () => {} })
+  const html = render([[['auth', 'providers', 'status'], { mobius: { available: true } }]], { onSignIn: () => {} })
   assert.match(html, /aria-busy="true"/)
   assert.doesNotMatch(html, /Sign in/)
 })
@@ -142,6 +150,32 @@ test('Möbius models turned off read as turned off, not as a signed-out account'
   assert.match(signedOut, />Sign in</)
 })
 
+// The Accounts row's summary, on a reload before the identity read lands.
+const savedSummary = { status: 'linked', mode: 'linked', handle: 'test_handle', avatar: '' }
+function SummaryProbe() {
+  const { status, handle } = useMobiusAccountSummary()
+  return `${status}:${handle}`
+}
+const summaryAfterReload = () => render([[['identity-summary'], savedSummary]], {}, SummaryProbe)
+
+test('after a reload the Accounts row paints the saved handle before the account is read', () => {
+  assert.equal(summaryAfterReload(), 'linked:test_handle')
+})
+
+test('a failed account read reports the account unavailable, not its saved state', () => {
+  // retryOnMount off: report the settled failure rather than a fresh retry.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false, staleTime: Infinity } } })
+  try {
+    client.setQueryData(['identity-summary'], savedSummary)
+    client.getQueryCache().build(client, { queryKey: mobiusAccountQueries.identity.key })
+      .setState({ status: 'error', error: new Error('down'), fetchStatus: 'idle' })
+    const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(SummaryProbe)))
+    assert.equal(html, 'unavailable:test_handle')
+  } finally {
+    client.clear()
+  }
+})
+
 function settingsHtml() {
   return render([
     [['settings'], { background_agents: [{ provider: 'mobius', enabled: true }] }],
@@ -154,15 +188,21 @@ function settingsHtml() {
 test('a shared-browser guest never reads the owner’s Möbius account or credit', () => {
   assert.match(settingsHtml(), /id="settings-accounts-title"/)
   assert.deepEqual(accountReads(), {
-    identity: 'fetching', agent: 'fetching', visibility: 'fetching', railway: 'fetching', mobiusUsage: 'fetching', claudeUsage: 'fetching',
+    identity: 'fetching', agent: 'fetching', railway: 'fetching', mobiusUsage: 'fetching', claudeUsage: 'fetching',
   })
   beginSharedBrowserAuth()
   // A guest's own provider usage still loads; the owner's Möbius credit never does.
   assert.deepEqual(accountReads(), {
-    identity: 'idle', agent: 'idle', visibility: 'idle', railway: 'idle', mobiusUsage: 'idle', claudeUsage: 'fetching',
+    identity: 'idle', agent: 'idle', railway: 'idle', mobiusUsage: 'idle', claudeUsage: 'fetching',
   })
   // Nor are the owner's accounts (Möbius and GitHub) shown to a guest.
   const guestHtml = settingsHtml()
   assert.doesNotMatch(guestHtml, /id="settings-accounts-title"/)
   assert.match(guestHtml, /id="settings-ai-title"/)
+  // Nor does a guest see a saved summary of the owner's account.
+  assert.equal(summaryAfterReload(), 'loading:null')
+  // Only the owner can sign in to the account, so a guest is never asked to.
+  const guestRow = mobiusProviderRow({ configured: false, available: true })
+  assert.match(guestRow, /Not signed in/)
+  assert.doesNotMatch(guestRow, />Sign in</)
 })

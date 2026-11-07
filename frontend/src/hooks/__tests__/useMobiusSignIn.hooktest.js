@@ -23,6 +23,23 @@ test('a confirmed sign-in hands the linked identity to the page', async t => {
   assert.equal(view.result.current.error, '')
 })
 
+test('a sign-in confirmed after the page closed still reaches the account cache', async t => {
+  const signedIn = []
+  let approve
+  const view = renderHook(props => useMobiusSignIn(props), {
+    onSignedIn: next => signedIn.push(next),
+    link: ({ onCompleting }) => new Promise(resolve => {
+      approve = () => { onCompleting(); resolve({ status: 'linked', identity }) }
+    }),
+  })
+  view.result.current.begin('google')
+  // The owner closes the guide or leaves Settings during "Finishing sign-in…".
+  view.unmount()
+  approve()
+  await tick(5)
+  assert.deepEqual(signedIn, [identity])
+})
+
 test('an unconfirmed completion offers one in-memory retry that finishes the link', async t => {
   const signedIn = []
   const completions = []

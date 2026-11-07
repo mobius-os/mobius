@@ -4,13 +4,12 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
-import useAuthedImageUrl, { forgetAuthedImage } from '../../hooks/useAuthedImageUrl.js'
-import { AVATAR_PATH, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
+import { AVATAR_PATH, avatarKey, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
 import {
   AVATAR_TYPES,
   HANDLE_PATTERN,
   avatarProblem,
-  mobiusAccessRequest,
   profileInitial,
 } from '../../lib/mobiusAccount.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
@@ -31,21 +30,15 @@ export function useAccountProfile() {
   const [claimedHere, setClaimedHere] = useState(false)
   const [editing, setEditing] = useState(false)
   // The same cached photo Settings shows; initials stand in until it loads.
-  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, identity?.profile?.avatar_url || '').url
-  const setIdentity = next => queryClient.setQueryData(mobiusAccountQueries.identity.key, next)
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, avatarKey(identity)).url
 
   async function claim(handle) {
-    const next = await mobiusAccessRequest('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }) })
-    if (!identity?.profile?.handle) setClaimedHere(true)
-    setIdentity(next)
-  }
-  async function uploadAvatar(file) {
-    const body = new FormData()
-    body.append('avatar', file)
-    const next = await mobiusAccessRequest('/identity/avatar', { method: 'POST', body })
-    // The account may keep the same avatar address for new bytes.
-    forgetAuthedImage(AVATAR_PATH)
-    setIdentity(next)
+    const first = !identity?.profile?.handle
+    await mobiusAccountQueries.saveHandle(queryClient, handle)
+    // Marked only once the handle is saved, and before the query notifies its
+    // readers (TanStack batches that to a later task), so the same render that
+    // shows the new handle knows it was claimed here, not brought back.
+    if (first) setClaimedHere(true)
   }
   const returning = returningHandle({ handle: identity?.profile?.handle, claimedHere, editing })
   return {
@@ -58,7 +51,7 @@ export function useAccountProfile() {
     setEditing,
     returning,
     claim,
-    uploadAvatar,
+    uploadAvatar: file => mobiusAccountQueries.uploadAvatar(queryClient, file),
     signedIn: next => mobiusAccountQueries.signedIn(queryClient, next),
   }
 }

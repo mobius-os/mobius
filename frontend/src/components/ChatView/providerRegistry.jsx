@@ -1,5 +1,5 @@
 /** Provider registry — the product-facing metadata and ordering shared by
- *  the chat model picker (ChatSettingsPanel), Manage models, SettingsView, and
+ *  the chat model picker (ChatSettingsPanel), SettingsView, and
  *  the background-agent defaults. It lives in its own light module (no heavy
  *  panel dependencies) so every surface reads the same source of truth and can
  *  be exercised in isolation. */
@@ -119,7 +119,7 @@ export const PROVIDER_INFO = {
   },
 }
 // Keep the app-owned Möbius subscription after the user's connected coding
-// subscriptions. This order is shared by the chat picker, Manage models, and
+// subscriptions. This order is shared by the chat picker and the
 // background-agent defaults so those surfaces cannot drift.
 export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
 

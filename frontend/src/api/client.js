@@ -1611,12 +1611,7 @@ export const api = {
     }),
   },
   models: {
-    // Pass refresh=true to bypass the 5-minute server cache. The
-    // manage-models modal's refresh button uses this; everything
-    // else rides the cache.
-    list: ({ refresh = false } = {}) => apiFetch(
-      `/models${refresh ? '?refresh=true' : ''}`,
-    ),
+    list: () => apiFetch('/models'),
   },
   owner: {
     modelPrefs: {

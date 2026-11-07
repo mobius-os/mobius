@@ -1,14 +1,16 @@
 /* The instance's GitHub account row in Settings › Accounts: avatar and login, then connect with a device code, add or remove private-repo access, or disconnect. */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
 import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
 import {
   cancelGithubSignIn,
   disconnectGithub,
-  fetchGithubStatus,
+  githubStatus,
   hasFullPrAccess,
   hasPrivateRepoAccess,
   startGithubSignIn,
+  unknownGithubStatus,
   waitForGithubSignIn,
 } from '../../lib/githubConnection.js'
 
@@ -42,13 +44,14 @@ function SignInCode({ attempt, retrying, cancelling, unconfirmed, message, onCan
   )
 }
 
-// The last confirmed connection for this page load. Reopening Settings paints
-// it (and its cached avatar) at once while a fresh status read confirms it; a
-// sign-in attempt is never carried over, only the settled account state.
-let lastConfirmed = null
-
 export default function GithubConnection({ active = true, focusRef, attention = false, expanded, onToggle, onExpand }) {
-  const [conn, setConn] = useState(() => lastConfirmed || { state: 'checking' })
+  const queryClient = useQueryClient()
+  // The last confirmed account paints at once, from the persisted cache after
+  // a reload, while the read Settings starts on opening confirms it. A read
+  // that fails is shown as such rather than as that older account.
+  const account = useQuery(githubStatus.options).data
+  const [unreadable, setUnreadable] = useState(null)
+  const conn = unreadable || account || { state: 'checking' }
   // null, 'starting', or the attempt being waited on.
   const [signIn, setSignIn] = useState(null)
   const [retrying, setRetrying] = useState(false)
@@ -60,14 +63,18 @@ export default function GithubConnection({ active = true, focusRef, attention = 
   const waitRef = useRef(null)
   const permissionIntentRef = useRef(null)
 
-  const refresh = useCallback(async (options = {}) => {
-    const next = await fetchGithubStatus(options)
-    if (next.state === 'connected' || next.state === 'disconnected') {
-      lastConfirmed = { ...next, attempt: null }
+  // Resolves the newest status, or null when an account change superseded this read.
+  const refresh = useCallback(async () => {
+    try {
+      const next = await githubStatus.refresh(queryClient)
+      if (next) setUnreadable(null)
+      return next
+    } catch (error) {
+      const next = unknownGithubStatus(error)
+      setUnreadable(next)
+      return next
     }
-    if (!options.signal?.aborted) setConn(next)
-    return next
-  }, [])
+  }, [queryClient])
 
   useEffect(() => () => waitRef.current?.abort(), [])
 
@@ -90,7 +97,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     const next = await refresh()
     if (result.status === 'complete') {
       setIncludePrivate(false)
-      const intent = permissionIntentRef.current
+      const intent = next ? permissionIntentRef.current : null
       if (intent === 'remove-private' && hasPrivateRepoAccess(next.scopes)) {
         setMessage('GitHub still granted private-repository access. Revoke this app on GitHub before reconnecting with public access only.')
       } else if (intent === 'remove-private' && next.state === 'connected') {
@@ -126,7 +133,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     if (!active) return
     let disposed = false
     void refresh().then(next => {
-      if (!disposed && next.attempt && !waitRef.current) void waitFor(next.attempt)
+      if (!disposed && next?.attempt && !waitRef.current) void waitFor(next.attempt)
     })
     return () => { disposed = true }
   }, [active, refresh, waitFor])
@@ -140,27 +147,28 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     setRetrying(false)
     setMessage('')
     try {
-      if (attemptId) await cancelGithubSignIn(attemptId, { signal: controller.signal })
+      if (attemptId) await githubStatus.change(queryClient, () => cancelGithubSignIn(attemptId, { signal: controller.signal }))
     } catch (error) {
       if (controller.signal.aborted) return
       setMessage(error.message)
     }
-    const next = await refresh({ signal: controller.signal })
+    const next = await refresh()
     if (controller.signal.aborted) return
     setBusy(false)
-    if (next.attempt) {
+    if (next?.attempt) {
       void waitFor(next.attempt, controller)
     } else {
       waitRef.current = null
-      if (next.state !== 'unknown') setSignIn(null)
+      // Null: an account change started since, and the status is read again after it.
+      if (next?.state !== 'unknown') setSignIn(null)
     }
-  }, [signIn, refresh, waitFor])
+  }, [signIn, refresh, waitFor, queryClient])
 
   const disconnect = useCallback(async () => {
     setBusy(true)
     setMessage('')
     try {
-      await disconnectGithub()
+      await githubStatus.change(queryClient, disconnectGithub)
     } catch (error) {
       setMessage(error.message)
     }
@@ -168,7 +176,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     await refresh()
     setBusy(false)
     setConfirmDisconnect(false)
-  }, [refresh])
+  }, [refresh, queryClient])
 
   const connected = conn.state === 'connected'
   const privateAccess = connected && hasPrivateRepoAccess(conn.scopes)
@@ -187,7 +195,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     panel = (
       <div className="settings-github__panel">
         <p className="settings-item-panel__text">{conn.message}</p>
-        <div className="settings-actions">{button('Check again', refresh)}</div>
+        <div className="settings-actions">{button('Check again', () => { void refresh() })}</div>
       </div>
     )
   } else if (!connected) {
