@@ -1077,6 +1077,9 @@ def request_actor(db, principal, caller=None) -> dict:
     "delegated": principal.delegation_id is not None,
     "access": access,
   }
+  if principal.delegation_id is not None:
+    actor.update(delegation_id=principal.delegation_id,
+                 delegation_chat=principal.chat_id)
   if principal.browser is not None:
     actor.update(browser_grant_id=principal.browser.grant_id,
                  browser_session_id=principal.browser.session_id)
@@ -1118,7 +1121,11 @@ def runs_provider_clis(service: dict) -> bool:
   return service.get("access", "self") != "public"
 
 
-def service_environment(app, owner, service: dict, *, public: bool, browser: BrowserLineage | None = None) -> dict[str, str]:
+def service_environment(
+  app, owner, service: dict, *, public: bool,
+  browser: BrowserLineage | None = None,
+  delegation_id: str | None = None, delegation_chat: str | None = None,
+) -> dict[str, str]:
   """The environment of one invocation; its APP_TOKEN's authority follows the caller.
 
   A public invocation acts for an anonymous visitor, so its token has the narrow
@@ -1147,6 +1154,8 @@ def service_environment(app, owner, service: dict, *, public: bool, browser: Bro
       expires_delta=timedelta(minutes=5),
       service="public" if public else "private",
       browser=browser,
+      delegation_id=delegation_id,
+      delegation_chat=delegation_chat,
     ),
   })
   return env
@@ -1402,7 +1411,8 @@ async def _invoke_admitted_service(
   # waiting for that app's serialized request. Count only executable requests.
   # Queued requests already own an accepted revision. Pin before admission so
   # pruning or a migration drain cannot overlook a request waiting to run.
-  browser = _actor_browser(request_envelope.get("actor") or {})
+  actor = request_envelope.get("actor") or {}
+  browser = _actor_browser(actor)
   _validate_browser_call(owner, browser)
   grant_id = browser.grant_id if browser is not None else None
   pin = hold_runtime(app.id)
@@ -1428,6 +1438,10 @@ async def _invoke_admitted_service(
         service_environment(
           app, owner, service, public=public,
           browser=browser,
+          # Like browser provenance, delegation belongs to the authenticated
+          # actor, never the app's request body or its current access mode.
+          delegation_id=actor.get("delegation_id"),
+          delegation_chat=actor.get("delegation_chat"),
         ), python_env,
       )
       outcome = None
@@ -1510,8 +1524,8 @@ async def _invoke_admitted_service(
   return status, response.get("body"), headers, None
 
 
-async def invoke_policy(app, owner, path: str, body: dict) -> dict:
-  """Invoke one authenticated app-owned policy and normalize its error shape."""
+async def invoke_policy(app, owner, path: str, body: dict, *, actor: dict | None = None) -> dict:
+  """Invoke platform policy, retaining any initiating caller's provenance."""
   status, result, _headers, media_type = await invoke_service(app, owner, {
     "schema": 1,
     "method": "POST",
@@ -1520,7 +1534,7 @@ async def invoke_policy(app, owner, path: str, body: dict) -> dict:
     "headers": {},
     "body": body,
     "public": False,
-    "actor": {"scope": "platform"},
+    "actor": {**(actor or {}), "scope": "platform"},
   })
   if media_type is not None:
     raise HTTPException(502, "App policy returned binary data.")
