@@ -4752,6 +4752,27 @@ function makeVisibility({ win, doc } = {}) {
 }
 
 //#endregion
+//#region src/runtime/activity.js
+function makeActivity({ win } = {}) {
+	const listeners = /* @__PURE__ */ new Set();
+	if (win && win.parent && win.parent !== win) win.addEventListener("message", (e) => {
+		if (e.source !== win.parent) return;
+		const msg = e.data;
+		if (!msg || msg.type !== "moebius:app-activity") return;
+		for (const cb of [...listeners]) try {
+			cb();
+		} catch (err) {}
+	});
+	return { onActivity(cb) {
+		if (typeof cb !== "function") return () => {};
+		listeners.add(cb);
+		return () => {
+			listeners.delete(cb);
+		};
+	} };
+}
+
+//#endregion
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
@@ -4784,8 +4805,10 @@ const _visibility = typeof window !== "undefined" ? makeVisibility({
 	win: window,
 	doc: typeof document !== "undefined" ? document : null
 }) : makeVisibility();
+const _activity = makeActivity({ win: typeof window !== "undefined" ? window : null });
 let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({
+	appActivity: true,
 	authoritativeVersionedReads: true,
 	frameVisibility: true,
 	idleDocument: true,
@@ -4850,6 +4873,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 			return _visibility.visible;
 		},
 		onVisibilityChange: _visibility.onVisibilityChange,
+		onActivity: _activity.onActivity,
 		storage,
 		DurableWriteError,
 		durableWrite: storage.durableWrite,
@@ -4891,4 +4915,4 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 }
 
 //#endregion
-export { CapabilityError, DurableWriteError, appChatMetadataBody, conflictContextItems, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, makeVisibility, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
+export { CapabilityError, DurableWriteError, appChatMetadataBody, conflictContextItems, createUseDocument, init, makeActivity, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, makeVisibility, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };

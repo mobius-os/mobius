@@ -231,6 +231,7 @@ import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
+import { publishAppActivity } from '../../lib/appActivitySignal.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -3251,7 +3252,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       void settingsQueries.providerUsage.reset(queryClient, ev.provider)
     } else if (ev.type === 'app_activity') {
       // Versioned notification activity updates one cached app. Badge changes
-      // and unknown markers still require the authoritative list.
+      // and unknown markers still require the authoritative list. The open app
+      // hears it too, so it refreshes with the pill.
+      publishAppActivity(ev.appId)
       if (!applyAppActivityEvent(
         queryClient, appQueries.keys.all, ev, appActivitySeenThroughRef.current,
       )) void invalidateShellListCache('apps').then(refreshApps)
