@@ -58,7 +58,7 @@ def observation(client, owner_token, monkeypatch):
   def remote(repo, *args, **kwargs):
     assert args[0] == "api" and len(args) == 2, args
     calls.append(args[1])
-    if "/git/ref/heads/" in args[1]: value = {"object": {"sha": "a" * 40}}
+    if "/git/ref/heads/" in args[1]: value = {"object": {"sha": live["head"]["sha"]}}
     elif "/pulls?" in args[1]: value = [live]
     elif args[1].endswith("/pulls/7"): value = live
     elif args[1].endswith("/labels"): value = []
@@ -125,23 +125,35 @@ def test_invalid_or_replaced_claim_never_settles(client, observation, damage):
   assert f["path"].read_bytes() == before and not f["calls"]
 
 
-@pytest.mark.parametrize("field", ["head", "base", "text", "labels"])
-def test_partial_and_conflicting_remote_facts_keep_lock_and_receipt(client, observation, field):
+@pytest.mark.parametrize("field", ["head", "base", "text"])
+def test_different_remote_head_text_or_base_returns_changed(client, observation, field):
   f = observation
   if field == "head": f["live"]["head"]["sha"] = "b" * 40
   elif field == "base": f["live"]["base"]["ref"] = "old-base"
-  elif field == "text": f["live"]["body"] = "not reviewed"
-  else:
-    receipt = json.loads(receipt_path(f).read_text())
-    receipt["claim_input"]["plan"]["labels"] = ["reviewed"]
-    receipt["claim_sha256"] = routes._personal_publication_input_sha256(receipt["claim_input"])
-    receipt_path(f).write_text(json.dumps(routes._signed_personal_attempt(receipt)))
-    record = json.loads(f["path"].read_text()); record["plan"]["labels"] = ["reviewed"]
-    routes._write_record(f["path"], record)
+  else: f["live"]["body"] = "not reviewed"
   before = f["path"].read_bytes()
   response = client.post(f["url"], headers=f["headers"])
-  assert response.json()["outcome"] in {"pending", "changed"}, response.text
+  assert response.json()["outcome"] == "changed", response.text
   assert f["path"].read_bytes() == before and receipt_path(f).exists()
+
+
+def test_missing_labels_never_strand_an_exact_pr(client, observation):
+  f = observation
+  receipt = json.loads(receipt_path(f).read_text())
+  receipt["claim_input"]["plan"]["labels"] = ["reviewed"]
+  receipt["claim_sha256"] = routes._personal_publication_input_sha256(receipt["claim_input"])
+  receipt_path(f).write_text(json.dumps(routes._signed_personal_attempt(receipt)))
+  record = json.loads(f["path"].read_text()); record["plan"]["labels"] = ["reviewed"]
+  routes._write_record(f["path"], record)
+  response = client.post(f["url"], headers=f["headers"])
+  assert response.json()["outcome"] == "settled", response.text
+  saved = response.json()["records"][0]
+  assert saved["status"] == "draft" and saved["number"] == 7
+  assert saved["last_submit_labels_requested"] == ["reviewed"]
+  assert saved["last_submit_labels_applied"] == []
+  assert saved["last_submit_labels_missing"] == ["reviewed"]
+  assert saved["last_submit_labels_note"]
+  assert not receipt_path(f).exists()
 
 
 @pytest.mark.parametrize("change", ["record", "receipt", "nonce", "actor"])
@@ -568,6 +580,65 @@ def test_unapplied_journal_reproves_same_attempt_and_preserves_local_edits(clien
 
 
 
+def test_branch_only_new_pr_stays_pending_and_is_never_created(client, observation, monkeypatch):
+  f = observation
+  remote = github_contribution_git._gh
+  def no_pr(repo, *args, **kwargs):
+    if "/pulls?" in args[1]:
+      return subprocess.CompletedProcess(args, 0, "[]", "")
+    return remote(repo, *args, **kwargs)
+  monkeypatch.setattr(github_contribution_git, "_gh", no_pr)
+  before = f["path"].read_bytes()
+  receipt = receipt_path(f).read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "pending" and body["effect"] == "branch_published", body
+  assert body["attempt"] == {"action": "submit", "phase": "pr_ambiguous", "effect": "create_pr"}
+  # A pushed branch is never a sent PR: nothing is written, the signed claim
+  # stays with the original Send, and the fixture forbids every create path.
+  assert f["path"].read_bytes() == before and receipt_path(f).read_bytes() == receipt
+
+
+@pytest.mark.parametrize("reply", ["[]", "{bad", "null", '{"message": "Server Error"}'])
+def test_empty_or_malformed_reads_never_unlock(client, observation, monkeypatch, reply):
+  f = observation
+  def unreadable(repo, *args, **kwargs):
+    f["calls"].append(args[1])
+    code = 0 if "/pulls?" in args[1] else 1
+    return subprocess.CompletedProcess(args, code, reply if code == 0 else "", "HTTP 502")
+  monkeypatch.setattr(github_contribution_git, "_gh", unreadable)
+  before = f["path"].read_bytes()
+  receipt = receipt_path(f).read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "unavailable", body
+  assert f["path"].read_bytes() == before and receipt_path(f).read_bytes() == receipt
+  # The retained receipt still owns the record: a fresh Send cannot start over.
+  assert routes._read_personal_attempt(f["path"], app_id=f["app_id"], record_id="observe-me")
+
+
+def test_forged_settlement_journal_cannot_write_the_ledger(client, observation):
+  f = observation
+  receipt = json.loads(receipt_path(f).read_text())
+  forged = {**f["record"], "status": "merged", "number": 1, "url": "https://github.com/owner/demo/pull/1"}
+  receipt["observation_settlement"] = {"before": f["record"], "after": forged}
+  receipt_path(f).write_text(json.dumps(receipt))  # not signed with the server key
+  before = f["path"].read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "unavailable", body
+  assert f["path"].read_bytes() == before and receipt_path(f).exists()
+  routes._assert_no_observation_settlement(f["app_id"], ["observe-me"])  # forged journal grants nothing
+
+
+def test_settled_observation_logs_one_content_free_event(client, observation, monkeypatch):
+  f = observation
+  seen = []
+  monkeypatch.setattr(routes.activity, "log_event", lambda ev, **fields: seen.append({"ev": ev, **fields}))
+  assert client.post(f["url"], headers=f["headers"]).json()["outcome"] == "settled"
+  assert client.post(f["url"], headers=f["headers"]).json()["outcome"] != "settled"
+  [event] = seen
+  assert event["action"] == "observe" and event["certainty"] == "effect"
+  assert set(event) == {"ev", "app_id", "attempt_id", "action", "phase", "code", "status", "certainty"}
+
+
 @pytest.mark.parametrize("phase", ["pr_ambiguous", "complete"])
 def test_lost_screenshot_create_reply_settles_and_keeps_its_asset_witness(client, observation, phase):
   f = observation
@@ -603,6 +674,39 @@ def test_lost_screenshot_create_reply_settles_and_keeps_its_asset_witness(client
   saved = body["records"][0]
   assert saved["number"] == 7 and saved["last_submit_screenshots"] == witness
   assert not receipt_path(f).exists()
+
+
+def test_push_only_new_pr_receipt_is_pending_and_keeps_the_ledger(client, observation, monkeypatch):
+  f = observation
+  claim = copy.deepcopy(f["record"])
+  for key in ("last_submit_error", "last_submit_error_code", "last_submit_error_detail"):
+    claim.pop(key)
+  claim["status"] = "submitting"
+  routes._write_record(f["path"], claim)
+  owner = routes._PersonalAttemptOwner(app_id=f["app_id"], record_id=claim["id"], record_path=f["path"],
+    claimed=claim, action_input={"action": "submit", "publication_stage": "draft"})
+  # The push succeeded and the process died before writing its create intent.
+  owner.event("branch_published", {k: v for k, v in f["effect"].items() if k not in {"title", "body"}}
+              | {"action": "push"}, f["patch"])
+  routes._write_record(f["path"], {**claim, **f["patch"], "status": "prepared"})
+  remote = github_contribution_git._gh
+  monkeypatch.setattr(github_contribution_git, "_gh", lambda repo, *args, **kw: (
+    subprocess.CompletedProcess(args, 0, "[]", "") if "/pulls?" in args[1] else remote(repo, *args, **kw)))
+  before, receipt = f["path"].read_bytes(), receipt_path(f).read_bytes()
+  body = client.post(f["url"], headers=f["headers"]).json()
+  assert body["outcome"] == "pending" and body["effect"] == "branch_published", body
+  assert body["attempt"] == {"action": "submit", "phase": "branch_published", "effect": "push"}
+  assert f["path"].read_bytes() == before and receipt_path(f).read_bytes() == receipt
+
+
+def test_resumed_local_settlement_logs_its_outcome(client, observation, monkeypatch):
+  f = observation
+  seen = []
+  monkeypatch.setattr(routes.activity, "log_event", lambda ev, **fields: seen.append(fields))
+  _crash_after_journal(client, f, monkeypatch)
+  assert seen == []
+  assert client.post(f["url"], headers=f["headers"]).json()["outcome"] == "settled"
+  assert [(e["action"], e["certainty"]) for e in seen] == [("observe", "effect")]
 
 
 @pytest.mark.parametrize("action", ["submit", "autopilot_update"])

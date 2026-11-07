@@ -13380,7 +13380,7 @@ def test_existing_pr_successor_preserves_claim_after_unexpected_failure(
     json={},
   )
 
-  assert response.status_code == 500, response.text
+  assert response.status_code == 503, response.text
   assert response.json()["detail"]["message"] == (
     "GitHub did not confirm whether this reviewed successor update completed."
   )
