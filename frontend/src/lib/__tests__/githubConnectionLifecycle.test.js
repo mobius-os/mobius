@@ -294,3 +294,97 @@ test('unmount during cancellation owns reconciliation and cannot resume a hidden
   assert.equal(cancelSignal?.aborted, true)
   assert.equal(polls, 1, 'only the original visible poll may run')
 })
+
+// Status reads answered by hand, in any order.
+function controlledStatus() {
+  const reads = []
+  return {
+    reads,
+    status: () => new Promise(resolve => { reads.push(resolve) }),
+  }
+}
+const connectedBody = login => ({ connected: true, login, scopes: ['public_repo', 'workflow'], device_flow_available: true })
+const disconnectedBody = { connected: false, device_flow_available: true }
+
+for (const [older, newer] of [['disconnected', 'connected'], ['connected', 'disconnected']]) {
+  test(`a read left over from before a provider page opened cannot replace the newer ${newer} status`, async t => {
+    const original = api.github
+    t.after(() => { api.github = original })
+    const { reads, status } = controlledStatus()
+    api.github = { status }
+    const body = state => json(state === 'connected' ? connectedBody('octo-test') : disconnectedBody)
+    // Settings starts a read, then a provider page unmounts it mid-read.
+    const first = renderConnection()
+    first.unmount()
+    // Back on the overview a newer read starts and answers first.
+    const second = renderConnection()
+    t.after(() => second.unmount())
+    assert.equal(reads.length, 2)
+    reads[1](body(newer))
+    await tick(20)
+    reads[0](body(older))
+    await tick(20)
+    second.rerender()
+    assert.equal(queryClient.getQueryData(githubStatus.key).state, newer)
+    if (newer === 'connected') {
+      assert.match(JSON.stringify(second.result.current), /"children":"octo-test"/)
+    } else {
+      assert.match(JSON.stringify(second.result.current), /Not connected/)
+      assert.ok(!findButton(second.result.current, 'Disconnect…'))
+    }
+  })
+}
+
+test('a read started before a disconnect never publishes over it, before or after its own status read', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  const { reads, status } = controlledStatus()
+  let finishDisconnect
+  api.github = {
+    status,
+    disconnect: () => new Promise(resolve => { finishDisconnect = () => resolve(json({})) }),
+  }
+  queryClient.setQueryData(githubStatus.key, { state: 'connected', login: 'octo-test', scopes: ['public_repo', 'workflow'], signInAvailable: true })
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  assert.equal(reads.length, 1, 'opening Settings reads the status')
+  findButton(view.result.current, 'Disconnect…').props.onClick()
+  const disconnecting = findButton(view.result.current, 'Disconnect').props.onClick()
+  // The opening read answers while the disconnect is under way.
+  reads[0](json(connectedBody('stale-login')))
+  await tick(20)
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo-test')
+  finishDisconnect()
+  await tick(20)
+  assert.equal(reads.length, 2, 'the disconnect reads the status it left')
+  reads[1](json(disconnectedBody))
+  await disconnecting
+  view.rerender()
+  assert.equal(queryClient.getQueryData(githubStatus.key).state, 'disconnected')
+  assert.match(JSON.stringify(view.result.current), /Not connected/)
+})
+
+test('a superseded read that fails reports nothing, and the newer answer stands', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let calls = 0
+  let failOld
+  api.github = {
+    status: () => {
+      calls += 1
+      return calls === 1
+        ? new Promise((_resolve, reject) => { failOld = () => reject(new Error('offline')) })
+        : Promise.resolve(json(connectedBody('octo-test')))
+    },
+  }
+  const first = renderConnection()
+  first.unmount()
+  const second = renderConnection()
+  t.after(() => second.unmount())
+  await tick(20)
+  failOld()
+  await tick(20)
+  second.rerender()
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo-test')
+  assert.doesNotMatch(JSON.stringify(second.result.current), /offline/)
+})

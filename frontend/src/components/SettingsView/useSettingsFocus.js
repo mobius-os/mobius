@@ -22,21 +22,23 @@ function destination(section, modelsProvider) {
  * frame) cannot leave the open page waiting for a section it no longer shows.
  */
 export function useSettingsFocus({
-  focusTarget, providerReady, modelsProvider = null, detailPage, setDetailPage,
+  focusTarget, providerReady, providersFailed = false, modelsProvider = null, detailPage, setDetailPage,
   setupFocusRefs, setAttentionSection,
 }) {
   // { request, page, anchor } for the request being navigated.
   const taken = useRef(null)
   const handled = useRef(null)
   const section = focusTarget?.section
-  // `models` needs the provider list to pick its page.
-  const waiting = section === 'models' && !providerReady
+  // `models` needs the provider list to pick its page. When it cannot be read
+  // (nothing cached and the read failed) the request lands on AI providers,
+  // where that failure and its Retry show, rather than waiting for ever.
+  const waiting = section === 'models' && !providerReady && !providersFailed
 
   useEffect(() => {
     if (!section || waiting || taken.current?.request === focusTarget) return
-    taken.current = { request: focusTarget, ...destination(section, modelsProvider) }
+    taken.current = { request: focusTarget, ...destination(section, providerReady ? modelsProvider : null) }
     setDetailPage(taken.current.page)
-  }, [focusTarget, section, waiting, modelsProvider, setDetailPage])
+  }, [focusTarget, section, waiting, providerReady, modelsProvider, setDetailPage])
 
   useEffect(() => {
     const target = taken.current
@@ -59,5 +61,5 @@ export function useSettingsFocus({
       cancelAnimationFrame(raf)
       if (clearTimer) clearTimeout(clearTimer)
     }
-  }, [focusTarget, providerReady, detailPage, setupFocusRefs, setAttentionSection])
+  }, [focusTarget, waiting, providerReady, detailPage, setupFocusRefs, setAttentionSection])
 }

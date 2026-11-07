@@ -63,10 +63,11 @@ export default function GithubConnection({ active = true, focusRef, attention = 
   const waitRef = useRef(null)
   const permissionIntentRef = useRef(null)
 
+  // Resolves the status, or null when a newer read or change superseded this one.
   const refresh = useCallback(async () => {
     try {
       const next = await githubStatus.refresh(queryClient)
-      setUnreadable(null)
+      if (next) setUnreadable(null)
       return next
     } catch (error) {
       const next = unknownGithubStatus(error)
@@ -96,7 +97,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     const next = await refresh()
     if (result.status === 'complete') {
       setIncludePrivate(false)
-      const intent = permissionIntentRef.current
+      const intent = next ? permissionIntentRef.current : null
       if (intent === 'remove-private' && hasPrivateRepoAccess(next.scopes)) {
         setMessage('GitHub still granted private-repository access. Revoke this app on GitHub before reconnecting with public access only.')
       } else if (intent === 'remove-private' && next.state === 'connected') {
@@ -132,7 +133,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     if (!active) return
     let disposed = false
     void refresh().then(next => {
-      if (!disposed && next.attempt && !waitRef.current) void waitFor(next.attempt)
+      if (!disposed && next?.attempt && !waitRef.current) void waitFor(next.attempt)
     })
     return () => { disposed = true }
   }, [active, refresh, waitFor])
@@ -146,7 +147,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     setRetrying(false)
     setMessage('')
     try {
-      if (attemptId) await cancelGithubSignIn(attemptId, { signal: controller.signal })
+      if (attemptId) await githubStatus.change(queryClient, () => cancelGithubSignIn(attemptId, { signal: controller.signal }))
     } catch (error) {
       if (controller.signal.aborted) return
       setMessage(error.message)
@@ -154,19 +155,20 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     const next = await refresh()
     if (controller.signal.aborted) return
     setBusy(false)
-    if (next.attempt) {
+    if (next?.attempt) {
       void waitFor(next.attempt, controller)
     } else {
       waitRef.current = null
-      if (next.state !== 'unknown') setSignIn(null)
+      // A superseded read leaves any attempt still waiting to the newer one.
+      if (next?.state !== 'unknown') setSignIn(null)
     }
-  }, [signIn, refresh, waitFor])
+  }, [signIn, refresh, waitFor, queryClient])
 
   const disconnect = useCallback(async () => {
     setBusy(true)
     setMessage('')
     try {
-      await disconnectGithub()
+      await githubStatus.change(queryClient, disconnectGithub)
     } catch (error) {
       setMessage(error.message)
     }
@@ -174,7 +176,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     await refresh()
     setBusy(false)
     setConfirmDisconnect(false)
-  }, [refresh])
+  }, [refresh, queryClient])
 
   const connected = conn.state === 'connected'
   const privateAccess = connected && hasPrivateRepoAccess(conn.scopes)

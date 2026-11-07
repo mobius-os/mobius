@@ -146,3 +146,37 @@ test('a models request still focuses Chat models when the leading provider chang
   assert.deepEqual(focused, ['claude'])
   view.unmount()
 })
+
+test('a models request lands on AI providers when the provider list cannot be read', t => {
+  const frames = new Map()
+  const oldRaf = globalThis.requestAnimationFrame
+  const oldCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
+  globalThis.cancelAnimationFrame = id => frames.delete(id)
+  t.after(() => {
+    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
+    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
+  })
+  const focused = []
+  const aiProviders = { scrollIntoView() {}, focus() { focused.push('ai-providers') } }
+  let detailPage = 'codex'
+  const pages = []
+  const view = renderHook(({ focusTarget, providersFailed }) => {
+    const setupFocusRefs = useRef({})
+    setupFocusRefs.current = detailPage ? {} : { 'ai-providers': aiProviders }
+    useSettingsFocus({ focusTarget, providerReady: false, providersFailed, modelsProvider: 'claude', detailPage,
+      setDetailPage: next => { pages.push(next); detailPage = next },
+      setupFocusRefs, setAttentionSection: () => {} })
+  }, { focusTarget: null, providersFailed: false })
+  const focusTarget = { section: 'models', nonce: 1 }
+  // Still loading: wait for the list.
+  view.rerender({ focusTarget, providersFailed: false })
+  assert.deepEqual(pages, [])
+  // The first read fails with nothing cached.
+  view.rerender({ focusTarget, providersFailed: true })
+  assert.deepEqual(pages, [null])
+  view.rerender({ focusTarget, providersFailed: true })
+  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  assert.deepEqual(focused, ['ai-providers'])
+  view.unmount()
+})

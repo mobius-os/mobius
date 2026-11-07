@@ -117,3 +117,23 @@ test('each completed polling delay releases its abort listener', async () => {
   await waitForGithubSignIn('a1', { signal: controller.signal })
   assert.equal(count, 0)
 })
+
+test('only the newest status read publishes; an older one resolves null so its caller does nothing', async () => {
+  const queryClient = new QueryClient()
+  const answers = []
+  globalThis.fetch = () => new Promise(resolve => { answers.push(resolve) })
+  const older = githubStatus.refresh(queryClient)
+  const newer = githubStatus.refresh(queryClient)
+  answers[1](json({ connected: true, login: 'octo', scopes: ['repo'], device_flow_available: true }))
+  assert.equal((await newer).login, 'octo')
+  answers[0](json({ connected: false, device_flow_available: true }))
+  assert.equal(await older, null)
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo')
+
+  // An account change makes a read already under way obsolete too.
+  const before = githubStatus.refresh(queryClient)
+  await githubStatus.change(queryClient, async () => {})
+  answers[2](json({ connected: false, device_flow_available: true }))
+  assert.equal(await before, null)
+  assert.equal(queryClient.getQueryData(githubStatus.key).state, 'connected')
+})

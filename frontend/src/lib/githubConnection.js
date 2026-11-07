@@ -58,6 +58,18 @@ export const unknownGithubStatus = error => ({
 
 const STATUS_KEY = ['github', 'status']
 
+// Status reads and account changes for one query client, in the order they
+// started. Only the newest may publish: Settings can unmount mid-read (a
+// provider page opens) and start another read on return, and the slower one
+// would otherwise land last and replace the newer answer, connected or not.
+const statusTurns = new WeakMap()
+function nextTurn(queryClient) {
+  const turn = (statusTurns.get(queryClient) || 0) + 1
+  statusTurns.set(queryClient, turn)
+  return turn
+}
+const isNewest = (queryClient, turn) => statusTurns.get(queryClient) === turn
+
 /**
  * GitHub status in the shared query cache, persisted (queryClient.js) so
  * Settings paints the last confirmed account at once after a reload. The
@@ -68,11 +80,34 @@ const STATUS_KEY = ['github', 'status']
 export const githubStatus = {
   key: STATUS_KEY,
   options: { queryKey: STATUS_KEY, enabled: false, staleTime: Infinity },
-  /** Read the status now and cache its account part. Resolves the full status; rejects when it cannot be read. */
+  /**
+   * Read the status now and cache its account part. Resolves the full status,
+   * or null when a newer read or account change started meanwhile (that one
+   * decides, so the caller must not act on this answer); rejects when it
+   * cannot be read.
+   */
   async refresh(queryClient) {
-    const { attempt, ...account } = await fetchGithubStatus()
+    const turn = nextTurn(queryClient)
+    let status
+    try {
+      status = await fetchGithubStatus()
+    } catch (error) {
+      if (!isNewest(queryClient, turn)) return null
+      throw error
+    }
+    if (!isNewest(queryClient, turn)) return null
+    const { attempt, ...account } = status
     queryClient.setQueryData(STATUS_KEY, account)
     return { ...account, attempt }
+  },
+  /**
+   * Run a request that changes the account (disconnect, cancelling a sign-in):
+   * every read already under way is obsolete, so none publishes over it.
+   * Follow it with `refresh` for the status it left.
+   */
+  change(queryClient, request) {
+    nextTurn(queryClient)
+    return request()
   },
 }
 

@@ -453,6 +453,7 @@ export default function SettingsView({
   useSettingsFocus({
     focusTarget,
     providerReady,
+    providersFailed: providerError,
     // Chat models open on the provider that leads background work.
     modelsProvider: effectiveBackgroundDraft.find(row => configuredProviders.has(row.provider))?.provider || null,
     detailPage,
