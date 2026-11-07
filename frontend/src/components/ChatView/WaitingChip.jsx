@@ -28,13 +28,18 @@ function WaitCommand({ command }) {
   const [shown, setShown] = useState(false)
   const textRef = useRef(null)
   // Above the composer the handoff stack scrolls inside itself; bring the
-  // revealed command into that stack's view. Only the stack moves, never the
-  // transcript.
+  // revealed command and the card's Stop action below it into view, never
+  // past the command's first line. Only the stack moves, never the transcript.
   useEffect(() => {
     const text = textRef.current
     const stack = text?.closest('.chat__waits')
-    if (!shown || !stack) return
-    const overflow = text.getBoundingClientRect().bottom - stack.getBoundingClientRect().bottom
+    const card = text?.closest('.chat__wait-card')
+    if (!shown || !stack || !card) return
+    const view = stack.getBoundingClientRect()
+    const overflow = Math.min(
+      card.getBoundingClientRect().bottom - view.bottom,
+      text.getBoundingClientRect().top - view.top,
+    )
     if (overflow > 0) stack.scrollTop += overflow
   }, [shown])
   return <div className="chat__wait-command">
@@ -78,11 +83,13 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
       text={presentation.condition}
       meta={presentation.summary}
       stateLabel={wait.delivery_pending && ['manual_resume', 'resume_failed', 'owner_input', 'restart'].includes(wait.resume_blocker) ? 'Needs you' : 'Waiting'}
-      action={cancellable && onCancel ? {
+      // Recovery needs the owner, so it stays on the collapsed line; stopping
+      // is a deliberate choice made from the details.
+      action={recoveryAction}
+      detailAction={cancellable && onCancel ? {
         label: cancelling ? 'Stopping…' : wait.delivery_pending ? 'Stop follow-up' : 'Stop waiting',
         onClick: cancel, disabled: cancelling || wait.can_withdraw === false, error: cancelError,
-      } : recoveryAction}
-      secondaryAction={cancellable && onCancel ? recoveryAction : null}
+      } : null}
       rows={[
         { label: 'Waiting for', value: presentation.condition, primary: true },
         ...(wait.delivery_pending ? [{ label: 'Original condition', value: wait.description, primary: true }] : []),
@@ -153,7 +160,7 @@ export default function WaitingChip({
 
   const toggle = key => setExpandedKey(current => current === key ? null : key)
   return (
-    <section className="chat__waits" aria-label="Handoffs">
+    <section className="chat__waits chat__handoffs" aria-label="Handoffs">
       {resourcePause && (
         <ResourceCard
           resourcePause={resourcePause}

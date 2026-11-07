@@ -129,18 +129,23 @@ test('an expanded command Wait offers its exact command behind a collapsed Comma
   }
 })
 
-test('collapsed cancellable Wait exposes Stop while blocked delivery reveals its existing recovery', () => {
+test('a collapsed Wait is one line with Stop in its details, while blocked delivery keeps recovery visible', () => {
   const wait = { id: 'wait-a', kind: 'timer', description: 'Deployment ready' }
   const props = { expanded: false, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {} }
   const html = render(h(WaitCard, { ...props, wait }))
-  assert.match(html, /Stop waiting/)
+  // Beside the composer a wait must stay one line; Stopping is a deliberate
+  // choice made from the expanded details.
+  assert.doesNotMatch(html, /Stop waiting|chat__wait-action/)
   assert.doesNotMatch(html, /<dl/)
+  const expanded = render(h(WaitCard, { ...props, expanded: true, wait }))
+  assert.match(expanded, /<\/dl><div class="chat__wait-detail-action"><button type="button" class="chat__wait-cancel">Stop waiting<\/button>/)
   for (const resume_blocker of ['manual_resume', 'resume_failed', 'restart']) {
     const blocked = render(h(WaitCard, { ...props, wait: { ...wait, delivery_pending: true, resume_blocker } }))
     assert.match(blocked, /View recovery/)
-    assert.doesNotMatch(blocked, /Stop waiting/)
+    const blockedDetails = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, delivery_pending: true, resume_blocker } }))
+    assert.doesNotMatch(blockedDetails, /Stop waiting/)
   }
-  const activation = render(h(WaitCard, { ...props, wait: { ...wait, kind: 'platform_activation' } }))
+  const activation = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, kind: 'platform_activation' } }))
   assert.doesNotMatch(activation, /Stop waiting/)
 })
 

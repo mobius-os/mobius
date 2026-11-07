@@ -4297,7 +4297,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
-.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 
@@ -4359,6 +4358,40 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   flex-shrink: 0;
 }
 
+/* The handoff stack sits over the scrolling transcript beside the composer,
+   so it is an opaque card like the queue tray: nothing behind may read
+   through it. */
+.chat__handoffs .chat__wait-card {
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* A collapsed wait is one line: what it waits for, then its countdown. */
+.chat__handoffs .chat__wait-summary {
+  flex-wrap: nowrap;
+}
+
+.chat__handoffs .chat__wait-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__handoffs .chat__wait-meta {
+  order: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.chat__wait-detail-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
 /* A wait's exact command, revealed on request: monospace, wrapped, and
    scrollable when long. */
 .chat__wait-command-toggle {
@@ -4405,6 +4438,37 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   margin: 2px 0 2px 16px;
   color: var(--muted);
   font-size: 11px;
+}
+
+/* On a phone each helper is one compact line: name · engine · status. */
+@media (max-width: 560px) {
+  .chat__helper-list {
+    padding: 3px 8px 3px 12px;
+  }
+
+  .chat__helper-list .chat__subagent {
+    min-height: 30px;
+  }
+
+  .chat__helper-list .chat__subagent-body {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .chat__helper-list .chat__subagent-name {
+    flex: 0 1 auto;
+    max-width: 55%;
+  }
+
+  .chat__helper-list .chat__subagent-sub {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .chat__helper-list .chat__subagent-sub::before {
+    content: "· ";
+  }
 }
 
 /* Archived notice: the waiting-card shell with one Restore action. */
