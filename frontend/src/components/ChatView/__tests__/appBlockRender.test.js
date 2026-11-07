@@ -591,3 +591,16 @@ test('a change size fact is coloured in the printed card and at Confirm; its tex
   assert.match(confirming, />Not now<\/button><button type="button" class="md-app-block__action">Confirm<\/button>/)
 })
 
+test('a linked change-size fact keeps its source link around the coloured counts, on the block and on a row', () => {
+  const href = 'https://github.com/owner/a/pull/7/files'
+  const html = render({ ...base, item_facts: 'values', facts: [{ label: 'Change', value: '+64 −12', href, lines: { added: 64, removed: 12 } }],
+    items: [{ title: 'Row A', intent: 'open:a', facts: [{ label: 'Change', value: '+64 −12', href, lines: { added: 64, removed: 12 } },
+      { label: 'Source', value: 'owner/a', href: 'https://github.com/owner/a' }] }] })
+  const linked = new RegExp(`<dd><a href="${href.replace(/[./]/g, '\\$&')}" target="_blank" rel="noopener noreferrer">${LINES.source}</a></dd>`, 'g')
+  assert.equal((html.match(linked) || []).length, 2, 'the root fact and the item fact each keep their anchor')
+  assert.match(html, /<dd><a href="https:\/\/github\.com\/owner\/a" target="_blank" rel="noopener noreferrer">owner\/a<\/a><\/dd>/, 'a plain linked fact is unchanged')
+  const unsafe = render({ ...base, facts: [{ label: 'Change', value: '+1 −0', href: 'javascript:alert(1)', lines: { added: 1, removed: 0 } }] })
+  assert.doesNotMatch(unsafe, /<a href="javascript/, 'an unsafe link stays plain text')
+  assert.match(unsafe, /<dd><span class="md-app-block__lines">/)
+})
+

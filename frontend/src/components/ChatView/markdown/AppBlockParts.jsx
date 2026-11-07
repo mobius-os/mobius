@@ -50,11 +50,14 @@ export function LineCounts({ lines }) {
 
 export function Facts({ facts }) {
   if (!facts.length) return null
-  return <dl className="md-app-block__facts">{facts.map((fact, i) => <div key={i}>
-    <dt>{fact.label}</dt>
-    <dd>{fact.lines ? <LineCounts lines={fact.lines} />
-      : fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{fact.value}</a> : fact.value}</dd>
-  </div>)}</dl>
+  return <dl className="md-app-block__facts">{facts.map((fact, i) => {
+    // The value (plain, or a coloured change size), then its source link.
+    const value = fact.lines ? <LineCounts lines={fact.lines} /> : fact.value
+    return <div key={i}>
+      <dt>{fact.label}</dt>
+      <dd>{fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{value}</a> : value}</dd>
+    </div>
+  })}</dl>
 }
 
 /** App-reported links open outside Möbius, marked by an arrow. */
