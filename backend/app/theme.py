@@ -255,6 +255,31 @@ def _prune_theme_snapshots(shared_dir: Path) -> None:
       pass
 
 
+# Held by every writer of theme.css, so the light/dark switch's
+# read-rewrite-write (`set_theme_mode`) never interleaves with another save
+# and silently drops it.
+THEME_CSS_LOCK = threading.Lock()
+
+
+def _write_theme_css(data_dir: str, css: str | bytes) -> None:
+  """Snapshot the prior theme.css, then write `css` atomically.  The caller
+  holds `THEME_CSS_LOCK`.  The snapshot is best-effort: a snapshot failure
+  must not block the write (/data git still holds the old file)."""
+  from app.storage_io import atomic_write
+
+  try:
+    snapshot_theme_if_present(data_dir)
+  except OSError as exc:
+    _log.warning("theme.css snapshot failed: %s", exc)
+  atomic_write(Path(data_dir) / "shared" / "theme.css", css)
+
+
+def save_theme_css(data_dir: str, css: str | bytes) -> None:
+  """Replace theme.css with `css`, keeping a snapshot of the prior file."""
+  with THEME_CSS_LOCK:
+    _write_theme_css(data_dir, css)
+
+
 def migrate_theme_surface2_token(data_dir: str) -> bool:
   """One-time, idempotent in-place rewrite of a saved theme.css's legacy
   --surface2 token to the standard --surface-2.
@@ -267,26 +292,24 @@ def migrate_theme_surface2_token(data_dir: str) -> bool:
   Reads theme.css, rewrites the token word-boundary-safely
   (`_LEGACY_SURFACE2_RE`), and — only when something
   actually changed — snapshots the prior file first (the same recovery trail
-  the storage write path keeps) and writes the result atomically. Returns True
+  every theme.css write keeps) and writes the result atomically. Returns True
   when it rewrote the file, False when there was nothing to do: missing file,
   empty file, or already migrated. Every other byte is preserved, and it is
   safe to run repeatedly.
   """
   path = Path(data_dir) / "shared" / "theme.css"
-  try:
-    content = path.read_text(encoding="utf-8")
-  except OSError:
-    # Missing file (fresh install using DEFAULT_THEME) or unreadable — nothing
-    # to migrate. Never a hard failure: the served theme is already canonical.
-    return False
-  migrated = _LEGACY_SURFACE2_RE.sub("--surface-2", content)
-  if migrated == content:
-    return False
-  from app.storage_io import atomic_write
-
-  snapshot_theme_if_present(data_dir)
-  atomic_write(path, migrated)
-  return True
+  with THEME_CSS_LOCK:
+    try:
+      content = path.read_text(encoding="utf-8")
+    except OSError:
+      # Missing file (fresh install using DEFAULT_THEME) or unreadable — nothing
+      # to migrate. Never a hard failure: the served theme is already canonical.
+      return False
+    migrated = _LEGACY_SURFACE2_RE.sub("--surface-2", content)
+    if migrated == content:
+      return False
+    _write_theme_css(data_dir, migrated)
+    return True
 
 
 def reset_theme_override(data_dir: str) -> dict:
@@ -302,11 +325,11 @@ def reset_theme_override(data_dir: str) -> dict:
     {"reset": False, "reason": "no override"}   when no theme.css exists
   """
   src = Path(data_dir) / "shared" / "theme.css"
-  if not src.exists():
-    return {"reset": False, "reason": "no override"}
-  ts = int(time.time())
-  dst = src.with_name(f"theme.css.reset-bak-{ts}")
-  src.rename(dst)
+  with THEME_CSS_LOCK:
+    if not src.exists():
+      return {"reset": False, "reason": "no override"}
+    dst = src.with_name(f"theme.css.reset-bak-{int(time.time())}")
+    src.rename(dst)
   return {"reset": True, "backup": str(dst)}
 
 
@@ -648,9 +671,8 @@ def theme_role_vars(
   return out
 
 
-_DECLARATION_RE = re.compile(r"[ \t\n\r\f]*(--[A-Za-z_][A-Za-z0-9_-]*)[ \t\n\r\f]*:(.*)", re.S)
+_DECLARATION_RE = re.compile(r"(-?-?[A-Za-z_][A-Za-z0-9_-]*)[ \t\n\r\f]*:(.*)", re.S)
 _IMPORTANT_RE = re.compile(r"![ \t\n\r\f]*important$", re.I)
-_ROOT_SELECTOR_RE = re.compile(r"[ \t\n\r\f]*:root[ \t\n\r\f]*")
 _URL_OPEN_RE = re.compile(r"url\(\s*(?=[^\s\"'])", re.I)
 
 
@@ -725,61 +747,120 @@ def _lex_theme_css(css: str) -> tuple[str, str, bool]:
   return "".join(text), "".join(mask), ok
 
 
+
+class _CssNode(NamedTuple):
+  """One statement, declaration or `{}` rule.  `head` is its text before the
+  `;` or `{` with comments blanked and whitespace stripped; [start, end) is
+  its span in the source, from the head's first character to just past its
+  `;` or `}` (a rule's last declaration may end at the rule's `}`); `body`
+  holds a rule's children and is None otherwise."""
+
+  head: str
+  start: int
+  end: int
+  body: "list[_CssNode] | None"
+
+
+def _parse_css(css: str) -> tuple[list["_CssNode"], bool]:
+  """The top-level nodes of `css`, read from the lexer's mask so a `;`, `{`
+  or `}` inside a comment, string or url() is never structure, plus whether
+  the parse is exact.  It is not when the lexer cannot follow the CSS or the
+  braces do not balance; the nodes are then a best effort (an unclosed rule
+  is dropped), which only the leading-statement reader relies on.  Text
+  after the last `;` or `}` at a level is not a node."""
+  text, mask, ok = _lex_theme_css(css)
+  levels: list[list[_CssNode]] = [[]]
+  opened: list[tuple[str, int]] = []
+  segment = 0
+
+  def head_at(end: int) -> tuple[str, int]:
+    raw = text[segment:end]
+    head = raw.strip(_CSS_WS)
+    return head, segment + len(raw) - len(raw.lstrip(_CSS_WS))
+
+  for i, ch in enumerate(mask):
+    if ch == "{":
+      opened.append(head_at(i))
+      levels.append([])
+    elif ch == "}":
+      if not opened:
+        ok = False
+        segment = i + 1
+        continue
+      head, start = head_at(i)
+      if head:
+        levels[-1].append(_CssNode(head, start, i, None))
+      body = levels.pop()
+      head, start = opened.pop()
+      levels[-1].append(_CssNode(head, start, i + 1, body))
+    elif ch == ";":
+      head, start = head_at(i)
+      if head:
+        levels[-1].append(_CssNode(head, start, i + 1, None))
+    else:
+      continue
+    segment = i + 1
+  return levels[0], ok and not opened
+
+
+def _declarations(nodes: "list[_CssNode]") -> list[tuple[str, str]]:
+  """(name, value) of each declaration among `nodes`, in source order."""
+  out = []
+  for node in nodes:
+    m = _DECLARATION_RE.fullmatch(node.head) if node.body is None else None
+    if m:
+      out.append((m.group(1), m.group(2).strip(_CSS_WS)))
+  return out
+
+
+def _winning(declarations: "list[tuple[str, str]]") -> dict[str, str]:
+  """The value each name resolves to: the last, except that an !important
+  one beats later normal ones.  Values keep their `!important`."""
+  out: dict[str, str] = {}
+  for name, value in declarations:
+    if not (_IMPORTANT_RE.search(out.get(name, "")) and not _IMPORTANT_RE.search(value)):
+      out[name] = value
+  return out
+
+
+def _is_root_rule(node: "_CssNode") -> bool:
+  return node.body is not None and node.head == ":root"
+
+
+def _custom_names(nodes: "list[_CssNode]") -> set[str]:
+  """Every custom property declared among `nodes`, at any depth."""
+  names = {name for name, _ in _declarations(nodes) if name.startswith("--")}
+  for node in nodes:
+    if node.body is not None:
+      names |= _custom_names(node.body)
+  return names
+
+
 def _scan_theme_css(css: str) -> tuple[dict[str, str], set[str]] | None:
   """(the winning custom properties of the theme's unconditional top-level
   `:root { }` rules, the names of custom properties it declares anywhere
-  else), or None when the CSS uses syntax this tokenizer cannot follow.
+  else), or None when the CSS uses syntax the parser cannot follow.
 
   In the plain roots the last declaration wins and an !important one beats
   later normal ones.  "Anywhere else" is every other rule, condition, layer
   or nesting level, whose value at the root this scanner does not resolve.
-  A generated block is ignored; comments, strings, url() contents and
-  escapes are lexed first, so a `}` or `;` inside them is never structure.
+  A generated block is ignored.
   """
-  text, mask, supported = _lex_theme_css(_GENERATED_BLOCK_RE.sub("", css or ""))
-  root: dict[str, str] = {}
+  nodes, exact = _parse_css(_GENERATED_BLOCK_RE.sub("", css or ""))
+  return _scan_nodes(nodes) if exact else None
+
+
+def _scan_nodes(nodes: "list[_CssNode]") -> tuple[dict[str, str], set[str]]:
+  in_root: list[tuple[str, str]] = []
   elsewhere: set[str] = set()
-  important: set[str] = set()
-
-  def record(decl: str, in_root: bool) -> None:
-    m = _DECLARATION_RE.fullmatch(decl)
-    if not m:
-      return
-    name, value = m.group(1), m.group(2).strip(_CSS_WS)
-    if not in_root:
-      elsewhere.add(name)
-      return
-    is_important = bool(_IMPORTANT_RE.search(value))
-    if is_important:
-      value = _IMPORTANT_RE.sub("", value).strip(_CSS_WS)
-    if name in important and not is_important:
-      return
-    if is_important:
-      important.add(name)
-    root[name] = value
-
-  depth = 0
-  segment = 0
-  root_rule = False
-  for i, ch in enumerate(mask):
-    if ch == "{":
-      if depth == 0:
-        root_rule = bool(_ROOT_SELECTOR_RE.fullmatch(text[segment:i]))
-      depth += 1
-      segment = i + 1
-    elif ch == "}":
-      if depth == 0:
-        return None
-      record(text[segment:i], depth == 1 and root_rule)
-      depth -= 1
-      if depth == 0:
-        root_rule = False
-      segment = i + 1
-    elif ch == ";":
-      record(text[segment:i], depth == 1 and root_rule)
-      segment = i + 1
-  if depth or not supported:
-    return None
+  for node in nodes:
+    if _is_root_rule(node):
+      in_root += [d for d in _declarations(node.body) if d[0].startswith("--")]
+      elsewhere |= _custom_names([child for child in node.body if child.body is not None])
+    else:
+      elsewhere |= _custom_names([node])
+  root = {name: _IMPORTANT_RE.sub("", value).strip(_CSS_WS)
+          for name, value in _winning(in_root).items()}
   return root, elsewhere
 
 
@@ -803,18 +884,20 @@ def _first_hex_anywhere(css: str, name: str) -> str | None:
   return m.group(1) if m else None
 
 
-def _infer_theme_mode(css: str) -> str:
-  """'light' or 'dark' from the theme's winning plain-:root --bg
-  (`scan_root_declarations`), else the first hex --bg declared anywhere
-  (an `html` rule, a condition, a layer).  With no hex --bg at all it is
-  'dark', the historical default (DEFAULT_THEME is dark).  #RGB/#RGBA double their
-  nibbles and #RRGGBB/#RRGGBBAA use their leading six digits: alpha never
-  changes the dark-vs-light direction.
-  """
+def _owner_hex_bg(css: str) -> str | None:
+  """The owner's winning plain-:root --bg when it is a hex colour, else the
+  first hex --bg declared anywhere (an `html` rule, a condition, a layer)."""
   bg = (scan_root_declarations(css) or {}).get("--bg", "")
-  if not re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
-    bg = _first_hex_anywhere(css, "--bg") or ""
-  m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", bg)
+  return bg if re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg) else _first_hex_anywhere(css, "--bg")
+
+
+def _infer_theme_mode(css: str) -> str:
+  """'light' or 'dark' from the owner's hex --bg (`_owner_hex_bg`).  With
+  no hex --bg at all it is 'dark', the historical default (DEFAULT_THEME is
+  dark).  #RGB/#RGBA double their nibbles and #RRGGBB/#RRGGBBAA use their
+  leading six digits: alpha never changes the dark-vs-light direction.
+  """
+  m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", _owner_hex_bg(css) or "")
   if not m or len(m.group(1)) not in (3, 4, 6, 8):
     return "dark"
   raw = m.group(1)
@@ -839,32 +922,19 @@ def theme_defaults_for_css(css: str) -> dict[str, str]:
   return defaults
 
 
-def _prelude_bounds(css: str) -> tuple[int, int]:
-  """(end of a leading @charset, end of the leading statement prelude).
+_PRELUDE_AT_RE = re.compile(r"@(charset|import|layer)\b", re.I)
 
-  CSS allows only @charset, @import and @layer *statements* before other
-  rules.  Statement ends are found with the same lexer as the root scanner,
-  so a `;` or `{` inside a string, url() or comment (a multi-weight Google
-  Fonts URL, say) never ends a statement.  Both offsets fall between
-  complete statements; nothing is rewritten.
-  """
-  text, mask, _ok = _lex_theme_css(css)
-  charset_end = prelude_end = i = 0
-  while True:
-    while i < len(mask) and mask[i] in _CSS_WS:
-      i += 1
-    m = re.match(r"@(charset|import|layer)\b", text[i:i + 8], re.I)
-    if not m:
+
+def _leading_statements(nodes: "list[_CssNode]") -> "list[_CssNode]":
+  """The leading @charset, @import and @layer *statements*: CSS allows only
+  these before other rules, so they must stay first.  An @layer block is a
+  rule and ends them."""
+  out = []
+  for node in nodes:
+    if node.body is not None or not _PRELUDE_AT_RE.match(node.head):
       break
-    j = i
-    while j < len(mask) and mask[j] not in ";{":
-      j += 1
-    if j >= len(mask) or mask[j] == "{":
-      break  # an @layer block is a rule, not a statement
-    i = prelude_end = j + 1
-    if m.group(1).lower() == "charset" and charset_end == 0:
-      charset_end = i
-  return charset_end, prelude_end
+    out.append(node)
+  return out
 
 
 def _ensure_core_vars(css: str) -> str:
@@ -894,23 +964,21 @@ def _ensure_core_vars(css: str) -> str:
   lines = "\n".join(f"  {name}: {defaults[name]};" for name in sorted(defaults))
   block = (f"/* {INJECTED_DEFAULTS_MARKER} */\n@layer {DEFAULTS_LAYER} {{\n"
            f":where(:root) {{\n{lines}\n}}\n}}\n")
-  charset_end, prelude_end = _prelude_bounds(owner)
+  lead = _leading_statements(_parse_css(owner)[0])
+  prelude_end = lead[-1].end if lead else 0
+  charset_end = lead[0].end if lead and lead[0].head[:8].lower() == "@charset" else 0
   return (owner[:charset_end] + f"@layer {DEFAULTS_LAYER};\n" + owner[charset_end:prelude_end]
           + block + owner[prelude_end:])
 
 
 def _theme_bg(effective_css: str) -> str:
-  """A pre-paint HINT for the theme's background: the owner's winning
-  plain-:root --bg when it is a hex colour, else the first hex --bg the
-  owner declared anywhere (the same rule as `_infer_theme_mode`), else the
-  generated default.  It may not be the background a condition or layer
+  """A pre-paint HINT for the theme's background: the owner's hex --bg
+  (`_owner_hex_bg`, as `_infer_theme_mode` reads it), else the generated
+  default.  It may not be the background a condition or layer
   resolves to; that is why the appliers only use this value for chrome
   painted before the theme stylesheet applies (theme-color, the first
   frame) and read the real background from the cascade afterwards."""
-  bg = (scan_root_declarations(effective_css) or {}).get("--bg", "")
-  if re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
-    return bg
-  bg = _first_hex_anywhere(effective_css, "--bg")
+  bg = _owner_hex_bg(effective_css)
   if bg:
     return bg
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)
@@ -934,7 +1002,6 @@ _TYPOGRAPHY_KEYS = ("--font", "--mono")
 # The roles plus --accent-fg: painted by the generated block, never written
 # back unless the owner chose a value of their own.
 _DERIVED_KEYS = _ROLE_KEYS | {"--accent-fg"}
-_RULE_DECLARATION_RE = re.compile(r"[ \t\n\r\f]*(-?-?[A-Za-z_][A-Za-z0-9_-]*)[ \t\n\r\f]*:(.*)", re.S)
 
 
 def _base_colors(mode: str) -> dict[str, str]:
@@ -943,81 +1010,6 @@ def _base_colors(mode: str) -> dict[str, str]:
     key: value for key, value in _shipped_palette(mode).items()
     if key not in _DERIVED_KEYS and key not in _TYPOGRAPHY_KEYS
   }
-
-
-def _matching_brace(mask: str, open_at: int) -> int:
-  depth = 0
-  for i in range(open_at, len(mask)):
-    if mask[i] == "{":
-      depth += 1
-    elif mask[i] == "}":
-      depth -= 1
-      if depth == 0:
-        return i
-  return -1
-
-
-def _rule_declarations(text: str, mask: str, start: int, end: int) -> dict[str, str]:
-  """The winning `name: value` per name directly inside one rule body
-  (nested rules skipped): the last wins, except that an !important one beats
-  later normal ones.  Values keep their `!important`, so a rebuilt rule
-  keeps the owner's importance."""
-  out: dict[str, str] = {}
-
-  def record(decl: str) -> None:
-    m = _RULE_DECLARATION_RE.fullmatch(decl)
-    if not m:
-      return
-    name, value = m.group(1), m.group(2).strip(_CSS_WS)
-    if _IMPORTANT_RE.search(out.get(name, "")) and not _IMPORTANT_RE.search(value):
-      return
-    out[name] = value
-
-  depth = 0
-  segment = start
-  for i in range(start, end):
-    ch = mask[i]
-    if ch == "{":
-      depth += 1
-    elif ch == "}":
-      depth -= 1
-      segment = i + 1
-    elif ch == ";" and depth == 0:
-      record(text[segment:i])
-      segment = i + 1
-  if depth == 0:
-    record(text[segment:end])
-  return out
-
-
-def _first_root_rule(css: str) -> tuple[int, int, dict[str, str]] | None:
-  """The first top-level rule whose selector is exactly `:root`: its span
-  [start, end) in `css` and its declarations, or None when there is none or
-  the lexer cannot follow the CSS (which is then kept verbatim)."""
-  text, mask, supported = _lex_theme_css(css)
-  if not supported:
-    return None
-  depth = 0
-  segment = 0
-  for i, ch in enumerate(mask):
-    if ch == ";" and depth == 0:
-      segment = i + 1
-    elif ch == "}":
-      if depth == 0:
-        return None
-      depth -= 1
-      if depth == 0:
-        segment = i + 1
-    elif ch == "{":
-      selector = text[segment:i].strip(_CSS_WS)
-      if depth == 0 and _ROOT_SELECTOR_RE.fullmatch(selector):
-        close = _matching_brace(mask, i)
-        if close < 0:
-          return None
-        start = segment + text[segment:i].index(selector)
-        return start, close + 1, _rule_declarations(text, mask, i + 1, close)
-      depth += 1
-  return None
 
 
 class UnreadableThemeCss(ValueError):
@@ -1029,11 +1021,13 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   in `old_mode` (a previously generated block in it is ignored).
 
   Only the first top-level plain `:root` rule is rebuilt; every other byte
-  of the owner's CSS is kept.  Inside that rule the owner's other
-  declarations are kept; its comments and nested rules are dropped.  CSS the
-  lexer cannot follow (an unclosed string, comment or url()) raises
-  `UnreadableThemeCss`: its rules cannot be found, so no rewrite could
-  change the colours it sets without stacking another rule on every switch.
+  of the owner's CSS is kept.  Inside that rule every declaration other than
+  a mode-owned colour and `color-scheme` is kept, a repeated one (a fallback
+  before a newer syntax) included, and so are its nested rules; only its
+  comments are dropped.  CSS the parser cannot follow (an unclosed string,
+  comment or url(), or unbalanced braces) raises `UnreadableThemeCss`: its
+  rules cannot be found, so no rewrite could change the colours it sets
+  without stacking another rule on every switch.
 
   A declared colour is MODE-OWNED, and replaced by the new mode's value,
   when it is a structural key, a shipped value of either mode (the shipped
@@ -1042,26 +1036,32 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   theme's own bases.  Every other value is the owner's and survives, so a
   custom accent outlives any number of round trips.  The one ambiguity: an
   owner who deliberately chose a shipped value of the other mode gets it
-  swapped.  Roles are not written unless the owner declared them; the
-  generated block paints them, so a later base edit re-derives them.
+  swapped.  Roles and typography are not written unless the owner declared
+  them; the generated block paints them, so a later base edit re-derives
+  the roles.
   """
-  # The leading @charset/@import/@layer statements only count before every
-  # rule, so they stay first, verbatim. The lexer reads them, so an @import
-  # inside a comment or a string is never taken for one.
   owner = _GENERATED_BLOCK_RE.sub("", css)
-  if not _lex_theme_css(owner)[2]:
+  nodes, exact = _parse_css(owner)
+  if not exact:
     raise UnreadableThemeCss(
-      "theme.css has an unclosed string, comment or url(), so the light/dark "
-      "switch cannot rewrite it. Fix the file, then switch again.")
-  _, prelude_end = _prelude_bounds(owner)
-  prelude, rest = owner[:prelude_end].strip(), owner[prelude_end:]
-  rule = _first_root_rule(rest)
-  declared = rule[2] if rule else {}
+      "theme.css has an unclosed string, comment, url() or rule, so the "
+      "light/dark switch cannot rewrite it. Fix the file, then switch again.")
+  root, elsewhere = _scan_nodes(nodes)
+  # The leading @charset/@import/@layer statements only count before every
+  # rule, so they stay first, verbatim.
+  lead = _leading_statements(nodes)
+  prelude_end = lead[-1].end if lead else 0
+  rule = next((node for node in nodes[len(lead):] if _is_root_rule(node)), None)
   # The rule is rebuilt where it stood, so the rules around it keep their
   # order of precedence; with none, the new one goes first.
-  before, after = (rest[:rule[0]].strip(), rest[rule[1]:].strip()) if rule else ("", rest.strip())
+  if rule:
+    before, after = owner[prelude_end:rule.start].strip(), owner[rule.end:].strip()
+  else:
+    before, after = "", owner[prelude_end:].strip()
+  body = rule.body if rule else []
+  declarations = _declarations(body)
+  declared = _winning([d for d in declarations if d[0].startswith("--")])
 
-  root = scan_root_declarations(css) or {}
   derived = theme_role_vars({k: v for k, v in root.items() if k not in _DERIVED_KEYS}, old_mode)
 
   def mode_owned(key: str, value: str) -> bool:
@@ -1073,26 +1073,16 @@ def toggled_theme_css(css: str, old_mode: str, new_mode: str) -> str:
   # restored; then the owner's own values over it. A non-structural colour the
   # theme sets in another rule (a layer, an `html {}`) is left to that rule:
   # a plain :root would override it.
-  scanned = _scan_theme_css(owner)
-  elsewhere = scanned[1] if scanned else set()
   colors = {key: value for key, value in _base_colors(new_mode).items()
             if key in _STRUCTURAL_KEYS or key not in elsewhere}
-  for key, value in declared.items():
-    if key.startswith("--") and key not in _TYPOGRAPHY_KEYS and not mode_owned(key, value):
-      colors[key] = value
-
-  font = declared.get("--font") or "'Inter', system-ui, sans-serif"
-  mono = declared.get("--mono") or "'JetBrains Mono', ui-monospace, monospace"
-  # Every other declaration in the rule (a `background`, a `line-height`) is
-  # the owner's; `font-size` and `color-scheme` are written below.
-  others = "".join(f"  {key}: {value};\n" for key, value in declared.items()
-                   if not key.startswith("--") and key not in ("font-size", "color-scheme"))
-  lines = "\n".join(f"  {key}: {value};" for key, value in colors.items())
-  rebuilt = (
-    f":root {{\n  /* Colors - {new_mode} theme */\n{lines}\n\n  /* Typography */\n"
-    + f"  --font: {font};\n  --mono: {mono};\n"
-    + f"  font-size: {declared.get('font-size') or '15px'};\n  color-scheme: {new_mode};\n{others}}}"
-  )
+  colors.update((key, value) for key, value in declared.items() if not mode_owned(key, value))
+  kept = [f"  {key}: {value};\n" for key, value in colors.items()]
+  kept.append(f"  color-scheme: {new_mode};\n")
+  kept += [f"  {key}: {value};\n" for key, value in declarations
+           if not key.startswith("--") and key != "color-scheme"]
+  kept += [f"  {owner[node.start:node.end]}\n" for node in body if node.body is not None]
+  rebuilt = f":root {{\n  /* Colors - {new_mode} theme */\n{''.join(kept)}}}"
+  prelude = owner[:prelude_end].strip()
   return "\n\n".join(part for part in (prelude, before, rebuilt, after) if part) + "\n"
 
 
@@ -1128,28 +1118,17 @@ def theme_with_toggle(data_dir: str) -> dict:
   return {**data, "toggle": {"css": css, "bg": bg, "mode": mode}}
 
 
-_THEME_MODE_LOCK = threading.Lock()
-
-
 def set_theme_mode(data_dir: str, mode: str) -> bool:
   """Switch the saved theme to `mode`, rewriting theme.css from its current
   contents on disk.  Returns False when `mode` is already saved."""
   from app.storage_io import atomic_write
 
-  with _THEME_MODE_LOCK:
+  with THEME_CSS_LOCK:
     old_mode = get_theme_mode(data_dir)
     if mode == old_mode:
       return False
-    css = toggled_theme_css(get_theme_css(data_dir), old_mode, mode)
-    shared = Path(data_dir) / "shared"
-    shared.mkdir(parents=True, exist_ok=True)
-    try:
-      snapshot_theme_if_present(data_dir)
-    except OSError as exc:
-      # Best-effort, as on every theme.css write: /data git still holds it.
-      _log.warning("theme.css snapshot failed: %s", exc)
-    atomic_write(shared / "theme.css", css)
-    atomic_write(shared / "theme-mode", json.dumps(mode))
+    _write_theme_css(data_dir, toggled_theme_css(get_theme_css(data_dir), old_mode, mode))
+    atomic_write(Path(data_dir) / "shared" / "theme-mode", json.dumps(mode))
     return True
 
 

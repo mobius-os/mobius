@@ -267,6 +267,36 @@ def test_only_real_leading_statements_are_kept_first():
   assert "mobius-defaults" not in persisted
 
 
+def test_repeated_and_nested_root_declarations_survive():
+  # A repeated declaration is a fallback for browsers without the newer
+  # syntax; a nested rule is owner CSS too.
+  css = (":root {\n  --bg: #0d0d0d;\n  background: #222;\n  background: color-mix(in srgb, var(--bg), red 5%);\n"
+         "  @media (min-width: 900px) { --gap: 24px; }\n}\n")
+  there, _ = toggle_once(css, "dark")
+  back, _ = toggle_once(there, "light")
+  for persisted in (there, back):
+    assert persisted.index("background: #222;") < persisted.index("background: color-mix(")
+    assert persisted.count("@media (min-width: 900px) { --gap: 24px; }") == 1
+    assert persisted.count(":root") == 1
+
+
+def test_typography_is_left_to_the_defaults_unless_declared():
+  persisted, painted = toggle_once(theme.DEFAULT_THEME, "dark")
+  for name in ("--font", "--mono", "font-size"):
+    assert root_var(persisted, name) is None, name
+  assert root_var(painted, "--font") == theme._shipped_palette("dark")["--font"]
+  kept, _ = toggle_once(CUSTOM_DARK, "dark")
+  assert root_var(kept, "--font") == "'Inter', sans-serif"
+  assert "font-size: 15px;" in kept
+
+
+def test_unbalanced_braces_are_refused_not_stacked():
+  with pytest.raises(theme.UnreadableThemeCss):
+    toggle_once(CUSTOM_DARK + ".broken { gap: 1px;\n", "dark")
+  with pytest.raises(theme.UnreadableThemeCss):
+    toggle_once(CUSTOM_DARK + "}\n", "dark")
+
+
 # --- the endpoint ------------------------------------------------------------
 
 
@@ -387,3 +417,16 @@ def test_the_mode_endpoint_is_guarded(client, auth, shared, events):
   assert client.post("/api/theme/mode", headers=auth, json={"mode": "sepia"}).status_code == 422
   assert not (shared / "theme.css").exists()
   assert events == []
+
+
+def test_every_theme_writer_waits_for_the_switch(client, auth, shared, events):
+  import threading
+  (shared / "theme.css").write_text(CUSTOM_DARK)
+  with theme.THEME_CSS_LOCK:  # as the switch holds it while it rewrites
+    writer = threading.Thread(target=client.put, args=("/api/storage/shared/theme.css",),
+                              kwargs={"headers": auth, "json": {"content": ":root { --bg: #ffffff; }"}})
+    writer.start()
+    writer.join(0.3)
+    assert writer.is_alive() and (shared / "theme.css").read_text() == CUSTOM_DARK
+  writer.join()
+  assert (shared / "theme.css").read_text() == ":root { --bg: #ffffff; }"

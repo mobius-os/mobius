@@ -34,7 +34,6 @@ import base64
 import datetime
 import heapq
 import json
-import logging
 import mimetypes
 import os
 import re
@@ -53,6 +52,7 @@ from app.config import get_settings
 from app.database import get_db
 from app import storage_io
 from app.storage_response import StorageFileResponse
+from app.theme import THEME_CSS_LOCK, save_theme_css
 from app.storage_io import (
   app_dir_usage,
   atomic_write,
@@ -76,7 +76,6 @@ from app.path_utils import has_overlong_segment, validate_path_within_base
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
-_log = logging.getLogger(__name__)
 _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_BLOB_READ_MAX = 8 * 1024 * 1024
@@ -1085,16 +1084,11 @@ async def write_shared_file(
   # memory — are always extensioned text the filename guess recovers), so the
   # stored-mime half of the decode result is discarded here.
   content, _ = await _decode_write_body(request, file_path)
-  # Snapshot the prior theme.css before any overwrite. The agent
-  # already does this informally; making it automatic means no
-  # accidental clobber when the agent forgets.
-  if file_path.name == "theme.css" and file_path.parent == base:
-    try:
-      from app.theme import snapshot_theme_if_present
-      snapshot_theme_if_present(settings.data_dir)
-    except Exception as exc:
-      _log.warning("theme.css snapshot failed: %s", exc)
-  atomic_write(file_path, content)
+  if file_path == base / "theme.css":
+    # Snapshots the prior theme and serializes with the light/dark switch.
+    save_theme_css(settings.data_dir, content)
+  else:
+    atomic_write(file_path, content)
   # storage_write for shared/* — debounced per (0, path) to match the
   # per-app rate-limit. app_id=0 is the documented platform-level
   # sentinel (see activity.py docstring); scope="shared" disambiguates
@@ -1140,7 +1134,11 @@ def delete_shared_file(
     deleted_size = file_path.stat().st_size
   except OSError:
     deleted_size = 0
-  file_path.unlink()
+  if file_path == base / "theme.css":
+    with THEME_CSS_LOCK:  # so the light/dark switch cannot write it back
+      file_path.unlink()
+  else:
+    file_path.unlink()
   if activity.should_emit_storage_write(0, path):
     activity.log_event(
       "storage_write",
