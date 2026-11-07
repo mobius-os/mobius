@@ -217,19 +217,26 @@ def test_mobius_sign_in_records_the_login_end_when_the_response_has_it(tmp_path,
 
 
 # Sign-in and refresh turn a token response into stored credentials through
-# claude_oauth_after_token_grant, so both refuse the same unusable responses.
-UNUSABLE_TOKEN_RESPONSES = [
+# claude_oauth_after_token_grant. Neither stores a response without an access
+# token; only a new sign-in, which has spent nothing yet, also refuses one
+# without a refresh token or a usable expiry.
+NO_ACCESS_TOKEN_RESPONSES = [
+  ["not", "an", "object"],
   {"refresh_token": "r", "expires_in": 3600},
   {"access_token": "", "refresh_token": "r", "expires_in": 3600},
+  {"access_token": ["a"], "refresh_token": "r", "expires_in": 3600},
+]
+UNUSABLE_EXPIRES_IN = [None, True, "3600", 0, -3600, float("inf"), float("nan"), 1e308, 10**400]
+UNUSABLE_EXPIRES_IN_IDS = ["none", "bool", "string", "zero", "negative", "inf", "nan", "1e308", "int-beyond-float"]
+UNUSABLE_SIGN_IN_RESPONSES = [
+  *NO_ACCESS_TOKEN_RESPONSES,
   {"access_token": "a", "expires_in": 3600},
   {"access_token": "a", "refresh_token": "r"},
-  *({"access_token": "a", "refresh_token": "r", "expires_in": value} for value in (
-    None, True, "3600", 0, -3600, float("inf"), float("nan"), 1e308, 10**400,
-  )),
+  *({"access_token": "a", "refresh_token": "r", "expires_in": value} for value in UNUSABLE_EXPIRES_IN),
 ]
 
 
-@pytest.mark.parametrize("body", UNUSABLE_TOKEN_RESPONSES)
+@pytest.mark.parametrize("body", UNUSABLE_SIGN_IN_RESPONSES)
 def test_sign_in_refuses_an_unusable_token_response(tmp_path, monkeypatch, body):
   from app.config import get_settings
   from app.routes import auth as auth_routes
@@ -241,11 +248,84 @@ def test_sign_in_refuses_an_unusable_token_response(tmp_path, monkeypatch, body)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", UNUSABLE_TOKEN_RESPONSES)
-async def test_refresh_refuses_an_unusable_token_response(monkeypatch, body):
+@pytest.mark.parametrize("body", NO_ACCESS_TOKEN_RESPONSES)
+async def test_refresh_refuses_a_response_without_an_access_token(monkeypatch, body):
   _serve_token_response(monkeypatch, body)
   with pytest.raises(RuntimeError):
     await providers._refresh_claude_access_token({"refreshToken": "r", "expiresAt": 0})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires_in", UNUSABLE_EXPIRES_IN, ids=UNUSABLE_EXPIRES_IN_IDS)
+async def test_refresh_keeps_rotated_tokens_when_the_expiry_is_unusable(monkeypatch, expires_in):
+  # Anthropic has already spent the old refresh token, so dropping the
+  # response would force a reconnect; the access token is stored as expired
+  # so the next use refreshes again.
+  _serve_token_response(monkeypatch, {
+    "access_token": "a2", "refresh_token": "r2", "expires_in": expires_in,
+  })
+  refreshed = await providers._refresh_claude_access_token({"refreshToken": "r", "expiresAt": 0})
+  assert (refreshed["accessToken"], refreshed["refreshToken"]) == ("a2", "r2")
+  assert refreshed["expiresAt"] <= time.time() * 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_token", ["missing", None, ""])
+async def test_refresh_without_a_new_refresh_token_keeps_the_stored_one(monkeypatch, refresh_token):
+  body = {"access_token": "a2", "expires_in": 3600}
+  if refresh_token != "missing":
+    body["refresh_token"] = refresh_token
+  _serve_token_response(monkeypatch, body)
+  before_ms = int(time.time() * 1000)
+  refreshed = await providers._refresh_claude_access_token({"refreshToken": "r", "expiresAt": 0})
+  assert (refreshed["accessToken"], refreshed["refreshToken"]) == ("a2", "r")
+  assert refreshed["expiresAt"] >= before_ms + 3600 * 1000
+
+
+def test_a_new_sign_in_drops_the_previous_accounts_keys(tmp_path, monkeypatch):
+  from app.config import get_settings
+  from app.routes import auth as auth_routes
+
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  previous = {key: {"previous": "account"} for key in providers._CLAUDE_ACCOUNT_KEYS}
+  assert set(previous) == {
+    "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
+    "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
+    "cloudSessionsOauth",
+  }
+  creds.write_text(json.dumps({**previous, "mcpOAuth": {"server": {"accessToken": "mcp"}}}))
+  auth_routes._write_credentials({
+    "access_token": "a", "refresh_token": "r", "expires_in": 3600,
+    "organization": {"uuid": "22222222-2222-4222-8222-222222222222"},
+  })
+  saved = json.loads(creds.read_text())
+  assert set(saved) == {"claudeAiOauth", "organizationUuid", "mcpOAuth"}
+  assert saved["organizationUuid"] == "22222222-2222-4222-8222-222222222222"
+  assert saved["claudeAiOauth"]["accessToken"] == "a"
+  assert saved["mcpOAuth"] == {"server": {"accessToken": "mcp"}}
+
+
+@pytest.mark.parametrize("optional", [
+  {"account": "person@example.com", "organization": ["uuid"]},
+  {"account": {"email_address": 7}, "organization": {"uuid": None}},
+  {"account": None, "organization": "22222222-2222-4222-8222-222222222222", "scope": 5},
+])
+def test_a_new_sign_in_ignores_malformed_optional_fields(tmp_path, monkeypatch, optional):
+  # The one-time code is already spent, so a malformed optional field must
+  # not lose the sign-in.
+  from app.config import get_settings
+  from app.routes import auth as auth_routes
+
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  auth_routes._write_credentials({
+    "access_token": "a", "refresh_token": "r", "expires_in": 3600, **optional,
+  })
+  saved = json.loads((tmp_path / "cli-auth" / "claude" / ".credentials.json").read_text())
+  assert "organizationUuid" not in saved
+  oauth = saved["claudeAiOauth"]
+  assert (oauth["accessToken"], oauth["email"], oauth["scopes"]) == ("a", "", [])
 
 
 def test_a_new_sign_in_replaces_the_sign_in_and_keeps_the_rest_of_the_file(tmp_path, monkeypatch):

@@ -748,24 +748,12 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _write_credentials(token_data: dict) -> None:
-  """Stores a new Claude sign-in from the token endpoint response.
+  """Stores a new Claude sign-in from the token endpoint response
+  (providers.write_claude_sign_in), creating the CLI home if needed."""
+  from app.providers import write_claude_sign_in
 
-  The CLI home is created if needed; the file is written atomically, 0600
-  unless it already exists with another mode, and keeps its other top-level
-  keys (such as MCP sign-ins) like a refresh does. The account's
-  `organizationUuid` (which usage controls address) is the response's, as
-  the CLI records it, so a previous account's never survives the sign-in."""
-  from app.providers import _write_claude_oauth, claude_oauth_after_token_grant
-
-  oauth = claude_oauth_after_token_grant(token_data, None)
-  email = (token_data.get("account") or {}).get("email_address", "")
-  oauth["email"] = email
-  organization = (token_data.get("organization") or {}).get("uuid")
   _, cli_home = _cli_env()
-  _write_claude_oauth(
-    Path(cli_home) / ".credentials.json", oauth,
-    {"organizationUuid": organization if isinstance(organization, str) and organization else None},
-  )
+  email = write_claude_sign_in(Path(cli_home) / ".credentials.json", token_data)
   log.info("Credentials written for %s", email or "(unknown)")
 
 

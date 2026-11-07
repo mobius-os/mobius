@@ -777,7 +777,10 @@ class ClaudeProvider(BaseProvider):
         and expires_at is not None
         and expires_at - now_ms >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
       )
-      # Like the CLI, an end it would reject counts as no end.
+      # The CLI's storage and display rule counts an end outside the range
+      # it accepts as no end (its own usability check would count it as
+      # ended). Möbius follows the storage rule and lets the refresh decide;
+      # a successful refresh then drops the bad end.
       refresh_expiry_is_current = (
         refresh_expires_at is None or refresh_expires_at > now_ms
       )
@@ -1730,6 +1733,14 @@ _CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
 # The CLI treats a stored sign-in end more than this far before the access
 # token's own expiry as stale and reports no end at all.
 _CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
+# The top-level credential keys that belong to one Claude account: the CLI's
+# own sign-in removes exactly these, so a new sign-in never inherits another
+# account's, and keeps the rest (such as mcpOAuth).
+_CLAUDE_ACCOUNT_KEYS = (
+  "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
+  "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
+  "cloudSessionsOauth",
+)
 
 
 def _finite_number(value: Any) -> float | None:
@@ -1770,12 +1781,30 @@ def claude_login_end_after(now_ms: int, lifetime_s: Any) -> int | None:
   return None if end is None else int(end)
 
 
+def _token_grant_text(tokens: dict, *path: str) -> str | None:
+  """A non-empty string at `path` in a token response, or None when any step
+  is missing or malformed (optional fields never fail a grant)."""
+  value: Any = tokens
+  for key in path:
+    value = value.get(key) if isinstance(value, dict) else None
+  return value if isinstance(value, str) and value else None
+
+
 def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
   """The claudeAiOauth block a token endpoint response leaves behind.
 
   `stored` is the current block for a refresh, whose other keys are kept, or
-  None for a new sign-in. Raises RuntimeError for a response the CLI could not
-  use, so the caller stores nothing.
+  None for a new sign-in, whose block also records the account's `email`
+  ('' when the response has none). Raises RuntimeError for a response that
+  cannot be stored, so the caller stores nothing.
+
+  A new sign-in needs an access token, a refresh token and an `expires_in`
+  that ends after now and within the latest sign-in end the CLI accepts. A
+  refresh needs only an access token: Anthropic has already rotated the
+  single-use refresh token, so its response is always kept. Like the CLI, a
+  refresh without a `refresh_token` keeps the stored one, and an unusable
+  `expires_in` saves the tokens with the access token already expired, so
+  the next use refreshes again.
 
   The sign-in end follows the CLI: a new sign-in records the response's
   `refresh_token_expires_in` (and no end, rather than the CLI's 30-day
@@ -1784,21 +1813,26 @@ def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
   a valid one and the response's."""
   if not isinstance(tokens, dict):
     raise RuntimeError("token response is not an object")
-  for field in ("access_token", "refresh_token"):
-    if not isinstance(tokens.get(field), str) or not tokens[field]:
+  access_token = _token_grant_text(tokens, "access_token")
+  refresh_token = _token_grant_text(tokens, "refresh_token")
+  if stored is not None and refresh_token is None:
+    refresh_token = _token_grant_text(stored, "refreshToken")
+  for field, value in (("access_token", access_token), ("refresh_token", refresh_token)):
+    if value is None:
       raise RuntimeError(f"token response missing '{field}'")
   now_ms = int(time.time() * 1000)
   lifetime = _finite_number(tokens.get("expires_in"))
   expires_at = None if lifetime is None else now_ms + lifetime * 1000
-  # The CLI cannot parse a non-finite expiry, and an access token cannot
-  # outlast the latest sign-in end the CLI accepts.
+  # An access token cannot outlast the latest sign-in end the CLI accepts.
   if expires_at is None or not (
     now_ms < expires_at <= now_ms + _CLAUDE_LOGIN_END_HORIZON_MS
   ):
-    raise RuntimeError("token response has no usable 'expires_in'")
+    if stored is None:
+      raise RuntimeError("token response has no usable 'expires_in'")
+    expires_at = now_ms
   oauth = {"scopes": []} if stored is None else dict(stored)
-  oauth["accessToken"] = tokens["access_token"]
-  oauth["refreshToken"] = tokens["refresh_token"]
+  oauth["accessToken"] = access_token
+  oauth["refreshToken"] = refresh_token
   oauth["expiresAt"] = int(expires_at)
   end = claude_login_end_after(now_ms, tokens.get("refresh_token_expires_in"))
   if stored is not None:
@@ -1806,9 +1840,11 @@ def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
     end = stored_end if end is None or stored_end is None else min(stored_end, end)
   if end is not None:
     oauth["refreshTokenExpiresAt"] = end
-  scope = tokens.get("scope")
-  if isinstance(scope, str) and scope:
+  scope = _token_grant_text(tokens, "scope")
+  if scope is not None:
     oauth["scopes"] = scope.split()
+  if stored is None:
+    oauth["email"] = _token_grant_text(tokens, "account", "email_address") or ""
   return oauth
 
 
@@ -1835,9 +1871,7 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   return creds_path, oauth
 
 
-def _write_claude_oauth(
-  creds_path: Path, oauth: dict | None, top_level: dict[str, str | None] | None = None,
-) -> None:
+def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
   """Persist a claudeAiOauth block, or remove it when oauth is None,
   in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
   leave a truncated file the chat path then reads).
@@ -1851,16 +1885,9 @@ def _write_claude_oauth(
   documented `docker cp ~/.claude/.credentials.json` dev workflow) also
   carries mcpOAuth and organizationUuid. Rewriting just {"claudeAiOauth": …}
   would drop those sibling keys on the first registry-path refresh, which is
-  what 'the file stays the single source of truth' is meant to prevent. The
-  file mode is preserved (the CLI writes 0600); we mirror it on the tmp file
-  and default to 0600 when the source is gone.
-
-  `top_level` sets, or with None removes, other top-level keys in the same
-  write: a new sign-in replaces the account's `organizationUuid`."""
+  what 'the file stays the single source of truth' is meant to prevent."""
   try:
-    raw = json.loads(creds_path.read_text())
-    if not isinstance(raw, dict):
-      raise ValueError("Claude credentials are not an object")
+    raw = _read_claude_credentials(creds_path)
   except (OSError, ValueError):
     if oauth is None:
       raise  # Disconnect must not discard unrelated, unreadable credentials.
@@ -1869,11 +1896,47 @@ def _write_claude_oauth(
     raw.pop("claudeAiOauth", None)
   else:
     raw["claudeAiOauth"] = oauth
-  for key, value in (top_level or {}).items():
-    if value is None:
-      raw.pop(key, None)
-    else:
-      raw[key] = value
+  _replace_claude_credentials(creds_path, raw)
+
+
+def write_claude_sign_in(creds_path: Path, tokens: Any) -> str:
+  """Store a new Claude sign-in from the token endpoint response and return
+  its account email ('' when unknown). Raises RuntimeError, storing nothing,
+  for a response claude_oauth_after_token_grant refuses.
+
+  Like the CLI's own sign-in, the previous account's keys
+  (_CLAUDE_ACCOUNT_KEYS) are dropped and the file's other keys are kept.
+  The response's organization uuid is then recorded as the top-level
+  `organizationUuid`: that key is Möbius's own convention, read by its usage
+  controls through claude_organization_uuid (the CLI records the
+  organization elsewhere)."""
+  oauth = claude_oauth_after_token_grant(tokens, None)
+  try:
+    raw = _read_claude_credentials(creds_path)
+  except (OSError, ValueError):
+    raw = {}
+  for key in _CLAUDE_ACCOUNT_KEYS:
+    raw.pop(key, None)
+  raw["claudeAiOauth"] = oauth
+  organization = _token_grant_text(tokens, "organization", "uuid")
+  if organization is not None:
+    raw["organizationUuid"] = organization
+  _replace_claude_credentials(creds_path, raw)
+  return oauth["email"]
+
+
+def _read_claude_credentials(creds_path: Path) -> dict:
+  """The credentials file as an object; raises OSError or ValueError."""
+  raw = json.loads(creds_path.read_text())
+  if not isinstance(raw, dict):
+    raise ValueError("Claude credentials are not an object")
+  return raw
+
+
+def _replace_claude_credentials(creds_path: Path, raw: dict) -> None:
+  """Atomically replace the credentials file with `raw`. The file mode is
+  preserved (the CLI writes 0600); we mirror it on the tmp file and default
+  to 0600 when the source is gone."""
   try:
     mode = stat.S_IMODE(creds_path.stat().st_mode)
   except OSError:
