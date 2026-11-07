@@ -221,6 +221,16 @@ export default function QuestionCard({
   const answered = Boolean(submitted) || !!answeredMap || completedAction
   const locallyQueued = !answered && Boolean(localAnswer)
   const selectionLocked = answered || locallyQueued
+  // The choice hint, paperclip, and Submit slot. A card first shown inactive
+  // (history; a stopped or superseded question opened later) stays compact.
+  // Once this mount has shown the card answerable, Stop or supersession only
+  // makes those controls inert: removing them collapsed the card by ~80px
+  // under the owner's eyes, and at the chat bottom the transcript slid down.
+  // The flag only ever latches on, so an interrupted render can at worst keep
+  // the inert controls; it can never hide them from a live card.
+  const shownAnswerableRef = useRef(!disabled)
+  if (!disabled) shownAnswerableRef.current = true
+  const showsAnswerControls = answered || shownAnswerableRef.current
   const attachLocked = selectionLocked || submitting || disabled
   const displayAnswers = answeredMap || localAnswer?.body?.answers || submitted?.answers || {}
   const grouped = questions.length > 1
@@ -258,8 +268,9 @@ export default function QuestionCard({
   const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
   // Incomplete cards stay tappable to reveal the first missing answer. Pending
   // uploads alone still disable submission until their durable IDs arrive.
-  const needsAnswers = !allAnswered && !pendingFiles && !restartAction
-    && !selectionLocked && !disabled && !submitting
+  const unansweredLook = !allAnswered && !pendingFiles && !restartAction
+    && !selectionLocked
+  const needsAnswers = unansweredLook && !disabled && !submitting
   // Quiet until a tap: the card shows no progress count up front.
   const submitHint = needsAnswers && showMissing
     ? 'Answer each question before submitting'
@@ -497,7 +508,7 @@ export default function QuestionCard({
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
                 (□ checkbox for multi, ○ radio for single). */}
-            {!completedAction && (!disabled || answered) && hasOptions && (
+            {!completedAction && showsAnswerControls && hasOptions && (
               <div className="qcard__hint">
                 {writtenRestartAction
                   ? platformAction.observation?.observed_at
@@ -578,7 +589,7 @@ export default function QuestionCard({
                     It stays while the action row does, so Submit, queueing
                     and the Submitted state never move the card; once the
                     answer is locked it only stops taking files. */}
-                {!platformAction && (answered || !disabled) && (
+                {!platformAction && showsAnswerControls && (
                   <button type="button" className="qcard__attach"
                     aria-label={grouped ? `Attach a photo or file to your answer to: ${q.question}` : 'Attach a photo or file'}
                     title="Attach a photo or file" disabled={attachLocked} onClick={() => {
@@ -619,7 +630,7 @@ export default function QuestionCard({
         <DependencyBacklinks chats={neededBy} onInternalNav={onInternalNav} />
       </details>}
       {hasCardFiles && fileTray(cardLevel, 'Files for all answers')}
-      {!platformAction && (answered || !disabled) && (
+      {!platformAction && showsAnswerControls && (
         <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
           disabled={attachLocked}
           aria-label="Attach files to your answer"
@@ -629,7 +640,7 @@ export default function QuestionCard({
             if (!attachLocked) addAnswerFiles(selected, attachTargetRef.current)
           }} />
       )}
-      {!completedAction && (answered || !disabled) && (
+      {!completedAction && showsAnswerControls && (
         <>
           {locallyQueued && (
             <div className="qcard__queue-status" role="status">
@@ -646,7 +657,9 @@ export default function QuestionCard({
           )}
           <button
             type="button"
-            className={`qcard__submit${needsAnswers ? ' qcard__submit--incomplete' : ''}`}
+            // A card stopped before it was answered keeps the quiet outline it had,
+            // dimmed by :disabled, rather than turning into a dimmed primary.
+            className={`qcard__submit${unansweredLook ? ' qcard__submit--incomplete' : ''}`}
             aria-disabled={needsAnswers || undefined}
             aria-describedby={submitHint ? submitHintId : undefined}
             onPointerDown={(event) => {
