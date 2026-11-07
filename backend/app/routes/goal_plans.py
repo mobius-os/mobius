@@ -164,6 +164,7 @@ async def promote_current_run_to_goal(
       "run_not_current": "A newer agent turn now owns this chat.",
       "different_goal_active": "This turn already owns a different Goal.",
       "logical_root_missing": "The running turn has no durable logical root.",
+      "claim_adoption_conflict": "An exact work claim changed or would create a Goal dependency cycle. Inspect it before promoting again.",
     }
     raise HTTPException(
       status_code=409,

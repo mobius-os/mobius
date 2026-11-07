@@ -1293,6 +1293,14 @@ Goals in that chat remain subscribed. A valid round-trip transfer can restore
 its pending follow after quota and cycle checks. Withdrawn or settled rows never
 revive this way. Same-chat Goal ownership rebinds use this same transition,
 so changing physical executors cannot strand a previously suppressed Goal.
+First-Goal promotion atomically adopts only open Goal-less acquisitions owned
+by that exact physical attempt, under the same graph fence and cycle checks.
+Earlier attempts' claims do not become Goal-owned merely by sharing a chat or
+causal root; an explicit refresh of the exact work key can adopt them.
+Replacing a completed Goal in the same physical turn also requires explicit
+claim refresh. A stamped source stall retains bounded structured evidence of
+the claim, owner run/Goal/root, latest chat attempt and native handoffs observed,
+never transcript content or an inferred "newest Goal" owner.
 
 `goal_dependency_sources` owns registration and immutable source outcomes. Finish,
 release, Goal hold/end and chat deletion stamp subscribed outcomes in the same

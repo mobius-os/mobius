@@ -4564,6 +4564,10 @@ class ChatWriterActor:
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
     """Atomically bind one exact live attempt to durable intent."""
+    # Promotion adopts exact acquisitions, changing subscriber graph edges.
+    # Serialize the identity read as well as adoption with follows/refreshes.
+    from app.decision_cards import fence_owner
+    fence_owner(db)
     run = db.query(models.ChatRun).filter(
       models.ChatRun.id == cmd.run_token,
       models.ChatRun.chat_id == cmd.chat_id,
@@ -4656,6 +4660,15 @@ class ChatWriterActor:
     )
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
+    if goal_was_missing and not replacing:
+      # A later Goal in one physical turn is a different action boundary.
+      # Historical NULL claims from its predecessor need an explicit refresh.
+      from app.agent_work_claims import stage_adopt_pre_goal_claims
+      try:
+        stage_adopt_pre_goal_claims(db, run)
+      except ValueError:
+        db.rollback()
+        return GoalPromotionRejected("claim_adoption_conflict")
     if goal_was_missing:
       # A helper spawned before promotion has no Goal snapshot yet. Adopt only
       # this physical attempt's helpers, never an earlier turn sharing its root.

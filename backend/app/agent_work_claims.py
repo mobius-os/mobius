@@ -129,6 +129,39 @@ def _stage_goal_owner_change(db: Session, row: models.AgentWorkClaim, *,
   return previous_follow_status
 
 
+def stage_adopt_pre_goal_claims(db: Session, run: models.ChatRun) -> None:
+  """Bind only this promoting attempt's exact open acquisitions to its Goal.
+
+  The writer holds the owner graph fence and commits adoption with promotion.
+  Sharing a chat or even a causal root with an earlier attempt is insufficient;
+  that work needs an explicit claim refresh instead.
+  """
+  for row in db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == run.chat_id,
+    models.AgentWorkClaim.owner_run_id == run.id,
+    models.AgentWorkClaim.owner_goal_id.is_(None),
+    models.AgentWorkClaim.acquisition_id.is_not(None),
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).populate_existing().all():
+    changed = db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.id == row.id,
+      models.AgentWorkClaim.acquisition_id == row.acquisition_id,
+      models.AgentWorkClaim.revision == row.revision,
+      models.AgentWorkClaim.owner_chat_id == run.chat_id,
+      models.AgentWorkClaim.owner_run_id == run.id,
+      models.AgentWorkClaim.owner_goal_id.is_(None),
+      models.AgentWorkClaim.completed_at.is_(None),
+      models.AgentWorkClaim.released_at.is_(None),
+    ).update({models.AgentWorkClaim.owner_goal_id: run.goal_id,
+              models.AgentWorkClaim.updated_at: now_naive_utc()}, synchronize_session=False)
+    if changed != 1:
+      raise ValueError("The claim changed during Goal adoption.")
+    db.refresh(row)
+    _stage_goal_owner_change(db, row, previous=run.chat_id,
+      previous_run_id=run.id, previous_goal_id=None)
+
+
 def claim_work(
   db: Session,
   *,
@@ -210,17 +243,20 @@ def claim_work(
   if row.owner_chat_id == chat_id:
     # Refreshing ownership from a different Goal in the same chat also changes
     # graph edges. Serialize it with follows/transfers and reject reverse edges.
+    expected_acquisition = row.acquisition_id
     fence_owner(db, owner_id)
     db.refresh(row)
-    if row.owner_chat_id != chat_id:
+    if row.owner_chat_id != chat_id or row.acquisition_id != expected_acquisition:
       db.rollback()
       raise ValueError("The claim changed while refreshing; inspect it before retrying.")
+    goal_id = _goal_id(db, chat_id, run_id)
     previous_revision = row.revision
     previous_goal_id, previous_run_id = row.owner_goal_id, row.owner_run_id
     changed = db.query(models.AgentWorkClaim).filter(
       models.AgentWorkClaim.id == row.id,
       models.AgentWorkClaim.owner_chat_id == chat_id,
       models.AgentWorkClaim.owner_goal_id == row.owner_goal_id,
+      models.AgentWorkClaim.acquisition_id == expected_acquisition,
       models.AgentWorkClaim.revision == previous_revision,
       models.AgentWorkClaim.completed_at.is_(None),
       models.AgentWorkClaim.released_at.is_(None),
@@ -452,9 +488,8 @@ def stage_settle_goal_claims(
     return []
   finished = set(finished_keys)
   settled = []
-  # A claim the chat took before this Goal existed (an approval answered
-  # before promote_goal) stays Goal-less; completion finishes it only when
-  # the Goal names it, and never releases it otherwise.
+  # Earlier attempts' unadopted claims stay Goal-less; completion finishes
+  # them only when the Goal names them, and never releases them otherwise.
   owned_by_goal = models.AgentWorkClaim.owner_goal_id == goal_id
   named_chat_claim = and_(
     models.AgentWorkClaim.owner_goal_id.is_(None),
