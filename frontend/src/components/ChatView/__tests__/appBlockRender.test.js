@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { PassiveBlockView, SessionControls, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { AskControl, PassiveBlockView, SessionControls, blockAsk, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -422,4 +422,109 @@ test('a merged row can use the accent tone, and a live title scopes the caption 
   assert.match(html, /md-app-block__pill is-accent">Merged</)
   assert.match(html, /md-app-block__source">Rows from this conversation</)
   assert.match(rowView({}), /md-app-block__source">From this conversation</)
+})
+
+// rows-v2: the app's own rows, a header state mark, and a folded block.
+function appRowsView(fields, { onJump = null, rowItems = [{ title: 'Saved row', intent: 'open:a', action: { label: 'Send', intent: 'send:a' },
+  facts: [{ label: 'Project', value: 'owner/saved' }] }] } = {}) {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    title: 'Saved card', facts: [{ label: 'Saved', value: 'root fact' }],
+    action: { label: 'Send all', intent: 'send-batch:sel-1' }, items: rowItems }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', label: 'Send all' },
+    { key: 'send:a', label: 'Send' }], ...fields }, 's', new Set(['send-batch:sel-1', 'send:a']), new Set(['open:a']), 'example')
+  return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {}, onJump }))
+}
+
+test('app rows replace the saved rows, facts and item controls, with no conversation caption', () => {
+  const html = appRowsView({ title: '2 contributions', rows: [
+    { title: 'First change', meta: 'owner/a · +12 −4', intent: 'review:a-1' },
+    { title: 'Second change', meta: 'owner/b · +3 −0', pill: 'Merged', tone: 'accent', links: [{ label: '#9', url: 'https://github.com/owner/b/pull/9' }] }] })
+  assert.deepEqual(rowTitles(html), ['First change', 'Second change'])
+  assert.match(html, /<a class="md-app-block__item-title" href="\/shell\/\?app=example&amp;intent=review%3Aa-1">First change<\/a>/)
+  assert.match(html, /<span class="md-app-block__item-title">Second change<\/span>/, 'a row without an intent links nowhere')
+  assert.match(html, /<p class="md-app-block__item-meta">owner\/a · \+12 −4<\/p>/)
+  assert.match(html, /#9<svg[^]*<\/a><\/span><span class="md-app-block__pill is-accent">Merged<\/span>/)
+  assert.doesNotMatch(html, /Saved row|owner\/saved|root fact|md-app-block__source/)
+  assert.equal((html.match(/class="md-app-block__action"/g) || []).length, 1, 'only the block action is drawn')
+  assert.match(html, /<footer>[^]*>Send all<\/button>/)
+})
+
+test('a live title carries a state mark: spinner, check or exclamation mark, none when neutral', () => {
+  assert.match(appRowsView({ title: 'Sending 2', titleBusy: true, rows: [] }),
+    /<header><span class="md-app-block__title-mark is-neutral" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
+  assert.match(appRowsView({ title: '2 pull requests opened', titleTone: 'success', rows: [] }),
+    /<span class="md-app-block__title-mark is-success" aria-hidden="true"><svg/)
+  assert.match(appRowsView({ title: '1 needs a fix', titleTone: 'attention', rows: [] }),
+    /<span class="md-app-block__title-mark is-attention" aria-hidden="true"><span class="md-app-block__title-mark-alert">!<\/span>/)
+  assert.doesNotMatch(appRowsView({ title: '2 contributions', rows: [] }), /md-app-block__title-mark/)
+})
+
+test('no rows and no visible action fold the block to one line, with a jump only when it is not the newest', () => {
+  const fields = { title: 'Continued below', rows: [], actions: [{ key: 'send-batch:sel-1', hidden: true }, { key: 'send:a', hidden: true }] }
+  const html = appRowsView(fields, { onJump: () => {} })
+  assert.match(html, /<section class="md-app-block md-app-block--folded" aria-label="Continued below">/)
+  assert.match(html, /<button type="button" class="md-app-block__jump">Jump to latest<svg/)
+  assert.doesNotMatch(html, /<footer>|md-app-block__items|Saved row|md-app-block__open/, 'one quiet line: the jump replaces the open link')
+  assert.doesNotMatch(appRowsView(fields), /md-app-block__jump/)
+  assert.match(appRowsView(fields), /md-app-block__open/, 'the newest folded block keeps its open link')
+  assert.doesNotMatch(appRowsView({ ...fields, actions: [{ key: 'send-batch:sel-1', label: 'Send all' }] }), /md-app-block--folded/,
+    'a visible action keeps the block open')
+})
+
+test('jumping to the newest block moves focus there, without animation for reduced motion', async () => {
+  const { jumpTo } = await import('../markdown/PassiveAppBlock.jsx')
+  const calls = []
+  const node = { attrs: {}, hasAttribute(name) { return name in this.attrs }, setAttribute(name, value) { this.attrs[name] = value },
+    scrollIntoView: options => calls.push(['scroll', options.behavior]), focus: options => calls.push(['focus', options.preventScroll]) }
+  const previous = globalThis.window
+  globalThis.window = { matchMedia: query => ({ matches: query.includes('reduce') }) }
+  try { jumpTo(node) } finally { globalThis.window = previous }
+  assert.deepEqual(calls, [['scroll', 'auto'], ['focus', true]])
+  assert.equal(node.attrs.tabindex, '-1')
+  jumpTo(null)
+})
+
+// ---- ask-v1: the host's ask replaces the block's controls.
+const fixAsk = { refs: [{ id: 'row-1', code: 'upstream_conflict', rev: 'abc1234' }] }
+const askView = (status, fields = {}) => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send all', intent: 'send-batch:sel-1' }, items: [{ title: 'Saved', intent: 'open:a', action: { label: 'Send', intent: 'send:a' } }] }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', label: 'Open Example', open: true },
+    { key: 'send:a', label: 'Send' }], rows: [{ title: 'Row', pill: 'Conflicts', tone: 'attention' }], ask: { ...fixAsk, label: 'Show details' }, ...fields },
+  's', new Set(['send-batch:sel-1', 'send:a']), new Set(['open:a']), 'example', { ask: true })
+  return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {},
+    ask: status ? createElement(AskControl, { status, locked: false, onAsk() {} }) : null }))
+}
+
+test('a drawn ask is the block\'s one action, with the host\'s own label; the app\'s controls are not drawn beside it', () => {
+  const html = askView('ready')
+  assert.equal((html.match(/class="md-app-block__action/g) || []).length, 1)
+  assert.match(html, /<footer><span class="md-app-block__controls"><button type="button" class="md-app-block__action is-ask"><svg[^>]*>.*<\/svg>Fix in chat<\/button><\/span><\/footer>/)
+  assert.doesNotMatch(html, /Open Example|>Send<|Show details/)
+  assert.match(html, /is-attention">Conflicts</)
+  assert.match(askView(null), /Open Example/, 'without an ask the app action stays')
+})
+
+test('after a tap the ask waits, and says why only to assistive technology', () => {
+  assert.match(askView('sending'), /is-ask" disabled="" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Asking…/)
+  assert.match(askView('asked'), /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">The request is in this chat\./)
+  assert.match(askView('already'), /disabled=""[^>]*>.*Already asked<\/button><span[^>]*>This chat already has this request\./)
+  const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
+  assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
+})
+
+test('an ask is drawn only for an admitted app on the attested chat\'s newest block, outside recovery', () => {
+  const state = { ask: fixAsk, recoveryPending: false }
+  const context = { chatId: 'chat-1', latest: true }
+  assert.equal(blockAsk({ state, admitted: true, allowed: true, context }), fixAsk)
+  for (const input of [
+    { state: null, admitted: true, allowed: true, context },
+    { state: { ...state, ask: null }, admitted: true, allowed: true, context },
+    { state, admitted: false, allowed: true, context },
+    { state, admitted: true, allowed: false, context },
+    { state, admitted: true, allowed: true, context: null },
+    { state, admitted: true, allowed: true, context: { chatId: 'chat-1', latest: false } },
+    { state, admitted: true, allowed: true, context: { chatId: '', latest: true } },
+    { state: { ...state, recoveryPending: true }, admitted: true, allowed: true, context },
+  ]) assert.equal(blockAsk(input), null, JSON.stringify(input))
 })

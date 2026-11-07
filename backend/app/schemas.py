@@ -7,8 +7,8 @@ from typing import Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
-  BaseModel, ConfigDict, Field, PrivateAttr, computed_field, field_validator,
-  model_validator,
+  BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, computed_field,
+  field_validator, model_validator,
 )
 
 from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
@@ -333,6 +333,14 @@ class AppOut(BaseModel):
     from app.app_capabilities import passive_block_module_digest
 
     return passive_block_module_digest(self)
+
+  @computed_field
+  @property
+  def passive_block_ask(self) -> bool:
+    """Whether this app's passive blocks may offer a host-drawn ask."""
+    from app.app_capabilities import passive_block_ask
+
+    return passive_block_ask(self)
 
   @computed_field
   @property
@@ -1194,18 +1202,17 @@ class ModelRegistryResponse(BaseModel):
 
 
 class ModelPrefsUpdate(BaseModel):
-  """`PATCH /api/owner/model-prefs` body.
+  """`PATCH /api/owner/model-prefs` body: only the models being changed.
 
-  `hidden_ids` replaces the persisted list verbatim — the modal
-  always sends the full set so partial-update merge logic isn't
-  needed. Passing an empty list clears all hidden entries (shows
-  everything). Unknown IDs are tolerated; they no-op until/unless
-  the registry surfaces them again.
+  `hidden` maps a model id to true (hide it from the picker) or false (show
+  it). Models not named keep their current visibility. Unknown ids are
+  tolerated; they no-op until/unless the registry surfaces them again.
   """
 
   model_config = ConfigDict(extra="forbid")
 
-  hidden_ids: list[str] = Field(default_factory=list)
+  # One Save of the picker modal names at most the whole registry.
+  hidden: dict[str, StrictBool] = Field(max_length=500)
 
 
 class NotificationOut(BaseModel):

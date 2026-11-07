@@ -698,37 +698,23 @@ def test_providers_status_accepts_app_token(client, auth):
   assert "codex" in body
   assert "configured" in body["claude"]
   assert body["claude"]["authenticated"] == body["claude"]["configured"]
-  assert body["mobius"]["available"] is False
+  # No broker link in tests: the platform provider is listed, not signed in.
+  assert body["mobius"]["available"] is True
   assert body["mobius"]["configured"] is False
+  assert body["mobius"]["error"] == (
+    "Sign in to your Möbius account in Settings to use Möbius models."
+  )
 
 
-def test_mobius_provider_is_available_only_with_identity_app_installed(
+def test_mobius_provider_is_available_without_identity_app_and_owner_switches_it(
   client, auth,
 ):
-  from app import models
-  from app.config import get_settings
-  from app.database import SessionLocal
-
-  absent = client.get("/api/auth/providers/status", headers=auth).json()
-  assert absent["mobius"]["available"] is False
-
-  app = create_local_app(
-    client, auth, name="Möbius · You", description="Account",
-  )
-  from app import providers
-  with SessionLocal() as session:
-    row = session.query(models.App).filter(models.App.id == app["id"]).one()
-    row.slug = "identity"
-    row.capability_contract = {"model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
-
+  """The Möbius provider is platform-owned; the owner turns it off in Settings."""
   installed = client.get("/api/auth/providers/status", headers=auth).json()
   assert installed["mobius"]["available"] is True
+  assert client.get(
+    "/api/auth/providers/mobius/enabled", headers=auth,
+  ).json() == {"enabled": True}
 
   disabled = client.patch(
     "/api/auth/providers/mobius/enabled",
@@ -740,6 +726,7 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   assert hidden["mobius"]["available"] is False
   assert hidden["mobius"]["configured"] is False
   assert hidden["mobius"]["authenticated"] is False
+  assert hidden["mobius"]["error"] == "Möbius models are turned off in Settings."
   assert hidden["claude"] == installed["claude"]
   assert hidden["codex"] == installed["codex"]
   assert client.patch(
@@ -755,26 +742,9 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   """The owner's Möbius trial balance is owner-only. App/embed principals share
   the endpoint for model-picker availability, so they must see the same
   provider fields without the owner's credit units and grant expiries."""
-  from app import models
-  from app.config import get_settings
-  from app.database import SessionLocal
   from app.providers import MobiusProvider
 
-  # Install the identity app so mobius reports as available.
-  app = create_local_app(
-    client, auth, name="Möbius · You", description="Account",
-  )
-  from app import providers
-  with SessionLocal() as session:
-    row = session.query(models.App).filter(models.App.id == app["id"]).one()
-    row.slug = "identity"
-    row.capability_contract = {"model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  app = create_local_app(client, auth, name="Picker host", description="x")
 
   # Fake a linked subscription carrying a real trial balance.
   balance = {
@@ -870,6 +840,20 @@ def test_claude_auth_accepts_current_access_or_refreshable_session(tmp_path):
   }))
   assert ClaudeProvider().check_auth(str(tmp_path)) is None
 
+  # A stored end outside the range the CLI accepts (here before 2025) is no
+  # end under the CLI's storage rule, which Möbius follows: the refresh then
+  # decides, and drops the bad end. (The CLI's own usability check would
+  # count it as ended.)
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "refresh-token",
+      "expiresAt": 0,
+      "refreshTokenExpiresAt": 0,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
 
 def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
   from app.providers import ClaudeProvider
@@ -893,7 +877,7 @@ def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
       "accessToken": "expired-token",
       "refreshToken": "expired-refresh-token",
       "expiresAt": 0,
-      "refreshTokenExpiresAt": 0,
+      "refreshTokenExpiresAt": int(time.time() * 1000) - 120_000,
     },
   }))
 
@@ -950,7 +934,10 @@ def test_providers_models_returns_known_models_on_missing_creds(
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  assert set(body) == {"claude", "codex"}
+  # The platform-owned Möbius catalogue is listed with no app installed.
+  assert set(body) == {"claude", "codex", "mobius"}
+  from app.providers import known_model_ids
+  assert [m["id"] for m in body["mobius"]] == known_model_ids("mobius")
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5-1",
@@ -1077,7 +1064,7 @@ def test_providers_models_respects_hidden_model_prefs(client, auth):
   r0 = client.patch(
     "/api/owner/model-prefs",
     headers=auth,
-    json={"hidden_ids": ["claude-opus-4-8", "gpt-5.5"]},
+    json={"hidden": {"claude-opus-4-8": True, "gpt-5.5": True}},
   )
   assert r0.status_code == 200, r0.text
 

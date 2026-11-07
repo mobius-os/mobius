@@ -517,14 +517,25 @@ or on `app-block-init`; act only on an owner `confirm`, and check that
 request against your own data first.
 
 `props.blockSession` is `{sessionId, generation, actions, items, features,
-checkpoint, retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+context, checkpoint, retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
 `[{key, intent, label}]` and `key` is the action's intent, and `items` is
 `[{intent}]`: the block's item intents in card order, after the host's
 validation and deduplication (an empty array when the block lists no items).
 Like `actions[].intent`, `items` is agent-printed and untrusted: it tells a
 single block-level action which records the card shows, but re-verify every
 intent against your own data before you build a confirmation, and build that
-confirmation list from your data, never from the block. The host also posts
+confirmation list from your data, never from the block.
+
+`context` is attested by the chat host, never read from the block:
+`{chatId, latest, intent}` when the block is in a chat transcript, otherwise
+`null`. `chatId` is the chat the block is rendered in, `intent` the block's own
+parsed intent, and `latest` is whether it is that chat's newest block with the
+same app and that `intent` (check `intent` before relying on `latest` as
+"newest of my kind": a block printed with another intent is its own group); it changes to
+`false` (in a new `app-block-init`) as soon as a newer one appears. Use
+`chatId` to scope what the block shows to that chat's own data, so a block
+printed in one chat can never act on another chat's records; use `latest` to
+let only the newest block of a kind stay live. The host also posts
 window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
@@ -534,6 +545,15 @@ window messages; read them with `subscribe` or a `message` listener that checks
   fields: `"row-state"` means `title`, `items`, `itemFacts`, `open` and the
   `accent` tone below. Without it the host ignores them (and draws an `open`
   action as an ordinary button), so keep your older presentation there.
+  `"rows-v2"` means `rows`, `titleTone`, `titleBusy`, `context` and
+  `app-block-refresh` below; a host without it sends no `context` and ignores
+  those fields. `"ask-v1"` means `ask` below; it is listed only when the owner
+  has also granted your app `chat.blocks.ask`.
+- `{type:'moebius:app-block-refresh', sessionId, generation, reason}`, a hint
+  to re-read your own state: `reason` is `turn` (a turn in this chat
+  settled) or `visible` (the tab became visible again). It is sent only to a
+  mounted document of a visible chat, carries no data and grants nothing.
+  Read cheaply (local storage); leave network checks to an owner action.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -576,9 +596,30 @@ included.
 - `title` (120): plain text that replaces the block's saved title while your
   document reports, for a header that says what happened ("3 pull requests
   opened"). It is your app's framing, not something the host verified, and it
-  stays while a confirmation is open. The caption then reads "Rows from this
-  conversation", because the rows are still the block's. Omit it or send `''`
+  stays while a confirmation is open. Outside a confirmation, and unless you
+  report `rows`, the caption then reads "Rows from this conversation",
+  because the rows are still the block's. Omit it or send `''`
   to keep the saved title.
+- `titleTone` and `titleBusy` (`rows-v2`): a small mark before your live
+  `title`: a spinner while busy, a check for `success` or `accent`, an
+  exclamation mark for `attention` or `danger`, nothing for `neutral`. The
+  title's words must say the state; the mark only reinforces it.
+- `rows` (`rows-v2`): your own list for the block, up to 12 `{title (120),
+  meta? (160), pill? (40), tone?, busy?, links?, intent?}`. They replace the
+  block's saved items and root facts for display, and the "From this
+  conversation" caption goes, because nothing saved is shown. `meta` is one
+  quiet line under the title (for example "owner/repo · +12 −4"), `pill` a
+  status pill in `tone` with a spinner when `busy`, `links` up to 2 `{label
+  (40), url}` with uncredentialed `https:` URLs, and `intent` an app intent
+  the row's title opens in your app. Rows carry no controls: while you report
+  rows, item actions are not drawn, only the block's own action. A complete
+  confirmation still owns the block while it is open, and while an action is
+  confirming without a complete list the saved card is shown, exactly as
+  without rows. Omit `rows` to keep the saved items; `[]` shows none. With no
+  rows, no visible action and no `summary`, the block folds to one quiet line
+  (your `title`, for example "Continued below"); when it is not the chat's
+  newest block of its kind, that line offers "Jump to latest" (which moves
+  focus to the newest block) in place of its open link.
 - `itemFacts: "values"`: the same value-only row facts as the block's
   `item_facts`, for rows whose values read on their own. Confirmation rows
   keep their labels.
@@ -591,6 +632,42 @@ included.
   URLs, opened outside Möbius. Row state is decoration only: it adds no
   control, is hidden while a confirmation owns the block, and is dropped while
   the block is held for recovery.
+- `ask` (`ask-v1`): `{refs: [{id, code, rev}]}`, 1 to 12 references to things
+  in your app that the chat's agent should fix ("Fix in chat"). Each `id` is
+  1-128 of `A-Za-z0-9._-` starting with a letter or digit, each `code` a
+  lower-case `snake_case` word of 2 to 48 characters (`^[a-z][a-z0-9_]{1,47}$`),
+  and each `rev` a lower-case hex token of 7 to 64 characters naming the state
+  you report (for example the item's current version hash, or a digest of its
+  last failure). Any other ref drops the whole ask. You supply no words: the
+  host draws its own **Fix in chat** button as the block's one action, in
+  place of yours (while it is shown none of your controls are drawn), and on
+  the owner's tap it sends this owner message in the chat, which starts (or
+  queues behind) a turn:
+
+  ```
+  Please fix what the <app slug> card in this chat flagged:
+
+  `<app slug> · <id> · <code>`
+  ```
+
+  with one line per ref (`rev` is not shown). Your document gets no event, and
+  the ask causes no effect in your app: only `confirm` can. Document what your
+  codes mean in your app's skill, so the agent knows what to do. The host
+  ignores `ask` while any action is confirming or busy, during recovery,
+  without admission, outside a chat transcript and on any block that is not
+  that chat's newest of its app and intent. The message's client id is a hash
+  of the chat, the block's saved content (app, intent, title and the intents
+  it lists and acts on) and the refs with their `rev`, so the server posts one
+  ask about one state once, however often it is tapped, retried or reloaded,
+  on any device; after a duplicate the button says "Already asked". Change
+  `rev` when the state changes (the agent restaged, a new failure) and the
+  owner can ask again. The block identity is its content, not its position:
+  two identical blocks in one chat share their asks, by design. After a tap
+  the button reads "Asked" until a turn in the chat settles. Omit `ask` (or
+  report `null`) when nothing needs the agent. An ask needs
+  `"chat.blocks.ask": {"version": 1}` in `mobius.json` beside
+  `chat.blocks.passive`, accepted by the owner and applied; without it the host
+  neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.

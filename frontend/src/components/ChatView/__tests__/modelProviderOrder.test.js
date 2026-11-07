@@ -118,7 +118,7 @@ for (const [name, query, path, body, expected] of [
   })
 }
 
-test('real preference query degrades only after four failed reads', async () => {
+test('real preference query degrades to show-all, marked unavailable, only after four failed reads', async () => {
   const originalFetch = globalThis.fetch
   const client = new QueryClient()
   let attempts = 0
@@ -128,7 +128,7 @@ test('real preference query degrades only after four failed reads', async () => 
     return Response.json({ detail: 'unavailable' }, { status: 503 })
   }
   try {
-    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [] })
+    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [], unavailable: true })
     assert.equal(attempts, 4, 'query retry must not multiply the read budget')
   } finally {
     client.clear()

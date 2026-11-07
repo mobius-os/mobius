@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 
 from tests.test_claude_subagent_hook_stop_e2e import (
-  CLI, ENV_ALLOW, FakeAnthropic, _system_text,
+  CLI, FakeAnthropic, _system_text, scrub_env,
 )
 
 PROBE_SYS = "PROBE-FAIL-CLOSED"
@@ -55,24 +54,7 @@ def fake_api(tmp_path):
 
 @pytest.fixture
 def scrubbed_env(monkeypatch, tmp_path, fake_api):
-  """Only allowlisted variables reach the CLI, pointed at the fake API."""
-  for key in set(os.environ) - set(ENV_ALLOW):
-    monkeypatch.delenv(key)
-  home = tmp_path / "home"
-  (home / ".claude").mkdir(parents=True)
-  for key, value in {
-    "HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude"),
-    "TMPDIR": str(tmp_path), "ANTHROPIC_API_KEY": "sk-ant-fake-probe",
-    "ANTHROPIC_BASE_URL": fake_api.url,
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
-    "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1",
-    "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
-    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
-  }.items():
-    monkeypatch.setenv(key, value)
-  work = tmp_path / "work"
-  work.mkdir()
-  return work
+  return scrub_env(monkeypatch, tmp_path, fake_api.url)
 
 
 async def _run_probe(scrubbed_env, event: str, hook) -> None:
@@ -109,6 +91,21 @@ async def test_raising_pre_tool_use_hook_blocks_the_call(scrubbed_env, fake_api)
   assert calls == ["Bash"]
   assert not fake_api.marker.exists()
   assert [result.get("is_error") for result in fake_api.tool_results] == [True]
+
+
+@pytest.mark.asyncio
+async def test_empty_pre_tool_use_output_lets_the_call_run(scrubbed_env, fake_api):
+  # Most helper file tools get `{}` back: no decision, so the call proceeds.
+  calls: list[str] = []
+
+  async def no_decision(data, tool_use_id, context):
+    calls.append(data.get("tool_name"))
+    return {}
+
+  await _run_probe(scrubbed_env, "PreToolUse", no_decision)
+  assert calls == ["Bash"]
+  assert fake_api.marker.exists()
+  assert [bool(result.get("is_error")) for result in fake_api.tool_results] == [False]
 
 
 @pytest.mark.asyncio

@@ -492,3 +492,44 @@ test('the session init carries the parsed item intents, in card order, intents o
     app: 'example', intent: 'open:a', title: 'Bare', interaction: 'inline', action: { label: 'Go', intent: 'go:a' } }) })
   assert.deepEqual(renderObserved({ block: bare, near: true }).result.current.blockSession.items, [])
 })
+
+test('the envelope carries the host-attested chat context and follows the newest-block verdict', () => {
+  const h = renderObserved({ block, near: true, context: { chatId: 'chat-1', latest: true } })
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: true, intent: 'open:a' },
+    'the context names the block intent its newest-block verdict is computed for')
+  assert.ok(h.result.current.blockSession.features.includes('rows-v2'))
+  const before = h.result.current.blockSession
+  h.rerender({ block, near: true, context: { chatId: 'chat-1', latest: false } })
+  assert.notEqual(h.result.current.blockSession, before, 'a changed verdict is a new envelope, so init is posted again')
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: false, intent: 'open:a' })
+  h.rerender({ block, near: true, context: null })
+  assert.equal('context' in h.result.current.blockSession, false, 'outside a chat there is no context')
+  h.rerender({ block, near: true, context: { chatId: '', latest: true } })
+  assert.equal('context' in h.result.current.blockSession, false)
+})
+
+test('a refresh hint is raised only for a mounted, supported document, bound to its generation', () => {
+  const h = renderObserved({ block, near: true, refresh: { seq: 0, reason: '' } })
+  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'turn' } })
+  assert.equal(h.result.current.blockRefresh, null, 'no document has negotiated yet')
+  h.result.current.onBlockCapability(true, { generation: 4, reset: true })
+  h.rerender({ block, near: true, refresh: { seq: 2, reason: 'visible' } })
+  assert.deepEqual(h.result.current.blockRefresh,
+    { seq: 2, reason: 'visible', sessionId: h.result.current.sessionId, generation: 4 })
+  h.rerender({ block, near: false, refresh: { seq: 3, reason: 'turn' } })
+  assert.equal(h.result.current.blockRefresh.seq, 2, 'a released frame gets no hint')
+})
+
+test('ask-v1 is advertised and an ask accepted only when the app is admitted to ask', () => {
+  const ask = { refs: [{ id: 'row-1', code: 'needs_review', rev: 'abc1234' }] }
+  for (const allowed of [true, false]) {
+    const h = renderObserved({ block, near: true, ask: allowed })
+    assert.equal(h.result.current.blockSession.features.includes('ask-v1'), allowed)
+    h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+    h.result.current.onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current.sessionId,
+      actions: [{ key: 'send-batch:sel-1', label: 'Send all' }], ask }, { generation: 1 })
+    h.observe()
+    assert.deepEqual(h.result.current.state.ask, allowed ? ask : null)
+    assert.equal(h.result.current.event, null, 'reporting an ask sends the app no event')
+  }
+})
