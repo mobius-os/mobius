@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app import transcript_rows
 from app import models
 from app.timeutil import now_naive_utc
+from app.prompt_blocks import json_block_data
 
 
 ACTIVATION_WAIT_KIND = "platform_activation"
@@ -285,14 +286,14 @@ def restart_action_block(chat, question_id: str | None) -> dict | None:
 
 def activation_notice(row: models.ChatWait, outcome: str) -> str:
   requirement = row.condition_json if isinstance(row.condition_json, dict) else {}
-  body = json.dumps({
+  body = json_block_data({
     "wait_id": row.id,
     "outcome": outcome,
     "required_paths": sorted(requirement.get("paths") or []),
     "declaring_run_id": row.created_by_run_id,
     "root_run_id": row.root_run_id,
     "goal_id": row.goal_id,
-  }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+  }, sort_keys=True, ensure_ascii=True)
   if outcome == "met":
     lead = (
       "Möbius restarted and reached a ready server. Continue the interrupted "

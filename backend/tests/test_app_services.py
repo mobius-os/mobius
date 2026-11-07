@@ -836,7 +836,8 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
 
     def delegated_principal(session=Depends(get_db)):
       return Principal(owner=session.query(models.Owner).one(), app_id=None,
-                       delegation_id='fixture-delegation', chat_id='fixture-child')
+                       delegation_id='fixture-delegation', chat_id='fixture-child',
+                       delegation_chat='fixture-child')
 
     server.dependency_overrides[get_principal] = delegated_principal
     # No delegation row stands behind this bearer, so it may only read.
@@ -850,6 +851,46 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
   finally:
     if caller_kind == 'delegated-owner':
       server.dependency_overrides.pop(get_principal, None)
+
+
+@pytest.mark.asyncio
+async def test_service_serialization_hides_lineage_without_mutating_the_actor():
+  actor = {
+    "scope": "owner", "delegated": True, "access": "read",
+    "delegation_id": "original-delegation", "delegation_chat": "original-child",
+  }
+  envelope = {"actor": actor, "body": {"delegation_id": "app-data"}}
+  serialized = json.loads(await app_services._serialize_request(envelope, 4096))
+  assert serialized == {
+    "actor": {"scope": "owner", "delegated": True, "access": "read"},
+    "body": {"delegation_id": "app-data"},
+  }
+  assert envelope["actor"] is actor
+  assert actor["delegation_id"] == "original-delegation"
+  assert actor["delegation_chat"] == "original-child"
+
+
+@pytest.mark.parametrize("scope", ["owner", "app"])
+@pytest.mark.parametrize("missing", ["delegation_id", "delegation_chat"])
+def test_service_refuses_incomplete_lineage_before_token_mint(
+  client, auth, db, scope, missing,
+):
+  target = _service_app(db)
+  owner = db.query(models.Owner).one()
+  claims = {
+    "sub": owner.username, "delegation_id": "original-delegation",
+    "delegation_chat": "original-child",
+  }
+  if scope == "app":
+    claims.update(scope="app", app_id=target.id, app_nonce=target.token_nonce)
+  claims.pop(missing)
+  token = auth_tokens.create_access_token(claims, token_epoch=owner.token_epoch)
+  response = client.get(
+    f"/api/apps/{target.id}/service/token",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert response.status_code == 401, response.text
+  assert response.json() == {"detail": "Incomplete delegation lineage."}
 
 
 SERVICE_TOKEN = b'''import json, os, sys

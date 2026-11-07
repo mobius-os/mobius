@@ -568,11 +568,10 @@ def create_app_token_endpoint(
       "message": "This app requires your approval before it opens.",
     })
   owner = principal.owner
-  # Preserve the delegation lineage on the down-scoped token. create_agent_token
-  # keeps agent_chat == delegation_chat, so principal.chat_id is the child chat
-  # a delegated bearer must carry; a plain owner has neither claim.
+  # Restrictive lineage is separate from chat/run execution identity. Preserve
+  # the signed provenance, never reconstruct it from the current caller chat.
   delegation_id = principal.delegation_id
-  delegation_chat = principal.chat_id if delegation_id is not None else None
+  delegation_chat = principal.delegation_chat
   token = auth.create_app_token(
     body.app_id,
     owner.username,
