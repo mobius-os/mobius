@@ -2754,10 +2754,14 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
   claim and derived patch. A missing/partial read is never a no-effect proof.
   Only the owning route may persist ``result`` and retire that same receipt.
   """
-  def answer(outcome: str, message: str, result: dict | None = None) -> dict:
+  def answer(
+    outcome: str, message: str, result: dict | None = None, effect: str | None = None,
+  ) -> dict:
     value = {"outcome": outcome, "message": message}
     if result is not None:
       value["result"] = result
+    if effect is not None:
+      value["effect"] = effect
     return value
 
   pending = lambda why: answer("pending", why)
@@ -2784,7 +2788,10 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
   phase = attempt.get("phase")
   effect = request.get("action")
   valid_effects = {
-    "pr": {"branch_published": {"create_pr"},
+    # A new PR's push phases are read-only witnesses too: an exact branch
+    # with no confirmed PR stays pending; only the sender may open the PR.
+    "pr": {"push_pending": {"push"}, "push_ambiguous": {"push"},
+           "branch_published": {"push", "create_pr"},
            "pr_ambiguous": {"create_pr"}, "complete": {"create_pr", "reconcile_pr"}},
     "pr_update": {
       "push_pending": {"push", "advance_successor_branch"},
@@ -2906,9 +2913,26 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
                and not isinstance(row.get("number"), bool)
                and row.get("html_url") == f"https://github.com/{repo_name}/pull/{row['number']}"
                and isinstance(row.get("head"), dict)
-               and row["head"].get("ref") == branch]
-      if len(exact) != 1:
-        return pending("The branch is published, but its exact PR is not confirmed.")
+               and row["head"].get("ref") == branch
+               and row["head"].get("sha") == head_sha]
+      if len(exact) > 1:
+        return unavailable("GitHub lists more than one PR for the reviewed head.")
+      if not exact:
+        # A pushed branch is not a sent PR. Only the original approved Send
+        # may open it; observation never creates or retries a public effect.
+        if branch_sha == head_sha:
+          return answer(
+            "pending",
+            "The reviewed branch is published, but GitHub has not confirmed "
+            "its exact pull request. Checking never opens one.",
+            effect="branch_published",
+          )
+        if branch_sha is None:
+          return unavailable(
+            "GitHub confirmed neither the reviewed branch nor its pull request. "
+            "This does not prove that nothing was sent."
+          )
+        return changed("The public branch has a different head than the signed review.")
       raw_number = exact[0]["number"]
     live_response = _git_ops._gh(repo, "api", f"repos/{repo_name}/pulls/{raw_number}", check=False)
     if live_response.returncode != 0:
@@ -2930,7 +2954,11 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
       or live.get("body") != body):
     return changed("The public PR identity or text differs from the signed review.")
   if remote_base.get("ref") != base:
-    return pending("The public PR has the reviewed head but not the reviewed base.")
+    # Only a successor's signed retarget can still be on its way; any other
+    # base is a positive conflict with the reviewed target.
+    if successor and remote_base.get("ref") == journal["old_base_branch"]:
+      return pending("The public PR has the reviewed head but not yet the reviewed base.")
+    return changed("The public PR targets a different base than the signed review.")
   terminal_merge = (
       live.get("state") == "closed"
       and isinstance(live.get("merged_at"), str) and live["merged_at"]
@@ -2960,25 +2988,7 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
       return unavailable("GitHub did not confirm the linked parent-base tip.")
     if base_sha != reviewed_parent_sha:
       return changed("The linked parent base moved from its reviewed commit.")
-  labels = _reviewed_pr_labels(plan)
-  observed_labels = []
-  if labels:
-    try:
-      labels_response = _git_ops._gh(repo, "api", f"repos/{repo_name}/issues/{raw_number}/labels", check=False)
-      live_labels = json.loads(labels_response.stdout or "null") if labels_response.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-      live_labels = None
-    if not isinstance(live_labels, list):
-      return unavailable("GitHub did not confirm the requested PR labels.")
-    if any(not isinstance(value, dict) or not isinstance(value.get("name"), str)
-           for value in live_labels):
-      return unavailable("GitHub returned an incomplete PR label witness.")
-    actual_labels = {value["name"].casefold(): value["name"] for value in live_labels}
-    if any(label.casefold() not in actual_labels for label in labels):
-      return pending("The PR exists, but requested labels are not all confirmed.")
-    # The sender also resolves reviewed names case-insensitively to GitHub's
-    # canonical spelling. Observe that same identity, never reapply a label.
-    observed_labels = [actual_labels[label.casefold()] for label in labels]
+  labels = _observed_pr_labels(repo, repo_name, raw_number, _reviewed_pr_labels(plan))
   state = live.get("state")
   if state not in {"open", "closed"} or not isinstance(live.get("draft"), bool):
     return unavailable("GitHub returned an incomplete PR lifecycle.")
@@ -2991,8 +3001,36 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
     "url": url, "number": raw_number, "head_repository": head_repo,
     "publication_stage": "draft" if live["draft"] else "ready",
     "status": status, "head_sha": head_sha, "base_branch": base,
-    **({"labels_requested": labels, "labels_applied": observed_labels} if labels else {}),
+    **labels,
   })
+
+
+def _observed_pr_labels(
+  repo: Path, repo_name: str, number: int, labels: list[str],
+) -> dict:
+  """Report reviewed labels as Send does: nonfatal metadata, never settlement.
+
+  The sender resolves reviewed names case-insensitively to GitHub's canonical
+  spelling. Observe that same identity and never reapply a label.
+  """
+  if not labels:
+    return {}
+  outcome = {"labels_requested": labels, "labels_applied": []}
+  try:
+    reply = _git_ops._gh(repo, "api", f"repos/{repo_name}/issues/{number}/labels", check=False)
+    live = json.loads(reply.stdout or "null") if reply.returncode == 0 else None
+  except (OSError, subprocess.TimeoutExpired, ValueError):
+    live = None
+  if not isinstance(live, list) or any(
+    not isinstance(value, dict) or not isinstance(value.get("name"), str) for value in live
+  ):
+    return {**outcome, "labels_note": "Could not confirm the reviewed labels on the pull request."}
+  actual = {value["name"].casefold(): value["name"] for value in live}
+  outcome["labels_applied"] = [actual[name.casefold()] for name in labels if name.casefold() in actual]
+  missing = [name for name in labels if name.casefold() not in actual]
+  if missing:
+    outcome.update(labels_missing=missing, labels_note="Some reviewed labels are not on the pull request.")
+  return outcome
 
 
 def _published_pr_body(plan: dict, body: str, patch: dict, branch: str) -> str | None:

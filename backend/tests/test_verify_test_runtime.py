@@ -869,7 +869,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "core-releases" not in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
   assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in image_workflow
-  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in image_workflow
+  assert "docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6" in image_workflow
   assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in image_workflow
   assert "DOCKER_BUILD_RECORD_UPLOAD: 'false'" in image_workflow
 
