@@ -1588,12 +1588,11 @@ async def _send_message_locked(
 
   # Work that already owns the chat (a restart drain, an approved restart's
   # activation, an auto-resuming limit park) takes new input into its queue
-  # before the queue-or-start branches below could spawn a turn. Resume
-  # bypasses the park; a drain refused it above, so only an activation is
-  # left to refuse it here.
-  # A typed send through an app carries the app's id, which the park's
-  # auto-resume treats as app work, so only input without one waits for it.
-  # Resume bypasses the park by design.
+  # before the queue-or-start branches below could spawn a turn. A typed send
+  # through an app carries the app's id, which the park's auto-resume treats
+  # as app work, so only input without one waits for the park. Resume bypasses
+  # the park; a drain refused it above, so only an activation is left to
+  # refuse it here.
   if _input_must_queue(
     db, chat_id, waits_for_park=principal.app_id is None and not manual_resume,
   ):
