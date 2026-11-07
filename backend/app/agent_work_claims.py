@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import re
 import uuid
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -58,11 +58,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "owner_goal_id": row.owner_goal_id,
     "revision": row.revision,
     "acquisition_id": row.acquisition_id,
-    "notification_pending": (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    ),
+    "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
     "takeover_reason": row.takeover_reason,
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
@@ -240,6 +236,9 @@ def claim_work(
     if changed != 1:
       db.rollback()
       raise ValueError("The released claim changed; inspect it before retrying.")
+    # A former owner taking a new acquisition must not receive an old stop
+    # notice for the action it now owns. Preserve other recipients' duties.
+    stage_retire_obsolete_transfer_notices(db, claim_id=row.id)
     db.commit()
     row = db.get(models.AgentWorkClaim, row.id)
     db.refresh(row)
@@ -280,11 +279,9 @@ def claim_work(
         previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
     db.commit()
     db.refresh(row)
-    pending_transfer = (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    )
+    pending_transfer = pending_transfer_notices(db, claim_id=row.id).filter(
+      models.AgentWorkClaimRevocation.revision == row.transfer_notice_revision,
+    ).first() is not None
     result = _serialize(db, row, "transferred" if pending_transfer else "owned")
     if pending_transfer:
       result["previous_owner_chat_id"] = row.previous_owner_chat_id
@@ -352,7 +349,21 @@ def claim_work(
   db.refresh(row)
   previous_follow_status = _stage_goal_owner_change(db, row, previous=previous,
     previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
-  db.commit()
+  stage_retire_obsolete_transfer_notices(db, claim_id=row.id)
+  db.add(models.AgentWorkClaimRevocation(
+    claim_id=row.id, revision=previous_revision + 1,
+    acquisition_id=row.acquisition_id, owner_id=owner_id,
+    sender_chat_id=chat_id, recipient_chat_id=previous,
+    body=(f"Work claim {key} transferred to {chat_id}: {reason} "
+          f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
+  ))
+  # No peer-message helper may commit here. The ownership change and its
+  # revocation obligation either both persist or both roll back.
+  try:
+    db.commit()
+  except Exception:
+    db.rollback()
+    raise
   db.refresh(row)
   result = _serialize(db, row, "transferred")
   # Settlement may have committed between transfer and refresh. The event's
@@ -362,6 +373,8 @@ def claim_work(
   result["notification_pending"] = True
   result["previous_owner_chat_id"] = previous
   result["previous_follow_status"] = previous_follow_status
+  # Only this request's newly-created obligation may be delivered inline.
+  result["_created_transfer_notice_revision"] = previous_revision + 1
   return result
 
 
@@ -442,6 +455,11 @@ def stage_release_claims_for_chat(
   The caller commits the release atomically with the chat tombstone and then
   nudges exact-Goal dependency delivery.
   """
+  _unresolved_transfer_notices(db).filter(
+    models.AgentWorkClaimRevocation.recipient_chat_id == chat_id,
+  ).update({models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+            models.AgentWorkClaimRevocation.closed_at: now_naive_utc()},
+           synchronize_session=False)
   released = [
     settled for row in _open_claims_for_chat(db, chat_id)
     if (settled := _stage_settle(
@@ -638,12 +656,74 @@ def finish_work(
   return _serialize(db, row, state)
 
 
+def _unresolved_transfer_notices(db: Session):
+  return db.query(models.AgentWorkClaimRevocation).filter(
+    models.AgentWorkClaimRevocation.outcome.is_(None),
+  )
+
+
+def _deleted_revocation_recipient():
+  return ~select(models.Chat.id).where(
+    models.Chat.id == models.AgentWorkClaimRevocation.recipient_chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).exists()
+
+
+def _superseded_revocation():
+  return select(models.AgentWorkClaim.id).where(
+    models.AgentWorkClaim.id == models.AgentWorkClaimRevocation.claim_id,
+    models.AgentWorkClaim.owner_chat_id == models.AgentWorkClaimRevocation.recipient_chat_id,
+    models.AgentWorkClaim.revision > models.AgentWorkClaimRevocation.revision,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).exists()
+
+
+def stage_retire_obsolete_transfer_notices(db: Session, *, claim_id: str | None = None):
+  """Keep obsolete obligations as history, without pretending delivery occurred."""
+  query = _unresolved_transfer_notices(db)
+  if claim_id is not None:
+    query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
+  query.filter(_deleted_revocation_recipient()).update(
+    {models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
+  )
+  query.filter(_superseded_revocation()).update(
+    {models.AgentWorkClaimRevocation.outcome: "superseded",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
+  )
+
+
+def pending_transfer_notices(db: Session, *, claim_id: str | None = None):
+  # Projection stays truthful before the sweep repairs older lifecycle paths.
+  query = _unresolved_transfer_notices(db).filter(
+    ~_deleted_revocation_recipient(), ~_superseded_revocation(),
+  )
+  if claim_id is not None:
+    query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
+  return query.order_by(models.AgentWorkClaimRevocation.created_at,
+                        models.AgentWorkClaimRevocation.revision)
+
+
 def acknowledge_transfer_notice(
   db: Session, *, claim_id: str, revision: int,
 ) -> None:
-  row = db.get(models.AgentWorkClaim, claim_id)
-  if row is None or row.transfer_notice_revision != revision:
-    return
-  if row.notification_revision < revision:
-    row.notification_revision = revision
+  """Acknowledge only this obligation, never a later transfer's notice.
+
+  This is a delivery-path receipt, not evidence the former executor stopped.
+  """
+  changed = db.query(models.AgentWorkClaimRevocation).filter_by(
+    claim_id=claim_id, revision=revision, outcome=None,
+  ).update({models.AgentWorkClaimRevocation.closed_at: now_naive_utc(),
+            models.AgentWorkClaimRevocation.outcome: "delivered"},
+           synchronize_session=False)
+  # Retain the last-transfer projection for existing claim readers. Recovery
+  # and notification_pending use per-transfer obligations, never this latch.
+  if changed:
+    db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.id == claim_id,
+      models.AgentWorkClaim.transfer_notice_revision == revision,
+      models.AgentWorkClaim.notification_revision < revision,
+    ).update({models.AgentWorkClaim.notification_revision: revision},
+             synchronize_session=False)
   db.commit()

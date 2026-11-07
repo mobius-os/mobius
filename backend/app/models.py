@@ -1669,6 +1669,8 @@ class AgentWorkClaim(Base):
   )
   owner_run_id = Column(String(64), nullable=False)
   owner_goal_id = Column(String(64), nullable=True, index=True)
+  # Last-transfer projection, never the recovery source for revocations.
+  # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
   takeover_reason = Column(String(1000), nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
@@ -1681,6 +1683,34 @@ class AgentWorkClaim(Base):
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
   outcome = Column(String(1000), nullable=True)
+
+
+class AgentWorkClaimRevocation(Base):
+  """One immutable former-executor notice, committed with its transfer.
+
+  Delivery acknowledgement records a peer delivery path, not that execution
+  stopped. Keep the snapshot even if the claim finishes, is reacquired, or a
+  recipient becomes unreachable; chat identities deliberately have no FK.
+  """
+
+  __tablename__ = "agent_work_claim_revocations"
+
+  claim_id = Column(
+    String(64), ForeignKey("agent_work_claims.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  revision = Column(Integer, primary_key=True)
+  acquisition_id = Column(String(64), nullable=True)
+  owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
+                    nullable=False)
+  sender_chat_id = Column(String(64), nullable=False)
+  recipient_chat_id = Column(String(64), nullable=False)
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  # Outcome is the state; the timestamp records when that outcome was stored.
+  # NULL is owed; closure need not mean a notice was delivered.
+  outcome = Column(String(32), nullable=True, index=True)
+  closed_at = Column(DateTime, nullable=True)
 
 
 class AgentWorkInterest(Base):

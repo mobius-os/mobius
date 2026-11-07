@@ -7026,6 +7026,48 @@ def _add_chat_branch_origin(eng) -> None:
     connection.exec_driver_sql("ALTER TABLE chats ADD COLUMN branch_origin JSON")
 
 
+def _add_claim_revocation_outbox(eng) -> None:
+  """Preserve every future transfer and recover the last known legacy notice.
+
+  The old claim row cannot recover earlier overwritten recipients. Do not
+  infer them, or treat settlement as a receipt for a pending transfer.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS agent_work_claim_revocations ("
+      "claim_id VARCHAR(64) NOT NULL REFERENCES agent_work_claims(id) ON DELETE CASCADE, "
+      "revision INTEGER NOT NULL, acquisition_id VARCHAR(64), "
+      "owner_id INTEGER NOT NULL REFERENCES owner(id) ON DELETE CASCADE, "
+      "sender_chat_id VARCHAR(64) NOT NULL, recipient_chat_id VARCHAR(64) NOT NULL, "
+      "body TEXT NOT NULL, created_at TIMESTAMP NOT NULL, "
+      "outcome VARCHAR(32), closed_at TIMESTAMP, "
+      "PRIMARY KEY (claim_id, revision))"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_agent_work_claim_revocations_outcome "
+      "ON agent_work_claim_revocations (outcome)"
+    ))
+  if "agent_work_claims" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO agent_work_claim_revocations "
+      "(claim_id, revision, acquisition_id, owner_id, sender_chat_id, "
+      "recipient_chat_id, body, created_at) "
+      "SELECT c.id, c.transfer_notice_revision, c.acquisition_id, c.owner_id, "
+      "c.owner_chat_id, c.previous_owner_chat_id, "
+      "'Work claim ' || c.work_key || ' transferred to ' || c.owner_chat_id || "
+      "': ' || COALESCE(c.takeover_reason, 'ownership changed'), c.updated_at "
+      "FROM agent_work_claims c "
+      "WHERE c.previous_owner_chat_id IS NOT NULL AND c.owner_chat_id IS NOT NULL "
+      "AND c.transfer_notice_revision IS NOT NULL "
+      "AND c.notification_revision < c.transfer_notice_revision "
+      "AND NOT EXISTS (SELECT 1 FROM agent_work_claim_revocations r "
+      "WHERE r.claim_id = c.id AND r.revision = c.transfer_notice_revision)"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7148,6 +7190,7 @@ _SCHEMA_MIGRATIONS = (
   ("0098_run_end_reason", _add_run_end_reason),
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
   ("0100_chat_branch_origin", _add_chat_branch_origin),
+  ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
 )
 
 
