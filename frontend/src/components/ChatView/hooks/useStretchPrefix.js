@@ -10,7 +10,7 @@ const PAGE_SIZE = 100
 
 /** The stretch's Markdown before `before`, reading older pages with
  *  `fetchPage(before)` (resolving to `{ messages, offset }`) until the page
- *  holding the stretch's start. */
+ *  holding the stretch's start. Rejects rather than return part of it. */
 export async function readStretchPrefix(fetchPage, before) {
   const rows = []
   let cursor = before
@@ -18,8 +18,9 @@ export async function readStretchPrefix(fetchPage, before) {
     const page = await fetchPage(cursor)
     const tail = stretchTail(page.messages || [])
     rows.unshift(...tail.rows)
+    if (tail.complete) break
     const next = page.offset || 0
-    if (tail.complete || next >= cursor) break
+    if (next >= cursor) throw new Error('Earlier messages did not advance')
     cursor = next
   }
   return replyProse(rows).map(part => part.markdown).join('\n\n')

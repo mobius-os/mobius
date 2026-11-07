@@ -27,12 +27,16 @@ test('the prefix reads earlier pages until the stretch’s start, oldest first',
   assert.equal(markdown, 'one\n\ntwo\n\nthree')
 })
 
-test('the prefix stops at the first page and never re-reads a page that does not advance', async () => {
+test('the prefix reaching the first page is the whole stretch', async () => {
+  const markdown = await readStretchPrefix(() => ({ offset: 0, messages: [reply('first')] }), 20)
+  assert.equal(markdown, 'first')
+})
+
+test('a page that does not advance fails rather than copy part of the stretch', async () => {
   let calls = 0
-  const markdown = await readStretchPrefix(() => {
+  await assert.rejects(readStretchPrefix(() => {
     calls += 1
     return { offset: 20, messages: [reply('loop')] }
-  }, 20)
-  assert.equal(calls, 1)
-  assert.equal(markdown, 'loop')
+  }, 20), /did not advance/)
+  assert.equal(calls, 1, 'the same page is never read again')
 })
