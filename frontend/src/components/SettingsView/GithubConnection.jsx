@@ -63,7 +63,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
   const waitRef = useRef(null)
   const permissionIntentRef = useRef(null)
 
-  // Resolves the status, or null when a newer read or change superseded this one.
+  // Resolves the newest status, or null when an account change superseded this read.
   const refresh = useCallback(async () => {
     try {
       const next = await githubStatus.refresh(queryClient)
@@ -159,7 +159,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
       void waitFor(next.attempt, controller)
     } else {
       waitRef.current = null
-      // A superseded read leaves any attempt still waiting to the newer one.
+      // Null: an account change started since, and the status is read again after it.
       if (next?.state !== 'unknown') setSignIn(null)
     }
   }, [signIn, refresh, waitFor, queryClient])

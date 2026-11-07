@@ -3,19 +3,27 @@ import assert from 'node:assert/strict'
 import { useRef, renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
 import { useSettingsFocus } from '../../components/SettingsView/useSettingsFocus.js'
 
+// Animation frames the hook requests, run by hand with runFrames().
+function stubAnimationFrames(t) {
+  const frames = new Map()
+  let nextFrame = 0
+  const { requestAnimationFrame, cancelAnimationFrame } = globalThis
+  globalThis.requestAnimationFrame = fn => { frames.set(++nextFrame, fn); return nextFrame }
+  globalThis.cancelAnimationFrame = id => frames.delete(id)
+  t.after(() => {
+    if (requestAnimationFrame === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = requestAnimationFrame
+    if (cancelAnimationFrame === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = cancelAnimationFrame
+  })
+  return {
+    frames,
+    runFrames() { for (const [id, fn] of frames) { frames.delete(id); fn() } },
+  }
+}
+
 for (const page of ['account', 'provider']) {
   for (const section of ['github', 'ai-providers', 'models']) {
     test(`Settings request for ${section} leaves the retained ${page} page before focusing`, t => {
-      const frames = new Map()
-      let nextFrame = 0
-      const oldRaf = globalThis.requestAnimationFrame
-      const oldCancel = globalThis.cancelAnimationFrame
-      globalThis.requestAnimationFrame = fn => { frames.set(++nextFrame, fn); return nextFrame }
-      globalThis.cancelAnimationFrame = id => frames.delete(id)
-      t.after(() => {
-        if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
-        if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
-      })
+      const { runFrames } = stubAnimationFrames(t)
       const focused = []
       const scrolled = []
       let mounted = false
@@ -42,7 +50,7 @@ for (const page of ['account', 'provider']) {
       view.rerender({ focusTarget })
       assert.equal(detailPage, null)
       view.rerender({ focusTarget })
-      for (const [id, fn] of frames) { frames.delete(id); fn() }
+      runFrames()
       assert.deepEqual(focused, [section])
       assert.deepEqual(scrolled, [section])
       // A consumed request cannot reopen the overview when the owner opens detail.
@@ -55,15 +63,7 @@ for (const page of ['account', 'provider']) {
 
 for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-models', 'mobius']]) {
   test(`Settings request for ${section} opens its page instead of focusing the overview`, t => {
-    const frames = new Map()
-    const oldRaf = globalThis.requestAnimationFrame
-    const oldCancel = globalThis.cancelAnimationFrame
-    globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
-    globalThis.cancelAnimationFrame = id => frames.delete(id)
-    t.after(() => {
-      if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
-      if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
-    })
+    const { frames } = stubAnimationFrames(t)
     let detailPage = 'codex'
     const view = renderHook(({ focusTarget }) => {
       const setupFocusRefs = useRef({})
@@ -78,15 +78,7 @@ for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-mo
 }
 
 test('a models request opens the leading connected provider at its Chat models section, once', t => {
-  const frames = new Map()
-  const oldRaf = globalThis.requestAnimationFrame
-  const oldCancel = globalThis.cancelAnimationFrame
-  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
-  globalThis.cancelAnimationFrame = id => frames.delete(id)
-  t.after(() => {
-    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
-    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
-  })
+  const { runFrames } = stubAnimationFrames(t)
   const focused = []
   const attention = []
   const chatModels = { scrollIntoView() {}, focus() { focused.push('chat-models') } }
@@ -107,7 +99,7 @@ test('a models request opens the leading connected provider at its Chat models s
   view.rerender({ focusTarget, providerReady: true, modelsProvider: 'claude' })
   assert.deepEqual(pages, ['claude'])
   view.rerender({ focusTarget, providerReady: true, modelsProvider: 'claude' })
-  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  runFrames()
   assert.deepEqual(focused, ['chat-models'])
   assert.equal(attention[0], 'chat-models')
   // Reordering providers later never moves the owner to another page.
@@ -116,15 +108,7 @@ test('a models request opens the leading connected provider at its Chat models s
 })
 
 test('a models request still focuses Chat models when the leading provider changes before the focus frame', t => {
-  const frames = new Map()
-  const oldRaf = globalThis.requestAnimationFrame
-  const oldCancel = globalThis.cancelAnimationFrame
-  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
-  globalThis.cancelAnimationFrame = id => frames.delete(id)
-  t.after(() => {
-    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
-    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
-  })
+  const { runFrames } = stubAnimationFrames(t)
   const focused = []
   const chatModels = { scrollIntoView() {}, focus() { focused.push(detailPage) } }
   let detailPage = null
@@ -141,22 +125,14 @@ test('a models request still focuses Chat models when the leading provider chang
   assert.deepEqual(pages, ['claude'])
   // Cached settings are replaced by a fresh read that puts Codex first.
   view.rerender({ focusTarget, modelsProvider: 'codex' })
-  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  runFrames()
   assert.deepEqual(pages, ['claude'])
   assert.deepEqual(focused, ['claude'])
   view.unmount()
 })
 
 test('a models request lands on AI providers when the provider list cannot be read', t => {
-  const frames = new Map()
-  const oldRaf = globalThis.requestAnimationFrame
-  const oldCancel = globalThis.cancelAnimationFrame
-  globalThis.requestAnimationFrame = fn => { frames.set(frames.size + 1, fn); return frames.size }
-  globalThis.cancelAnimationFrame = id => frames.delete(id)
-  t.after(() => {
-    if (oldRaf === undefined) delete globalThis.requestAnimationFrame; else globalThis.requestAnimationFrame = oldRaf
-    if (oldCancel === undefined) delete globalThis.cancelAnimationFrame; else globalThis.cancelAnimationFrame = oldCancel
-  })
+  const { runFrames } = stubAnimationFrames(t)
   const focused = []
   const aiProviders = { scrollIntoView() {}, focus() { focused.push('ai-providers') } }
   let detailPage = 'codex'
@@ -176,7 +152,7 @@ test('a models request lands on AI providers when the provider list cannot be re
   view.rerender({ focusTarget, providersFailed: true })
   assert.deepEqual(pages, [null])
   view.rerender({ focusTarget, providersFailed: true })
-  for (const [id, fn] of frames) { frames.delete(id); fn() }
+  runFrames()
   assert.deepEqual(focused, ['ai-providers'])
   view.unmount()
 })

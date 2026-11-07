@@ -94,8 +94,15 @@ export const mobiusAccountQueries = {
     refreshProviders(queryClient)
     return queryClient.invalidateQueries({ queryKey: rootKey, predicate: query => query.queryKey[1] !== 'account' })
   },
-  /** Forget the signed-out account's deployments and agent, then re-read the rest. */
-  signedOut: queryClient => {
+  /**
+   * Forget the signed-out account's deployments and agent, then re-read the
+   * rest. The saved summary turns signed-out at once, past any account read
+   * still under way (as acceptIdentity does), so a reload whose read fails
+   * never paints the old handle.
+   */
+  signedOut: async queryClient => {
+    await queryClient.cancelQueries({ queryKey: identityKey })
+    queryClient.setQueryData(summaryKey, accountSummary({ account_mode: 'signed_out' }))
     queryClient.removeQueries({ queryKey: railwayKey })
     queryClient.removeQueries({ queryKey: agentKey })
     refreshProviders(queryClient)

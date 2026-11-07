@@ -140,10 +140,20 @@ export function claudeRedeemOutcomeMessage(outcome) {
   }
 }
 
-export function visibleUsageWindows(snapshot) {
+// A reading taken before its window reset says nothing about that window now.
+// The server never serves one, but the last reading restored from disk can be
+// one while the server is unreachable. Every view drops such a window, so it
+// reads as unknown rather than as its old figure.
+function windowIsCurrent(window, now) {
+  const reset = window?.resets_at ? new Date(window.resets_at) : null
+  return !reset || Number.isNaN(reset.getTime()) || reset > now
+}
+
+/** The windows a provider page lists: at most four, none whose reset has passed. */
+export function visibleUsageWindows(snapshot, now = new Date()) {
   if (!Array.isArray(snapshot?.windows)) return []
   return snapshot.windows
-    .filter(window => window && typeof window.label === 'string')
+    .filter(window => window && typeof window.label === 'string' && windowIsCurrent(window, now))
     .slice(0, 4)
 }
 
@@ -184,16 +194,10 @@ function gaugeKind(provider, snapshot) {
   return 'five_hour'
 }
 
-// A reading taken before its window reset says nothing about that window now.
-// The server never serves one, but the last reading restored from disk can be
-// one while the server is unreachable, so such a window reads as unknown.
 function currentUsedPercent(window, now) {
-  if (window?.used_percent == null) return null
+  if (window?.used_percent == null || !windowIsCurrent(window, now)) return null
   const used = Number(window.used_percent)
-  if (!Number.isFinite(used)) return null
-  const reset = window.resets_at ? new Date(window.resets_at) : null
-  if (reset && !Number.isNaN(reset.getTime()) && reset <= now) return null
-  return clampUsagePercent(used)
+  return Number.isFinite(used) ? clampUsagePercent(used) : null
 }
 
 function allowanceForKind(provider, snapshot, kind, now) {

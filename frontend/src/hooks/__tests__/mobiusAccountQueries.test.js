@@ -80,6 +80,17 @@ test('the photo is keyed by a fingerprint of its address, which is never kept it
   assert.doesNotMatch(JSON.stringify(summary), /photos\.example|owner@example|Test Möbius/)
 })
 
+test('a sign-out replaces the saved summary, so a reload never paints the old handle', async t => {
+  const queryClient = seeded()
+  t.mock.method(globalThis, 'fetch', async () => Response.json(accountWithPhoto()))
+  await mobiusAccountQueries.saveHandle(queryClient, 'owner')
+  assert.equal(savedSummary(queryClient).handle, 'owner')
+  // The account read that follows the sign-out fails.
+  t.mock.method(globalThis, 'fetch', async () => { throw new TypeError('offline') })
+  await mobiusAccountQueries.signedOut(queryClient)
+  assert.deepEqual(savedSummary(queryClient), { status: 'signed_out', mode: 'signed_out', handle: null, avatar: '' })
+})
+
 test('a handle saved from the guide also refreshes the saved Settings summary', async t => {
   const queryClient = seeded()
   t.mock.method(globalThis, 'fetch', async () => Response.json(accountWithPhoto()))

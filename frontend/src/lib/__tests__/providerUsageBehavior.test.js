@@ -19,6 +19,7 @@ import { providerExtraUsage, rowUsage, signInExpiryNotice } from '../../componen
 const vite = await createSsrRenderServer()
 const { default: SettingsView } = await vite.ssrLoadModule('/src/components/SettingsView/SettingsView.jsx')
 const { default: ProviderPage } = await vite.ssrLoadModule('/src/components/SettingsView/ProviderPage.jsx')
+const { default: ProviderUsage } = await vite.ssrLoadModule('/src/components/SettingsView/ProviderUsage.jsx')
 after(() => vite.close())
 
 
@@ -338,4 +339,24 @@ test('a window whose reset has passed reads as unknown in the row and the compos
     state: 'ready',
     windows: [{ kind: 'weekly', label: 'Weekly', used_percent: 64, resets_at: '2026-11-10T00:00:00Z' }],
   }, now).percent, 64)
+})
+
+test('the provider page\'s Usage section never shows a window whose reset has passed', () => {
+  const usage = windows => renderToStaticMarkup(createElement(ProviderUsage, {
+    id: 'provider-usage-claude',
+    snapshot: { state: 'ready', observed_at: inDays(-0.2), windows },
+    failed: true,
+  }))
+  // The last reading restored from disk, taken before its 5-hour window reset.
+  const passed = usage([{ id: 'five_hour', kind: 'five_hour', label: '5-hour', used_percent: 92, resets_at: inDays(-0.1) }])
+  assert.doesNotMatch(passed, /92%|Resets /)
+  assert.match(passed, /Usage unavailable/)
+  // Beside it, a window still running keeps its reading.
+  const mixed = usage([
+    { id: 'five_hour', kind: 'five_hour', label: '5-hour', used_percent: 92, resets_at: inDays(-0.1) },
+    { id: 'weekly', kind: 'weekly', label: 'Weekly', used_percent: 64, resets_at: inDays(3) },
+  ])
+  assert.doesNotMatch(mixed, /92%/)
+  assert.match(mixed, /Weekly<\/span><span class="provider-usage__percent">64%</)
+  assert.doesNotMatch(mixed, /Usage unavailable/)
 })

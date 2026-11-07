@@ -388,3 +388,38 @@ test('a superseded read that fails reports nothing, and the newer answer stands'
   assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo-test')
   assert.doesNotMatch(JSON.stringify(second.result.current), /offline/)
 })
+
+test('a failed cancellation still shows the waiting sign-in when reopening Settings reads the status first', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  const { reads, status } = controlledStatus()
+  let polls = 0
+  api.github = {
+    status,
+    connectPoll: async () => { polls++; return json({ status: 'pending', retry_after: 100 }) },
+    connectCancel: async () => { throw new Error('Cancellation service unavailable') },
+  }
+  const props = { active: true, expanded: true, onExpand: noop, onToggle: noop }
+  const view = renderHook(next => GithubConnection(next), props)
+  t.after(() => view.unmount())
+  const waiting = () => json({ connected: false, device_flow_available: true, active_attempt: attempt })
+  reads[0](waiting())
+  await tick(20)
+  assert.equal(findSignIn(view.result.current).props.attempt.attemptId, 'a1')
+  const cancelling = findSignIn(view.result.current).props.onCancel()
+  await tick(20)
+  assert.equal(reads.length, 2, 'the failed cancellation reads the status it left')
+  // Settings is hidden and shown again while that read is under way, and the
+  // read the reopening starts answers first.
+  view.rerender({ ...props, active: false })
+  view.rerender(props)
+  assert.equal(reads.length, 3)
+  reads[2](waiting())
+  await tick(20)
+  reads[1](waiting())
+  await cancelling
+  await tick(20)
+  view.rerender(props)
+  assert.equal(findSignIn(view.result.current)?.props.attempt.attemptId, 'a1', 'the sign-in still waiting on GitHub stays visible')
+  assert.equal(polls, 2, 'and its wait resumes')
+})

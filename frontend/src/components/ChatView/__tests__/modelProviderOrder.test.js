@@ -39,7 +39,7 @@ function renderChatModels(provider) {
   )
 }
 
-test('chat model surfaces expose the connected providers before Möbius', () => {
+test('the provider order lists Codex and Claude before Möbius', () => {
   assert.deepEqual(PROVIDER_ORDER, ['codex', 'claude', 'mobius'])
   assert.equal(PROVIDER_INFO.mobius.label, 'Möbius')
 })
