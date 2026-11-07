@@ -69,3 +69,11 @@ test('the read start’s HTML keeps image alt text and app links without the liv
   assert.match(link, /<a href="\/shell\/\?app=12">Kanban<\/a>/)
   assert.match(link, /<strong>this<\/strong>/)
 })
+
+test('the read start’s math carries its TeX as the transcript’s KaTeX does', () => {
+  assert.match(markdownHtml('Area is $\\pi r^2$ here.'),
+    /<span class="katex"><annotation encoding="application\/x-tex">\\pi r\^2<\/annotation><\/span>/)
+  assert.match(markdownHtml('$$\nE = mc^2\n$$'),
+    /<div class="md-math-block"><annotation encoding="application\/x-tex">E = mc\^2<\/annotation><\/div>/)
+  assert.doesNotMatch(markdownHtml('It costs $5 and $10.'), /katex/, 'currency stays prose')
+})

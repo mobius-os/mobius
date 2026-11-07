@@ -10,6 +10,7 @@ import { apiFetch, jsonOrThrow } from '../../../api/client.js'
 import { assistantReplyGroups, presentAssistantActivity, presentAssistantReply } from '../assistantReplies.js'
 import { replyProse, stretchTail } from '../messageCopy.js'
 import { plainTextFromFragment } from '../markdownClipboard.js'
+import { mathTokens } from '../markdown/mathTokens.js'
 
 const PAGE_SIZE = 100
 
@@ -51,11 +52,21 @@ export function stretchClipboard(markdown, plainTextOf) {
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
 }
 
+const escapeHtml = text => text.replace(/[&<>"]/g, char => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]))
+// Math renders as the TeX annotation KaTeX carries, which is what the
+// clipboard rules read from the transcript.
+const texHtml = (tag, className) => token => `<${tag} class="${className}">`
+  + `<annotation encoding="application/x-tex">${escapeHtml(token.text)}</annotation></${tag}>`
 const markdownParser = new Marked({ gfm: true })
+markdownParser.use(mathTokens(), { extensions: [
+  { name: 'inlineKatex', renderer: texHtml('span', 'katex') },
+  { name: 'blockKatex', renderer: texHtml('div', 'md-math-block') },
+] })
 
-/** Markdown as plain HTML: the chat's Markdown parser without the live
- *  renderer's effects or app context, so an image keeps its alt text and an
- *  app link stays a link. */
+/** Markdown as plain HTML: the chat's Markdown parser and math tokens without
+ *  the live renderer's effects or app context, so an image keeps its alt text
+ *  and an app link stays a link. */
 export function markdownHtml(text) {
   return markdownParser.parse(text)
 }
