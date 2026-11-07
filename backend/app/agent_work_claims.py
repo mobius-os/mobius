@@ -181,13 +181,15 @@ def claim_work(
   reason = takeover_reason.strip() if takeover_reason else None
   if reason is not None and not 10 <= len(reason) <= 1000:
     raise ValueError("takeover_reason must be 10-1000 characters")
-  goal_id = _goal_id(db, chat_id, run_id)
-
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
   ).first()
   if row is None:
+    # Promotion shares this fence: either it adopts the committed acquisition
+    # or this write snapshots the Goal it has already attached to the run.
+    fence_owner(db, owner_id)
+    goal_id = _goal_id(db, chat_id, run_id)
     row = models.AgentWorkClaim(
       id=str(uuid.uuid4()), owner_id=owner_id, work_key=key,
       summary=clean_summary, owner_chat_id=chat_id, owner_run_id=run_id,
@@ -209,6 +211,8 @@ def claim_work(
   if row.completed_at is not None:
     return _serialize(db, row, "completed")
   if row.released_at is not None:
+    fence_owner(db, owner_id)
+    goal_id = _goal_id(db, chat_id, run_id)
     previous_revision = row.revision
     next_revision = previous_revision + 1
     now = now_naive_utc()
@@ -316,6 +320,7 @@ def claim_work(
   if row.owner_chat_id != expected_owner_chat_id:
     db.rollback()
     raise ValueError("The expected owner changed; inspect the current claim before transfer.")
+  goal_id = _goal_id(db, chat_id, run_id)
   previous = row.owner_chat_id
   previous_run_id = row.owner_run_id
   previous_goal_id = row.owner_goal_id

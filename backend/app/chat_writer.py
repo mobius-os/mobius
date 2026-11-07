@@ -4658,11 +4658,12 @@ class ChatWriterActor:
       run.goal_objective != cmd.objective
       or run.goal_id != goal_id
     )
+    was_goal_less = run.goal_id is None
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
-    if goal_was_missing and not replacing:
-      # A later Goal in one physical turn is a different action boundary.
-      # Historical NULL claims from its predecessor need an explicit refresh.
+    if was_goal_less:
+      # First attachment owns this attempt's claims whether the Goal is new
+      # or retained. Replacing a prior Goal still needs explicit claim refresh.
       from app.agent_work_claims import stage_adopt_pre_goal_claims
       try:
         stage_adopt_pre_goal_claims(db, run)

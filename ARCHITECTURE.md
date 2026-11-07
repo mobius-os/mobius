@@ -1293,8 +1293,9 @@ Goals in that chat remain subscribed. A valid round-trip transfer can restore
 its pending follow after quota and cycle checks. Withdrawn or settled rows never
 revive this way. Same-chat Goal ownership rebinds use this same transition,
 so changing physical executors cannot strand a previously suppressed Goal.
-First-Goal promotion atomically adopts only open Goal-less acquisitions owned
-by that exact physical attempt, under the same graph fence and cycle checks.
+Attaching a Goal to a Goal-less physical attempt atomically adopts only its
+open Goal-less acquisitions, under the same graph fence and cycle checks,
+whether the Goal is new or an existing intent being explicitly resumed.
 Earlier attempts' claims do not become Goal-owned merely by sharing a chat or
 causal root; an explicit refresh of the exact work key can adopt them.
 Replacing a completed Goal in the same physical turn also requires explicit

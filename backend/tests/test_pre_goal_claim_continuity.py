@@ -255,3 +255,121 @@ def test_stall_handoff_evidence_is_bounded_without_losing_counts():
   assert evidence["waits"]["sample"][0] == {
     "wait_id": "wait-0", "kind": "timer", "delivery_pending": True, "resume_blocker": "manual_resume"}
   assert evidence["progress_owned"] is False
+
+
+@pytest.mark.parametrize("target_status", ["open", "stopped"])
+def test_goal_less_attempt_attaches_or_owner_resumes_existing_goal_with_its_claim(db, target_status):
+  from app.chat_waits import declare_wait
+  from app.goals import stage_goal_hold
+  _, source, run, acquired = setup_claim(db)
+  goal = models.ChatGoal(id="retained", chat_id=source.id, objective="Retained work")
+  db.add(goal); db.flush()
+  if target_status == "stopped":
+    stage_goal_hold(goal, cause="stop", actor="owner", source_id="hold", run_id="earlier-run")
+    # Only later owner input authorizes reopening; adoption grants no resume.
+    run.owner_input_at = now_naive_utc() + timedelta(seconds=1)
+  db.commit()
+  result = get_writer()._promote_run_to_goal(db, PromoteRunToGoal(
+    chat_id=source.id, run_token=run.id, objective=goal.objective, resume_goal_id=goal.id))
+  assert result["goal_id"] == goal.id
+  declare_wait(db, chat_id=source.id, created_by_run_id=run.id,
+    description="Retained action's condition", kind="timer", delay_secs=60)
+  run.status = "completed"
+  db.commit()
+  assert stage_reconcile_claim_sources(db) == 0
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id == goal.id
+  assert db.query(models.GoalDependency).one().resolved_at is None
+
+
+def test_claim_adoption_itself_never_reopens_a_held_goal(db):
+  from app.agent_work_claims import stage_adopt_pre_goal_claims
+  from app.decision_cards import fence_owner
+  from app.goals import stage_goal_hold
+  _, source, run, acquired = setup_claim(db)
+  goal = models.ChatGoal(id="held-adoption", chat_id=source.id, objective="Held work")
+  db.add(goal); db.flush()
+  stage_goal_hold(goal, cause="stop", actor="owner", source_id="hold", run_id=run.id)
+  hold = dict(goal.hold_json)
+  run.goal_id = goal.id
+  db.commit()
+  fence_owner(db)
+  stage_adopt_pre_goal_claims(db, run)
+  db.commit()
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id == goal.id
+  assert goal.status == "stopped" and goal.hold_json == hold
+  assert stage_reconcile_claim_sources(db) == 1
+  db.commit(); db.expire_all()
+  assert db.query(models.GoalDependency).one().outcome_json["reason"] == "source_held"
+
+
+def test_automatic_attempt_cannot_attach_claims_to_reopen_a_held_goal(db):
+  from app.chat_writer import GoalPromotionRejected
+  from app.goals import stage_goal_hold
+  _, source, run, acquired = setup_claim(db)
+  goal = models.ChatGoal(id="held-target", chat_id=source.id, objective="Held work")
+  db.add(goal); db.flush()
+  stage_goal_hold(goal, cause="stop", actor="owner", source_id="hold", run_id="earlier-run")
+  db.commit()
+  result = get_writer()._promote_run_to_goal(db, PromoteRunToGoal(
+    chat_id=source.id, run_token=run.id, objective=goal.objective, resume_goal_id=goal.id))
+  assert isinstance(result, GoalPromotionRejected)
+  assert result.reason == "owner_continuation_required"
+  assert goal.status == "stopped" and run.goal_id is None
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id is None
+
+
+def test_attaching_existing_goal_rolls_back_a_real_claim_dependency_cycle(db):
+  from app.chat_writer import GoalPromotionRejected
+  owner, source, run, acquired = setup_claim(db)
+  goal = models.ChatGoal(id="retained", chat_id=source.id, objective="Retained work")
+  prior = models.ChatRun(id="prior", chat_id=source.id, goal_id=goal.id,
+    status="completed", started_at=run.started_at - timedelta(minutes=1))
+  db.add_all([goal, prior]); db.commit()
+  claim_work(db, owner_id=owner.id, chat_id="follower", run_id="follower-run",
+    work_key="platform:reverse-attach", summary="Other action")
+  claim_work(db, owner_id=owner.id, chat_id=source.id, run_id=prior.id,
+    work_key="platform:reverse-attach", summary="Retained Goal follows other action")
+  result = get_writer()._promote_run_to_goal(db, PromoteRunToGoal(
+    chat_id=source.id, run_token=run.id, objective=goal.objective, resume_goal_id=goal.id))
+  assert isinstance(result, GoalPromotionRejected)
+  assert result.reason == "claim_adoption_conflict"
+  assert run.goal_id is None and goal.status == "open"
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id is None
+
+
+@pytest.mark.parametrize("reacquire", [False, True])
+def test_claim_acquisition_serializes_goal_snapshot_with_promotion(db, monkeypatch, reacquire):
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  owner, source, run, _ = setup_claim(db)
+  key = KEY if reacquire else "platform:first-acquisition"
+  if reacquire:
+    finish_work(db, owner_id=owner.id, chat_id=source.id, work_key=key,
+      outcome="Previous acquisition released", release=True)
+  original_goal = agent_work_claims._goal_id
+  original_fence = agent_work_claims.fence_owner
+  fenced = False
+  promoted = None
+  def mark_fence(session, owner_id):
+    nonlocal fenced
+    original_fence(session, owner_id)
+    fenced = True
+  def promote_after_unfenced_goal_snapshot(session, chat_id, run_id):
+    nonlocal promoted
+    snapshot = original_goal(session, chat_id, run_id)
+    if not fenced:
+      # Force the writer to commit between the stale snapshot and claim write.
+      # Once acquisition owns the fence this interleaving is impossible.
+      with SessionLocal() as other:
+        promoted = get_writer()._promote_run_to_goal(other, PromoteRunToGoal(
+          chat_id=source.id, run_token=run.id, objective="Exact action"))
+    return snapshot
+  monkeypatch.setattr(agent_work_claims, "fence_owner", mark_fence)
+  monkeypatch.setattr(agent_work_claims, "_goal_id", promote_after_unfenced_goal_snapshot)
+  acquired = claim_work(db, owner_id=owner.id, chat_id=source.id,
+    run_id=run.id, work_key=key, summary="Acquiring during promotion")
+  if promoted is None:
+    promoted = get_writer()._promote_run_to_goal(db, PromoteRunToGoal(
+      chat_id=source.id, run_token=run.id, objective="Exact action"))
+  db.expire_all()
+  assert db.get(models.AgentWorkClaim, acquired["id"]).owner_goal_id == promoted["goal_id"]
