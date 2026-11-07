@@ -748,38 +748,12 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _write_credentials(token_data: dict) -> None:
-  """Transforms the token endpoint response into CLI credential format."""
-  for field in ("access_token", "refresh_token", "expires_in"):
-    if field not in token_data:
-      raise ValueError(f"Token response missing '{field}'")
+  """Stores a new Claude sign-in from the token endpoint response
+  (providers.write_claude_sign_in), creating the CLI home if needed."""
+  from app.providers import write_claude_sign_in
 
   _, cli_home = _cli_env()
-
-  # Extract email from the account object if present.
-  account = token_data.get("account") or {}
-  email = account.get("email_address", "")
-
-  now_ms = int(time.time() * 1000)
-  oauth = {
-    "accessToken": token_data["access_token"],
-    "refreshToken": token_data["refresh_token"],
-    "expiresAt": now_ms + token_data["expires_in"] * 1000,
-    "scopes": token_data.get("scope", "").split(),
-    "email": email,
-  }
-  # The sign-in's hard end, in the field the CLI reports as `loginExpiresAt`
-  # and check_auth honors; refreshes keep it. When the response has no
-  # usable refresh_token_expires_in, Möbius leaves it absent (unknown) rather
-  # than assuming the CLI's 30-day default.
-  from app.providers import claude_login_end_after
-  login_end = claude_login_end_after(now_ms, token_data.get("refresh_token_expires_in"))
-  if login_end is not None:
-    oauth["refreshTokenExpiresAt"] = login_end
-  creds = {"claudeAiOauth": oauth}
-  path = os.path.join(cli_home, ".credentials.json")
-  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(fd, "w") as f:
-    json.dump(creds, f)
+  email = write_claude_sign_in(Path(cli_home) / ".credentials.json", token_data)
   log.info("Credentials written for %s", email or "(unknown)")
 
 

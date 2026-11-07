@@ -870,6 +870,20 @@ def test_claude_auth_accepts_current_access_or_refreshable_session(tmp_path):
   }))
   assert ClaudeProvider().check_auth(str(tmp_path)) is None
 
+  # A stored end outside the range the CLI accepts (here before 2025) is no
+  # end under the CLI's storage rule, which Möbius follows: the refresh then
+  # decides, and drops the bad end. (The CLI's own usability check would
+  # count it as ended.)
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "refresh-token",
+      "expiresAt": 0,
+      "refreshTokenExpiresAt": 0,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
 
 def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
   from app.providers import ClaudeProvider
@@ -893,7 +907,7 @@ def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
       "accessToken": "expired-token",
       "refreshToken": "expired-refresh-token",
       "expiresAt": 0,
-      "refreshTokenExpiresAt": 0,
+      "refreshTokenExpiresAt": int(time.time() * 1000) - 120_000,
     },
   }))
 
