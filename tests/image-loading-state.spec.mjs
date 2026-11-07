@@ -28,6 +28,10 @@ for (const viewport of [{ width: 1180, height: 820 }, { width: 390, height: 844 
           total: 2, offset: 0, ...runtimeSnapshot(),
         },
       }))
+      await page.route(new RegExp(`/api/chats/${CHAT_ID}/runtime$`), route =>
+        route.fulfill({ json: runtimeSnapshot() }))
+      await page.route(new RegExp(`/api/chats/${CHAT_ID}/activity(?:\\?.*)?$`), route =>
+        route.fulfill({ json: { events: [], next_before: null } }))
       await page.route(new RegExp(`/api/chats/${CHAT_ID}/stream$`), route =>
         route.fulfill({ status: 204, body: '' }))
       let releaseToken

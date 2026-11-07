@@ -290,7 +290,8 @@ export function ExpandableImage({
     && imageUnreadableForHref(rawSrc, mediaDimensions)
 
   useEffect(() => {
-    if (!rawSrc || dimensionError) { setResolvedSrc(null); return }
+    setResolvedSrc(null)
+    if (!rawSrc || dimensionError) return
     let cancelled = false
     if (mediaChatId) {
       // Media path: fetch a short-lived media token, never the owner JWT in URL.

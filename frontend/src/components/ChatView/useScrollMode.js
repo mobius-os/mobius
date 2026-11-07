@@ -1147,9 +1147,8 @@ export default function useScrollMode({
   // ResizeObserver layout updates (including the mobile keyboard after Shell
   // has resized), user-gesture detection, and geometry-based transitions.
   // Re-runs when transcript structure, queue presence, or chat identity changes.
-  // Content-only growth uses the committed-layout bridge (and ResizeObserver
-  // for intrinsic changes); reinstalling here would settle and recreate the
-  // active gesture on every streamed chunk.
+  // Content-only streaming is already owned by ResizeObserver; reinstalling
+  // here would settle and recreate the active gesture on every streamed chunk.
   useLayoutEffect(() => {
     // Empty chats intentionally render no scroll node. Initialize the chat
     // identity before that early return so the first send can arm its pin
