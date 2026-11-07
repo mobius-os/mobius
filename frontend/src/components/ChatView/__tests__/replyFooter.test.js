@@ -232,6 +232,14 @@ test('provider text that repeats an error is the error, not prose to copy', () =
   )]), 'Checking the board.')
 })
 
+test('an error echo is dropped even when its error card is on another row', () => {
+  const limit = 'Usage limit reached'
+  assert.equal(proseText([
+    failedReply({ type: 'text', content: 'Checking.' }, { type: 'text', content: limit }),
+    failedReply({ type: 'error', message: limit, resumable: true }),
+  ]), 'Checking.')
+})
+
 test('a failed reply leaves recovery to its error card, never Try again', () => {
   const stopped = failedReply(
     { type: 'tool', name: 'Bash' },

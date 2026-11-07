@@ -197,6 +197,7 @@ import {
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
 import { replyProse } from './messageCopy.js'
+import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
@@ -5917,8 +5918,20 @@ export default function ChatView({
     if (!footerGroup) return null
     const first = agentStretchStart(peerTimeline.messages, replyGroups, footerGroup)
     const stretch = peerTimeline.messages.slice(first.start, footerGroup.end + 1)
-    return { startKey: first.rows[0].key, copyable: replyProse(stretch).length > 0 }
-  }, [footerGroup, peerTimeline.messages, replyGroups])
+    let before = first.start - 1
+    while (before >= 0 && peerTimeline.messages[before]?.hidden) before -= 1
+    return {
+      startKey: first.rows[0].key,
+      copyable: replyProse(stretch).length > 0,
+      // The stretch may have begun before the loaded page.
+      truncated: before < 0 && offset > 0,
+    }
+  }, [footerGroup, peerTimeline.messages, replyGroups, offset])
+  const stretchPrefix = useStretchPrefix(chatId, offset, !turnActive && !!footerStretch?.truncated)
+  // Copy only once the whole stretch can be copied.
+  const stretchCopyable = footerStretch?.truncated
+    ? stretchPrefix != null && (footerStretch.copyable || stretchPrefix !== '')
+    : !!footerStretch?.copyable
 
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
@@ -5982,7 +5995,8 @@ export default function ChatView({
       // included) and fills again where the agent next stops.
       footer={group === footerGroup ? (turnActive ? 'working' : 'settled') : null}
       stretchStartKey={group === footerGroup ? footerStretch?.startKey : undefined}
-      stretchCopyable={group === footerGroup && !!footerStretch?.copyable}
+      stretchCopyable={group === footerGroup && stretchCopyable}
+      stretchPrefix={group === footerGroup ? stretchPrefix || '' : ''}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

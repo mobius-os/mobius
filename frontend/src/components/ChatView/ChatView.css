@@ -486,8 +486,8 @@
 /* ── One-tap message copy ──────────────────────────────
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
-   see chatUiPolish.test), but a single tap reveals a quiet ghost button
-   below a reply or beside an owner message. */
+   see chatUiPolish.test), but a quiet ghost button sits in the chat's one
+   reply footer, and a single tap reveals one beside an owner message. */
 .chat__msg-copy,
 .chat__msg-branch {
   display: inline-flex;

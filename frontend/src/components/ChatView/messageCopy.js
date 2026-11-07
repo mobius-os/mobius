@@ -47,14 +47,14 @@ function questionCopyText(block) {
  *  `data-markdown-block` (renderedBlockEntries), so Copy reads the text the
  *  owner sees. A card part has only its `markdown`. */
 export function replyProse(messages) {
+  const rows = messages.map(msg => (msg.hidden || isSystemRow(msg) ? [] : renderedBlockEntries(
+    repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
+      ? msg.blocks : [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }]),
+  )))
+  const errors = new Set(rows.flat().flatMap(({ item }) => (
+    item?.type === 'error' && item.message?.trim() ? [item.message.trim()] : [])))
   const parts = []
-  messages.forEach((msg, message) => {
-    if (msg.hidden || isSystemRow(msg)) return
-    const blocks = repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
-      ? msg.blocks : [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }])
-    const entries = renderedBlockEntries(blocks)
-    const errors = new Set(entries.flatMap(({ item }) => (
-      item?.type === 'error' && item.message?.trim() ? [item.message.trim()] : [])))
+  rows.forEach((entries, message) => {
     entries.forEach(({ item: block, idx: index }) => {
       if (block?.type === 'question') {
         const markdown = questionCopyText(block)
@@ -67,6 +67,16 @@ export function replyProse(messages) {
     })
   })
   return parts
+}
+
+/** The rows at the end of an older history page that belong to the agent's
+ *  stretch continuing past it: back to the last visible row that is not a
+ *  reply. `complete` is false when the whole page belongs to the stretch, so
+ *  its start lies on an earlier page still. */
+export function stretchTail(messages) {
+  let start = messages.length
+  while (start > 0 && (messages[start - 1].hidden || messages[start - 1].role === 'assistant')) start -= 1
+  return { rows: messages.slice(start), complete: start > 0 }
 }
 
 /* Each settled reply element's prose, so the one footer at the end of the
@@ -109,17 +119,19 @@ export function renderedReplyClipboard(replyElement, rowKeys, parts) {
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
 }
 
-/** The whole stretch's clipboard payload: every reply from the one whose
- *  first row is `startKey` through `lastReply` (the reply holding the footer),
- *  in transcript order, as each registered its prose. Null when nothing in it
- *  is copyable or a part is not rendered. */
-export function renderedStretchClipboard(lastReply, startKey) {
+/** The whole stretch's clipboard payload: `prefix`, the Markdown of any part
+ *  that began before the loaded history page (copied as its source, like a
+ *  card), then every reply from the one whose first row is `startKey` through
+ *  `lastReply` (the reply holding the footer), in transcript order, as each
+ *  registered its prose. Null when nothing in it is copyable or a part is not
+ *  rendered. */
+export function renderedStretchClipboard(lastReply, startKey, prefix = '') {
   const replies = Array.from(lastReply?.closest('.chat__list')?.querySelectorAll('li.chat__reply') || [])
   const end = replies.indexOf(lastReply)
   if (end < 0) return null
   const start = replies.findIndex(reply => reply.dataset.replyKey === startKey)
-  const markdown = []
-  const plain = []
+  const markdown = prefix ? [prefix] : []
+  const plain = prefix ? [prefix] : []
   for (const reply of replies.slice(start >= 0 && start <= end ? start : end, end + 1)) {
     const prose = replyProseByElement.get(reply)
     if (!prose?.parts.length) continue

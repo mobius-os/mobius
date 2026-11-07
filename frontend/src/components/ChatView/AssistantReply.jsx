@@ -46,6 +46,7 @@ function AssistantReply({
   footer = null,
   stretchStartKey,
   stretchCopyable = false,
+  stretchPrefix = '',
   onBranch,
   pendingQuestionRef,
   resumeCardRef,
@@ -169,7 +170,7 @@ function AssistantReply({
     {footer && <MessageMetaRow
       timestamp={settled ? presentationRows[0].message.ts : null}
       copy={settled && stretchCopyable ? button => renderedStretchClipboard(
-        button.closest('.chat__reply'), stretchStartKey,
+        button.closest('.chat__reply'), stretchStartKey, stretchPrefix,
       ) : undefined}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.
