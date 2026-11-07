@@ -104,6 +104,27 @@
   color: var(--text);
 }
 
+/* Reuse chat Markdown without its transcript gutter or roomier line height. */
+.qcard .md-blocks {
+  min-width: 0;
+  gap: .5em;
+}
+.qcard :is(.md-paragraph, .md-heading) {
+  margin: 0;
+  padding: 0;
+  line-height: inherit;
+}
+.qcard .md-list {
+  padding-left: 1.5em;
+}
+.qcard .md-list-item {
+  padding-left: 0;
+  line-height: inherit;
+}
+.qcard .md-inline-code {
+  font-size: .95em;
+}
+
 .qcard__hint {
   font-size: 11px;
   color: var(--muted, var(--text));
@@ -127,6 +148,8 @@
   background: transparent;
   color: var(--text);
   font-size: 13px;
+  min-width: 0;
+  max-width: 100%;
   cursor: pointer;
   transition: background .15s, border-color .15s, color .15s;
   /* Don't let the browser's default mouse-focus ring linger on the
