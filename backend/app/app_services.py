@@ -1036,6 +1036,13 @@ async def _serialize_request(request_envelope: dict, max_bytes: int) -> bytes:
   serialization too rather than building an arbitrarily large request first.
   The pure-Python encoder yields cooperatively between bounded runs of parts.
   """
+  # Keep signed delegation provenance for token minting, not the app's stdin
+  # API. The actor's delegated/access flags remain app-visible as before.
+  if isinstance(request_envelope.get("actor"), dict):
+    request_envelope = {**request_envelope, "actor": {
+      key: value for key, value in request_envelope["actor"].items()
+      if key not in {"delegation_id", "delegation_chat"}
+    }}
   try:
     buffer = io.BytesIO()
     size = 0
@@ -1079,7 +1086,7 @@ def request_actor(db, principal, caller=None) -> dict:
   }
   if principal.delegation_id is not None:
     actor.update(delegation_id=principal.delegation_id,
-                 delegation_chat=principal.chat_id)
+                 delegation_chat=principal.delegation_chat or principal.chat_id)
   if principal.browser is not None:
     actor.update(browser_grant_id=principal.browser.grant_id,
                  browser_session_id=principal.browser.session_id)
@@ -1526,6 +1533,10 @@ async def _invoke_admitted_service(
 
 async def invoke_policy(app, owner, path: str, body: dict, *, actor: dict | None = None) -> dict:
   """Invoke platform policy, retaining any initiating caller's provenance."""
+  lineage = {
+    key: value for key, value in (actor or {}).items()
+    if key in {"delegation_id", "delegation_chat", "browser_grant_id", "browser_session_id"}
+  }
   status, result, _headers, media_type = await invoke_service(app, owner, {
     "schema": 1,
     "method": "POST",
@@ -1534,7 +1545,7 @@ async def invoke_policy(app, owner, path: str, body: dict, *, actor: dict | None
     "headers": {},
     "body": body,
     "public": False,
-    "actor": {**(actor or {}), "scope": "platform"},
+    "actor": {**lineage, "scope": "platform"},
   })
   if media_type is not None:
     raise HTTPException(502, "App policy returned binary data.")

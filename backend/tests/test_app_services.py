@@ -840,8 +840,7 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
 
     server.dependency_overrides[get_principal] = delegated_principal
     # No delegation row stands behind this bearer, so it may only read.
-    expected.update(delegated=True, access='read',
-                    delegation_id='fixture-delegation', delegation_chat='fixture-child')
+    expected.update(delegated=True, access='read')
   path = (f'/api/apps/{target.id}/service/actor' if route == 'numeric'
           else '/api/services/stable-actor/actor')
   try:
@@ -854,7 +853,8 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
 
 
 SERVICE_TOKEN = b'''import json, os, sys
-json.load(sys.stdin)
+request = json.load(sys.stdin)
+assert not {"delegation_id", "delegation_chat"}.intersection(request.get("actor", {}))
 print(json.dumps({"status": 200, "body": {"token": os.environ["APP_TOKEN"]}}))
 '''
 
@@ -891,8 +891,10 @@ def _assert_service_lineage(db, token, *, delegated):
   assert claims.get("delegation_chat") == ("service-agent" if delegated else None)
   principal = get_principal(token, db)
   assert principal.delegation_id == claims.get("delegation_id")
-  assert principal.chat_id == claims.get("delegation_chat")
-  if delegated:
+  assert principal.delegation_chat == claims.get("delegation_chat")
+  assert principal.chat_id is None
+  assert principal.run_id is None
+  if delegated or principal.browser is not None:
     with pytest.raises(HTTPException) as denied:
       require_account_owner_control(principal)
     assert denied.value.status_code == 403
@@ -980,6 +982,66 @@ def test_nested_service_tokens_keep_the_original_delegation_even_without_its_row
     _assert_service_lineage(db, token, delegated=delegated)
 
 
+@pytest.mark.parametrize("token_kind", ["service", "frame"])
+def test_delegation_lineage_restricts_app_tokens_without_granting_helper_identity(
+  client, auth, db, monkeypatch, token_kind,
+):
+  from app.deps import get_principal, require_account_owner_control
+
+  target = _service_app(db, service_bytes=SERVICE_TOKEN)
+  helper_token = _service_agent_token(db, delegated=True)
+  helper_headers = {"Authorization": f"Bearer {helper_token}"}
+
+  async def start(**_kwargs):
+    return True
+
+  monkeypatch.setattr("app.routes.delegations.start_programmatic_chat_turn", start)
+  body = {
+    "parent_chat_id": "service-agent", "task_key": "nested",
+    "prompt": "Review one bounded task.", "provider": "claude",
+  }
+  nested = client.post("/api/delegations", headers=helper_headers, json=body)
+  assert nested.status_code == 201, nested.text
+  child_id = nested.json()["id"]
+  child_chat = nested.json()["child_chat_id"]
+  # A settled child supports result-read and follow-up, without a provider.
+  db.add(models.ChatRun(id="nested-run", root_run_id="nested-run",
+                        chat_id=child_chat, provider="claude", status="completed"))
+  db.commit()
+
+  if token_kind == "service":
+    response = client.get(f"/api/apps/{target.id}/service/token", headers=helper_headers)
+  else:
+    response = client.post("/api/auth/app-token", headers=helper_headers, json={"app_id": target.id})
+  assert response.status_code == 200, response.text
+  token = response.json()["token"]
+  app_headers = {"Authorization": f"Bearer {token}"}
+  principal = get_principal(token, db)
+  assert principal.chat_id is None and principal.run_id is None
+  assert principal.delegation_id == "service-helper"
+  assert principal.delegation_chat == "service-agent"
+  with pytest.raises(HTTPException) as denied:
+    require_account_owner_control(principal)
+  assert denied.value.status_code == 403
+
+  for method, path, payload, helper_status in (
+    ("POST", "/api/delegations", {**body, "task_key": "another"}, 201),
+    ("GET", "/api/delegations", None, 200),
+    ("GET", f"/api/delegations/{child_id}", None, 200),
+    ("GET", f"/api/delegations/{child_id}?include_history=true", None, 200),
+    ("POST", f"/api/delegations/{child_id}/result-read", None, 200),
+    ("POST", f"/api/delegations/{child_id}/messages", {"message": "Review again."}, 202),
+    ("POST", "/api/delegations/service-helper/questions", {"question": "Which option?"}, 200),
+    ("POST", f"/api/delegations/{child_id}/cancel", None, 200),
+  ):
+    response = client.request(method, path, headers=app_headers, json=payload)
+    assert response.status_code == 403, (method, path, response.text)
+    response = client.request(method, path, headers=helper_headers, json=payload)
+    assert response.status_code == helper_status, (method, path, response.text)
+    if method == "GET" and path == "/api/delegations":
+      assert child_id in {item["id"] for item in response.json()["items"]}
+
+
 @pytest.mark.asyncio
 async def test_preloaded_service_children_do_not_share_delegation_lineage(db, auth, monkeypatch):
   from app import service_preload
@@ -1015,17 +1077,27 @@ if __name__ == "__main__":
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delegated", [False, True])
-async def test_reviewer_comment_policy_service_inherits_the_callers_lineage(
-  db, auth, monkeypatch, delegated,
+@pytest.mark.parametrize("browser_guest", [False, True])
+async def test_reviewer_comment_policy_service_inherits_only_the_callers_lineage(
+  db, auth, monkeypatch, delegated, browser_guest,
 ):
+  from app.browser_access import BrowserLineage
   from app.deps import get_principal
   from app.routes.reviewer import _reviewer_validate_comment
+  from tests.browser_access_fixtures import link_grant
 
-  target = _service_app(db, service_bytes=b'''import json, sys
+  browser = None
+  expected_actor = {"scope": "platform"}
+  if browser_guest:
+    grant, _ = link_grant(db, db.query(models.Owner).one(), "Policy guest")
+    browser = BrowserLineage(grant.id)
+    expected_actor.update(browser_grant_id=grant.id, browser_session_id=None)
+  target = _service_app(db, service_bytes=('''import json, sys
 request = json.load(sys.stdin)
+assert request["actor"] == %r, request["actor"]
 print(json.dumps({"body": request["body"]}))
-''')
-  token = _service_agent_token(db, delegated=delegated)
+''' % expected_actor).encode())
+  token = _service_agent_token(db, delegated=delegated, browser=browser)
   tokens = []
   original_environment = app_services.service_environment
 
@@ -1041,6 +1113,9 @@ print(json.dumps({"body": request["body"]}))
   assert result == "test comment"
   assert len(tokens) == 1
   _assert_service_lineage(db, tokens[0], delegated=delegated)
+  assert auth_tokens.decode_access_token(tokens[0]).get("browser_grant") == (
+    browser.grant_id if browser is not None else None
+  )
 
 
 def test_service_token_preserves_browser_and_delegation_provenance_together(client, auth, db):
