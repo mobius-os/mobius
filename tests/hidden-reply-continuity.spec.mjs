@@ -1,4 +1,4 @@
-/** Replies preserve continuous prose and own one safe, draft-independent footer. */
+/** Replies preserve continuous prose; the chat's last reply owns one safe, draft-independent footer. */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { checkHiddenReplyContinuity } from './_replyContinuityFixture.mjs'
@@ -56,24 +56,20 @@ test.describe('reply footer', () => {
     })
   }
 
-  test('older reply actions reveal on tap, never on hover', async ({ page }) => {
+  test('only the reply at the end of the chat has a footer', async ({ page }) => {
     const f = await mountReplyFooter(page, BASE)
     const older = f.replies.first()
-    const copy = older.getByRole('button', { name: 'Copy message' })
-    await older.hover()
-    await expect(copy).toBeHidden()
+    await expect(older.locator('.chat__msg-meta')).toHaveCount(0)
     await older.locator('.chat__text--assistant').last().click()
-    await expect(copy).toBeVisible()
-    await expect(copy).toBeHidden({ timeout: 7000 })
+    await expect(older.getByRole('button', { name: 'Copy message', includeHidden: true })).toHaveCount(0)
     await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
   })
 
-  test('starting a message clears a tapped older footer before the send completes', async ({ page }) => {
+  test('sending a message clears the footer before the send completes', async ({ page }) => {
     const f = await mountReplyFooter(page, BASE)
     await f.composer.fill('A new question')
     await waitForComposerSendable(f.surface)
-    const older = f.replies.first()
-    const copy = older.getByRole('button', { name: 'Copy message' })
+    const copy = f.replies.last().getByRole('button', { name: 'Copy message' })
     let release
     const responseGate = new Promise(resolve => { release = resolve })
     await page.route(`**${f.path}/messages`, async route => {
@@ -81,11 +77,9 @@ test.describe('reply footer', () => {
       await route.fulfill({ status: 400, json: { detail: 'Fixture rejection; no provider starts.' } })
     })
     try {
-      await older.locator('.chat__text--assistant').last().click()
       await expect(copy).toBeVisible()
       await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
       await expect(copy).toBeHidden({ timeout: 1000 })
-      await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeHidden()
     } finally { release() }
   })
 

@@ -32,7 +32,7 @@ const { renderedBlockEntries, upsertQuestionItem } = await vite.ssrLoadModule(
   '/src/components/ChatView/streamReducers.js',
 )
 const { streamItemToBlock } = await vite.ssrLoadModule('/src/components/ChatView/streamPromotion.js')
-const { replyOutcome } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
+const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
 const { questionKey } = await vite.ssrLoadModule('/src/components/ChatView/questionKey.js')
 
 const card = {
@@ -90,8 +90,9 @@ test('the live surface keeps the message and owns it while it shows the card', (
   assert.equal(suppressed.includes('Ship it today?'), false)
 })
 
-test('Copy reads the closing message as the reply answer', () => {
-  assert.equal(replyOutcome([message]).answer, card.message)
+test('Copy reads the closing message as the reply’s prose', () => {
+  assert.deepEqual(replyProse([message]).map(part => part.markdown),
+    ['Checking the build.', card.message, 'Ship it today?'])
 })
 
 test('a hostile closing message gets the same guards as any reply prose', () => {
