@@ -206,6 +206,59 @@ def test_active_wait_context_is_compact_safe_lifecycle_data(
   assert build_active_waits_context(db, chat_id) == ""
 
 
+def test_wait_cancelled_from_its_chip_between_turns_is_named_on_the_next_turn(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  base = now_naive_utc() - timedelta(minutes=5)
+  db.add(models.ChatRun(id="turn-armed", root_run_id="turn-armed", chat_id=chat_id,
+                        status="completed", provider="claude", started_at=base))
+  db.commit()
+  row = _command_wait(
+    db, chat_id=chat_id, description="https://site.example/ loads the plan page",
+    condition_owner="Owner adds the DNS records", kind="command",
+    command="false", deadline_secs=3600,
+  )
+  cancel_wait(db, row)
+  db.add(models.ChatRun(id="turn-next", root_run_id="turn-next", chat_id=chat_id,
+                        status="running", provider="claude",
+                        started_at=now_naive_utc()))
+  db.commit()
+
+  context = build_active_waits_context(db, chat_id, "turn-next")
+
+  assert "<active_waits>" not in context
+  assert f'"id":"{row.id}"' in context
+  assert "never describe them as still checking" in context
+  # Only the turn right after the cancellation is told; later turns are not.
+  db.add(models.ChatRun(id="turn-later", root_run_id="turn-later", chat_id=chat_id,
+                        status="running", provider="claude",
+                        started_at=now_naive_utc() + timedelta(seconds=1)))
+  db.commit()
+  assert build_active_waits_context(db, chat_id, "turn-later") == ""
+
+
+def test_cancelled_waits_sit_beside_armed_waits_without_hiding_them(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  db.add(models.ChatRun(id="turn-a", root_run_id="turn-a", chat_id=chat_id,
+                        status="completed", provider="claude",
+                        started_at=now_naive_utc() - timedelta(minutes=1)))
+  db.commit()
+  kwargs = dict(chat_id=chat_id, condition_owner="CI", kind="command",
+                command="false", deadline_secs=3600)
+  kept = _command_wait(db, description="checks finish", **kwargs)
+  dropped = _command_wait(db, description="old domain loads", **kwargs)
+  cancel_wait(db, dropped)
+
+  context = build_active_waits_context(db, chat_id, "turn-b")
+
+  active, cancelled = context.split("</active_waits>")
+  assert f'"id":"{kept.id}"' in active and dropped.id not in active
+  assert f'"id":"{dropped.id}"' in cancelled
+
+
 def test_active_wait_context_cannot_close_its_platform_envelope(
   client, owner_token, db,
 ):
