@@ -23,6 +23,22 @@ GOAL_BRIEF_FIELD_CHARS = 4_000
 GOAL_BRIEF_LIST_ITEMS = 50
 
 
+# One page of a long text read on demand. Providers cap a tool result (Claude
+# Code MCP at about 25k tokens; Codex truncates), so a whole 200k-character
+# note could not arrive in one read; 40,000 characters (~10k tokens) fits.
+READ_PAGE_CHARS = 40_000
+
+
+def text_page(text: str, offset: int = 0) -> dict:
+  """One character range of ``text``, with what the next read needs."""
+  offset = max(int(offset), 0)
+  end = min(offset + READ_PAGE_CHARS, len(text))
+  return {
+    "text": text[offset:end], "offset": offset, "total_chars": len(text),
+    "next_offset": end if end < len(text) else None,
+  }
+
+
 def excerpt(text: str, limit: int, read_full: str) -> str:
   """``text`` whole when it fits ``limit``, else its head marked as an excerpt."""
   if len(text) <= limit:

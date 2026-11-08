@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
-from app.context_budget import PEER_NOTES_CHARS, excerpt, fair_shares
+from app.context_budget import PEER_NOTES_CHARS, excerpt, fair_shares, text_page
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -32,9 +32,9 @@ DELIVERY_NEXT_TURN = "next_turn"
 DELIVERY_INTERRUPT = "interrupt"
 MAX_PEERS = 200
 # Retention per recipient inbox and per broadcast channel, by size: a note
-# costs its body plus a fixed charge for its row, oldest first; the newest note
-# is always kept, however long. This bounds disk per inbox while keeping recent
-# history browsable.
+# costs its body plus a fixed charge for its row. Only notes already delivered
+# are evicted, oldest first, so unread mail always survives. This bounds disk
+# per inbox while keeping recent history browsable.
 INBOX_RETENTION_CHARS = 2_000_000
 ROW_RETENTION_CHARS = 256
 MAX_CONTEXT_PEERS = 24
@@ -104,9 +104,24 @@ class CoordinationContextDelivery:
   delivered_through: PeerMessageCursor | None
 
 
+# Recipient lists are uncapped, so queries over them run in batches that stay
+# well under SQLite's bound-parameter limit.
+_ID_BATCH = 500
+
+
+def _batches(values) -> list[list[str]]:
+  ordered = list(dict.fromkeys(values))
+  return [ordered[start:start + _ID_BATCH] for start in range(0, len(ordered), _ID_BATCH)]
+
+
 def _latest_runs(
   db: Session, chat_ids: list[str] | set[str],
 ) -> dict[str, Any]:
+  if len(chat_ids) > _ID_BATCH:
+    merged: dict[str, Any] = {}
+    for batch in _batches(chat_ids):
+      merged.update(_latest_runs(db, batch))
+    return merged
   if not chat_ids:
     return {}
   latest_started = db.query(
@@ -414,6 +429,8 @@ def _agent_chat_ids(
   db: Session, candidate_ids: list[str] | set[str],
 ) -> set[str]:
   """Return non-deleted chats with a run or durable Delegation identity."""
+  if len(candidate_ids) > _ID_BATCH:
+    return set().union(*(_agent_chat_ids(db, batch) for batch in _batches(candidate_ids)))
   if not candidate_ids:
     return set()
   live_chat_ids = {
@@ -642,6 +659,15 @@ def _message_names(
     for value in (row.from_chat_id, row.to_chat_id)
     if value
   }
+  if len(chat_ids) > _ID_BATCH:
+    merged: dict[str, str] = {}
+    for batch in _batches(chat_ids):
+      merged.update(_names_for(db, batch))
+    return merged
+  return _names_for(db, chat_ids)
+
+
+def _names_for(db: Session, chat_ids) -> dict[str, str]:
   if not chat_ids:
     return {}
   names = {
@@ -706,27 +732,24 @@ def context_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   ):
     if len(body) > share:
       message["body"] = excerpt(
-        body, share, f"read_agent_message(message_id={message['id']}) for the full note",
+        body, share, f"read_agent_message(message_id={message['id']}) pages the full note",
       )
       message["body_truncated"] = True
   return messages
 
 
 def peer_message_for_agent(
-  db: Session, chat_id: str, run_id: str | None, message_id: str,
+  db: Session, chat_id: str, message_id: str, *, offset: int = 0,
 ) -> dict[str, Any] | None:
-  """One exact note this chat sent or received, whole; not an inbox read."""
-  row = db.get(models.AgentCoordinationMessage, message_id)
+  """One page of one note this chat may read, by the chat's history visibility."""
+  row = chat_message_history_query(db, chat_id).filter(
+    models.AgentCoordinationMessage.id == message_id,
+  ).first()
   if row is None:
     return None
-  if row.to_chat_id is not None:
-    visible = chat_id in (row.to_chat_id, row.from_chat_id)
-  else:
-    scope = scope_for_chat(db, chat_id, run_id)
-    visible = scope is not None and (row.room_kind, row.room_id) == (scope.kind, scope.id)
-  if not visible:
-    return None
-  return model_message(serialize_messages(db, [row])[0])
+  message = model_message(serialize_messages(db, [row])[0])
+  page = text_page(message.pop("body"), offset)
+  return {**message, "body": page.pop("text"), **page}
 
 
 def visible_peer_messages(
@@ -1318,28 +1341,63 @@ def _matching_retry(
   return rows
 
 
-def _prune_by_size(db: Session, query) -> None:
-  """Evict oldest first until the rows fit retention, never loading a body.
+def _delivered_through(db: Session, chat_ids) -> PeerMessageCursor | None:
+  """The inbox boundary every one of these chats has already been delivered.
 
-  The database measures each body and the newest note always stays. Delivery
-  advances an inbox as a chronological prefix, so oldest-first already evicts
-  delivered notes before any that are still owed.
+  A chat's admitted turns carry its inbox oldest first, so its newest
+  acknowledged cursor covers every earlier note it can see. A chat with no
+  delivery yet means nothing is delivered to all of them.
   """
+  boundary = None
+  for chat_id in dict.fromkeys(chat_ids):
+    row = db.query(
+      models.ChatRun.peer_message_through_created_at,
+      models.ChatRun.peer_message_through_id,
+    ).filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.provider_execution_admitted.is_(True),
+      models.ChatRun.peer_message_through_created_at.isnot(None),
+      models.ChatRun.peer_message_through_id.isnot(None),
+    ).order_by(
+      models.ChatRun.peer_message_through_created_at.desc(),
+      models.ChatRun.peer_message_through_id.desc(),
+    ).first()
+    if row is None:
+      return None
+    cursor = PeerMessageCursor(
+      created_at=row.peer_message_through_created_at,
+      message_id=str(row.peer_message_through_id),
+    )
+    boundary = cursor if boundary is None else min(boundary, cursor)
+  return boundary
+
+
+def _prune_by_size(
+  db: Session, query, delivered: PeerMessageCursor | None,
+) -> None:
+  """Evict delivered notes, oldest first, until the rows fit retention.
+
+  A note not yet delivered to its recipients is never evicted, however much
+  newer mail arrives; such an inbox stays over its retention until it is
+  read. Sizes come from the length stored at write time.
+  """
+  if delivered is None:
+    return
   message = models.AgentCoordinationMessage
   sized = query.with_entities(
-    message.id, func.length(message.body),
+    message.id, message.created_at,
+    func.coalesce(message.body_chars, func.length(message.body)),
   ).order_by(message.created_at.asc(), message.id.asc()).all()
-  if not sized:
-    return
-  used = sum(length + ROW_RETENTION_CHARS for _, length in sized)
+  used = sum(length + ROW_RETENTION_CHARS for _, _, length in sized)
+  boundary = (delivered.created_at, delivered.message_id)
   stale_ids = []
-  for message_id, length in sized[:-1]:
-    if used <= INBOX_RETENTION_CHARS:
+  for message_id, created_at, length in sized:
+    if used <= INBOX_RETENTION_CHARS or (created_at, message_id) > boundary:
       break
     used -= length + ROW_RETENTION_CHARS
     stale_ids.append(message_id)
-  for start in range(0, len(stale_ids), 500):
-    chunk = stale_ids[start:start + 500]
+  for start in range(0, len(stale_ids), _ID_BATCH):
+    chunk = stale_ids[start:start + _ID_BATCH]
     db.query(models.ChatActivityPosition).filter(
       models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in chunk]),
     ).delete(synchronize_session=False)
@@ -1347,7 +1405,9 @@ def _prune_by_size(db: Session, query) -> None:
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
-  _prune_by_size(db, _channel_query(db, scope))
+  # A broadcast is delivered once every current scope member has received it.
+  members = _scope_membership(db, scope, limit=None)[0]
+  _prune_by_size(db, _channel_query(db, scope), _delivered_through(db, members))
 
 
 def _prune_direct_inboxes(
@@ -1368,7 +1428,7 @@ def _prune_direct_inboxes(
     _prune_by_size(db, _channel_query(db, network).filter(
       models.AgentCoordinationMessage.to_chat_id == recipient,
       ~revocation,
-    ))
+    ), _delivered_through(db, [recipient]))
 
 
 def _publish_message_hint(
@@ -1441,6 +1501,7 @@ def _persist_send(
       kind=kind,
       delivery=clean_delivery,
       body=clean_body,
+      body_chars=len(clean_body),
     )
     for target in targets
   ]
@@ -2009,6 +2070,11 @@ def unreachable_reasons(
   physical run that failed, or one stopped before its provider turn began. A
   running, parked, resuming, or idle chat is queued for its next turn.
   """
+  if len(chat_ids) > _ID_BATCH:
+    merged: dict[str, str] = {}
+    for batch in _batches(chat_ids):
+      merged.update(unreachable_reasons(db, batch))
+    return merged
   if not chat_ids:
     return {}
   ids = list(dict.fromkeys(chat_ids))

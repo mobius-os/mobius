@@ -1626,6 +1626,9 @@ def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypat
     acknowledge_transfer_notice(db, claim_id=notice.claim_id, revision=notice.revision)
   # Room for exactly one ordinary note with its row charge.
   monkeypatch.setattr(coordination, "INBOX_RETENTION_CHARS", 30 + coordination.ROW_RETENTION_CHARS)
+  from datetime import datetime
+  monkeypatch.setattr(coordination, "_delivered_through", lambda db, chat_ids:
+                      coordination.PeerMessageCursor(datetime.max, "~"))
   for index in range(2):
     coordination.send_agent_message(
       owner_id=owner.id, sender_chat_id=third.id, sender_run_id="claim-run-third",

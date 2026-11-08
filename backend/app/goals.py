@@ -238,6 +238,35 @@ def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
           "helpers": own_helper_statuses(db, chat_id, run_id) if run_id else []}
 
 
+GOAL_TEXT_FIELDS = ("objective", "next_action", "checkpoint")
+TASK_TEXT_FIELDS = ("title", "note", "result", "completion_condition")
+
+
+def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, field, offset=0):
+  """One page of one Goal or task text, from exactly what read_goal may show."""
+  from app.context_budget import text_page
+  allowed = TASK_TEXT_FIELDS if task_id else GOAL_TEXT_FIELDS
+  if field not in allowed:
+    raise ValueError(f"field must be one of: {', '.join(allowed)}")
+  if task_id is None and delegation_id is None:
+    from app.goal_plans import presented_goal_rows
+    goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
+    if goal is None:
+      rows = presented_goal_rows(db, chat_id)
+      goal = rows[1] if rows is not None else None
+    source = scoped_goal_context(db, goal) if goal is not None else None
+  else:
+    source = read_goal_view(
+      db, chat_id, run_id, delegation_id=delegation_id, task_id=task_id,
+    )["goal"]
+  if task_id and isinstance(source, dict):
+    source = source.get("task")
+  text = source.get(field) if isinstance(source, dict) else None
+  if not isinstance(text, str):
+    raise LookupError(f"No {field} to read here.")
+  return {"field": field, "task": task_id, **text_page(text, offset)}
+
+
 def turn_goal_brief(db, chat_id, run_id, *, delegated):
   """The one Goal brief a turn carries: coordinator view or helper assignment."""
   return helper_goal_brief(db, chat_id) if delegated else resume_context(db, run_id)

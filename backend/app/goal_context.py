@@ -137,9 +137,10 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   ))
   if task_id and role == "coordinator":
     # A sibling that is also a prerequisite appears once, in full, below.
+    prerequisite = set(dependencies)
     siblings = [sibling for key in path(task_id)
                 for sibling in children.get(by_id[key].get("parent_id"), [])
-                if sibling != key and sibling not in dependencies]
+                if sibling != key and sibling not in prerequisite]
     if siblings:
       shown.update(siblings)
       payload["siblings"] = [summary(key) for key in siblings]
@@ -186,10 +187,10 @@ def fit_brief(payload, task_id, *, role="coordinator"):
 
   def fit(entry):
     """Fit one entry's prose and dependency ids, then charge its structure."""
-    read = f"read_goal(task={entry['id']}) for the full text"
     for field in _BRIEF_PROSE:
       if isinstance(entry.get(field), str):
-        entry[field] = budget.take(entry[field], read)
+        entry[field] = budget.take(
+          entry[field], f"read_goal(task={entry['id']}, field={field}) pages the full text")
     if entry.get("depends_on"):
       entry["depends_on"], omitted = budget.take_ids(entry["depends_on"])
       if omitted:
@@ -214,7 +215,8 @@ def fit_brief(payload, task_id, *, role="coordinator"):
         f"{len(entries) - len(kept)} more; {read_rest} lists them all")
     payload[key] = list(reversed(kept)) if nearest_first else kept
 
-  payload["objective"] = budget.take(payload["objective"], f"{goal_read} for the full objective")
+  payload["objective"] = budget.take(
+    payload["objective"], "read_goal(field=objective) pages the full objective")
   if isinstance((payload.get("hold") or {}).get("reason"), str):
     payload["hold"] = {**payload["hold"], "reason": budget.take(
       payload["hold"]["reason"], f"{goal_read} for the full reason")}
@@ -222,7 +224,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     fit(payload["task"])
   for key in ("next_action", "checkpoint"):
     if isinstance(payload.get(key), str):
-      payload[key] = budget.take(payload[key], f"{goal_read} for the full text")
+      payload[key] = budget.take(payload[key], f"read_goal(field={key}) pages the full text")
   for key in _BRIEF_LISTS:
     if payload.get(key):
       fit_list(key, payload[key], overview)

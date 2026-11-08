@@ -1534,11 +1534,14 @@ def test_read_agent_message_reads_one_exact_note(monkeypatch):
   monkeypatch.setattr(control, "_agent_api_call", lambda method, path: calls.append(
     (method, path)) or {"id": "n 1", "body": "whole"})
   assert control._call_read_agent_message({"message_id": "n 1"})["body"] == "whole"
-  assert calls == [("GET", "/api/agent-coordination/messages/n%201")]
+  control._call_read_agent_message({"message_id": "n 1", "offset": 40000})
+  assert calls == [("GET", "/api/agent-coordination/messages/n%201"),
+                   ("GET", "/api/agent-coordination/messages/n%201?offset=40000")]
   with pytest.raises(ValueError, match="one message_id"):
     control._call_read_agent_message({"message_id": "n", "extra": 1})
   schema = control._TOOL_DEFINITIONS["read_agent_message"]
   assert "marked excerpt" in schema["description"]
+  assert "next_offset" in schema["description"]
   assert "read_agent_message" in platform_tools.PEER_TOOL_NAMES
 
 

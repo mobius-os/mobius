@@ -339,10 +339,16 @@ async def _attach_run_to_goal(db: Session, chat_id: str, principal: Principal,
 def read_goal_brief(
   chat_id: str,
   task: str | None = Query(default=None, min_length=1, max_length=64),
+  field: str | None = Query(default=None),
+  offset: int = Query(default=0, ge=0),
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
   """read_goal: expand one task of the calling agent's own Goal, on demand.
+
+  With ``field`` it returns one page of that text instead: a task's title,
+  note, result or completion_condition, or with no task the Goal's
+  objective, next_action or checkpoint (as far as this agent may see them).
 
   The same projection a turn receives, refocused on ``task``. Without a
   task a helper re-reads its assignment brief; a coordinator is pointed to
@@ -354,14 +360,21 @@ def read_goal_brief(
   if principal.chat_id != chat_id:
     raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
   get_active_chat_for_principal(db, chat_id, principal)
-  from app.goals import read_goal_view
+  from app.goals import read_goal_text, read_goal_view
   try:
+    if field is not None:
+      return read_goal_text(
+        db, chat_id, principal.run_id, delegation_id=principal.delegation_id,
+        task_id=task, field=field, offset=offset,
+      )
     return read_goal_view(
       db, chat_id, principal.run_id, delegation_id=principal.delegation_id,
       task_id=task,
     )
   except PermissionError as exc:
     raise HTTPException(status_code=403, detail=str(exc)) from exc
+  except LookupError as exc:
+    raise HTTPException(status_code=404, detail=str(exc)) from exc
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 

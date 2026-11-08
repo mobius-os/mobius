@@ -625,7 +625,7 @@ def test_read_goal_tool_is_one_result_bearing_read_for_both_levels(monkeypatch):
   with pytest.raises(ValueError, match="does not take: page"):
     control._call_read_goal({"task": "build", "page": 2})
   schema = control._TOOL_DEFINITIONS[control.READ_GOAL_TOOL]["inputSchema"]
-  assert set(schema["properties"]) == {"task"}
+  assert set(schema["properties"]) == {"task", "field", "offset"}
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
@@ -849,9 +849,9 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
   shown = len(brief["children"])
   assert 0 < shown < 120
   assert brief["children_omitted"] == f"{120 - shown} more; read_goal(task=parent) lists them all"
-  assert "read_goal(task=parent) for the full text" in brief["task"]["note"]
-  assert "read_goal(task=dep) for the full text" in brief["dependencies"][0]["result"]
-  assert "update_goal with no arguments" in brief["next_action"]
+  assert "read_goal(task=parent, field=note) pages the full text" in brief["task"]["note"]
+  assert "read_goal(task=dep, field=result) pages the full text" in brief["dependencies"][0]["result"]
+  assert "read_goal(field=next_action) pages the full text" in brief["next_action"]
   assert full["task"]["note"] == huge
   assert len(full["children"]) == 120
   assert full["children"][119]["note"] == "119 " + huge
@@ -905,7 +905,7 @@ def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
   brief = fit_brief(project_goal(goal, "parent"), "parent")
 
   assert _within_budget(brief)
-  assert "update_goal with no arguments for the full objective" in brief["objective"]
+  assert "read_goal(field=objective) pages the full objective" in brief["objective"]
   # Only the entry where the budget ran out marks its cut dependency list.
   assert sum("depends_on_omitted" in child for child in brief["children"]) <= 1
   assert brief["children_omitted"].endswith("read_goal(task=parent) lists them all")
@@ -920,7 +920,7 @@ def test_a_helper_brief_points_its_excerpts_at_read_goal():
   goal = _goal([_task("parent", status="running")], objective="O" * 100_000,
                hold_json=None)
   brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
-  assert "read_goal for the full objective" in brief["objective"]
+  assert "read_goal(field=objective) pages the full objective" in brief["objective"]
 
 
 def test_brief_projection_walks_large_plans_once(monkeypatch):
@@ -941,3 +941,54 @@ def test_brief_projection_walks_large_plans_once(monkeypatch):
   chain.append(_task("side", "c10", "running"))
   # The deepest task holding every running leaf: c10 holds c4999 and side.
   assert project_goal(_goal(chain))["focus"] == "c10"
+
+
+def _page_through(client, url, headers, params):
+  pieces, offset = [], 0
+  while offset is not None:
+    page = client.get(url, headers=headers, params={**params, "offset": offset})
+    assert page.status_code == 200, page.text
+    body = page.json()
+    pieces.append(body["text"])
+    offset = body["next_offset"]
+  return "".join(pieces), body["total_chars"]
+
+
+def test_read_goal_pages_a_long_objective_and_task_note_in_full(client, owner_token, db):
+  from app.context_budget import READ_PAGE_CHARS
+  chat = _goal_fixture(db)
+  goal = db.get(models.ChatGoal, "goal-a")
+  objective = "".join(f"{index:07d}" for index in range(30_000))
+  note = "".join(f"n{index:06d}" for index in range(30_000))
+  goal.objective = objective
+  tasks = copy.deepcopy(goal.plan_json["tasks"])
+  next(task for task in tasks if task["id"] == "verify")["note"] = note
+  goal.plan_json = {**goal.plan_json, "tasks": tasks}
+  db.commit()
+  headers = _token(db, chat, "run-a")
+  url = f"/api/chats/{chat}/goal-brief"
+
+  assert READ_PAGE_CHARS < len(objective)
+  assert _page_through(client, url, headers, {"field": "objective"}) == (objective, len(objective))
+  assert _page_through(client, url, headers, {"task": "verify", "field": "note"}) == (note, len(note))
+  assert client.get(url, headers=headers, params={"field": "secret"}).status_code == 422
+
+
+def test_sibling_filtering_is_linear_in_prerequisites():
+  class CountingId(str):
+    comparisons = 0
+
+    def __eq__(self, other):
+      CountingId.comparisons += 1
+      return str.__eq__(self, other)
+
+    __hash__ = str.__hash__
+
+  deps = [CountingId(f"d{i:05d}") for i in range(2000)]
+  tasks = [_task(str(dep), "root", "completed") for dep in deps]
+  tasks += [_task("root", status="running"),
+            _task("focus", "root", "running", depends_on=deps)]
+  tasks += [_task(f"s{i:05d}", "root") for i in range(4000)]
+  project_goal(_goal(tasks), "focus")
+  # A list scan per sibling would compare about 6000 * 2000 times.
+  assert CountingId.comparisons < 100_000

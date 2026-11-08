@@ -122,8 +122,10 @@ READ_GOAL_DESCRIPTION = (
   "children and its prerequisites' results. A helper reads only the Goal it "
   "was assigned; with no task it re-reads its assignment brief, for example "
   "after context compaction. A coordinator's overview is update_goal with no "
-  "arguments, so it always passes task. Read-only: it never resumes, "
-  "attaches or changes a Goal."
+  "arguments, so it always passes task. A text the brief showed as an "
+  "excerpt is read in pages with field (and task for a task's text) plus "
+  "offset; each page gives next_offset until the text ends. Read-only: it "
+  "never resumes, attaches or changes a Goal."
 )
 DECLARE_WAIT_DESCRIPTION = (
   "Persist this top-level chat's one cross-turn wait: the chat resumes by "
@@ -631,13 +633,16 @@ def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
 
 
 def _call_read_goal(arguments: dict[str, Any]) -> dict:
-  unknown = set(arguments) - {"task"}
+  unknown = set(arguments) - {"task", "field", "offset"}
   if unknown:
     raise ValueError(f"read_goal does not take: {', '.join(sorted(unknown))}")
+  if "offset" in arguments and "field" not in arguments:
+    raise ValueError("read_goal offset pages a field; pass field too")
   chat_id = os.environ.get("CHAT_ID") or ""
   if not chat_id:
     raise RuntimeError("missing environment: CHAT_ID")
-  query = {"task": arguments["task"]} if arguments.get("task") is not None else {}
+  query = {key: arguments[key] for key in ("task", "field", "offset")
+           if arguments.get(key) is not None}
   path = f"/api/chats/{quote(chat_id, safe='')}/goal-brief"
   if query:
     path += "?" + urlencode(query)
@@ -757,11 +762,14 @@ def _call_list_agent_peers(arguments: dict[str, Any]) -> dict:
 
 def _call_read_agent_message(arguments: dict[str, Any]) -> dict:
   message_id = arguments.get("message_id")
-  if set(arguments) != {"message_id"} or not isinstance(message_id, str) or not message_id:
-    raise ValueError("read_agent_message takes one message_id")
-  return _agent_api_call(
-    "GET", f"/api/agent-coordination/messages/{quote(message_id, safe='')}",
-  )
+  offset = arguments.get("offset", 0)
+  if (
+    not set(arguments) <= {"message_id", "offset"} or not isinstance(message_id, str)
+    or not message_id or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
+  ):
+    raise ValueError("read_agent_message takes one message_id and an optional offset")
+  path = f"/api/agent-coordination/messages/{quote(message_id, safe='')}"
+  return _agent_api_call("GET", path + (f"?offset={offset}" if offset else ""))
 
 
 def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
@@ -1884,7 +1892,13 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "task": {"type": "string", "minLength": 1, "maxLength": 64,
-                 "description": "A task id of this Goal to show in full. Required for a coordinator."},
+                 "description": "A task id of this Goal to show in full. Required for a coordinator unless reading a Goal field."},
+        "field": {"type": "string", "enum": [
+                    "objective", "next_action", "checkpoint",
+                    "title", "note", "result", "completion_condition"],
+                  "description": "Read one long text in pages: a Goal field without task, or a task field with task."},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Character offset of the page; use the previous page's next_offset."},
       },
       "additionalProperties": False,
     },
@@ -1988,16 +2002,19 @@ _TOOL_DEFINITIONS = {
   READ_AGENT_MESSAGE_TOOL: {
     "name": READ_AGENT_MESSAGE_TOOL,
     "description": (
-      "Read one peer note whole by its message id, when this turn's "
-      "coordination context carried only a marked excerpt of it. Only notes "
-      "this chat sent or received, or broadcasts in its current scope; not "
-      "an inbox and never a poll: new notes arrive in context by themselves."
+      "Read one peer note in full by its message id, when this turn's "
+      "coordination context carried only a marked excerpt of it. A long note "
+      "comes in pages: pass the previous page's next_offset as offset until it "
+      "is null. Only notes this chat can see; not an inbox and never a poll: "
+      "new notes arrive in context by themselves."
     ),
     "inputSchema": {
       "type": "object",
       "properties": {
         "message_id": {"type": "string", "minLength": 1,
                        "description": "The id of the excerpted note."},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Character offset of the page; use the previous page's next_offset."},
       },
       "required": ["message_id"],
       "additionalProperties": False,
