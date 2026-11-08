@@ -289,7 +289,7 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
 def test_a_long_peer_note_is_stored_and_delivered_whole(client, auth, db):
   chats, _ = _network_fixture(db)
   nested_auth = _delegated_auth(db, chats["nested"].id, "nested-run")
-  body = "Long finding " * 2000 + "END"
+  body = "Long finding " * 1500 + "END"  # long, within the turn's note budget
 
   sent = client.post(
     "/api/agent-coordination/messages",
@@ -1370,6 +1370,61 @@ def test_next_turn_context_delivers_a_long_note_whole(db):
   context = build_coordination_context(db, chats["scout"].id, current.id)
   assert json.dumps(body, ensure_ascii=False)[1:-1] in context
   assert "…" not in context
+
+
+@pytest.mark.parametrize("sizes", [[60_000] * MAX_CONTEXT_MESSAGES, [500_000]])
+def test_oversized_peer_notes_fit_the_turn_budget_and_still_advance(db, sizes):
+  """Huge notes cannot wedge a recipient: the block stays bounded, every note
+  is marked whole or excerpted, and the delivery cursor reaches the last one."""
+  from app.context_budget import PEER_NOTES_CHARS
+
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  current = make_goal_run(db,
+    id="scout-huge-notes-run", root_run_id="scout-huge-notes-run",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=previous_started + timedelta(seconds=100),
+  )
+  notes = [models.AgentCoordinationMessage(
+    id=f"huge-{index:02d}", room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id=f"huge-send-{index:02d}", send_target_key=chats["scout"].id,
+    to_chat_id=chats["scout"].id, kind="finding", body=f"{index}:" + "x" * size,
+    created_at=previous_started + timedelta(seconds=1 + index),
+  ) for index, size in enumerate(sizes)]
+  db.add_all([current, *notes])
+  db.commit()
+
+  delivery = build_coordination_context_delivery(db, chats["scout"].id, current.id)
+
+  assert len(delivery.text) < PEER_NOTES_CHARS + 8_000
+  assert delivery.delivered_through.message_id == notes[-1].id
+  assert "/api/agent-coordination/messages/huge-00 for the full note" in delivery.text
+  assert '"body_truncated":true' in delivery.text
+
+
+def test_an_agent_reads_one_excerpted_note_whole_but_no_one_elses(client, auth, db):
+  chats, _ = _network_fixture(db)
+  body = "Whole finding " * 5000
+  db.add(models.AgentCoordinationMessage(
+    id="whole-note", room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id="whole-send", send_target_key=chats["scout"].id,
+    to_chat_id=chats["scout"].id, kind="finding", body=body,
+  ))
+  db.commit()
+
+  read = client.get(
+    "/api/agent-coordination/messages/whole-note",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+  )
+  assert read.status_code == 200, read.text
+  assert read.json()["body"] == body
+  assert client.get(
+    "/api/agent-coordination/messages/whole-note",
+    headers=_delegated_auth(db, chats["nested"].id, "nested-run"),
+  ).status_code == 404
 
 
 def test_unadmitted_turn_does_not_consume_peer_context(db):

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
+from app.context_budget import PEER_NOTES_CHARS, TextBudget
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -33,8 +34,10 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-# Notes are delivered whole: a clipped note forces the recipient to dig the
-# rest out of the activity log. The message count bounds the delivery.
+# A turn's coordination block carries at most this many notes, whole while
+# their combined bodies fit context_budget.PEER_NOTES_CHARS. The rest arrive as
+# marked excerpts naming the exact read, so the delivery cursor always advances
+# and one long note can never make every turn of the recipient fail.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -690,6 +693,40 @@ def model_message(message: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def context_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Model notes for repeated context, bounded by one combined budget."""
+  budget = TextBudget(PEER_NOTES_CHARS)
+  messages = []
+  for row in rows:
+    message = model_message(row)
+    body = message.get("body") or ""
+    shown = budget.take(
+      body, f"GET /api/agent-coordination/messages/{row['id']} for the full note",
+    )
+    if shown != body:
+      message["body"] = shown
+      message["body_truncated"] = True
+    messages.append(message)
+  return messages
+
+
+def peer_message_for_agent(
+  db: Session, chat_id: str, run_id: str | None, message_id: str,
+) -> dict[str, Any] | None:
+  """One exact note this chat sent or received, whole; not an inbox read."""
+  row = db.get(models.AgentCoordinationMessage, message_id)
+  if row is None:
+    return None
+  if row.to_chat_id is not None:
+    visible = chat_id in (row.to_chat_id, row.from_chat_id)
+  else:
+    scope = scope_for_chat(db, chat_id, run_id)
+    visible = scope is not None and (row.room_kind, row.room_id) == (scope.kind, scope.id)
+  if not visible:
+    return None
+  return model_message(serialize_messages(db, [row])[0])
+
+
 def visible_peer_messages(
   db: Session,
   scope: CoordinationScope,
@@ -979,7 +1016,7 @@ def agent_context_snapshot(
     oldest_first=True,
   )
   delivered_rows = message_window[:MAX_CONTEXT_MESSAGES]
-  messages = [model_message(message) for message in delivered_rows]
+  messages = context_messages(delivered_rows)
   snapshot = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -1760,7 +1797,7 @@ def _interrupt_peer_carrier(
   messages = message_window[-MAX_CONTEXT_MESSAGES:]
   if not messages:
     return None
-  model_messages = [model_message(message) for message in messages]
+  model_messages = context_messages(messages)
   payload: dict[str, Any] = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,

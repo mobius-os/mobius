@@ -118,9 +118,9 @@ def admit_goal(db, chat_id, goal_id, objective, message=None):
       goal.revision += 1
 
 
-def scoped_goal_context(db, goal, task_id=None, *, role="coordinator"):
+def scoped_goal_context(db, goal, task_id=None, *, role="coordinator", brief=False):
   from app.goal_context import project_goal
-  payload = project_goal(goal, task_id, role=role)
+  payload = project_goal(goal, task_id, role=role, brief=brief)
   if role != "coordinator":
     return payload
   others = db.query(models.ChatGoal).filter(
@@ -150,14 +150,15 @@ def resume_context(db, run_id):
     "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
     "If the owner defers a step, continue other authorized work. When none can proceed, "
     "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
-    "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal)) + "</mobius_goal>"
+    "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal, brief=True))
+    + "</mobius_goal>"
   )
 
 
-def helper_goal_view(db, assignment, task_id=None):
+def helper_goal_view(db, assignment, task_id=None, *, brief=False):
   """The assigned Goal as one helper may read it, focused on its task by default."""
   payload = scoped_goal_context(
-    db, assignment.goal, task_id or assignment.plan_task, role="helper",
+    db, assignment.goal, task_id or assignment.plan_task, role="helper", brief=brief,
   )
   payload["assignment"] = {
     "delegation_id": assignment.delegation_id, "helper": assignment.helper,
@@ -187,7 +188,7 @@ def helper_goal_brief(db, chat_id):
     "brief, for example after context compaction; read_goal(task=<id>) shows "
     "any task of this Goal in full, and read_goal(task=<parent id>) lists "
     "your neighbouring tasks.\n"
-    "<mobius_goal_brief>" + json_block_data(helper_goal_view(db, assignment))
+    "<mobius_goal_brief>" + json_block_data(helper_goal_view(db, assignment, brief=True))
     + "</mobius_goal_brief>"
   )
 
@@ -199,7 +200,10 @@ COORDINATOR_READ_GOAL_NEEDS_TASK = (
 
 
 def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
-  """What read_goal returns: the same projection as the turn's brief.
+  """What read_goal returns: the turn brief's projection, whole.
+
+  The per-turn brief fits the context budget with marked excerpts; this read
+  is where those excerpts point, so it never clips.
 
   read_goal(task) is the one per-task expansion at both levels. With no
   task a helper re-reads its assignment brief, its only Goal read. A

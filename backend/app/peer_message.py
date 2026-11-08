@@ -27,7 +27,7 @@ MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
 # Transcript preview bound: the card persists in the transcript row, so a
 # longer note is stored as an excerpt marked body_truncated (the card labels
-# it) while the recipient still receives the whole note.
+# it); the stored note itself stays whole.
 MAX_BODY_CHARS = 4000
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.

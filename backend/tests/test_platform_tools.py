@@ -1500,6 +1500,15 @@ def test_refusals_read_as_their_reason_not_the_wire_envelope(body, reason):
   assert "{" not in control._refusal_message(body) or body.startswith("<")
 
 
+def test_a_non_json_error_page_is_shown_as_a_marked_head():
+  control = _control_module()
+  page = "<html>" + "gateway " * 5000 + "</html>"
+  rendered = control._refusal_message(page)
+  assert rendered.startswith("<html>gateway")
+  assert rendered.endswith(f"[excerpt of a {len(page)}-character non-JSON error body]")
+  assert len(rendered) < 2100
+
+
 def test_a_refusal_reason_is_shown_whole():
   control = _control_module()
   reason = "R" * 5000

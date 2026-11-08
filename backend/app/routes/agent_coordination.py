@@ -21,6 +21,7 @@ from app.agent_coordination import (
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
+  peer_message_for_agent,
   send_agent_message,
   deliver_work_claim_revocation,
   visible_peer_messages,
@@ -253,6 +254,19 @@ async def send_current_message(
       "recipient or tell the owner."
     )
   return result
+
+
+@router.get("/messages/{message_id}")
+def read_current_message(
+  message_id: str,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Read one note whole when turn context carried only its excerpt."""
+  message = peer_message_for_agent(db, principal.chat_id, principal.run_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this agent.")
+  return message
 
 
 @router.get("/chats/{chat_id}")

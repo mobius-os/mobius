@@ -287,7 +287,11 @@ def _refusal_message(raw: str) -> str:
   try:
     detail = json.loads(raw).get("detail", raw)
   except (json.JSONDecodeError, AttributeError):
-    return raw.strip() or "no reason given"
+    # Not a typed refusal: a proxy or server error page. Show its head only.
+    text = raw.strip()
+    if len(text) > 2000:
+      return f"{text[:2000]}… [excerpt of a {len(text)}-character non-JSON error body]"
+    return text or "no reason given"
   if isinstance(detail, dict):
     diagnostic = detail.get("stderr") if detail.get("code") == "compile_failed" else None
     detail = detail.get("message") or detail.get("code") or json.dumps(detail)

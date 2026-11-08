@@ -1743,3 +1743,37 @@ def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
   emitted.clear()
   publish_plan_for_delegation(db, direct)
   assert [event["chatId"] for event in emitted] == [owner]
+
+
+def test_dependency_checks_stay_linear_in_deeply_nested_plans(monkeypatch):
+  from app import goal_plans
+
+  class Counting(frozenset):
+    checks = 0
+
+    def __contains__(self, value):
+      Counting.checks += 1
+      return frozenset.__contains__(self, value)
+
+  monkeypatch.setattr(goal_plans, "SETTLED_TASK_STATUSES", Counting(goal_plans.SETTLED_TASK_STATUSES))
+  depth = 2000
+  tasks = [{"id": f"d{i}", "title": "Done", "status": "completed"} for i in range(depth)]
+  tasks += [{"id": f"g{i}", "title": "Group", "status": "pending",
+             "parent_id": f"g{i - 1}" if i else None, "depends_on": [f"d{i}"]}
+            for i in range(depth)]
+  tasks[-1]["status"] = "running"
+  for task in tasks:
+    if task.get("parent_id") is None:
+      task.pop("parent_id", None)
+  assert len(goal_plans.normalize_tasks(tasks)) == 2 * depth
+  # Each dependency and child is checked a constant number of times; an
+  # inherited-chain rescan per task would need about depth**2 / 2 checks.
+  assert Counting.checks < 10 * len(tasks)
+
+
+def test_a_five_thousand_task_plan_normalizes():
+  from app.goal_plans import normalize_tasks
+  tasks = [{"id": "root", "title": "Root", "status": "running"}]
+  tasks += [{"id": f"t{i}", "title": "Task", "status": "completed", "parent_id": "root",
+             "depends_on": [f"t{i - 1}"] if i else []} for i in range(5000)]
+  assert len(normalize_tasks(tasks)) == 5001

@@ -172,7 +172,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     if start in visited:
       continue
     # Explicit frames keep dependency validation independent of recursion
-    # depth within the bounded plan.
+    # depth, however deep the plan nests.
     stack = [(start, False)]
     while stack:
       task_id, leaving = stack.pop()
@@ -191,38 +191,52 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       stack.extend((dependency, False) for dependency in reversed(
         by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])))
 
-  def effective_dependencies(task_id: str) -> list[str]:
-    """Return direct dependencies plus those inherited from parent groups."""
+  # Whether every dependency of a task and of its parent groups has settled.
+  # Parentage is acyclic (checked above), so one memoized walk per chain keeps
+  # this linear in the plan size however deep the groups nest.
+  chain_settled: dict[str, bool] = {}
+  for task in tasks:
+    chain = []
+    current: str | None = task["id"]
+    while current is not None and current not in chain_settled:
+      chain.append(current)
+      current = by_id[current].get("parent_id")
+    settled = True if current is None else chain_settled[current]
+    for key in reversed(chain):
+      settled = settled and all(
+        by_id[dependency]["status"] in SETTLED_TASK_STATUSES
+        for dependency in by_id[key]["depends_on"]
+      )
+      chain_settled[key] = settled
+
+  def incomplete_dependencies(task_id: str) -> list[str]:
+    """Unsettled direct and inherited dependencies, for a refusal only."""
     dependencies: list[str] = []
-    current = by_id[task_id]
-    while True:
-      dependencies.extend(current["depends_on"])
-      parent_id = current.get("parent_id")
-      if parent_id is None:
-        break
-      current = by_id[parent_id]
+    current: str | None = task_id
+    while current is not None:
+      dependencies.extend(
+        dependency for dependency in by_id[current]["depends_on"]
+        if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
+      )
+      current = by_id[current].get("parent_id")
     return list(dict.fromkeys(dependencies))
 
   for task in tasks:
-    incomplete = [
-      dependency for dependency in effective_dependencies(task["id"])
-      if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] in {"running", "completed"} and incomplete:
+    if task["status"] in {"running", "completed"} and not chain_settled[task["id"]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {', '.join(incomplete)}"
+        f"complete: {', '.join(incomplete_dependencies(task['id']))}"
       )
-    unfinished_children = [
-      child["id"] for child in tasks
-      if child.get("parent_id") == task["id"]
-      and child["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] == "completed" and unfinished_children:
-      raise GoalPlanError(
-        f"{task['id']} cannot complete before its children settle: "
-        f"{', '.join(unfinished_children)}"
-      )
+    if task["status"] == "completed":
+      unfinished_children = [
+        child for child in children_by_parent.get(task["id"], [])
+        if by_id[child]["status"] not in SETTLED_TASK_STATUSES
+      ]
+      if unfinished_children:
+        raise GoalPlanError(
+          f"{task['id']} cannot complete before its children settle: "
+          f"{', '.join(unfinished_children)}"
+        )
     progress = task.get("progress")
     if (
       task["status"] == "completed" and progress is not None

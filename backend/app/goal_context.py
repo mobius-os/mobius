@@ -1,6 +1,10 @@
 """Deterministic hierarchical Goal views. No summaries, caches or extra state."""
 from collections import Counter
 
+from app.context_budget import (
+  GOAL_BRIEF_CHARS, GOAL_BRIEF_FIELD_CHARS, GOAL_BRIEF_LIST_ITEMS, TextBudget,
+)
+
 ROLES = ("coordinator", "helper")
 # The coordinator owns the Goal outcome. A helper works one assigned branch
 # and must not receive the owner's next step or outcome contract.
@@ -12,17 +16,17 @@ COORDINATOR_ONLY_FIELDS = ("outcome_contract", "next_action", "checkpoint")
 # read_goal(task=<parent>) lists a helper's neighbours on demand.
 
 
-def project_goal(goal, task_id=None, *, role="coordinator"):
+def project_goal(goal, task_id=None, *, role="coordinator", brief=False):
   """Focus on the common ancestor of running work, or the root overview.
 
-  Shrunk by structure, never by clipping. Full detail belongs only to the
-  focus, its ancestors' constraints, the results and notes of its
-  prerequisites, and blocker reasons. Immediate children, siblings along its
-  ancestor path, and
+  Shrunk by structure first. Full detail belongs only to the focus, its
+  ancestors' constraints, the results and notes of its prerequisites, and
+  blocker reasons. Immediate children, siblings along its ancestor path, and
   blockers elsewhere are summaries: id, title, status, dependency ids, and
-  has_result/has_note flags naming what focusing that task returns. Lists
-  are whole. The saved plan is untouched; read_goal
-  uses the identical projection.
+  has_result/has_note flags naming what focusing that task returns. The
+  saved plan is untouched. read_goal returns this projection whole; the
+  per-turn ``brief`` repeats in every turn, so it also fits the context
+  budget with marked excerpts that name the read returning the full text.
   """
   if role not in ROLES:
     raise ValueError(f"Unknown Goal view role: {role}")
@@ -157,6 +161,44 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   if role == "helper":
     for key in COORDINATOR_ONLY_FIELDS:
       payload.pop(key, None)
+  return _fit_brief(payload, task_id) if brief else payload
+
+
+_BRIEF_PROSE = ("title", "completion_condition", "note", "result")
+# In priority order: what constrains and feeds the focus is kept first.
+_BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
+
+
+def _fit_brief(payload, task_id):
+  """Bound the repeated brief; the saved plan and read_goal stay whole."""
+  budget = TextBudget(GOAL_BRIEF_CHARS, field=GOAL_BRIEF_FIELD_CHARS)
+  overview = f"read_goal(task={task_id})" if task_id else "update_goal with no arguments"
+
+  def fit(entry):
+    read = f"read_goal(task={entry['id']}) for the full text"
+    for field in _BRIEF_PROSE:
+      if isinstance(entry.get(field), str):
+        entry[field] = budget.take(entry[field], read)
+
+  if "task" in payload:
+    fit(payload["task"])
+  for key in ("next_action", "checkpoint"):
+    if isinstance(payload.get(key), str):
+      payload[key] = budget.take(payload[key], "update_goal with no arguments for the full text")
+  for key in _BRIEF_LISTS:
+    entries = payload.get(key)
+    if not entries:
+      continue
+    if len(entries) > GOAL_BRIEF_LIST_ITEMS:
+      payload[f"{key}_omitted"] = (
+        f"{len(entries) - GOAL_BRIEF_LIST_ITEMS} more; {overview} lists them all"
+      )
+      # The nearest ancestors constrain the focus most; other lists keep order.
+      entries = (entries[-GOAL_BRIEF_LIST_ITEMS:] if key == "ancestors"
+                 else entries[:GOAL_BRIEF_LIST_ITEMS])
+    payload[key] = entries
+    for entry in entries:
+      fit(entry)
   return payload
 
 

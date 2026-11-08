@@ -147,7 +147,7 @@ def test_every_task_in_a_list_is_shown_without_paging():
   goal = _goal([_task("parent", status="running"), *children,
                 _task("x"), _task("y")])
   view = project_goal(goal, "parent")
-  # Plan order, all of them: MAX_TASKS is the bound, not a page size.
+  # Plan order, all of them: read_goal lists are whole, never paged.
   assert [c["id"] for c in view["children"]] == [c["id"] for c in children]
   assert view["children"][50]["note"] == "Blocked late in plan order"
   assert not [key for key in view if key.endswith("_page") or key == "navigation"]
@@ -156,7 +156,7 @@ def test_every_task_in_a_list_is_shown_without_paging():
 
 
 def _max_plan(width, depth):
-  """An admitted plan with every text field at its validation limit."""
+  """An admitted plan whose text fields are all long."""
   text = lambda c: (c * MAX_NOTE)
   tasks, parent = [], None
   for level in range(depth):
@@ -172,7 +172,7 @@ def _max_plan(width, depth):
   return normalize_tasks([{k: v for k, v in t.items() if v is not None} for t in tasks])
 
 
-def test_production_maximum_plan_brief_is_well_below_the_plan():
+def test_a_long_plan_projection_is_well_below_the_plan():
   tasks = _max_plan(MAX_TASKS - 3, 3)
   assert len(tasks) == MAX_TASKS
   goal = _goal(tasks)
@@ -621,7 +621,7 @@ def test_read_goal_tool_is_one_result_bearing_read_for_both_levels(monkeypatch):
   assert calls[-1] == ("GET", "/api/chats/chat%201/goal-brief")
   with pytest.raises(ValueError, match="does not take: goal_id"):
     control._call_read_goal({"goal_id": "other"})
-  # Paging is gone: every list is whole, bounded by MAX_TASKS.
+  # Paging is gone: read_goal lists are whole; only the turn brief is budgeted.
   with pytest.raises(ValueError, match="does not take: page"):
     control._call_read_goal({"task": "build", "page": 2})
   schema = control._TOOL_DEFINITIONS[control.READ_GOAL_TOOL]["inputSchema"]
@@ -823,3 +823,32 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
   finally:
     for turn in turns:
       turn.env_file.remove()
+
+
+def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
+  from app.context_budget import GOAL_BRIEF_CHARS, GOAL_BRIEF_LIST_ITEMS
+  huge = "N" * 50_000
+  children = [_task(f"c{i:03d}", "parent", "blocked", note=f"{i} " + huge) for i in range(120)]
+  goal = _goal([_task("dep", status="completed", result="R" * 50_000),
+                _task("parent", status="running", depends_on=["dep"], note=huge),
+                *children], next_action="A" * 50_000)
+
+  brief = project_goal(goal, "parent", brief=True)
+  full = project_goal(goal, "parent")
+
+  assert _chars(brief) < GOAL_BRIEF_CHARS + 20_000
+  assert len(brief["children"]) == GOAL_BRIEF_LIST_ITEMS
+  assert brief["children_omitted"].startswith(f"{120 - GOAL_BRIEF_LIST_ITEMS} more; read_goal(task=parent)")
+  assert "read_goal(task=parent) for the full text" in brief["task"]["note"]
+  assert "read_goal(task=dep) for the full text" in brief["dependencies"][0]["result"]
+  assert "update_goal with no arguments" in brief["next_action"]
+  assert full["task"]["note"] == huge
+  assert len(full["children"]) == 120
+  assert full["children"][119]["note"] == "119 " + huge
+  assert full["dependencies"][0]["result"] == "R" * 50_000
+
+
+def test_a_short_brief_is_identical_to_the_full_projection():
+  goal = _goal([_task("parent", status="running", note="Keep files"),
+                _task("leaf", "parent", "blocked", note="Waiting on review")])
+  assert project_goal(goal, "parent", brief=True) == project_goal(goal, "parent")
