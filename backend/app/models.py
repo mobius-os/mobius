@@ -27,6 +27,7 @@ from sqlalchemy import (
 from sqlalchemy import inspect as sa_inspect
 
 from sqlalchemy.types import TypeDecorator
+from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import column_property, deferred, relationship
 
 from app.database import Base
@@ -1485,12 +1486,33 @@ class ProjectAgentMessage(Base):
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
+class AgentCoordinationNote(Base):
+  """The body of one peer send, stored once however many inboxes hold it.
+
+  ``body_chars`` lets size-aware inbox retention and delivery budgets work
+  from row metadata without loading bodies.
+  """
+
+  __tablename__ = "agent_coordination_notes"
+
+  id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+  body = Column(Text, nullable=False)
+  body_chars = Column(Integer, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+    if self.body is not None and self.body_chars is None:
+      self.body_chars = len(self.body)
+
+
 class AgentCoordinationMessage(Base):
-  """One durable provider-neutral peer note.
+  """One durable provider-neutral peer note delivery.
 
   Broadcast rows remain scoped to a Project or delegation tree. Directed rows
   use the owner-keyed workspace channel so topology never constrains delivery;
-  one row per recipient keeps inbox visibility and retention exact. ``send_id``
+  one row per recipient keeps inbox visibility and retention exact, while all
+  rows of one send share a single ``AgentCoordinationNote`` body. ``send_id``
   groups one multi-recipient send and lets callers safely reuse an explicit
   retry identity within the same physical agent run.
   """
@@ -1526,7 +1548,15 @@ class AgentCoordinationMessage(Base):
   delivery = Column(
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
-  body = Column(Text, nullable=False)
+  # Always set. Nullable only because an existing table cannot gain a NOT NULL
+  # column in place on SQLite; the upgrade fills it for every earlier row.
+  note_id = Column(
+    String(64), ForeignKey("agent_coordination_notes.id"), nullable=True, index=True,
+  )
+  note = relationship(AgentCoordinationNote)
+  body = association_proxy(
+    "note", "body", creator=lambda body: AgentCoordinationNote(body=body),
+  )
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 

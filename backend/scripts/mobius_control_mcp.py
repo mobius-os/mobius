@@ -67,6 +67,7 @@ CARD_MESSAGE_PROPERTY = {
 }
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
+READ_AGENT_MESSAGE_TOOL = "read_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
 FINISH_AGENT_WORK_TOOL = "finish_agent_work"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
@@ -278,7 +279,11 @@ def _agent_api_settings() -> tuple[str, str]:
   return base, token
 
 
-def _refusal_message(raw: str) -> str:
+# Transport bound on how much of an HTTP refusal body is read.
+REFUSAL_READ_BYTES = 65536
+
+
+def _refusal_message(raw: str, *, cut: bool = False) -> str:
   """The human reason inside a backend refusal, without its wire envelope.
 
   FastAPI wraps reasons as {"detail": ...}: a string, a typed refusal
@@ -287,8 +292,11 @@ def _refusal_message(raw: str) -> str:
   try:
     detail = json.loads(raw).get("detail", raw)
   except (json.JSONDecodeError, AttributeError):
-    # Not a typed refusal: a proxy or server error page. Show its head only.
+    # Not a typed refusal (an error page), or one cut at the transport read.
+    # Show its head only, labelled with which it was.
     text = raw.strip()
+    if cut:
+      return f"{text[:2000]}… [excerpt of a refusal body truncated at the {REFUSAL_READ_BYTES}-byte read]"
     if len(text) > 2000:
       return f"{text[:2000]}… [excerpt of a {len(text)}-character non-JSON error body]"
     return text or "no reason given"
@@ -350,9 +358,11 @@ def _agent_api_json(
     # Transport bound: large enough for a whole structured refusal (a
     # compile diagnostic is ~4 KB plus its envelope); the reason inside it is
     # shown whole.
-    raw = exc.read(65536).decode("utf-8", errors="replace")
+    body = exc.read(REFUSAL_READ_BYTES + 1)
+    raw = body[:REFUSAL_READ_BYTES].decode("utf-8", errors="replace")
     raise RuntimeError(
-      f"Refused ({exc.code}): {_refusal_message(raw)}"
+      f"Refused ({exc.code}): "
+      f"{_refusal_message(raw, cut=len(body) > REFUSAL_READ_BYTES)}"
     ) from exc
   except (URLError, TimeoutError) as exc:
     reason = exc.reason if isinstance(exc, URLError) else "request timed out"
@@ -743,6 +753,15 @@ def _call_list_agent_peers(arguments: dict[str, Any]) -> dict:
   if arguments:
     raise ValueError("list_agent_peers takes no arguments")
   return _agent_api_call("GET", "/api/agent-coordination/room")
+
+
+def _call_read_agent_message(arguments: dict[str, Any]) -> dict:
+  message_id = arguments.get("message_id")
+  if set(arguments) != {"message_id"} or not isinstance(message_id, str) or not message_id:
+    raise ValueError("read_agent_message takes one message_id")
+  return _agent_api_call(
+    "GET", f"/api/agent-coordination/messages/{quote(message_id, safe='')}",
+  )
 
 
 def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
@@ -1966,6 +1985,24 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  READ_AGENT_MESSAGE_TOOL: {
+    "name": READ_AGENT_MESSAGE_TOOL,
+    "description": (
+      "Read one peer note whole by its message id, when this turn's "
+      "coordination context carried only a marked excerpt of it. Only notes "
+      "this chat sent or received, or broadcasts in its current scope; not "
+      "an inbox and never a poll: new notes arrive in context by themselves."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1,
+                       "description": "The id of the excerpted note."},
+      },
+      "required": ["message_id"],
+      "additionalProperties": False,
+    },
+  },
   SEND_AGENT_MESSAGE_TOOL: {
     "name": SEND_AGENT_MESSAGE_TOOL,
     "description": SEND_AGENT_MESSAGE_DESCRIPTION,
@@ -2033,8 +2070,8 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "summary"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
-        "takeover_reason": {"type": "string", "minLength": 10, "maxLength": 1000},
+        "summary": {"type": "string", "minLength": 1},
+        "takeover_reason": {"type": "string", "minLength": 10},
         "expected_owner_chat_id": {"type": "string", "minLength": 1, "maxLength": 64},
       },
     },
@@ -2055,7 +2092,7 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "outcome"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "outcome": {"type": "string", "minLength": 1},
         "release": {"type": "boolean"},
       },
     },
@@ -2080,6 +2117,7 @@ _TOOL_HANDLERS = {
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,
   SEND_AGENT_MESSAGE_TOOL: _call_send_agent_message,
+  READ_AGENT_MESSAGE_TOOL: _call_read_agent_message,
   CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
   FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,

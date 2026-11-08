@@ -16,7 +16,7 @@ COORDINATOR_ONLY_FIELDS = ("outcome_contract", "next_action", "checkpoint")
 # read_goal(task=<parent>) lists a helper's neighbours on demand.
 
 
-def project_goal(goal, task_id=None, *, role="coordinator", brief=False):
+def project_goal(goal, task_id=None, *, role="coordinator"):
   """Focus on the common ancestor of running work, or the root overview.
 
   Shrunk by structure first. Full detail belongs only to the focus, its
@@ -25,8 +25,7 @@ def project_goal(goal, task_id=None, *, role="coordinator", brief=False):
   blockers elsewhere are summaries: id, title, status, dependency ids, and
   has_result/has_note flags naming what focusing that task returns. The
   saved plan is untouched. read_goal returns this projection whole; the
-  per-turn ``brief`` repeats in every turn, so it also fits the context
-  budget with marked excerpts that name the read returning the full text.
+  per-turn brief repeats in every turn, so ``fit_brief`` bounds it.
   """
   if role not in ROLES:
     raise ValueError(f"Unknown Goal view role: {role}")
@@ -161,30 +160,44 @@ def project_goal(goal, task_id=None, *, role="coordinator", brief=False):
   if role == "helper":
     for key in COORDINATOR_ONLY_FIELDS:
       payload.pop(key, None)
-  return _fit_brief(payload, task_id) if brief else payload
+  return payload
 
 
 _BRIEF_PROSE = ("title", "completion_condition", "note", "result")
-# In priority order: what constrains and feeds the focus is kept first.
+# In priority order after the objective, hold and focus: what constrains and
+# feeds the focus is kept first.
 _BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
 
 
-def _fit_brief(payload, task_id):
-  """Bound the repeated brief; the saved plan and read_goal stay whole."""
+def fit_brief(payload, task_id, *, role="coordinator"):
+  """Fit the per-turn brief to its context budget with marked excerpts.
+
+  The saved Goal and plan are untouched, and the reads the excerpts name
+  return everything whole, so an excerpt never alters the outcome contract.
+  """
   budget = TextBudget(GOAL_BRIEF_CHARS, field=GOAL_BRIEF_FIELD_CHARS)
-  overview = f"read_goal(task={task_id})" if task_id else "update_goal with no arguments"
+  goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
+  overview = f"read_goal(task={task_id})" if task_id else goal_read
 
   def fit(entry):
     read = f"read_goal(task={entry['id']}) for the full text"
     for field in _BRIEF_PROSE:
       if isinstance(entry.get(field), str):
         entry[field] = budget.take(entry[field], read)
+    if entry.get("depends_on"):
+      entry["depends_on"], omitted = budget.take_ids(entry["depends_on"])
+      if omitted:
+        entry["depends_on_omitted"] = f"{omitted} more; read_goal(task={entry['id']}) lists them all"
 
+  payload["objective"] = budget.take(payload["objective"], f"{goal_read} for the full objective")
+  if isinstance((payload.get("hold") or {}).get("reason"), str):
+    payload["hold"] = {**payload["hold"], "reason": budget.take(
+      payload["hold"]["reason"], f"{goal_read} for the full reason")}
   if "task" in payload:
     fit(payload["task"])
   for key in ("next_action", "checkpoint"):
     if isinstance(payload.get(key), str):
-      payload[key] = budget.take(payload[key], "update_goal with no arguments for the full text")
+      payload[key] = budget.take(payload[key], f"{goal_read} for the full text")
   for key in _BRIEF_LISTS:
     entries = payload.get(key)
     if not entries:
@@ -199,6 +212,15 @@ def _fit_brief(payload, task_id):
     payload[key] = entries
     for entry in entries:
       fit(entry)
+  others = payload.get("other_open_goals")
+  if others:
+    if len(others) > GOAL_BRIEF_LIST_ITEMS:
+      payload["other_open_goals_omitted"] = f"{len(others) - GOAL_BRIEF_LIST_ITEMS} more"
+      others = others[:GOAL_BRIEF_LIST_ITEMS]
+    payload["other_open_goals"] = [
+      {**other, "objective": budget.take(other["objective"], "shown whole only by that Goal's own reads")}
+      for other in others
+    ]
   return payload
 
 

@@ -45,6 +45,8 @@ from app import models
 
 
 router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"])
+# A send receipt shows the sender this much of its own note.
+SENDER_PREVIEW_CHARS = 500
 
 
 class AgentMessageCreate(BaseModel):
@@ -86,8 +88,8 @@ class AgentWorkClaimCreate(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  summary: str = Field(min_length=1, max_length=500)
-  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+  summary: str = Field(min_length=1)
+  takeover_reason: str | None = Field(default=None, min_length=10)
   expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -95,7 +97,7 @@ class AgentWorkClaimFinish(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  outcome: str = Field(min_length=1, max_length=1000)
+  outcome: str = Field(min_length=1)
   release: bool = False
 
 
@@ -227,11 +229,17 @@ async def send_current_message(
     )
     if not body.broadcast else None
   )
-  # One row is stored per recipient inbox. The sender already knows the note,
-  # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated once per recipient.
+  # The sender already knows the note: return one canonical row with a short
+  # preview of its body (the owner-visible card labels it as an excerpt), plus
+  # the exact recipient count and names, never the body again.
+  receipt = [model_message(row) for row in rows[:1]]
+  for row in receipt:
+    body = row.get("body") or ""
+    if len(body) > SENDER_PREVIEW_CHARS:
+      row.update(body=body[:SENDER_PREVIEW_CHARS], body_truncated=True,
+                 body_chars=len(body))
   result = {
-    "messages": [model_message(row) for row in rows[:1]],
+    "messages": receipt,
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)

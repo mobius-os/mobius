@@ -1509,6 +1509,49 @@ def test_a_non_json_error_page_is_shown_as_a_marked_head():
   assert len(rendered) < 2100
 
 
+def test_a_refusal_cut_at_the_transport_read_is_labelled_truncated(monkeypatch):
+  import io
+  import urllib.error
+
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://backend.test")
+  monkeypatch.setenv("AGENT_TOKEN", "t")
+  body = json.dumps({"detail": "R" * 200_000}).encode()
+
+  def refuse(request, timeout=None):
+    raise urllib.error.HTTPError(request.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
+
+  monkeypatch.setattr(control, "urlopen", refuse)
+  with pytest.raises(RuntimeError) as caught:
+    control._agent_api_json("POST", "/api/x")
+  assert "truncated at the 65536-byte read" in str(caught.value)
+  assert "non-JSON" not in str(caught.value)
+
+
+def test_read_agent_message_reads_one_exact_note(monkeypatch):
+  control = _control_module()
+  calls = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: calls.append(
+    (method, path)) or {"id": "n 1", "body": "whole"})
+  assert control._call_read_agent_message({"message_id": "n 1"})["body"] == "whole"
+  assert calls == [("GET", "/api/agent-coordination/messages/n%201")]
+  with pytest.raises(ValueError, match="one message_id"):
+    control._call_read_agent_message({"message_id": "n", "extra": 1})
+  schema = control._TOOL_DEFINITIONS["read_agent_message"]
+  assert "marked excerpt" in schema["description"]
+  assert "read_agent_message" in platform_tools.PEER_TOOL_NAMES
+
+
+def test_work_claim_text_fields_are_uncapped():
+  control = _control_module()
+  claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
+  finish = control._TOOL_DEFINITIONS["finish_agent_work"]["inputSchema"]["properties"]
+  assert "maxLength" not in claim["summary"]
+  assert "maxLength" not in claim["takeover_reason"]
+  assert claim["takeover_reason"]["minLength"] == 10
+  assert "maxLength" not in finish["outcome"]
+
+
 def test_a_refusal_reason_is_shown_whole():
   control = _control_module()
   reason = "R" * 5000

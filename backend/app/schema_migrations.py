@@ -3286,6 +3286,13 @@ def _migrate_project_agent_messages(eng) -> None:
   }
   if not required.issubset(columns):
     return
+  # A schema created after 0102 keeps bodies in agent_coordination_notes; it is
+  # fresh, so it has no legacy project mail to copy.
+  if "body" not in {
+    column["name"]
+    for column in inspector.get_columns("agent_coordination_messages")
+  }:
+    return
   with eng.begin() as conn:
     conn.execute(text(
       "INSERT INTO agent_coordination_messages "
@@ -7068,6 +7075,48 @@ def _add_claim_revocation_outbox(eng) -> None:
     ))
 
 
+def _store_peer_note_bodies_once(eng) -> None:
+  """Move peer-note bodies into one row per send, referenced by each inbox row.
+
+  Earlier rows each get their own body row (they cannot be safely regrouped);
+  new sends share one. Each step is schema-gated, so a retry resumes safely.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS agent_coordination_notes ("
+      "id VARCHAR(64) NOT NULL PRIMARY KEY, body TEXT NOT NULL, "
+      "body_chars INTEGER NOT NULL, created_at TIMESTAMP NOT NULL)"
+    ))
+  inspector = sa_inspect(eng)
+  if "agent_coordination_messages" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("agent_coordination_messages")}
+  with eng.begin() as conn:
+    if "note_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE agent_coordination_messages ADD COLUMN note_id VARCHAR(64) "
+        "NULL REFERENCES agent_coordination_notes(id)"
+      ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_agent_coordination_messages_note_id "
+      "ON agent_coordination_messages (note_id)"
+    ))
+  if "body" not in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO agent_coordination_notes (id, body, body_chars, created_at) "
+      "SELECT m.id, m.body, LENGTH(m.body), m.created_at "
+      "FROM agent_coordination_messages AS m WHERE m.note_id IS NULL "
+      "AND NOT EXISTS (SELECT 1 FROM agent_coordination_notes AS n WHERE n.id = m.id)"
+    ))
+    conn.execute(text(
+      "UPDATE agent_coordination_messages SET note_id = id WHERE note_id IS NULL"
+    ))
+    conn.execute(text("ALTER TABLE agent_coordination_messages DROP COLUMN body"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7191,6 +7240,7 @@ _SCHEMA_MIGRATIONS = (
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
   ("0100_chat_branch_origin", _add_chat_branch_origin),
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
+  ("0102_peer_note_bodies_once", _store_peer_note_bodies_once),
 )
 
 

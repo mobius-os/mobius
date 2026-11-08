@@ -53,6 +53,10 @@ class DelegationSubmit(BaseModel):
   app_id: int | None = Field(default=None, gt=0)
   parent_chat_id: str = Field(min_length=1, max_length=64)
   task_key: str = Field(min_length=1, max_length=128)
+  # Uncapped like an owner message: it becomes the helper's first user
+  # message over the provider's stdin/JSON-RPC stream (no argv limit). A prompt
+  # beyond the model's context fails that helper's turn with the provider's own
+  # context-length error, reported to this parent like any failed helper turn.
   prompt: str = Field(min_length=1)
   provider: str
   model: str | None = Field(default=None, max_length=256)

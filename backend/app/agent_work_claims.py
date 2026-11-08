@@ -172,11 +172,12 @@ def claim_work(
   """Acquire first claim, observe its owner, or deliberately transfer it."""
   key = clean_work_key(work_key)
   clean_summary = summary.strip()
-  if not clean_summary or len(clean_summary) > 500:
-    raise ValueError("summary must be 1-500 characters")
+  if not clean_summary:
+    raise ValueError("summary must not be blank")
   reason = takeover_reason.strip() if takeover_reason else None
-  if reason is not None and not 10 <= len(reason) <= 1000:
-    raise ValueError("takeover_reason must be 10-1000 characters")
+  # A takeover must explain itself; ten characters rules out "x" or "ok".
+  if reason is not None and len(reason) < 10:
+    raise ValueError("takeover_reason must be at least 10 characters")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
@@ -411,7 +412,7 @@ def _stage_settle(
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).update({
-    models.AgentWorkClaim.outcome: outcome[:1000],
+    models.AgentWorkClaim.outcome: outcome,
     models.AgentWorkClaim.updated_at: now,
     models.AgentWorkClaim.revision: previous_revision + 1,
     (
@@ -424,7 +425,7 @@ def _stage_settle(
   stage_stamp_claim_outcome(
     db, row, ("completed" if complete else
               "owner_deleted" if outcome == _DELETED_OWNER_OUTCOME else "released"),
-    outcome[:1000],
+    outcome,
   )
   db.expire(row)
   return ReleasedClaim(
@@ -432,7 +433,7 @@ def _stage_settle(
     work_key=work_key,
     revision=previous_revision + 1,
     state="completed" if complete else "released",
-    outcome=outcome[:1000],
+    outcome=outcome,
   )
 
 
@@ -629,8 +630,8 @@ def finish_work(
 ) -> dict:
   key = clean_work_key(work_key)
   clean_outcome = outcome.strip()
-  if not clean_outcome or len(clean_outcome) > 1000:
-    raise ValueError("outcome must be 1-1000 characters")
+  if not clean_outcome:
+    raise ValueError("outcome must not be blank")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,

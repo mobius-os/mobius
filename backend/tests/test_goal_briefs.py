@@ -11,7 +11,7 @@ import pytest
 from app.chat_writer import create_chat
 
 from app import auth as auth_mod, models
-from app.goal_context import project_goal
+from app.goal_context import fit_brief, project_goal
 from app.goal_plans import goal_assignment, normalize_tasks
 from tests.goal_fixtures import goal_run
 # Bind the real Claude runner helpers before any test patches the runner.
@@ -833,7 +833,7 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
                 _task("parent", status="running", depends_on=["dep"], note=huge),
                 *children], next_action="A" * 50_000)
 
-  brief = project_goal(goal, "parent", brief=True)
+  brief = fit_brief(project_goal(goal, "parent"), "parent")
   full = project_goal(goal, "parent")
 
   assert _chars(brief) < GOAL_BRIEF_CHARS + 20_000
@@ -851,4 +851,31 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
 def test_a_short_brief_is_identical_to_the_full_projection():
   goal = _goal([_task("parent", status="running", note="Keep files"),
                 _task("leaf", "parent", "blocked", note="Waiting on review")])
-  assert project_goal(goal, "parent", brief=True) == project_goal(goal, "parent")
+  assert fit_brief(project_goal(goal, "parent"), "parent") == project_goal(goal, "parent")
+
+
+def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
+  from app.context_budget import GOAL_BRIEF_CHARS
+  objective = "Deliver the outcome. " * 10_000
+  deps = [_task(f"d{i:04d}", status="completed", result="ok") for i in range(2000)]
+  children = [_task(f"c{i:02d}", "parent", depends_on=[d["id"] for d in deps]) for i in range(50)]
+  goal = _goal([*deps, _task("parent", status="running"), *children], objective=objective)
+  saved = copy.deepcopy(goal.plan_json)
+
+  brief = fit_brief(project_goal(goal, "parent"), "parent")
+
+  assert _chars(brief) < GOAL_BRIEF_CHARS + 20_000
+  assert "update_goal with no arguments for the full objective" in brief["objective"]
+  assert "depends_on_omitted" in brief["children"][-1]
+  assert brief["dependencies_omitted"].startswith("1950 more")
+  # The excerpt never alters the outcome contract: storage and reads stay whole.
+  assert goal.objective == objective
+  assert project_goal(goal, "parent")["objective"] == objective
+  assert goal.plan_json == saved
+
+
+def test_a_helper_brief_points_its_excerpts_at_read_goal():
+  goal = _goal([_task("parent", status="running")], objective="O" * 100_000,
+               hold_json=None)
+  brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
+  assert "read_goal for the full objective" in brief["objective"]

@@ -119,17 +119,17 @@ def admit_goal(db, chat_id, goal_id, objective, message=None):
 
 
 def scoped_goal_context(db, goal, task_id=None, *, role="coordinator", brief=False):
-  from app.goal_context import project_goal
-  payload = project_goal(goal, task_id, role=role, brief=brief)
-  if role != "coordinator":
-    return payload
-  others = db.query(models.ChatGoal).filter(
-    models.ChatGoal.chat_id == goal.chat_id, models.ChatGoal.id != goal.id,
-    models.ChatGoal.status == "open",
-  ).order_by(models.ChatGoal.created_at, models.ChatGoal.id).all()
-  if others:
-    payload["other_open_goals"] = [{"id": g.id, "objective": g.objective} for g in others]
-  return payload
+  """The Goal view; ``brief`` fits the per-turn copy to its context budget."""
+  from app.goal_context import fit_brief, project_goal
+  payload = project_goal(goal, task_id, role=role)
+  if role == "coordinator":
+    others = db.query(models.ChatGoal).filter(
+      models.ChatGoal.chat_id == goal.chat_id, models.ChatGoal.id != goal.id,
+      models.ChatGoal.status == "open",
+    ).order_by(models.ChatGoal.created_at, models.ChatGoal.id).all()
+    if others:
+      payload["other_open_goals"] = [{"id": g.id, "objective": g.objective} for g in others]
+  return fit_brief(payload, payload.get("focus"), role=role) if brief else payload
 
 
 def resume_context(db, run_id):

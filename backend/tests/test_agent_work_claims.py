@@ -1624,7 +1624,8 @@ def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypat
   )
   if closed:
     acknowledge_transfer_notice(db, claim_id=notice.claim_id, revision=notice.revision)
-  monkeypatch.setattr(coordination, "MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
+  # Room for exactly one ordinary note with its row charge.
+  monkeypatch.setattr(coordination, "INBOX_RETENTION_CHARS", 30 + coordination.ROW_RETENTION_CHARS)
   for index in range(2):
     coordination.send_agent_message(
       owner_id=owner.id, sender_chat_id=third.id, sender_run_id="claim-run-third",

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
-from app.context_budget import PEER_NOTES_CHARS, TextBudget
+from app.context_budget import PEER_NOTES_CHARS, excerpt, fair_shares
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -31,13 +31,17 @@ MESSAGE_DELIVERIES = frozenset({"next_turn", "interrupt"})
 DELIVERY_NEXT_TURN = "next_turn"
 DELIVERY_INTERRUPT = "interrupt"
 MAX_PEERS = 200
-MAX_SCOPE_MESSAGES = 1000
-MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
+# Retention per recipient inbox and per broadcast channel, by size: a note
+# costs its body plus a fixed charge for its row, and the oldest notes go
+# first. This bounds disk per chat while keeping recent history browsable; the
+# newest note is always kept, however long it is.
+INBOX_RETENTION_CHARS = 2_000_000
+ROW_RETENTION_CHARS = 256
 MAX_CONTEXT_PEERS = 24
-# A turn's coordination block carries at most this many notes, whole while
-# their combined bodies fit context_budget.PEER_NOTES_CHARS. The rest arrive as
-# marked excerpts naming the exact read, so the delivery cursor always advances
-# and one long note can never make every turn of the recipient fail.
+# A turn's coordination block carries at most this many notes. Their bodies
+# share context_budget.PEER_NOTES_CHARS fairly: short notes stay whole and long
+# ones arrive as marked excerpts naming read_agent_message, so the delivery
+# cursor always advances and one long note can never make every turn fail.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -659,6 +663,12 @@ def serialize_messages(
   db: Session, rows: list[models.AgentCoordinationMessage],
 ) -> list[dict[str, Any]]:
   names = _message_names(db, rows)
+  # Load the shared bodies in one query; each row then reads from the session.
+  note_ids = {row.note_id for row in rows if row.note_id}
+  if note_ids:
+    db.query(models.AgentCoordinationNote).filter(
+      models.AgentCoordinationNote.id.in_(note_ids),
+    ).all()
   return [serialize_message(row, names) for row in rows]
 
 
@@ -694,19 +704,17 @@ def model_message(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def context_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-  """Model notes for repeated context, bounded by one combined budget."""
-  budget = TextBudget(PEER_NOTES_CHARS)
-  messages = []
-  for row in rows:
-    message = model_message(row)
-    body = message.get("body") or ""
-    shown = budget.take(
-      body, f"GET /api/agent-coordination/messages/{row['id']} for the full note",
-    )
-    if shown != body:
-      message["body"] = shown
+  """Model notes for repeated context: each keeps a fair share of one budget."""
+  messages = [model_message(row) for row in rows]
+  bodies = [message.get("body") or "" for message in messages]
+  for message, body, share in zip(
+    messages, bodies, fair_shares([len(body) for body in bodies], PEER_NOTES_CHARS),
+  ):
+    if len(body) > share:
+      message["body"] = excerpt(
+        body, share, f"read_agent_message(message_id={message['id']}) for the full note",
+      )
       message["body_truncated"] = True
-    messages.append(message)
   return messages
 
 
@@ -1316,16 +1324,41 @@ def _matching_retry(
   return rows
 
 
-def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
-  stale = _channel_query(db, scope).order_by(
-    models.AgentCoordinationMessage.created_at.desc(),
-    models.AgentCoordinationMessage.id.desc(),
-  ).offset(MAX_SCOPE_MESSAGES).all()
-  for row in stale:
-    db.query(models.ChatActivityPosition).filter(
-      models.ChatActivityPosition.event_id == f"peer:{row.id}",
+def delete_orphan_notes(db: Session, note_ids) -> None:
+  """Delete the given note bodies that no delivery row references any more."""
+  note_ids = [note_id for note_id in set(note_ids) if note_id]
+  message, note = models.AgentCoordinationMessage, models.AgentCoordinationNote
+  for start in range(0, len(note_ids), 500):
+    chunk = note_ids[start:start + 500]
+    db.query(note).filter(
+      note.id.in_(chunk),
+      ~db.query(message.id).filter(message.note_id == note.id).exists(),
     ).delete(synchronize_session=False)
-    db.delete(row)
+
+
+def _prune_by_size(db: Session, query) -> None:
+  """Keep the newest rows that fit retention; prune by id, never loading bodies."""
+  message, note = models.AgentCoordinationMessage, models.AgentCoordinationNote
+  sized = query.join(note, note.id == message.note_id).with_entities(
+    message.id, message.note_id, note.body_chars,
+  ).order_by(message.created_at.desc(), message.id.desc())
+  used, stale_ids, stale_notes = 0, [], []
+  for index, (message_id, note_id, body_chars) in enumerate(sized):
+    used += body_chars + ROW_RETENTION_CHARS
+    if index and used > INBOX_RETENTION_CHARS:
+      stale_ids.append(message_id)
+      stale_notes.append(note_id)
+  for start in range(0, len(stale_ids), 500):
+    chunk = stale_ids[start:start + 500]
+    db.query(models.ChatActivityPosition).filter(
+      models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in chunk]),
+    ).delete(synchronize_session=False)
+    db.query(message).filter(message.id.in_(chunk)).delete(synchronize_session=False)
+  delete_orphan_notes(db, stale_notes)
+
+
+def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
+  _prune_by_size(db, _channel_query(db, scope))
 
 
 def _prune_direct_inboxes(
@@ -1343,18 +1376,10 @@ def _prune_direct_inboxes(
     ),
   ).exists()
   for recipient in recipients:
-    stale = _channel_query(db, network).filter(
+    _prune_by_size(db, _channel_query(db, network).filter(
       models.AgentCoordinationMessage.to_chat_id == recipient,
       ~revocation,
-    ).order_by(
-      models.AgentCoordinationMessage.created_at.desc(),
-      models.AgentCoordinationMessage.id.desc(),
-    ).offset(MAX_DIRECT_MESSAGES_PER_RECIPIENT).all()
-    for row in stale:
-      db.query(models.ChatActivityPosition).filter(
-        models.ChatActivityPosition.event_id == f"peer:{row.id}",
-      ).delete(synchronize_session=False)
-      db.delete(row)
+    ))
 
 
 def _publish_message_hint(
@@ -1414,6 +1439,8 @@ def _persist_send(
 
   resolved_send_id = requested_send_id or str(uuid.uuid4())
   targets: list[str | None] = [None] if broadcast else recipients
+  # One body per send; each recipient row references it.
+  note = models.AgentCoordinationNote(body=clean_body)
   rows = [
     models.AgentCoordinationMessage(
       id=str(uuid.uuid4()),
@@ -1426,7 +1453,7 @@ def _persist_send(
       send_target_key=target or "",
       kind=kind,
       delivery=clean_delivery,
-      body=clean_body,
+      note=note,
     )
     for target in targets
   ]
