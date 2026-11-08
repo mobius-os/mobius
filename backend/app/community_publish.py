@@ -18,6 +18,7 @@ from PIL import Image, ImageOps, JpegImagePlugin, UnidentifiedImageError
 
 from app import app_git, icon_assets, models
 from app.config import get_settings
+from app.credential_files import is_credential_file
 from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
   MAX_STORE_SCREENSHOTS,
@@ -73,15 +74,6 @@ _UNPUBLISHED_SEGMENTS = {
     "public repository."
   ),
 }
-_SENSITIVE_FILES = {
-  ".netrc", ".npmrc", ".pypirc",
-  "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
-  "credentials.json", "service-account.json",
-}
-# Environment files under any name, and key stores the content scan cannot
-# read because they are binary (.jks, .keystore, .p12, .pfx) or have no
-# PEM header (.ppk).
-_SENSITIVE_SUFFIXES = (".env", ".jks", ".keystore", ".p12", ".pfx", ".ppk")
 # Heuristics catch recognizable credentials, not every possible secret.
 # Authors still need to review the accepted source before publication.
 _SECRET_PATTERNS = (
@@ -94,8 +86,14 @@ _SECRET_PATTERNS = (
   re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}"),
   re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
   re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
-  re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b"),
+  # Every OpenAI key format, old and new, embeds base64 "OpenAI".
+  re.compile(r"\bsk-[A-Za-z0-9_-]*T3BlbkFJ[A-Za-z0-9_-]{20,}"),
+  re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b"),
   re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
+  # Slack incoming webhooks; documentation's all-X secret part is a placeholder.
+  re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/(?![Xx]{24})[A-Za-z0-9]{24}"),
+  # Telegram bot tokens: numeric bot id, then a 35-character secret that starts AA.
+  re.compile(r"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"),
 )
 _JOURNAL_STATES = {"listing_pending", "failed", "live"}
 _LOCAL_APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
@@ -386,12 +384,7 @@ def _validate_path(path: str) -> None:
       raise CommunityPublicationError(
         f"Remove {path} before publishing: {reason}", "sensitive_path",
       )
-  name = folded[-1]
-  if (
-    name in _SENSITIVE_FILES
-    or name.startswith(".env.")
-    or name.endswith(_SENSITIVE_SUFFIXES)
-  ):
+  if is_credential_file(parts[-1]):
     raise CommunityPublicationError(
       f"Remove {path} before publishing: it is a common credential file name.",
       "sensitive_path",
