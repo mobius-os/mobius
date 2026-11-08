@@ -18,6 +18,7 @@ from PIL import Image, ImageOps, JpegImagePlugin, UnidentifiedImageError
 
 from app import app_git, icon_assets, models
 from app.config import get_settings
+from app.credential_files import is_credential_file
 from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
   MAX_STORE_SCREENSHOTS,
@@ -57,12 +58,12 @@ def _is_unsafe_path_character(char: str) -> bool:
 
 
 # Path segments refused anywhere in a published tree, each with the reason the
-# author sees. Private folder names remain a guard beyond the content scan.
+# author sees. Credentials are found by file name and content below, not
+# guessed from a folder name: apps legitimately ship folders such as secrets/
+# (a secrets-manager UI) or credentials/ (setup docs).
 _UNPUBLISHED_SEGMENTS = {
   ".git": "Git's own metadata is never app source.",
   ".env": "environment files usually hold credentials.",
-  "credentials": "private credential directories must not be published.",
-  "secrets": "private secret directories must not be published.",
   ".github": (
     "Möbius does not publish .github files, because creating GitHub workflow "
     "files needs a broader GitHub token scope than publishing uses."
@@ -73,11 +74,6 @@ _UNPUBLISHED_SEGMENTS = {
     "public repository."
   ),
 }
-_SENSITIVE_FILES = {
-  ".netrc", ".npmrc", ".pypirc",
-  "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
-  "credentials.json", "service-account.json",
-}
 # Heuristics catch recognizable credentials, not every possible secret.
 # Authors still need to review the accepted source before publication.
 _SECRET_PATTERNS = (
@@ -87,9 +83,19 @@ _SECRET_PATTERNS = (
   re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
   re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
   re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+  re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}"),
+  re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
   re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
-  re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b"),
+  # Every OpenAI key format, old and new, embeds base64 "OpenAI".
+  # The marker sits within the first few dozen characters of every OpenAI key;
+  # bounding the prefix keeps the scan linear on long runs of "sk-".
+  re.compile(r"\bsk-[A-Za-z0-9_-]{0,200}T3BlbkFJ[A-Za-z0-9_-]{20,}"),
+  re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b"),
   re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
+  # Slack incoming webhooks; documentation's all-X secret part is a placeholder.
+  re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/(?![Xx]{24})[A-Za-z0-9]{24}"),
+  # Telegram bot tokens: numeric bot id, then a 35-character secret that starts AA.
+  re.compile(r"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"),
 )
 _JOURNAL_STATES = {"listing_pending", "failed", "live"}
 _LOCAL_APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
@@ -380,7 +386,7 @@ def _validate_path(path: str) -> None:
       raise CommunityPublicationError(
         f"Remove {path} before publishing: {reason}", "sensitive_path",
       )
-  if folded[-1] in _SENSITIVE_FILES or folded[-1].startswith(".env."):
+  if is_credential_file(parts[-1]):
     raise CommunityPublicationError(
       f"Remove {path} before publishing: it is a common credential file name.",
       "sensitive_path",
