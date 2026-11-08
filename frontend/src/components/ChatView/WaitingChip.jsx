@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronRight, Clock } from '@openai/apps-sdk-ui/components/Icon'
 import WaitingCard from './WaitingCard.jsx'
-import { HelperRow } from './HelperResultCard.jsx'
+import { HelperEventConversation, HelperRowLine } from './HelperResultCard.jsx'
 import { useCountdownNow } from './countdownClock.js'
 import { useDisclosureState } from './disclosureState.js'
 import {
@@ -21,8 +21,7 @@ import {
 const HANDOFF_LIST_DISCLOSURE = 'foot-handoffs'
 
 // The exact check, hidden until asked for: commands are long and technical.
-function WaitCommand({ command }) {
-  const [shown, setShown] = useState(false)
+function WaitCommand({ command, shown, onToggle }) {
   const textRef = useRef(null)
   // Above the composer the handoff stack scrolls inside itself; bring the
   // revealed command and the card's Stop action below it into view, never
@@ -41,34 +40,27 @@ function WaitCommand({ command }) {
   }, [shown])
   return <div className="chat__wait-command">
     <button type="button" className="chat__wait-command-toggle" aria-expanded={shown}
-      onClick={() => setShown(value => !value)}>
+      onClick={onToggle}>
       {shown ? 'Hide' : 'Show'}
     </button>
     {shown && <pre ref={textRef} className="chat__wait-command-text"><code>{command}</code></pre>}
   </div>
 }
 
-export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery }) {
+const NO_STOP = { pending: false, error: null }
+
+// `stop` is this wait's Stop request (pending, then why it was refused) and
+// `commandShown` whether its details reveal the command; the stack keeps both
+// (see WaitingChip), so the card itself holds no state a remount could lose.
+export function WaitCard({
+  wait, expanded, onToggle, onCancel, stop = NO_STOP, commandShown = false, onToggleCommand, onRevealRecovery,
+}) {
   const now = useCountdownNow(!wait.delivery_pending)
   const presentation = waitPresentation(wait, now)
-  const [cancelling, setCancelling] = useState(false)
-  const [cancelError, setCancelError] = useState(null)
-  const cancel = async () => {
-    setCancelling(true)
-    setCancelError(null)
-    try {
-      const result = await onCancel(wait.id)
-      if (result.disposition === 'not_withdrawable') setCancelError(result.detail)
-    } catch {
-      setCancelError('Could not stop this follow-up. Try again.')
-    } finally {
-      setCancelling(false)
-    }
-  }
   const needsRecovery = wait.delivery_pending && ['manual_resume', 'resume_failed', 'restart'].includes(wait.resume_blocker)
   const cancellable = wait.kind !== 'platform_activation' && !wait.result_disposition
     && (wait.delivery_pending || !wait.status || wait.status === 'armed')
-    && (wait.can_withdraw !== false || !!cancelError)
+    && (wait.can_withdraw !== false || !!stop.error)
   const recoveryAction = needsRecovery && onRevealRecovery
     ? { label: 'View recovery', onClick: onRevealRecovery } : null
   return (
@@ -84,8 +76,8 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
       // is a deliberate choice made from the details.
       action={recoveryAction}
       detailAction={cancellable && onCancel ? {
-        label: cancelling ? 'Stopping…' : wait.delivery_pending ? 'Stop follow-up' : 'Stop waiting',
-        onClick: cancel, disabled: cancelling || wait.can_withdraw === false, error: cancelError,
+        label: stop.pending ? 'Stopping…' : wait.delivery_pending ? 'Stop follow-up' : 'Stop waiting',
+        onClick: onCancel, disabled: stop.pending || wait.can_withdraw === false, error: stop.error,
       } : null}
       rows={[
         { label: 'Waiting for', value: presentation.condition, primary: true },
@@ -95,7 +87,7 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
         { label: 'Activity', value: presentation.activity },
         { label: presentation.timeoutLabel, value: presentation.timeout },
         { label: 'Agent usage', value: presentation.usage },
-        ...(presentation.command ? [{ label: 'Command', value: <WaitCommand command={presentation.command} /> }] : []),
+        ...(presentation.command ? [{ label: 'Command', value: <WaitCommand command={presentation.command} shown={commandShown} onToggle={onToggleCommand} /> }] : []),
       ]}
     />
   )
@@ -104,11 +96,12 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
 // One row per helper, the same row the transcript shows at its launch, so a
 // tap opens that helper's conversation. Status only: the live step and clock
 // are not in this projection yet.
-function HelperListRows({ helpers, chatId, onInternalNav, label = 'Helpers', unlisted = 0, automatic = false }) {
+function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', unlisted = 0, automatic = false }) {
   return (
     <section className="chat__wait-card chat__helper-list" aria-label={label}>
       {helpers.map(helper => (
-        <HelperRow key={helper.delegation_id} event={helper} chatId={chatId} onInternalNav={onInternalNav} />
+        <HelperRowLine key={helper.delegation_id} event={helper} chatId={chatId}
+          onOpen={event => onOpenHelper({ id: helper.delegation_id, host: event.currentTarget.closest('.chat') })} />
       ))}
       <HandoffNotes unlisted={unlisted} automatic={automatic} />
     </section>
@@ -124,7 +117,7 @@ const sameHelperRows = (before, after) => before.length === after.length && befo
 })
 const HelperList = memo(HelperListRows, (before, after) => (
   before.chatId === after.chatId
-  && before.onInternalNav === after.onInternalNav
+  && before.onOpenHelper === after.onOpenHelper
   && before.label === after.label
   && before.unlisted === after.unlisted
   && before.automatic === after.automatic
@@ -179,6 +172,29 @@ function ResourceCard({ resourcePause, handoff, expanded, onToggle, onRevealReco
   )
 }
 
+// A Stop request per wait id: pending while it runs, then the reason it was
+// refused. A stop that succeeds removes the wait, and its entry with it.
+function useWaitStops(onCancel) {
+  const [stops, setStops] = useState({})
+  const stopWait = async id => {
+    setStops(current => ({ ...current, [id]: { pending: true, error: null } }))
+    let error = null
+    try {
+      const result = await onCancel(id)
+      if (result.disposition === 'not_withdrawable') error = result.detail
+    } catch {
+      error = 'Could not stop this follow-up. Try again.'
+    }
+    setStops(current => {
+      const next = { ...current }
+      delete next[id]
+      if (error) next[id] = { pending: false, error }
+      return next
+    })
+  }
+  return [stops, stopWait]
+}
+
 export default function WaitingChip({
   waits = [],
   helpers = [],
@@ -190,32 +206,46 @@ export default function WaitingChip({
   onRevealRecovery,
   onInternalNav,
 }) {
-  const [expandedKey, setExpandedKey] = useState(null)
+  // Rows move to a new parent when the stack folds into its summary or a row
+  // changes group, and React remounts a row whose parent changed. So what the
+  // reader opened lives here, keyed by each row's own id: the expanded card
+  // (with its revealed command, which collapsing hides), each wait's Stop
+  // request, and the helper whose conversation is open.
+  const [expanded, setExpanded] = useState({ key: null, command: false })
+  const [stops, stopWait] = useWaitStops(onCancel)
+  const [openHelper, setOpenHelper] = useState(null)
   const [listOpen, setListOpen] = useDisclosureState(chatId, HANDOFF_LIST_DISCLOSURE)
+  const conversationHelper = openHelper && helpers.find(helper => helper.delegation_id === openHelper.id)
+  // A helper that leaves the stack takes its conversation with it, and a
+  // later return does not reopen it.
+  if (openHelper && !conversationHelper) setOpenHelper(null)
   const hasHelpers = helpers.length > 0 || unlistedHelpers > 0
   if (!waits.length && !hasHelpers && !resourcePause) return null
 
-  const toggle = key => setExpandedKey(current => current === key ? null : key)
+  const toggle = key => setExpanded(current => ({ key: current.key === key ? null : key, command: false }))
   const automatic = handoff?.kind === 'automatic'
   const waitCard = wait => (
     <WaitCard
       key={wait.id}
       wait={wait}
-      expanded={expandedKey === wait.id}
+      expanded={expanded.key === wait.id}
       onToggle={() => toggle(wait.id)}
-      onCancel={onCancel}
+      commandShown={expanded.key === wait.id && expanded.command}
+      onToggleCommand={() => setExpanded(current => ({ ...current, command: !current.command }))}
+      stop={stops[wait.id]}
+      onCancel={onCancel && (() => stopWait(wait.id))}
       onRevealRecovery={onRevealRecovery}
     />
   )
   const summarized = shouldSummarizeHandoffs({ helpers, waits, unlistedHelpers })
-  return (
+  return <>
     <section className={`chat__waits chat__handoffs${summarized && listOpen ? ' chat__handoffs--open' : ''}`} aria-label="Handoffs">
       {resourcePause && (
         <ResourceCard
           resourcePause={resourcePause}
           handoff={handoff}
           onRevealRecovery={onRevealRecovery}
-          expanded={expandedKey === 'resource'}
+          expanded={expanded.key === 'resource'}
           onToggle={() => toggle('resource')}
         />
       )}
@@ -229,7 +259,7 @@ export default function WaitingChip({
           <div key={group.key} className="chat__handoff-group" role="group" aria-label={`${group.label}: ${group.count}`}>
             <p className="chat__handoff-group-label" aria-hidden="true">{`${group.label} · ${group.count}`}</p>
             {group.helpers.length > 0 && (
-              <HelperList helpers={group.helpers} chatId={chatId} onInternalNav={onInternalNav} label={`${group.label} helpers`} />
+              <HelperList helpers={group.helpers} chatId={chatId} onOpenHelper={setOpenHelper} label={`${group.label} helpers`} />
             )}
             {group.waits.map(waitCard)}
           </div>
@@ -241,11 +271,18 @@ export default function WaitingChip({
         )}
       </> : <>
         {hasHelpers && (
-          <HelperList helpers={helpers} chatId={chatId} onInternalNav={onInternalNav}
+          <HelperList helpers={helpers} chatId={chatId} onOpenHelper={setOpenHelper}
             unlisted={unlistedHelpers} automatic={automatic} />
         )}
         {waits.map(waitCard)}
       </>}
     </section>
-  )
+    {conversationHelper && <HelperEventConversation
+      event={conversationHelper}
+      chatId={chatId}
+      host={openHelper.host}
+      onClose={() => setOpenHelper(null)}
+      onInternalNav={onInternalNav}
+    />}
+  </>
 }
