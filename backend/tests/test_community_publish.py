@@ -781,13 +781,15 @@ def test_snapshot_refuses_declared_icon_missing_from_snapshot(tmp_path):
 def test_public_certificates_publish_and_private_keys_in_pem_are_refused(tmp_path):
   repo, app, _ = _app_repo(tmp_path)
   _commit_files(repo, app, {"certs/cacert.pem": b"-----BEGIN CERTIFICATE-----\nMIIB\n"})
-  build_public_snapshot(app)
+  _, files = build_public_snapshot(app)
+  assert any(entry["path"] == "certs/cacert.pem" for entry in files)
 
   (tmp_path / "second").mkdir()
   repo, app, _ = _app_repo(tmp_path / "second")
   _commit_files(repo, app, {"certs/server.pem": b"-----BEGIN PRIVATE KEY-----\nMIIE"})
-  with pytest.raises(CommunityPublicationError):
+  with pytest.raises(CommunityPublicationError) as raised:
     build_public_snapshot(app)
+  assert raised.value.code == "secret_detected"
 
 
 def test_openai_marker_scan_stays_linear_on_long_runs(tmp_path):

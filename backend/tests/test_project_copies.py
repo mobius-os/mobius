@@ -208,6 +208,9 @@ def test_source_copy_rejects_control_characters_and_nested_secrets(path):
   # Shared with publication and newly skipped here too.
   'prod.env', 'release.jks', 'vault.kdbx', 'deploy.ppk', '.netrc', 'id_rsa',
   'service-account.json',
+  # Env folders, such as a virtualenv named .env, are private as a whole.
+  '.env/production', 'src/.env/dev', '.env.local/x', '.env/lib/python3.12/site-packages/x.py',
+  'credentials', '.credentials.json',
 ])
 def test_source_copy_skips_private_data_and_credential_files(path):
   assert not copies.eligible(path)

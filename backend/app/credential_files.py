@@ -1,7 +1,9 @@
 """File names that conventionally hold credentials.
 
-One rule for every path that sends workspace files elsewhere (Store
-publication, project copies), so the guards cannot drift apart. It judges a
+One rule for the paths that send workspace files to another person (Store
+publication, project copies), so those two guards cannot drift apart. Local
+file-access guards (routes/fs.py, contribution review repairs) keep their own
+lists of platform-private names. It judges a
 single file name; callers decide which path segments to apply it to and
 whether to refuse or skip. Content that the name does not reveal is the
 caller's content scan's job, and no name rule catches every secret.
@@ -11,7 +13,7 @@ from __future__ import annotations
 # Bare "credentials" and "secrets" are file names here (for example
 # ~/.aws/credentials); folders with those names are judged by their files.
 _NAMES = frozenset({
-  "credentials", "secrets", ".git-credentials",
+  "credentials", "secrets", ".git-credentials", ".credentials.json",
   ".netrc", ".npmrc", ".pypirc", ".secret-key",
   "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
   "credentials.json", "secrets.json", "service-account.json",

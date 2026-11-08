@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/project-copies", tags=["project-copies"])
 MAX_PACKAGE = 16 * 1024 * 1024
 MAX_SOURCE = 10 * 1024 * 1024
 MAX_FILES = 500
-EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', 'credentials', 'cli-auth', 'app-secrets'})
+EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', '.env', 'credentials', 'cli-auth', 'app-secrets'})
 # Saved app data is private by nature; credential files follow the shared rule.
 DATA_SUFFIXES = ('.sqlite', '.sqlite3', '.db')
 # A copy is an unreviewed snapshot, so it also skips .pem files, which can
@@ -67,7 +67,7 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES):
+    if lower in EXCLUDED or lower.startswith('.env.') or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES):
       return False
   # The shared rule names credential files; private folders are EXCLUDED above.
   return not is_credential_file(rel.name)
