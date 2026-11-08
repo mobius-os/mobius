@@ -1023,7 +1023,8 @@ def test_active_codex_turn_interrupt_times_out_if_runner_never_finishes(caplog):
       object(), turn, chat_id="chat-1"
     )
     start = asyncio.get_running_loop().time()
-    await asyncio.wait_for(active_turn.interrupt(), timeout=5.5)
+    with pytest.raises(asyncio.TimeoutError):
+      await asyncio.wait_for(active_turn.interrupt(), timeout=5.5)
     return asyncio.get_running_loop().time() - start
 
   with caplog.at_level("WARNING", logger="moebius.chat"):
@@ -5957,3 +5958,14 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
     assert {key: attachment_blocks[0]['files'][0].get(key) for key in (
       'source_tool_use_id', 'width', 'height',
     )} == {'source_tool_use_id': 'image-call', 'width': 1, 'height': 1}
+
+
+def test_wedged_codex_turn_is_not_reported_stopped_to_a_long_stop_budget():
+  """The restart drain allows 10s; a wedged turn must not be parked as stopped."""
+  async def _scenario() -> bool:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _FakeTurnHandle(), chat_id="wedged-long-budget",
+    )
+    return await active.stop(timeout=10.0)
+
+  assert asyncio.run(_scenario()) is False

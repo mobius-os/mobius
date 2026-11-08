@@ -794,9 +794,10 @@ class ActiveClaudeClient:
 
     Bounds the `_finished` wait at 5s as a defense-in-depth so a
     wedged runner (one that never reaches its `finally` block) can't
-    hang Stop indefinitely. `chat.py:stop_chat_for` adds its own 2s
-    bound at the call site; this inner timeout protects any other
-    direct caller.
+    hang Stop indefinitely, and raises ``asyncio.TimeoutError`` then so
+    ``stop`` reports the turn as not stopped. `chat.py:stop_chat_for` adds
+    its own 2s bound at the call site; this inner timeout protects any other
+    direct caller, such as the restart drain's longer budget.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
@@ -813,6 +814,7 @@ class ActiveClaudeClient:
         "ActiveClaudeClient._finished never resolved within 5s; "
         "runner is wedged",
       )
+      raise
 
   @property
   def interrupt_requested(self) -> bool:

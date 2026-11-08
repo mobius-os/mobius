@@ -948,7 +948,12 @@ class ActiveCodexTurn:
       raise
 
   async def interrupt(self) -> None:
-    """Signals the live turn and waits for runner-side drain."""
+    """Signals the live turn and waits for runner-side drain.
+
+    Raises ``asyncio.TimeoutError`` when the runner has not drained within 5s,
+    so ``stop`` reports a wedged turn as not stopped; a caller with a longer
+    budget (the restart drain) must not park a chat that is still running.
+    """
     self._interrupt_requested = True
     self._reject_pending_steer()
     try:
@@ -961,7 +966,7 @@ class ActiveCodexTurn:
       log.warning(
         "codex active_turn._finished never resolved within 5s; runner is wedged"
       )
-      return
+      raise
 
   async def clear_goal(self) -> None:
     """Stop this attempt; the platform writer owns Goal dismissal."""
