@@ -34,6 +34,13 @@ _DISK_CONSTRAINED_CEILING = 2 * GIB
 _DISK_CRITICAL_FRACTION = 0.05
 _DISK_CRITICAL_FLOOR = 32 * MIB
 _DISK_CRITICAL_CEILING = 1 * GIB
+# Below this the volume is about to refuse writes outright. The storage guard
+# then releases the recovery reserve (app.disk_reserve) so the database can
+# still commit. It is not a separate pressure state: consumers that only care
+# about admission keep reading "critical".
+_DISK_EXHAUSTED_FRACTION = 0.0075
+_DISK_EXHAUSTED_FLOOR = 16 * MIB
+_DISK_EXHAUSTED_CEILING = 64 * MIB
 
 # memory.current includes reclaimable file cache, so pressure is based on the
 # existing cgroup working-set estimate.  PSI catches sustained contention that
@@ -163,6 +170,12 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     floor_bytes=_DISK_CRITICAL_FLOOR,
     ceiling_bytes=_DISK_CRITICAL_CEILING,
   )
+  exhausted_below = _bounded_headroom(
+    total,
+    fraction=_DISK_EXHAUSTED_FRACTION,
+    floor_bytes=_DISK_EXHAUSTED_FLOOR,
+    ceiling_bytes=_DISK_EXHAUSTED_CEILING,
+  )
   state = "normal"
   reason = None
   if free < critical_below:
@@ -186,6 +199,7 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     "free_ratio": free / total,
     "constrained_below_bytes": constrained_below,
     "critical_below_bytes": critical_below,
+    "exhausted_below_bytes": exhausted_below,
     "reason": reason,
   }
 

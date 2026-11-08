@@ -151,7 +151,8 @@ def terminate_process_group(
 # processes and never another chat's or a later run's.
 RUN_TOKEN_ENV = "MOBIUS_RUN_TOKEN"
 # The non-secret twin every agent run carries, delegated helpers included (they
-# never receive the run token). A shared helper host names each helper turn's
+# never receive the run token). Scheduled app jobs carry one of their own too,
+# so the storage guard can stop a job that is filling the volume. A shared helper host names each helper turn's
 # commands with it, and a provider may persist it in session history, so it
 # must reveal nothing: it is a one-way digest of the run token.
 RUN_MARKER_ENV = "MOBIUS_RUN_MARKER"
@@ -210,6 +211,83 @@ def run_owned_processes(marker: str) -> list[tuple[int, int]]:
     except (OSError, ProcessLookupError, ValueError, IndexError):
       continue
   return owned
+
+
+def _marked_processes() -> dict[int, tuple[str, int, int, str]]:
+  """Every readable process carrying any run marker.
+
+  Maps pid to ``(marker, parent_pid, start_ticks, argv0 basename)``. Same
+  readability rules as :func:`run_owned_processes`.
+  """
+  prefix = f"{RUN_MARKER_ENV}=".encode()
+  own = os.getpid()
+  marked: dict[int, tuple[str, int, int, str]] = {}
+  try:
+    entries = os.listdir("/proc")
+  except OSError:
+    return marked
+  for entry in entries:
+    if not entry.isdigit() or int(entry) == own:
+      continue
+    pid = int(entry)
+    try:
+      with open(f"/proc/{pid}/environ", "rb") as handle:
+        marker = next(
+          (
+            item[len(prefix):].decode("ascii", "replace")
+            for item in handle.read().split(b"\0")
+            if item.startswith(prefix)
+          ),
+          "",
+        )
+      if not marker:
+        continue
+      with open(f"/proc/{pid}/stat", "rb") as handle:
+        fields = handle.read().rsplit(b") ", 1)[1].split()
+      if fields[0] == b"Z":
+        continue
+      with open(f"/proc/{pid}/cmdline", "rb") as handle:
+        argv0 = handle.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+      marked[pid] = (marker, int(fields[1]), int(fields[19]), os.path.basename(argv0))
+    except (OSError, ValueError, IndexError):
+      continue
+  return marked
+
+
+# Agent runtimes Möbius launches. Their own processes carry the run marker
+# too, but they must keep running so an interrupted turn can still be parked
+# cleanly and resumed.
+AGENT_RUNTIMES = frozenset({"claude", "codex"})
+
+
+def stop_agent_commands(*, spare_markers: frozenset[str] = frozenset()) -> int:
+  """Freeze, then kill, every command agent runs or app jobs started.
+
+  For a volume about to fill: the writer is almost always a command an agent
+  started (an install, a download, a build) or a scheduled app job, and
+  waiting for an agent's turn to be
+  interrupted gives it seconds more to write. Every process carrying a run
+  marker is stopped at once (SIGSTOP), then killed (SIGKILL also ends a
+  stopped process, so nothing is ever left frozen), except the agent runtimes
+  themselves and browsers, which keep their graceful owners, and runs whose
+  marker is in ``spare_markers``. Identity is by executable name, as for
+  browsers, because a shared Codex app-server parents commands from several
+  chats and a reparented orphan has no telling parent at all. Returns how many
+  processes were killed.
+  """
+  from app.browser_processes import BROWSERS, DAEMONS
+  spared_names = BROWSERS | DAEMONS | AGENT_RUNTIMES
+  victims = [
+    (pid, ticks)
+    for pid, (marker, _parent, ticks, name) in _marked_processes().items()
+    if marker not in spare_markers and name not in spared_names
+  ]
+  for pid, ticks in victims:
+    _signal_same_process(pid, ticks, signal.SIGSTOP)
+  return sum(
+    1 for pid, ticks in victims
+    if _signal_same_process(pid, ticks, signal.SIGKILL)
+  )
 
 
 def _signal_same_process(pid: int, ticks: int, sig: signal.Signals) -> bool:

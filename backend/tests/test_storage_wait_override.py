@@ -241,3 +241,25 @@ def test_continue_anyway_tells_the_agent_storage_is_still_low(db, chat, monkeypa
   assert prompts[-1].startswith("Resume the interrupted work.")
   assert prompts[-1].endswith(LOW_STORAGE_NOTICE)
   assert "ask the owner before deleting anything else" in LOW_STORAGE_NOTICE
+
+
+def test_storage_guard_spares_the_turn_the_owner_continued(db, chat, monkeypatch):
+  """The guard pauses work that keeps filling a critical volume, but a turn
+  the owner continued anyway is their explicit choice to free space."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [run.id]
+  assert storage_guard._continued == {chat.id: run.id}
+
+
+def test_admitted_turn_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  from app import storage_guard
+
+  async def admitted(_data_dir, **_kwargs):
+    pass
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  _run_turn(db, chat, monkeypatch, "manual", admitted)
+  assert storage_guard._continued == {}

@@ -338,7 +338,7 @@ def test_drain_does_not_promote_the_queue():
   assert _chat("drain-nopromote")["pending"] == [
     {"role": "user", "content": "q", "ts": 2}
   ]
-  assert "drain-nopromote" in chat_mod._restart_draining_chats
+  assert "drain-nopromote" in chat_mod._park_handoff_chats
 
 
 def test_drain_park_failure_leaves_authenticated_marker_for_boot_recovery(
@@ -531,7 +531,7 @@ def test_delegated_restart_failure_recovers_with_exact_app_identity(
   # nonce survive. The generic app-work fallback would leave this manual.
   registry.reset_for_tests()
   chat_mod.unregister_active_sink(cid, sink)
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoff_chats.clear()
   chat_mod.draining = False
   with SessionLocal() as db:
     result = chat_mod.reconcile_startup_chats(
@@ -678,7 +678,7 @@ def test_five_chat_restart_recovers_timeouts_and_finalize_failure(
   registry.reset_for_tests()
   for cid, sink in sinks.items():
     chat_mod.unregister_active_sink(cid, sink)
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoff_chats.clear()
   chat_mod.draining = False
 
   db = SessionLocal()
@@ -1075,7 +1075,7 @@ def test_restart_continues_a_then_normal_completion_delivers_queued_b(
 
   # Simulate process-local boot state; the durable park/queue are untouched.
   chat_mod.draining = False
-  chat_mod._restart_draining_chats.discard(cid)
+  chat_mod._park_handoff_chats.discard(cid)
   chat_mod.forget_chat(cid)
   registry._admission_closed = False
   from app.broadcast import remove_broadcast

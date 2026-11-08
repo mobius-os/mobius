@@ -25,6 +25,12 @@ trap cleanup TERM INT
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
 
+# Give the volume its recovery reserve back before anything below writes. On a
+# full volume the boot transaction cannot commit and the container would refuse
+# to start; with the reserve released it has room. The running server re-arms
+# the reserve once the volume has comfortable room (backend/app/storage_guard.py).
+rm -f /data/run/recovery-reserve /data/run/recovery-reserve.partial
+
 # Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready

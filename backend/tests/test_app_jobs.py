@@ -875,3 +875,19 @@ def test_job_context_uses_configured_public_origin_not_request_host(
   assert response.status_code == 200, response.text
   assert response.json()["public_origin"] == configured.rstrip("/")
   assert "untrusted.example" not in json.dumps(response.json())
+
+
+def test_jobs_wait_while_storage_is_critical(monkeypatch):
+  """A job started on a critical volume would only be stopped again by the
+  storage guard within a second, so it is skipped until its next schedule."""
+  runner = _load_runner()
+
+  def status(state):
+    return lambda *_args, **_kwargs: {"pressure": {"disk": {"state": state}}}
+
+  monkeypatch.setattr(runner, "resource_status", status("critical"))
+  assert runner._storage_critical() is True
+  monkeypatch.setattr(runner, "resource_status", status("constrained"))
+  assert runner._storage_critical() is False
+  monkeypatch.setattr(runner, "resource_status", status("unknown"))
+  assert runner._storage_critical() is False

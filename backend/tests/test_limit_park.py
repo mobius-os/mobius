@@ -3750,7 +3750,7 @@ async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
   _seed_chat(cid)
   _seed_run(cid, "rt-setup-failure")
 
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False

@@ -278,3 +278,97 @@ def test_run_marker_is_a_stable_one_way_digest():
   assert marker == process_groups.run_marker("secret-run-token")
   assert "secret-run-token" not in marker and len(marker) == 32
   assert process_groups.run_marker(None) == ""
+
+
+# --- storage guard: stopping what fills the volume ---------------------------
+
+
+def _scoped_to(monkeypatch, *procs):
+  """Let stop_agent_commands see only these test processes.
+
+  The real scan and real signals run, but a live instance's own agent
+  commands (this test run may share the container) are never in view.
+  """
+  ours = {proc.pid for proc in procs}
+  real = process_groups._marked_processes
+  monkeypatch.setattr(
+    process_groups, "_marked_processes",
+    lambda: {pid: row for pid, row in real().items() if pid in ours},
+  )
+
+
+def _named_command(tmp_path, name, marker):
+  import os
+  import shutil
+  import subprocess
+  alias = tmp_path / name
+  alias.symlink_to(shutil.which("sleep"))
+  env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: marker})
+  return subprocess.Popen([str(alias), "60"], env=env, start_new_session=True)
+
+
+def test_storage_stop_kills_agent_commands_but_keeps_agent_runtimes(
+  tmp_path, monkeypatch,
+):
+  marker = f"filling-{uuid4().hex}"
+  command = _named_command(tmp_path, "npm", marker)
+  agent = _named_command(tmp_path, "claude", marker)
+  try:
+    _scoped_to(monkeypatch, command, agent)
+
+    assert process_groups.stop_agent_commands() == 1
+    assert _gone(command)
+    # The agent keeps running so its turn can still be paused and resumed.
+    assert agent.poll() is None
+  finally:
+    for proc in (command, agent):
+      proc.kill()
+      proc.wait()
+
+
+def test_storage_stop_spares_a_run_the_owner_continued(tmp_path, monkeypatch):
+  continued = f"continued-{uuid4().hex}"
+  other = f"other-{uuid4().hex}"
+  continued_command = _named_command(tmp_path, "du", continued)
+  other_command = _named_command(tmp_path, "curl", other)
+  try:
+    _scoped_to(monkeypatch, continued_command, other_command)
+
+    assert process_groups.stop_agent_commands(
+      spare_markers=frozenset({continued}),
+    ) == 1
+    assert _gone(other_command)
+    assert continued_command.poll() is None
+  finally:
+    for proc in (continued_command, other_command):
+      proc.kill()
+      proc.wait()
+
+
+def test_storage_stop_never_leaves_a_process_frozen(tmp_path, monkeypatch):
+  """A stopped process still dies: SIGKILL ends it without a SIGCONT."""
+  marker = f"frozen-{uuid4().hex}"
+  command = _named_command(tmp_path, "tar", marker)
+  try:
+    _scoped_to(monkeypatch, command)
+    process_groups.stop_agent_commands()
+    assert _gone(command)
+    assert command.returncode == -signal.SIGKILL
+  finally:
+    command.kill()
+    command.wait()
+
+
+def test_unmarked_processes_are_never_scanned_as_agent_commands(tmp_path):
+  import os
+  import shutil
+  import subprocess
+  env = {k: v for k, v in os.environ.items() if k != process_groups.RUN_MARKER_ENV}
+  plain = subprocess.Popen(
+    [shutil.which("sleep"), "60"], env=env, start_new_session=True,
+  )
+  try:
+    assert plain.pid not in process_groups._marked_processes()
+  finally:
+    plain.kill()
+    plain.wait()

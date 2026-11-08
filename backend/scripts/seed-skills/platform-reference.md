@@ -49,6 +49,17 @@ PM_COMMIT_ROOT=/data/platform pm-commit --from "$START" 'what and why' -- <paths
 The `chown` matters twice: `pm-commit` runs as the owner, so it cannot read a
 root-only file, and a file left root-owned makes the next agent edit fail.
 
+**A full data volume.** If Möbius will not start because `/data` is full,
+delete the recovery reserve first; it always frees room for the boot to commit,
+and the running server re-creates it once space is comfortable again:
+
+```bash
+rm -f /data/run/recovery-reserve
+```
+
+Then start Möbius and free space from a chat; while storage is critical,
+Möbius lets one chat the owner starts run for exactly that.
+
 ## Host-owned container replacement
 
 A container recreation is not an ordinary server restart. Use the Settings

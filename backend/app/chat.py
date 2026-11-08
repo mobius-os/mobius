@@ -200,13 +200,15 @@ _clear_after_terminal_status: dict[str, str] = {}
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
 # turns, and the finished-run marker sweep stands down so it cannot race the
-# drain's own interrupt. `_restart_draining_chats` records the chats
-# whose live turn the drain interrupted, so each turn's terminal transition
-# (run_chat's finally) leaves its exact run intact long enough for the drain to
-# move it to the existing durable continuation state. If that transaction fails,
-# the still-set generic marker is deliberately left for manual boot recovery.
+# drain's own interrupt. `_park_handoff_chats` records the chats whose live
+# turn an interrupter (the restart drain, or the storage guard pausing turns
+# that are filling the disk) took over, so each turn's terminal transition
+# (run_chat's finally) leaves its exact run intact long enough for that
+# interrupter to move it to the durable continuation state. If that transaction
+# fails, the still-set generic marker is left for manual recovery: boot
+# reconcile after a restart, the wedged-run sweep otherwise.
 draining = False
-_restart_draining_chats: set[str] = set()
+_park_handoff_chats: set[str] = set()
 
 # Budget for the drain to interrupt live turns + flush their notes. The restart
 # utility arms its SIGKILL backstop at DRAIN_TIMEOUT + grace; the existing short
@@ -1656,7 +1658,7 @@ async def _interrupt_and_park_live_turns(
 
   The shared core of every interrupter-owned pause: publish ``note`` through
   the turn's sink, hand the turn to this caller (the chat joins
-  ``_restart_draining_chats`` before its generation bumps, so the dying turn's
+  ``_park_handoff_chats`` before its generation bumps, so the dying turn's
   finally leaves the exact run and the pending queue intact), stop every
   handle concurrently, then finalize the transcript and ``ParkRun`` with
   ``park_reason``. ``parked_until=None`` means due now. A restart parks only a
@@ -1679,7 +1681,7 @@ async def _interrupt_and_park_live_turns(
       continue
     # Mark BEFORE bumping so the turn's finally (which may run the instant the
     # interrupt lands) observes the drain and leaves the marker set.
-    _restart_draining_chats.add(chat_id)
+    _park_handoff_chats.add(chat_id)
     bump_run_generation(chat_id)
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "interrupted"
@@ -1797,6 +1799,43 @@ async def _interrupt_and_park_live_turns(
   return parked_runs
 
 
+STORAGE_PAUSE_MESSAGE = (
+  "Paused because Möbius storage is almost full. Your work is saved and "
+  "continues by itself once space is freed. If an agent needs to free the "
+  "space, use Continue anyway."
+)
+
+
+async def pause_live_turns_for_storage(spare_chat_ids: frozenset[str]) -> int:
+  """Pause every live turn except ``spare_chat_ids`` into a storage wait.
+
+  The storage guard's response to a volume that is about to fill. Each turn
+  gets the same storage card admission uses and parks with
+  ``park_reason='storage'``, so the continuation sweep resumes it once
+  admission would succeed again. A restart drain owns every turn while it
+  runs, and a chat another interrupter already took over is left to it.
+  Returns how many turns reached the durable park.
+  """
+  if draining:
+    return 0
+  chat_ids = [
+    chat_id for chat_id in sorted(registry.all_alive_chat_ids())
+    if chat_id not in spare_chat_ids and chat_id not in _park_handoff_chats
+  ]
+  if not chat_ids:
+    return 0
+  parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+  parked = await _interrupt_and_park_live_turns(
+    chat_ids,
+    note=_park_event(STORAGE_PAUSE_MESSAGE, parked_until, "storage"),
+    park_reason="storage",
+    parked_until=parked_until,
+    timeout=RESTART_HANDLE_STOP_TIMEOUT_SECS,
+    label="storage-pause",
+  )
+  return len(parked)
+
+
 async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
@@ -1829,7 +1868,7 @@ async def drain_all_for_restart(
       note that is equally resumable);
     - mirrors explicit Stop's clean-interrupt handoff — bump the generation so
       the turn-end drain sees a stale generation and does NOT
-      promote the queue — BUT records the chat in `_restart_draining_chats` so
+      promote the queue — BUT records the chat in `_park_handoff_chats` so
       the turn's finally does not clear the exact run before this drain can
       transition it. After every handle stops, the same writer transaction used
       by provider-limit recovery moves that exact run to ``parked`` with
@@ -4269,12 +4308,12 @@ def _park_exit(
   A planned restart is already the authoritative terminal outcome by the time
   the provider exits: ``drain_all_for_restart`` publishes the resumable pause
   before interrupting the handle and records the chat in
-  ``_restart_draining_chats``. Provider teardown errors after that point
+  ``_park_handoff_chats``. Provider teardown errors after that point
   describe HOW the requested interrupt completed, not a second user-visible
   outcome, so they must not replace the pause card. Returns the
   `_complete_turn` kwargs for the limit disposition.
   """
-  if getattr(sink, "chat_id", None) in _restart_draining_chats:
+  if getattr(sink, "chat_id", None) in _park_handoff_chats:
     return {"parked": False}
   # Claude reports 413 and 429 as `api_error_status`, and the Codex runner
   # turns a reached rate-limit window into 429. Results without a status, and
@@ -4988,6 +5027,10 @@ async def run_chat(
       await require_agent_turn_admission(
         get_settings().data_dir, allow_low_storage=True,
       )
+      # The storage guard pauses work that keeps filling a critical volume;
+      # this turn is the owner's explicit choice to free space, so it stays.
+      from app.storage_guard import spare_continued_turn
+      spare_continued_turn(chat_id, run_token)
       # Only a turn the override actually admitted is told storage is low.
       from app.continuations import LOW_STORAGE_NOTICE
       if messages:
@@ -5182,7 +5225,7 @@ async def run_chat(
     # claim leaves it alive, and then we leave the marker for that new owner
     # (STALE_NO_ACTION-equivalent — no clear).
     if chat_id and clear_stopped_run and run_gen is not None:
-      if chat_id in _restart_draining_chats:
+      if chat_id in _park_handoff_chats:
         # Drain-for-restart handoff: this turn was interrupted for a graceful
         # restart. Leave the exact running row and pending queue intact so
         # drain_all_for_restart can move that row to the durable due-restart
@@ -5191,7 +5234,7 @@ async def run_chat(
         # `_complete_turn` already finalized the partials + paused note; the
         # bumped generation prevented queue promotion. Discard the in-memory
         # handoff flag once this dying wrapper has observed it.
-        _restart_draining_chats.discard(chat_id)
+        _park_handoff_chats.discard(chat_id)
         disposition = chat_queue.TerminalDisposition.DRAINED_FOR_RESTART
       else:
         try:
