@@ -73,6 +73,8 @@ test('the chat has one reply footer, on the reply at its very end', () => {
     'the row only renders the visibility its owner decides')
   assert.match(chatView, /const turnStarting = turnActive \|\| questionFollowHandoff != null/,
     'a submitted card answer starts the turn before the server acknowledges it')
+  assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(!turnStarting\) settledFooterKeyRef\.current = settledFooterKey\s*\}, \[turnStarting, settledFooterKey\]\)/,
+    'the settled footer is recorded from committed renders only')
   assert.match(chatView, /const footerState = !turnStarting \? 'settled'\s*: showActiveAssistantSurface && footerGroup\?\.rows\[0\]\.key !== settledFooterKeyRef\.current\s*\? 'working' : null/,
     'answering or sending clears the footer at once; only a new live reply reserves its line again')
   assert.match(chatView, /footer=\{group === footerGroup \? footerState : null\}/,
@@ -93,7 +95,7 @@ test('every row reads time, then Copy, then Branch; the reply footer appears on 
     && metaRow.indexOf('<MessageCopyButton read={copy} />') < metaRow.indexOf('<MessageBranchButton branch={branch} />'),
   'time, Copy, Branch')
   const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible \{ opacity: 0; \}/,
+  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) and \(not \(any-pointer: coarse\)\) \{\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible \{ opacity: 0; \}/,
     'with a fine pointer the whole footer waits for hover')
   assert.match(footerCss, /\.chat__reply:hover > \.chat__msg-meta--start\.chat__msg-meta--visible,\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible:focus-within \{ opacity: 1; \}/,
     'hovering the reply or focusing a control reveals it')

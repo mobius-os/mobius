@@ -10,14 +10,21 @@ import MessageBranchButton from './MessageBranchButton.jsx'
 import MessageCopyButton from './MessageCopyButton.jsx'
 import { formatDateTime, formatRecentDateTime } from '../../lib/dateTimeFormat.js'
 
-/** The current time, refreshed each minute while `ticking`. */
+/** The current time, refreshed each minute while `ticking`, and at once
+ *  when a suspended tab is shown again. */
 function useMinuteClock(ticking) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!ticking) return undefined
-    setNow(Date.now())
-    const timer = setInterval(() => setNow(Date.now()), 60_000)
-    return () => clearInterval(timer)
+    const refresh = () => setNow(Date.now())
+    refresh()
+    const timer = setInterval(refresh, 60_000)
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [ticking])
   return now
 }

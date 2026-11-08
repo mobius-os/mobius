@@ -5946,9 +5946,13 @@ export default function ChatView({
   const turnStarting = turnActive || questionFollowHandoff != null
   // The reply that held the footer when the turn started never reserves its
   // line again while it runs: the live surface can briefly reselect it as the
-  // turn is acknowledged, and its line would blink in and out.
+  // turn is acknowledged, and its line would blink in and out. Recorded from
+  // committed renders only, so a discarded render cannot name a reply.
   const settledFooterKeyRef = useRef(null)
-  if (!turnStarting) settledFooterKeyRef.current = footerGroup?.rows[0].key ?? null
+  const settledFooterKey = turnStarting ? null : footerGroup?.rows[0].key ?? null
+  useLayoutEffect(() => {
+    if (!turnStarting) settledFooterKeyRef.current = settledFooterKey
+  }, [turnStarting, settledFooterKey])
   const footerState = !turnStarting ? 'settled'
     : showActiveAssistantSurface && footerGroup?.rows[0].key !== settledFooterKeyRef.current
       ? 'working' : null
