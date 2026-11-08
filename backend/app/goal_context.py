@@ -1,5 +1,6 @@
 """Deterministic hierarchical Goal views. No summaries, caches or extra state."""
 from collections import Counter
+import json
 
 from app.context_budget import (
   GOAL_BRIEF_CHARS, GOAL_BRIEF_FIELD_CHARS, GOAL_BRIEF_LIST_ITEMS, TextBudget,
@@ -172,16 +173,19 @@ _BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_block
 
 
 def fit_brief(payload, task_id, *, role="coordinator"):
-  """Fit the per-turn brief to its context budget with marked excerpts.
+  """Fit the per-turn brief to its context budget.
 
-  The saved Goal and plan are untouched, and the reads the excerpts name
-  return everything whole, so an excerpt never alters the outcome contract.
+  Long texts become marked excerpts; once the budget is spent a list stops
+  and says once how many entries it left out and where to read them. The
+  saved Goal and plan are untouched, and the reads named return everything
+  whole, so the brief never alters the outcome contract.
   """
   budget = TextBudget(GOAL_BRIEF_CHARS, field=GOAL_BRIEF_FIELD_CHARS)
   goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
   overview = f"read_goal(task={task_id})" if task_id else goal_read
 
   def fit(entry):
+    """Fit one entry's prose and dependency ids, then charge its structure."""
     read = f"read_goal(task={entry['id']}) for the full text"
     for field in _BRIEF_PROSE:
       if isinstance(entry.get(field), str):
@@ -191,6 +195,24 @@ def fit_brief(payload, task_id, *, role="coordinator"):
       if omitted:
         entry["depends_on_omitted"] = budget.charge(
           f"{omitted} more; read_goal(task={entry['id']}) lists them all")
+    prose = sum(len(entry[field]) for field in _BRIEF_PROSE if isinstance(entry.get(field), str))
+    ids = sum(len(value) + 3 for value in entry.get("depends_on") or [])
+    budget.remaining -= max(len(json.dumps(entry, ensure_ascii=False)) - prose - ids, 0)
+
+  def fit_list(key, entries, read_rest):
+    # The nearest ancestors constrain the focus most, so they are kept first.
+    nearest_first = key == "ancestors"
+    order = list(reversed(entries)) if nearest_first else list(entries)
+    kept = []
+    for entry in order[:GOAL_BRIEF_LIST_ITEMS]:
+      if budget.spent:
+        break
+      fit(entry)
+      kept.append(entry)
+    if len(kept) < len(entries):
+      payload[f"{key}_omitted"] = budget.charge(
+        f"{len(entries) - len(kept)} more; {read_rest} lists them all")
+    payload[key] = list(reversed(kept)) if nearest_first else kept
 
   payload["objective"] = budget.take(payload["objective"], f"{goal_read} for the full objective")
   if isinstance((payload.get("hold") or {}).get("reason"), str):
@@ -202,29 +224,21 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     if isinstance(payload.get(key), str):
       payload[key] = budget.take(payload[key], f"{goal_read} for the full text")
   for key in _BRIEF_LISTS:
-    entries = payload.get(key)
-    if not entries:
-      continue
-    if len(entries) > GOAL_BRIEF_LIST_ITEMS:
-      payload[f"{key}_omitted"] = budget.charge(
-        f"{len(entries) - GOAL_BRIEF_LIST_ITEMS} more; {overview} lists them all"
-      )
-      # The nearest ancestors constrain the focus most; other lists keep order.
-      entries = (entries[-GOAL_BRIEF_LIST_ITEMS:] if key == "ancestors"
-                 else entries[:GOAL_BRIEF_LIST_ITEMS])
-    payload[key] = entries
-    for entry in entries:
-      fit(entry)
+    if payload.get(key):
+      fit_list(key, payload[key], overview)
   others = payload.get("other_open_goals")
   if others:
-    if len(others) > GOAL_BRIEF_LIST_ITEMS:
+    shown = []
+    for other in others[:GOAL_BRIEF_LIST_ITEMS]:
+      if budget.spent:
+        break
+      shown.append({**other, "objective": budget.take(
+        other["objective"], "shown whole only by that Goal's own reads")})
+      budget.remaining -= len(other["id"]) + 30
+    if len(shown) < len(others):
       payload["other_open_goals_omitted"] = budget.charge(
-        f"{len(others) - GOAL_BRIEF_LIST_ITEMS} more")
-      others = others[:GOAL_BRIEF_LIST_ITEMS]
-    payload["other_open_goals"] = [
-      {**other, "objective": budget.take(other["objective"], "shown whole only by that Goal's own reads")}
-      for other in others
-    ]
+        f"{len(others) - len(shown)} more open Goals in this chat")
+    payload["other_open_goals"] = shown
   return payload
 
 

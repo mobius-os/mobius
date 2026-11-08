@@ -60,9 +60,15 @@ class TextBudget:
     if len(text) <= allowance:
       self.remaining -= len(text)
       return text
-    # The marker is part of the brief too: leave room for it in the head.
+    # The marker is part of the brief too: leave room for it in the head, and
+    # never swap a text for a marker longer than the text itself.
     room = allowance - len(excerpt("x" * (len(text) + 1), 0, read_full)) - len(str(allowance))
-    return self.charge(excerpt(text, max(room, 0), read_full))
+    shown = excerpt(text, max(room, 0), read_full)
+    return self.charge(text if len(shown) >= len(text) else shown)
+
+  @property
+  def spent(self) -> bool:
+    return self.remaining <= 0
 
   def charge(self, text: str) -> str:
     """Count text the assembler adds itself, such as an omission marker."""

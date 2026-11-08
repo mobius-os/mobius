@@ -825,8 +825,17 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
       turn.env_file.remove()
 
 
+# The brief's fixed shape (identity, outcome contract, totals) plus one
+# omission marker per list sits outside the prose budget.
+BRIEF_ALLOWANCE = 2_500
+
+
+def _within_budget(brief):
+  from app.context_budget import GOAL_BRIEF_CHARS
+  return _chars(brief) <= GOAL_BRIEF_CHARS + BRIEF_ALLOWANCE
+
+
 def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
-  from app.context_budget import GOAL_BRIEF_CHARS, GOAL_BRIEF_LIST_ITEMS
   huge = "N" * 50_000
   children = [_task(f"c{i:03d}", "parent", "blocked", note=f"{i} " + huge) for i in range(120)]
   goal = _goal([_task("dep", status="completed", result="R" * 50_000),
@@ -836,9 +845,10 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
   brief = fit_brief(project_goal(goal, "parent"), "parent")
   full = project_goal(goal, "parent")
 
-  assert _chars(brief) < GOAL_BRIEF_CHARS + 20_000
-  assert len(brief["children"]) == GOAL_BRIEF_LIST_ITEMS
-  assert brief["children_omitted"].startswith(f"{120 - GOAL_BRIEF_LIST_ITEMS} more; read_goal(task=parent)")
+  assert _within_budget(brief)
+  shown = len(brief["children"])
+  assert 0 < shown < 120
+  assert brief["children_omitted"] == f"{120 - shown} more; read_goal(task=parent) lists them all"
   assert "read_goal(task=parent) for the full text" in brief["task"]["note"]
   assert "read_goal(task=dep) for the full text" in brief["dependencies"][0]["result"]
   assert "update_goal with no arguments" in brief["next_action"]
@@ -848,6 +858,37 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
   assert full["dependencies"][0]["result"] == "R" * 50_000
 
 
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_long_plans_stay_within_the_brief_budget(role):
+  title, text = "T" * 5_000, "F" * 5_000
+  tasks = [_task("root", status="running", title=title, note=text, completion_condition=text)]
+  tasks += [_task(f"dep{i}", status="completed", title=title, result=text, note=text)
+            for i in range(60)]
+  tasks.append(_task("parent", "root", "running", title=title, note=text,
+                     depends_on=[f"dep{i}" for i in range(60)]))
+  tasks += [_task(f"c{i}", "parent", "blocked", title=title, note=text,
+                  depends_on=[f"dep{j}" for j in range(60)]) for i in range(60)]
+  tasks += [_task(f"s{i}", "root", "blocked", title=title, note=text) for i in range(60)]
+  tasks += [_task(f"x{i}", status="failed", title=title, note=text) for i in range(60)]
+  goal = _goal(tasks, objective="O" * 30_000, next_action="A" * 5_000, checkpoint="C" * 5_000)
+
+  brief = fit_brief(project_goal(goal, "parent", role=role), "parent", role=role)
+
+  assert _within_budget(brief), _chars(brief)
+  text_dump = json.dumps(brief)
+  # Lists stop once the budget is spent and say so once, not per entry.
+  assert text_dump.count("lists them all") <= 6
+
+
+def test_many_short_entries_stop_listing_when_the_budget_is_spent():
+  tasks = [_task("parent", status="running")]
+  tasks += [_task(f"c{i:04d}", "parent") for i in range(3000)]
+  brief = fit_brief(project_goal(_goal(tasks), "parent"), "parent")
+  assert _within_budget(brief)
+  # Short titles are never swapped for a longer excerpt marker.
+  assert all("excerpt" not in child["title"] for child in brief["children"])
+
+
 def test_a_short_brief_is_identical_to_the_full_projection():
   goal = _goal([_task("parent", status="running", note="Keep files"),
                 _task("leaf", "parent", "blocked", note="Waiting on review")])
@@ -855,7 +896,6 @@ def test_a_short_brief_is_identical_to_the_full_projection():
 
 
 def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
-  from app.context_budget import GOAL_BRIEF_CHARS
   objective = "Deliver the outcome. " * 10_000
   deps = [_task(f"d{i:04d}", status="completed", result="ok") for i in range(2000)]
   children = [_task(f"c{i:02d}", "parent", depends_on=[d["id"] for d in deps]) for i in range(50)]
@@ -864,10 +904,12 @@ def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
 
   brief = fit_brief(project_goal(goal, "parent"), "parent")
 
-  assert _chars(brief) < GOAL_BRIEF_CHARS + 20_000
+  assert _within_budget(brief)
   assert "update_goal with no arguments for the full objective" in brief["objective"]
-  assert "depends_on_omitted" in brief["children"][-1]
-  assert brief["dependencies_omitted"].startswith("1950 more")
+  # Only the entry where the budget ran out marks its cut dependency list.
+  assert sum("depends_on_omitted" in child for child in brief["children"]) <= 1
+  assert brief["children_omitted"].endswith("read_goal(task=parent) lists them all")
+  assert brief["dependencies_omitted"].endswith("lists them all")
   # The excerpt never alters the outcome contract: storage and reads stay whole.
   assert goal.objective == objective
   assert project_goal(goal, "parent")["objective"] == objective
