@@ -5941,7 +5941,17 @@ export default function ChatView({
       truncated: before < 0 && offset > 0,
     }
   }, [footerGroup, stretches, peerTimeline.messages, offset])
-  const footerState = !turnActive ? 'settled' : showActiveAssistantSurface ? 'working' : null
+  // Answering a card starts the turn the moment it is submitted, before the
+  // server acknowledges it; a failed answer clears this and the footer returns.
+  const turnStarting = turnActive || questionFollowHandoff != null
+  // The reply that held the footer when the turn started never reserves its
+  // line again while it runs: the live surface can briefly reselect it as the
+  // turn is acknowledged, and its line would blink in and out.
+  const settledFooterKeyRef = useRef(null)
+  if (!turnStarting) settledFooterKeyRef.current = footerGroup?.rows[0].key ?? null
+  const footerState = !turnStarting ? 'settled'
+    : showActiveAssistantSurface && footerGroup?.rows[0].key !== settledFooterKeyRef.current
+      ? 'working' : null
   // A stretch that began before the loaded page copies from its own read.
   const truncatedClipboard = useStretchPrefix(
     chatId, offset, footerStretch?.rows, !turnActive && !!footerStretch?.truncated,
@@ -6016,7 +6026,7 @@ export default function ChatView({
       stretchClipboard={group === footerGroup && footerStretch?.truncated ? truncatedClipboard : null}
       // References of the latest stretch leave with its footer while the
       // agent works, and return, whole, where it next stops.
-      stretchSourceRows={group === footerGroup && turnActive ? null : stretchSourceRows.get(group) || null}
+      stretchSourceRows={group === footerGroup && turnStarting ? null : stretchSourceRows.get(group) || null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

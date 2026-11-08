@@ -112,7 +112,7 @@ test('a stretch with no prose offers no Copy but keeps its time', () => {
   const toolsOnly = { role: 'assistant', id: 'run', ts: turn.ts, blocks: [{ type: 'tool', name: 'Bash' }] }
   const row = actionRow(renderReply([toolsOnly]))
   assert.doesNotMatch(row, /aria-label="Copy message"/)
-  assert.match(row, /<time class="chat__ts">/)
+  assert.match(row, /<time class="chat__ts"/)
 })
 
 test('Copy takes everything the reply said, progress notes included', () => {
@@ -148,17 +148,19 @@ test('an open card copies; answered and sealed cards do not', () => {
   'Checking the logs:')
 })
 
-test('the reply row shows the reply’s date and time before Copy', () => {
+test('the footer shows an older reply’s date and time, with the full date on hover', () => {
+  // Recent replies read "23 minutes ago" (dateTimeFormat.test); this one is
+  // weeks old, so it shows its date.
   const html = renderReply([turn])
-  assert.match(html, /<time class="chat__ts">21st Oct 2026, /)
+  assert.match(html, /<time class="chat__ts" title="21st Oct 2026, \d\d:\d\d">21st Oct 2026, /)
 })
 
 test('the footer offers Copy without Try again', () => {
   const html = renderReply([turn])
   assert.match(html, /aria-label="Copy message"/)
   assert.doesNotMatch(html, /aria-label="Try again"/)
-  const timeIndex = html.indexOf('<time class="chat__ts">')
-  assert.ok(timeIndex >= 0 && timeIndex < html.indexOf('aria-label="Copy message"'))
+  const timeIndex = html.indexOf('<time class="chat__ts"')
+  assert.ok(timeIndex >= 0 && timeIndex < html.indexOf('aria-label="Copy message"'), 'the time leads, then Copy')
 })
 
 // A reloaded transcript folds two or more adjacent tool/thinking steps into
@@ -258,7 +260,7 @@ test('a failed reply leaves recovery to its error card, never Try again', () => 
   assert.doesNotMatch(row, /aria-label="Try again"/)
   assert.doesNotMatch(row, /aria-label="Copy message"/,
     'no prose, so the row has nothing to copy (the error card copies its own message)')
-  assert.match(row, /<time class="chat__ts">/)
+  assert.match(row, /<time class="chat__ts"/)
 })
 
 test('the footer offers Branch right after Copy', () => {
@@ -268,7 +270,7 @@ test('the footer offers Branch right after Copy', () => {
   assert.match(row, /aria-label="Branch in new chat"/)
   assert.ok(row.indexOf('aria-label="Copy message"') < row.indexOf('aria-label="Branch in new chat"'),
     'Branch sits to the right of Copy')
-  assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'))
+  assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'), 'the time leads')
   assert.doesNotMatch(renderReply([turn], { footer: 'working', onBranch: () => {} }),
     /aria-label="Branch in new chat"/, 'no Branch while the agent works')
 })

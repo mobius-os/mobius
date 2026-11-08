@@ -62,7 +62,9 @@ const markdownParser = new Marked({ gfm: true })
 markdownParser.use(mathTokens(), { extensions: [
   { name: 'inlineKatex', renderer: texHtml('span', 'katex') },
   { name: 'blockKatex', renderer: texHtml('div', 'md-math-block') },
-] })
+  // Raw HTML renders as nothing, as in the transcript: an HTML block is not
+  // shown, and an inline tag drops while the text between tags stays.
+], renderer: { html: () => '' } })
 
 /** Markdown as plain HTML: the chat's Markdown parser and math tokens without
  *  the live renderer's effects or app context, so an image keeps its alt text

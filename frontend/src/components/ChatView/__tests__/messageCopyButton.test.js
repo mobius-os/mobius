@@ -64,17 +64,20 @@ test('owner rows copy their own text; a reply copies only from its one end row',
 
 test('the chat has one reply footer, on the reply at its very end', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
-    'hovering a reply must not reveal another Copy above the current reply')
+  // Hover reveals only the footer's Branch and time, never a row.
+  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta\s*[,{]/,
+    'hovering a reply must not reveal another row above the current reply')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /const footerState = !turnActive \? 'settled' : showActiveAssistantSurface \? 'working' : null/,
-    'answering or sending clears the footer at once; the live reply reserves its line again')
+  assert.match(chatView, /const turnStarting = turnActive \|\| questionFollowHandoff != null/,
+    'a submitted card answer starts the turn before the server acknowledges it')
+  assert.match(chatView, /const footerState = !turnStarting \? 'settled'\s*: showActiveAssistantSurface && footerGroup\?\.rows\[0\]\.key !== settledFooterKeyRef\.current\s*\? 'working' : null/,
+    'answering or sending clears the footer at once; only a new live reply reserves its line again')
   assert.match(chatView, /footer=\{group === footerGroup \? footerState : null\}/,
     'only the last reply holds the footer')
-  assert.match(chatView, /stretchSourceRows=\{group === footerGroup && turnActive \? null : stretchSourceRows\.get\(group\) \|\| null\}/,
+  assert.match(chatView, /stretchSourceRows=\{group === footerGroup && turnStarting \? null : stretchSourceRows\.get\(group\) \|\| null\}/,
     'the latest stretch’s References leave with its footer while the agent works')
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
@@ -85,12 +88,17 @@ test('ChatView gives the footer the start of the agent’s stretch to copy from'
   assert.match(chatView, /stretchStartKey=\{group === footerGroup \? footerStretch\?\.startKey : undefined\}/)
 })
 
-test('copy follows the timestamp inside one tap-revealed metadata row', () => {
-  assert.ok(
-    metaRow.indexOf('<time className="chat__ts">')
-      < metaRow.indexOf('<MessageCopyButton read={copy} />'),
-    'copy must render immediately after the timestamp',
-  )
+test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
+  assert.ok(metaRow.indexOf('{time}') < metaRow.indexOf('<MessageCopyButton read={copy} />')
+    && metaRow.indexOf('<MessageCopyButton read={copy} />') < metaRow.indexOf('<MessageBranchButton branch={branch} />'),
+  'time, Copy, Branch')
+  const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible \{ opacity: 0; \}/,
+    'with a fine pointer the whole footer waits for hover')
+  assert.match(footerCss, /\.chat__reply:hover > \.chat__msg-meta--start\.chat__msg-meta--visible,\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible:focus-within \{ opacity: 1; \}/,
+    'hovering the reply or focusing a control reveals it')
+  assert.match(footerCss, /\.chat__msg-meta--start > :is\(\.chat__msg-copy, \.chat__msg-branch\):not\(\.chat__msg-copy--failed\) \{\s*width: 24px;\s*height: 24px;\s*padding: 0;/,
+    'Copy and Branch are equal square buttons with centred icons')
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')

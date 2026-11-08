@@ -77,3 +77,10 @@ test('the read start’s math carries its TeX as the transcript’s KaTeX does',
     /<div class="md-math-block"><annotation encoding="application\/x-tex">E = mc\^2<\/annotation><\/div>/)
   assert.doesNotMatch(markdownHtml('It costs $5 and $10.'), /katex/, 'currency stays prose')
 })
+
+test('the read start drops raw HTML as the transcript does, keeping text between inline tags', () => {
+  assert.doesNotMatch(markdownHtml('Shown.\n\n<div>Not shown in chat</div>\n\nAlso shown.'), /Not shown/)
+  const inline = markdownHtml('Click <button>Continue</button> to proceed.')
+  assert.doesNotMatch(inline, /<button/)
+  assert.match(inline, /Click Continue to proceed\./)
+})

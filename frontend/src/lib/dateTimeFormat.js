@@ -32,6 +32,21 @@ export function formatTime(value) {
   return TIME_FORMAT.format(date)
 }
 
+const RELATIVE_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'always' })
+
+/** A recent moment as "Just now", "23 minutes ago" or "5 hours ago"; anything
+ *  a day or more old, or in the future, as its full date and time. */
+export function formatRecentDateTime(value, now = Date.now()) {
+  const date = asDate(value)
+  if (!date) return ''
+  const elapsed = now - date.getTime()
+  if (elapsed < 0 || elapsed >= 86_400_000) return formatDateTime(date)
+  if (elapsed < 60_000) return 'Just now'
+  return elapsed < 3_600_000
+    ? RELATIVE_FORMAT.format(-Math.floor(elapsed / 60_000), 'minute')
+    : RELATIVE_FORMAT.format(-Math.floor(elapsed / 3_600_000), 'hour')
+}
+
 export function formatDateTime(value) {
   const date = asDate(value)
   if (!date) return ''

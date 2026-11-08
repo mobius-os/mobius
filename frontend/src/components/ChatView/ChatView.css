@@ -474,9 +474,26 @@
   margin: 6px 0 0;
   padding: 0 8px;
 }
-/* A reply saved without a time: pull Copy back by its own padding so its
-   glyph still lines up with the reply's prose. */
+/* The footer's actions are equal 24px square buttons, icon centred, side by
+   side; the time sits the same distance from Copy's icon as Copy's icon from
+   Branch's. Without a time, Copy is pulled back so its icon lines up with
+   the reply's prose. */
+.chat__msg-meta--start { gap: 0; }
+.chat__msg-meta--start > .chat__ts { margin-right: 5px; }
+.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed) {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
+/* With a fine pointer the footer waits for its reply to be hovered (or a
+   control in it focused, which stays reachable by keyboard); touch shows it,
+   having no hover. Its line stays reserved, so revealing it moves nothing. */
+@media (hover: hover) and (pointer: fine) {
+  .chat__reply > .chat__msg-meta--start.chat__msg-meta--visible { opacity: 0; }
+  .chat__reply:hover > .chat__msg-meta--start.chat__msg-meta--visible,
+  .chat__reply > .chat__msg-meta--start.chat__msg-meta--visible:focus-within { opacity: 1; }
+}
 /* Owner messages reveal their row only on tap/click; the chat's last reply
    keeps its footer visible. */
 .chat__msg-meta--visible {
