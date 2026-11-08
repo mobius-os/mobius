@@ -532,7 +532,7 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None,
+    *, sink=None, run_generation: int | float | None = None,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
@@ -545,7 +545,12 @@ class ActiveClaudeClient:
     # after the first hard stop.
     self._force_stop_started = False
     self._interrupt_owner: Literal["stop", "card"] | None = None
-    self._run_generation = registry.current_generation(chat_id)
+    # The generation this run was admitted for, not whatever is current when
+    # the handle is built: a Stop during startup must leave this handle stale.
+    self._run_generation = (
+      registry.current_generation(chat_id)
+      if run_generation is None else run_generation
+    )
     self._ready = False
     self._admission_closed = False
     self._native_queue_needs_cancel = False
@@ -1201,6 +1206,7 @@ async def run_claude_sdk_turn(
   coordination_enabled: bool = True,
   goal_brief_refresh=None,
   fork_from: dict | None = None,
+  run_generation: int | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1215,6 +1221,9 @@ async def run_claude_sdk_turn(
     chat_id: Möbius chat identifier used for registries.
     skill_text: Möbius skill/system prompt text, passed as the system
       prompt on every turn (including resumes).
+    run_generation: The chat run generation this turn was admitted for. A
+      Stop or delete during startup supersedes it, and the turn then ends
+      before sending its prompt instead of running unseen.
     bc: Chat broadcast object with a publish(event) method.
     skills_enabled: When True, offer SDK skills to the agent
       (`setting_sources` including user+project + `skills="all"`). This
@@ -1644,8 +1653,16 @@ async def run_claude_sdk_turn(
 
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
+      run_generation=run_generation,
     )
-    registry.register(active_client)
+    if not registry.register(active_client, run_generation=run_generation):
+      startup_file_stack.close()
+      active_client.mark_finished()
+      log.info("Claude turn superseded before registration chat_id=%s", chat_id)
+      return {
+        "session_id": current_session_id, "cost_usd": None, "error": None,
+        "prompt_sent": False,
+      }
     # The root result reached while native helpers still owe a follow-up. Its
     # cost and usage are already spent, so any exit before the follow-up keeps
     # them.
@@ -1703,6 +1720,14 @@ async def run_claude_sdk_turn(
         label="Claude CLI",
       )
       active_client.set_process_group_id(process_group_id)
+      if registry.current_generation(chat_id) != active_client._run_generation:
+        # Stopped while connecting: the registered handle was told to stop,
+        # so end here, through the normal teardown, without a model request.
+        log.info("Claude turn superseded before its prompt chat_id=%s", chat_id)
+        return {
+          "session_id": current_session_id, "cost_usd": None, "error": None,
+          "prompt_sent": False,
+        }
       await client.query(turn_message)
       active_client.mark_ready()
       # Startup timing: from the query to Claude's first message of any kind,

@@ -6707,6 +6707,7 @@ async def _run_chat_impl_with_db(
           helper_host_key=helper_host_key,
           data_dir=settings.data_dir,
           goal_brief_refresh=goal_brief_refresh,
+          run_generation=run_gen,
         )
       else:
         async def claude_turn(*, user_message: str, fork_from: dict | None):
@@ -6725,6 +6726,7 @@ async def _run_chat_impl_with_db(
             coordination_enabled=coordination_tools_enabled,
             goal_brief_refresh=goal_brief_refresh,
             fork_from=fork_from,
+            run_generation=run_gen,
           )
 
         runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)
