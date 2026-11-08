@@ -519,14 +519,69 @@ def test_snapshot_publishes_file_names_install_accepts(tmp_path):
 
 
 @pytest.mark.parametrize("folder", ["secrets", "credentials"])
-def test_snapshot_refuses_private_directory_names_without_known_secret_content(tmp_path, folder):
+def test_snapshot_publishes_private_sounding_folders_without_secret_content(tmp_path, folder):
   repo, app, _ = _app_repo(tmp_path)
   path = f"{folder}/ordinary.txt"
-  _commit_files(repo, app, {path: b"unrecognized private material"})
+  _commit_files(repo, app, {path: b"ordinary source"})
+
+  _, files = build_public_snapshot(app)
+
+  assert path in {item["path"] for item in files}
+
+
+# What a private folder typically holds is refused by its own name, whatever
+# folder it sits in: the folder name is not what makes it private.
+@pytest.mark.parametrize("folder", ["", "secrets/", "credentials/", "config/"])
+@pytest.mark.parametrize("name", [
+  ".env", ".env.production", "prod.env", ".netrc", ".npmrc", "id_ed25519",
+  "credentials.json", "service-account.json", "release.jks",
+  "debug.keystore", "client.p12", "client.pfx", "deploy.ppk",
+])
+def test_snapshot_refuses_credential_files_by_name_in_any_folder(tmp_path, folder, name):
+  repo, app, _ = _app_repo(tmp_path)
+  path = f"{folder}{name}"
+  _commit_files(repo, app, {path: b"\x30\x82 opaque"})
+
   with pytest.raises(CommunityPublicationError) as raised:
     build_public_snapshot(app)
+
   assert raised.value.code == "sensitive_path"
   assert path in raised.value.detail
+
+
+@pytest.mark.parametrize("name, content", [
+  ("server.pem", b"-----BEGIN PRIVATE KEY-----\nMIIE"),
+  ("tls.key", b"-----BEGIN EC PRIVATE KEY-----\nMHcC"),
+  ("deploy_key", b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl"),
+  ("signing.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n"),
+  ("token.json", b'{"token": "ya29.' + b"a0Af" * 10 + b'"}'),
+  ("client_secret.json", b'{"installed": {"client_secret": "GOCSPX-' + b"A" * 28 + b'"}}'),
+])
+def test_snapshot_refuses_recognizable_credentials_in_private_folders(tmp_path, name, content):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {f"secrets/{name}": content})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
+
+
+def test_content_scan_reads_tokens_inside_a_binary_database(tmp_path):
+  import sqlite3
+
+  database = tmp_path / "vault.db"
+  with sqlite3.connect(database) as connection:
+    connection.execute("create table keys (value text)")
+    connection.execute("insert into keys values (?)", ("ghp_" + "A" * 36,))
+  connection.close()
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"secrets/vault.db": database.read_bytes()})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
 
 
 def test_snapshot_names_the_path_it_refuses_and_why(tmp_path):

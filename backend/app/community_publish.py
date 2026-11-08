@@ -57,12 +57,12 @@ def _is_unsafe_path_character(char: str) -> bool:
 
 
 # Path segments refused anywhere in a published tree, each with the reason the
-# author sees. Private folder names remain a guard beyond the content scan.
+# author sees. Credentials are found by file name and content below, not
+# guessed from a folder name: apps legitimately ship folders such as secrets/
+# (a secrets-manager UI) or credentials/ (setup docs).
 _UNPUBLISHED_SEGMENTS = {
   ".git": "Git's own metadata is never app source.",
   ".env": "environment files usually hold credentials.",
-  "credentials": "private credential directories must not be published.",
-  "secrets": "private secret directories must not be published.",
   ".github": (
     "Möbius does not publish .github files, because creating GitHub workflow "
     "files needs a broader GitHub token scope than publishing uses."
@@ -78,6 +78,10 @@ _SENSITIVE_FILES = {
   "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
   "credentials.json", "service-account.json",
 }
+# Environment files under any name, and key stores the content scan cannot
+# read because they are binary (.jks, .keystore, .p12, .pfx) or have no
+# PEM header (.ppk).
+_SENSITIVE_SUFFIXES = (".env", ".jks", ".keystore", ".p12", ".pfx", ".ppk")
 # Heuristics catch recognizable credentials, not every possible secret.
 # Authors still need to review the accepted source before publication.
 _SECRET_PATTERNS = (
@@ -87,6 +91,8 @@ _SECRET_PATTERNS = (
   re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
   re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
   re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+  re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}"),
+  re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
   re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
   re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b"),
   re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
@@ -380,7 +386,12 @@ def _validate_path(path: str) -> None:
       raise CommunityPublicationError(
         f"Remove {path} before publishing: {reason}", "sensitive_path",
       )
-  if folded[-1] in _SENSITIVE_FILES or folded[-1].startswith(".env."):
+  name = folded[-1]
+  if (
+    name in _SENSITIVE_FILES
+    or name.startswith(".env.")
+    or name.endswith(_SENSITIVE_SUFFIXES)
+  ):
     raise CommunityPublicationError(
       f"Remove {path} before publishing: it is a common credential file name.",
       "sensitive_path",
