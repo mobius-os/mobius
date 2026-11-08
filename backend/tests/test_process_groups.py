@@ -297,22 +297,28 @@ def _scoped_to(monkeypatch, *procs):
   )
 
 
-def _named_command(tmp_path, name, marker):
+def _named_command(name, marker):
+  """A long-running process whose argv[0] is ``name``.
+
+  Runs the Python interpreter rather than a renamed ``sleep``: multi-call
+  coreutils builds refuse to run under a name they do not recognise.
+  """
   import os
-  import shutil
   import subprocess
-  alias = tmp_path / name
-  alias.symlink_to(shutil.which("sleep"))
+  import sys
   env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: marker})
-  return subprocess.Popen([str(alias), "60"], env=env, start_new_session=True)
+  return subprocess.Popen(
+    [name, "-c", "import time; time.sleep(60)"],
+    executable=sys.executable, env=env, start_new_session=True,
+  )
 
 
 def test_storage_stop_kills_agent_commands_but_keeps_agent_runtimes(
   tmp_path, monkeypatch,
 ):
   marker = f"filling-{uuid4().hex}"
-  command = _named_command(tmp_path, "npm", marker)
-  agent = _named_command(tmp_path, "claude", marker)
+  command = _named_command("npm", marker)
+  agent = _named_command("claude", marker)
   try:
     _scoped_to(monkeypatch, command, agent)
 
@@ -329,8 +335,8 @@ def test_storage_stop_kills_agent_commands_but_keeps_agent_runtimes(
 def test_storage_stop_spares_a_run_the_owner_continued(tmp_path, monkeypatch):
   continued = f"continued-{uuid4().hex}"
   other = f"other-{uuid4().hex}"
-  continued_command = _named_command(tmp_path, "du", continued)
-  other_command = _named_command(tmp_path, "curl", other)
+  continued_command = _named_command("du", continued)
+  other_command = _named_command("curl", other)
   try:
     _scoped_to(monkeypatch, continued_command, other_command)
 
@@ -348,7 +354,7 @@ def test_storage_stop_spares_a_run_the_owner_continued(tmp_path, monkeypatch):
 def test_storage_stop_never_leaves_a_process_frozen(tmp_path, monkeypatch):
   """A stopped process still dies: SIGKILL ends it without a SIGCONT."""
   marker = f"frozen-{uuid4().hex}"
-  command = _named_command(tmp_path, "tar", marker)
+  command = _named_command("tar", marker)
   try:
     _scoped_to(monkeypatch, command)
     process_groups.stop_agent_commands()
