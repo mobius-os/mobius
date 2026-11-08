@@ -1642,6 +1642,161 @@ async def _stop_handle_with_escalation(
     return False, True
 
 
+async def _interrupt_and_park_live_turns(
+  chat_ids: list[str],
+  *,
+  note: dict,
+  park_reason: str,
+  parked_until: datetime | None,
+  timeout: float,
+  restart_nonce: str = "",
+  label: str,
+) -> list[dict[str, str]]:
+  """Interrupt each chat's live turn and move its exact run to a durable park.
+
+  The shared core of every interrupter-owned pause: publish ``note`` through
+  the turn's sink, hand the turn to this caller (the chat joins
+  ``_restart_draining_chats`` before its generation bumps, so the dying turn's
+  finally leaves the exact run and the pending queue intact), stop every
+  handle concurrently, then finalize the transcript and ``ParkRun`` with
+  ``park_reason``. ``parked_until=None`` means due now. A restart parks only a
+  nonce-bound run: without that binding authenticated boot recovery owns it.
+  Returns the exact runs that reached the durable park.
+  """
+  log = _get_logger()
+  parked_runs: list[dict[str, str]] = []
+  candidates: list[tuple[str, list, object | None]] = []
+  for chat_id in chat_ids:
+    handles = registry.get_handles(chat_id)
+    if not handles:
+      # A chat reserved 'starting' but with no live handle yet — nothing to
+      # interrupt. Its send is durable and reconciles on the next boot.
+      continue
+    sink = get_active_sink(chat_id)
+    stopped_gen = current_run_generation(chat_id)
+    if not isinstance(stopped_gen, int):
+      # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
+      continue
+    # Mark BEFORE bumping so the turn's finally (which may run the instant the
+    # interrupt lands) observes the drain and leaves the marker set.
+    _restart_draining_chats.add(chat_id)
+    bump_run_generation(chat_id)
+    _clear_after_terminal_generation[chat_id] = stopped_gen
+    _clear_after_terminal_status[chat_id] = "interrupted"
+
+    if sink is not None:
+      sink.publish(dict(note))
+    else:
+      bc = get_broadcast(chat_id)
+      if bc is not None:
+        # Transport-only fallback (handle live but no sink). The note isn't
+        # persisted here; boot reconcile still adds the resumable interrupted
+        # note for this marker.
+        bc.publish(dict(note))
+    candidates.append((chat_id, handles, sink))
+
+  async def _stop_candidate(chat_id: str, handles: list) -> bool:
+    all_interrupted = True
+    for handle in handles:
+      # Every parked turn must stay resumable; a handle whose stop would end
+      # its work for good offers suspend (see RunnerHandle).
+      end = getattr(handle, "suspend", None) or handle.stop
+      try:
+        stopped = await end(
+          timeout=min(RESTART_HANDLE_STOP_TIMEOUT_SECS, timeout)
+        )
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        log.warning(
+          "%s interrupt failed chat_id=%s kind=%s",
+          label, chat_id, getattr(handle, "kind", "?"), exc_info=True,
+        )
+        stopped = False
+      if not stopped:
+        log.warning(
+          "%s stop timed out; authenticated boot "
+          "reconciliation will preserve chat_id=%s kind=%s",
+          label, chat_id, getattr(handle, "kind", "?"),
+        )
+        all_interrupted = False
+    return all_interrupted
+
+  stop_results = await asyncio.gather(*(
+    _stop_candidate(chat_id, handles)
+    for chat_id, handles, _sink in candidates
+  ))
+
+  for (chat_id, _handles, sink), all_interrupted in zip(
+    candidates, stop_results, strict=True,
+  ):
+    if all_interrupted:
+      run_token = sink.run_token if sink is not None else None
+      # Own the terminal snapshot fence here instead of assuming the runner's
+      # teardown won the scheduling race. This force-completes running tool
+      # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
+      # marker. A failed Finalize leaves that marker + its already-committed
+      # restart nonce intact for authenticated startup recovery.
+      if sink is not None:
+        try:
+          await sink.finalize()
+        except Exception:
+          log.warning(
+            "%s terminal snapshot failed; authenticated boot "
+            "recovery will continue chat_id=%s run_token=%s",
+            label, chat_id, run_token, exc_info=True,
+          )
+          continue
+      if run_token and (restart_nonce or park_reason != "restart"):
+        try:
+          parked = await _park_run_strict(
+            chat_id,
+            run_token,
+            parked_until or datetime.now(UTC).replace(tzinfo=None),
+            park_reason,
+            restart_nonce=restart_nonce,
+          )
+          if parked:
+            parked_runs.append({
+              "chat_id": chat_id,
+              "run_token": run_token,
+            })
+          else:
+            log.warning(
+              "%s could not park exact run; authenticated boot "
+              "recovery will continue chat_id=%s run_token=%s",
+              label,
+              chat_id,
+              run_token,
+            )
+        except Exception:
+          # Restart must still proceed. ParkRun is transactional; on failure
+          # the generic running marker remains for safe manual reconciliation.
+          log.warning(
+            "%s park failed; authenticated boot recovery "
+            "will continue "
+            "chat_id=%s run_token=%s",
+            label,
+            chat_id,
+            run_token,
+            exc_info=True,
+          )
+      else:
+        log.warning(
+          "%s has no exact run token/nonce; leaving manual "
+          "recovery chat_id=%s run_token=%s",
+          label, chat_id, run_token,
+        )
+  # Flush the writer so every paused note (the sink's fire-and-forget
+  # PersistError above) is durably committed before the worker restarts.
+  try:
+    ack = get_writer().submit(Barrier())
+    await _await_ack(ack, timeout=min(timeout, 10.0))
+  except Exception:
+    log.warning("%s writer flush failed", label, exc_info=True)
+  return parked_runs
+
+
 async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
@@ -1703,7 +1858,6 @@ async def drain_all_for_restart(
         "drain-for-restart intent preparation failed; fallbacks stay manual",
         exc_info=True,
       )
-  parked_runs: list[dict[str, str]] = []
   # `resumable` rides the event LIVE (events.process_event carries the
   # whitelisted extras onto the persisted block), so a drained turn's manual
   # Resume fallback renders immediately. The exact ChatRun transition below,
@@ -1712,133 +1866,15 @@ async def drain_all_for_restart(
   # lets the card render in the calm "Paused" family instead of the danger-red
   # error styling reserved for genuine failures.
   note = _pause_note(PAUSED_FOR_RESTART_MESSAGE, kind="restart")
-  candidates: list[tuple[str, list, object | None]] = []
-  for chat_id in sorted(registry.all_alive_chat_ids()):
-    handles = registry.get_handles(chat_id)
-    if not handles:
-      # A chat reserved 'starting' but with no live handle yet — nothing to
-      # interrupt. Its send is durable and reconciles on the next boot.
-      continue
-    sink = get_active_sink(chat_id)
-    stopped_gen = current_run_generation(chat_id)
-    if not isinstance(stopped_gen, int):
-      # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
-      continue
-    # Mark BEFORE bumping so the turn's finally (which may run the instant the
-    # interrupt lands) observes the drain and leaves the marker set.
-    _restart_draining_chats.add(chat_id)
-    bump_run_generation(chat_id)
-    _clear_after_terminal_generation[chat_id] = stopped_gen
-    _clear_after_terminal_status[chat_id] = "interrupted"
-
-    if sink is not None:
-      sink.publish(dict(note))
-    else:
-      bc = get_broadcast(chat_id)
-      if bc is not None:
-        # Transport-only fallback (handle live but no sink). The note isn't
-        # persisted here; boot reconcile still adds the resumable interrupted
-        # note for this marker.
-        bc.publish(dict(note))
-    candidates.append((chat_id, handles, sink))
-
-  async def _stop_candidate(chat_id: str, handles: list) -> bool:
-    all_interrupted = True
-    for handle in handles:
-      # Every parked turn must stay resumable; a handle whose stop would end
-      # its work for good offers suspend (see RunnerHandle).
-      end = getattr(handle, "suspend", None) or handle.stop
-      try:
-        stopped = await end(
-          timeout=min(RESTART_HANDLE_STOP_TIMEOUT_SECS, timeout)
-        )
-      except asyncio.CancelledError:
-        raise
-      except Exception:
-        log.warning(
-          "drain-for-restart interrupt failed chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"), exc_info=True,
-        )
-        stopped = False
-      if not stopped:
-        log.warning(
-          "drain-for-restart stop timed out; authenticated boot "
-          "reconciliation will preserve chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"),
-        )
-        all_interrupted = False
-    return all_interrupted
-
-  stop_results = await asyncio.gather(*(
-    _stop_candidate(chat_id, handles)
-    for chat_id, handles, _sink in candidates
-  ))
-
-  for (chat_id, _handles, sink), all_interrupted in zip(
-    candidates, stop_results, strict=True,
-  ):
-    if all_interrupted:
-      run_token = sink.run_token if sink is not None else None
-      # Own the terminal snapshot fence here instead of assuming the runner's
-      # teardown won the scheduling race. This force-completes running tool
-      # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
-      # marker. A failed Finalize leaves that marker + its already-committed
-      # restart nonce intact for authenticated startup recovery.
-      if sink is not None:
-        try:
-          await sink.finalize()
-        except Exception:
-          log.warning(
-            "drain-for-restart terminal snapshot failed; authenticated boot "
-            "recovery will continue chat_id=%s run_token=%s",
-            chat_id, run_token, exc_info=True,
-          )
-          continue
-      if run_token and restart_nonce:
-        try:
-          parked = await _park_run_strict(
-            chat_id,
-            run_token,
-            datetime.now(UTC).replace(tzinfo=None),
-            "restart",
-            restart_nonce=restart_nonce,
-          )
-          if parked:
-            parked_runs.append({
-              "chat_id": chat_id,
-              "run_token": run_token,
-            })
-          else:
-            log.warning(
-              "drain-for-restart could not park exact run; authenticated boot "
-              "recovery will continue chat_id=%s run_token=%s",
-              chat_id,
-              run_token,
-            )
-        except Exception:
-          # Restart must still proceed. ParkRun is transactional; on failure
-          # the generic running marker remains for safe manual reconciliation.
-          log.warning(
-            "drain-for-restart park failed; authenticated boot recovery "
-            "will continue "
-            "chat_id=%s run_token=%s",
-            chat_id,
-            run_token,
-            exc_info=True,
-          )
-      else:
-        log.warning(
-          "drain-for-restart has no exact run token/nonce; leaving manual "
-          "recovery chat_id=%s run_token=%s",
-          chat_id, run_token,
-        )
-  # Flush the writer so every paused note (the sink's fire-and-forget
-  # PersistError above) is durably committed before the worker restarts.
-  try:
-    ack = get_writer().submit(Barrier())
-    await _await_ack(ack, timeout=min(timeout, 10.0))
-  except Exception:
-    log.warning("drain-for-restart writer flush failed", exc_info=True)
+  parked_runs = await _interrupt_and_park_live_turns(
+    sorted(registry.all_alive_chat_ids()),
+    note=note,
+    park_reason="restart",
+    parked_until=None,
+    timeout=timeout,
+    restart_nonce=restart_nonce,
+    label="drain-for-restart",
+  )
   if parked_runs:
     log.info(
       "drain-for-restart parked %d exact turn(s): %s",
