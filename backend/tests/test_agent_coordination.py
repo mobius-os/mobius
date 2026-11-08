@@ -1430,27 +1430,33 @@ def test_a_short_urgent_note_stays_whole_after_long_ones():
     assert len(message["body"]) > 11_000
 
 
-def test_a_multi_recipient_send_stores_its_body_once_and_previews_it(client, auth, db):
+@pytest.mark.parametrize("length", [600, 3_999, 30_000])
+def test_the_send_card_shows_notes_up_to_its_bound_whole_and_labels_longer_ones(
+  client, auth, db, length,
+):
+  from app.peer_message import MAX_BODY_CHARS, settle_peer_message
+
   chats, _ = _network_fixture(db)
-  body = "Shared finding " * 2000
+  body = "n" * length
   sent = client.post(
     "/api/agent-coordination/messages",
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
     json={"recipients": [chats["builder"].id, chats["root"].id], "body": body},
   )
   assert sent.status_code == 200, sent.text
-  rows = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.from_chat_id == chats["scout"].id,
-  ).all()
-  assert len(rows) == 2 and len({row.note_id for row in rows}) == 1
-  assert db.get(models.AgentCoordinationNote, rows[0].note_id).body_chars == len(body.strip())
+  card = settle_peer_message({"direction": "send", "status": "sending"}, sent.text)
+  long = length > MAX_BODY_CHARS
+  assert card["body"] == body[:MAX_BODY_CHARS]
+  assert card["body_truncated"] is long
   receipt = sent.json()["messages"][0]
-  assert receipt["body_truncated"] is True
-  assert receipt["body_chars"] == len(body.strip())
-  assert len(receipt["body"]) == 500
+  assert receipt.get("body_chars") == (length if long else None)
+  # Each inbox keeps the whole note.
+  assert {row.body for row in db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.from_chat_id == chats["scout"].id,
+  )} == {body}
 
 
-def test_inbox_retention_is_by_size_and_reclaims_unreferenced_bodies(
+def test_inbox_retention_is_by_size_and_keeps_the_newest_note(
   client, auth, db, monkeypatch,
 ):
   chats, _ = _network_fixture(db)
@@ -1465,9 +1471,7 @@ def test_inbox_retention_is_by_size_and_reclaims_unreferenced_bodies(
   inbox = db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
   ).all()
-  # The newest note is kept whole however long; older ones over budget go.
   assert [row.body for row in inbox] == ["x" * 30_000]
-  assert db.query(models.AgentCoordinationNote).count() == 1
 
 
 def test_read_agent_message_sees_scope_broadcasts_only_inside_the_scope(client, auth, db):

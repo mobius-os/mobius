@@ -206,8 +206,10 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
     if not body:
       continue
     # A note longer than the transcript preview is kept as a marked excerpt.
+    # A receipt already marks its preview; a longer body is cut here too.
     rows.append({
-      **message, "body": body, "body_truncated": len(stripped) > MAX_BODY_CHARS,
+      **message, "body": body,
+      "body_truncated": bool(message.get("body_truncated")) or len(stripped) > MAX_BODY_CHARS,
     })
   return rows
 

@@ -32,6 +32,7 @@ from app.agent_work_claims import (
   finish_work,
 )
 from app.database import get_db
+from app.peer_message import MAX_BODY_CHARS as PEER_CARD_BODY_CHARS
 from app.deps import (
   Principal,
   get_agent_run_principal,
@@ -45,8 +46,9 @@ from app import models
 
 
 router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"])
-# A send receipt shows the sender this much of its own note.
-SENDER_PREVIEW_CHARS = 500
+# A send receipt previews the note at the transcript card's bound, so the card
+# shows any note up to that size whole and labels a longer one as an excerpt.
+SENDER_PREVIEW_CHARS = PEER_CARD_BODY_CHARS
 
 
 class AgentMessageCreate(BaseModel):
@@ -271,6 +273,9 @@ def read_current_message(
   db: Session = Depends(get_db),
 ):
   """Read one note whole when turn context carried only its excerpt."""
+  if principal.chat_id is None or principal.run_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  get_active_chat_for_principal(db, principal.chat_id, principal)
   message = peer_message_for_agent(db, principal.chat_id, principal.run_id, message_id)
   if message is None:
     raise HTTPException(404, "Peer note not found for this agent.")

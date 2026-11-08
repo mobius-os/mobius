@@ -44,24 +44,11 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 
   if task_id is not None and task_id not in by_id:
     raise ValueError("Task not found in this Goal")
-  if task_id is None:
-    running = [path(t["id"]) for t in tasks if t["status"] == "running"]
-    # A running coordinator plus running descendants should focus on those
-    # descendants, not force a full coordinator view.
-    leaves = [p for p in running if not any(
-      len(other) > len(p) and other[:len(p)] == p for other in running
-    )]
-    if leaves:
-      common = []
-      for level in zip(*leaves):
-        if len(set(level)) != 1:
-          break
-        common.append(level[0])
-      task_id = common[-1] if common else None
 
   counts = {}
-
-  # Count bottom-up without a Python recursion depth limit for deep plans.
+  # Running tasks with no running descendant, per subtree; one bottom-up pass
+  # without a Python recursion depth limit for deep plans.
+  running_leaves = {}
   stack = [(None, False)]
   while stack:
     key, leaving = stack.pop()
@@ -70,10 +57,24 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
       stack.extend((child, False) for child in children.get(key, []))
       continue
     count = Counter()
+    below = 0
     for child in children.get(key, []):
       count[by_id[child]["status"]] += 1
       count.update(counts[child])
+      below += running_leaves[child]
     counts[key] = dict(sorted(count.items()))
+    running_leaves[key] = below or int(key is not None and by_id[key]["status"] == "running")
+
+  if task_id is None and running_leaves[None]:
+    # A running coordinator plus running descendants should focus on those
+    # descendants: the deepest task whose subtree holds every running leaf.
+    total = running_leaves[None]
+    while True:
+      deeper = next((child for child in children.get(task_id, [])
+                     if running_leaves[child] == total), None)
+      if deeper is None:
+        break
+      task_id = deeper
 
   def summary(key, *, parent=True):
     t = by_id[key]
@@ -152,7 +153,8 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
     # A helper sees what can hold up its own work: blockers in its subtree and
     # along its prerequisite chain (a prerequisite, anything it in turn needs,
     # and their subtrees). Unrelated branches' blockers are the coordinator's.
-    blockers = [key for key in blockers if key in _work_reach(task_id, ancestors, by_id, children)]
+    reach = _work_reach(task_id, ancestors, by_id, children)
+    blockers = [key for key in blockers if key in reach]
   if blockers:
     payload["open_blockers"] = [summary(key) for key in blockers]
   if role == "coordinator":
@@ -187,7 +189,8 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     if entry.get("depends_on"):
       entry["depends_on"], omitted = budget.take_ids(entry["depends_on"])
       if omitted:
-        entry["depends_on_omitted"] = f"{omitted} more; read_goal(task={entry['id']}) lists them all"
+        entry["depends_on_omitted"] = budget.charge(
+          f"{omitted} more; read_goal(task={entry['id']}) lists them all")
 
   payload["objective"] = budget.take(payload["objective"], f"{goal_read} for the full objective")
   if isinstance((payload.get("hold") or {}).get("reason"), str):
@@ -203,7 +206,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     if not entries:
       continue
     if len(entries) > GOAL_BRIEF_LIST_ITEMS:
-      payload[f"{key}_omitted"] = (
+      payload[f"{key}_omitted"] = budget.charge(
         f"{len(entries) - GOAL_BRIEF_LIST_ITEMS} more; {overview} lists them all"
       )
       # The nearest ancestors constrain the focus most; other lists keep order.
@@ -215,7 +218,8 @@ def fit_brief(payload, task_id, *, role="coordinator"):
   others = payload.get("other_open_goals")
   if others:
     if len(others) > GOAL_BRIEF_LIST_ITEMS:
-      payload["other_open_goals_omitted"] = f"{len(others) - GOAL_BRIEF_LIST_ITEMS} more"
+      payload["other_open_goals_omitted"] = budget.charge(
+        f"{len(others) - GOAL_BRIEF_LIST_ITEMS} more")
       others = others[:GOAL_BRIEF_LIST_ITEMS]
     payload["other_open_goals"] = [
       {**other, "objective": budget.take(other["objective"], "shown whole only by that Goal's own reads")}

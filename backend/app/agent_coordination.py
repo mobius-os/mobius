@@ -32,9 +32,9 @@ DELIVERY_NEXT_TURN = "next_turn"
 DELIVERY_INTERRUPT = "interrupt"
 MAX_PEERS = 200
 # Retention per recipient inbox and per broadcast channel, by size: a note
-# costs its body plus a fixed charge for its row, and the oldest notes go
-# first. This bounds disk per chat while keeping recent history browsable; the
-# newest note is always kept, however long it is.
+# costs its body plus a fixed charge for its row, oldest first; the newest note
+# is always kept, however long. This bounds disk per inbox while keeping recent
+# history browsable.
 INBOX_RETENTION_CHARS = 2_000_000
 ROW_RETENTION_CHARS = 256
 MAX_CONTEXT_PEERS = 24
@@ -663,12 +663,6 @@ def serialize_messages(
   db: Session, rows: list[models.AgentCoordinationMessage],
 ) -> list[dict[str, Any]]:
   names = _message_names(db, rows)
-  # Load the shared bodies in one query; each row then reads from the session.
-  note_ids = {row.note_id for row in rows if row.note_id}
-  if note_ids:
-    db.query(models.AgentCoordinationNote).filter(
-      models.AgentCoordinationNote.id.in_(note_ids),
-    ).all()
   return [serialize_message(row, names) for row in rows]
 
 
@@ -1324,37 +1318,32 @@ def _matching_retry(
   return rows
 
 
-def delete_orphan_notes(db: Session, note_ids) -> None:
-  """Delete the given note bodies that no delivery row references any more."""
-  note_ids = [note_id for note_id in set(note_ids) if note_id]
-  message, note = models.AgentCoordinationMessage, models.AgentCoordinationNote
-  for start in range(0, len(note_ids), 500):
-    chunk = note_ids[start:start + 500]
-    db.query(note).filter(
-      note.id.in_(chunk),
-      ~db.query(message.id).filter(message.note_id == note.id).exists(),
-    ).delete(synchronize_session=False)
-
-
 def _prune_by_size(db: Session, query) -> None:
-  """Keep the newest rows that fit retention; prune by id, never loading bodies."""
-  message, note = models.AgentCoordinationMessage, models.AgentCoordinationNote
-  sized = query.join(note, note.id == message.note_id).with_entities(
-    message.id, message.note_id, note.body_chars,
-  ).order_by(message.created_at.desc(), message.id.desc())
-  used, stale_ids, stale_notes = 0, [], []
-  for index, (message_id, note_id, body_chars) in enumerate(sized):
-    used += body_chars + ROW_RETENTION_CHARS
-    if index and used > INBOX_RETENTION_CHARS:
-      stale_ids.append(message_id)
-      stale_notes.append(note_id)
+  """Evict oldest first until the rows fit retention, never loading a body.
+
+  The database measures each body and the newest note always stays. Delivery
+  advances an inbox as a chronological prefix, so oldest-first already evicts
+  delivered notes before any that are still owed.
+  """
+  message = models.AgentCoordinationMessage
+  sized = query.with_entities(
+    message.id, func.length(message.body),
+  ).order_by(message.created_at.asc(), message.id.asc()).all()
+  if not sized:
+    return
+  used = sum(length + ROW_RETENTION_CHARS for _, length in sized)
+  stale_ids = []
+  for message_id, length in sized[:-1]:
+    if used <= INBOX_RETENTION_CHARS:
+      break
+    used -= length + ROW_RETENTION_CHARS
+    stale_ids.append(message_id)
   for start in range(0, len(stale_ids), 500):
     chunk = stale_ids[start:start + 500]
     db.query(models.ChatActivityPosition).filter(
       models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in chunk]),
     ).delete(synchronize_session=False)
     db.query(message).filter(message.id.in_(chunk)).delete(synchronize_session=False)
-  delete_orphan_notes(db, stale_notes)
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
@@ -1439,8 +1428,6 @@ def _persist_send(
 
   resolved_send_id = requested_send_id or str(uuid.uuid4())
   targets: list[str | None] = [None] if broadcast else recipients
-  # One body per send; each recipient row references it.
-  note = models.AgentCoordinationNote(body=clean_body)
   rows = [
     models.AgentCoordinationMessage(
       id=str(uuid.uuid4()),
@@ -1453,7 +1440,7 @@ def _persist_send(
       send_target_key=target or "",
       kind=kind,
       delivery=clean_delivery,
-      note=note,
+      body=clean_body,
     )
     for target in targets
   ]

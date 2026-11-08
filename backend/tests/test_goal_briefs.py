@@ -879,3 +879,23 @@ def test_a_helper_brief_points_its_excerpts_at_read_goal():
                hold_json=None)
   brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
   assert "read_goal for the full objective" in brief["objective"]
+
+
+def test_brief_projection_walks_large_plans_once(monkeypatch):
+  from app import goal_context
+
+  calls = []
+  real = goal_context._work_reach
+  monkeypatch.setattr(goal_context, "_work_reach", lambda *args: calls.append(1) or real(*args))
+  blocked = [_task(f"b{i:04d}", "leaf", "blocked", note="waiting") for i in range(4000)]
+  goal = _goal([_task("root", status="running"), _task("leaf", "root", "running"), *blocked])
+  view = project_goal(goal, "leaf", role="helper")
+  # One reach computation for the whole blocker filter, not one per blocker.
+  assert calls == [1]
+  assert len(view["children"]) == 4000
+
+  chain = [_task("c0", status="running")]
+  chain += [_task(f"c{i}", f"c{i - 1}", "running") for i in range(1, 5000)]
+  chain.append(_task("side", "c10", "running"))
+  # The deepest task holding every running leaf: c10 holds c4999 and side.
+  assert project_goal(_goal(chain))["focus"] == "c10"

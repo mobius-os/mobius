@@ -27,7 +27,6 @@ from sqlalchemy import (
 from sqlalchemy import inspect as sa_inspect
 
 from sqlalchemy.types import TypeDecorator
-from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import column_property, deferred, relationship
 
 from app.database import Base
@@ -1486,33 +1485,12 @@ class ProjectAgentMessage(Base):
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
-class AgentCoordinationNote(Base):
-  """The body of one peer send, stored once however many inboxes hold it.
-
-  ``body_chars`` lets size-aware inbox retention and delivery budgets work
-  from row metadata without loading bodies.
-  """
-
-  __tablename__ = "agent_coordination_notes"
-
-  id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-  body = Column(Text, nullable=False)
-  body_chars = Column(Integer, nullable=False)
-  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
-
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
-    if self.body is not None and self.body_chars is None:
-      self.body_chars = len(self.body)
-
-
 class AgentCoordinationMessage(Base):
-  """One durable provider-neutral peer note delivery.
+  """One durable provider-neutral peer note.
 
   Broadcast rows remain scoped to a Project or delegation tree. Directed rows
   use the owner-keyed workspace channel so topology never constrains delivery;
-  one row per recipient keeps inbox visibility and retention exact, while all
-  rows of one send share a single ``AgentCoordinationNote`` body. ``send_id``
+  one row per recipient keeps inbox visibility and retention exact. ``send_id``
   groups one multi-recipient send and lets callers safely reuse an explicit
   retry identity within the same physical agent run.
   """
@@ -1548,15 +1526,7 @@ class AgentCoordinationMessage(Base):
   delivery = Column(
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
-  # Always set. Nullable only because an existing table cannot gain a NOT NULL
-  # column in place on SQLite; the upgrade fills it for every earlier row.
-  note_id = Column(
-    String(64), ForeignKey("agent_coordination_notes.id"), nullable=True, index=True,
-  )
-  note = relationship(AgentCoordinationNote)
-  body = association_proxy(
-    "note", "body", creator=lambda body: AgentCoordinationNote(body=body),
-  )
+  body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
@@ -1693,7 +1663,7 @@ class AgentWorkClaim(Base):
   owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
                     nullable=False, index=True)
   work_key = Column(String(256), nullable=False)
-  summary = Column(String(500), nullable=False)
+  summary = Column(Text, nullable=False)
   owner_chat_id = Column(
     String(64), ForeignKey("chats.id", ondelete="SET NULL"),
     nullable=True, index=True,
@@ -1703,7 +1673,7 @@ class AgentWorkClaim(Base):
   # Last-transfer projection, never the recovery source for revocations.
   # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
-  takeover_reason = Column(String(1000), nullable=True)
+  takeover_reason = Column(Text, nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
   notification_revision = Column(
     Integer, nullable=False, default=1, server_default="1"
@@ -1713,7 +1683,7 @@ class AgentWorkClaim(Base):
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
-  outcome = Column(String(1000), nullable=True)
+  outcome = Column(Text, nullable=True)
 
 
 class AgentWorkClaimRevocation(Base):

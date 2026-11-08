@@ -147,7 +147,6 @@ def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
   assert db.get(models.Chat, chat_id) is None
   assert db.get(models.Chat, peer.id) is not None
   assert db.query(models.AgentCoordinationMessage).count() == 0
-  assert db.query(models.AgentCoordinationNote).count() == 0
   assert db.query(models.ChatActivityPosition).count() == 0
 
 

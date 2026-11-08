@@ -57,9 +57,17 @@ class TextBudget:
   def take(self, text: str, read_full: str) -> str:
     """Return ``text`` whole, or a marked excerpt naming ``read_full``."""
     allowance = self.remaining if self.field is None else min(self.remaining, self.field)
-    shown = excerpt(text, allowance, read_full)
-    self.remaining -= min(len(text), max(allowance, 0))
-    return shown
+    if len(text) <= allowance:
+      self.remaining -= len(text)
+      return text
+    # The marker is part of the brief too: leave room for it in the head.
+    room = allowance - len(excerpt("x" * (len(text) + 1), 0, read_full)) - len(str(allowance))
+    return self.charge(excerpt(text, max(room, 0), read_full))
+
+  def charge(self, text: str) -> str:
+    """Count text the assembler adds itself, such as an omission marker."""
+    self.remaining -= len(text)
+    return text
 
   def take_ids(self, ids: list[str]) -> tuple[list[str], int]:
     """Keep ids while the budget lasts; return them and how many were left out."""

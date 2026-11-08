@@ -1886,7 +1886,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0099_app_chat_scope_starts",
     "0100_chat_branch_origin",
     "0101_claim_revocation_outbox",
-    "0102_peer_note_bodies_once",
+    "0102_work_claim_text",
   ]
   assert second == first
 
@@ -3604,9 +3604,8 @@ def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
   ]
   with eng.connect() as conn:
     rows = conn.execute(text(
-      "SELECT m.id, m.room_kind, m.room_id, m.from_chat_id, m.to_chat_id, "
-      "m.kind, n.body FROM agent_coordination_messages m "
-      "JOIN agent_coordination_notes n ON n.id = m.note_id"
+      "SELECT id, room_kind, room_id, from_chat_id, to_chat_id, kind, body "
+      "FROM agent_coordination_messages"
     )).mappings().all()
   assert rows == [{
     "id": "legacy-message",

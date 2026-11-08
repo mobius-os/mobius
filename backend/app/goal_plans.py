@@ -691,19 +691,25 @@ def serialize_plan(
     if parent_id is not None:
       children_by_parent.setdefault(parent_id, []).append(task["id"])
 
+  # Unsettled direct and inherited dependencies, memoized per parent chain so
+  # each task's own dependencies are checked once however deep groups nest.
+  waiting: dict[str, list[str]] = {}
+
   def effective_waiting(task: dict[str, Any]) -> list[str]:
-    dependencies: list[str] = []
-    current = task
-    while True:
-      dependencies.extend(current.get("depends_on", []))
-      parent_id = current.get("parent_id")
-      if parent_id is None:
-        break
-      current = by_id[parent_id]
-    return [
-      dependency for dependency in dict.fromkeys(dependencies)
-      if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES
-    ]
+    chain = []
+    current: str | None = task["id"]
+    while current is not None and current not in waiting:
+      chain.append(current)
+      current = by_id[current].get("parent_id")
+    inherited = [] if current is None else waiting[current]
+    for key in reversed(chain):
+      own = [
+        dependency for dependency in by_id[key].get("depends_on", [])
+        if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES
+      ]
+      inherited = list(dict.fromkeys(own + inherited)) if own else inherited
+      waiting[key] = inherited
+    return list(waiting[task["id"]])
   delegations = _delegation_tree(db, physical, root)
   active_helpers = _active_helper_nodes(delegations)
   active_execution_keys = [_helper_key(node) for node in active_helpers]

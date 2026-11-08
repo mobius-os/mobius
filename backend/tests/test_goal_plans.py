@@ -1777,3 +1777,30 @@ def test_a_five_thousand_task_plan_normalizes():
   tasks += [{"id": f"t{i}", "title": "Task", "status": "completed", "parent_id": "root",
              "depends_on": [f"t{i - 1}"] if i else []} for i in range(5000)]
   assert len(normalize_tasks(tasks)) == 5001
+
+
+def test_serialized_waiting_lists_stay_linear_in_deep_plans(monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  class Counting(frozenset):
+    checks = 0
+
+    def __contains__(self, value):
+      Counting.checks += 1
+      return frozenset.__contains__(self, value)
+
+  depth = 2000
+  tasks = [{"id": f"d{i}", "title": "Done", "status": "completed"} for i in range(depth)]
+  tasks += [{"id": f"g{i}", "title": "Group", "status": "pending",
+             **({"parent_id": f"g{i - 1}"} if i else {}), "depends_on": [f"d{i}"]}
+            for i in range(depth)]
+  monkeypatch.setattr(goal_plans, "_delegation_tree", lambda *args: [])
+  monkeypatch.setattr(goal_plans, "_active_helper_nodes", lambda nodes: [])
+  monkeypatch.setattr(goal_plans, "SETTLED_TASK_STATUSES", Counting(goal_plans.SETTLED_TASK_STATUSES))
+  root = SimpleNamespace(id="g", objective="O", revision=1, plan_json={"tasks": tasks})
+  physical = SimpleNamespace(id="r", root_run_id="r")
+  plan = goal_plans.serialize_plan(None, physical, root)
+  assert plan["summary"]["ready"] == [f"g{depth - 1}"]
+  assert all(task["waiting_on"] == [] for task in plan["tasks"])
+  assert Counting.checks < 20 * len(tasks)
