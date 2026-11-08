@@ -535,7 +535,7 @@ def test_snapshot_publishes_private_sounding_folders_without_secret_content(tmp_
 @pytest.mark.parametrize("name", [
   ".env", ".env.production", "prod.env", ".netrc", ".npmrc", "id_ed25519",
   "credentials.json", "secrets.json", "service-account.json", ".secret-key",
-  "service-token.txt", "tls.key", "server.pem", "release.jks",
+  "service-token.txt", "tls.key", "release.jks",
   "debug.keystore", "trust.bks", "keys.jceks", "client.p12", "client.pfx",
   "deploy.ppk", "vault.kdbx",
 ])
@@ -775,3 +775,25 @@ def test_snapshot_refuses_declared_icon_missing_from_snapshot(tmp_path):
 
   assert raised.value.code == "invalid_icon"
   assert "missing.png" in raised.value.detail
+
+
+def test_public_certificates_publish_and_private_keys_in_pem_are_refused(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"certs/cacert.pem": b"-----BEGIN CERTIFICATE-----\nMIIB\n"})
+  build_public_snapshot(app)
+
+  (tmp_path / "second").mkdir()
+  repo, app, _ = _app_repo(tmp_path / "second")
+  _commit_files(repo, app, {"certs/server.pem": b"-----BEGIN PRIVATE KEY-----\nMIIE"})
+  with pytest.raises(CommunityPublicationError):
+    build_public_snapshot(app)
+
+
+def test_openai_marker_scan_stays_linear_on_long_runs(tmp_path):
+  import time
+  from app import community_publish
+  text = "sk-" * 200_000
+  started = time.monotonic()
+  assert not any(pattern.search(text) for pattern in community_publish._SECRET_PATTERNS)
+  # The unbounded prefix took about a minute here; the bounded one is instant.
+  assert time.monotonic() - started < 5

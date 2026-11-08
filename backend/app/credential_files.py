@@ -14,12 +14,13 @@ _NAMES = frozenset({
   "credentials.json", "secrets.json", "service-account.json",
   "service-token.txt",
 })
-# Environment files under any name, private keys and certificates (.key and
-# .pem may be binary DER), and key stores and password databases a text scan
-# cannot read (.jks, .keystore, .bks, .jceks, .p12, .pfx, .kdbx) or that have
-# no PEM header (.ppk).
+# Environment files under any name, private keys (.key may be binary DER),
+# and key stores and password databases a text scan cannot read (.jks,
+# .keystore, .bks, .jceks, .p12, .pfx, .kdbx) or that have no PEM header
+# (.ppk). .pem is text: the content scan finds a private key inside it, and a
+# public certificate or CA bundle is ordinary app source.
 _SUFFIXES = (
-  ".env", ".key", ".pem", ".ppk",
+  ".env", ".key", ".ppk",
   ".jks", ".keystore", ".bks", ".jceks", ".p12", ".pfx", ".kdbx",
 )
 

@@ -36,6 +36,9 @@ MAX_FILES = 500
 EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', 'credentials', 'cli-auth', 'app-secrets'})
 # Saved app data is private by nature; credential files follow the shared rule.
 DATA_SUFFIXES = ('.sqlite', '.sqlite3', '.db')
+# A copy is an unreviewed snapshot, so it also skips .pem files, which can
+# hold a private key; Store publication reads their content instead.
+PEM_SUFFIXES = ('.pem',)
 SOURCE_SUFFIXES = frozenset({'.jsx', '.tsx', '.js', '.ts', '.html', '.htm', '.css', '.scss', '.json', '.md', '.txt', '.py', '.tex', '.bib', '.sty', '.cls', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.toml', '.yaml', '.yml'})
 WARNING = 'Only selected files are shared. Check them for private information or passwords written into the files. Chats, saved app data, and built previews are not included.'
 
@@ -64,7 +67,7 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower.endswith(DATA_SUFFIXES) or is_credential_file(part):
+    if lower in EXCLUDED or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES) or is_credential_file(part):
       return False
   return True
 

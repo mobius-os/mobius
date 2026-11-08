@@ -87,7 +87,9 @@ _SECRET_PATTERNS = (
   re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
   re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
   # Every OpenAI key format, old and new, embeds base64 "OpenAI".
-  re.compile(r"\bsk-[A-Za-z0-9_-]*T3BlbkFJ[A-Za-z0-9_-]{20,}"),
+  # The marker sits within the first few dozen characters of every OpenAI key;
+  # bounding the prefix keeps the scan linear on long runs of "sk-".
+  re.compile(r"\bsk-[A-Za-z0-9_-]{0,200}T3BlbkFJ[A-Za-z0-9_-]{20,}"),
   re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b"),
   re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
   # Slack incoming webhooks; documentation's all-X secret part is a placeholder.
