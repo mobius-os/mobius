@@ -439,7 +439,8 @@ def test_a_long_compile_refusal_survives_the_http_error_body_read(monkeypatch):
   text = str(caught.value)
   assert text.startswith("Refused (422): Compilation failed.\n[UNRESOLVED_IMPORT] missing-0")
   assert not text.lstrip("Refused (422): ").startswith("{")
-  assert len(text) < 5200
+  # The server caps the diagnostic; the client shows what it read whole.
+  assert text.endswith(stderr)
 
 
 def test_only_a_compile_refusal_appends_stderr():
@@ -986,13 +987,48 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
 
   with pytest.raises(ValueError) as target:
     control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
-  assert "list of at most 24 agent/chat ids" in str(target.value)
+  assert "list of agent/chat ids" in str(target.value)
   assert "secret-peer" not in str(target.value)
 
   send = control._TOOL_DEFINITIONS["send_agent_message"]
   followup = control._TOOL_DEFINITIONS["message_agent"]
   assert "finished helper's follow-up" in send["description"]
   assert "live helper" in followup["description"]
+
+
+def test_peer_notes_and_recipient_lists_are_not_capped(monkeypatch):
+  control = _control_module()
+  body = "Long coordination note " * 1000 + "END"
+  recipients = [f"peer-{index}" for index in range(40)]
+  sent = []
+  monkeypatch.setattr(
+    control, "_agent_api_call",
+    lambda _method, _path, payload, **_kwargs: sent.append(payload) or {"messages": []},
+  )
+
+  control._call_send_agent_message({"recipients": recipients, "body": body})
+
+  assert sent[0]["body"] == body
+  assert sent[0]["recipients"] == recipients
+  schema = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
+  assert "maxLength" not in schema["body"]
+  assert "maxItems" not in schema["recipients"]
+
+
+def test_agent_prose_fields_carry_no_guessed_length_budgets():
+  control = _control_module()
+  spawn = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]["properties"]
+  update = control._TOOL_DEFINITIONS["update_goal"]["inputSchema"]["properties"]
+  task = update["tasks"]["items"]["properties"]
+  assert "maxLength" not in spawn["task"]
+  assert "maxItems" not in update["tasks"]
+  assert "maxItems" not in update["finished_claims"]
+  for name in ("next_action", "cancel", "defer"):
+    assert "maxLength" not in update[name]
+  for name in ("reason", "efforts", "unmet_outcome"):
+    assert "maxLength" not in update["cannot_complete"]["properties"][name]
+  for name in ("title", "completion_condition", "note", "result"):
+    assert "maxLength" not in task[name]
 
 
 def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
@@ -1450,8 +1486,8 @@ def test_screenshot_in_a_read_only_sandbox_says_why_it_cannot_capture(monkeypatc
 
 
 @pytest.mark.parametrize(("body", "reason"), [
-  ('{"detail":{"code":"invalid_plan","message":"note for a must be at most 1000 characters","task_id":"a"}}',
-   "note for a must be at most 1000 characters"),
+  ('{"detail":{"code":"invalid_plan","message":"depends_on for a must be a list of ids","task_id":"a"}}',
+   "depends_on for a must be a list of ids"),
   ('{"detail":"A recipient is not an addressable Möbius peer."}',
    "A recipient is not an addressable Möbius peer."),
   ('{"detail":[{"loc":["body","tasks",0,"id"],"msg":"Field required"}]}',
@@ -1462,6 +1498,16 @@ def test_refusals_read_as_their_reason_not_the_wire_envelope(body, reason):
   control = _control_module()
   assert control._refusal_message(body) == reason
   assert "{" not in control._refusal_message(body) or body.startswith("<")
+
+
+def test_a_refusal_reason_is_shown_whole():
+  control = _control_module()
+  reason = "R" * 5000
+  assert control._refusal_message(json.dumps({"detail": reason})) == reason
+  issues = [{"loc": ["body", f"field{index}"], "msg": "Field required"} for index in range(8)]
+  rendered = control._refusal_message(json.dumps({"detail": issues}))
+  assert rendered.count("Field required") == 8
+  assert "field7: Field required" in rendered
 
 
 def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):

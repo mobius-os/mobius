@@ -286,6 +286,25 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
   ]
 
 
+def test_a_long_peer_note_is_stored_and_delivered_whole(client, auth, db):
+  chats, _ = _network_fixture(db)
+  nested_auth = _delegated_auth(db, chats["nested"].id, "nested-run")
+  body = "Long finding " * 2000 + "END"
+
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=nested_auth,
+    json={"recipients": [chats["outside_helper"].id], "body": body},
+  )
+
+  assert sent.status_code == 200, sent.text
+  stored = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.to_chat_id == chats["outside_helper"].id,
+  ).one()
+  assert stored.body == body
+  assert body in _next_turn_context(db, chats["outside_helper"], "outside-helper-next")
+
+
 def test_mixed_scope_direct_send_is_atomic_grouped_and_idempotent(
   client, auth, db, monkeypatch,
 ):
@@ -1328,8 +1347,8 @@ def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
   assert "messages_truncated" not in later_snapshot
 
 
-def test_next_turn_context_delivers_a_note_at_the_send_cap_whole(db):
-  """A note the sender was allowed to write arrives complete, never clipped."""
+def test_next_turn_context_delivers_a_long_note_whole(db):
+  """A long note arrives complete, never clipped."""
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
@@ -1338,7 +1357,7 @@ def test_next_turn_context_delivers_a_note_at_the_send_cap_whole(db):
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=previous_started + timedelta(seconds=100),
   )
-  body = ("Reply on the review: " + "detail " * 700)[:4000].rstrip() + " END"
+  body = "Reply on the review: " + "detail " * 3000 + "END"
   db.add_all([current, models.AgentCoordinationMessage(
     id="long-note", room_kind="workspace", room_id="1",
     from_chat_id=chats["outsider"].id, from_run_id="outside-run",

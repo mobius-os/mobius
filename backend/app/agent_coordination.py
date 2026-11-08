@@ -33,9 +33,8 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-# Notes are delivered whole: the send cap (4000 characters) already bounds
-# each one, and a clipped note forces the recipient to dig the rest out of the
-# activity log. The message count bounds the delivery.
+# Notes are delivered whole: a clipped note forces the recipient to dig the
+# rest out of the activity log. The message count bounds the delivery.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -1219,8 +1218,6 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
-  if len(clean_body) > 4000:
-    raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
 
 
@@ -2125,6 +2122,8 @@ def build_coordination_context_delivery(
       "expires_at": row.expires_at.isoformat() if row.expires_at else None,
     } for row in claim_rows]
   snapshot["work_claims"] = claims
+  # The roster repeats in every turn's context, so a long Goal objective is
+  # previewed here; list_agent_peers returns it whole.
   for peer in snapshot["collaborators"]:
     goal = peer.get("goal")
     if isinstance(goal, str) and len(goal) > 240:

@@ -1524,12 +1524,11 @@ def test_helper_without_a_goal_is_unfiled_and_cannot_name_a_task(db):
     helper_plan_task(db, "plain-chat", "r2")
 
 
-def test_a_task_note_preserves_full_text_within_its_bound():
-  from app.goal_plans import GoalPlanError, normalize_tasks
+def test_a_task_note_preserves_full_text():
+  from app.goal_plans import normalize_tasks
 
-  assert normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1000}])[0]["note"] == "n" * 1000
-  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
-    normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1001}])
+  note = "n" * 20_000
+  assert normalize_tasks([{"id": "a", "title": "A", "note": note}])[0]["note"] == note
 
 
 def test_runtime_goal_embeds_plan_and_idle_invalidation(client, owner_token, db, monkeypatch):
@@ -1684,34 +1683,28 @@ def test_shared_run_missing_position_message_does_not_use_legacy_receipt(
   assert cards[1][0]["completion_tool_use_id"] == "b-call"
 
 
-def test_plan_preserves_bounded_input_contract():
-  from app.goal_plans import GoalPlanError, normalize_tasks
-  import pytest
-  tasks = [{"id": f"t{i}", "title": "T" * 161, "status": "pending"}
-           for i in range(66)]
-  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
-  tasks[-1]["note"] = "N" * 1001
-  tasks[-1]["result"] = "R" * 1001
-  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
-    normalize_tasks(tasks)
-  tasks = tasks[:64]
-  with pytest.raises(GoalPlanError, match="at most 160 characters"):
-    normalize_tasks(tasks)
-  tasks = [{**task, "title": "Task"} for task in tasks]
-  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
-  with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
-    normalize_tasks(tasks)
-  tasks[-1]["depends_on"] = []
-  tasks[-1]["note"] = "N" * 1001
-  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
-    normalize_tasks(tasks)
+def test_large_plans_keep_every_task_and_full_text():
+  from app.goal_plans import normalize_tasks
+  tasks = [{"id": f"t{i}", "title": "T" * 500, "status": "pending"}
+           for i in range(200)]
+  tasks[-1]["depends_on"] = [f"t{i}" for i in range(150)]
+  tasks[-1]["completion_condition"] = "C" * 5000
+  tasks[-1]["note"] = "N" * 5000
+  tasks[-1]["result"] = "R" * 5000
+  normalized = normalize_tasks(tasks)
+  assert len(normalized) == 200
+  assert normalized[-1]["title"] == "T" * 500
+  assert normalized[-1]["depends_on"] == [f"t{i}" for i in range(150)]
+  assert normalized[-1]["completion_condition"] == "C" * 5000
+  assert normalized[-1]["note"] == "N" * 5000
+  assert normalized[-1]["result"] == "R" * 5000
 
 
-def test_maximum_bounded_dependency_chain_is_valid():
+def test_a_long_dependency_chain_is_valid():
   from app.goal_plans import normalize_tasks
   tasks = [{"id": f"t{i}", "title": "Task", "status": "pending",
-            "depends_on": [f"t{i-1}"] if i else []} for i in range(64)]
-  assert len(normalize_tasks(tasks)) == 64
+            "depends_on": [f"t{i-1}"] if i else []} for i in range(500)]
+  assert len(normalize_tasks(tasks)) == 500
 
 
 def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(

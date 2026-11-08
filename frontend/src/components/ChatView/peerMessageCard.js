@@ -1,9 +1,9 @@
 // Pure view model for the peer-message tool card, keeping bounds and shapes
 // directly testable without mounting React. Mirrors memoryRecallCard.js.
 
-// Preserve the full note (the platform caps a note at 4,000 chars) so the
-// expandable card shows the whole thing in its scrollable detail region — the
-// owner never sees a silent excerpt. body_truncated only trips past this bound.
+// Mirrors the backend transcript preview bound (app/peer_message.py). A longer
+// note arrives as an excerpt with body_truncated set, which the card labels,
+// so the owner never sees a silent excerpt.
 const MAX_BODY_CHARS = 4000
 const MAX_NAME_CHARS = 120
 const MAX_NOTES = 8

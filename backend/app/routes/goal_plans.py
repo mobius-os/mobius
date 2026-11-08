@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/chats", tags=["goal-plans"])
 class GoalPromotionRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  objective: str = Field(min_length=1, max_length=1000)
+  objective: str = Field(min_length=1)
 
   @field_validator("objective")
   @classmethod
@@ -224,9 +224,9 @@ async def clear_presented_goal(
 
 class CannotCompleteOutcome(BaseModel):
   model_config = ConfigDict(extra="forbid")
-  reason: str = Field(min_length=1, max_length=1500)
-  efforts: str = Field(min_length=1, max_length=2000)
-  unmet_outcome: str = Field(min_length=1, max_length=1000)
+  reason: str = Field(min_length=1)
+  efforts: str = Field(min_length=1)
+  unmet_outcome: str = Field(min_length=1)
 
 
 class GoalUpdateRequest(BaseModel):
@@ -235,19 +235,19 @@ class GoalUpdateRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
   goal_id: str | None = Field(default=None, min_length=1, max_length=64)
   tasks: list[dict[str, Any]] | None = Field(default=None, min_length=1)
-  next_action: str | None = Field(default=None, min_length=1, max_length=2000)
+  next_action: str | None = Field(default=None, min_length=1)
   complete: bool | str | None = None
   cannot_complete: CannotCompleteOutcome | None = None
-  cancel: str | None = Field(default=None, min_length=1, max_length=4000)
-  defer: str | None = Field(default=None, min_length=1, max_length=2000)
-  finished_claims: list[str] = Field(default_factory=list, max_length=50)
+  cancel: str | None = Field(default=None, min_length=1)
+  defer: str | None = Field(default=None, min_length=1)
+  finished_claims: list[str] = Field(default_factory=list)
 
   @field_validator("complete", mode="before")
   @classmethod
   def completion_signal(cls, value):
     if value is None or value is True:
       return value
-    if isinstance(value, str) and value.strip() and len(value) <= 4000:
+    if isinstance(value, str) and value.strip():
       return value
     raise ValueError("complete must be true")
 

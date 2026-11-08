@@ -53,7 +53,7 @@ class DelegationSubmit(BaseModel):
   app_id: int | None = Field(default=None, gt=0)
   parent_chat_id: str = Field(min_length=1, max_length=64)
   task_key: str = Field(min_length=1, max_length=128)
-  prompt: str = Field(min_length=1, max_length=200_000)
+  prompt: str = Field(min_length=1)
   provider: str
   model: str | None = Field(default=None, max_length=256)
   effort: str | None = Field(default=None, max_length=32)
@@ -552,7 +552,7 @@ async def cancel_delegation(
 
 
 class DelegationMessage(BaseModel):
-  message: str = Field(min_length=1, max_length=200_000)
+  message: str = Field(min_length=1)
   # Correlates an answer with the helper's exact question; required while the
   # helper is waiting, so a retried answer can never become a fresh follow-up.
   question_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -833,8 +833,8 @@ def ask_parent(
 
 
 class DelegationQuestionAsk(BaseModel):
-  question: str = Field(min_length=1, max_length=200_000)
-  options: list[str] = Field(default_factory=list, max_length=16)
+  question: str = Field(min_length=1)
+  options: list[str] = Field(default_factory=list)
 
   @field_validator("question")
   @classmethod
@@ -850,8 +850,6 @@ class DelegationQuestionAsk(BaseModel):
     cleaned = [value.strip() for value in values]
     if any(not value for value in cleaned):
       raise ValueError("options must not be empty")
-    if any(len(value) > 200_000 for value in cleaned):
-      raise ValueError("options must be at most 200000 characters")
     return cleaned
 
 

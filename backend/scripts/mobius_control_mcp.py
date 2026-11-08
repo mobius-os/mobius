@@ -178,15 +178,15 @@ _GOAL_TASK_SCHEMA = {
   "type": "object",
   "properties": {
     "id": {"type": "string", "description": "Stable short id, e.g. build."},
-    "title": {"type": "string", "maxLength": 160},
+    "title": {"type": "string"},
     "status": {"type": "string", "enum": [
       "pending", "running", "completed", "blocked", "failed", "cancelled",
     ]},
     "depends_on": {"type": "array", "items": {"type": "string"}},
     "parent_id": {"type": "string"},
-    "completion_condition": {"type": "string", "maxLength": 1000},
-    "note": {"type": "string", "maxLength": 1000},
-    "result": {"type": "string", "maxLength": 1000},
+    "completion_condition": {"type": "string"},
+    "note": {"type": "string"},
+    "result": {"type": "string"},
     "progress": {
       "type": "object",
       "properties": {"current": {"type": "integer"}, "total": {"type": "integer"}},
@@ -197,7 +197,7 @@ _GOAL_TASK_SCHEMA = {
   "required": ["id"],
   "additionalProperties": False,
 }
-_GOAL_TASKS_SCHEMA = {"type": "array", "items": _GOAL_TASK_SCHEMA, "minItems": 1, "maxItems": 64}
+_GOAL_TASKS_SCHEMA = {"type": "array", "items": _GOAL_TASK_SCHEMA, "minItems": 1}
 
 
 def _helper_module(filename: str, module_name: str) -> ModuleType:
@@ -287,21 +287,21 @@ def _refusal_message(raw: str) -> str:
   try:
     detail = json.loads(raw).get("detail", raw)
   except (json.JSONDecodeError, AttributeError):
-    return raw.strip()[:1000] or "no reason given"
+    return raw.strip() or "no reason given"
   if isinstance(detail, dict):
     diagnostic = detail.get("stderr") if detail.get("code") == "compile_failed" else None
     detail = detail.get("message") or detail.get("code") or json.dumps(detail)
     if isinstance(diagnostic, str) and diagnostic.strip():
       # A compile refusal's reason and location live in its sanitized,
       # server-capped diagnostic; the message alone only says it failed.
-      return f"{str(detail).strip()[:1000]}\n{diagnostic.strip()[:4000]}"
+      return f"{str(detail).strip()}\n{diagnostic.strip()}"
   elif isinstance(detail, list):
     detail = "; ".join(
       " ".join(str(part) for part in (issue.get("loc") or [])[1:]) + ": " + str(issue.get("msg"))
       if isinstance(issue, dict) else str(issue)
-      for issue in detail[:5]
+      for issue in detail
     )
-  return str(detail).strip()[:1000] or "no reason given"
+  return str(detail).strip() or "no reason given"
 
 
 def _agent_api_call(
@@ -343,8 +343,9 @@ def _agent_api_json(
     with urlopen(request, timeout=timeout) as response:
       raw = response.read()
   except HTTPError as exc:
-    # Large enough for a whole structured refusal (a compile diagnostic is
-    # ~4 KB plus its envelope); _refusal_message caps what is rendered.
+    # Transport bound: large enough for a whole structured refusal (a
+    # compile diagnostic is ~4 KB plus its envelope); the reason inside it is
+    # shown whole.
     raw = exc.read(65536).decode("utf-8", errors="replace")
     raise RuntimeError(
       f"Refused ({exc.code}): {_refusal_message(raw)}"
@@ -755,11 +756,10 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   recipients = arguments.get("recipients", [])
   if (
     not isinstance(recipients, list)
-    or len(recipients) > 24
     or any(not isinstance(value, str) or not value for value in recipients)
   ):
     raise ValueError(
-      "recipients must be a list of at most 24 agent/chat ids from "
+      "recipients must be a list of agent/chat ids from "
       "list_agent_peers; for a finished helper use message_agent(helper, message)"
     )
   broadcast = arguments.get("broadcast", False)
@@ -781,8 +781,6 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   body = arguments.get("body")
   if not isinstance(body, str) or not body.strip():
     raise ValueError("body must be a non-empty string")
-  if len(body.strip()) > 4000:
-    raise ValueError("body must be 4000 characters or fewer")
   send_id = arguments.get("send_id")
   if send_id is not None and (
     not isinstance(send_id, str)
@@ -1409,7 +1407,7 @@ _TOOL_DEFINITIONS = {
           "description": "Short stable name, e.g. review-auth-flow. Reuse only for the identical task and settings; use message_agent for a finished helper's follow-up.",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         },
-        "task": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "task": {"type": "string", "minLength": 1},
         "provider": {
           "type": "string", "enum": ["claude", "codex", "mobius"],
           "description": "Omit to use this chat's provider.",
@@ -1809,7 +1807,7 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "tasks": _GOAL_TASKS_SCHEMA,
-        "next_action": {"type": "string", "maxLength": 2000, "description": "Next step for unfinished work. Do not combine with complete."},
+        "next_action": {"type": "string", "description": "Next step for unfinished work. Do not combine with complete."},
         "complete": {
           "type": "boolean", "enum": [True],
           "description": "Set true after verifying the whole outcome. No separate success summary. Keep useful verification evidence in task results or the chat checkpoint; communicate the outcome and any consequential caveats in your normal final reply. Do not combine with next_action; final task edits may share this call.",
@@ -1818,17 +1816,17 @@ _TOOL_DEFINITIONS = {
           "type": "object", "additionalProperties": False,
           "required": ["reason", "efforts", "unmet_outcome"],
           "properties": {
-            "reason": {"type": "string", "minLength": 1, "maxLength": 1500},
-            "efforts": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "unmet_outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "reason": {"type": "string", "minLength": 1},
+            "efforts": {"type": "string", "minLength": 1},
+            "unmet_outcome": {"type": "string", "minLength": 1},
           },
         },
-        "cancel": {"type": "string", "minLength": 1, "maxLength": 4000,
+        "cancel": {"type": "string", "minLength": 1,
                    "description": "Owner-called-off reason, not an unreachable-work shortcut."},
-        "defer": {"type": "string", "minLength": 1, "maxLength": 2000,
+        "defer": {"type": "string", "minLength": 1,
                   "description": "Why remaining work is deferred, after other authorized work is done. Quietly holds this Goal, not an outcome or a new question; tasks may share this atomic call. Do not combine with next_action or outcomes."},
         "finished_claims": {
-          "type": "array", "items": {"type": "string"}, "maxItems": 50,
+          "type": "array", "items": {"type": "string"},
           "description": (
             "With complete only: exact work_keys performed, from this Goal's open "
             "claims or same-chat Goal-less claims, not claim ids or invented names. "
@@ -1973,7 +1971,6 @@ _TOOL_DEFINITIONS = {
         "recipients": {
           "type": "array",
           "items": {"type": "string"},
-          "maxItems": 24,
           "description": "Agent/chat ids from list_agent_peers for a direct note, including a live helper's peer chat id; not spawn_agent helper names or delegation ids.",
         },
         "broadcast": {
@@ -1996,7 +1993,6 @@ _TOOL_DEFINITIONS = {
         },
         "body": {
           "type": "string",
-          "maxLength": 4000,
           "description": (
             "One concise note. Cite files by path; never paste their contents."
           ),

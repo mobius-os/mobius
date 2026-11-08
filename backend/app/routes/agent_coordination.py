@@ -49,11 +49,11 @@ router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"]
 class AgentMessageCreate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  recipients: list[str] = Field(default_factory=list, max_length=24)
+  recipients: list[str] = Field(default_factory=list)
   broadcast: bool = False
   kind: str = "note"
   delivery: str = "next_turn"
-  body: str = Field(min_length=1, max_length=4000)
+  body: str = Field(min_length=1)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("body")
@@ -228,7 +228,7 @@ async def send_current_message(
   )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated up to 24 times.
+  # owner-visible activity card needs, not the body repeated once per recipient.
   result = {
     "messages": [model_message(row) for row in rows[:1]],
     "recipient_count": len(rows),

@@ -30,11 +30,6 @@ TASK_STATUSES = frozenset({
 })
 ACTIVE_TASK_STATUSES = frozenset({"running"})
 SETTLED_TASK_STATUSES = frozenset({"completed", "cancelled"})
-MAX_TASKS = 64
-MAX_DEPENDENCIES = 16
-MAX_TITLE = 160
-MAX_NOTE = 1000
-MAX_RESULT = 1000
 
 
 class GoalPlanError(ValueError):
@@ -54,7 +49,7 @@ class GoalPlanConflict(RuntimeError):
   """Another writer advanced the plan revision first."""
 
 
-def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
+def _clean_text(value: Any, *, field: str, required: bool) -> str:
   if value is None and not required:
     return ""
   if not isinstance(value, str):
@@ -62,8 +57,6 @@ def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
   cleaned = " ".join(value.split())
   if required and not cleaned:
     raise GoalPlanError(f"{field} must not be empty")
-  if len(cleaned) > maximum:
-    raise GoalPlanError(f"{field} must be at most {maximum} characters")
   return cleaned
 
 
@@ -78,8 +71,6 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   """
   if not isinstance(raw_tasks, list) or not raw_tasks:
     raise GoalPlanError("a goal plan needs at least one task")
-  if len(raw_tasks) > MAX_TASKS:
-    raise GoalPlanError(f"a goal plan supports at most {MAX_TASKS} tasks")
 
   tasks: list[dict[str, Any]] = []
   ids: set[str] = set()
@@ -104,10 +95,6 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     ):
       raise GoalPlanError(f"depends_on for {task_id} must be a list of ids")
     depends_on = list(dict.fromkeys(depends_on))
-    if len(depends_on) > MAX_DEPENDENCIES:
-      raise GoalPlanError(
-        f"{task_id} supports at most {MAX_DEPENDENCIES} dependencies"
-      )
     progress = raw.get("progress")
     normalized_progress = None
     if progress is not None:
@@ -127,8 +114,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     task = {
       "id": task_id,
       "title": _clean_text(
-        raw.get("title"), field=f"title for {task_id}",
-        maximum=MAX_TITLE, required=True,
+        raw.get("title"), field=f"title for {task_id}", required=True,
       ),
       "status": status,
       "depends_on": depends_on,
@@ -140,20 +126,17 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       task["parent_id"] = parent_id
     completion_condition = _clean_text(
       raw.get("completion_condition"),
-      field=f"completion_condition for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      field=f"completion_condition for {task_id}", required=False,
     )
     if completion_condition:
       task["completion_condition"] = completion_condition
     note = _clean_text(
-      raw.get("note"), field=f"note for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      raw.get("note"), field=f"note for {task_id}", required=False,
     )
     if note:
       task["note"] = note
     result = _clean_text(
-      raw.get("result"), field=f"result for {task_id}",
-      maximum=MAX_RESULT, required=False,
+      raw.get("result"), field=f"result for {task_id}", required=False,
     )
     if result:
       task["result"] = result
