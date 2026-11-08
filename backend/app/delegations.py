@@ -720,8 +720,8 @@ def _assistant_result_from_newest(messages, *, run_ids: set[str] | None = None) 
       return "\n\n".join([content.strip(), *later_error])
   return "\n\n".join(later_error)
 
-_SAME_ATTEMPT_RESUME_REASONS = frozenset({
-  "restart", "usage_limit", "memory", "storage", "model_capacity", "compaction",
+_SAME_ATTEMPT_RESUME_REASONS = models.RESOURCE_PARK_REASONS | frozenset({
+  "restart", "usage_limit", "model_capacity", "compaction",
 })
 
 

@@ -249,3 +249,29 @@ async def test_storage_override_does_not_override_critical_memory():
       status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
     )
   assert waiting.value.resource == "memory"
+
+
+@pytest.mark.asyncio
+async def test_critical_process_headroom_defers_new_turns_before_the_task_cap():
+  """A burst of agents past the thread cap took every route down; wait instead."""
+  async def sweep():
+    raise AssertionError("scratch cleanup frees no threads")
+
+  status = {
+    "facts": {"disk": {"free_bytes": 8 * 1024 * 1024 * 1024}},
+    "pressure": {
+      "disk": {"state": "normal"},
+      "memory": {"state": "normal", "working_set_ratio": 0.4, "critical_at_ratio": 0.9},
+      "processes": {"state": "critical", "current_tasks": 870, "limit_tasks": 1000},
+    },
+  }
+  with pytest.raises(AgentTurnDeferred, match=r"870 of its 1000 processes") as raised:
+    await require_agent_turn_admission(
+      "/data", status_reader=lambda _path: status, scratch_sweeper=sweep,
+    )
+  assert raised.value.resource == "processes"
+
+  status["pressure"]["processes"]["state"] = "constrained"
+  await require_agent_turn_admission(
+    "/data", status_reader=lambda _path: status, scratch_sweeper=sweep,
+  )

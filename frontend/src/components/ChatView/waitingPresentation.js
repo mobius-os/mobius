@@ -31,7 +31,7 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
+export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage', 'processes'])
 
 export function isResourcePause(block) {
   return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
@@ -39,13 +39,15 @@ export function isResourcePause(block) {
 
 export function resourcePausePresentation(block, handoff = null) {
   const kind = block?.pause?.kind
-  // A memory/storage park keeps its one saved card while the server keeps
+  // A platform-resource park keeps its one saved card while the server keeps
   // moving the next check later, so the time saved on the card goes stale.
   const next = RESOURCE_PAUSE_KINDS.has(kind)
     ? null
     : clockLabel(pauseTiming(block?.pause).checkAt)
   const storage = kind === 'storage'
   const memory = kind === 'memory'
+  const processes = kind === 'processes'
+  const resource = RESOURCE_PAUSE_KINDS.has(kind)
   const limit = ['rate_limit', 'usage_limit', 'limit'].includes(kind)
   const automatic = handoff?.kind === 'automatic' && handoff.reason === kind
   const restoring = handoff?.kind === 'automatic' && handoff.reason === 'restoring_edits'
@@ -56,20 +58,22 @@ export function resourcePausePresentation(block, handoff = null) {
     manual,
     summary: storage ? 'Waiting for storage headroom'
       : memory ? 'Waiting for memory to settle'
-        : limit ? 'Provider usage limit' : 'Model capacity',
+        : processes ? 'Waiting for process headroom'
+          : limit ? 'Provider usage limit' : 'Model capacity',
     next: restoring ? 'restoring local work'
       : restart ? 'server restart needed'
       : handoff?.kind === 'owner_input' ? 'answer needed'
       : manual
       ? 'manual recovery' : next ? `checks again ${next}` : 'checks again automatically',
-    owner: storage || memory ? 'Möbius resource monitor' : 'Provider availability',
+    owner: resource ? 'Möbius resource monitor' : 'Provider availability',
     pressure: storage ? 'Storage reached its measured critical boundary'
       : memory ? 'Memory reached its measured critical boundary'
-        : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
+        : processes ? 'Running processes and threads reached their measured critical boundary'
+          : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
     wakeUp: restoring ? 'Möbius is restoring local work; this chat continues after that work is restored and loaded'
       : restart ? 'Waiting for a server restart to load restored work; use the saved Restart card'
       : blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'
-      : blocked && ['memory', 'storage'].includes(kind) ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
+      : blocked && resource ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
       : kind === 'model_capacity' && !automatic ? 'Automatic retries are unavailable; choose another model and Resume'
       : limit && !automatic ? handoff?.reason === 'manual_resume'
         ? 'Enable automatic continuation or choose another model and Resume'

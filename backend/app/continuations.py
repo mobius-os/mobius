@@ -351,6 +351,7 @@ def continuation_protocol_source(
     "usage_limit": "Resume the interrupted owner work after a provider-limit check. Provider availability is not yet confirmed.",
     "memory": "Resume the interrupted owner work now that memory pressure has cleared.",
     "storage": "Resume the interrupted owner work now that storage pressure has cleared.",
+    "processes": "Resume the interrupted owner work now that process and thread headroom has cleared.",
     "compaction": (
       "The oversized provider session was replaced using the saved detailed handoff "
       "and uncovered conversation. Continue the interrupted work from that briefing, "

@@ -114,7 +114,7 @@ import BranchOrigin from './BranchOrigin.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime, isProviderLimitPause, pauseTiming } from './resetTime.js'
-import { isResourcePause } from './waitingPresentation.js'
+import { isResourcePause, resourcePausePresentation } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
@@ -5726,9 +5726,7 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (serverHandoff?.kind === 'recovery') return 'This chat needs recovery. Review the saved recovery card.'
     if (resourcePause) {
-      return resourcePause.pause?.kind === 'storage'
-        ? 'Waiting for storage headroom. This chat will resume automatically.'
-        : 'Waiting for memory to settle. This chat will resume automatically.'
+      return `${resourcePausePresentation(resourcePause).summary}. This chat will resume automatically.`
     }
     if (modelCapacityPause) {
       const label = formatResetTime(pendingLimitCheckAt)

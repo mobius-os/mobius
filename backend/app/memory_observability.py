@@ -219,6 +219,28 @@ def _pressure_fields(text: str | None) -> dict[str, dict[str, float | int]]:
   return result
 
 
+def cgroup_tasks_snapshot(
+  *,
+  proc_root: Path = Path("/proc"),
+  cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> dict[str, Any]:
+  """Return the cgroup-v2 task count and cap (``pids.current``/``pids.max``).
+
+  Every thread counts as a task, so a burst of agent CLIs can exhaust this cap
+  while memory and disk look healthy; past it, no process in the container can
+  start a thread. ``limit_tasks`` is ``None`` when the cgroup is uncapped.
+  """
+  root = _cgroup_dir(proc_root=proc_root, cgroup_root=cgroup_root)
+  current = _read_int(root / "pids.current")
+  if current is None:
+    return {"available": False}
+  return {
+    "available": True,
+    "current_tasks": current,
+    "limit_tasks": _read_int(root / "pids.max"),
+  }
+
+
 def cgroup_oom_kill_count(
   *,
   proc_root: Path = Path("/proc"),

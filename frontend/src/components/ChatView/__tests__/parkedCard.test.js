@@ -7,6 +7,7 @@ import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mj
 import { upsertTerminalErrorItem } from '../streamReducers.js'
 import { ownsRecoveryAction } from '../recoveryCard.js'
 import { isProviderLimitPause, pauseTiming } from '../resetTime.js'
+import { isResourcePause, resourcePausePresentation } from '../waitingPresentation.js'
 
 const vite = await createSsrRenderServer()
 const { default: ErrorCard } = await vite.ssrLoadModule(
@@ -96,7 +97,7 @@ test('provider date beyond bounded check remains separate and elapsed checks do 
 
 test('resource and model-capacity checks never claim provider quota resets', () => {
   const check_at = '2099-09-14T12:00:00Z'
-  for (const kind of ['memory', 'storage', 'model_capacity']) {
+  for (const kind of ['memory', 'storage', 'processes', 'model_capacity']) {
     const block = { type: 'error', pause: { kind, check_at } }
     const html = renderToStaticMarkup(createElement(ErrorCard, { block }))
     assert.doesNotMatch(html, /Provider reports the limit resets|Provider reset time unknown|Rate limit/)
@@ -130,6 +131,7 @@ for (const [label, overrides, kind] of [
   ['historical card', { isLastMsg: false }, 'limit'],
   ['memory wait', {}, 'memory'],
   ['storage wait', {}, 'storage'],
+  ['process wait', {}, 'processes'],
 ]) {
   test(`early retry does not bypass ${label} ownership`, () => {
     const html = renderToStaticMarkup(createElement(MsgContent, {
@@ -625,8 +627,8 @@ test('resource parks appear in the standard Waiting surface', () => {
     'the shared Waiting surface should explain resource ownership and wake-up')
   assert.match(chatView, /const hasPendingResume = !!pendingResumeBlock[\s\S]*&& !resourcePause/,
     'an automatically managed resource wait must not advertise a manual resume nudge')
-  assert.match(chatView, /Waiting for storage headroom\. This chat will resume automatically\./,
-    'the screen-reader status must describe the actual automatic handoff')
+  assert.match(chatView, /resourcePausePresentation\(resourcePause\)\.summary\}\. This chat will resume automatically\./,
+    'the screen-reader status must describe the actual automatic handoff for every resource kind')
 })
 
 test('the park card keeps provider mechanics behind progressive disclosure', () => {
@@ -830,4 +832,14 @@ test('an error card’s Copy hands its button the raw error message', () => {
   walk(ErrorCard({ block: { type: 'error', message } }))
   assert.equal(found.length, 1)
   assert.deepEqual(found[0].read({}), { plainText: message })
+})
+
+test('process-headroom waits present as an automatic Möbius resource wait', () => {
+  const block = { type: 'error', resumable: true, pause: { kind: 'processes' } }
+  assert.equal(isResourcePause(block), true)
+  const view = resourcePausePresentation(block)
+  assert.equal(view.summary, 'Waiting for process headroom')
+  assert.equal(view.owner, 'Möbius resource monitor')
+  assert.equal(view.manual, false)
+  assert.equal(view.wakeUp, 'This chat resumes automatically when pressure clears')
 })

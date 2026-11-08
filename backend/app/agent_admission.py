@@ -74,9 +74,26 @@ def _storage_deferral(status: dict[str, Any]) -> str | None:
   )
 
 
+def _process_deferral(status: dict[str, Any]) -> str | None:
+  """Why the container's process/thread cap requires a pause, or ``None``.
+
+  Past the cgroup task cap no process can start a thread, so the server's own
+  routes fail along with every running turn. Holding new turns short of the cap
+  lets running work finish instead of taking the whole instance down.
+  """
+  processes = _section(status, "pressure", "processes")
+  if processes.get("state") != "critical":
+    return None
+  return (
+    f"{processes['current_tasks']} of its {processes['limit_tasks']} "
+    "processes and threads in use"
+  )
+
+
 def _deferral(status: dict[str, Any], *, allow_low_storage: bool = False) -> AgentTurnDeferred | None:
-  """One attempt: the owner-facing deferral for measured critical memory or
-  storage, or ``None`` when the turn may start. Unknown telemetry fails open."""
+  """One attempt: the owner-facing deferral for measured critical memory,
+  storage, or process headroom, or ``None`` when the turn may start. Unknown
+  telemetry fails open."""
   memory_reason = _memory_deferral(status)
   if memory_reason is not None:
     return AgentTurnDeferred(
@@ -91,6 +108,13 @@ def _deferral(status: dict[str, Any], *, allow_low_storage: bool = False) -> Age
       f"This turn is waiting because Möbius has {storage_reason}. It will "
       "continue automatically after cleanup frees space.",
       resource="storage",
+    )
+  process_reason = _process_deferral(status)
+  if process_reason is not None:
+    return AgentTurnDeferred(
+      f"This turn is waiting because Möbius has {process_reason}. It will "
+      "continue automatically as other agent work finishes.",
+      resource="processes",
     )
   return None
 

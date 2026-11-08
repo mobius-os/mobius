@@ -9,6 +9,7 @@ from app.memory_observability import (
   _process_identity,
   allocation_report,
   cgroup_memory_snapshot,
+  cgroup_tasks_snapshot,
   estimate_payload_bytes,
   memory_map_summary,
   process_memory_snapshot,
@@ -265,3 +266,20 @@ def test_checkpoint_once_collapses_repeated_boundary(monkeypatch):
   assert first["context"] == {"stage": "first"}
   assert second is None
   assert process_calls == 1
+
+
+def test_cgroup_task_snapshot_reads_current_count_and_cap(tmp_path):
+  proc = tmp_path / "proc"
+  (proc / "self").mkdir(parents=True)
+  (proc / "self" / "cgroup").write_text("0::/\n")
+  cgroup = tmp_path / "cgroup"
+  cgroup.mkdir()
+  (cgroup / "pids.current").write_text("123\n")
+  (cgroup / "pids.max").write_text("1000\n")
+  assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=cgroup) == {
+    "available": True, "current_tasks": 123, "limit_tasks": 1000,
+  }
+  (cgroup / "pids.max").write_text("max\n")
+  assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=cgroup)["limit_tasks"] is None
+  (cgroup / "pids.current").unlink()
+  assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=cgroup) == {"available": False}
