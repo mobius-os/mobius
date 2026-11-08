@@ -534,6 +534,7 @@ def test_snapshot_publishes_private_sounding_folders_without_secret_content(tmp_
 @pytest.mark.parametrize("folder", ["", "src/", "secrets/", "credentials/", "config/"])
 @pytest.mark.parametrize("name", [
   ".env", ".env.production", "prod.env", ".netrc", ".npmrc", "id_ed25519",
+  "credentials", "secrets", ".git-credentials", ".aws/credentials",
   "credentials.json", "secrets.json", "service-account.json", ".secret-key",
   "service-token.txt", "tls.key", "release.jks",
   "debug.keystore", "trust.bks", "keys.jceks", "client.p12", "client.pfx",

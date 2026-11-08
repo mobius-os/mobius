@@ -67,9 +67,10 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES) or is_credential_file(part):
+    if lower in EXCLUDED or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES):
       return False
-  return True
+  # The shared rule names credential files; private folders are EXCLUDED above.
+  return not is_credential_file(rel.name)
 
 
 def digest(value: dict) -> str:

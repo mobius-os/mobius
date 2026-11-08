@@ -8,7 +8,10 @@ caller's content scan's job, and no name rule catches every secret.
 """
 from __future__ import annotations
 
+# Bare "credentials" and "secrets" are file names here (for example
+# ~/.aws/credentials); folders with those names are judged by their files.
 _NAMES = frozenset({
+  "credentials", "secrets", ".git-credentials",
   ".netrc", ".npmrc", ".pypirc", ".secret-key",
   "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
   "credentials.json", "secrets.json", "service-account.json",
