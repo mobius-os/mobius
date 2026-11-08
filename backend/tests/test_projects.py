@@ -1338,7 +1338,7 @@ def test_project_retention_does_not_touch_root_when_database_commit_fails(
   assert db.get(models.Chat, chat["id"]) is not None
 
 
-def test_project_retention_retries_native_orphan_after_filesystem_failure(
+def test_project_retention_finishes_interrupted_delete_on_next_pass(
   client, auth, db, monkeypatch,
 ):
   project = client.post(
@@ -1347,22 +1347,41 @@ def test_project_retention_retries_native_orphan_after_filesystem_failure(
   ).json()
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
+  retired = root.with_name(".purging-" + root.name)
   chat = _create_project_chat(client, auth, project, "Retry cleanup chat")
   _expire_project_pair(db, project["id"], chat["id"])
 
   import app.project_retention as retention
-  real_remove = retention._remove_owned_root
+  real_rmtree = retention.shutil.rmtree
   monkeypatch.setattr(
-    retention, "_remove_owned_root",
-    lambda _root: (_ for _ in ()).throw(OSError("filesystem busy")),
+    retention.shutil, "rmtree",
+    lambda _path: (_ for _ in ()).throw(OSError("filesystem busy")),
   )
   assert purge_expired_project_tombstones(db) == [project["id"]]
   assert db.get(models.Project, project["id"]) is None
-  assert root.is_dir()
-
-  monkeypatch.setattr(retention, "_remove_owned_root", real_remove)
-  assert purge_expired_project_tombstones(db) == []
   assert not root.exists()
+  assert retired.is_dir()
+
+  monkeypatch.setattr(retention.shutil, "rmtree", real_rmtree)
+  assert purge_expired_project_tombstones(db) == []
+  assert not retired.exists()
+
+
+def test_retention_never_deletes_project_folders_the_database_does_not_know(db):
+  """An empty, restored, or misdirected database must not erase owner files."""
+  data_root = Path(os.environ["DATA_DIR"])
+  project_root = data_root / "projects" / str(uuid.uuid4())
+  snapshot_root = data_root / "shared" / "app-instances" / str(uuid.uuid4())
+  for root in (project_root, snapshot_root / "build"):
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("only copy")
+  assert db.query(models.Project).count() == 0
+
+  purge_expired_chat_tombstones(db)
+  purge_expired_project_tombstones(db)
+
+  assert (project_root / "README.md").read_text() == "only copy"
+  assert (snapshot_root / "build" / "README.md").read_text() == "only copy"
 
 
 @pytest.fixture

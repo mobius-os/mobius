@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -84,51 +83,61 @@ def _owned_native_root(project_id: str, root_path: str) -> Path | None:
   return expected
 
 
-def _remove_owned_root(root: Path) -> None:
+RETIRED_ROOT_PREFIX = ".purging-"
+
+
+def retire_owned_root(root: Path) -> None:
+  """Delete an owned root whose database row has already committed away.
+
+  The root is renamed to a ``.purging-`` sibling before deletion, so a delete
+  that fails or is interrupted leaves an explicitly marked leftover for
+  ``sweep_retired_roots`` to finish. Leftover cleanup never infers ownership
+  from a missing database row: an empty, restored, or misdirected database
+  would otherwise erase every owner folder it does not know about. If the
+  rename itself fails, the folder keeps its name and stays on disk.
+  """
   if root.is_symlink():
     root.unlink(missing_ok=True)
-  elif root.exists():
-    shutil.rmtree(root)
-
-
-def _sweep_orphaned_native_roots(db: Session) -> None:
-  """Retry cleanup left after a crash between DB commit and filesystem delete."""
-  data_root = Path(get_settings().data_dir).resolve()
-  projects_root = data_root / "projects"
-  if not projects_root.is_dir() or projects_root.is_symlink():
     return
-  live_ids = {
-    str(project_id)
-    for (project_id,) in db.query(models.Project.id).all()
-  }
-  for child in projects_root.iterdir():
-    try:
-      uuid.UUID(child.name)
-    except (ValueError, AttributeError):
+  if not root.exists():
+    return
+  retired = root.with_name(RETIRED_ROOT_PREFIX + root.name)
+  if retired.exists():
+    shutil.rmtree(retired)
+  root.rename(retired)
+  shutil.rmtree(retired)
+
+
+def sweep_retired_roots(parent: Path) -> None:
+  """Finish deletions that ``retire_owned_root`` marked but did not complete."""
+  if not parent.is_dir() or parent.is_symlink():
+    return
+  for child in parent.iterdir():
+    if not child.name.startswith(RETIRED_ROOT_PREFIX):
       continue
-    if child.name in live_ids:
-      continue
     try:
-      _remove_owned_root(child)
+      if child.is_symlink():
+        child.unlink(missing_ok=True)
+      else:
+        shutil.rmtree(child)
     except OSError:
-      log.exception("Could not remove orphaned native project root %s", child)
+      log.exception("Could not finish removing retired root %s", child)
 
 
 def purge_expired_project_tombstones(db: Session) -> list[str]:
   """Release expired project/chat pairs, preserving externally owned roots.
 
   The project rows commit away before any filesystem deletion. Thus a failed
-  transaction leaves the project fully recoverable. A crash after that commit
-  may leave only an owner-managed orphan under ``data/projects``; the next sweep
-  recognizes that exact UUID namespace and retries it. Linked roots outside
-  that namespace are never passed to filesystem cleanup.
+  transaction leaves the project fully recoverable. A failed or interrupted
+  delete after that commit leaves a marked ``.purging-`` leftover under
+  ``data/projects`` that the next pass finishes. Linked roots outside that
+  namespace are never passed to filesystem cleanup.
   """
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   with PROJECT_LIFECYCLE_LOCK:
     from app.shared_app_retention import (
       delete_project_shared_apps,
       purge_expired_shared_apps,
-      remove_snapshot_root,
     )
     purge_expired_shared_apps(db)
     # Source-copy links expire independently of the original project. Drop the
@@ -164,14 +173,13 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
       db.expire_all()
       for root in roots:
         try:
-          _remove_owned_root(root)
+          retire_owned_root(root)
         except OSError:
-          # The row is already gone, so the UUID orphan sweep can retry safely.
           log.exception("Could not remove expired native project root %s", root)
       for root in shared_app_roots:
         try:
-          remove_snapshot_root(root)
+          retire_owned_root(root)
         except OSError:
           log.exception("Could not remove project-owned shared-app snapshot %s", root)
-    _sweep_orphaned_native_roots(db)
+    sweep_retired_roots(Path(get_settings().data_dir).resolve() / "projects")
     return project_ids
