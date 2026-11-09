@@ -411,7 +411,7 @@ async def take_goal_brief_after_compaction(
   db.close()  # The brief loads in its own short session; hold no connection.
   try:
     context = await handle.goal_brief_after_compaction(body.thread_id)
-  except GoalTextNotFound as exc:
+  except LookupError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
   return {"context": context}
 
