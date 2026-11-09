@@ -459,6 +459,40 @@ def test_charging_before_pairing_says_so(client, auth, db, service):
   assert not service.calls
 
 
+def test_only_an_app_service_with_spend_credits_can_check_a_charge(client, auth, db, paired):
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
+  url = "/api/identity/credits/charges/c-1"
+  calls = len(paired.calls)
+  for headers in (_as(db, granted, None), _as(db, ungranted, "private"),
+                  _as(db, ungranted, "public"), auth):
+    assert client.get(url, headers=headers).status_code == 403
+  assert len(paired.calls) == calls
+  paired.answers["charges/c-1"] = (200, {"charge_id": "c-1", "seller": "ana"})
+  # Both lanes: the public one is where a marketplace checks a visitor's claim.
+  for lane in ("private", "public"):
+    checked = client.get(url, headers=_as(db, granted, lane))
+    assert checked.status_code == 200 and checked.json()["seller"] == "ana"
+  assert paired.calls[-1]["method"] == "GET"
+  assert paired.calls[-1]["url"].endswith("/api/billing/charges/c-1")
+
+
+@pytest.mark.parametrize("charge_id", ["..", ".", "c-1/../balance", "c 1", ""])
+def test_an_invalid_charge_id_never_sends_the_installation_key(paired, charge_id):
+  paired.calls.clear()
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.charge_receipt(charge_id)
+  assert refused.value.code == "invalid_name"
+  assert not paired.calls
+
+
+def test_a_failed_charge_receipt_read_keeps_the_services_refusal(paired):
+  # Reading a receipt moves no money, so a 5xx is not an unknown charge outcome.
+  paired.answers["charges/c-1"] = (503, {"detail": {"code": "busy", "message": "busy"}})
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.charge_receipt("c-1")
+  assert refused.value.code == "busy" and refused.value.status == 503
+
+
 def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
   credits_client.pair("https://www.mobius.you/credits", "mbc_example_key")
   terms = {"currency": "usd", "amounts_cents": [500, 1000], "waiver_required": True}
@@ -642,9 +676,10 @@ def test_every_credits_route_has_exactly_one_gate():
   gates would mean one of them is not saying the whole rule."""
   from app.routes import credits
   gates = {deps.get_credits_reader, deps.get_credits_controller,
-           deps.get_credits_spender, deps.get_credits_price_reader}
+           deps.get_credits_spender, deps.get_credits_price_reader,
+           deps.get_credits_receipt_reader}
   routes = [route for route in credits.router.routes if hasattr(route, "dependant")]
-  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 1  # and the app charge
+  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 2  # and the app charge and its receipt
   for route in routes:
     used = {dep.call for dep in route.dependant.dependencies} & gates
     assert len(used) == 1, (route.path, used)

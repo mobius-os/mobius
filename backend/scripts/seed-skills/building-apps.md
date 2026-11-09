@@ -1128,6 +1128,15 @@ and explain each refusal by its `detail.code`: `not_paired`
 The key is scoped to your app, so another app's identical key never replays
 your charge.
 
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid whom, for
+which `{app, action}`, and how much. Its own service may ask on either lane
+(the public lane is where a visitor says they paid) under the same
+`spend_credits` grant; it moves no money. Unlock only for a charge that paid
+this creator for this item, and record each charge id once so one payment
+never unlocks twice.
+
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
 `identity_manage` does not include it.

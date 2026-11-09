@@ -50,6 +50,7 @@ KEY_PREFIX = "mbc_"
 _HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 _TOPUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_CHARGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 class CreditsUnavailable(Exception):
@@ -388,6 +389,16 @@ def charge(seller: str, app: str, action: str, idempotency_key: str,
     "seller": seller, "app": app, "action": action,
     "idempotency_key": app_scoped_key(payer, idempotency_key),
     "max_price_micro": int(max_price_micro), "buyer_app": buyer_app})
+
+
+def charge_receipt(charge_id: str) -> dict:
+  """Who paid whom, for which call, and how much: a claimed charge, checked.
+
+  A marketplace app unlocks an item for a buyer on another Möbius only after
+  this confirms the charge id that buyer handed over. Reading a receipt moves
+  no money, so its failures keep the service's own refusal.
+  """
+  return _call("GET", f"charges/{_path_piece(charge_id, _CHARGE_ID)}", _paired())
 
 
 def app_scoped_key(payer: str, idempotency_key: str) -> str:

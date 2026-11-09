@@ -1542,6 +1542,40 @@ def get_credits_spender(
   return app
 
 
+def get_credits_receipt_reader(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> models.App:
+  """An app service with a reviewed ``spend_credits`` grant, on either lane.
+
+  Checking a charge spends nothing, and the caller that most needs it is the
+  public lane: a marketplace answering a visitor who says they paid. The
+  browser frame stays excluded, as for every credits action, and the app's
+  credits consent applies as for ``get_credits_spender``. A public
+  invocation resolves as an ordinary app caller
+  (``get_principal_or_public_service``), so its own scope is read from the
+  token here, before that.
+  """
+  owner, payload = _resolve_owner(token, db)
+  public = payload.get("scope") == auth.PUBLIC_SERVICE_SCOPE
+  principal = _generic_principal(owner, {**payload, "scope": "app"} if public else payload, db)
+  if principal.app_id is None or not (principal.app_is_service or public):
+    raise HTTPException(
+      status_code=403,
+      detail="Only an app's own service can check a credits charge.",
+    )
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if not spend_credits_targets(app):
+    raise HTTPException(
+      status_code=403,
+      detail="This app needs permissions.spend_credits in its manifest to check a credits charge.",
+    )
+  return app
+
+
 def get_credits_price_reader(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

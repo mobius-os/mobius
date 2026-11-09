@@ -116,6 +116,15 @@ and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.
 Balance, history and purchase reads refuse a shared-browser guest.
 
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid whom, for
+which `{app, action}`, and how much. Its own service may ask on either lane
+(the public lane is where a visitor says they paid) under the same
+`spend_credits` grant; it moves no money. Unlock only for a charge that paid
+this creator for this item, and record each charge id once so one payment
+never unlocks twice.
+
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing
 prices, and keeping or withdrawing earnings. Besides the owner, only an app
