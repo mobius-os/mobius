@@ -92,21 +92,16 @@ def _preflight(gh, cwd, row, target):
     raise HTTPException(409, "GitHub does not allow a verdict on your own pull request. Nothing was posted.")
 
 
-async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
-  """Post the owner-submitted proposal once; return its settled receipt."""
-  async with _github_connection_transaction():
-    try:
-      await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
-    except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
-      raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
-    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      armed = _arm(db, row, item_key, proposal_id, authorize)
-    try:
-      authorize()
-    except HTTPException as exc:
-      _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
-      raise
-    result = await settled.run_settled(public.post_review, gh, cwd, target, armed["body"], armed["event"])
+async def _prove_target(gh, cwd, row, target):
+  """Read-only proof of actor, open PR, exact head and authorship; a failed read proves non-dispatch."""
+  try:
+    await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
+  except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
+    raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
+
+
+def _persist_result(db, row, item_key, proposal_id, result):
+  """Record what the dispatch returned: the proposal leaves `posting` only here."""
   fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state]}
   receipt = result.receipt or {}
   # The proposal id is its identity; GitHub's review id is a separate fact.
@@ -114,6 +109,34 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
   if result.reason:
     fields["summary"] = result.reason
   _settle(db, row, item_key, proposal_id, fields)
+
+
+async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
+  """Post the owner-submitted proposal once; return its settled receipt."""
+  async with _github_connection_transaction():
+    await _prove_target(gh, cwd, row, target)
+    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+      armed = _arm(db, row, item_key, proposal_id, authorize)
+      # Admission and the reservation's database fence can both wait, so the
+      # proof above may be stale. Repeat it now that the dispatch is reserved;
+      # anything that ends before the post is a definite non-dispatch.
+      try:
+        await _prove_target(gh, cwd, row, target)
+      except BaseException as exc:
+        summary = str(exc.detail) if isinstance(exc, HTTPException) else "The request ended before anything was posted."
+        _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": summary})
+        raise
+    try:
+      authorize()
+    except HTTPException as exc:
+      _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
+      raise
+    # A caller cancelled during the post still records what GitHub answered.
+    result = await settled.settle(
+      asyncio.to_thread(public.post_review, gh, cwd, target, armed["body"], armed["event"]),
+      what="Verdict dispatch",
+      abandoned=lambda task: _persist_result(db, row, item_key, proposal_id, task.result()))
+  _persist_result(db, row, item_key, proposal_id, result)
   db.refresh(row)
   return row.outcomes_json[item_key]["verdict_proposal"]
 
