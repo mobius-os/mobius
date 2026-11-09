@@ -2,7 +2,13 @@
 
 from types import SimpleNamespace
 
-from app.usage_metrics import normalize_claude_usage, normalize_codex_usage
+from app.usage_metrics import (
+  normalize_claude_helper_usage,
+  normalize_claude_usage,
+  normalize_codex_usage,
+  run_usage_quality,
+  summarize_chat_run_tokens,
+)
 
 
 def _breakdown(
@@ -104,6 +110,10 @@ def test_codex_thread_delta_sums_every_model_call_in_the_turn():
   assert usage["reasoning_output_tokens"] == 100
   assert usage["total_tokens"] == 1_100
   assert usage["model_context_window"] == 200_000
+  assert run_usage_quality(usage, "completed") == "final"
+  # A turn that ended before Codex completed it may have cut a call short
+  # whose usage never arrived: the same delta is only a lower bound.
+  assert run_usage_quality(usage, "stopped") == "partial"
 
 
 def test_codex_counter_reset_uses_labelled_latest_call_fallback():
@@ -146,6 +156,7 @@ def test_codex_counter_reset_uses_labelled_latest_call_fallback():
   assert usage is not None
   assert usage["calculation"] == "last_call_fallback"
   assert usage["input_tokens"] == 80
+  assert run_usage_quality(usage, "completed") == "partial"
   assert usage["total_tokens"] == 100
 
 
@@ -404,3 +415,94 @@ def test_codex_cost_usd_flows_from_normalized_usage():
   assert codex_cost_usd("gpt-5.6-terra", metrics) == round(
     (1_000 * 2.5 + 500 * 15.0) / 1_000_000, 6
   )
+
+
+# ------------------------------------------------------- hosted Claude helpers
+
+
+def _call(input_tokens, output_tokens, cache_read=0, cache_write=0):
+  return {
+    "input_tokens": input_tokens, "output_tokens": output_tokens,
+    "cache_read_input_tokens": cache_read,
+    "cache_creation_input_tokens": cache_write,
+  }
+
+
+def test_helper_usage_sums_every_model_call_of_the_turn():
+  """A hosted helper's task total is only its last call; the turn's own
+  per-call usage is summed instead, keeping Claude's input/cache split."""
+  usage = normalize_claude_helper_usage(
+    [_call(10, 5, cache_read=1_000, cache_write=200), _call(20, 7, cache_read=1_200)],
+    duration_ms=4_000,
+  )
+  assert (usage["scope"], usage["calculation"]) == ("helper_turn", "helper_call_sum")
+  assert usage["uncached_input_tokens"] == 30
+  assert usage["cache_read_input_tokens"] == 2_200
+  assert usage["cache_creation_input_tokens"] == 200
+  assert usage["input_tokens"] == 2_430
+  assert usage["output_tokens"] == 12
+  assert usage["total_tokens"] == 2_442
+  # Context occupancy is the latest call's input, never the sum.
+  assert usage["latest_model_input_tokens"] == 1_220
+  assert usage["duration_ms"] == 4_000
+  # Output counts can be relayed before a call finishes: never final.
+  assert run_usage_quality(usage, "completed") == "partial"
+
+
+def test_helper_without_model_calls_has_no_usage():
+  assert normalize_claude_helper_usage([], duration_ms=1) is None
+
+
+def test_usage_quality_labels_new_and_older_shapes_honestly():
+  claude = normalize_claude_usage({"input_tokens": 1, "output_tokens": 1})
+  assert run_usage_quality(claude, "completed") == "final"
+  # A stopped or failed turn may have cut its last call short, whatever the
+  # provider: its aggregate is only a lower bound.
+  for status in ("stopped", "failed", "interrupted"):
+    assert run_usage_quality(claude, status) == "partial"
+    assert run_usage_quality({"calculation": "thread_delta"}, status) == "partial"
+  assert run_usage_quality({"calculation": "thread_delta"}, "completed") == "final"
+  # Codex's counter-reset fallback is the latest call only: a lower bound.
+  assert run_usage_quality({"calculation": "last_call_fallback"}, "completed") == "partial"
+  # The older hosted-helper shape (a task total) and unrecognized shapes.
+  assert run_usage_quality({"total_tokens": 9, "duration_ms": 1}, "completed") == "unknown"
+  assert run_usage_quality({}, "completed") == "unknown"
+  assert run_usage_quality("legacy", "completed") == "unknown"
+  assert run_usage_quality(None, "running") == "missing"
+
+
+def _run(usage, status="completed", **counts):
+  from app.usage_metrics import CHAT_TOKEN_FIELDS
+  return SimpleNamespace(
+    **{field: counts.get(field) for field in CHAT_TOKEN_FIELDS},
+    usage_json=usage, status=status,
+  )
+
+
+def test_summary_adds_final_and_partial_runs_but_never_unknown_ones():
+  final = _run({"calculation": "thread_delta"}, input_tokens=100,
+               cache_read_input_tokens=80, output_tokens=10, total_tokens=110)
+  partial = _run({"calculation": "thread_delta"}, "stopped", total_tokens=7)
+  old_helper = _run({"total_tokens": 500, "duration_ms": 1}, total_tokens=500)
+  missing = _run(None, "running")
+
+  only_final = summarize_chat_run_tokens([final])
+  # Cached input is inside input_tokens; it is never added a second time.
+  assert only_final["totals"]["input_tokens"] == 100
+  assert only_final["coverage"]["runs_by_quality"]["final"] == 1
+
+  mixed = summarize_chat_run_tokens([final, partial, old_helper, missing])
+  assert mixed["coverage"]["runs"] == 4
+  assert mixed["coverage"]["runs_with_usage"] == 3
+  assert mixed["coverage"]["runs_by_quality"] == {
+    "final": 1, "partial": 1, "unknown": 1, "missing": 1,
+  }
+  # The old helper's task total is not this run's usage: never summed.
+  assert mixed["totals"]["total_tokens"] == 117
+
+  alone = summarize_chat_run_tokens([old_helper])
+  assert alone["coverage"]["runs_by_quality"]["unknown"] == 1
+  assert alone["totals"]["total_tokens"] is None
+  empty = summarize_chat_run_tokens([])
+  assert empty["totals"]["total_tokens"] is None
+  assert set(empty["coverage"]["runs_by_quality"].values()) == {0}

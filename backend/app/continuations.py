@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import hashlib
 from typing import Any
 
@@ -124,6 +124,54 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
     return None
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
 
+def is_owner_typed(message: object) -> bool:
+  """Whether Stop keeps a queued row for the owner's next send: a visible row
+  not positively marked as another sender's (an app's request, a browser
+  guest's message, an agent's message, a helper's answer). Rows queued before
+  owner input was stamped count, so Stop never drops the owner's text; they
+  just cannot release holds (`releases_holds`)."""
+  return bool(
+    isinstance(message, Mapping)
+    and not message.get("hidden")
+    and message.get("_initiated_by_app_id") is None
+    and message.get("_browser_grant_id") is None
+    and not message.get("_agent_input")
+    and helper_answer_question_id(message) is None
+  )
+
+
+def releases_holds(message: object) -> bool:
+  """Whether starting this row releases the rows a Stop held, so they follow
+  it: the owner's own message, with positive proof (`_owner_input_at`, which
+  only the owner's send stamps). Releasing stamps the held rows as owner
+  input, so nothing less than that proof may do it."""
+  return is_owner_typed(message) and bool(message.get("_owner_input_at"))
+
+
+def release_holds(rows: list[Any], released_at: str) -> list[Any]:
+  """Return the queue with every hold released. The owner's send is owner
+  input now, so each released row is stamped with that time: a Goal a Stop
+  paused resumes for it like for a freshly typed message."""
+  return [
+    {**{k: v for k, v in row.items() if k != "held"}, "_owner_input_at": released_at}
+    if isinstance(row, Mapping) and row.get("held") else row
+    for row in rows
+  ]
+
+
+def runnable_pending(pending: Iterable[Any] | None) -> list[Mapping[str, Any]]:
+  """The queued rows that can run without the owner: every row a Stop did
+  not hold."""
+  return [row for row in pending or () if isinstance(row, Mapping) and not row.get("held")]
+
+
+def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
+  """Whether the queue holds work that can run without the owner. Held rows
+  are not runnable work, so checks that mean "something is queued to run"
+  use this rather than a non-empty queue."""
+  return bool(runnable_pending(pending))
+
+
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""
   kind = message.get("kind")
@@ -240,9 +288,56 @@ def continuation_actor_label(message: Mapping[str, Any] | None) -> str:
   return f"Automatic continuation ({reason})"
 
 
+def undelivered_input(db, chat, superseded_run) -> list[str]:
+  """Owner input a parked turn was carrying when it never reached the provider.
+
+  A turn deferred at admission (low memory or storage) is parked before the
+  provider starts, so the provider session never received the owner rows that
+  turn was answering. A control-only continuation would otherwise deliver just
+  "resume the interrupted work", and the agent answers the pause instead of the
+  request. Walk back from the transcript tail over pause rows of this turn's
+  own never-started attempts (same logical root) and collect the owner rows
+  between them. Stop at any other run's row, so a stopped or unrelated turn's
+  input is never resumed. Product-written user-slot rows (a kept side answer,
+  a continuation marker) are context with their own delivery, not requests.
+  Empty when the superseded run had started.
+  """
+  from app import models, transcript_rows
+
+  if superseded_run is None or superseded_run.provider_execution_admitted is not False:
+    return []
+  root = superseded_run.root_run_id or superseded_run.id
+  carried: list[str] = []
+  for _seq, row in transcript_rows.reverse_iter(db, chat):
+    if row.get("role") == "user":
+      if row.get("content") and not_owner_speech_label(row) is None:
+        carried.append(row["content"])
+      continue
+    run_id = assistant_message_run_id(row.get("id"))
+    run = db.get(models.ChatRun, run_id) if run_id else None
+    if (
+      run is None or run.provider_execution_admitted is not False
+      or (run.root_run_id or run.id) != root
+    ):
+      break
+  carried.reverse()
+  return carried
+
+
+# Added by the runtime only when admission actually used Continue anyway, so a
+# turn admitted after space recovered is not told the disk is low. The floor is
+# shared by every chat: say so without licensing cleanup of other data.
+LOW_STORAGE_NOTICE = (
+  "The owner let this turn start below the shared disk safety floor;"
+  " avoid large writes. Delete only files this chat created; ask the"
+  " owner before deleting anything else."
+)
+
+
 def continuation_protocol_source(
   *, reason: str, control_id: str, run_token: str,
   source_work_id: str | None = None, goal_id: str | None = None,
+  undelivered: list[str] | None = None,
 ) -> dict:
   """Build provider-only input for a typed continuation control.
 
@@ -274,11 +369,19 @@ def continuation_protocol_source(
       "This recovery will not automatically repeat."
     ),
   }
+  content = prompts.get(
+    reason, "Resume the interrupted owner work from its saved state."
+  )
+  if undelivered:
+    content = "\n\n".join([
+      content,
+      "That turn paused before it reached you, so you have not seen the input "
+      "it was carrying. Respond to it now as the work to resume:",
+      *undelivered,
+    ])
   source = {
     "role": "user",
-    "content": prompts.get(
-      reason, "Resume the interrupted owner work from its saved state."
-    ),
+    "content": content,
     "kind": "continuation",
     "continuation_reason": reason,
     "hidden": True,
@@ -297,6 +400,7 @@ def continuation_control_envelope(
   source_work_id: str | None = None, goal_id: str | None = None,
   supersedes_run_token: str | None = None,
   goal_revision: int | None = None,
+  allow_low_storage: bool = False,
 ) -> dict:
   """Return the bounded durable half of a provider-only continuation."""
   envelope = {
@@ -311,13 +415,17 @@ def continuation_control_envelope(
     envelope["supersedes_run_token"] = supersedes_run_token
   if goal_revision is not None:
     envelope["goal_revision"] = goal_revision
+  if allow_low_storage:
+    envelope["allow_low_storage"] = True
   return envelope
 
 
 def manual_resume_matches(control, *, control_id, run_id=None,
-                          goal_id=None, goal_revision=None):
+                          goal_id=None, goal_revision=None, allow_low_storage=False):
   """A lost Resume receipt can acknowledge only the original exact target."""
   if control.get("control_id") != control_id or control.get("reason") != "manual":
+    return False
+  if bool(control.get("allow_low_storage")) != allow_low_storage:
     return False
   if goal_id is not None or "goal_revision" in control:
     return (goal_id == control.get("goal_id")

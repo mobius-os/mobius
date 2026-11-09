@@ -130,7 +130,9 @@ test('ChatView reconciles textarea geometry on value commits and foreground retu
   assert.match(inputBarSource, /syncComposerTallState\(/)
   assert.doesNotMatch(voiceSource, /resizeComposerTextarea/)
   const resets = source.match(/resetComposerTextarea\(inputRef\.current\)/g) || []
-  assert.equal(resets.length, 2, 'both queued and immediate sends collapse stale textarea geometry')
+  assert.equal(resets.length, 1, 'one composer-clearing helper collapses stale textarea geometry')
+  assert.match(source, /function clearComposerForSend\(\) \{[\s\S]*?if \(inputRef\.current\) resetComposerTextarea\(inputRef\.current\)\n\s+\}/)
+  assert.equal((source.match(/\n\s+clearComposerForSend\(\)\n/g) || []).length, 2, 'both queued and immediate sends use it')
 })
 
 test('wrapped-line detection compares rendered rows with source lines', () => {

@@ -9,6 +9,7 @@ the real upgrade passed.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -54,9 +55,26 @@ def test_host_proof_is_default_off_and_only_runs_on_manual_disposable_runners():
 def test_host_proof_checks_out_full_history_without_retained_credentials():
   job = _host_proof_workflow()["jobs"]["mixed-upgrade-proof"]
   checkout = job["steps"][0]
-  assert checkout["uses"] == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+  assert re.fullmatch(r"actions/checkout@[0-9a-fA-F]{40}", checkout["uses"])
   assert checkout["with"] == {"persist-credentials": "false", "fetch-depth": "0"}
   assert "secrets." not in json.dumps(job)
+
+
+def test_host_proof_contract_accepts_a_checkout_pin_bump(monkeypatch):
+  workflow = _host_proof_workflow()
+  checkout = workflow["jobs"]["mixed-upgrade-proof"]["steps"][0]
+  checkout["uses"] = "actions/checkout@" + "b" * 40
+  monkeypatch.setitem(globals(), "_host_proof_workflow", lambda: workflow)
+  test_host_proof_checks_out_full_history_without_retained_credentials()
+
+
+@pytest.mark.parametrize("ref", ["v7", "a" * 39, "a" * 41, "g" * 40])
+def test_host_proof_contract_rejects_a_non_commit_checkout_ref(monkeypatch, ref):
+  workflow = _host_proof_workflow()
+  workflow["jobs"]["mixed-upgrade-proof"]["steps"][0]["uses"] = "actions/checkout@" + ref
+  monkeypatch.setitem(globals(), "_host_proof_workflow", lambda: workflow)
+  with pytest.raises(AssertionError):
+    test_host_proof_checks_out_full_history_without_retained_credentials()
 
 
 def test_host_proof_uses_root_owned_source_and_the_reviewed_historical_pair():

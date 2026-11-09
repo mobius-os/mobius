@@ -78,8 +78,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent, #a78bfa);
-  color: #fff;
+  background: var(--accent-fill, var(--accent, #7c5ce6));
+  color: var(--accent-fg, #fff);
   border: none;
   border-radius: 6px;
   padding: 10px;
@@ -91,7 +91,7 @@
 }
 
 .login__btn:hover:not(:disabled) {
-  background: var(--accent-hover, #c4b5fd);
+  background: var(--accent-fill-hover, var(--accent-hover, #7053cf));
 }
 
 .login__btn:disabled {

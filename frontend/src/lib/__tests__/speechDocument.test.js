@@ -179,11 +179,13 @@ test('Speech Document segments normalize text, kinds, hints, and pauses once', (
         kind: 'summary',
         text: 'Moh bee us is ready.',
         pauseAfterMs: 813,
+        sourceIndex: 0,
       },
       {
         kind: 'paragraph',
         text: 'Second segment.',
         pauseAfterMs: 5_000,
+        sourceIndex: 1,
       },
     ],
   })
@@ -197,4 +199,15 @@ test('Speech Document segments normalize text, kinds, hints, and pauses once', (
   })
   assert.equal(clamped.locale, 'l'.repeat(35))
   assert.equal(clamped.segments[0].kind, 'k'.repeat(40))
+})
+
+test('pieces of a long segment keep the index of the segment they came from', () => {
+  const long = Array.from({ length: 12 }, (_, i) => `Sentence number ${i} carries some words.`).join(' ')
+  const value = normalizeSpeechInput({
+    document: { version: 1, segments: [{ text: 'Short.' }, { text: long, pauseAfterMs: 600 }] },
+  })
+  assert.ok(value.segments.length > 2)
+  assert.deepEqual(value.segments.map(({ sourceIndex }) => sourceIndex),
+    [0, ...value.segments.slice(1).map(() => 1)])
+  assert.equal(value.segments.at(-1).pauseAfterMs, 600)
 })

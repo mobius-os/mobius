@@ -1,0 +1,21 @@
+.project-source-editor__state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-source-editor__scroll-hint { display: none; }
+
+@container project-finder (max-width: 679px) {
+  .project-finder__pane-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .project-source-editor__state { flex-basis: 100%; text-align: right; }
+  .project-source-editor__scroll-hint {
+    display: block;
+    position: sticky;
+    left: 0;
+    margin: 0;
+    padding: 6px 14px;
+    color: var(--muted);
+    background: var(--surface);
+    font-size: 12px;
+  }
+}

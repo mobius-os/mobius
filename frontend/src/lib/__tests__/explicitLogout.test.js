@@ -131,11 +131,12 @@ test('explicit logout revokes copied handoffs before local owner state', async (
     stopInstallHandoffPreparation: async () => { calls.push('stop') },
     revokeInstallHandoffs: async () => { calls.push('revoke') },
     forgetPushDevice: async () => { calls.push('push') },
+    stopLocationTracking: async () => { calls.push('location') },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'location', 'credential', 'cache'])
 })
 
 test('failed handoff revocation or push sign-out never strands ordinary local logout', async () => {
@@ -150,11 +151,15 @@ test('failed handoff revocation or push sign-out never strands ordinary local lo
       calls.push('push')
       throw new Error('offline')
     },
+    stopLocationTracking: async () => {
+      calls.push('location')
+      throw new Error('offline')
+    },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'location', 'credential', 'cache'])
 })
 
 test('failed local preparation stop still reaches server revocation', async () => {
@@ -166,11 +171,12 @@ test('failed local preparation stop still reaches server revocation', async () =
     },
     revokeInstallHandoffs: async () => { calls.push('revoke') },
     forgetPushDevice: async () => { calls.push('push') },
+    stopLocationTracking: async () => { calls.push('location') },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'location', 'credential', 'cache'])
 })
 
 test('explicit logout records that it was deliberate for the sign-in screen', async () => {

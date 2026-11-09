@@ -97,6 +97,7 @@ test('opened project artifacts join Recents once, plainly, and rebuilds do not m
   ])
   assert.equal(before.recents[1].item.artifact_id, 'site')
   assert.equal('project' in before.recents[1].item, false, 'an artifact row carries no project belonging')
+  assert.equal(before.recents[1].item.display_name, 'Portfolio · Website', 'a Recents result is named for its project')
 
   project.artifacts[0].updated_at = '2026-08-25T12:10:00Z'
   const after = buildDrawerSections([

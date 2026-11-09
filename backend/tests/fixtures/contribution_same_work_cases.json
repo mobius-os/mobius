@@ -528,6 +528,34 @@
     ]
    },
    "expect": true
+  },
+  {
+   "name": "A file name that holds the next fields' text is not the same work as the file and line it imitates",
+   "approved": {
+    "files": [
+     {
+      "filename": "a",
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "patch": "@@ -0,0 +1 @@\n+x|added|+y"
+     }
+    ]
+   },
+   "head": {
+    "files": [
+     {
+      "filename": "a|added|+x",
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "patch": "@@ -0,0 +1 @@\n+y"
+     }
+    ]
+   },
+   "expect": false
   }
  ]
 }

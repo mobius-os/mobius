@@ -139,14 +139,15 @@ test('retained sends move into the tray while authoritative failures restore the
   const freshSend = chatView.slice(freshStart, silentStart)
   assert.match(
     freshSend,
-    /const keepQueued = shouldKeepQueuedAfterSendFailure[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedUserMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?clearFailedAttempt\(\)/,
+    /const keepQueued = shouldKeepQueuedAfterSendFailure[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedUserMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?clearComposerFailedAttempt\(\)/,
     'a retained fresh send must leave the composer empty and own one queued cid row',
   )
   assert.match(
     freshSend,
-    /else \{[\s\S]*?rememberFailedAttempt\(failedAttempt\)[\s\S]*?restoreComposerAfterFailedSend\(\)/,
+    /else \{[\s\S]*?keepFailedDraft\(failedAttempt\)/,
     'only the non-retained branch may restore the composer',
   )
+  assert.match(chatView, /function keepFailedDraft\(failedAttempt\) \{\n\s+if \(!fromComposer\) return\n\s+rememberFailedAttempt\(failedAttempt\)\n\s+restoreComposerAfterFailedSend\(\)/)
   assert.match(chatView, /if \(keepQueued\) \{[\s\S]*?status: 'locally_queued', cid: silentCid/,
     'a retained answer must return a local receipt, not pretend server acceptance')
   assert.doesNotMatch(chatView, /queuedAnswerMsg|const silentUserMsg/,

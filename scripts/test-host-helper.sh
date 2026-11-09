@@ -496,8 +496,10 @@ chmod 0600 "$ENV_FILE"
 TPROOF=$(mktemp -d /tmp/mobius-transcript-proof.XXXXXX)
 served_backend() {  # <exact CID>: the serving uvicorn process's working directory
   # As the server's own user: the container has no CAP_SYS_PTRACE, so root
-  # cannot read another user's /proc/<pid>/cwd.
-  docker exec -u mobius "$1" sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
+  # cannot read another user's /proc/<pid>/cwd. -o, not -n: the server is the
+  # oldest match; a child it is starting (say, a build in the frontend folder)
+  # carries the server's command line in its own cwd until it execs.
+  docker exec -u mobius "$1" sh -c 'readlink "/proc/$(pgrep -o -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
 }
 tprobe() {  # <command>: runs in the code the server runs; any error fails at once
   local backend output cid
@@ -556,8 +558,12 @@ done
   || fail "the previous release did not become healthy"
 original_app_name=$(docker inspect -f '{{.Name}}' "$(app_container)")
 # The worker's chat drain authenticates with the owner's service token.
+# A release with a one-time owner setup code issues it on the status read;
+# older releases have none and ignore the field.
+docker exec "$(app_container)" curl -fsS -o /dev/null http://127.0.0.1:8000/api/auth/setup/status || true
+setup_code=$(docker exec -u mobius "$(app_container)" cat /data/setup-code 2>/dev/null | tr -d '[:space:]' || true)
 docker exec "$(app_container)" curl -fsS -o /dev/null -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"owner","password":"host-helper-owner-password"}' \
+  -d "{\"username\":\"owner\",\"password\":\"host-helper-owner-password\",\"setup_code\":\"$setup_code\"}" \
   http://127.0.0.1:8000/api/auth/setup || fail "owner setup failed"
 for _ in $(seq 1 30); do
   docker exec "$(app_container)" test -s /data/service-token.txt && break

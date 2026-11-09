@@ -19,7 +19,8 @@ What gets stripped, and why each matters (design §2 "Redaction"):
     contents, API responses; the richest leak surface.
   - `thinking` blocks — model chain-of-thought, may quote secrets.
   - `question` / `error` blocks — AskUserQuestion option text + raw
-    error strings (often include paths/tokens).
+    error strings (often include paths/tokens). A card's closing `message`
+    is reply prose and is kept like a text block.
   - attachment and media metadata — filenames, paths, mime.
   - hidden + pending messages — internal answer-delivery + not-yet-run
     queue; never part of the visible conversation.
@@ -124,19 +125,23 @@ def scrub_secrets(text: str) -> str:
 
 
 def _assistant_text(blocks: list, content: str) -> str:
-  """Concatenates ONLY type=="text" assistant blocks.
+  """Concatenates ONLY the assistant's prose: text blocks and card messages.
 
-  Whitelist by construction: tool / thinking / question / error blocks
-  are dropped because they aren't `text`. Falls back to the message-level
-  `content` string (which `build_assistant_message` fills from the same
-  text blocks) when `blocks` is absent — legacy rows predate the blocks
-  shape.
+  Whitelist by construction: tool / thinking / error blocks and a question
+  card's prompts and options are dropped; only the closing `message` a card
+  carries counts, because it is the reply prose shown above the card. Falls
+  back to the message-level `content` string (which `build_assistant_message`
+  fills from the same prose) when `blocks` is absent — legacy rows predate
+  the blocks shape.
   """
   if blocks:
     parts = [
-      b.get("content", "")
+      b.get("content", "") if b.get("type") == "text" else b.get("message")
       for b in blocks
-      if isinstance(b, dict) and b.get("type") == "text"
+      if isinstance(b, dict) and (
+        b.get("type") == "text"
+        or (b.get("type") == "question" and isinstance(b.get("message"), str))
+      )
     ]
     return _join_text_parts(parts)
   return content or ""

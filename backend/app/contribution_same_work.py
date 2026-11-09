@@ -18,6 +18,7 @@ untruncated answer can say the work is the same.
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 
@@ -42,7 +43,7 @@ def _has_changes(file: dict) -> bool:
   return _count(file.get("additions")) + _count(file.get("deletions")) > 0
 
 
-def _content(file: dict) -> str:
+def _content(file: dict) -> list[str]:
   """A patch's lines say what changed; without one only the file's content id (`sha`) can.
 
   The id is ignored when there is a patch: a file's blob changes whenever the
@@ -50,13 +51,17 @@ def _content(file: dict) -> str:
   """
   patch = file.get("patch")
   if isinstance(patch, str):
-    return "\n".join(line for line in patch.split("\n") if line[:1] in ("+", "-"))
+    return [line for line in patch.split("\n") if line[:1] in ("+", "-")]
   sha = file.get("sha")
-  return f"blob {'' if sha is None else sha}"
+  return [f"blob {'' if sha is None else sha}"]
 
 
 def _signature(file: dict) -> str:
-  return f"{file.get('previous_filename') or ''}>{file.get('filename')}|{file.get('status')}|{_content(file)}"
+  """One JSON array of the separate fields, so no file name or line can run into the next field.
+
+  A name that holds ``|added|+`` must not read as a status and a line.
+  """
+  return json.dumps([file.get("previous_filename") or "", file.get("filename"), file.get("status"), _content(file)])
 
 
 def _files(compare) -> list | None:
