@@ -167,6 +167,10 @@ fi
 
 _public_port=${PORT:-8000}
 _restart_poller_started=0
+# Set by /app/runtime/container_supervisor.py; only root-owned helpers use it,
+# so it is not passed on to the app.
+_supervisor_pid="${MOBIUS_SUPERVISOR_PID:-}"
+unset MOBIUS_SUPERVISOR_PID
 
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
@@ -176,8 +180,8 @@ _start_platform_restart_poller() {
     while true; do
       if [ -f /data/.platform-restart-requested ]; then
         # The baked helper authenticates the matching one-shot chat intent.
-        # Only this root-owned poller acknowledges the cause before terminating
-        # pid 1, so ordinary Settings restarts keep their continuation contract.
+        # Only this root-owned poller acknowledges the cause before ending the
+        # boot, so ordinary Settings restarts keep their continuation contract.
         if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
           accept "$MOBIUS_BOOT_ID"; then
           rm -f /data/.platform-restart-requested \
@@ -185,9 +189,17 @@ _start_platform_restart_poller() {
           echo "O1: rejected unauthenticated restart sentinel; container stays running." >&2
           continue
         fi
-        echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
-        kill -TERM 1 2>/dev/null || true
-        # pid1 is now draining + exiting; give it a moment, then stop polling.
+        # The image's container supervisor reruns the boot inside this
+        # container, so a planned restart never depends on the host's restart
+        # policy (Railway's default ON_FAILURE never revives a clean stop).
+        # Only a boot started without it falls back to stopping the container.
+        if [ -n "$_supervisor_pid" ] && kill -USR1 "$_supervisor_pid" 2>/dev/null; then
+          echo "O1: platform-restart sentinel seen — restarting inside this container." >&2
+        else
+          echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
+          kill -TERM 1 2>/dev/null || true
+        fi
+        # The boot is now draining + exiting; give it a moment, then stop polling.
         sleep 5
         exit 0
       fi
@@ -1039,8 +1051,8 @@ if [ "$_identity_broker_ready" -ne 1 ]; then
 fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
-# a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or
-# Railway recreates the service. It is part of the ordinary app lifecycle.
+# a nonce-bound request; this poller accepts it and asks the container supervisor
+# to rerun the boot in place. It is part of the ordinary app lifecycle.
 _start_platform_restart_poller
 
 # The probe polls the app's /api/health (127.0.0.1, never routed outside the

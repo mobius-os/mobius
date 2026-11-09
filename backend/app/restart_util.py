@@ -9,7 +9,8 @@ Every restart routes through one DRAIN-GATED path (design §2.2): live turns are
 never simply killed. The worker first sets the ``draining`` gate (new sends
 queue), interrupts each live turn so it finalizes its partials + a "paused for a
 platform update" note WITHOUT touching the pending queue, then asks the frozen
-entrypoint supervisor to acknowledge the exact restart intent and cycle pid 1.
+entrypoint supervisor to acknowledge the exact restart intent and rerun the
+boot inside the container.
 A SIGKILL backstop still guarantees recovery if the handshake or shutdown
 wedges. Boot reconcile handles fallback markers and unacknowledged parks
 manually.
@@ -352,7 +353,8 @@ async def restart_this_worker(
        nonce-stamped running row, which authenticated startup converts to the
        same due continuation state.
     4. Publish the exact intent + restart sentinel. The frozen root-owned
-       poller acknowledges it in the boot ledger, then SIGTERMs pid 1. If that
+       poller acknowledges it in the boot ledger, then asks the container
+       supervisor to rerun the boot in place. If that
        path wedges, the backstop force-exits the worker without an
        acknowledgement, so the next boot recovers manually.
 
@@ -401,7 +403,7 @@ async def restart_this_worker(
       raise RuntimeError("entrypoint boot id is unavailable")
     # Publishing the sentinel is the only normal shutdown request. The frozen
     # root-owned entrypoint poller validates the matching intent, records its
-    # exact runs in the one-shot boot ledger, and then terminates pid 1.
+    # exact runs in the one-shot boot ledger, and then ends this boot.
     restart_ledger.request_restart(
       boot_id=boot_id,
       nonce=restart_nonce,
