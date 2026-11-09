@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left.mjs'
 import ArrowRight from 'lucide-react/dist/esm/icons/arrow-right.mjs'
 
-export default function ProjectPdfPreview({ data, title }) {
+export function projectPdfScale(natural, width, height, fit, zoom) {
+  const available = Math.max(fit === 'width' ? 240 : 1, width - 28)
+  const widthScale = Math.min(2, available / natural.width)
+  const heightScale = Math.max(1, height - 28) / natural.height
+  return (fit === 'page' ? Math.min(widthScale, heightScale) : widthScale) * zoom
+}
+
+export default function ProjectPdfPreview({ data, title, defaultFit = 'width', onDownload, controls = false }) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const [document, setDocument] = useState(null)
@@ -10,6 +17,8 @@ export default function ProjectPdfPreview({ data, title }) {
   const [pageCount, setPageCount] = useState(0)
   const [renderVersion, setRenderVersion] = useState(0)
   const [error, setError] = useState('')
+  const [fit, setFit] = useState(defaultFit)
+  const [zoom, setZoom] = useState(1)
 
   useEffect(() => {
     if (!data?.byteLength) return undefined
@@ -70,8 +79,7 @@ export default function ProjectPdfPreview({ data, title }) {
       const context = canvas?.getContext('2d')
       if (!canvas || !context) throw new Error('The PDF canvas is unavailable.')
       const natural = page.getViewport({ scale: 1 })
-      const available = Math.max(240, containerRef.current.clientWidth - 28)
-      const scale = Math.min(2, available / natural.width)
+      const scale = projectPdfScale(natural, containerRef.current.clientWidth, containerRef.current.clientHeight, fit, zoom)
       const viewport = page.getViewport({ scale })
       const outputScale = Math.min(2, window.devicePixelRatio || 1)
       canvas.width = Math.floor(viewport.width * outputScale)
@@ -97,7 +105,7 @@ export default function ProjectPdfPreview({ data, title }) {
       renderTask?.cancel?.()
       page?.cleanup?.()
     }
-  }, [document, pageNumber, renderVersion])
+  }, [document, pageNumber, renderVersion, fit, zoom])
 
   if (error) return (
     <div className="project-document__empty" role="alert">
@@ -112,6 +120,14 @@ export default function ProjectPdfPreview({ data, title }) {
         <button type="button" aria-label="Previous PDF page" disabled={pageNumber <= 1} onClick={() => setPageNumber(page => page - 1)}><ArrowLeft size={16} /></button>
         <span>{pageCount ? `Page ${pageNumber} of ${pageCount}` : 'Loading PDF…'}</span>
         <button type="button" aria-label="Next PDF page" disabled={!pageCount || pageNumber >= pageCount} onClick={() => setPageNumber(page => page + 1)}><ArrowRight size={16} /></button>
+        {controls && <>
+          <button type="button" className="project-pdf__text-control" aria-pressed={fit === 'page' && zoom === 1} onClick={() => { setFit('page'); setZoom(1) }}>Fit page</button>
+          <button type="button" className="project-pdf__text-control" aria-pressed={fit === 'width' && zoom === 1} onClick={() => { setFit('width'); setZoom(1) }}>Fit width</button>
+          <button type="button" aria-label="Zoom out" disabled={zoom <= 0.5} onClick={() => setZoom(value => Math.max(0.5, Math.round((value - 0.25) * 100) / 100))}>−</button>
+          <span aria-label={`Zoom ${Math.round(zoom * 100)} percent`}>{Math.round(zoom * 100)}%</span>
+          <button type="button" aria-label="Zoom in" disabled={zoom >= 3} onClick={() => setZoom(value => Math.min(3, Math.round((value + 0.25) * 100) / 100))}>+</button>
+          {onDownload && <button type="button" className="project-pdf__text-control" onClick={onDownload}>Download</button>}
+        </>}
       </div>
       <div ref={containerRef} className="project-pdf__viewport">
         <canvas ref={canvasRef} role="img" aria-label={`${title}, page ${pageNumber}`} />

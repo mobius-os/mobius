@@ -1,32 +1,25 @@
 /**
- * Locks in the R1 invariant from .pm/features/_034-design.md:
+ * Locks in the Stop-chat contract (ARCHITECTURE.md): Stop only interrupts.
  *
- *   handleStop must clear the pending-queue ref SYNCHRONOUSLY before
- *   the `/chat/stop` await. During that await the SSE stream closes
- *   server-side (kill proc + close broadcast), which fires the natural
- *   onStreamEnd path in useStreamConnection → ChatView's onStreamEnd →
- *   if pendingMessagesRef has items it would call fetchMessages with
- *   force:true → that fetch resolving BEFORE handleStop continues
- *   post-await would overwrite the just-promoted partial + the
- *   soon-to-be-sent combined turn with stale DB state.
+ *   The server holds the queue; Stop neither clears nor resends it. While the
+ *   `/chat/stop` await is open the SSE stream closes server-side, which fires
+ *   the natural onStreamEnd path. That path must not refetch (a stale page
+ *   could overwrite the partial Stop promotes), and the queued row must stay
+ *   visible throughout. After Stop the composer stays empty and offers
+ *   "Send queued messages", whose empty send runs the whole queue.
  *
- * Originated by Ticket 034. Lives in tests/ alongside the other
- * Playwright lock-ins so it runs in the same suite.
- *
- * The companion unit suite at
- *   frontend/src/components/ChatView/hooks/__tests__/usePendingQueue.test.js
- * covers the hook contract in isolation (clear / cancelByTs / hydrate
- * all update pendingMessagesRef.current synchronously). This spec
- * verifies that contract holds end-to-end through ChatView's real
- * handleStop + the bundler output, catching wiring regressions that
- * the node-side unit suite cannot see.
+ * The companion unit suites cover the pieces in isolation (composerSubmission,
+ * queuedMessages' PrimaryAction, and the backend test_chat_stop_holds_queue).
+ * This spec verifies the wiring end-to-end through ChatView's real handleStop
+ * and the bundler output.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/handleStop-sync-ordering.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
 import { attachCleanup } from './_chatTracker.mjs'
-import { mockDeliveryReady } from './_chatTestPrerequisites.mjs'
+import { mockDeliveryReady, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { installControlledChatStream } from './_controlledChatStream.mjs'
 import { createChat, sendMessage, waitForChatShell, waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -54,30 +47,22 @@ async function queueMessage(page, text) {
 test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
-test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
-  test('Stop with a queued message clears the queue and never resurrects it during the stop POST', async ({ page }) => {
-    // Route plan:
-    //   POST /messages → 202 (the optimistic queue add is local-only
-    //     until the agent finishes the active turn)
-    //   GET  /stream   → SSE that stays open (no `done` event) so the
-    //     UI sits in sending=true with a queued tray
-    //   POST /chat/stop → held for 250ms then 200 — the window the
-    //     natural-handler refetch could race into
-    //   GET  /chats/:id?limit=1 → returns the queue with one item
-    //     ("resurrected"). If the ref-clear weren't synchronous, the
-    //     fetch resolution would re-populate the tray.
-
+test.describe('handleStop keeps the queue for the owner', () => {
+  test('Stop with a queued message keeps it queued, resends nothing, and an empty Send runs it', async ({ page }) => {
     let stopHits = 0
-    let refetchHits = 0
+    let stopHeld = false
+    const staleRefetches = []
     let ordinaryMessageHits = 0
+    let queueSends = 0
     let steerHits = 0
     let resolveStop
     const stopGate = new Promise(r => { resolveStop = r })
     let resolveSteer
     const steerGate = new Promise(r => { resolveSteer = r })
-    // The runtime poll is the authority on whether a turn runs (the first
-    // stream never ends). Stop clears run and queue, as the backend does.
     const live = await mockLiveRuntime(page)
+    const stream = await installControlledChatStream(page, 'streaming response...')
+    let firstMessage
+    let queuedMessage
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
       const request = route.request()
@@ -91,11 +76,27 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
           body: JSON.stringify({ status: 'not_steered' }),
         })
       }
+      if (body.continuation === 'queue') {
+        queueSends++
+        expect(body.content).toBe('')
+        const promoted = { ...queuedMessage, ts: 12346 }
+        delete promoted.held
+        live.pending = []
+        live.messages.push(promoted)
+        live.running = true
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'started',
+            message: { ...promoted, _consumed_cids: [queuedMessage.cid], _messages: [promoted] },
+          }),
+        })
+      }
       ordinaryMessageHits++
       if (ordinaryMessageHits === 2) {
-        live.pending = [{ role: 'user', content: body.content, ts: 12344, cid: body.cid }]
-        // Confirm the second send as a durable queued row so the fast-forward
-        // control can enter its real in-flight path.
+        queuedMessage = { role: 'user', content: body.content, ts: 12344, cid: body.cid }
+        live.pending = [queuedMessage]
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -103,144 +104,168 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
             status: 'queued',
             ts: 12344,
             position: 1,
-            pending_message: {
-              role: 'user',
-              content: body.content,
-              ts: 12344,
-              cid: body.cid,
-            },
+            pending_message: queuedMessage,
           }),
         })
       }
       live.running = true
+      const message = { role: 'user', content: body.content, cid: body.cid, ts: 12342 + ordinaryMessageHits }
+      if (!firstMessage) firstMessage = message
+      live.messages.push(message)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        // Echo the accepted message so the send intent retires; otherwise the
-        // outbox replays it and the real second send is never confirmed as queued.
-        body: JSON.stringify({
-          status: 'started',
-          message: { role: 'user', content: body.content, cid: body.cid, ts: 12343 },
-        }),
+        body: JSON.stringify({ status: 'started', message }),
       })
     })
-    // page.route().fulfill() cannot drip a body: it delivers the complete payload and
-    // closes the response. Sleeping before fulfill merely delayed the first SSE event,
-    // then closed the stream and removed Stop before the click. Install a page-local
-    // fetch seam that returns a real open ReadableStream instead. All other requests
-    // continue through Playwright's route mocks.
-    await page.addInitScript(events => {
-      const nativeFetch = window.fetch.bind(window)
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : input?.url
-        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(String(url))) {
-          const encoder = new TextEncoder()
-          const stream = new ReadableStream({
-            start(controller) {
-              for (const event of events) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-              }
-            },
-          })
-          return Promise.resolve(new Response(stream, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-            },
-          }))
-        }
-        return nativeFetch(input, init)
-      }
-    }, [
-      { type: 'catch_up_done' },
-      { type: 'text', content: 'streaming response...' },
-    ])
     await page.route('**/api/chat/stop', async (route) => {
       stopHits++
-      // Park for 250ms; any natural-handler refetch firing during
-      // the await would resolve well inside this window. The
-      // resurrection assertion below polls during this gap.
-      await new Promise(r => setTimeout(r, 250))
-      resolveStop()
+      stopHeld = true
+      await stopGate
+      stopHeld = false
+      // The server held the queue: the row stays, marked for the owner.
       live.running = false
-      live.pending = []
-      route.fulfill({
-        status: 200, contentType: 'application/json', body: '{"stopped": true}',
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=1$/, route => {
-      refetchHits++
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [],
-          offset: 0,
-          provider: 'claude',
-          pending_messages: [
-            { role: 'user', content: 'resurrected-queue-item', ts: 12345 },
-          ],
-        }),
+      live.pending = [{ ...queuedMessage, held: true }]
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        json: { stopped: true, cleared_pending_cids: [] },
       })
     })
 
     await setupChat(page)
-    await createChat(page, 'handleStop')
-    // Send the first message — kicks off the active turn (stream
-    // stays open per the route mock above).
+    const chat = await createChat(page, 'handleStop')
+    await page.route(url => url.pathname === `/api/chats/${chat.id}` && url.searchParams.has('limit'), route => {
+      if (!stopHeld) return route.fallback()
+      // Record rather than assert here, so an unexpected refetch fails the
+      // test below with its URL instead of throwing inside the route handler.
+      staleRefetches.push(route.request().url())
+      return route.fallback()
+    })
+    await stream.arm()
     await sendMessage(page, 'first message')
-    // Wait until sending=true (Stop button rendered).
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
-    // Queue a second message while the first is still streaming.
     await queueMessage(page, 'queued message')
-    // Verify the queued tray rendered with the second message.
-    await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
-        .some(el => el.textContent?.includes('queued message')),
-      { timeout: 5000 },
-    )
+    const surface = page.locator('[data-chat-surface="painted"]')
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
 
-    // Queued work intentionally replaces Stop with Steer. Enter the real
-    // reachable overlap: Steer hides its confirmed row while its POST is in
-    // flight, which reveals Stop; Stop serializes behind that request. Resolve
-    // Steer as not_steered so it restores the durable row before handleStop
-    // snapshots and clears it.
-    await page.locator('[data-chat-surface="painted"] .chat__steer').click()
+    // Queued work replaces Stop with Steer; a Steer in flight reveals Stop.
+    await surface.locator('.chat__steer').click()
     await expect.poll(() => steerHits).toBe(1)
-    const stop = page.locator('[data-chat-surface="painted"] .chat__stop')
+    const stop = surface.locator('.chat__stop')
     await expect(stop).toBeVisible()
     await stop.click()
     resolveSteer()
     await expect.poll(() => stopHits).toBe(1)
 
-    // handleStop must:
-    //   (1) bump fetchGenRef + clear pendingMessagesRef SYNCHRONOUSLY
-    //   (2) then await POST /chat/stop (held by our mock for 250ms)
-    // During step 2, the natural onStreamEnd path may attempt to
-    // refetch; whether it does or not, the cleared queue must NOT
-    // come back.
-    // Poll the queued tray every ~30ms during the stop-await window.
-    // Each sample must be empty (or at least not contain the
-    // resurrected ts). Any sample seeing "resurrected-queue-item"
-    // fails the test.
-    let sawResurrection = false
-    for (let i = 0; i < 8; i++) {
-      const queuedTexts = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
-          .map(el => el.textContent?.trim() ?? '')
-      })
-      if (queuedTexts.some(t => t.includes('resurrected-queue-item'))) {
-        sawResurrection = true
-        break
+    // Natural completion lands while the Stop response is held. The queued
+    // row stays visible, and the stream end requests no stale page.
+    await stream.emit({ type: 'text', content: ' terminal chunk' })
+    await stream.finish()
+    live.messages.push({ role: 'assistant', content: 'streaming response... terminal chunk' })
+    await expect(surface.locator('.chat__scroll')).toContainText('terminal chunk')
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    expect(stopHeld).toBe(true)
+    expect(staleRefetches).toEqual([])
+
+    resolveStop()
+    const sendQueued = surface.getByRole('button', { name: 'Send queued messages' })
+    await expect(sendQueued).toBeVisible()
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toHaveValue('')
+    // Stop resent nothing.
+    expect(ordinaryMessageHits).toBe(2)
+    expect(queueSends).toBe(0)
+
+    await sendQueued.click()
+    await expect.poll(() => queueSends).toBe(1)
+    await expect(surface.locator('.chat__msg--user').last()).toContainText('queued message')
+    await expect(surface.locator('.queued__row')).toHaveCount(0)
+    expect(ordinaryMessageHits).toBe(2)
+  })
+
+  test('a Stop whose interrupt fails still shows the queue the server settled', async ({ page }) => {
+    // The server holds the owner's rows before it interrupts the turn, so a
+    // timed-out interrupt (`stopped: false`) has held them all the same. The
+    // tray must stop promising they send after this turn.
+    let ordinaryMessageHits = 0
+    let queueSends = 0
+    let steerHits = 0
+    let stopHits = 0
+    let resolveSteer
+    const steerGate = new Promise(r => { resolveSteer = r })
+    let resolveStop
+    const stopGate = new Promise(r => { resolveStop = r })
+    const live = await mockLiveRuntime(page)
+    const stream = await installControlledChatStream(page, 'streaming response...')
+    let queuedMessage
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+      const body = route.request().postDataJSON()
+      if (body.force_steer) {
+        steerHits++
+        await steerGate
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'not_steered' }),
+        })
       }
-      await page.waitForTimeout(30)
-    }
-    await stopGate
-    expect(sawResurrection, 'queue must not resurrect during stop-await').toBe(false)
-    expect(stopHits).toBe(1)
-    // We don't assert refetchHits — the natural handler may or may
-    // not fire depending on event ordering. The load-bearing
-    // contract is just "no resurrection."
+      if (body.continuation === 'queue') {
+        queueSends++
+        return route.fulfill({ status: 500 })
+      }
+      ordinaryMessageHits++
+      if (ordinaryMessageHits === 2) {
+        queuedMessage = { role: 'user', content: body.content, ts: 12344, cid: body.cid }
+        live.pending = [queuedMessage]
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'queued', ts: 12344, position: 1, pending_message: queuedMessage }),
+        })
+      }
+      live.running = true
+      const message = { role: 'user', content: body.content, cid: body.cid, ts: 12343 }
+      live.messages.push(message)
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'started', message }),
+      })
+    })
+    await page.route('**/api/chat/stop', async (route) => {
+      stopHits++
+      await stopGate
+      // The queue is settled, but the runner did not acknowledge the interrupt.
+      live.pending = [{ ...queuedMessage, held: true }]
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        json: { stopped: false, cleared_pending_cids: [] },
+      })
+    })
+
+    await setupChat(page)
+    await createChat(page, 'handleStop failed interrupt')
+    await stream.arm()
+    await sendMessage(page, 'first message')
+    const surface = page.locator('[data-chat-surface="painted"]')
+    await expect(surface.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await queueMessage(page, 'queued message')
+    await expect(surface.locator('.queued__hint')).toHaveText('Will send after the current turn finishes')
+
+    // A Steer in flight reveals Stop; let the refused steer return the row
+    // to the tray before the Stop answers.
+    await surface.locator('.chat__steer').click()
+    await expect.poll(() => steerHits).toBe(1)
+    await surface.locator('.chat__stop').click()
+    await expect.poll(() => stopHits).toBe(1)
+    resolveSteer()
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    resolveStop()
+
+    await expect(surface.locator('.queued__hint')).toHaveText('Waiting for you — sends when you send')
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    expect(queueSends).toBe(0)
+    expect(ordinaryMessageHits).toBe(2)
   })
 })

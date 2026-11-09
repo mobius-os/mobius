@@ -28,7 +28,7 @@ import FileChips from './FileChips.jsx'
 import Attachments from './Attachments.jsx'
 import { pastedFiles, filePasteNeedsDefaultPrevented } from './pasteUpload.js'
 import { Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { ORPHANED_FILE_GROUP, fileBelongsToQuestion, fileQuestionTag, restoredQuestionFiles, resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
+import { ORPHANED_FILE_GROUP, fileBelongsToQuestion, fileQuestionTag, restoredQuestionFiles, resolveQuestionAnswer, questionOptionSubmission, unansweredQuestions } from './questionSubmission.js'
 import {
   isRestartCardAction,
   restartCardSelectedOptions,
@@ -184,6 +184,10 @@ export default function QuestionCard({
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(null)
   const [submitError, setSubmitError] = useState('')
+  // Set by a tap on Submit while answers are missing: the unanswered
+  // questions' hints turn to the accent colour so the gap is easy to find.
+  const [showMissing, setShowMissing] = useState(false)
+  const submitHintId = `qcard-submit-hint-${encodeURIComponent(draftKey)}`
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -244,13 +248,32 @@ export default function QuestionCard({
     writeQuestionDraft(draftKey, { answers, otherTexts, files })
   }, [draftKey, answers, otherTexts, files, answered, discardFiles])
 
-  const allAnswered = questionAnswersReady(questions, answers, otherTexts, readyFiles)
+  const unanswered = unansweredQuestions(questions, answers, otherTexts, readyFiles)
+  const allAnswered = unanswered.length === 0
   const selectedOptions = restartCardSelectedOptions(
     platformAction,
     questions,
     answers,
   )
   const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
+  // Incomplete cards stay tappable to reveal the first missing answer. Pending
+  // uploads alone still disable submission until their durable IDs arrive.
+  const needsAnswers = !allAnswered && !pendingFiles && !restartAction
+    && !selectionLocked && !disabled && !submitting
+  // Quiet until a tap: the card shows no progress count up front.
+  const submitHint = needsAnswers && showMissing
+    ? 'Answer each question before submitting'
+    : ''
+
+  function showFirstUnanswered(questionCard) {
+    setShowMissing(true)
+    const index = questions.indexOf(unanswered[0])
+    const node = questionCard?.querySelector(`[data-question-index="${index}"]`)
+    if (!node) return
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    node.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+    node.querySelector('button.qcard__opt, textarea')?.focus({ preventScroll: true })
+  }
 
   function selectOption(question, label) {
     if (selectionLocked || disabled) return
@@ -461,7 +484,11 @@ export default function QuestionCard({
           : selectedArr.length
 
         return (
-          <div key={qi} className="qcard__q">
+          <div
+            key={qi}
+            className={`qcard__q${showMissing && needsAnswers && unanswered.includes(q) ? ' qcard__q--missing' : ''}`}
+            data-question-index={qi}
+          >
             {q.header && (
               <div className="qcard__header">{q.header}</div>
             )}
@@ -614,10 +641,16 @@ export default function QuestionCard({
           {submitError && !answered && !locallyQueued && (
             <div className="qcard__submit-error" role="status">{submitError}</div>
           )}
+          {submitHint && (
+            <div className="qcard__submit-hint" id={submitHintId}>{submitHint}</div>
+          )}
           <button
             type="button"
-            className="qcard__submit"
+            className={`qcard__submit${needsAnswers ? ' qcard__submit--incomplete' : ''}`}
+            aria-disabled={needsAnswers || undefined}
+            aria-describedby={submitHint ? submitHintId : undefined}
             onPointerDown={(event) => {
+              if (needsAnswers) return
               if (event.button !== 0 || event.isPrimary === false) return
               const questionCard = event.currentTarget.closest('.qcard')
               preparedSubmissionRef.current = onPrepareAnswer?.(questionCard) || null
@@ -628,11 +661,15 @@ export default function QuestionCard({
               if (event.buttons !== 0) cancelPreparedSubmission()
             }}
             onClick={(event) => {
+              if (needsAnswers) {
+                showFirstUnanswered(event.currentTarget.closest('.qcard'))
+                return
+              }
               const prepared = preparedSubmissionRef.current
               preparedSubmissionRef.current = null
               handleSubmit(event.currentTarget.closest('.qcard'), prepared)
             }}
-            disabled={!canSubmit || disabled || selectionLocked || submitting}
+            disabled={(!canSubmit && !needsAnswers) || disabled || selectionLocked || submitting}
           >
             {submitLabel}
           </button>

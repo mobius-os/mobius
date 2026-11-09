@@ -85,6 +85,9 @@ refused, preserve the Goal rather than minting a replacement. An unrelated
 follow-up must remain separate. Terminal outcomes cannot reopen. A legacy interruption without recorded intent
 is unknown, not evidence that the owner paused the work.
 
+After promoting or attaching, re-claim this chat's earlier-turn action with
+`claim_agent_work` and the exact same work key; older claims are not adopted automatically.
+
 ### Responsibility, handoffs and outcomes
 
 Work in-run; turns are not a budget. An unfinished Goal remains your

@@ -15,7 +15,7 @@ STORE_LISTING_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 MAX_STORE_SCREENSHOTS = 5
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
-RECOGNIZED_CAPABILITIES = (
+BOOLEAN_PERMISSIONS = (
   "manage_apps",
   "manage_skills",
   "github_access",
@@ -24,8 +24,16 @@ RECOGNIZED_CAPABILITIES = (
   "connections_manage",
   "connect_manage",
   "identity_manage",
+  "credits_manage",
   "railway_manage",
+  "helper_activity_read",
+  "location_history_read",
 )
+# What an app's service may pay for from the owner's credits, as
+# ``"<seller handle>/<app>"`` entries naming the creators' priced apps.
+SPEND_CREDITS_TARGET = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+SPEND_CREDITS_MAX = 16
+RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits")
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
 # The one size bound for an app package: every file its manifest declares
@@ -592,14 +600,18 @@ def validate_agent_tools(tools, *, has_service: bool) -> None:
     field = f"tools[{index}]"
     if not isinstance(tool, Mapping) or not (
       {"name", "description", "input_schema"} <= set(tool)
-      <= {"name", "description", "input_schema", "always_load", "result_independent"}
+      <= {
+        "name", "description", "input_schema", "always_load", "routine",
+        "result_independent",
+      }
     ):
       _fail(
         f"Manifest `{field}` must contain `name`, `description`, and "
-        "`input_schema`, and optionally `always_load`."
+        "`input_schema`, and optionally `always_load` and `routine`."
       )
-    if not isinstance(tool.get("always_load", False), bool):
-      _fail(f"Manifest `{field}.always_load` must be true or false.")
+    for flag in ("always_load", "routine"):
+      if not isinstance(tool.get(flag, False), bool):
+        _fail(f"Manifest `{field}.{flag}` must be true or false.")
     # Retired: `result_independent` once routed calls through a hidden reply
     # channel. Published manifests may still carry it, so it stays valid and
     # has no effect; every tool call is an ordinary result-bearing call.
@@ -658,6 +670,10 @@ def validate_manifest_contract(manifest) -> None:
   if model_provider is not None:
     if not isinstance(model_provider, Mapping):
       _fail("Manifest `model_provider` must be an object.")
+    # The identity_broker transport is inert: the platform owns the Möbius
+    # catalogue (mobius_models.json) and the registry skips this declaration.
+    # It stays valid, and reserved to the reviewed `identity` app, so
+    # installed copies and the published Möbius · You package keep applying.
     broker = model_provider.get("transport") == "identity_broker"
     expected = {"name", "base_url", "models", "default_model"}
     expected |= {"transport"} if broker else {"secret_name"}
@@ -811,7 +827,18 @@ def validate_manifest_contract(manifest) -> None:
     or len(set(job_secrets)) != len(job_secrets)
   ):
     _fail("Manifest `permissions.job_secret_read` must list up to 16 unique secret names.")
-  for field in RECOGNIZED_CAPABILITIES:
+  targets = permissions.get("spend_credits", [])
+  if (
+    not isinstance(targets, list) or len(targets) > SPEND_CREDITS_MAX
+    or any(not isinstance(target, str) or not SPEND_CREDITS_TARGET.fullmatch(target)
+           for target in targets)
+    or len(set(targets)) != len(targets)
+  ):
+    _fail(
+      "Manifest `permissions.spend_credits` must list up to "
+      f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" entries it may pay for."
+    )
+  for field in BOOLEAN_PERMISSIONS:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
 

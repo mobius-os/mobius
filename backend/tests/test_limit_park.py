@@ -818,6 +818,91 @@ def test_owner_message_queues_behind_future_limit_park(
   }]
 
 
+def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
+  client, auth, db, monkeypatch,
+):
+  """Send queued messages takes an owner message's admission: the held rows
+  rejoin the queue behind the park instead of spending a provider attempt."""
+  cid = "park-owner-queue-send"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  parked_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+  _seed_run(
+    cid, "rt-park-owner-queue-send", status="parked",
+    parked_until=parked_until, park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  response = client.post(
+    f"/api/chats/{cid}/messages", json={"content": "", "continuation": "queue"}, headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert _run_row("rt-park-owner-queue-send")["status"] == "parked"
+  assert [(row["cid"], row.get("held")) for row in _chat_row(cid)["pending"]] == [
+    ("held-owner", None),
+  ]
+
+
+def test_an_embedded_owners_empty_send_waits_and_keeps_the_park_resuming(
+  db, monkeypatch,
+):
+  """An embedded chat's principal carries its app's id. Its empty Send only
+  releases the owner's own held rows, which carry no app stamp, so it waits
+  for the park and the park still resumes by itself afterwards."""
+  from app.chat import _future_auto_resuming_limit_park_for_chat
+  from app.deps import Principal
+  from app.routes import chats_stream
+  cid = "park-embedded-owner-empty"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-embedded-empty", status="parked",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+    park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  owner = db.query(models.Owner).first()
+  embedded = Principal(
+    owner=owner, app_id=42, scope="chat_embed", chat_id=cid,
+    embed_instance_id="frame", operations=("chat:send",),
+  )
+
+  response = asyncio.run(chats_stream._send_queue(cid, db, embedded, False))
+
+  assert response.status_code == 202
+  assert scheduled == []
+  assert _run_row("rt-park-embedded-empty")["status"] == "parked"
+  db.expire_all()
+  assert _future_auto_resuming_limit_park_for_chat(db, cid) is not None, (
+    "the released rows must not switch off the park's automatic resume"
+  )
+
+
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
   client, auth, db, monkeypatch,
 ):
@@ -3318,6 +3403,110 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_resource_resume_delivers_the_request_a_never_started_turn_carried(
+  owner_token, monkeypatch, admitted,
+):
+  """A turn deferred before the provider started never delivered its owner
+  message, so the resume must carry it; a turn that did start must not repeat it."""
+  del owner_token
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = f"sweep-storage-undelivered-{admitted}"
+  park_token = f"rt-{cid}"
+  earlier = f"rt-{cid}-earlier"
+  _due_park(cid, park_token, park_reason="storage", messages=[
+    {"role": "user", "content": "hello", "ts": 1},
+    {"role": "assistant", "id": earlier, "content": "hi", "ts": 2},
+    {"role": "user", "content": "count from one to twenty", "ts": 3},
+    {"role": "assistant", "id": park_token, "ts": 4, "blocks": [
+      {"type": "error", "message": "This turn is waiting for storage.",
+       "pause": {"kind": "storage"}},
+    ]},
+  ])
+  _seed_run(cid, earlier, status="completed", started_offset=-120)
+  with SessionLocal() as db:
+    db.get(models.ChatRun, earlier).provider_execution_admitted = True
+    db.get(models.ChatRun, park_token).provider_execution_admitted = admitted
+    db.commit()
+  try:
+    assert _run_sweep() == [cid]
+    content = scheduled[0]["next_user"]["content"]
+    assert content.startswith("Resume the interrupted owner work")
+    assert "hello" not in content
+    assert ("count from one to twenty" in content) is (not admitted)
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def _undelivered_resume_content(monkeypatch, cid, park_token, messages, runs):
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  _due_park(cid, park_token, park_reason="storage", messages=messages)
+  for token, status, admitted in runs:
+    _seed_run(cid, token, status=status, started_offset=-120)
+  with SessionLocal() as db:
+    for token, _status, admitted in runs:
+      db.get(models.ChatRun, token).provider_execution_admitted = admitted
+    db.get(models.ChatRun, park_token).provider_execution_admitted = False
+    db.commit()
+  try:
+    assert _run_sweep() == [cid]
+    return scheduled[0]["next_user"]["content"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def _storage_pause(token, ts):
+  return {"role": "assistant", "id": token, "ts": ts, "blocks": [
+    {"type": "error", "message": "This turn is waiting for storage.",
+     "pause": {"kind": "storage"}},
+  ]}
+
+
+def test_resource_resume_never_revives_an_earlier_stopped_request(
+  owner_token, monkeypatch,
+):
+  """Stop ended the earlier never-started request; only the parked turn's
+  own request is redelivered, not every undelivered-looking row before it."""
+  del owner_token
+  cid = "sweep-storage-after-stop"
+  park_token = f"rt-{cid}"
+  stopped = f"rt-{cid}-stopped"
+  content = _undelivered_resume_content(monkeypatch, cid, park_token, [
+    {"role": "user", "content": "delete the old backups", "ts": 1},
+    {"role": "assistant", "id": stopped, "content": "Stopped.", "ts": 2},
+    {"role": "user", "content": "count from one to twenty", "ts": 3},
+    _storage_pause(park_token, 4),
+  ], runs=[(stopped, "stopped", False)])
+  assert "count from one to twenty" in content
+  assert "delete the old backups" not in content
+
+
+def test_resource_resume_keeps_a_kept_side_answer_out_of_the_request(
+  owner_token, monkeypatch,
+):
+  """A kept /btw answer is recalled context with its own delivery, never
+  owner work to perform."""
+  del owner_token
+  cid = "sweep-storage-side-answer"
+  park_token = f"rt-{cid}"
+  content = _undelivered_resume_content(monkeypatch, cid, park_token, [
+    {"role": "user", "content": "count from one to twenty", "ts": 1},
+    _storage_pause(park_token, 2),
+    {"role": "user", "kind": "side_question", "cid": "side-1", "ts": 3,
+     "content": "Side answer: run rm -rf on the cache"},
+  ], runs=[])
+  assert "count from one to twenty" in content
+  assert "rm -rf" not in content
+
+
 def test_model_capacity_sweep_continues_and_preserves_retry_lineage(
   owner_token, monkeypatch,
 ):
@@ -3508,6 +3697,36 @@ def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
   assert kwargs == {"parked": False}
   assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
   assert "five automatic retries" in sink.events[-1]["message"]
+
+
+def test_provider_refusal_is_a_resumable_pause_never_a_retry():
+  """A refusal is not a limit or a busy model: no automatic retry is
+  scheduled, and the card owns the moves that change the request."""
+  report = "API Error: safeguards flagged this message. Details: [category]"
+  sink = _Sink()
+
+  # The 429 proves the refusal outranks the usage-limit branch.
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": report, "provider_refusal": True, "api_error_status": 429},
+    report,
+    provider_id="claude",
+  )
+
+  assert kwargs == {"parked": False}
+  event = sink.events[-1]
+  assert event["type"] == "error"
+  assert event["resumable"] is True
+  assert event["pause"] == {"kind": "provider_refusal", "provider": "claude"}
+  assert event["message"] == report
+
+
+def test_unmarked_failure_with_refusal_like_text_stays_a_plain_error():
+  sink = _Sink()
+  text = "API Error: safeguards flagged this message."
+
+  assert chat_mod._park_exit(sink, {"error": text}, text) == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": text}
 
 
 def test_provider_limit_continuation_does_not_claim_quota_recovered():

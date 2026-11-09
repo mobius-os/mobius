@@ -152,12 +152,12 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
   assert chat_mod.is_chat_running(chat_id) is False
 
 
-def test_stop_clears_idle_question_barrier_and_queued_followup(client, auth, db):
+def test_stop_clears_idle_question_barrier_and_holds_queued_followup(client, auth, db):
   """A saved card can outlive its provider process and durable run.
 
   Stop is still the owner's escape hatch in that idle shape: it must clear the
-  protocol barrier and the queued follow-up even though there is no handle or
-  nonterminal ChatRun left to stop.
+  protocol barrier and hold the queued follow-up for the owner's next send
+  even though there is no handle or nonterminal ChatRun left to stop.
   """
   from app import models
 
@@ -177,7 +177,7 @@ def test_stop_clears_idle_question_barrier_and_queued_followup(client, auth, db)
     }],
     pending_messages=[{
       "role": "user", "content": "queued behind the card", "ts": 2,
-      "cid": "idle-card-followup",
+      "cid": "idle-card-followup", "_owner_input_at": "2026-11-06T10:00:00+00:00",
     }],
     pending_question_id=question_id,
   ))
@@ -190,8 +190,10 @@ def test_stop_clears_idle_question_barrier_and_queued_followup(client, auth, db)
 
   assert response.status_code == 200, response.text
   assert response.json()["stopped"] is True
-  assert response.json()["cleared_pending_cids"] == ["idle-card-followup"]
+  assert response.json()["cleared_pending_cids"] == []
   db.expire_all()
   chat = db.get(models.Chat, chat_id)
   assert chat.pending_question_id is None
-  assert chat.pending_messages == []
+  assert [(m["cid"], m["held"]) for m in chat.pending_messages] == [
+    ("idle-card-followup", True),
+  ]

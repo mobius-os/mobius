@@ -16,7 +16,8 @@ const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.s
 /* Like PassiveAppBlock, each observation names the showing it was made for:
    the one committed when the test supplied it. A new showing is unseen until
    the test observes again (`h.observe()`), as an IntersectionObserver reports
-   only after the new layout. */
+   only after the new layout. The list's start follows its end unless a test
+   sets it apart. */
 function renderObserved(initial) {
   let committed = null
   let lastProps = null
@@ -24,14 +25,16 @@ function renderObserved(initial) {
   const h = renderHook(props => {
     if (props !== lastProps) {
       lastProps = props
-      observation = { showing: committed, confirm: props.confirmVisible === true, end: props.listEndVisible === true }
+      observation = { showing: committed, confirm: props.confirmVisible === true, end: props.listEndVisible === true,
+        start: (props.listStartVisible ?? props.listEndVisible) === true }
     }
-    const { confirmVisible: _c, listEndVisible: _l, ...rest } = props
+    const { confirmVisible: _c, listStartVisible: _s, listEndVisible: _l, ...rest } = props
     // The unkeyed booleans are what 5272c66 read; they show the old head
     // borrowing a stale observation. The keyed views are what counts now.
     const session = useAppBlockSession({ ...rest,
       confirmVisible: observation.confirm, listEndVisible: observation.end,
       confirmView: { showing: observation.showing, visible: observation.confirm },
+      listStartView: { showing: observation.showing, visible: observation.start },
       listEndView: { showing: observation.showing, visible: observation.end } })
     committed = session.showing
     return session
@@ -90,7 +93,8 @@ test('state and acknowledgement from another document generation are ignored', (
   h.result.current.dispatch('send:b', 'activate')
   const sent = h.result.current.event
   capability(null, 2)
-  // A document reload discards idle controls and the unacknowledged activate.
+  // A document reload discards idle controls and the unacknowledged activate:
+  // activate may not cause an effect (only confirm may), so nothing is unresolved.
   assert.equal(h.result.current.state, null)
   assert.equal(h.result.current.event, null)
   report({ ackNonce: sent.nonce, summary: 'stale' }, 1)
@@ -339,6 +343,29 @@ test('Confirm arms only after the list end has been on screen during this showin
   } finally { mock.timers.reset() }
 })
 
+test('with the rows above Confirm, their end alone never arms it: the start must be seen too', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const h = renderObserved({ block, near: true, confirmVisible: true, listStartVisible: false, listEndVisible: true })
+    const report = fields => h.result.current.onBlockState({ type: 'moebius:app-block-state',
+      sessionId: h.result.current.sessionId, ...fields }, { generation: 1 })
+    h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+    // The block's own action is in its footer: the last row sits just above
+    // Confirm, while the first row is scrolled above the viewport.
+    report(confirmList('Long list'))
+    h.observe()
+    mock.timers.tick(CONFIRM_ARM_MS * 4)
+    assert.equal(h.result.current.confirmArmed, false)
+    assert.equal(h.result.current.dispatch('send-batch:sel-1', 'confirm'), false)
+    // The reader scrolls up to the first row, then back down to Confirm.
+    h.rerender({ block, near: true, confirmVisible: false, listStartVisible: true, listEndVisible: false })
+    h.rerender({ block, near: true, confirmVisible: true, listStartVisible: false, listEndVisible: true })
+    mock.timers.tick(CONFIRM_ARM_MS)
+    assert.equal(h.result.current.confirmArmed, true)
+    assert.equal(h.result.current.dispatch('send-batch:sel-1', 'confirm'), true)
+  } finally { mock.timers.reset() }
+})
+
 test('an unsupported verdict belongs to one applied revision; a newer revision negotiates again', () => {
   const h = renderObserved( { block, near: true, revision: 'r1' })
   h.result.current.onBlockCapability(false, { generation: 1, reset: true })
@@ -445,4 +472,64 @@ test('the first retain report and the admission withdrawal in the same tick neve
   h.result.current.onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current.sessionId,
     actions: [{ key: 'send-batch:sel-1', label: 'Ready' }], retain: false, checkpoint: null, checkpointAck: 'race' }, { generation: 1 })
   assert.deepEqual(decide(false, h.result.current), { route: 'passive', mode: 'static' })
+})
+
+test('the session init carries the parsed item intents, in card order, intents only', () => {
+  const card = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+    app: 'example', intent: 'review:sel-1', title: 'Ready', interaction: 'inline',
+    action: { label: 'Publish all', intent: 'send-batch:sel-1' },
+    items: [
+      { title: 'B change', intent: 'review:b', facts: [{ label: 'Project', value: 'example/web' }] },
+      { title: 'Bad', intent: 'not an intent' },
+      { title: 'x'.repeat(241), intent: 'review:too-long-title' },
+      { title: 'A change', intent: 'review:a' },
+      { title: 'B again', intent: 'review:b' },
+    ] }) })
+  const h = renderObserved({ block: card, near: true })
+  assert.deepEqual(h.result.current.blockSession.items, [{ intent: 'review:b' }, { intent: 'review:a' }])
+  assert.deepEqual(h.result.current.blockSession.actions.map(action => action.key), ['send-batch:sel-1'])
+  const bare = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
+    app: 'example', intent: 'open:a', title: 'Bare', interaction: 'inline', action: { label: 'Go', intent: 'go:a' } }) })
+  assert.deepEqual(renderObserved({ block: bare, near: true }).result.current.blockSession.items, [])
+})
+
+test('the envelope carries the host-attested chat context and follows the newest-block verdict', () => {
+  const h = renderObserved({ block, near: true, context: { chatId: 'chat-1', latest: true } })
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: true, intent: 'open:a' },
+    'the context names the block intent its newest-block verdict is computed for')
+  assert.ok(h.result.current.blockSession.features.includes('rows-v2'))
+  const before = h.result.current.blockSession
+  h.rerender({ block, near: true, context: { chatId: 'chat-1', latest: false } })
+  assert.notEqual(h.result.current.blockSession, before, 'a changed verdict is a new envelope, so init is posted again')
+  assert.deepEqual(h.result.current.blockSession.context, { chatId: 'chat-1', latest: false, intent: 'open:a' })
+  h.rerender({ block, near: true, context: null })
+  assert.equal('context' in h.result.current.blockSession, false, 'outside a chat there is no context')
+  h.rerender({ block, near: true, context: { chatId: '', latest: true } })
+  assert.equal('context' in h.result.current.blockSession, false)
+})
+
+test('a refresh hint is raised only for a mounted, supported document, bound to its generation', () => {
+  const h = renderObserved({ block, near: true, refresh: { seq: 0, reason: '' } })
+  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'turn' } })
+  assert.equal(h.result.current.blockRefresh, null, 'no document has negotiated yet')
+  h.result.current.onBlockCapability(true, { generation: 4, reset: true })
+  h.rerender({ block, near: true, refresh: { seq: 2, reason: 'visible' } })
+  assert.deepEqual(h.result.current.blockRefresh,
+    { seq: 2, reason: 'visible', sessionId: h.result.current.sessionId, generation: 4 })
+  h.rerender({ block, near: false, refresh: { seq: 3, reason: 'turn' } })
+  assert.equal(h.result.current.blockRefresh.seq, 2, 'a released frame gets no hint')
+})
+
+test('ask-v1 is advertised and an ask accepted only when the app is admitted to ask', () => {
+  const ask = { refs: [{ id: 'row-1', code: 'needs_review', rev: 'abc1234' }] }
+  for (const allowed of [true, false]) {
+    const h = renderObserved({ block, near: true, ask: allowed })
+    assert.equal(h.result.current.blockSession.features.includes('ask-v1'), allowed)
+    h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+    h.result.current.onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current.sessionId,
+      actions: [{ key: 'send-batch:sel-1', label: 'Send all' }], ask }, { generation: 1 })
+    h.observe()
+    assert.deepEqual(h.result.current.state.ask, allowed ? ask : null)
+    assert.equal(h.result.current.event, null, 'reporting an ask sends the app no event')
+  }
 })

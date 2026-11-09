@@ -51,6 +51,31 @@ test('live dictation delegates geometry to the controlled composer value owner',
   }
 })
 
+test('a microphone denial explains browser settings but stays silent in the phone app', () => {
+  for (const native of [false, true]) {
+    const instances = installSpeechRecognition()
+    if (native) globalThis.window.MobiusNative = {}
+    const transcripts = []
+    try {
+      const { result } = renderHook(() => useVoiceInput({
+        onTranscript: text => transcripts.push(text),
+        inputRef: { current: { value: 'draft' } },
+      }))
+      result.current.startVoice()
+      instances[0].onerror({ error: 'not-allowed' })
+
+      assert.equal(result.current.listeningRef.current, false)
+      if (native) {
+        assert.deepEqual(transcripts, [], 'the OS prompt was the answer; leave the draft alone')
+      } else {
+        assert.match(transcripts.at(-1), /^draft \[Microphone access denied/)
+      }
+    } finally {
+      delete globalThis.window
+    }
+  }
+})
+
 test('a manual edit while listening survives late speech results and rebases dictation', () => {
   const instances = installSpeechRecognition()
   const transcripts = []

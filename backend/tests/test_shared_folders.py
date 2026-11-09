@@ -670,6 +670,17 @@ def test_write_never_reads_input_unless_asked_and_refuses_empty_content(folders_
   assert folders_cli("write", "Downloads/b.txt", "--text", "", "--allow-empty")[-1]["content"] == ""
 
 
+def test_default_read_fits_in_what_an_agent_shell_shows_at_once(folders_cli):
+  # Past about 30,000 characters an agent sees only a preview and the rest is
+  # saved to a file on Möbius, so the default must stay below that.
+  client = folders_cli.client
+  client.run = lambda folder, command: client.sent.append(command) or {
+    "text": "", "offset": 0, "length": 0, "size": 0, "eof": True,
+  }
+  assert folders_cli("read", "Downloads/notes.txt")[-1]["length"] <= 30_000
+  assert folders_cli("read", "Downloads/notes.txt", "--length", "100000")[-1]["length"] == 100_000
+
+
 def test_move_stays_inside_the_folder_named_by_both_paths(folders_cli):
   sent = folders_cli("move", "Downloads/IMG_1.jpg", "Downloads/Photos/2026-10-01.jpg")
   assert sent[-1] == {"op": "move", "path": "IMG_1.jpg", "to": "Photos/2026-10-01.jpg"}

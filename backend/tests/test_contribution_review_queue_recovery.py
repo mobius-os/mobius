@@ -12,13 +12,15 @@ from app.deps import Principal
 from app.chat_writer import create_chat
 from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, report
 from tests.test_contribution_review_workflows import takeover, configure_repair, publish_body, checkout_body, overlapping_grant, propose_and_push, NEW
-from tests.test_contribution_review_queue import queue_timeline, saved_queue_receipt, queue_graphql, loaded_before_window, QUEUE_TIME, REMOVED_TIME
+from tests.test_contribution_review_queue import queue_timeline, saved_queue_receipt, queue_graphql, loaded_before_window, lost_attempt, QUEUE_TIME, REMOVED_TIME
 CURRENT_PULL = domain.current_pull
 
 
-def removed_takeover(setup, monkeypatch, *, legacy=False):
+def removed_takeover(setup, monkeypatch, *, legacy=False, lost=False):
   db, row, principal = takeover(setup, monkeypatch)
   node = queue_timeline()
+  if lost:
+    node["timelineItems"]["nodes"] = []
   queue_graphql(monkeypatch, node)
   def read_live(gh, cwd, endpoint):
     if endpoint == "user": return {"id": 42}
@@ -34,7 +36,8 @@ def removed_takeover(setup, monkeypatch, *, legacy=False):
         "ref": "topic", "repo": {"id": 1, "full_name": "example/project"}}}
   monkeypatch.setattr(domain, "read", read_live)
   monkeypatch.setattr(domain, "current_pull", CURRENT_PULL)
-  saved = saved_queue_receipt(summary="Original independent review", tests="Original passing tests",
+  receipt = lost_attempt if lost else saved_queue_receipt
+  saved = receipt(summary="Original independent review", tests="Original passing tests",
     review_run_id=principal.run_id, scope=sorted(routes.SCOPE), tests_passed=True,
     reviewed_base_sha=BASE, independent_receipt_id="old-clear",
     independent_reviews=[{"id": "old-clear", "head_sha": SHA, "base_sha": BASE,
@@ -310,3 +313,32 @@ def test_successor_never_inherits_the_predecessors_settlement(setup, monkeypatch
   observed = observe_removed(db, row, principal)
   assert observed["head_sha"] == NEW and domain.merge_pending(row.outcomes_json[domain.key(ITEM)])
   assert not set(domain.MERGE_SETTLEMENTS).intersection(row.outcomes_json[domain.key(ITEM)])
+
+
+def test_lost_merge_response_ends_after_window_and_permits_only_a_reviewed_successor(setup, monkeypatch):
+  """A lost response whose PR stays open, unmerged and unqueued at its head no longer pins the run."""
+  db, row, principal, _ = removed_takeover(setup, monkeypatch, lost=True)
+  assert report(setup, tests_passed=True, reviewed_base_sha=BASE,
+    independent_receipt_id="old-clear")["run"]["items"][0]["state"] == "needs_you"
+  item = row.outcomes_json[domain.key(ITEM)]
+  assert item["queue_removal"]["dispatch_window_closed"] is True
+  assert item["merge_attempted"] is True and item["merge_attempts"][0]["head_sha"] == SHA
+  checkout = {"checkout": "/fake/server-repair", "initial_head_sha": SHA, "allowed_files": ["owned.py"]}
+  monkeypatch.setattr(repairs, "prepare_checkout", lambda *a: checkout)
+  monkeypatch.setattr(repairs, "validate_repair", lambda *a, **kw: {**checkout,
+    "head_sha": NEW, "files": ["owned.py"], "diff_sha256": "d" * 64})
+  asyncio.run(routes.repair_checkout(1, row.id, checkout_body(), db, principal))
+  def push(*a, before_push=None):
+    before_push()
+    return DispatchResult.confirmed({})
+  monkeypatch.setattr(repairs, "push_repair", push)
+  item = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
+  assert item["head_sha"] == NEW and item["state"] == "reviewing"
+  assert not item.get("merge_attempted") and not item.get("queue_removal")
+  assert item["merge_attempts"][0]["queue_removal"]["dispatch_window_closed"] is True
+  # The successor still needs its own fresh independent review.
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "head": {"sha": NEW}}))
+  with pytest.raises(HTTPException) as error:
+    report(setup, head_sha=NEW, tests_passed=True, reviewed_base_sha=BASE,
+      independent_receipt_id="old-clear")
+  assert error.value.status_code == 422

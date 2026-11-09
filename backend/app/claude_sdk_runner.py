@@ -61,6 +61,7 @@ from collections import deque
 from collections.abc import Awaitable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
@@ -469,12 +470,39 @@ def _resumable(
   """
   if not session_id:
     return False
+  path = claude_session_path(config_dir, cwd, session_id)
+  return path is not None and path.is_file()
+
+
+def claude_session_path(config_dir: str | os.PathLike | None, cwd: str, session_id: str) -> Path | None:
+  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``.
+
+  ``config_dir`` is the turn's ``CLAUDE_CONFIG_DIR`` (``ClaudeProvider.build_env``);
+  without one the CLI uses this process's own. None when neither is set.
+  """
   base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
   if not base:
-    return False
+    return None
   proj = "-" + cwd.strip("/").replace("/", "-")
-  return os.path.isfile(
-    os.path.join(base, "projects", proj, f"{session_id}.jsonl")
+  return Path(base) / "projects" / proj / f"{session_id}.jsonl"
+
+
+# The CLI's refusals of a resume target. It prints them and exits before any
+# session starts, so no session id has been reported (see fork_rejected).
+_RESUME_TARGET_REFUSALS = ("No message found with message.uuid", "No conversation found")
+
+
+def fork_rejected(result: RunnerResult) -> bool:
+  """Whether a turn started with ``fork_from`` failed because the fork was refused.
+
+  Only a refused resume target ends a turn before Claude reports its new
+  session id. Usage limits, auth and provider errors come from the API after
+  the session started, so they keep the fork for the next attempt.
+  """
+  error = result.get("error")
+  return (
+    bool(error) and not result.get("session_id")
+    and any(refusal in str(error) for refusal in _RESUME_TARGET_REFUSALS)
   )
 
 
@@ -1103,6 +1131,60 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
+# The owner reads only a turn's text blocks; thinking is folded away. A turn
+# that ends with a short visible reply after long reasoning is the shape in
+# which the agent composed its answer in thinking and closed with a line such
+# as "Nothing has been changed." — the owner then sees no answer at all. The
+# shape is rare (under 1% of stored replies on one instance), so the check
+# below rarely costs an extra model call, and the agent itself judges whether
+# its reply is complete.
+_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
+_ANSWER_CHECK_THINKING_MIN_CHARS = 600
+_ANSWER_CHECK_REASON = (
+  "Möbius end-of-turn check. The owner sees only your visible reply; your "
+  "thinking is hidden from them. This turn's reasoning is long but its "
+  "visible reply is short, so your answer may exist only in your thinking. "
+  "Re-read the owner's latest message. If your visible reply does not "
+  "already answer it or report the result, write that answer now as visible "
+  "text, without mentioning this check. If it already does, end your turn "
+  "without writing anything more."
+)
+
+
+def _answer_may_be_only_in_thinking(
+  blocks: object, last_assistant_message: object = None,
+) -> bool:
+  """Whether this reply's reasoning dwarfs what the owner can actually read.
+
+  ``blocks`` is the sink's current assistant segment. The Stop hook can run
+  before the stream reader has dispatched the final text, so the CLI's own
+  ``last_assistant_message`` is counted when the blocks do not contain it yet.
+  """
+  if not isinstance(blocks, list):
+    return False
+  visible = "".join(
+    block["content"] for block in blocks
+    if isinstance(block, dict) and block.get("type") == "text"
+    and isinstance(block.get("content"), str)
+  )
+  visible_chars = len(visible.strip())
+  if isinstance(last_assistant_message, str):
+    tail = last_assistant_message.strip()
+    if tail and tail not in visible:
+      visible_chars += len(tail)
+  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
+    return False
+  longest_thinking = max(
+    (
+      len(block["content"].strip()) for block in blocks
+      if isinstance(block, dict) and block.get("type") == "thinking"
+      and isinstance(block.get("content"), str)
+    ),
+    default=0,
+  )
+  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
+
+
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1118,12 +1200,16 @@ async def run_claude_sdk_turn(
   connector_plan=None,
   coordination_enabled: bool = True,
   goal_brief_refresh=None,
+  fork_from: dict | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
   Args:
     user_message: Fully prepared user prompt for this turn.
     session_id: Existing Claude session to resume, or None on first turn.
+    fork_from: On a branch's first turn (no ``session_id``), the source
+      ``{"session_id", "at"}``: the turn starts in a new session forked from
+      that one at entry ``at`` (chat_branches.claude_fork_point).
     base_env: Environment passed through to the Claude subprocess.
     cwd: Working directory for the SDK run.
     chat_id: Möbius chat identifier used for registries.
@@ -1346,6 +1432,36 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
+  # Fires when the root agent is about to end its turn. At most once per turn,
+  # when the visible reply is short beside long reasoning, it returns the turn
+  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
+  # thinking gets written where the owner can read it. A Stop or a saved owner
+  # card owns the turn's end, so neither is ever reopened here.
+  answer_check_sent = False
+
+  async def visible_answer_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    nonlocal answer_check_sent
+    del tool_use_id, context
+    if (
+      answer_check_sent
+      or hook_input.get("stop_hook_active")
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return {"continue_": True}
+    if not _answer_may_be_only_in_thinking(
+      getattr(bc, "assistant_blocks", None),
+      hook_input.get("last_assistant_message"),
+    ):
+      return {"continue_": True}
+    answer_check_sent = True
+    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
+    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
     del hook_input, tool_use_id, context
@@ -1422,7 +1538,15 @@ async def run_claude_sdk_turn(
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
-        "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        # The queued-prompt gate keeps Stop and a saved owner card final, so a
+        # hook that raises or returns no valid decision refuses the prompt
+        # rather than letting it start new work.
+        # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
+        # one closed would turn a completed tool (even the saved card itself)
+        # into an error result, inviting a duplicate.
+        "UserPromptSubmit": [HookMatcher(
+          matcher=None, hooks=[queued_prompt_hook], on_failure="block",
+        )],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
@@ -1431,6 +1555,7 @@ async def run_claude_sdk_turn(
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
         ],
+        "Stop": [HookMatcher(matcher=None, hooks=[visible_answer_hook])],
       },
     }
     if run_policy is not None:
@@ -1452,6 +1577,10 @@ async def run_claude_sdk_turn(
       options_kwargs["thinking"] = thinking_config
     if _effort:
       options_kwargs["effort"] = _effort
+    if session_id is None and fork_from is not None:
+      options_kwargs["resume"] = fork_from["session_id"]
+      options_kwargs["fork_session"] = True
+      options_kwargs["resume_session_at"] = fork_from["at"]
     # Arm ultracode via its documented `ultracode` settings flag; on every other
     # turn set the documented `disableWorkflows` flag so a stray "ultracode" token
     # in injected memory/context can't arm the Workflow fleet on a turn the owner

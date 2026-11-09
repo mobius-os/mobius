@@ -10,7 +10,8 @@ import { settingsQueries } from '../../hooks/queries.js'
 import ProviderUsage from '../../components/SettingsView/ProviderUsage.jsx'
 import {
   clampUsagePercent,
-  formatPlanStatus,
+  formatCreditBalance,
+  formatPlanName,
   formatUsagePercent,
   formatTrialTimeLeft,
   formatUsageReset,
@@ -26,8 +27,8 @@ const settingsView = readFileSync(
   new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
   'utf8',
 )
-const providerCss = readFileSync(
-  new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url),
+const pageCss = readFileSync(
+  new URL('../../components/SettingsView/SettingsPage.css', import.meta.url),
   'utf8',
 )
 const shellSource = readFileSync(
@@ -103,12 +104,11 @@ for (const provider of ['codex', 'claude']) {
   })
 }
 
-test('connected plan status uses the compact green-disclosure copy', () => {
-  assert.equal(formatPlanStatus('Max plan'), 'Plan: Max')
-  assert.equal(formatPlanStatus('Pro plan'), 'Plan: Pro')
-  assert.equal(formatPlanStatus('API billing'), 'Plan: API billing')
-  assert.equal(formatPlanStatus(''), 'Plan: Unknown')
-  assert.equal(formatPlanStatus('Self Serve Business Prolite plan'), 'Plan: Business')
+test('a provider page names its plan once, and an unknown plan says nothing', () => {
+  assert.equal(formatPlanName('Max plan'), 'Max plan')
+  assert.equal(formatPlanName('Pro'), 'Pro plan')
+  assert.equal(formatPlanName(''), '')
+  assert.equal(formatPlanName('Self Serve Business Prolite plan'), 'Business plan')
 })
 
 test('usage freshness renders a verified reading time, stale state, and refresh action', () => {
@@ -133,8 +133,8 @@ test('usage freshness renders a verified reading time, stale state, and refresh 
   }))
   assert.match(unavailable, /Could not refresh/)
   assert.doesNotMatch(unavailable, /Time unavailable/)
-  assert.match(settingsView, /onRefresh=\{\(\) => codexUsageQuery\.refetch\(\)\}/)
-  assert.match(settingsView, /onRefresh=\{\(\) => claudeUsageQuery\.refetch\(\)\}/)
+  assert.match(settingsView, /onRefresh=\{\(\) => usageQuery\.refetch\(\)\}/)
+  assert.match(settingsView, /const usageQueries = \{ claude: claudeUsageQuery, codex: codexUsageQuery, mobius: mobiusUsageQuery \}/)
 })
 
 test('usage percentages are bounded and retain useful precision', () => {
@@ -182,34 +182,21 @@ test('only four valid allowance windows are rendered', () => {
   assert.deepEqual(windows.map(window => window.id), ['a', 'b', 'c', 'd'])
 })
 
-test('dedicated provider pages fetch only their own usage', () => {
-  assert.match(settingsView, /selectedProvider === 'codex'/)
-  assert.match(settingsView, /selectedProvider === 'claude'/)
-  assert.match(settingsView, /selectedProvider && selectedProvider !== row\.provider \? null/)
-  assert.match(settingsView, /snapshot=\{codexUsageQuery\.data\}/)
-  assert.match(settingsView, /snapshot=\{claudeUsageQuery\.data\}/)
+test('a provider page shows its own usage section', () => {
+  assert.match(settingsView, /const usageQuery = usageQueries\[selectedProvider\]/)
+  assert.match(settingsView, /snapshot=\{usageQuery\.data\}/)
+  assert.match(settingsView, /id=\{`provider-usage-\$\{selectedProvider\}`\}/)
 })
 
-test('expanded usage shares aligned columns without tall cards', () => {
-  assert.match(usageView, /className="provider-usage__track"/)
-  assert.match(usageView, /role="progressbar"/)
-  assert.match(usageView, /className="provider-usage__fill"/)
-  assert.match(
-    providerCss,
-    /\.provider-usage__track\s*\{[^}]*height:\s*3px;/s,
-  )
-  assert.match(
-    providerCss,
-    /\.provider-usage__windows\s*\{[^}]*grid-template-columns:/s,
-  )
-  assert.match(
-    providerCss,
-    /\.provider-usage__window\s*\{[^}]*display:\s*contents;/s,
-  )
+test('usage windows are labelled progress bars on the shared Settings meter', () => {
+  assert.match(usageView, /className="settings-meter__track"\s*role="progressbar"/)
+  assert.match(usageView, /className="settings-meter__fill"/)
+  assert.match(pageCss, /\.provider-usage__window \.settings-meter__track\s*\{\s*height:\s*8px;/)
+  assert.match(pageCss, /\.settings-meter--compact\s*\{\s*width:\s*92px;/)
 })
 
 test('Claude extra usage is a deliberate reversible account action', () => {
-  assert.match(usageView, /Extra usage \$\{enabled \? 'enabled' : 'disabled'\}/)
+  assert.match(usageView, /Paid usage beyond your plan · \$\{enabled \? 'On' : 'Off'\}/)
   assert.match(usageView, /Enable' : 'Disable'\} paid extra usage\?/)
   assert.match(usageView, /onToggle\(next, enabled\)/)
   assert.match(settingsView, /api\.settings\.setClaudeExtraUsage\(enabled, expectedEnabled\)/)
@@ -220,5 +207,16 @@ test('Claude banked resets require a current provider offer and confirmation', (
   assert.match(usageView, /!resets\.redeemable/)
   assert.match(usageView, /resets\.nextCreditResetsLeft \|\| null/)
   assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId, expectedResetsLeft\)/)
-  assert.match(settingsView, /onRedeemClaudeReset=\{handleRedeemClaudeReset\}/)
+  assert.match(settingsView, /onRedeemClaudeReset: handleRedeemClaudeReset/)
+})
+
+test('a credit balance keeps enough precision that a small balance is never shown as none', () => {
+  assert.equal(formatCreditBalance('54036.32 credits'), '54,036 credits')
+  assert.equal(formatCreditBalance('12.6 credits'), '13 credits')
+  assert.equal(formatCreditBalance('0.42 credits'), '0.4 credits')
+  assert.equal(formatCreditBalance('9.94 credits'), '9.9 credits')
+  assert.equal(formatCreditBalance('0.04 credits'), '<0.1 credits')
+  assert.equal(formatCreditBalance('0 credits'), '0 credits')
+  assert.equal(formatCreditBalance('-0.4 credits'), '-0.4 credits')
+  assert.equal(formatCreditBalance('lots'), 'lots')
 })

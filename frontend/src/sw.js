@@ -45,6 +45,7 @@ import {
 } from 'workbox-precaching'
 import { registerRoute, setCatchHandler } from 'workbox-routing'
 import { LiveShellList } from './sw-shell-lists.js'
+import { pinnedProxyImageStrategy, trimCachePlugin } from './sw-cache-strategies.js'
 import {
   CacheFirst, StaleWhileRevalidate, NetworkFirst, NetworkOnly,
 } from 'workbox-strategies'
@@ -72,12 +73,11 @@ import {
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
   isAppCodeRoute,
-  isCacheableProxyRequest,
+  proxyCacheLane,
   appCodeCacheKey,
   appCodeRequestMayBeStored,
   appCodeStoreAction,
   supersededVersionKeys,
-  entriesToTrim,
 } from './sw-cache-policy.js'
 import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
 import { isShellNavigationDenied } from './lib/swNavigationPolicy.js'
@@ -284,27 +284,8 @@ registerRoute(
 // (2026-06-12); the request side is the only place the case is visible.
 // packagedAssetCacheLane owns the choice. A page navigation to /app-assets
 // takes neither route: it reaches the server's fresh inert response.
-// Bounded-growth trim for APP_ASSETS_CACHE. Neither route below carries a
-// Workbox ExpirationPlugin (it's not a dep on these routes), and a single app
-// can be ~19MB of assets, so without a cap the cache grows unbounded across
-// installs and one asset-heavy app could evict the whole origin's quota.
-// cacheDidUpdate fires after each successful write; we then trim the OLDEST
-// entries (cache.keys() is insertion order) down to APP_ASSETS_MAX_ENTRIES via
-// the unit-tested entriesToTrim helper. Best-effort: a trim failure never
-// affects the served response.
-const appAssetsTrimPlugin = {
-  cacheDidUpdate: async ({ cacheName }) => {
-    try {
-      const cache = await caches.open(cacheName)
-      const keys = (await cache.keys()).map(r => r.url)
-      await Promise.all(
-        entriesToTrim(keys, APP_ASSETS_MAX_ENTRIES).map(k => cache.delete(k)),
-      )
-    } catch {
-      // ignore — the cache is over its soft cap for one extra entry at worst.
-    }
-  },
-}
+// Bounded growth for both routes below; see trimCachePlugin.
+const appAssetsTrimPlugin = trimCachePlugin(APP_ASSETS_MAX_ENTRIES)
 
 const packagedAssetCacheKeyPlugin = {
   cacheKeyWillBeUsed: async ({ request }) => {
@@ -364,9 +345,15 @@ registerRoute(
   }),
 )
 
-// /api/proxy — server-side CORS bypass; see isCacheableProxyRequest.
+// /api/proxy — server-side CORS bypass; see proxyCacheLane.
 registerRoute(
-  ({ url, request }) => isCacheableProxyRequest(url, request, self.location.origin),
+  ({ url, request }) =>
+    proxyCacheLane(url, request, self.location.origin) === 'immutable',
+  pinnedProxyImageStrategy(),
+)
+registerRoute(
+  ({ url, request }) =>
+    proxyCacheLane(url, request, self.location.origin) === 'revalidate',
   new StaleWhileRevalidate({ cacheName: 'mobius-proxy' }),
 )
 

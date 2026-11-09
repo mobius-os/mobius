@@ -16,8 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.owner_card_receipts import turn_end_receipt_id
-from codex_goal_brief_hook import _load_turn_identity
-from mobius_control_mcp import _agent_api_call
+
+
+# This hook runs after every Bash and control tool call; import the heavier
+# modules only once a turn-end receipt is found.
+def _load_turn_identity(thread_id: str) -> None:
+  from codex_goal_brief_hook import _load_turn_identity as load
+  load(thread_id)
+
+
+def _agent_api_call(*args):
+  from mobius_control_mcp import _agent_api_call as call
+  return call(*args)
 
 
 def finish_card_tool(payload: dict) -> None:

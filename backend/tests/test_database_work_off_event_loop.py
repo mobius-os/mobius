@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 from app import delegations
+from app.routes import apps as apps_routes
 
 
 def _running_on_event_loop() -> bool:
@@ -153,6 +154,81 @@ def test_parent_wake_skips_the_history_scan_without_a_running_run(
 
   assert delegations._plan_parent_wake(chat.id, "source-run") is None
   assert read == [chat.id]
+
+
+def test_app_list_reads_run_off_the_event_loop(client, auth, monkeypatch):
+  seen = []
+  real_list = apps_routes._live_apps_for_drawer
+  real_tombstones = apps_routes._has_expired_app_tombstone
+
+  def live_apps(db):
+    seen.append(("list", _running_on_event_loop()))
+    return real_list(db)
+
+  def tombstones(db, cutoff):
+    seen.append(("tombstones", _running_on_event_loop()))
+    return real_tombstones(db, cutoff)
+
+  monkeypatch.setattr(apps_routes, "_live_apps_for_drawer", live_apps)
+  monkeypatch.setattr(apps_routes, "_has_expired_app_tombstone", tombstones)
+
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+  assert seen == [("tombstones", False), ("list", False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", ["_has_expired_app_tombstone", "_live_apps_for_drawer"])
+async def test_cancelled_app_list_closes_its_session_after_the_read(
+  auth, monkeypatch, read,
+):
+  import gc
+  import threading
+  import anyio
+  import httpx
+  from app.main import app as application
+
+  entered = threading.Event()
+  release = threading.Event()
+  events = []
+  real_read = getattr(apps_routes, read)
+
+  def blocked_read(db, *args):
+    real_close = db.close
+
+    def close():
+      events.append("session closed")
+      real_close()
+
+    db.close = close
+    entered.set()
+    assert release.wait(5)
+    result = real_read(db, *args)
+    events.append("read finished")
+    return result
+
+  monkeypatch.setattr(apps_routes, read, blocked_read)
+  scope = anyio.CancelScope()
+  async with httpx.AsyncClient(
+    transport=httpx.ASGITransport(app=application), base_url="http://test",
+  ) as http:
+    async def get():
+      with scope:
+        await http.get("/api/apps/", headers=auth)
+
+    task = asyncio.create_task(get())
+    try:
+      assert await asyncio.to_thread(entered.wait, 5)
+      scope.cancel()
+      # Room for the cancelled request to unwind if it does not wait for its read.
+      await asyncio.wait({task}, timeout=0.2)
+    finally:
+      release.set()
+      await asyncio.gather(task, return_exceptions=True)
+
+  # A cancelled request can leave get_db in a traceback cycle; finalize it.
+  gc.collect()
+  assert scope.cancelled_caught
+  assert events == ["read finished", "session closed"]
 
 
 def _freeze_provider_clock(monkeypatch, start=1_000_000.0):

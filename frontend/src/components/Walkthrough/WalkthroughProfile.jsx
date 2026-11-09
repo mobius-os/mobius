@@ -1,92 +1,66 @@
 /* First-screen profile setup. A hosted or already-linked owner picks a handle
    and avatar right here; a self-hosted owner who has not linked yet signs in
-   with Möbius through Möbius · You, which owns the account-link handshake. */
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
-import { detailToMessage } from '../../lib/errorDetail.js'
+   to their Möbius account in place, through the shell's account-link flow. */
+import { useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import useMobiusSignIn from '../../hooks/useMobiusSignIn.js'
+import useAuthedImageUrl from '../../hooks/useAuthedImageUrl.js'
+import { AVATAR_PATH, avatarKey, mobiusAccountQueries } from '../../hooks/mobiusAccountQueries.js'
+import {
+  AVATAR_TYPES,
+  HANDLE_PATTERN,
+  avatarProblem,
+  profileInitial,
+} from '../../lib/mobiusAccount.js'
+import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
 import { CheckIcon } from './WalkthroughIcons.jsx'
 import { returningHandle } from './returningOwner.js'
 
-const HANDLE_PATTERN = /^[a-z0-9_]{3,30}$/
-const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp']
-const AVATAR_MAX_BYTES = 5 * 1024 * 1024
-
-function avatarProblem(file) {
-  if (!AVATAR_TYPES.includes(file.type)) return 'Choose a JPEG, PNG, or WebP image.'
-  if (file.size > AVATAR_MAX_BYTES) return 'Choose an image under 5 MB.'
-  return ''
-}
-
-/* The avatar image is served by the owner's own backend and needs auth, so it
-   is fetched into a blob URL (the same way Möbius · You shows it). */
-function useAvatarUrl(avatarKey) {
-  const [url, setUrl] = useState(null)
-  useEffect(() => {
-    if (!avatarKey) { setUrl(null); return undefined }
-    const controller = new AbortController()
-    let objectUrl = null
-    apiFetch('/identity/avatar', { signal: controller.signal, timeoutMs: 15_000 }).then(async response => {
-      if (!response.ok) return
-      objectUrl = URL.createObjectURL(await response.blob())
-      setUrl(objectUrl)
-    }).catch(() => { /* Initials stay as the fallback artwork. */ })
-    return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl) }
-  }, [avatarKey])
-  return url
-}
-
-/* The owner's profile: { loading, error, identity, avatarUrl, editing, returning, claim, uploadAvatar, signIn, reload }.
-   `returning` is the handle of an owner who arrived with one, or null (see returningOwner.js).
-   claim and uploadAvatar reject with a user-facing Error message. */
-export function useAccountProfile(onSignIn) {
-  const [state, setState] = useState({ identity: null, loading: true, error: '' })
-  // Set when this owner's first handle is claimed in the guide; `reload` refetches after the sign-in hand-off.
+/* The owner's profile: { loading, error, identity, avatarUrl, editing, returning, claim, uploadAvatar, signedIn }.
+   It reads and writes the same validated account Settings › Möbius shows (mobiusAccountQueries), so the two
+   never disagree. `returning` is the handle of an owner who arrived with one, or null (see returningOwner.js).
+   claim and uploadAvatar reject with a user-facing Error message; signedIn(identity) adopts a just-linked account. */
+export function useAccountProfile() {
+  const queryClient = useQueryClient()
+  const query = mobiusAccountQueries.identity.useQuery()
+  // A failed refresh keeps a profile the owner already has here (for example one just signed in).
+  const identity = query.data || null
+  const error = !identity && query.isError ? 'Your profile is not available right now.' : ''
+  // Set when this owner's first handle is claimed in the guide.
   const [claimedHere, setClaimedHere] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [reloads, setReloads] = useState(0)
-  const reload = useCallback(() => setReloads(count => count + 1), [])
-  useEffect(() => {
-    const controller = new AbortController()
-    apiFetch('/identity', { signal: controller.signal, timeoutMs: 15_000 }).then(async response => {
-      if (!response.ok) throw new Error('Your profile is not available right now.')
-      setState({ identity: await response.json(), loading: false, error: '' })
-    }).catch(error => {
-      if (error.name === 'AbortError') return
-      // A refresh that fails keeps the profile the owner already saw; only the first load shows the error.
-      setState(current => (current.identity
-        ? { ...current, loading: false }
-        : { identity: null, loading: false, error: error.message || 'Your profile is not available right now.' }))
-    })
-    return () => controller.abort()
-  }, [reloads])
-  const avatarUrl = useAvatarUrl(state.identity?.profile?.avatar_url)
-  const setIdentity = identity => setState(current => ({ ...current, identity }))
+  // The same cached photo Settings shows; initials stand in until it loads.
+  const avatarUrl = useAuthedImageUrl(AVATAR_PATH, avatarKey(identity)).url
 
   async function claim(handle) {
-    const response = await apiFetch('/identity/profile', { method: 'PATCH', body: JSON.stringify({ handle }), timeoutMs: 20_000 })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(detailToMessage(data.detail, 'Could not claim that handle.'))
-    if (!state.identity?.profile?.handle) setClaimedHere(true)
-    setIdentity(data)
+    const first = !identity?.profile?.handle
+    await mobiusAccountQueries.saveHandle(queryClient, handle)
+    // Marked only once the handle is saved, and before the query notifies its
+    // readers (TanStack batches that to a later task), so the same render that
+    // shows the new handle knows it was claimed here, not brought back.
+    if (first) setClaimedHere(true)
   }
-  async function uploadAvatar(file) {
-    // multipart: the browser must set the Content-Type boundary, which apiFetch would override with JSON.
-    const body = new FormData()
-    body.append('avatar', file)
-    const response = await fetch(`${BASE}/api/identity/avatar`, { method: 'POST', headers: getAuthHeaders(), body })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(detailToMessage(data.detail, 'Could not update your avatar.'))
-    setIdentity(data)
+  const returning = returningHandle({ handle: identity?.profile?.handle, claimedHere, editing })
+  return {
+    identity,
+    loading: !identity && query.isPending,
+    error,
+    avatarUrl,
+    claimedHere,
+    editing,
+    setEditing,
+    returning,
+    claim,
+    uploadAvatar: file => mobiusAccountQueries.uploadAvatar(queryClient, file),
+    signedIn: next => mobiusAccountQueries.signedIn(queryClient, next),
   }
-  const returning = returningHandle({ handle: state.identity?.profile?.handle, claimedHere, editing })
-  return { ...state, avatarUrl, claimedHere, editing, setEditing, returning, claim, uploadAvatar, signIn: onSignIn, reload }
 }
 
-function Avatar({ url, name, busy, onPick }) {
+function Avatar({ url, profile, busy, onPick }) {
   const inputRef = useRef(null)
   return <div className="wt-avatar">
     <span className={`wt-avatar__face${busy ? ' is-busy' : ''}`} aria-hidden="true">
-      {url ? <img src={url} alt="" /> : <span>{(name || '?').slice(0, 1).toUpperCase()}</span>}
+      {url ? <img src={url} alt="" /> : <span>{profileInitial(profile)}</span>}
     </span>
     <button type="button" className="wt-avatar__edit" onClick={() => inputRef.current?.click()} disabled={busy} aria-label={url ? 'Change avatar' : 'Upload an avatar'}>
       <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>
@@ -95,13 +69,35 @@ function Avatar({ url, name, busy, onPick }) {
   </div>
 }
 
-export default function WalkthroughProfile({ identityApp, controller }) {
-  const identityAvailable = Boolean(identityApp)
+function SignInChoices({ onSignedIn }) {
+  const signIn = useMobiusSignIn({ onSignedIn })
+  const { pending } = signIn
+  const waiting = pending === 'google' || pending === 'apple'
+  const label = (provider, text) => (pending === provider ? 'Waiting for sign-in…' : text)
+  return <>
+    <div className="wt-profile__providers">
+      <button type="button" className="wt-btn wt-btn--primary" onClick={() => signIn.begin('google')} disabled={Boolean(pending)}>
+        <span className="wt-btn__brand" aria-hidden="true"><GoogleMark size={16} /></span>{label('google', 'Continue with Google')}
+      </button>
+      <button type="button" className="wt-btn" onClick={() => signIn.begin('apple')} disabled={Boolean(pending)}>
+        <AppleMark size={16} />{label('apple', 'Continue with Apple')}
+      </button>
+    </div>
+    {signIn.error && <p className="wt-error" role="alert">{signIn.error}</p>}
+    {(waiting || signIn.canRetry || pending === 'complete') && <div className="wt-profile__actions wt-profile__actions--center">
+      {signIn.canRetry && <button type="button" className="wt-btn wt-btn--primary" onClick={signIn.retry} disabled={Boolean(pending)}>Finish signing in</button>}
+      {pending === 'complete' ? <span className="wt-profile__fine" role="status">Finishing sign-in…</span>
+        : <button type="button" className="wt-link" onClick={signIn.cancel}>Cancel</button>}
+    </div>}
+    <p className="wt-profile__fine">A sign-in window opens and closes by itself when you’re done, and your guide stays right here.</p>
+  </>
+}
+
+export default function WalkthroughProfile({ controller }) {
   const { identity, loading, error: loadError, avatarUrl, editing, setEditing, returning } = controller
   const [value, setValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [signingIn, setSigningIn] = useState(false)
   const [error, setError] = useState('')
   const profile = identity?.profile
   const handle = profile?.handle
@@ -138,13 +134,8 @@ export default function WalkthroughProfile({ identityApp, controller }) {
     }
   }
 
-  async function signIn() {
-    setSigningIn(true)
-    try { await controller.signIn() } finally { setSigningIn(false) }
-  }
-
   if (loading) return <div className="wt-profile wt-profile--loading" role="status" aria-label="Checking your profile"><span className="wt-skeleton wt-skeleton--avatar" /><span className="wt-skeleton wt-skeleton--line" /></div>
-  if (loadError) return <p className="wt-note" role="alert">{loadError} You can set this up later in Möbius · You.</p>
+  if (loadError) return <p className="wt-note" role="alert">{loadError} You can set this up later in Settings.</p>
 
   if (signedOut) {
     return <div className="wt-profile wt-profile--signin">
@@ -152,14 +143,11 @@ export default function WalkthroughProfile({ identityApp, controller }) {
         <span className="wt-avatar__face" aria-hidden="true"><span>?</span></span>
         <div><h3>Claim a handle and add a picture</h3><p>Sign in with Möbius to get started. Both are optional to change later, and your email stays private.</p></div>
       </div>
-      <button type="button" className="wt-btn wt-btn--primary wt-btn--wide" onClick={signIn} disabled={!identityAvailable || signingIn}>
-        <span className="wt-btn__mark" aria-hidden="true"><i /></span>{signingIn ? 'Signing in…' : 'Sign in with Möbius'}
-      </button>
-      <p className="wt-profile__fine">{identityAvailable ? 'Opens Möbius · You. Come back here when you are done and your guide will be waiting.' : 'Möbius · You is not available right now. You can do this later.'}</p>
+      <SignInChoices onSignedIn={controller.signedIn} />
     </div>
   }
 
-  if (!canEdit) return <p className="wt-note" role="status">Your Möbius account can’t be reached right now. You can pick a handle later in Möbius · You.</p>
+  if (!canEdit) return <p className="wt-note" role="status">Your Möbius account can’t be reached right now. You can pick a handle later in Settings.</p>
 
   const showForm = !handle || editing
   return <>
@@ -167,7 +155,7 @@ export default function WalkthroughProfile({ identityApp, controller }) {
     {showForm && <h3 className="wt-profile__title">Claim a handle and upload a picture <span>(optional)</span> to get started.</h3>}
     <div className="wt-profile__body">
     <div className="wt-profile__picture">
-      <Avatar url={avatarUrl} name={handle || profile.display_name} busy={uploading} onPick={pickAvatar} />
+      <Avatar url={avatarUrl} profile={profile} busy={uploading} onPick={pickAvatar} />
     </div>
     <div className="wt-profile__main">
       {showForm ? <form className="wt-handle" onSubmit={claim}>
