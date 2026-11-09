@@ -12,8 +12,15 @@ const vite = await createSsrRenderServer()
 const { default: ErrorCard } = await vite.ssrLoadModule(
   '/src/components/ChatView/ErrorCard.jsx',
 )
+const {
+  canStartRefusalFreshSession,
+  refusalActionSentence,
+} = await vite.ssrLoadModule('/src/components/ChatView/ErrorCard.jsx')
 const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
+)
+const { default: MessageCopyButton } = await vite.ssrLoadModule(
+  '/src/components/ChatView/MessageCopyButton.jsx',
 )
 
 after(() => vite.close())
@@ -264,6 +271,115 @@ test('an exhausted busy-model card stops promising retries and offers Resume', (
   assert.doesNotMatch(html, /Trying again/)
 })
 
+const refusalBlock = {
+  type: 'error', resumable: true,
+  message: 'API Error: safeguards flagged this message. Details: `[category]`',
+  pause: { kind: 'provider_refusal', provider: 'claude' },
+}
+
+function withWindow(t) {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+}
+
+test('a provider refusal offers moves that change the request, never a timed retry', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: true,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.match(html, /usually fails again/)
+  assert.match(html, />Switch model<\/button>/)
+  assert.match(html, />Start fresh session<\/button>/)
+  assert.match(html, />Resume<\/button>/)
+  // The provider's raw report stays available but is not the headline.
+  assert.match(html, /Technical details/)
+  assert.doesNotMatch(html, /Trying again|auto-continue|role="alert"/)
+})
+
+test('a refusal card away from the transcript tail offers no actions', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: false,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.doesNotMatch(html, /Switch model<\/button>|Start fresh session<\/button>|>Resume</)
+})
+
+function withPathname(t, pathname) {
+  const previousLocation = globalThis.location
+  globalThis.location = { pathname }
+  t.after(() => {
+    if (previousLocation === undefined) delete globalThis.location
+    else globalThis.location = previousLocation
+  })
+}
+
+// ChatView passes the fresh-session action only through this gate, because
+// POST /compact is owner lifecycle control: a chat embed or a shared-workspace
+// guest gets a 403, so the button would only ever produce an error.
+function refusalCardFor(viewer) {
+  const freshSession = canStartRefusalFreshSession({ embedded: viewer.embedded })
+  return renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: true,
+    onResume() {},
+    onRefusalModelChoice: viewer.showPicker ? () => {} : undefined,
+    onRefusalFreshSession: freshSession ? () => {} : undefined,
+  }))
+}
+
+test('the owner is offered a fresh session after a refusal, and the copy says so', (t) => {
+  withWindow(t)
+  withPathname(t, '/shell/')
+  assert.equal(canStartRefusalFreshSession(), true)
+  const html = refusalCardFor({ embedded: false, showPicker: true })
+  assert.match(html, />Start fresh session<\/button>/)
+  assert.match(html, /Switch model, then Resume, or start a fresh session from a summary of this chat\./)
+})
+
+for (const [viewer, pathname, embedded] of [
+  ['an embedded chat', '/shell/', true],
+  ['a shared-workspace guest', '/shell/shared', false],
+]) {
+  test(`${viewer} is never offered a fresh session it cannot start`, (t) => {
+    withWindow(t)
+    withPathname(t, pathname)
+    assert.equal(canStartRefusalFreshSession({ embedded }), false)
+    const html = refusalCardFor({ embedded, showPicker: true })
+    assert.doesNotMatch(html, /Start fresh session|fresh session/)
+    assert.match(html, />Switch model<\/button>/)
+    assert.match(html, /Your work is saved\. Switch model, then Resume\./)
+  })
+}
+
+test('a refusal card with no moves on offer promises none', (t) => {
+  withWindow(t)
+  withPathname(t, '/shell/shared')
+  const html = refusalCardFor({ embedded: true, showPicker: false })
+  assert.doesNotMatch(html, /Switch model|fresh session/)
+  assert.match(html, /usually fails again\. Your work is saved\.<\/div>/)
+})
+
+test('the refusal sentence names exactly the offered actions', () => {
+  assert.equal(refusalActionSentence({}), '')
+  assert.equal(refusalActionSentence({ switchModel: true }), 'Switch model, then Resume.')
+  assert.equal(refusalActionSentence({ freshSession: true }), 'Start a fresh session from a summary of this chat.')
+  assert.match(refusalActionSentence({ switchModel: true, freshSession: true }), /^Switch model.*fresh session/)
+})
+
 for (const [continuationWait, title, explanation] of [
   ['restoring_edits', 'Waiting for the platform update', 'while the update restores unfinished work'],
   ['restart_required', 'Waiting for a server restart', 'until a server restart loads the restored work'],
@@ -429,7 +545,7 @@ test('continuations render as product markers, not user bubbles', () => {
   assert.match(continuationCard, /Resumed manually/)
   assert.match(continuationCard, /Server restarted — continuing automatically/)
   assert.match(continuationCard, /Retry check due — trying the provider again/)
-  assert.match(msgContent, /onClick=\{onResume\}/,
+  assert.match(msgContent, /onClick=\{\(\) => onResume\(\{ allowLowStorage: storageOverrideAvailable \}\)\}/,
     'Resume delegates the lifecycle action instead of manufacturing owner text')
   assert.match(chatView, /const markerRow = isContinuationMessage\(msg\)/,
     'continuation rows are marker rows')
@@ -600,11 +716,11 @@ test('continuation blocker changes survive mounted and cached runtime reconcilia
   }
 })
 
-test('manual resource recovery retains the existing Resume action while automatic waits do not compete', () => {
+test('manual recovery remains available while only storage waits offer a warned override', () => {
   for (const kind of ['memory', 'storage', 'model_capacity']) {
     const props = {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind } }] },
-      isLastMsg: true, onResume() {}, resumeState: {},
+      isLastMsg: true, onResume() {}, resumeState: {}, canOverrideStorage: true,
     }
     const manual = renderToStaticMarkup(createElement(MsgContent, { ...props, handoff: { kind: 'recovery' } }))
     assert.match(manual, /class="chat__resume chat__recovery-action"/)
@@ -612,7 +728,15 @@ test('manual resource recovery retains the existing Resume action while automati
     const unknown = renderToStaticMarkup(createElement(MsgContent, props))
     assert.doesNotMatch(unknown, /class="chat__resume chat__recovery-action"/)
     const automatic = renderToStaticMarkup(createElement(MsgContent, { ...props, handoff: { kind: 'automatic', reason: kind } }))
-    assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    if (kind === 'storage') {
+      assert.match(automatic, />Continue anyway<\/button>/)
+      assert.match(manual, />Continue anyway<\/button>/)
+      assert.match(automatic, /If the disk fills completely, saving may fail\./)
+      assert.match(automatic, /continue automatically/)
+      assert.doesNotMatch(manual, />Resume<\/button>/)
+    } else {
+      assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    }
     const answered = renderToStaticMarkup(createElement(MsgContent, {
       ...props,
       msg: { ...props.msg, blocks: [{ type: 'question', question_id: 'open-question', questions: [] }, ...props.msg.blocks] },
@@ -621,6 +745,59 @@ test('manual resource recovery retains the existing Resume action while automati
     assert.doesNotMatch(answered, /class="chat__resume chat__recovery-action"/)
   }
 })
+
+for (const [name, overrides] of [
+  ['historical', { isLastMsg: false }],
+  ['earlier error block', { msg: { role: 'assistant', blocks: [
+    { type: 'error', resumable: true, pause: { kind: 'storage' } },
+    { type: 'error', resumable: false, pause: { kind: 'memory' } },
+  ] } }],
+  ['working', { handoff: { kind: 'working' } }],
+  // The server's real shape for a storage wait during an update.
+  ['waiting for restart', { handoff: { kind: 'recovery', reason: 'restart_required' } }],
+  ['restoring work', { handoff: { kind: 'automatic', reason: 'restoring_edits' } }],
+]) {
+  test(`${name} storage pause cannot offer Continue anyway`, () => {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
+      isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' },
+      canOverrideStorage: true, ...overrides,
+    }))
+    assert.doesNotMatch(html, /Continue anyway/)
+  })
+}
+
+test('only the installation owner is offered Continue anyway; guests and embeds keep Resume', () => {
+  // ChatView derives the prop from the same owner rule as a fresh session.
+  assert.match(chatView, /canOverrideStorage=\{canStartFreshSession\}/)
+  const props = {
+    msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
+    isLastMsg: true, onResume() {}, resumeState: {}, handoff: { kind: 'recovery' },
+  }
+  for (const viewer of [{ embedded: true }, { ownerWorkspace: false }]) {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      ...props, canOverrideStorage: canStartRefusalFreshSession(viewer),
+    }))
+    assert.doesNotMatch(html, /Continue anyway|If the disk fills completely/)
+    assert.match(html, /class="chat__resume chat__recovery-action"[^>]*>(Resume|Try now)<\/button>/)
+  }
+  const owner = renderToStaticMarkup(createElement(MsgContent, {
+    ...props, canOverrideStorage: canStartRefusalFreshSession({ embedded: false, ownerWorkspace: true }),
+  }))
+  assert.match(owner, />Continue anyway<\/button>/)
+})
+
+for (const state of [{ pending: true }, { unavailable: true }]) {
+  test(`storage override respects ${Object.keys(state)[0]} acknowledgement state`, () => {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
+      isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' }, resumeState: state,
+      canOverrideStorage: true,
+    }))
+    assert.match(html, /disabled=""/)
+    assert.match(html, state.pending ? /Continuing…/ : /Reconnecting…/)
+  })
+}
 
 for (const kind of ['memory', 'storage', 'model_capacity', 'restart']) {
   for (const [name, props] of [
@@ -638,3 +815,19 @@ for (const kind of ['memory', 'storage', 'model_capacity', 'restart']) {
     })
   }
 }
+
+test('an error card’s Copy hands its button the raw error message', () => {
+  // MessageCopyButton reads its payload at tap time through `read(button)`;
+  // a card still passing the old `text` prop threw on tap and copied nothing.
+  const message = 'Provider returned 500: upstream reset'
+  const found = []
+  const walk = node => {
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (!node || typeof node !== 'object') return
+    if (node.type === MessageCopyButton) found.push(node.props)
+    walk(node.props?.children)
+  }
+  walk(ErrorCard({ block: { type: 'error', message } }))
+  assert.equal(found.length, 1)
+  assert.deepEqual(found[0].read({}), { plainText: message })
+})

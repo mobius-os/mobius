@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
@@ -16,6 +17,30 @@ function diagnosticText(error) {
 }
 
 
+// A mini-app bundle may read only its own source tree, the platform's runtime
+// packages, and the two runtime files the compiler injects. Anything else the
+// server can read (owner tokens, other apps' data, secrets) must never be
+// inlined into a bundle or quoted in a parse error. Paths are compared after
+// resolving symlinks, so a link inside the tree cannot point outside it.
+function readConfinement(config) {
+  const real = (p) => realpathSync(path.resolve(p))
+  const roots = [real(config.sourceRoot), real(config.nodeModules)]
+  const files = new Set([real(config.runtimeInject), real(config.mobiusRuntime)])
+  return (id) => {
+    // Rolldown's own virtual modules (`\0…`, `rolldown:…`) are not files.
+    if (!path.isAbsolute(id)) return true
+    let target
+    try {
+      target = realpathSync(id)
+    } catch {
+      return false
+    }
+    return files.has(target)
+      || roots.some((root) => target === root || target.startsWith(root + path.sep))
+  }
+}
+
+
 async function main() {
   if (process.argv.length !== 3) {
     throw new Error('usage: node rolldown_compile.mjs <json-config>')
@@ -27,6 +52,7 @@ async function main() {
   const rolldownUrl = pathToFileURL(requireFromRuntime.resolve('rolldown')).href
   const { rolldown } = await import(rolldownUrl)
   const entryId = path.resolve(config.entry)
+  const readable = readConfinement(config)
 
   const bundle = await rolldown({
     input: config.entry,
@@ -51,6 +77,12 @@ async function main() {
       name: 'mobius-mini-app-contract',
       resolveId(source) {
         if (/\.css(?:$|[?#])/.test(source)) throw new Error(config.cssImportError)
+        return null
+      },
+      load(id) {
+        // Runs before Rolldown reads any module from disk.
+        const file = id.split('?')[0]
+        if (!readable(file)) throw new Error(`${config.outsideImportError} Refused: ${file}`)
         return null
       },
       transform(code, id) {

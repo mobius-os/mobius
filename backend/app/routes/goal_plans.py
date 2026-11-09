@@ -164,6 +164,7 @@ async def promote_current_run_to_goal(
       "run_not_current": "A newer agent turn now owns this chat.",
       "different_goal_active": "This turn already owns a different Goal.",
       "logical_root_missing": "The running turn has no durable logical root.",
+      "claim_adoption_conflict": "An exact work claim changed or would create a Goal dependency cycle. Inspect it before promoting again.",
     }
     raise HTTPException(
       status_code=409,
@@ -270,7 +271,7 @@ class GoalUpdateRequest(BaseModel):
 
 
 def _goal_summary(db: Session, goal) -> dict[str, Any]:
-  from app.agent_work_claims import open_claim_keys
+  from app.agent_work_claims import completable_claim_keys, open_claim_keys
   from app.goals import goal_hold
   return {
     "hold": goal_hold(goal) if goal.status == "stopped" else None,
@@ -278,6 +279,9 @@ def _goal_summary(db: Session, goal) -> dict[str, Any]:
     "objective": goal.objective, "next_action": goal.next_action,
     "result": goal.result,
     "held_work_keys": sorted(open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)),
+    "completable_work_keys": sorted(completable_claim_keys(
+      db, chat_id=goal.chat_id, goal_id=goal.id,
+    )),
   }
 
 

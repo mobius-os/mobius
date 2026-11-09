@@ -49,13 +49,14 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
-  get_project_principal, reject_cross_site, resolve_project_principal,
+  get_project_principal, reject_cross_site, require_account_owner_control,
+  resolve_project_principal,
 )
 from app.path_utils import validate_path_within_base
 from app.storage_io import make_parent_folders, require_parent_folders
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
-from app.theme import DEFAULT_THEME, theme_data
+from app.theme import DEFAULT_THEME, shipped_palettes_css, theme_data
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, serialize_project_lifecycle
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -666,6 +667,7 @@ def _within_artifacts(root: Path, path: Path) -> bool:
 
 def _artifact_view(
   project: models.Project, root: Path, entry: dict[str, Any],
+  source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
   """Owner-facing artifact row: registry fields plus reconciled/derived state.
 
@@ -698,6 +700,7 @@ def _artifact_view(
       has_output = True
   except (OSError, ValueError):
     has_output = False
+  status = project_builders.effective_status(project.id, entry)
   return {
     "id": artifact_id,
     "name": entry.get("name") or artifact_id,
@@ -707,12 +710,18 @@ def _artifact_view(
     "source": source,
     "output_rel": output_rel,
     "log_rel": log_rel,
-    "status": project_builders.effective_status(project.id, entry),
+    "status": status,
     "updated_at": entry.get("updated_at"),
     "last_opened_at": getattr(project, "artifact_last_opened_at", {}).get(str(artifact_id)),
     "duration_ms": entry.get("duration_ms"),
     "has_output": has_output,
     "source_missing": not source_exists,
+    # Only the per-project results listing fingerprints the tree; project
+    # lists leave this false rather than walk every project.
+    "out_of_date": bool(
+      has_output and status == "ok"
+      and project_builders.is_out_of_date(entry, source_fingerprint)
+    ),
   }
 
 
@@ -2511,7 +2520,8 @@ async def pull_project_git_remote(
 
 
 @router.post(
-  "/{project_id}/git/push", dependencies=[Depends(reject_cross_site)],
+  "/{project_id}/git/push",
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 def push_project_git_remote(
   project_id: str,
@@ -2685,7 +2695,7 @@ def get_project_theme_source(
   principal: ProjectPrincipal = Depends(get_project_principal),
   db: Session = Depends(get_db),
 ):
-  """Inspect the two fixed CSS sources without effective-theme augmentation.
+  """Inspect the saved stylesheet and the shipped defaults, unaugmented.
 
   No caller-supplied path: project membership grants only this theme resource,
   not access to shared storage. Keep absence distinct from an empty override.
@@ -2699,6 +2709,7 @@ def get_project_theme_source(
     pass
   else:
     files.append({"name": "theme.css", "content": content})
+  files.append({"name": "palettes.css", "content": shipped_palettes_css()})
   files.append({"name": "default-theme.css", "content": DEFAULT_THEME})
   return {"files": files}
 
@@ -2714,10 +2725,15 @@ def list_project_artifacts(
   if principal.is_owner:
     project_drawer.annotate_projects(db, [project])
   root = _project_root(project)
+  entries = project_builders.read_artifacts(project)
+  fingerprint = (
+    project_builders.source_fingerprint(root)
+    if any(entry.get("built_fingerprint") for entry in entries) else None
+  )
   return {
     "artifacts": [
-      _artifact_view(project, root, entry)
-      for entry in project_builders.read_artifacts(project)
+      _artifact_view(project, root, entry, fingerprint)
+      for entry in entries
     ],
   }
 

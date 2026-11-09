@@ -400,37 +400,31 @@ def test_new_claim_after_goal_ends_is_not_released_as_old_work(db, status):
   assert finished["state"] == "completed"
 
 
-def test_racing_first_claims_leave_one_owner_and_one_follower(db):
+def test_racing_first_claims_leave_one_owner_and_one_follower(db, monkeypatch):
   """Two chats insert the same key at once: the unique key picks one owner."""
-  from sqlalchemy import event
-  from sqlalchemy.orm import Session
-
+  from app import agent_work_claims
   from app.database import SessionLocal
 
   owner, first, second = _fixture(db)
   raced = []
+  original_fence = agent_work_claims.fence_owner
 
-  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
-    pending = [
-      row for row in session.new
-      if isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == second.id
-    ]
-    if not pending or raced:
-      return
-    raced.append(True)
-    with SessionLocal() as other:
-      won = claim_work(other, owner_id=owner.id, chat_id=first.id,
-                       run_id="claim-run-first", work_key=KEY,
-                       summary="Merge the reviewed PR")
-      assert won["state"] == "claimed"
+  def first_chat_wins_before_the_fence(session, owner_id):
+    # Another writer can win after the collision read, not while acquisition
+    # already holds the graph fence through its flush and commit.
+    if session is db and not raced:
+      raced.append(True)
+      with SessionLocal() as other:
+        won = claim_work(other, owner_id=owner.id, chat_id=first.id,
+                         run_id="claim-run-first", work_key=KEY,
+                         summary="Merge the reviewed PR")
+        assert won["state"] == "claimed"
+    original_fence(session, owner_id)
 
-  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
-  try:
-    lost = claim_work(db, owner_id=owner.id, chat_id=second.id,
-                      run_id="claim-run-second", work_key=KEY,
-                      summary="Merge the same reviewed PR")
-  finally:
-    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+  monkeypatch.setattr(agent_work_claims, "fence_owner", first_chat_wins_before_the_fence)
+  lost = claim_work(db, owner_id=owner.id, chat_id=second.id,
+                    run_id="claim-run-second", work_key=KEY,
+                    summary="Merge the same reviewed PR")
 
   assert raced == [True]
   assert (lost["state"], lost["owner_chat_id"]) == ("held_by_peer", first.id)
@@ -459,6 +453,44 @@ def test_goal_completion_releases_a_declined_action_it_did_not_name(db):
     work_key=KEY, summary="Merge once the owner approves",
   )
   assert (taken["state"], taken["owner_chat_id"]) == ("claimed", second.id)
+
+
+def _claim_before_the_goal(db, owner, chat, work_key):
+  """Claim from a Goal-less run, as an approval answered before promotion is."""
+  db.add(models.ChatRun(
+    id=f"plain-run-{work_key}", root_run_id=f"plain-run-{work_key}",
+    chat_id=chat.id, status="running", provider="claude",
+  ))
+  db.commit()
+  claim_work(db, owner_id=owner.id, chat_id=chat.id,
+             run_id=f"plain-run-{work_key}", work_key=work_key,
+             summary="Approved before the Goal existed")
+
+
+def test_goal_completion_finishes_a_named_claim_taken_before_the_goal(db):
+  from app.goals import update_goal_record
+
+  owner, first, _second = _owned_goal_claim(db)
+  _claim_before_the_goal(db, owner, first, "local:approved-before-goal")
+  _claim_before_the_goal(db, owner, first, "local:unnamed-before-goal")
+  run = db.get(models.ChatRun, "claim-run-first")
+  goal = db.get(models.ChatGoal, "claim-goal-first")
+
+  update_goal_record(db, run, goal, 1, complete="Done",
+                     finished_claims=[KEY, "local:approved-before-goal"])
+
+  db.expire_all()
+  named = db.query(models.AgentWorkClaim).filter_by(
+    work_key="local:approved-before-goal").one()
+  unnamed = db.query(models.AgentWorkClaim).filter_by(
+    work_key="local:unnamed-before-goal").one()
+  assert named.completed_at is not None and named.outcome == "Owning Goal completed: Done"
+  # A Goal-less claim the Goal does not name stays the chat's open claim.
+  assert unnamed.completed_at is None and unnamed.released_at is None
+  # A lost receipt may replay the same completion verbatim.
+  update_goal_record(db, run, db.get(models.ChatGoal, "claim-goal-first"), 1,
+                     complete="Done",
+                     finished_claims=[KEY, "local:approved-before-goal"])
 
 
 def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
@@ -1437,3 +1469,312 @@ def test_goalless_claim_source_keeps_exact_self_resuming_helper(db, affinity):
   assert get_writer().submit(ReconcileClaimSources()).result(timeout=5) == (0 if expected_pending else 1)
   db.expire_all()
   assert (db.query(models.GoalDependency).one().resolved_at is None) == expected_pending
+
+
+def _unnotified_transfer_chain(db):
+  owner, first, second = _fixture(db)
+  third = create_chat(id="claim-third", title="Final executor", messages=[])
+  db.add(third)
+  db.add(models.ChatRun(id="claim-run-third", root_run_id="claim-run-third",
+                        chat_id=third.id, status="running", provider="codex"))
+  db.commit()
+  key = "platform:test:durable-revocations"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+  for previous, current, run in ((first, second, "claim-run-second"),
+                                 (second, third, "claim-run-third")):
+    claim_work(db, owner_id=owner.id, chat_id=current.id, run_id=run,
+               work_key=key, summary="Continue the action",
+               takeover_reason="The previous executor handed over the action.",
+               expected_owner_chat_id=previous.id)
+  db.expire_all()
+  return owner, first, second, third, initial
+
+
+def test_each_transfer_commits_its_own_former_executor_obligation(db):
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  notices = db.query(models.AgentWorkClaimRevocation).order_by(
+    models.AgentWorkClaimRevocation.revision,
+  ).all()
+  assert [(row.revision, row.recipient_chat_id, row.sender_chat_id)
+          for row in notices] == [(2, first.id, second.id), (3, second.id, third.id)]
+  assert all(row.acquisition_id == initial["acquisition_id"] for row in notices)
+  assert all(row.closed_at is None for row in notices)
+  assert db.query(models.AgentCoordinationMessage).count() == 0
+
+
+def test_delayed_acknowledgement_cannot_clear_a_later_transfer(db):
+  from app.agent_work_claims import acknowledge_transfer_notice, pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  acknowledge_transfer_notice(db, claim_id=initial["id"], revision=2)
+  acknowledge_transfer_notice(db, claim_id=initial["id"], revision=2)
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [3]
+  current = claim_work(db, owner_id=owner.id, chat_id=third.id,
+                       run_id="claim-run-third", work_key=initial["work_key"],
+                       summary="Continue after the delayed receipt")
+  assert current["notification_pending"] is True
+  assert db.get(models.AgentWorkClaim, initial["id"]).notification_revision < 3
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_finish_release_and_reacquisition_preserve_older_revocations(db, release):
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  finish_work(db, owner_id=owner.id, chat_id=third.id,
+              work_key=initial["work_key"], outcome="Executor ended", release=release)
+  if release:
+    acquired = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                          run_id="claim-run-first", work_key=initial["work_key"],
+                          summary="A new acquisition")
+    assert acquired["acquisition_id"] != initial["acquisition_id"]
+    assert acquired["notification_pending"] is True
+    refreshed = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                           run_id="claim-run-first", work_key=initial["work_key"],
+                           summary="Still the new acquisition")
+    assert refreshed["state"] == "owned"
+    assert refreshed["notification_pending"] is True
+  notices = pending_transfer_notices(db).all()
+  expected_revisions = [3] if release else [2, 3]
+  assert [(row.revision, row.acquisition_id) for row in notices] == [
+    (revision, initial["acquisition_id"]) for revision in expected_revisions
+  ]
+  if release:
+    from app.agent_work_claims import acknowledge_transfer_notice
+    acknowledge_transfer_notice(db, claim_id=initial["id"], revision=2)
+    superseded = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+    db.refresh(superseded)
+    assert superseded.outcome == "superseded"
+    assert superseded.closed_at is not None
+  assert db.query(models.AgentWorkClaimRevocation).count() == 2
+
+
+def test_outbox_insert_failure_rolls_back_ownership_and_goal_edges(db):
+  from sqlalchemy import event
+
+  owner, first, second = _fixture(db)
+  key = "platform:test:fail-closed-transfer"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+
+  def fail_obligation(_conn, _cursor, statement, _params, _context, _many):
+    if statement.startswith("INSERT INTO agent_work_claim_revocations"):
+      raise RuntimeError("obligation storage failed")
+
+  event.listen(db.bind, "before_cursor_execute", fail_obligation)
+  try:
+    with pytest.raises(RuntimeError, match="obligation storage failed"):
+      claim_work(db, owner_id=owner.id, chat_id=second.id,
+                 run_id="claim-run-second", work_key=key, summary="Take over",
+                 takeover_reason="The prior owner handed over this action.",
+                 expected_owner_chat_id=first.id)
+  finally:
+    event.remove(db.bind, "before_cursor_execute", fail_obligation)
+  db.expire_all()
+  row = db.get(models.AgentWorkClaim, initial["id"])
+  assert (row.owner_chat_id, row.revision) == (first.id, 1)
+  assert db.query(models.GoalDependency).count() == 0
+  assert db.query(models.AgentWorkClaimRevocation).count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreachable", ["deleted", "failed"])
+async def test_recovery_retains_unreachable_owner_without_blocking_other_notices(
+  db, monkeypatch, unreachable,
+):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  if unreachable == "deleted":
+    first.deleted_at = now_naive_utc()
+    db.commit()
+  calls = []
+
+  async def deliver(**kwargs):
+    recipient = kwargs["recipients"][0]
+    calls.append(recipient)
+    if recipient == first.id:
+      return PeerDeliveryResult(steered=[], woken=[], queued=[], unreachable=[first.id])
+    return PeerDeliveryResult(steered=[recipient], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", deliver)
+  await recover_work_claim_revocations()
+  db.expire_all()
+  expected_pending = [] if unreachable == "deleted" else [first.id]
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == expected_pending
+  assert second.id in calls
+  assert db.query(models.AgentWorkClaimRevocation).count() == 2
+  # Repeating recovery does not replay the acknowledged second revocation.
+  await recover_work_claim_revocations()
+  assert calls.count(second.id) == 1
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypatch, closed):
+  from app import agent_coordination as coordination
+  from app.agent_work_claims import acknowledge_transfer_notice
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  coordination.send_work_claim_transfer_notice(
+    db, owner_id=owner.id, claim_id=notice.claim_id, revision=notice.revision,
+    sender_chat_id=notice.sender_chat_id, recipients=[notice.recipient_chat_id], body=notice.body,
+  )
+  if closed:
+    acknowledge_transfer_notice(db, claim_id=notice.claim_id, revision=notice.revision)
+  monkeypatch.setattr(coordination, "MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
+  for index in range(2):
+    coordination.send_agent_message(
+      owner_id=owner.id, sender_chat_id=third.id, sender_run_id="claim-run-third",
+      recipients=[first.id], broadcast=False, kind="note", delivery="next_turn",
+      body=f"Ordinary later note {index}", send_id=f"ordinary-{index}",
+    )
+  db.expire_all()
+  inbox = db.query(models.AgentCoordinationMessage).filter_by(to_chat_id=first.id).all()
+  assert {row.body for row in inbox} == (
+    {"Ordinary later note 1"} if closed else {notice.body, "Ordinary later note 1"}
+  )
+  # Mailbox retention never erases the immutable obligation/closure history.
+  assert db.query(models.AgentWorkClaimRevocation).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_deleted_recipient_closes_without_a_delivery_receipt(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  first.deleted_at = now_naive_utc()
+  db.commit()
+
+  async def delivered(**kwargs):
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  await recover_work_claim_revocations()
+  assert pending_transfer_notices(db).count() == 0
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  db.refresh(notice)
+  assert notice.outcome == "recipient_deleted"
+  assert notice.closed_at is not None
+  current = claim_work(db, owner_id=owner.id, chat_id=third.id,
+                       run_id="claim-run-third", work_key=initial["work_key"],
+                       summary="Inspect after deletion")
+  assert current["notification_pending"] is False
+
+
+def test_chat_deletion_closes_its_revocations_in_the_deletion_transaction(db):
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  stage_release_claims_for_chat(db, first.id)
+  db.rollback()  # An aborted deletion must not close its notice.
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [2, 3]
+  first.deleted_at = now_naive_utc()
+  stage_release_claims_for_chat(db, first.id)
+  db.commit()
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  db.refresh(notice)
+  assert notice.outcome == "recipient_deleted"
+  assert notice.closed_at is not None
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [second.id]
+
+
+@pytest.mark.asyncio
+async def test_recovery_retires_a_legacy_notice_for_the_current_new_acquisition(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+
+  owner, first, second, third, initial = _unnotified_transfer_chain(db)
+  finish_work(db, owner_id=owner.id, chat_id=third.id,
+              work_key=initial["work_key"], outcome="Released", release=True)
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=initial["work_key"], summary="A new acquisition")
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  notice.outcome = None  # Simulate an older re-acquisition path missing retirement.
+  db.commit()
+  recipients = []
+
+  async def delivered(**kwargs):
+    recipients.extend(kwargs["recipients"])
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  await recover_work_claim_revocations()
+  db.refresh(notice)
+  assert recipients == [second.id]
+  assert notice.outcome == "superseded"
+  assert notice.closed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_handback_supersedes_earlier_notice_in_the_ownership_transaction(db, monkeypatch):
+  from app.agent_coordination import PeerDeliveryResult, recover_work_claim_revocations
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second = _fixture(db)
+  key = "platform:test:direct-handback"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+  moved = claim_work(db, owner_id=owner.id, chat_id=second.id,
+                     run_id="claim-run-second", work_key=key, summary="Continue",
+                     takeover_reason="The first owner handed over this action.",
+                     expected_owner_chat_id=first.id)
+  returned = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                        run_id="claim-run-first", work_key=key, summary="Take it back",
+                        takeover_reason="The second owner handed the same action back.",
+                        expected_owner_chat_id=second.id)
+  assert initial["acquisition_id"] == moved["acquisition_id"] == returned["acquisition_id"]
+  # Inspect the committed source before any recovery or recipient delivery.
+  obsolete = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  assert obsolete.outcome == "superseded"
+  assert [row.recipient_chat_id for row in pending_transfer_notices(db).all()] == [second.id]
+  deliveries = []
+
+  async def unreachable(**kwargs):
+    deliveries.extend(kwargs["recipients"])
+    return PeerDeliveryResult(steered=[], woken=[], queued=[], unreachable=kwargs["recipients"])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", unreachable)
+  await recover_work_claim_revocations()
+  db.refresh(obsolete)
+  assert deliveries == [second.id]
+  assert obsolete.outcome == "superseded"
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [3]
+
+
+def test_failed_handback_preserves_the_prior_notice_and_owner(db):
+  from sqlalchemy import event
+  from app.agent_work_claims import pending_transfer_notices
+
+  owner, first, second = _fixture(db)
+  key = "platform:test:failed-handback"
+  initial = claim_work(db, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=key, summary="Act once")
+  claim_work(db, owner_id=owner.id, chat_id=second.id,
+             run_id="claim-run-second", work_key=key, summary="Continue",
+             takeover_reason="The first owner handed over this action.",
+             expected_owner_chat_id=first.id)
+
+  def fail_new_obligation(_conn, _cursor, statement, _params, _context, _many):
+    if statement.startswith("INSERT INTO agent_work_claim_revocations"):
+      raise RuntimeError("new handback obligation could not persist")
+
+  event.listen(db.bind, "before_cursor_execute", fail_new_obligation)
+  try:
+    with pytest.raises(RuntimeError, match="could not persist"):
+      claim_work(db, owner_id=owner.id, chat_id=first.id,
+                 run_id="claim-run-first", work_key=key, summary="Take it back",
+                 takeover_reason="The second owner handed the same action back.",
+                 expected_owner_chat_id=second.id)
+  finally:
+    event.remove(db.bind, "before_cursor_execute", fail_new_obligation)
+  db.expire_all()
+  claim = db.get(models.AgentWorkClaim, initial["id"])
+  assert (claim.owner_chat_id, claim.revision) == (second.id, 2)
+  prior = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  assert prior.outcome is None and prior.closed_at is None
+  assert [row.revision for row in pending_transfer_notices(db).all()] == [2]
+  assert db.get(models.AgentWorkClaimRevocation, (initial["id"], 3)) is None
+  assert db.query(models.GoalDependency).one().target_chat_id == second.id

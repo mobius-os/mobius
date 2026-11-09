@@ -208,7 +208,7 @@ async def test_helper_write_waits_for_its_inflight_stop_before_rechecking_run(db
 
 
 def test_parent_acceptance_keeps_live_child_visible_and_can_reopen_work(client, db, branch):
-  from app.goal_plans import active_goal_helpers
+  from app.goal_plans import active_goal_helpers, goal_helper_tree
 
   _, row, headers = branch
   child_response = _spawn(client, headers, row.child_chat_id, "api-review", "backend-api")
@@ -221,9 +221,9 @@ def test_parent_acceptance_keeps_live_child_visible_and_can_reopen_work(client, 
   late = patch(client, child_branch, [{"id": "backend-api", "note": "Late work"}])
   assert late.status_code == 422, late.text
   db.expire_all()
-  assert "api-review" in active_goal_helpers(
+  assert "api-review" in active_goal_helpers(goal_helper_tree(
     db, db.get(models.ChatRun, "coord-run"), db.get(models.ChatGoal, "release-goal"),
-  )
+  )).values()
   reopened = patch(client, branch, [{"id": "backend-api", "status": "running"}])
   assert reopened.status_code == 200, reopened.text
   resumed = patch(client, child_branch, [{"id": "backend-api", "note": "Requested follow-up"}])

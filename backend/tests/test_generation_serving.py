@@ -23,6 +23,7 @@ import pytest
 import app.main as main
 import app.frontend_watcher as fw
 from app.frontend_assets import reset_frontend_dir_cache
+from tests.shell_serving_helpers import assert_shell_served
 
 
 def _reset_memo():
@@ -72,13 +73,6 @@ def serving():
     _reset_memo()
 
 
-def _spa_active(client):
-  r = client.get("/")
-  return r.status_code == 200 and "text/html" in r.headers.get(
-    "content-type", "",
-  )
-
-
 # -- request-time asset resolution: dist -> attic -> 404 -----------------
 
 
@@ -91,8 +85,7 @@ def test_old_generation_asset_served_from_attic(client, serving):
     "export const gen = 'gen1';", encoding="utf-8",
   )
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
 
   # current generation from dist
   cur = client.get("/assets/index-gen2.js")
@@ -121,8 +114,7 @@ def test_old_generation_asset_served_from_attic(client, serving):
 def test_unknown_asset_returns_404_not_html(client, serving):
   _write_build(serving["live"], "gen2")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   for miss in ("/assets/index-doesnotexist.js", "/assets/nope.css",
                "/assets/deep/missing.js"):
     r = client.get(miss)
@@ -145,8 +137,7 @@ def test_push_worker_scope_never_resolves_to_a_document(client, serving):
   """
   _write_build(serving["live"], "gen2")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   for path in ("/shell/push", "/shell/push/", "/shell/push/anything"):
     r = client.get(path)
     assert r.status_code == 404, path
@@ -230,8 +221,7 @@ def test_contained_file_rejects_escapes_and_accepts_inner_files(tmp_path):
 def test_dist_appearing_after_boot_is_served_without_restart(client, serving):
   # "boot": no live dist -> the baked floor serves.
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   assert main._resolve_static_dir() == main._baked_dir
   boot = client.get("/")
   assert boot.status_code == 200
@@ -256,8 +246,7 @@ def test_baked_floor_served_when_dist_incomplete(client, serving):
   live.mkdir(parents=True, exist_ok=True)
   (live / "index.html").write_text("<title>INCOMPLETE</title>", encoding="utf-8")
   _reset_memo()
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  assert_shell_served(client)
   assert main._resolve_static_dir() == main._baked_dir
   r = client.get("/")
   assert r.status_code == 200

@@ -456,6 +456,8 @@ jobs:
         run: |
           npm run lint
           npm run test:coverage
+      - name: Test the pre-push gate on a read-only dependency loan
+        run: scripts/test-prepush-dependency-loan.sh
       - name: Run static app packager tests
         run: npm run test:packager
       - name: Run dependency safety check tests

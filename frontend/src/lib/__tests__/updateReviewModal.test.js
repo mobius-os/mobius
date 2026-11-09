@@ -197,3 +197,9 @@ test('a settling update offers a check and the owner keep decision, never a new 
   assert.match(updates, /onClick=\{update\.keepSettling\}>Keep this version</)
   assert.match(requests, /api\.platform\.keepSettlingUpdate\(\)/)
 })
+
+test('the review lists replaced local copies and qualifies its keep-your-changes promise', () => {
+  assert.match(modal, /const retiredCopies = retiredLocalCopies\(preview\)/)
+  assert.match(modal, /<RetiredLocalCopies copies=\{retiredCopies\} \/>/)
+  assert.match(modal, /keeping your changes\$\{retiredCopies\.length \? ', except local copies this release already includes \(listed below\)' : ''\}/)
+})

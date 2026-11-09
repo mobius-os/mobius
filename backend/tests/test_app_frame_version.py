@@ -83,7 +83,7 @@ def test_code_change_and_data_wipe_rotate_frame_version(
   app = create_local_app(client, auth, name="Notes", description="test")
   initial = client.get(f"/api/apps/{app['id']}", headers=auth).json()
 
-  async def fake_compile(jsx, *, out_path=None, source_path=None):
+  async def fake_compile(jsx, *, out_path=None, source_path=None, source_root=None):
     Path(out_path).write_text("// a different bundle\n", encoding="utf-8")
 
   monkeypatch.setattr(compiler, "compile_jsx", fake_compile)

@@ -80,6 +80,15 @@ def test_older_overlapping_success_does_not_clear_newer_limit(db):
   assert pa.provider_within_quota(db, "claude") is False
 
 
+def test_limited_providers_lists_only_live_limits(db):
+  now = now_naive_utc()
+  pa.mark_provider_limited(db, "codex", now + timedelta(minutes=5), "rate_limit")
+  pa.mark_provider_limited(db, "claude", now + timedelta(hours=1), "usage_limit")
+  pa.mark_provider_limited(db, "mobius", now - timedelta(minutes=1), "usage_limit")
+  db.commit()
+  assert pa.limited_providers(db) == ["claude", "codex"]
+
+
 def test_limit_in_the_past_is_within_quota(db):
   pa.mark_provider_limited(
     db, "codex", now_naive_utc() - timedelta(minutes=1), "usage_limit",

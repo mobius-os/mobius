@@ -539,6 +539,46 @@ def test_record_run_metrics_updates_exact_run_without_touching_transcript():
     db.close()
 
 
+def test_helper_call_sum_persists_as_a_partial_lower_bound():
+  """A hosted Claude helper's summed calls keep Claude's split on the durable
+  run, and the chat summary labels them a lower bound, never complete."""
+  from app.usage_metrics import (
+    normalize_claude_helper_usage, summarize_chat_run_tokens,
+  )
+
+  _seed_chat("r-helper-usage")
+  _seed_run("rt-helper-partial", "r-helper-usage")
+  _seed_run("rt-helper-none", "r-helper-usage")
+  usage = normalize_claude_helper_usage([
+    {"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": 40},
+    {"input_tokens": 3, "output_tokens": 4, "cache_read_input_tokens": 60},
+  ], duration_ms=20)
+  get_writer().submit(RecordRunMetrics(
+    chat_id="r-helper-usage", run_token="rt-helper-partial",
+    provider_session_id="claude-host:s:agent-1:toolu_1", cost_usd=None,
+    usage=usage,
+  )).result(timeout=5)
+
+  db = SessionLocal()
+  try:
+    runs = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == "r-helper-usage",
+    ).all()
+    partial = next(run for run in runs if run.id == "rt-helper-partial")
+    assert (partial.input_tokens, partial.output_tokens) == (108, 6)
+    assert partial.cache_read_input_tokens == 100
+    assert partial.total_tokens == 114
+    summary = summarize_chat_run_tokens(runs)
+  finally:
+    db.close()
+  assert summary["coverage"]["runs"] == 2
+  assert summary["coverage"]["runs_with_usage"] == 1
+  assert summary["coverage"]["runs_by_quality"]["partial"] == 1
+  assert summary["coverage"]["runs_by_quality"]["missing"] == 1
+  assert summary["coverage"]["runs_by_quality"]["final"] == 0
+  assert summary["totals"]["total_tokens"] == 114
+
+
 def test_record_run_metrics_keeps_session_identity_and_explicit_zero_cost(
   monkeypatch,
 ):

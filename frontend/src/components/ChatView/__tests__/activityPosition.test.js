@@ -7,6 +7,7 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from '../activityPosition.js'
+import { renderedBlockEntries } from '../streamReducers.js'
 const note = (id, block_index, text_offset) => ({ id, created_at: 1000, body: id, sender_chat_id: 'other', display_position: { assistant_message_id: 'answer', block_index, ...(text_offset === undefined ? {} : { text_offset }) } })
 const entries = blocks => blocks.map((item, idx) => ({ item, idx }))
 test('Q&A continuation keeps the note between answered question and new response', () => {
@@ -15,6 +16,14 @@ test('Q&A continuation keeps the note between answered question and new response
   assert.deepEqual(output.map(e => e.item.type), ['question', 'tool', 'text'])
   assert.equal(output[2].idx, 1)
   assert.equal(blocks.length, 2)
+})
+test('a card closing message counts as rendered prose before a later note', () => {
+  const blocks = [
+    { type: 'question', question_id: 'q', message: 'Done.', answers: { answer: 'yes' } },
+    { type: 'text', content: 'Response keeps growing' },
+  ]
+  const output = insertPositionedActivity(renderedBlockEntries(blocks), [note('one', 1)], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), ['text', 'question', 'tool', 'text'])
 })
 test('recorded text offset stays fixed as more text arrives', () => {
   const blocks = [{ type: 'text', content: 'Before.\n\nAfter.' }]

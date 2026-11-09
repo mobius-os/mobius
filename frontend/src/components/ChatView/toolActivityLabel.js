@@ -2,6 +2,7 @@ import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { appActivityLabel } from './appActivityCard.js'
 import { runningBackgroundTask } from './toolTasks.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -220,7 +221,7 @@ const CATEGORY_ONLY = new Set([
 ])
 
 // The bare control name (`update_goal`) for either provider's spelling.
-function bareControlName(name) {
+export function bareControlName(name) {
   if (typeof name !== 'string') return null
   const prefix = CONTROL_PREFIXES.find(p => name.startsWith(p))
   return prefix ? name.slice(prefix.length) : null
@@ -561,5 +562,18 @@ export function memoryRecallLabel(tool) {
   return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`
 }
 export function isDistinctiveActivityTool(item) {
-  return item?.type === 'tool' && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+  return item?.type === 'tool' && !isRoutineTool(item)
+    && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+}
+
+// A tool's owner declares routine bookkeeping (the platform for its controls,
+// an app with `tools[].routine` in its manifest); the backend stamps `routine`
+// on each call. Such a call never stands as its own beat or names an activity
+// line beside other work. A failed, warned or receipt-less call reads like any
+// other tool.
+export function isRoutineTool(item) {
+  if (item?.type !== 'tool' || item.routine !== true || item.status === 'failed') return false
+  const activity = item.app_activity
+  return !toolBlockFailed(item) && activity?.status !== 'failed'
+    && !activity?.warning && !activity?.receipt_missing
 }

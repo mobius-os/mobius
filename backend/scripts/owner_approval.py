@@ -1,7 +1,8 @@
 """Save an owner-input card and return its receipt, never wait for an answer.
 
-The saved card ends the turn: the response is cut at the card, so say
-everything before calling it. See app/questions.py for the card lifecycle.
+The saved card ends the turn: the response is cut at the card, so its
+`message` carries the turn's closing message. See app/questions.py for the
+card lifecycle.
 
 Agents call this through the Möbius control tools. When a provider cannot
 surface those tools, the one command-line fallback for every control is
@@ -20,24 +21,29 @@ from urllib.request import Request, urlopen
 
 _SAFE_REJECTION_PATH_PARTS = frozenset({
   "questions", "id", "header", "question", "options",
-  "label", "description", "on_answer", "work_key",
+  "label", "description", "on_answer", "work_key", "message",
 })
 
 
 def request_approval(
-  question: str, options: list[dict], work_key: str,
+  question: str, options: list[dict], work_key: str, message: str | None = None,
 ) -> dict:
   body = {"question": question, "options": options, "work_key": work_key}
-  return save_card("approval", body)
+  return save_card("approval", _with_message(body, message))
 
 
-def request_question(questions: list[dict]) -> dict:
-  return save_card("question", {"questions": questions})
+def request_question(questions: list[dict], message: str | None = None) -> dict:
+  return save_card("question", _with_message({"questions": questions}, message))
 
 
-def request_restart() -> dict:
+def request_restart(message: str | None = None) -> dict:
   """Ask the platform to derive and save the exact pending restart action."""
-  return save_card("restart-request", {})
+  return save_card("restart-request", _with_message({}, message))
+
+
+def _with_message(body: dict, message: str | None) -> dict:
+  """The turn's closing message, shown above the card it travels with."""
+  return {**body, "message": message} if message is not None else body
 
 
 def _format_rejection_detail(candidate: object) -> str:

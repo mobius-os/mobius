@@ -130,8 +130,8 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
         continue
       }
       try {
-        // Can't use apiFetch here: multipart requires the browser to set
-        // Content-Type with the boundary, which apiFetch overrides with JSON.
+        // Multipart: the browser sets Content-Type with the boundary, so no
+        // Content-Type header is sent here (apiFetch also leaves FormData alone).
         const fd = new FormData()
         fd.append('files', fileList[i])
         const res = await fetch(`${BASE}/api/chats/${chatId}/uploads`, {

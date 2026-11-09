@@ -28,7 +28,9 @@ from app import transcript_rows
 from app import auth, models
 from app.settled import run_settled
 from app.browser_access import BrowserLineage, require_live
-from app.continuations import HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON
+from app.continuations import (
+  HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON, has_runnable_pending,
+)
 from app.timeutil import now_naive_utc
 
 
@@ -3265,7 +3267,7 @@ def safe_parent_activity_startup_writer_orphan(
     or physical.status != "running"
     or physical.provider_execution_admitted is not False
     or chat.pending_question_id is not None
-    or bool(chat.pending_messages)
+    or has_runnable_pending(chat.pending_messages)
     or (chat.live_assistant or {}).get("id") != physical.id
     or bool((chat.live_assistant or {}).get("blocks") or [])
   ):
@@ -3426,7 +3428,7 @@ def _plan_result_steer(
       return None
     # Never jump ahead of owner-authored or other queued work. Sends queue
     # under the same chat queue lock the caller holds across this read.
-    if list(chat.pending_messages or []):
+    if has_runnable_pending(chat.pending_messages):
       return None
     # A result the live turn already admitted into its context latches only
     # at that turn's Finalize; steering it in again would be a duplicate.

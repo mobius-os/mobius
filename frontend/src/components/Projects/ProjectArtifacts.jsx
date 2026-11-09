@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, SettingsWrench as Hammer, EditPencil as Pencil } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
@@ -29,7 +29,7 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
     queryKey: projectQueries.keys.artifacts(projectId),
     queryFn: async ({ signal }) => normalizeArtifacts(await jsonOrThrow(
       await api.projects.artifacts(projectId, { signal }),
-      'Project artifacts failed:',
+      'Project results failed:',
     )),
     // The owner shell forwards build-status events into this cache; a
     // collaborator route has no such stream, so poll only while a build runs.
@@ -38,6 +38,38 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
     ),
   })
   const artifacts = artifactsQuery.data || []
+
+  // A build this view watched finish earns "PDF ready · Open" until the result
+  // is opened or built again. Builds started by a save or an agent count too.
+  // `watchingIds` holds what was building at the last commit, so the render
+  // that first sees the finished build already says ready, with no "Built" flash.
+  const [readyIds, setReadyIds] = useState(() => new Set())
+  const [watchingIds, setWatchingIds] = useState(() => new Set())
+  useEffect(() => {
+    const rows = artifactsQuery.data || []
+    const building = new Set(rows
+      .filter(artifact => isBuilding(artifact) || busyId === artifact.id)
+      .map(artifact => artifact.id))
+    const finished = rows
+      .filter(artifact => watchingIds.has(artifact.id) && !building.has(artifact.id) && artifact.status === 'ok')
+      .map(artifact => artifact.id)
+    if (!sameIds(watchingIds, building)) setWatchingIds(building)
+    setReadyIds(current => {
+      const next = new Set([...current].filter(id => !building.has(id)))
+      for (const id of finished) next.add(id)
+      return sameIds(current, next) ? current : next
+    })
+  }, [artifactsQuery.data, busyId, watchingIds])
+
+  function openResult(artifactId) {
+    setReadyIds(current => {
+      if (!current.has(artifactId)) return current
+      const next = new Set(current)
+      next.delete(artifactId)
+      return next
+    })
+    onOpen?.(artifactId)
+  }
 
   async function build(artifact) {
     if (busyId || isBuilding(artifact)) return
@@ -62,24 +94,28 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
         {canBuild && <div className="project-artifacts__build"><ApplyAppSourceButton projectId={projectId} app={linkedApp} onError={setError} className="project-artifacts__action" /></div>}
       </div>}
       {artifactsQuery.isLoading ? (
-        <p className="projects-empty" role="status">Loading artifacts…</p>
+        <p className="projects-empty" role="status">Loading results…</p>
       ) : artifactsQuery.isError ? (
-        <div className="projects-empty" role="alert"><p>Artifacts are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
+        <div className="projects-empty" role="alert"><p>Results are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
       ) : artifacts.length === 0 ? (
         !linkedApp && <p className="projects-empty project-artifacts__empty">Build a supported file from its actions, or ask a project chat to create something.</p>
       ) : (
         <div className="project-artifacts__list">
           {artifacts.map(artifact => {
-            const pill = artifactStatusPill(artifact)
             const building = isBuilding(artifact) || busyId === artifact.id
+            const justBuilt = readyIds.has(artifact.id)
+              || (watchingIds.has(artifact.id) && !building && artifact.status === 'ok')
+            const pill = artifactStatusPill(artifact, { building, justBuilt })
             const name = artifact.name || artifact.id
+            const typeName = artifactTypeName(artifact)
+            const detail = [typeName === name ? '' : typeName, artifact.source].filter(Boolean).join(' · ')
             return (
               <div key={artifact.id} className="project-artifacts__row">
-                <button type="button" className="project-artifacts__main" aria-label={`Open ${name}`} onClick={() => onOpen?.(artifact.id)}>
+                <button type="button" className="project-artifacts__main" aria-label={`Open ${name}`} onClick={() => openResult(artifact.id)}>
                   <ArtifactIdentityIcon artifact={artifact} size={30} />
                   <span className="project-artifacts__copy">
                     <strong>{name}</strong>
-                    <small>{artifactTypeName(artifact)}{artifact.source ? ` · ${artifact.source}` : ''}</small>
+                    {detail && <small>{detail}</small>}
                   </span>
                   <span className={`artifact-pill artifact-pill--${pill.variant}`}>{pill.label}</span>
                   <ChevronRight width={16} height={16} aria-hidden="true" className="project-artifacts__chevron" />
@@ -104,4 +140,8 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
       )}
     </div>
   )
+}
+
+function sameIds(a, b) {
+  return a.size === b.size && [...a].every(id => b.has(id))
 }

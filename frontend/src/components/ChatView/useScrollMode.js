@@ -377,6 +377,10 @@ export default function useScrollMode({
   // to null and `maybeApplyMode()` would re-write scrollTop with the
   // same mode it already applied, visibly snapping the viewport.
   const lastAppliedModeRef = useRef(null)
+  // The scrollTop FOLLOW_BOTTOM itself last wrote, cleared by every mode
+  // transition. Send pinning reads it as the autoscroll tail while live output
+  // has committed but the next layout observation has not followed it yet.
+  const followTailTopRef = useRef(null)
   // The pinned message's offsetTop at the last PIN_USER_MSG apply. The RO
   // re-pins when this shifts (content ABOVE the message grew — an image
   // finished loading, an error/question card rendered), which the identity
@@ -390,6 +394,9 @@ export default function useScrollMode({
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
   const paneResizeRunRef = useRef(null)
+  // Transcript-source handoffs share the observer's guarded geometry pass;
+  // sizing the reservation and applying its mode must happen before paint.
+  const committedLayoutRunRef = useRef(null)
   // Footer height changes are scroll geometry: the controller observes the
   // footer and publishes its list clearance in the same guarded transaction.
   // Controlled composer edits must publish their draft before a PIN -> FOLLOW
@@ -490,6 +497,7 @@ export default function useScrollMode({
     if (!nextMode) return previousMode
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    followTailTopRef.current = null
     modeAdoptedAtReaderIntentVersionRef.current = readerIntentVersionRef.current
     const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
@@ -537,6 +545,9 @@ export default function useScrollMode({
     if (!allowed) return false
     const before = scrollEl.scrollTop
     applyMode(scrollEl, mode)
+    if (mode.kind === 'FOLLOW_BOTTOM' && mode === modeRef.current) {
+      followTailTopRef.current = scrollEl.scrollTop
+    }
     if (Math.abs(scrollEl.scrollTop - before) > 0.5) {
       recordTrace('writes', event, {
         from: mode,
@@ -678,6 +689,7 @@ export default function useScrollMode({
       scrollEl: scrollRef.current,
       mode: modeRef.current,
       isFirstUserMsg,
+      followTailTop: followTailTopRef.current,
     })
     const intent = {
       willPin: delayedSendWillPin({
@@ -1493,6 +1505,7 @@ export default function useScrollMode({
       settleAnchoredMode(authorityVersion)
       return true
     }
+    committedLayoutRunRef.current = syncLayout
     syncLayout({ authorityVersion: currentAuthority() })
 
     // Shell supplies committed pane geometry separately from viewport resize.
@@ -2329,6 +2342,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
+      if (committedLayoutRunRef.current === syncLayout) committedLayoutRunRef.current = null
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
@@ -2370,36 +2384,17 @@ export default function useScrollMode({
     footRef,
   ])
 
-  // Re-hold the reading position after an atomic transcript-source commit
-  // lands post-reveal. Reconnect catch-up and authoritative compact reads can
-  // both re-settle row heights without changing message count. Apply the mode
-  // already owned by the controller before paint; ResizeObserver remains the
-  // fallback for later intrinsic media/markdown growth. Before reveal,
-  // hide-then-reveal already owns the position, so this no-ops.
+  // Synchronize each transcript-source handoff before
+  // paint, including reservation consumption and an armed PIN -> FOLLOW
+  // transition. The same effect-owned pass handles reader-gesture deferral
+  // and conditional anchor/pin repair; no second scroll authority is created.
+  // ResizeObserver owns live reveal and intrinsic media/markdown growth.
   const reapplyActiveMode = useCallback(() => {
-    if (!revealedRef.current) return
-    const scrollEl = scrollRef.current
-    if (!scrollEl) return
-    const authorityVersion = readerIntentVersionRef.current
-    if (!scrollAuthorityAllowsCommit({
-      capturedVersion: authorityVersion,
-      currentVersion: readerIntentVersionRef.current,
-      gestureWindowUntil: gestureWindowUntilRef.current,
-      now: performance.now(),
-      touchContactActive: touchContactCountRef.current > 0,
-    })) return
-    const k = modeRef.current.kind
-    if (k === 'ANCHOR_AT'
-        && !_anchorReapplyNeeded(scrollEl, modeRef.current, lastAnchorTopRef.current)) return
-    if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT' || k === 'PIN_USER_MSG') {
-      if (writeMode(
-        scrollEl,
-        modeRef.current,
-        'lifecycle:transcript-reapply',
-        authorityVersion,
-      )) rememberAppliedMode(scrollEl)
-    }
-  }, [rememberAppliedMode, scrollRef, writeMode])
+    if (!revealedRef.current || !readingPositionOwnerRef.current) return
+    committedLayoutRunRef.current?.({
+      forceApply: modeRef.current.kind === 'FOLLOW_BOTTOM',
+    })
+  }, [])
 
   // Terminal stream promotion and final buffered text can land in separate
   // React/browser phases. Observe committed geometry until two consecutive
