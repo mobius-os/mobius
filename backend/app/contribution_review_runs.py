@@ -67,6 +67,14 @@ def base_head(gh, cwd: Path, repo: str, base_ref: str) -> str:
 
 
 def assert_current_base(gh, cwd: Path, target: dict) -> None:
+  """Refuse unless the PR still targets the branch and head this target names, at the tip seen.
+
+  The merge call follows the PR's own base, so the branch tip alone cannot
+  prove it: a retargeted PR can leave the old branch untouched.
+  """
+  pull = read(gh, cwd, f"repos/{target['repo']}/pulls/{target['number']}")
+  if (pull.get("base") or {}).get("ref") != target["base_ref"] or (pull.get("head") or {}).get("sha") != target["head_sha"]:
+    raise HTTPException(409, "The pull request changed since it was checked. Refresh and check it again.")
   if base_head(gh, cwd, target["repo"], target["base_ref"]) != target["base_sha"]:
     raise HTTPException(409, "The target branch changed. Review the new combined result first.")
 
@@ -531,6 +539,33 @@ def released_on_refusal(db, row, claim):
     raise
 
 
+def saved_merge_attempt(db, owner_id, target):
+  """``(run id, chat id, item)`` of any review grant that already armed a merge of this exact head, or None."""
+  item = models.ContributionReviewRun.outcomes_json[key(target)]
+  # Filter by PR key and either the current attempt or a historical same-head
+  # attempt. The second clause is a coarse SQL prefilter; Python proves shape.
+  candidates = db.query(models.ContributionReviewRun.id,
+      models.ContributionReviewRun.chat_id, item).filter(
+    models.ContributionReviewRun.owner_id == owner_id,
+    or_(item["head_sha"].as_string() == target["head_sha"],
+      cast(item["merge_attempts"], String).like(f"%{target['head_sha']}%")),
+  ).all()
+  return next(((grant_id, chat_id, saved) for grant_id, chat_id, saved in candidates
+    if isinstance(saved, dict) and any(
+      isinstance(attempt, dict) and attempt.get("head_sha") == target["head_sha"]
+        and merge_attempted(attempt)
+      for attempt in [saved, *(saved.get("merge_attempts") if isinstance(saved.get("merge_attempts"), list) else [])])), None)
+
+
+def unconfirmed_direct_merge(db, owner_id, target):
+  """The owner's one-tap merge of this exact head whose write may still land, or None."""
+  saved = db.query(models.DirectMergeAttempt).filter_by(
+    owner_id=owner_id, work_key=merge_work_key(target)).first()
+  if saved and saved.state in {"attempting", "unknown"} and not dispatch_window_closed(saved.armed_at, time.time()):
+    return saved
+  return None
+
+
 def arm_merge(db, row, target, outcome, principal):
   """Reserve one exact public attempt across grants as well as within a grant.
 
@@ -550,20 +585,13 @@ def arm_merge(db, row, target, outcome, principal):
                         + ("Your Goal follows this claim and will receive its result." if follows else
                            f"No new Goal follow was created ({follow_status}); reconcile the result yourself."))}
   item_key = key(target)
-  item = models.ContributionReviewRun.outcomes_json[item_key]
-  # Filter by PR key and either the current attempt or a historical same-head
-  # attempt. The second clause is a coarse SQL prefilter; Python proves shape.
-  candidates = db.query(models.ContributionReviewRun.id,
-      models.ContributionReviewRun.chat_id, item).filter(
-    models.ContributionReviewRun.owner_id == row.owner_id,
-    or_(item["head_sha"].as_string() == target["head_sha"],
-      cast(item["merge_attempts"], String).like(f"%{target['head_sha']}%")),
-  ).all()
-  previous = next(((grant_id, chat_id, saved) for grant_id, chat_id, saved in candidates
-    if isinstance(saved, dict) and any(
-      isinstance(attempt, dict) and attempt.get("head_sha") == target["head_sha"]
-        and merge_attempted(attempt)
-      for attempt in [saved, *(saved.get("merge_attempts") if isinstance(saved.get("merge_attempts"), list) else [])])), None)
+  previous = saved_merge_attempt(db, row.owner_id, target)
+  direct = unconfirmed_direct_merge(db, row.owner_id, target)
+  if previous is None and direct is not None:
+    db.rollback()
+    release_if_acquired(db, row, claim)
+    return {**outcome, "state": "needs_you",
+            "summary": "Your one-tap Merge of this exact version is not confirmed yet. Check the pull request on GitHub; no request was repeated."}
   if previous is not None:
     # Claim acquisition commits and refreshes ORM state. Recheck this row too:
     # another worker may have armed it while this one awaited GitHub preflight.
@@ -672,6 +700,9 @@ def view(row):
     if attempt.get("state") == "attempting":
       return {**outcome, "state": "marking_ready"}
     verdict = verdict_overlay(row, outcome)
+    if verdict and approved_merge_waiting(row, outcome):
+      summary = outcome.get("summary") or ""
+      return {**outcome, "state": verdict, "summary": f"{MERGE_WAITING}\n\n{summary}" if summary else MERGE_WAITING}
     return {**outcome, "state": verdict} if verdict else outcome
   projected_items = [projected(t) for t in row.targets_json]
   states = [item.get("state", "reviewing") for item in projected_items]
@@ -701,6 +732,22 @@ def view(row):
           "created_at": row.created_at.isoformat() + "Z", "items": views}
 
 
+MERGE_WAITING = ("GitHub confirmed your approval, but the merge has not run. "
+                 "Continue the merge here, or press Merge on the pull request.")
+
+
+def approved_merge_waiting(row, outcome) -> bool:
+  """An approval GitHub confirmed whose granted merge was never attempted.
+
+  Neither a lost response that observation later recovered nor an agent that
+  was not resumed arranges the merge by itself: the grant is not complete.
+  """
+  proposal = outcome.get("verdict_proposal") or {}
+  return (row.mode == "review_merge" and outcome.get("state") == "all_clear"
+          and proposal.get("state") == "posted" and proposal.get("event") == "APPROVE"
+          and not proposal.get("dismissed_on_github") and not merge_attempted(outcome))
+
+
 def verdict_overlay(row, outcome):
   """The item state a verdict proposal adds on top of its private review.
 
@@ -715,6 +762,8 @@ def verdict_overlay(row, outcome):
     return "verdict_posting"
   if state == "unknown":
     return "verdict_unknown"
+  if approved_merge_waiting(row, outcome):
+    return "needs_you"
   if state == "not_dispatched" or (state == "discarded" and row.mode == "review_merge"
                                    and not merge_attempted(outcome)):
     return "needs_you"
@@ -743,6 +792,8 @@ def public_merge_blocker(row, item) -> str | None:
       return "You discarded the proposed approval, so nothing was posted or merged."
     if proposal.get("state") != "posted":
       return "The approval was not confirmed on GitHub, so this PR was not merged. Check GitHub; nothing was repeated."
+    if proposal.get("dismissed_on_github"):
+      return "The approval was dismissed on GitHub, so it no longer counts and this PR was not merged."
     return None
   receipt = item.get("public_review") or {}
   if receipt.get("state") != "posted":
