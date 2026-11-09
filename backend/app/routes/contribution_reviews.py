@@ -33,6 +33,7 @@ from app.chat_start import start_programmatic_chat_turn
 from app.chat_visibility import coerce_agent_settings
 from app.config import get_settings
 from app.contribution_autopilot import resolve_round_choice
+from app.contribution_review_effects import DispatchResult
 from app.database import get_db
 from app.deps import (Principal, get_agent_run_principal, get_principal, is_owner_input_principal,
                       reject_cross_site, require_account_owner, require_account_owner_control,
@@ -292,6 +293,8 @@ _ADMISSION_ACTIONS = {("review", "author"): "check_my_pr", ("review", "reviewer"
 # The one comment admitting a takeover of someone else's PR posts from the owner's
 # account, with their own reason; the app's confirm sheet shows these exact words.
 TAKEOVER_NOTICE_KEY = "_takeover_notice"
+TAKEOVER_ACTOR_CHANGED = ("The connected GitHub account changed after you approved this, so nothing was posted. "
+                          "Reconnect the account you approved and start it again.")
 TAKEOVER_NOTICE_UNCONFIRMED = {"code": "takeover_comment_unconfirmed", "message": (
   "GitHub may have posted the takeover comment. Check the pull request: it is never sent twice, "
   "and nothing was started.")}
@@ -394,7 +397,7 @@ def _require_takeover_announced(row) -> None:
   """A takeover starts only once GitHub confirmed its comment; a lost answer is never resent."""
   for notice in ((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).values():
     if notice.get("state") == "not_dispatched":
-      raise HTTPException(409, f"GitHub refused the takeover comment, so nothing was started. {notice.get('summary', '')}".strip())
+      raise HTTPException(409, f"The takeover comment was not posted, so nothing was started. {notice.get('summary', '')}".strip())
     if notice.get("state") != "posted":
       raise HTTPException(502, TAKEOVER_NOTICE_UNCONFIRMED)
 
@@ -405,7 +408,13 @@ async def _announce_takeover(db, row, cwd) -> None:
   for item_key, notice in list(((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).items()):
     target = next(t for t in row.targets_json if reviews.key(t) == item_key)
     async with _github_connection_transaction():
-      result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
+      # The lock keeps the connection still, but only this read says whose it is: the comment goes out
+      # from the account that was approved at admission, never from one connected since.
+      actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
+      if str(actor.get("id") or "") != row.github_actor_id:
+        result = DispatchResult.not_dispatched(TAKEOVER_ACTOR_CHANGED)
+      else:
+        result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
     fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
               **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
     _save_notice(db, row, item_key, {**notice, **fields})

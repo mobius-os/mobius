@@ -126,8 +126,9 @@ def post_note(gh, cwd, target, body) -> str | None:
 
 
 def _rereview_only(facts: dict, pull: dict, body) -> None:
-  allowed = machine.decide(facts)["rereview_from"]
-  others = [login for login in body.reviewers if login.lower() not in allowed]
+  allowed = machine.decide(facts)["rereview_from"]  # spelled as GitHub spells them; logins match without case
+  eligible = {login.lower() for login in allowed}
+  others = [login for login in body.reviewers if login.lower() not in eligible]
   if others:
     raise HTTPException(409, "Ask only people whose review is of an older version: "
                              f"{', '.join(allowed) or 'nobody'}.")

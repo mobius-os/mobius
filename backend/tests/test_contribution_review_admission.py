@@ -168,6 +168,25 @@ def test_a_takeover_github_did_not_confirm_starts_nothing_and_is_never_resent(ow
   assert start(db, principal, mode="review_fix_merge", request_id="takeover-again", takeover_reason=REASON)["run"]
 
 
+def test_a_takeover_never_posts_from_an_account_other_than_the_one_that_approved_it(owner, monkeypatch):
+  db, fixture_run, principal, started = owner
+  settle_fixture_review(db, fixture_run)
+  posted = comments(monkeypatch)
+  accounts = [{"id": 42}, {"id": 43}]  # the connection is switched after admission read it
+  monkeypatch.setattr(domain, "read", lambda *args: accounts.pop(0) if args[2] == "user" else {"id": 42})
+  status, detail = refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)
+  assert status == 409 and "connected GitHub account changed" in detail
+  assert posted == [] and started == []
+  row = db.query(models.ContributionReviewRun).filter_by(request_id="machine-admission").one()
+  notice = row.outcomes_json[routes.TAKEOVER_NOTICE_KEY]["example/project#7"]
+  assert notice["state"] == "not_dispatched" and "changed" in notice["summary"]
+  assert row.outcomes_json[routes.REVIEW_STOP_KEY]["state"] == "requested"
+  # Switching back does not revive it: the same request is refused and still posts nothing.
+  monkeypatch.setattr(domain, "read", lambda *args: {"id": 42})
+  assert refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)[0] == 409
+  assert posted == [] and started == []
+
+
 def test_finishing_the_owners_own_pr_posts_nothing(owner, monkeypatch):
   db, fixture_run, principal, _ = owner
   settle_fixture_review(db, fixture_run)
