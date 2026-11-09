@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.decision_cards import fence_owner
+from app.context_budget import excerpt
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
 from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_outcome
@@ -355,7 +356,9 @@ def claim_work(
     claim_id=row.id, revision=previous_revision + 1,
     acquisition_id=row.acquisition_id, owner_id=owner_id,
     sender_chat_id=chat_id, recipient_chat_id=previous,
-    body=(f"Work claim {key} transferred to {chat_id}: {reason} "
+    # The notice is a capped peer note; a long reason stays whole on the claim.
+    body=(f"Work claim {key} transferred to {chat_id}: "
+          f"{excerpt(reason, 3000, f'claim_agent_work(work_key={key}) shows the full reason')} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its

@@ -242,9 +242,8 @@ GOAL_TEXT_FIELDS = ("objective", "next_action", "checkpoint")
 TASK_TEXT_FIELDS = ("title", "note", "result", "completion_condition")
 
 
-def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, field, offset=0):
-  """One page of one Goal or task text, from exactly what read_goal may show."""
-  from app.context_budget import text_page
+def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, field):
+  """One Goal or task text, whole, from exactly what read_goal may show."""
   allowed = TASK_TEXT_FIELDS if task_id else GOAL_TEXT_FIELDS
   if field not in allowed:
     raise ValueError(f"field must be one of: {', '.join(allowed)}")
@@ -264,7 +263,7 @@ def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, fie
   text = source.get(field) if isinstance(source, dict) else None
   if not isinstance(text, str):
     raise LookupError(f"No {field} to read here.")
-  return {"field": field, "task": task_id, **text_page(text, offset)}
+  return {"field": field, "task": task_id, "text": text}
 
 
 def turn_goal_brief(db, chat_id, run_id, *, delegated):

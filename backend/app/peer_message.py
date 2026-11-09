@@ -25,9 +25,9 @@ MAX_PEER_NOTES = 8
 MAX_RESULT_MESSAGES = 200  # bounds both current receipts and historic markers
 MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
-# Transcript preview bound: the card persists in the transcript row, so a
-# longer note is stored as an excerpt marked body_truncated (the card labels
-# it); the stored note itself stays whole.
+# The card preserves the FULL note (the platform caps a note at 4,000 chars),
+# so an owner never mistakes an excerpt for the whole note. body_truncated only
+# trips on the defensive over-limit case.
 MAX_BODY_CHARS = 4000
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.
@@ -205,11 +205,10 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
     # expandable card from a malformed empty row.
     if not body:
       continue
-    # A note longer than the transcript preview is kept as a marked excerpt.
-    # A receipt already marks its preview; a longer body is cut here too.
+    # The card shows the full note (MAX_BODY_CHARS == the platform's note cap);
+    # body_truncated only trips on a defensive over-limit note.
     rows.append({
-      **message, "body": body,
-      "body_truncated": bool(message.get("body_truncated")) or len(stripped) > MAX_BODY_CHARS,
+      **message, "body": body, "body_truncated": len(stripped) > MAX_BODY_CHARS,
     })
   return rows
 

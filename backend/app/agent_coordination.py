@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
-from app.context_budget import PEER_NOTES_CHARS, excerpt, fair_shares, text_page
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -31,17 +30,13 @@ MESSAGE_DELIVERIES = frozenset({"next_turn", "interrupt"})
 DELIVERY_NEXT_TURN = "next_turn"
 DELIVERY_INTERRUPT = "interrupt"
 MAX_PEERS = 200
-# Retention per recipient inbox and per broadcast channel, by size: a note
-# costs its body plus a fixed charge for its row. Only notes already delivered
-# are evicted, oldest first, so unread mail always survives. This bounds disk
-# per inbox while keeping recent history browsable.
-INBOX_RETENTION_CHARS = 2_000_000
-ROW_RETENTION_CHARS = 256
+MAX_SCOPE_MESSAGES = 1000
+MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-# A turn's coordination block carries at most this many notes. Their bodies
-# share context_budget.PEER_NOTES_CHARS fairly: short notes stay whole and long
-# ones arrive as marked excerpts naming read_agent_message, so the delivery
-# cursor always advances and one long note can never make every turn fail.
+PEER_GOAL_PREVIEW_CHARS = 240
+# Notes are delivered whole: the send cap (4000 characters) already bounds
+# each one, and a clipped note forces the recipient to dig the rest out of the
+# activity log. The message count bounds the delivery.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -104,24 +99,9 @@ class CoordinationContextDelivery:
   delivered_through: PeerMessageCursor | None
 
 
-# Recipient lists are uncapped, so queries over them run in batches that stay
-# well under SQLite's bound-parameter limit.
-_ID_BATCH = 500
-
-
-def _batches(values) -> list[list[str]]:
-  ordered = list(dict.fromkeys(values))
-  return [ordered[start:start + _ID_BATCH] for start in range(0, len(ordered), _ID_BATCH)]
-
-
 def _latest_runs(
   db: Session, chat_ids: list[str] | set[str],
 ) -> dict[str, Any]:
-  if len(chat_ids) > _ID_BATCH:
-    merged: dict[str, Any] = {}
-    for batch in _batches(chat_ids):
-      merged.update(_latest_runs(db, batch))
-    return merged
   if not chat_ids:
     return {}
   latest_started = db.query(
@@ -429,8 +409,6 @@ def _agent_chat_ids(
   db: Session, candidate_ids: list[str] | set[str],
 ) -> set[str]:
   """Return non-deleted chats with a run or durable Delegation identity."""
-  if len(candidate_ids) > _ID_BATCH:
-    return set().union(*(_agent_chat_ids(db, batch) for batch in _batches(candidate_ids)))
   if not candidate_ids:
     return set()
   live_chat_ids = {
@@ -659,15 +637,6 @@ def _message_names(
     for value in (row.from_chat_id, row.to_chat_id)
     if value
   }
-  if len(chat_ids) > _ID_BATCH:
-    merged: dict[str, str] = {}
-    for batch in _batches(chat_ids):
-      merged.update(_names_for(db, batch))
-    return merged
-  return _names_for(db, chat_ids)
-
-
-def _names_for(db: Session, chat_ids) -> dict[str, str]:
   if not chat_ids:
     return {}
   names = {
@@ -709,6 +678,11 @@ def model_peer(
   result = {
     key: peer[key] for key in _MODEL_PEER_KEYS if peer.get(key) is not None
   }
+  # Goal objectives are uncapped; a peer's is a label here, in the per-turn
+  # roster and in list_agent_peers alike. Its chat holds the full objective.
+  goal = result.get("goal")
+  if isinstance(goal, str) and len(goal) > PEER_GOAL_PREVIEW_CHARS:
+    result["goal"] = goal[:PEER_GOAL_PREVIEW_CHARS].rstrip() + "…"
   if include_ended_at and peer.get("ended_at") is not None:
     result["ended_at"] = peer["ended_at"]
   return result
@@ -721,35 +695,6 @@ def model_message(message: dict[str, Any]) -> dict[str, Any]:
     for key in _MODEL_MESSAGE_KEYS
     if message.get(key) is not None
   }
-
-
-def context_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-  """Model notes for repeated context: each keeps a fair share of one budget."""
-  messages = [model_message(row) for row in rows]
-  bodies = [message.get("body") or "" for message in messages]
-  for message, body, share in zip(
-    messages, bodies, fair_shares([len(body) for body in bodies], PEER_NOTES_CHARS),
-  ):
-    if len(body) > share:
-      message["body"] = excerpt(
-        body, share, f"read_agent_message(message_id={message['id']}) pages the full note",
-      )
-      message["body_truncated"] = True
-  return messages
-
-
-def peer_message_for_agent(
-  db: Session, chat_id: str, message_id: str, *, offset: int = 0,
-) -> dict[str, Any] | None:
-  """One page of one note this chat may read, by the chat's history visibility."""
-  row = chat_message_history_query(db, chat_id).filter(
-    models.AgentCoordinationMessage.id == message_id,
-  ).first()
-  if row is None:
-    return None
-  message = model_message(serialize_messages(db, [row])[0])
-  page = text_page(message.pop("body"), offset)
-  return {**message, "body": page.pop("text"), **page}
 
 
 def visible_peer_messages(
@@ -1041,7 +986,7 @@ def agent_context_snapshot(
     oldest_first=True,
   )
   delivered_rows = message_window[:MAX_CONTEXT_MESSAGES]
-  messages = context_messages(delivered_rows)
+  messages = [model_message(message) for message in delivered_rows]
   snapshot = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -1280,6 +1225,8 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
+  if len(clean_body) > 4000:
+    raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
 
 
@@ -1341,73 +1288,16 @@ def _matching_retry(
   return rows
 
 
-def _delivered_through(db: Session, chat_ids) -> PeerMessageCursor | None:
-  """The inbox boundary every one of these chats has already been delivered.
-
-  A chat's admitted turns carry its inbox oldest first, so its newest
-  acknowledged cursor covers every earlier note it can see. A chat with no
-  delivery yet means nothing is delivered to all of them.
-  """
-  boundary = None
-  for chat_id in dict.fromkeys(chat_ids):
-    row = db.query(
-      models.ChatRun.peer_message_through_created_at,
-      models.ChatRun.peer_message_through_id,
-    ).filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.provider_execution_admitted.is_(True),
-      models.ChatRun.peer_message_through_created_at.isnot(None),
-      models.ChatRun.peer_message_through_id.isnot(None),
-    ).order_by(
-      models.ChatRun.peer_message_through_created_at.desc(),
-      models.ChatRun.peer_message_through_id.desc(),
-    ).first()
-    if row is None:
-      return None
-    cursor = PeerMessageCursor(
-      created_at=row.peer_message_through_created_at,
-      message_id=str(row.peer_message_through_id),
-    )
-    boundary = cursor if boundary is None else min(boundary, cursor)
-  return boundary
-
-
-def _prune_by_size(
-  db: Session, query, delivered: PeerMessageCursor | None,
-) -> None:
-  """Evict delivered notes, oldest first, until the rows fit retention.
-
-  A note not yet delivered to its recipients is never evicted, however much
-  newer mail arrives; such an inbox stays over its retention until it is
-  read. Sizes come from the length stored at write time.
-  """
-  if delivered is None:
-    return
-  message = models.AgentCoordinationMessage
-  sized = query.with_entities(
-    message.id, message.created_at,
-    func.coalesce(message.body_chars, func.length(message.body)),
-  ).order_by(message.created_at.asc(), message.id.asc()).all()
-  used = sum(length + ROW_RETENTION_CHARS for _, _, length in sized)
-  boundary = (delivered.created_at, delivered.message_id)
-  stale_ids = []
-  for message_id, created_at, length in sized:
-    if used <= INBOX_RETENTION_CHARS or (created_at, message_id) > boundary:
-      break
-    used -= length + ROW_RETENTION_CHARS
-    stale_ids.append(message_id)
-  for start in range(0, len(stale_ids), _ID_BATCH):
-    chunk = stale_ids[start:start + _ID_BATCH]
-    db.query(models.ChatActivityPosition).filter(
-      models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in chunk]),
-    ).delete(synchronize_session=False)
-    db.query(message).filter(message.id.in_(chunk)).delete(synchronize_session=False)
-
-
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
-  # A broadcast is delivered once every current scope member has received it.
-  members = _scope_membership(db, scope, limit=None)[0]
-  _prune_by_size(db, _channel_query(db, scope), _delivered_through(db, members))
+  stale = _channel_query(db, scope).order_by(
+    models.AgentCoordinationMessage.created_at.desc(),
+    models.AgentCoordinationMessage.id.desc(),
+  ).offset(MAX_SCOPE_MESSAGES).all()
+  for row in stale:
+    db.query(models.ChatActivityPosition).filter(
+      models.ChatActivityPosition.event_id == f"peer:{row.id}",
+    ).delete(synchronize_session=False)
+    db.delete(row)
 
 
 def _prune_direct_inboxes(
@@ -1425,10 +1315,18 @@ def _prune_direct_inboxes(
     ),
   ).exists()
   for recipient in recipients:
-    _prune_by_size(db, _channel_query(db, network).filter(
+    stale = _channel_query(db, network).filter(
       models.AgentCoordinationMessage.to_chat_id == recipient,
       ~revocation,
-    ), _delivered_through(db, [recipient]))
+    ).order_by(
+      models.AgentCoordinationMessage.created_at.desc(),
+      models.AgentCoordinationMessage.id.desc(),
+    ).offset(MAX_DIRECT_MESSAGES_PER_RECIPIENT).all()
+    for row in stale:
+      db.query(models.ChatActivityPosition).filter(
+        models.ChatActivityPosition.event_id == f"peer:{row.id}",
+      ).delete(synchronize_session=False)
+      db.delete(row)
 
 
 def _publish_message_hint(
@@ -1501,7 +1399,6 @@ def _persist_send(
       kind=kind,
       delivery=clean_delivery,
       body=clean_body,
-      body_chars=len(clean_body),
     )
     for target in targets
   ]
@@ -1872,7 +1769,7 @@ def _interrupt_peer_carrier(
   messages = message_window[-MAX_CONTEXT_MESSAGES:]
   if not messages:
     return None
-  model_messages = context_messages(messages)
+  model_messages = [model_message(message) for message in messages]
   payload: dict[str, Any] = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -2070,11 +1967,6 @@ def unreachable_reasons(
   physical run that failed, or one stopped before its provider turn began. A
   running, parked, resuming, or idle chat is queued for its next turn.
   """
-  if len(chat_ids) > _ID_BATCH:
-    merged: dict[str, str] = {}
-    for batch in _batches(chat_ids):
-      merged.update(unreachable_reasons(db, batch))
-    return merged
   if not chat_ids:
     return {}
   ids = list(dict.fromkeys(chat_ids))
@@ -2239,12 +2131,6 @@ def build_coordination_context_delivery(
       "expires_at": row.expires_at.isoformat() if row.expires_at else None,
     } for row in claim_rows]
   snapshot["work_claims"] = claims
-  # The roster repeats in every turn's context, so a long Goal objective is
-  # previewed here; list_agent_peers returns it whole.
-  for peer in snapshot["collaborators"]:
-    goal = peer.get("goal")
-    if isinstance(goal, str) and len(goal) > 240:
-      peer["goal"] = goal[:240].rstrip() + "…"
   if (
     not snapshot["collaborators"]
     and not snapshot["messages"]

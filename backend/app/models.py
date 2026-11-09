@@ -1527,10 +1527,6 @@ class AgentCoordinationMessage(Base):
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
   body = Column(Text, nullable=False)
-  # Written with the note so size-aware retention never measures bodies.
-  # Nullable: rows from before migration 0103 or a rolled-back release lack
-  # it, and retention then measures that row's body.
-  body_chars = Column(Integer, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 

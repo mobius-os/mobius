@@ -987,32 +987,13 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
 
   with pytest.raises(ValueError) as target:
     control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
-  assert "list of agent/chat ids" in str(target.value)
+  assert "list of at most 24 agent/chat ids" in str(target.value)
   assert "secret-peer" not in str(target.value)
 
   send = control._TOOL_DEFINITIONS["send_agent_message"]
   followup = control._TOOL_DEFINITIONS["message_agent"]
   assert "finished helper's follow-up" in send["description"]
   assert "live helper" in followup["description"]
-
-
-def test_peer_notes_and_recipient_lists_are_not_capped(monkeypatch):
-  control = _control_module()
-  body = "Long coordination note " * 1000 + "END"
-  recipients = [f"peer-{index}" for index in range(40)]
-  sent = []
-  monkeypatch.setattr(
-    control, "_agent_api_call",
-    lambda _method, _path, payload, **_kwargs: sent.append(payload) or {"messages": []},
-  )
-
-  control._call_send_agent_message({"recipients": recipients, "body": body})
-
-  assert sent[0]["body"] == body
-  assert sent[0]["recipients"] == recipients
-  schema = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
-  assert "maxLength" not in schema["body"]
-  assert "maxItems" not in schema["recipients"]
 
 
 def test_agent_prose_fields_carry_no_guessed_length_budgets():
@@ -1528,23 +1509,6 @@ def test_a_refusal_cut_at_the_transport_read_is_labelled_truncated(monkeypatch):
   assert "non-JSON" not in str(caught.value)
 
 
-def test_read_agent_message_reads_one_exact_note(monkeypatch):
-  control = _control_module()
-  calls = []
-  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: calls.append(
-    (method, path)) or {"id": "n 1", "body": "whole"})
-  assert control._call_read_agent_message({"message_id": "n 1"})["body"] == "whole"
-  control._call_read_agent_message({"message_id": "n 1", "offset": 40000})
-  assert calls == [("GET", "/api/agent-coordination/messages/n%201"),
-                   ("GET", "/api/agent-coordination/messages/n%201?offset=40000")]
-  with pytest.raises(ValueError, match="one message_id"):
-    control._call_read_agent_message({"message_id": "n", "extra": 1})
-  schema = control._TOOL_DEFINITIONS["read_agent_message"]
-  assert "marked excerpt" in schema["description"]
-  assert "next_offset" in schema["description"]
-  assert "read_agent_message" in platform_tools.PEER_TOOL_NAMES
-
-
 def test_work_claim_text_fields_are_uncapped():
   control = _control_module()
   claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
@@ -1555,9 +1519,25 @@ def test_work_claim_text_fields_are_uncapped():
   assert "maxLength" not in finish["outcome"]
 
 
+def _read_all_pages(control, name, arguments):
+  pieces, offset = [], 0
+  while True:
+    call = dict(arguments, **({"offset": offset} if offset else {}))
+    text = control._call_tool({"name": name, "arguments": call})["content"][0]["text"]
+    if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
+      return pieces + [text]
+    text, footer = text.rsplit("\n", 1)
+    assert len(text) <= control._CONTEXT_BUDGET.READ_PAGE_CHARS
+    pieces.append(text)
+    if "end of result" in footer:
+      return pieces
+    offset = int(footer.rsplit("offset=", 1)[1].rstrip(")]"))
+
+
 def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   tasks = [{"id": f"t{index:04d}", "status": "pending", "title": f"Task {index} " + "x" * 200}
            for index in range(800)]
   payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
@@ -1566,29 +1546,45 @@ def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
   monkeypatch.setattr(control, "_agent_api_call",
                       lambda method, path, body=None: sent.append(body) or payload)
   full = control._goal_report(payload, full=True)
-  page_chars = control._CONTEXT_BUDGET.READ_PAGE_CHARS
-  assert len(full) > 2 * page_chars
+  assert len(full) > 2 * control._CONTEXT_BUDGET.READ_PAGE_CHARS
 
-  pieces, offset = [], 0
-  while True:
-    page = control._call_update_goal({} if offset == 0 else {"offset": offset})
-    text, footer = page.rsplit("\n", 1)
-    assert len(text) <= page_chars
-    pieces.append(text)
-    if "end of report" in footer:
-      break
-    offset = int(footer.rsplit("offset=", 1)[1].rstrip(")]"))
-  assert "".join(pieces) == full
-  # Every page is a read: no plan change is ever sent with an offset.
+  assert "".join(_read_all_pages(control, "update_goal", {})) == full
+  # Every page is the plain read: no change is ever sent or re-run for a page.
   assert all(body == {} for body in sent)
-  with pytest.raises(ValueError, match="pass it alone"):
-    control._call_update_goal({"offset": 5, "next_action": "x"})
+  refused = control._call_tool({"name": "update_goal",
+                                "arguments": {"offset": 5, "next_action": "x"}})
+  assert refused["isError"] and "pass it alone" in refused["content"][0]["text"]
 
   small = {"goal": {"status": "open", "revision": 1, "objective": "Ship"},
            "plan": {"tasks": tasks[:3], "summary": {"total": 3}}}
   monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: small)
-  assert control._call_update_goal({}) == control._goal_report(small, full=True)
+  assert control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"] == (
+    control._goal_report(small, full=True))
 
+
+def test_read_goal_pages_a_long_task_view_and_a_long_field(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  view = {"role": "coordinator", "helpers": [], "goal": {
+    "focus": "parent", "children": [{"id": f"c{index}", "title": "T" * 300} for index in range(400)]}}
+  note = "".join(f"{index:07d}" for index in range(30_000))
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "parent", "text": note} if "field=" in path else view))
+
+  joined = "".join(_read_all_pages(control, "read_goal", {"task": "parent"}))
+  assert json.loads(joined) == view
+  assert "".join(_read_all_pages(control, "read_goal", {"task": "parent", "field": "note"})) == note
+
+
+def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "objective", "task": None, "text": "Ship it"} if "field=" in path
+    else {"role": "coordinator", "goal": None, "helpers": []}))
+  assert control._call_read_goal({"field": "objective"}) == "Ship it"
+  assert control._call_read_goal({"task": "a"})["goal"] == "This chat has no Goal."
 
 def test_a_refusal_reason_is_shown_whole():
   control = _control_module()

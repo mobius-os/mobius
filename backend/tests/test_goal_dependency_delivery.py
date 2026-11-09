@@ -586,3 +586,21 @@ def test_a_dependency_result_starts_while_a_stop_holds_the_owner_queue(db, chat,
   assert [(m["cid"], m.get("held")) for m in db.get(models.Chat, chat.id).pending_messages] == [
     ("held", True),
   ]
+
+
+def test_a_long_claim_outcome_is_excerpted_in_its_one_notice():
+  from types import SimpleNamespace
+  from app import goal_dependencies as deps_module
+  from app.context_budget import GOAL_BRIEF_CHARS
+
+  row = SimpleNamespace(id="dep-1", waiting_goal_id="goal-1", target_kind="claim_acquisition",
+                        target_key="test:long", outcome_json={
+                          "kind": "completed", "work_key": "test:long",
+                          "summary": "S" * 50_000, "outcome": "O" * 50_000,
+                          "source_diagnostics": {"secret": True}})
+  notice = deps_module.dependency_notice(row)
+  assert len(notice) < GOAL_BRIEF_CHARS + 2_000
+  assert "the full text stays with the source chat's work claim" in notice
+  assert "source_diagnostics" not in notice
+  # Deterministic, so startup orphan checks still match the saved notice.
+  assert deps_module.dependency_notice(row) == notice

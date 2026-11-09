@@ -7086,24 +7086,6 @@ def _widen_work_claim_text(eng) -> None:
       ))
 
 
-def _add_peer_note_body_chars(eng) -> None:
-  """Record each peer note's length once so retention never measures bodies."""
-  from sqlalchemy import inspect as sa_inspect, text
-  inspector = sa_inspect(eng)
-  if "agent_coordination_messages" not in inspector.get_table_names():
-    return
-  columns = {c["name"] for c in inspector.get_columns("agent_coordination_messages")}
-  with eng.begin() as conn:
-    if "body_chars" not in columns:
-      conn.execute(text(
-        "ALTER TABLE agent_coordination_messages ADD COLUMN body_chars INTEGER NULL"
-      ))
-    conn.execute(text(
-      "UPDATE agent_coordination_messages SET body_chars = LENGTH(body) "
-      "WHERE body_chars IS NULL"
-    ))
-
-
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7228,7 +7210,6 @@ _SCHEMA_MIGRATIONS = (
   ("0100_chat_branch_origin", _add_chat_branch_origin),
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
   ("0102_work_claim_text", _widen_work_claim_text),
-  ("0103_peer_note_body_chars", _add_peer_note_body_chars),
 )
 
 

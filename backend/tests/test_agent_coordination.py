@@ -286,25 +286,6 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
   ]
 
 
-def test_a_long_peer_note_is_stored_and_delivered_whole(client, auth, db):
-  chats, _ = _network_fixture(db)
-  nested_auth = _delegated_auth(db, chats["nested"].id, "nested-run")
-  body = "Long finding " * 1500 + "END"  # long, within the turn's note budget
-
-  sent = client.post(
-    "/api/agent-coordination/messages",
-    headers=nested_auth,
-    json={"recipients": [chats["outside_helper"].id], "body": body},
-  )
-
-  assert sent.status_code == 200, sent.text
-  stored = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.to_chat_id == chats["outside_helper"].id,
-  ).one()
-  assert stored.body == body
-  assert body in _next_turn_context(db, chats["outside_helper"], "outside-helper-next")
-
-
 def test_mixed_scope_direct_send_is_atomic_grouped_and_idempotent(
   client, auth, db, monkeypatch,
 ):
@@ -1151,13 +1132,9 @@ def test_network_retention_is_per_recipient_and_does_not_prune_broadcasts(
   client, auth, db, monkeypatch,
 ):
   chats, _ = _network_fixture(db)
-  # Room for two of the 8-character notes below, each with its row charge,
-  # and everything already delivered so retention may evict.
   monkeypatch.setattr(
-    "app.agent_coordination.INBOX_RETENTION_CHARS",
-    2 * (8 + agent_coordination.ROW_RETENTION_CHARS),
+    "app.agent_coordination.MAX_DIRECT_MESSAGES_PER_RECIPIENT", 2,
   )
-  _everything_delivered(monkeypatch)
   scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
   broadcast = client.post(
     "/api/agent-coordination/messages",
@@ -1351,8 +1328,8 @@ def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
   assert "messages_truncated" not in later_snapshot
 
 
-def test_next_turn_context_delivers_a_long_note_whole(db):
-  """A long note arrives complete, never clipped."""
+def test_next_turn_context_delivers_a_note_at_the_send_cap_whole(db):
+  """A note the sender was allowed to write arrives complete, never clipped."""
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
@@ -1361,7 +1338,7 @@ def test_next_turn_context_delivers_a_long_note_whole(db):
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=previous_started + timedelta(seconds=100),
   )
-  body = "Reply on the review: " + "detail " * 3000 + "END"
+  body = ("Reply on the review: " + "detail " * 700)[:4000].rstrip() + " END"
   db.add_all([current, models.AgentCoordinationMessage(
     id="long-note", room_kind="workspace", room_id="1",
     from_chat_id=chats["outsider"].id, from_run_id="outside-run",
@@ -1374,218 +1351,6 @@ def test_next_turn_context_delivers_a_long_note_whole(db):
   context = build_coordination_context(db, chats["scout"].id, current.id)
   assert json.dumps(body, ensure_ascii=False)[1:-1] in context
   assert "…" not in context
-
-
-@pytest.mark.parametrize("sizes", [[60_000] * MAX_CONTEXT_MESSAGES, [500_000]])
-def test_oversized_peer_notes_fit_the_turn_budget_and_still_advance(db, sizes):
-  """Huge notes cannot wedge a recipient: the block stays bounded, every note
-  is marked whole or excerpted, and the delivery cursor reaches the last one."""
-  from app.context_budget import PEER_NOTES_CHARS
-
-  chats, runs = _network_fixture(db)
-  previous_started = runs["scout"].started_at
-  runs["scout"].provider_execution_admitted = True
-  current = make_goal_run(db,
-    id="scout-huge-notes-run", root_run_id="scout-huge-notes-run",
-    chat_id=chats["scout"].id, status="running", provider="claude",
-    started_at=previous_started + timedelta(seconds=100),
-  )
-  notes = [models.AgentCoordinationMessage(
-    id=f"huge-{index:02d}", room_kind="workspace", room_id="1",
-    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
-    send_id=f"huge-send-{index:02d}", send_target_key=chats["scout"].id,
-    to_chat_id=chats["scout"].id, kind="finding", body=f"{index}:" + "x" * size,
-    created_at=previous_started + timedelta(seconds=1 + index),
-  ) for index, size in enumerate(sizes)]
-  db.add_all([current, *notes])
-  db.commit()
-
-  delivery = build_coordination_context_delivery(db, chats["scout"].id, current.id)
-
-  assert len(delivery.text) < PEER_NOTES_CHARS + 8_000
-  assert delivery.delivered_through.message_id == notes[-1].id
-  assert "read_agent_message(message_id=huge-00) pages the full note" in delivery.text
-  payload = json.loads(delivery.text.rsplit("<agent_coordination>", 1)[1].split(
-    "</agent_coordination>", 1)[0])
-  # Every note keeps a fair share of the budget, not just the first ones.
-  shares = [len(message["body"]) for message in payload["messages"]]
-  assert len(shares) == len(sizes)
-  assert min(shares) >= PEER_NOTES_CHARS // len(sizes) - 200
-  assert all(message["body_truncated"] for message in payload["messages"])
-
-
-def test_a_short_urgent_note_stays_whole_after_long_ones():
-  from app.agent_coordination import context_messages
-
-  rows = [
-    {"id": "long-1", "kind": "note", "body": "a" * 13_000},
-    {"id": "long-2", "kind": "note", "body": "b" * 13_000},
-    {"id": "urgent", "kind": "blocker", "delivery": "interrupt",
-     "body": "Stop: the target branch moved."},
-  ]
-  messages = context_messages(rows)
-  assert messages[2]["body"] == "Stop: the target branch moved."
-  assert "body_truncated" not in messages[2]
-  for message in messages[:2]:
-    assert message["body_truncated"] is True
-    assert "read_agent_message(message_id=long-" in message["body"]
-    assert len(message["body"]) > 11_000
-
-
-@pytest.mark.parametrize("length", [600, 3_999, 30_000])
-def test_the_send_card_shows_notes_up_to_its_bound_whole_and_labels_longer_ones(
-  client, auth, db, length,
-):
-  from app.peer_message import MAX_BODY_CHARS, settle_peer_message
-
-  chats, _ = _network_fixture(db)
-  body = "n" * length
-  sent = client.post(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-    json={"recipients": [chats["builder"].id, chats["root"].id], "body": body},
-  )
-  assert sent.status_code == 200, sent.text
-  card = settle_peer_message({"direction": "send", "status": "sending"}, sent.text)
-  long = length > MAX_BODY_CHARS
-  assert card["body"] == body[:MAX_BODY_CHARS]
-  assert card["body_truncated"] is long
-  receipt = sent.json()["messages"][0]
-  assert receipt.get("body_chars") == (length if long else None)
-  # Each inbox keeps the whole note.
-  assert {row.body for row in db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.from_chat_id == chats["scout"].id,
-  )} == {body}
-
-
-def _everything_delivered(monkeypatch):
-  from datetime import datetime
-  from app.agent_coordination import PeerMessageCursor
-  monkeypatch.setattr(agent_coordination, "_delivered_through",
-                      lambda db, chat_ids: PeerMessageCursor(datetime.max, "~"))
-
-
-def _inbox(db, chat_id):
-  db.expire_all()
-  return [row.body for row in db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.to_chat_id == chat_id,
-  ).order_by(models.AgentCoordinationMessage.created_at.asc(),
-             models.AgentCoordinationMessage.id.asc())]
-
-
-def test_retention_evicts_only_delivered_notes_oldest_first(client, auth, db, monkeypatch):
-  chats, _ = _network_fixture(db)
-  monkeypatch.setattr(agent_coordination, "INBOX_RETENTION_CHARS", 20_000)
-  scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
-  for body in ("small one", "small two"):
-    assert client.post(
-      "/api/agent-coordination/messages", headers=scout_auth,
-      json={"recipients": [chats["builder"].id], "body": body},
-    ).status_code == 200
-  delivered = db.query(models.AgentCoordinationMessage).filter_by(body="small one").one()
-  from app.agent_coordination import PeerMessageCursor
-  monkeypatch.setattr(agent_coordination, "_delivered_through", lambda db, chat_ids:
-                      PeerMessageCursor(delivered.created_at, delivered.id))
-  assert client.post(
-    "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [chats["builder"].id], "body": "x" * 30_000},
-  ).status_code == 200
-  # Only the delivered note went; the undelivered one survives the giant note.
-  assert _inbox(db, chats["builder"].id) == ["small two", "x" * 30_000]
-
-
-def test_an_undelivered_note_survives_a_giant_newer_note(client, auth, db, monkeypatch):
-  chats, _ = _network_fixture(db)
-  monkeypatch.setattr(agent_coordination, "INBOX_RETENTION_CHARS", 1_000)
-  outsider_auth = _top_level_auth(db, chats["outsider"].id, "outside-run")
-  scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
-  assert client.post(
-    "/api/agent-coordination/messages", headers=outsider_auth,
-    json={"recipients": [chats["builder"].id], "body": "Unread from another sender"},
-  ).status_code == 200
-  assert client.post(
-    "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [chats["builder"].id], "body": "y" * 100_000},
-  ).status_code == 200
-  assert _inbox(db, chats["builder"].id) == ["Unread from another sender", "y" * 100_000]
-  assert db.query(models.AgentCoordinationMessage).filter_by(
-    to_chat_id=chats["builder"].id).first().body_chars is not None
-
-
-def test_a_note_is_paged_in_full_through_read_agent_message_route(client, auth, db):
-  from app.context_budget import READ_PAGE_CHARS
-  chats, _ = _network_fixture(db)
-  body = "".join(f"{index:07d}" for index in range(30_000))  # 210k characters
-  sent = client.post(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-    json={"recipients": [chats["builder"].id], "body": body},
-  )
-  message_id = sent.json()["messages"][0]["id"]
-  reader = _delegated_auth(db, chats["builder"].id, "builder-run")
-  pieces, offset = [], 0
-  while offset is not None:
-    page = client.get(f"/api/agent-coordination/messages/{message_id}",
-                      headers=reader, params={"offset": offset}).json()
-    assert len(page["body"]) <= READ_PAGE_CHARS
-    assert page["total_chars"] == len(body)
-    pieces.append(page["body"])
-    offset = page["next_offset"]
-  assert "".join(pieces) == body
-
-
-def test_a_huge_recipient_list_does_not_hit_the_parameter_limit(db):
-  from app.agent_coordination import _agent_chat_ids, unreachable_reasons
-  chats, _ = _network_fixture(db)
-  ids = [f"missing-{index}" for index in range(40_000)] + [chats["builder"].id]
-  assert _agent_chat_ids(db, set(ids)) == {chats["builder"].id}
-  assert unreachable_reasons(db, ids) == {}
-
-
-def test_read_agent_message_sees_scope_broadcasts_only_inside_the_scope(client, auth, db):
-  chats, _ = _network_fixture(db)
-  sent = client.post(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-    json={"broadcast": True, "body": "Scope-wide finding " * 1500},
-  )
-  assert sent.status_code == 200, sent.text
-  message_id = sent.json()["messages"][0]["id"]
-  member = client.get(
-    f"/api/agent-coordination/messages/{message_id}",
-    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
-  )
-  assert member.status_code == 200, member.text
-  assert member.json()["body"] == ("Scope-wide finding " * 1500).strip()
-  assert member.json()["broadcast"] is True
-  outsider = client.get(
-    f"/api/agent-coordination/messages/{message_id}",
-    headers=_top_level_auth(db, chats["outsider"].id, "outside-run"),
-  )
-  assert outsider.status_code == 404
-
-
-def test_an_agent_reads_one_excerpted_note_whole_but_no_one_elses(client, auth, db):
-  chats, _ = _network_fixture(db)
-  body = "Whole finding " * 2000  # one page; paging is tested separately
-  db.add(models.AgentCoordinationMessage(
-    id="whole-note", room_kind="workspace", room_id="1",
-    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
-    send_id="whole-send", send_target_key=chats["scout"].id,
-    to_chat_id=chats["scout"].id, kind="finding", body=body,
-  ))
-  db.commit()
-
-  read = client.get(
-    "/api/agent-coordination/messages/whole-note",
-    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-  )
-  assert read.status_code == 200, read.text
-  assert read.json()["body"] == body
-  assert client.get(
-    "/api/agent-coordination/messages/whole-note",
-    headers=_delegated_auth(db, chats["nested"].id, "nested-run"),
-  ).status_code == 404
 
 
 def test_unadmitted_turn_does_not_consume_peer_context(db):
@@ -2235,3 +2000,12 @@ def test_claim_reads_do_not_dispatch_or_expose_an_older_revocation(
   assert response.status_code == 200, response.text
   assert response.json()["notification_pending"] is True
   assert all(state not in response.json() for state in ("steered", "woken", "queued", "unreachable"))
+
+
+def test_peer_goal_objectives_are_previewed_wherever_agents_see_them():
+  from app.agent_coordination import PEER_GOAL_PREVIEW_CHARS
+  peer = {"id": "peer", "status": "running", "goal": "Objective " * 1000}
+  shown = model_peer(peer)
+  assert len(shown["goal"]) <= PEER_GOAL_PREVIEW_CHARS + 1
+  assert shown["goal"].endswith("…")
+  assert model_peer({"id": "peer", "goal": "Short goal"})["goal"] == "Short goal"

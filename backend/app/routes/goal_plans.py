@@ -340,15 +340,15 @@ def read_goal_brief(
   chat_id: str,
   task: str | None = Query(default=None, min_length=1, max_length=64),
   field: str | None = Query(default=None),
-  offset: int = Query(default=0, ge=0),
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
   """read_goal: expand one task of the calling agent's own Goal, on demand.
 
-  With ``field`` it returns one page of that text instead: a task's title,
+  With ``field`` it returns that one text whole instead: a task's title,
   note, result or completion_condition, or with no task the Goal's
   objective, next_action or checkpoint (as far as this agent may see them).
+  The control tool pages any result too long for one provider tool result.
 
   The same projection a turn receives, refocused on ``task``. Without a
   task a helper re-reads its assignment brief; a coordinator is pointed to
@@ -365,7 +365,7 @@ def read_goal_brief(
     if field is not None:
       return read_goal_text(
         db, chat_id, principal.run_id, delegation_id=principal.delegation_id,
-        task_id=task, field=field, offset=offset,
+        task_id=task, field=field,
       )
     return read_goal_view(
       db, chat_id, principal.run_id, delegation_id=principal.delegation_id,

@@ -190,7 +190,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     for field in _BRIEF_PROSE:
       if isinstance(entry.get(field), str):
         entry[field] = budget.take(
-          entry[field], f"read_goal(task={entry['id']}, field={field}) pages the full text")
+          entry[field], f"read_goal(task={entry['id']}, field={field}) reads the full text")
     if entry.get("depends_on"):
       entry["depends_on"], omitted = budget.take_ids(entry["depends_on"])
       if omitted:
@@ -216,7 +216,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     payload[key] = list(reversed(kept)) if nearest_first else kept
 
   payload["objective"] = budget.take(
-    payload["objective"], "read_goal(field=objective) pages the full objective")
+    payload["objective"], "read_goal(field=objective) reads the full objective")
   if isinstance((payload.get("hold") or {}).get("reason"), str):
     payload["hold"] = {**payload["hold"], "reason": budget.take(
       payload["hold"]["reason"], f"{goal_read} for the full reason")}
@@ -224,7 +224,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     fit(payload["task"])
   for key in ("next_action", "checkpoint"):
     if isinstance(payload.get(key), str):
-      payload[key] = budget.take(payload[key], f"read_goal(field={key}) pages the full text")
+      payload[key] = budget.take(payload[key], f"read_goal(field={key}) reads the full text")
   for key in _BRIEF_LISTS:
     if payload.get(key):
       fit_list(key, payload[key], overview)

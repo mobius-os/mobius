@@ -21,7 +21,6 @@ from app.agent_coordination import (
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
-  peer_message_for_agent,
   send_agent_message,
   deliver_work_claim_revocation,
   visible_peer_messages,
@@ -32,7 +31,6 @@ from app.agent_work_claims import (
   finish_work,
 )
 from app.database import get_db
-from app.peer_message import MAX_BODY_CHARS as PEER_CARD_BODY_CHARS
 from app.deps import (
   Principal,
   get_agent_run_principal,
@@ -46,19 +44,16 @@ from app import models
 
 
 router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"])
-# A send receipt previews the note at the transcript card's bound, so the card
-# shows any note up to that size whole and labels a longer one as an excerpt.
-SENDER_PREVIEW_CHARS = PEER_CARD_BODY_CHARS
 
 
 class AgentMessageCreate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  recipients: list[str] = Field(default_factory=list)
+  recipients: list[str] = Field(default_factory=list, max_length=24)
   broadcast: bool = False
   kind: str = "note"
   delivery: str = "next_turn"
-  body: str = Field(min_length=1)
+  body: str = Field(min_length=1, max_length=4000)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("body")
@@ -231,17 +226,11 @@ async def send_current_message(
     )
     if not body.broadcast else None
   )
-  # The sender already knows the note: return one canonical row with a short
-  # preview of its body (the owner-visible card labels it as an excerpt), plus
-  # the exact recipient count and names, never the body again.
-  receipt = [model_message(row) for row in rows[:1]]
-  for row in receipt:
-    body = row.get("body") or ""
-    if len(body) > SENDER_PREVIEW_CHARS:
-      row.update(body=body[:SENDER_PREVIEW_CHARS], body_truncated=True,
-                 body_chars=len(body))
+  # One row is stored per recipient inbox. The sender already knows the note,
+  # so return one canonical row plus the exact recipient count and names the
+  # owner-visible activity card needs, not the body repeated up to 24 times.
   result = {
-    "messages": receipt,
+    "messages": [model_message(row) for row in rows[:1]],
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
@@ -264,23 +253,6 @@ async def send_current_message(
       "recipient or tell the owner."
     )
   return result
-
-
-@router.get("/messages/{message_id}")
-def read_current_message(
-  message_id: str,
-  offset: int = Query(default=0, ge=0),
-  principal: Principal = Depends(get_agent_run_principal),
-  db: Session = Depends(get_db),
-):
-  """Read one note in pages when turn context carried only its excerpt."""
-  if principal.chat_id is None or principal.run_id is None:
-    raise HTTPException(403, "Current chat-bound agent run required.")
-  get_active_chat_for_principal(db, principal.chat_id, principal)
-  message = peer_message_for_agent(db, principal.chat_id, message_id, offset=offset)
-  if message is None:
-    raise HTTPException(404, "Peer note not found for this agent.")
-  return message
 
 
 @router.get("/chats/{chat_id}")

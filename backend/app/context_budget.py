@@ -2,18 +2,14 @@
 
 Agent input is not capped where it is written: the store keeps it whole and an
 explicit read returns it whole. What Möbius re-sends on every turn (and again
-after compaction) is bounded where that context is assembled, so one long note
-or plan can never crowd out the owner's work or make every turn fail.
+after compaction) is bounded where that context is assembled, so one long plan
+or outcome can never crowd out the owner's work or make every turn fail.
 
 24,000 characters is roughly 6k tokens, a few percent of a provider context
-window, so peer notes and the Goal brief together stay a small share of every
-turn. Text over budget becomes a marked excerpt that names where the full text
-is read.
+window. Text over budget becomes a marked excerpt that names where the full
+text is read.
 """
 
-# Combined peer-note bodies delivered in one turn's coordination block, split
-# by fair_shares so every note keeps a share.
-PEER_NOTES_CHARS = 24_000
 # Combined prose fields (titles, notes, results, conditions, next action) in
 # one Goal brief, and the most any single field takes of it.
 GOAL_BRIEF_CHARS = 24_000
@@ -23,9 +19,9 @@ GOAL_BRIEF_FIELD_CHARS = 4_000
 GOAL_BRIEF_LIST_ITEMS = 50
 
 
-# One page of a long text read on demand. Providers cap a tool result (Claude
-# Code MCP at about 25k tokens; Codex truncates), so a whole 200k-character
-# note could not arrive in one read; 40,000 characters (~10k tokens) fits.
+# One page of a long control-tool result. Providers cap a tool result (Claude
+# Code MCP at about 25k tokens; Codex truncates), so a 200k-character text
+# could not arrive in one read; 40,000 characters (~10k tokens) fits.
 READ_PAGE_CHARS = 40_000
 
 
@@ -45,22 +41,6 @@ def excerpt(text: str, limit: int, read_full: str) -> str:
     return text
   head = text[:max(limit, 0)].rstrip()
   return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
-
-
-def fair_shares(lengths: list[int], total: int) -> list[int]:
-  """Split ``total`` so short texts stay whole and long ones share the rest.
-
-  Shortest first, each text gets at most an equal share of what is left, so
-  the result does not depend on order: an urgent short note is never blanked
-  by earlier long ones, and every long note keeps a share.
-  """
-  shares = [0] * len(lengths)
-  remaining = total
-  order = sorted(range(len(lengths)), key=lengths.__getitem__)
-  for position, index in enumerate(order):
-    shares[index] = min(lengths[index], remaining // (len(order) - position))
-    remaining -= shares[index]
-  return shares
 
 
 class TextBudget:

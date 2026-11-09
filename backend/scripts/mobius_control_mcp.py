@@ -67,7 +67,6 @@ CARD_MESSAGE_PROPERTY = {
 }
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
-READ_AGENT_MESSAGE_TOOL = "read_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
 FINISH_AGENT_WORK_TOOL = "finish_agent_work"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
@@ -111,8 +110,8 @@ UPDATE_GOAL_DESCRIPTION = (
   "off. Settle every task honestly and wait for helpers before any outcome. "
   "Tasks and outcome commit atomically; refusal saves neither. No proof-of-prose "
   "approval validator substitutes for the agent's judgment. With no arguments it returns the current "
-  "plan; a plan too long for one result ends by naming the offset of its next page, "
-  "read with update_goal(offset=...) alone. goal_id explicitly resumes a named retained Goal instead of the presented "
+  "plan; a plan too long for one result ends by naming its next page, read with "
+  "update_goal(offset=...) alone. goal_id explicitly resumes a named retained Goal instead of the presented "
   "one, including a held Goal only when the owner asked to continue that work. "
   "Do not create a replacement Goal or reattach an unrelated follow-up."
 )
@@ -124,9 +123,9 @@ READ_GOAL_DESCRIPTION = (
   "was assigned; with no task it re-reads its assignment brief, for example "
   "after context compaction. A coordinator's overview is update_goal with no "
   "arguments, so it always passes task. A text the brief showed as an "
-  "excerpt is read in pages with field (and task for a task's text) plus "
-  "offset; each page gives next_offset until the text ends. Read-only: it "
-  "never resumes, attaches or changes a Goal."
+  "excerpt is read whole with field (and task for a task's text). A result "
+  "too long for one read ends by naming its next page (the same call with "
+  "offset). Read-only: it never resumes, attaches or changes a Goal."
 )
 DECLARE_WAIT_DESCRIPTION = (
   "Persist this top-level chat's one cross-turn wait: the chat resumes by "
@@ -617,29 +616,10 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
 
 def _call_update_goal(arguments: dict[str, Any]) -> str:
   allowed = {"tasks", "next_action", "complete", "cannot_complete", "cancel", "defer", "finished_claims", "goal_id"}
-  unknown = set(arguments) - allowed - {"offset"}
+  unknown = set(arguments) - allowed
   if unknown:
     raise ValueError(f"update_goal does not take: {', '.join(sorted(unknown))}")
-  if "offset" not in arguments:
-    return _paged_report(_update_goal(arguments), 0)
-  offset = arguments["offset"]
-  if set(arguments) != {"offset"} or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-    raise ValueError("update_goal offset pages the plan report; pass it alone")
-  return _paged_report(_update_goal({}), offset)
-
-
-def _paged_report(report: str, offset: int) -> str:
-  """The report whole when it fits one result, else one page naming the next."""
-  if offset == 0 and len(report) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
-    return report
-  page = _CONTEXT_BUDGET.text_page(report, offset)
-  end = page["offset"] + len(page["text"])
-  footer = (
-    f"[Report characters {page['offset']}-{end} of {page['total_chars']}; "
-    + (f"next page: update_goal(offset={page['next_offset']})]"
-       if page["next_offset"] is not None else "end of report]")
-  )
-  return page["text"] + "\n" + footer
+  return _update_goal(arguments)
 
 
 def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
@@ -653,21 +633,22 @@ def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
   )
 
 
-def _call_read_goal(arguments: dict[str, Any]) -> dict:
-  unknown = set(arguments) - {"task", "field", "offset"}
+def _call_read_goal(arguments: dict[str, Any]) -> dict | str:
+  unknown = set(arguments) - {"task", "field"}
   if unknown:
     raise ValueError(f"read_goal does not take: {', '.join(sorted(unknown))}")
-  if "offset" in arguments and "field" not in arguments:
-    raise ValueError("read_goal offset pages a field; pass field too")
   chat_id = os.environ.get("CHAT_ID") or ""
   if not chat_id:
     raise RuntimeError("missing environment: CHAT_ID")
-  query = {key: arguments[key] for key in ("task", "field", "offset")
+  query = {key: arguments[key] for key in ("task", "field")
            if arguments.get(key) is not None}
   path = f"/api/chats/{quote(chat_id, safe='')}/goal-brief"
   if query:
     path += "?" + urlencode(query)
   payload = _agent_api_call("GET", path)
+  if "field" in arguments:
+    # One text, plain, so its pages read as the text itself.
+    return payload["text"]
   if payload.get("goal") is None:
     payload["goal"] = (
       "This helper has no assigned Goal; complete the bounded task you were given."
@@ -781,18 +762,6 @@ def _call_list_agent_peers(arguments: dict[str, Any]) -> dict:
   return _agent_api_call("GET", "/api/agent-coordination/room")
 
 
-def _call_read_agent_message(arguments: dict[str, Any]) -> dict:
-  message_id = arguments.get("message_id")
-  offset = arguments.get("offset", 0)
-  if (
-    not set(arguments) <= {"message_id", "offset"} or not isinstance(message_id, str)
-    or not message_id or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
-  ):
-    raise ValueError("read_agent_message takes one message_id and an optional offset")
-  path = f"/api/agent-coordination/messages/{quote(message_id, safe='')}"
-  return _agent_api_call("GET", path + (f"?offset={offset}" if offset else ""))
-
-
 def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   allowed = {
     "recipients", "broadcast", "kind", "delivery", "body", "send_id",
@@ -808,10 +777,11 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   recipients = arguments.get("recipients", [])
   if (
     not isinstance(recipients, list)
+    or len(recipients) > 24
     or any(not isinstance(value, str) or not value for value in recipients)
   ):
     raise ValueError(
-      "recipients must be a list of agent/chat ids from "
+      "recipients must be a list of at most 24 agent/chat ids from "
       "list_agent_peers; for a finished helper use message_agent(helper, message)"
     )
   broadcast = arguments.get("broadcast", False)
@@ -833,6 +803,8 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   body = arguments.get("body")
   if not isinstance(body, str) or not body.strip():
     raise ValueError("body must be a non-empty string")
+  if len(body.strip()) > 4000:
+    raise ValueError("body must be 4000 characters or fewer")
   send_id = arguments.get("send_id")
   if send_id is not None and (
     not isinstance(send_id, str)
@@ -1919,9 +1891,9 @@ _TOOL_DEFINITIONS = {
         "field": {"type": "string", "enum": [
                     "objective", "next_action", "checkpoint",
                     "title", "note", "result", "completion_condition"],
-                  "description": "Read one long text in pages: a Goal field without task, or a task field with task."},
+                  "description": "Read one text whole: a Goal field without task, or a task field with task."},
         "offset": {"type": "integer", "minimum": 0,
-                   "description": "Character offset of the page; use the previous page's next_offset."},
+                   "description": "Page of a long result, as its last line names."},
       },
       "additionalProperties": False,
     },
@@ -2022,27 +1994,6 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
-  READ_AGENT_MESSAGE_TOOL: {
-    "name": READ_AGENT_MESSAGE_TOOL,
-    "description": (
-      "Read one peer note in full by its message id, when this turn's "
-      "coordination context carried only a marked excerpt of it. A long note "
-      "comes in pages: pass the previous page's next_offset as offset until it "
-      "is null. Only notes this chat can see; not an inbox and never a poll: "
-      "new notes arrive in context by themselves."
-    ),
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "message_id": {"type": "string", "minLength": 1,
-                       "description": "The id of the excerpted note."},
-        "offset": {"type": "integer", "minimum": 0,
-                   "description": "Character offset of the page; use the previous page's next_offset."},
-      },
-      "required": ["message_id"],
-      "additionalProperties": False,
-    },
-  },
   SEND_AGENT_MESSAGE_TOOL: {
     "name": SEND_AGENT_MESSAGE_TOOL,
     "description": SEND_AGENT_MESSAGE_DESCRIPTION,
@@ -2052,6 +2003,7 @@ _TOOL_DEFINITIONS = {
         "recipients": {
           "type": "array",
           "items": {"type": "string"},
+          "maxItems": 24,
           "description": "Agent/chat ids from list_agent_peers for a direct note, including a live helper's peer chat id; not spawn_agent helper names or delegation ids.",
         },
         "broadcast": {
@@ -2074,6 +2026,7 @@ _TOOL_DEFINITIONS = {
         },
         "body": {
           "type": "string",
+          "maxLength": 4000,
           "description": (
             "One concise note. Cite files by path; never paste their contents."
           ),
@@ -2157,7 +2110,6 @@ _TOOL_HANDLERS = {
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,
   SEND_AGENT_MESSAGE_TOOL: _call_send_agent_message,
-  READ_AGENT_MESSAGE_TOOL: _call_read_agent_message,
   CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
   FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
@@ -2199,9 +2151,44 @@ def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]
   if handler is None:
     return _tool_result("Unknown tool.", is_error=True)
   try:
+    if name in _PAGED_READ_TOOLS:
+      return _tool_result(_paged_read(name, handler, arguments))
     return _tool_result(handler(arguments))
   except Exception as exc:  # Tool failures are data; keep the MCP server alive.
     return _tool_result(str(exc) or "Tool call failed.", is_error=True)
+
+
+# Reads whose result can outgrow a provider's tool-result limit (Claude Code
+# MCP at about 25k tokens; Codex truncates). One pager serves them all: a
+# result that fits one page is returned unchanged; a longer one comes as one
+# character page ending in a line that names the call for the next page.
+_PAGED_READ_TOOLS = frozenset({READ_GOAL_TOOL, UPDATE_GOAL_TOOL})
+
+
+def _paged_read(name: str, handler, arguments: dict[str, Any]):
+  arguments = dict(arguments)
+  offset = arguments.pop("offset", 0)
+  if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+    raise ValueError(f"{name} offset must be a non-negative integer")
+  if name == UPDATE_GOAL_TOOL and arguments:
+    # A change is never re-run to fetch a page; only the plain read pages.
+    if offset:
+      raise ValueError("update_goal offset pages the no-argument plan report; pass it alone")
+    return handler(arguments)
+  value = handler(arguments)
+  text = value if isinstance(value, str) else json.dumps(
+    value, ensure_ascii=False, separators=(",", ":"),
+  )
+  if offset == 0 and len(text) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
+    return value
+  page = _CONTEXT_BUDGET.text_page(text, offset)
+  end = page["offset"] + len(page["text"])
+  call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)),
+                    f"offset={page['next_offset']}"])
+  footer = (f"next page: {name}({call})" if page["next_offset"] is not None
+            else "end of result")
+  return (f"{page['text']}\n[Result characters {page['offset']}-{end} of "
+          f"{page['total_chars']}; {footer}]")
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:

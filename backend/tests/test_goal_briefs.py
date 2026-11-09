@@ -849,9 +849,9 @@ def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
   shown = len(brief["children"])
   assert 0 < shown < 120
   assert brief["children_omitted"] == f"{120 - shown} more; read_goal(task=parent) lists them all"
-  assert "read_goal(task=parent, field=note) pages the full text" in brief["task"]["note"]
-  assert "read_goal(task=dep, field=result) pages the full text" in brief["dependencies"][0]["result"]
-  assert "read_goal(field=next_action) pages the full text" in brief["next_action"]
+  assert "read_goal(task=parent, field=note) reads the full text" in brief["task"]["note"]
+  assert "read_goal(task=dep, field=result) reads the full text" in brief["dependencies"][0]["result"]
+  assert "read_goal(field=next_action) reads the full text" in brief["next_action"]
   assert full["task"]["note"] == huge
   assert len(full["children"]) == 120
   assert full["children"][119]["note"] == "119 " + huge
@@ -905,7 +905,7 @@ def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
   brief = fit_brief(project_goal(goal, "parent"), "parent")
 
   assert _within_budget(brief)
-  assert "read_goal(field=objective) pages the full objective" in brief["objective"]
+  assert "read_goal(field=objective) reads the full objective" in brief["objective"]
   # Only the entry where the budget ran out marks its cut dependency list.
   assert sum("depends_on_omitted" in child for child in brief["children"]) <= 1
   assert brief["children_omitted"].endswith("read_goal(task=parent) lists them all")
@@ -920,7 +920,7 @@ def test_a_helper_brief_points_its_excerpts_at_read_goal():
   goal = _goal([_task("parent", status="running")], objective="O" * 100_000,
                hold_json=None)
   brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
-  assert "read_goal(field=objective) pages the full objective" in brief["objective"]
+  assert "read_goal(field=objective) reads the full objective" in brief["objective"]
 
 
 def test_brief_projection_walks_large_plans_once(monkeypatch):
@@ -943,19 +943,7 @@ def test_brief_projection_walks_large_plans_once(monkeypatch):
   assert project_goal(_goal(chain))["focus"] == "c10"
 
 
-def _page_through(client, url, headers, params):
-  pieces, offset = [], 0
-  while offset is not None:
-    page = client.get(url, headers=headers, params={**params, "offset": offset})
-    assert page.status_code == 200, page.text
-    body = page.json()
-    pieces.append(body["text"])
-    offset = body["next_offset"]
-  return "".join(pieces), body["total_chars"]
-
-
-def test_read_goal_pages_a_long_objective_and_task_note_in_full(client, owner_token, db):
-  from app.context_budget import READ_PAGE_CHARS
+def test_read_goal_returns_a_long_objective_and_task_note_whole(client, owner_token, db):
   chat = _goal_fixture(db)
   goal = db.get(models.ChatGoal, "goal-a")
   objective = "".join(f"{index:07d}" for index in range(30_000))
@@ -968,9 +956,10 @@ def test_read_goal_pages_a_long_objective_and_task_note_in_full(client, owner_to
   headers = _token(db, chat, "run-a")
   url = f"/api/chats/{chat}/goal-brief"
 
-  assert READ_PAGE_CHARS < len(objective)
-  assert _page_through(client, url, headers, {"field": "objective"}) == (objective, len(objective))
-  assert _page_through(client, url, headers, {"task": "verify", "field": "note"}) == (note, len(note))
+  # The route returns texts whole; the control tool pages long results.
+  assert client.get(url, headers=headers, params={"field": "objective"}).json()["text"] == objective
+  assert client.get(url, headers=headers,
+                    params={"task": "verify", "field": "note"}).json()["text"] == note
   assert client.get(url, headers=headers, params={"field": "secret"}).status_code == 422
 
 

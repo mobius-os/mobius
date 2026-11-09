@@ -34,7 +34,6 @@ SECRET_TOOL_NAME = "request_secret"
 APP_BUILD_TOOL_NAMES = ("list_apps", "apply_app", "screenshot")
 LIST_PEERS_TOOL_NAME = "list_agent_peers"
 SEND_MESSAGE_TOOL_NAME = "send_agent_message"
-READ_MESSAGE_TOOL_NAME = "read_agent_message"
 CLAIM_WORK_TOOL_NAME = "claim_agent_work"
 FINISH_WORK_TOOL_NAME = "finish_agent_work"
 SPAWN_AGENT_TOOL_NAME = "spawn_agent"
@@ -55,7 +54,6 @@ HELPER_TOOL_NAMES = (
 PEER_TOOL_NAMES = (
   LIST_PEERS_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
-  READ_MESSAGE_TOOL_NAME,
 )
 WORK_OWNERSHIP_TOOL_NAMES = (
   CLAIM_WORK_TOOL_NAME,
