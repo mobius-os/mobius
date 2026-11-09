@@ -111,7 +111,8 @@ UPDATE_GOAL_DESCRIPTION = (
   "off. Settle every task honestly and wait for helpers before any outcome. "
   "Tasks and outcome commit atomically; refusal saves neither. No proof-of-prose "
   "approval validator substitutes for the agent's judgment. With no arguments it returns the current "
-  "plan. goal_id explicitly resumes a named retained Goal instead of the presented "
+  "plan; a plan too long for one result ends by naming the offset of its next page, "
+  "read with update_goal(offset=...) alone. goal_id explicitly resumes a named retained Goal instead of the presented "
   "one, including a held Goal only when the owner asked to continue that work. "
   "Do not create a replacement Goal or reattach an unrelated follow-up."
 )
@@ -220,6 +221,7 @@ _SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
 # Which tools each authority level gets is one policy, shared with provider
 # approval and readiness checks; platform_tools.py is stdlib-only.
 _PLATFORM_TOOLS = _helper_module("../app/platform_tools.py", "mobius_platform_tools")
+_CONTEXT_BUDGET = _helper_module("../app/context_budget.py", "mobius_context_budget")
 
 
 def _promote_goal(objective: str) -> dict:
@@ -615,10 +617,29 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
 
 def _call_update_goal(arguments: dict[str, Any]) -> str:
   allowed = {"tasks", "next_action", "complete", "cannot_complete", "cancel", "defer", "finished_claims", "goal_id"}
-  unknown = set(arguments) - allowed
+  unknown = set(arguments) - allowed - {"offset"}
   if unknown:
     raise ValueError(f"update_goal does not take: {', '.join(sorted(unknown))}")
-  return _update_goal(arguments)
+  if "offset" not in arguments:
+    return _paged_report(_update_goal(arguments), 0)
+  offset = arguments["offset"]
+  if set(arguments) != {"offset"} or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+    raise ValueError("update_goal offset pages the plan report; pass it alone")
+  return _paged_report(_update_goal({}), offset)
+
+
+def _paged_report(report: str, offset: int) -> str:
+  """The report whole when it fits one result, else one page naming the next."""
+  if offset == 0 and len(report) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
+    return report
+  page = _CONTEXT_BUDGET.text_page(report, offset)
+  end = page["offset"] + len(page["text"])
+  footer = (
+    f"[Report characters {page['offset']}-{end} of {page['total_chars']}; "
+    + (f"next page: update_goal(offset={page['next_offset']})]"
+       if page["next_offset"] is not None else "end of report]")
+  )
+  return page["text"] + "\n" + footer
 
 
 def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
@@ -1865,6 +1886,8 @@ _TOOL_DEFINITIONS = {
           ),
         },
         "goal_id": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Alone: read the next page of a long plan report, as its last page line names."},
       },
       "additionalProperties": False,
     },

@@ -1555,6 +1555,41 @@ def test_work_claim_text_fields_are_uncapped():
   assert "maxLength" not in finish["outcome"]
 
 
+def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": f"Task {index} " + "x" * 200}
+           for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or payload)
+  full = control._goal_report(payload, full=True)
+  page_chars = control._CONTEXT_BUDGET.READ_PAGE_CHARS
+  assert len(full) > 2 * page_chars
+
+  pieces, offset = [], 0
+  while True:
+    page = control._call_update_goal({} if offset == 0 else {"offset": offset})
+    text, footer = page.rsplit("\n", 1)
+    assert len(text) <= page_chars
+    pieces.append(text)
+    if "end of report" in footer:
+      break
+    offset = int(footer.rsplit("offset=", 1)[1].rstrip(")]"))
+  assert "".join(pieces) == full
+  # Every page is a read: no plan change is ever sent with an offset.
+  assert all(body == {} for body in sent)
+  with pytest.raises(ValueError, match="pass it alone"):
+    control._call_update_goal({"offset": 5, "next_action": "x"})
+
+  small = {"goal": {"status": "open", "revision": 1, "objective": "Ship"},
+           "plan": {"tasks": tasks[:3], "summary": {"total": 3}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: small)
+  assert control._call_update_goal({}) == control._goal_report(small, full=True)
+
+
 def test_a_refusal_reason_is_shown_whole():
   control = _control_module()
   reason = "R" * 5000
