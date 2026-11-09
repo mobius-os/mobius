@@ -139,7 +139,18 @@ def require(*, app_id: int, app_name: str, key: str, seller: str, priced_app: st
 
 
 def settle(payment: Payment) -> None:
-  """The confirmed charge went through: its question is closed."""
+  """The confirmed charge went through.
+
+  Its answer stays until it expires, so the app retrying the same charge
+  (because a later step of its own failed) replays that charge at the credits
+  service instead of asking the owner to pay again.
+  """
+  with _lock:
+    payment.at = time.monotonic()
+
+
+def forget(payment: Payment) -> None:
+  """The confirmed payment ended without a charge: the next try asks again."""
   with _lock:
     _payments.pop(payment.id, None)
 

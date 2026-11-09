@@ -614,7 +614,14 @@ def accept(app: models.App, digest: str, *, via: str = "owner") -> bool:
 
 
 def session_id(app: models.App) -> str | None:
-  """Names the acceptance a credential was issued under (None for old records)."""
+  """Names the acceptance a credential was issued under (None for old records).
+
+  Only first-open consent issues sessions. A local app's credits answer is
+  stored in the same field but signs nothing out: allowing or removing its
+  credits must not invalidate the tokens its frame and service already hold.
+  """
+  if not gated(app):
+    return None
   record = app.accepted_consent
   return record.get("id") if isinstance(record, dict) else None
 

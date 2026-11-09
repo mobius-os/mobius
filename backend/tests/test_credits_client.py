@@ -997,6 +997,11 @@ def test_every_charge_waits_for_the_owners_pay(client, auth, db, paired, chat, r
   assert charged.status_code == 200 and charged.json()["charge_id"] == "c1"
   assert len(_charges_upstream(paired)) == 1
   assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  # The app's next step failed and it retries the same charge: the owner is
+  # not asked to pay again, and the credits service replays the one charge.
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["charge_id"] == "c1"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
 
 
 def test_an_unpriced_action_is_refused_without_asking(client, auth, db, paired, real_payments):

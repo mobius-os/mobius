@@ -162,6 +162,22 @@ def test_the_owner_approves_and_revokes_a_local_apps_credits(client, owner_token
   assert not app_consent.credits_approved(app)
 
 
+def test_a_local_apps_credits_answer_keeps_its_tokens_working(client, owner_token, db):
+  """Allowing or removing credits must not sign the app's frame and service out."""
+  app = _app(db, "localtokens", contract=_contract(credits_manage=True), store=False)
+  headers = _owner_headers(client, owner_token)
+  issued_under = app_consent.session_id(app)
+  digest = client.get(f"/api/apps/{app.id}/credits-approval", headers=headers).json()["digest"]
+  assert client.post(f"/api/apps/{app.id}/credits-approval", json={"digest": digest},
+                     headers=headers).status_code == 200
+  db.refresh(app)
+  assert app_consent.credits_approved(app)
+  assert app_consent.session_valid(app, issued_under)
+  assert client.delete(f"/api/apps/{app.id}/credits-approval", headers=headers).status_code == 200
+  db.refresh(app)
+  assert app_consent.session_valid(app, issued_under)
+
+
 def test_an_agent_cannot_approve_a_local_apps_credits(client, owner_token, db, chat):
   app = _app(db, "localagent", contract=_contract(credits_manage=True), store=False)
   digest = client.get(f"/api/apps/{app.id}/credits-approval",

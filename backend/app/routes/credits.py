@@ -244,7 +244,7 @@ def _card_payment(payment) -> dict:
     return purchase["charge"]
   if status == "pending":
     raise HTTPException(409, {"code": "payment_in_progress", "message": "Finish paying on Stripe's page."})
-  credits_confirmations.settle(payment)
+  credits_confirmations.forget(payment)
   error = purchase.get("error") if isinstance(purchase.get("error"), dict) else None
   if error:
     # Paid, but the charge was refused (the price rose, it was switched off):
