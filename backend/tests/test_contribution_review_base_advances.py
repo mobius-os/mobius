@@ -59,6 +59,8 @@ def moving_base(monkeypatch, live, *, status="ahead"):
       state["compares"].append((old, new))
       return {"status": state["status"], "base_commit": {"sha": old},
               "merge_base_commit": {"sha": old if state["status"] == "ahead" else "0" * 40}}
+    if "/pulls/" in endpoint:
+      return {"base": {"ref": ITEM["base_ref"]}, "head": {"sha": SHA}}
     return {"id": 42}
   monkeypatch.setattr(domain, "read", read)
   return state

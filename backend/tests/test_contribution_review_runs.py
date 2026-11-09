@@ -571,6 +571,16 @@ def test_peer_claim_result_only_promises_goal_follow_when_registered(setup, monk
   assert "Your Goal follows this claim" in result["summary"]
 
 
+def test_an_unconfirmed_one_tap_merge_of_this_head_stops_a_review_merge_from_arming(setup):
+  db, row, principal = setup
+  db.add(models.DirectMergeAttempt(owner_id=row.owner_id, work_key=domain.merge_work_key(TARGET),
+                                   state="unknown", armed_at=domain.utc_now_iso()))
+  db.commit()
+  result = domain.arm_merge(db, row, TARGET, {"head_sha": SHA}, principal)
+  assert result["state"] == "needs_you" and "one-tap Merge" in result["summary"]
+  assert not domain.merge_attempted(row.outcomes_json.get(domain.key(TARGET), {}))
+
+
 @pytest.mark.parametrize("conflict", [
   "The claim changed while following; inspect it before retrying.",
   "Transfer would create a direct Goal dependency cycle.",

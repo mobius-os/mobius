@@ -831,7 +831,7 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
 
 class VerdictDecision(PullIdentity):
   proposal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
-  decision: Literal["submit", "discard", "dismiss"]
+  decision: Literal["submit", "discard", "dismiss", "continue_merge"]
 
 
 def _require_owner_hands(principal: Principal, refusal: str) -> None:
@@ -864,7 +864,8 @@ async def _resume_for_merge(db, row, item):
              dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
 async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
                          db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
-  """The owner's own submit or discard of one exact proposed verdict, or dismissal of an unconfirmed one."""
+  """The owner's own submit or discard of one exact proposed verdict, dismissal of an unconfirmed one,
+  or continuing the merge of an approval GitHub already holds."""
   _require_owner_hands(principal, "Only you can submit, discard or dismiss a verdict. An agent cannot decide its own proposal.")
   row = _row(db, app_id, run_id, principal)
   item_key = reviews.key(body.model_dump())
@@ -883,6 +884,13 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
     if body.decision in {"discard", "dismiss"}:
       (verdicts.discard if body.decision == "discard" else verdicts.dismiss)(db, row, item_key, body.proposal_id)
       return {"run": _run_view(db, row)}
+    if body.decision == "continue_merge":
+      # The owner's own tap re-arranges the guarded merge of an approval GitHub already holds.
+      if not reviews.approved_merge_waiting(row, item):
+        raise HTTPException(409, "No confirmed approval is waiting for its merge. Refresh to see the current state.")
+      resumed = await _resume_for_merge(db, row, {**original, "head_sha": target["head_sha"]})
+      db.refresh(row)
+      return {"run": _run_view(db, row), "merge_resumed": resumed}
     cwd = Path(get_settings().data_dir) / "platform"
     receipt = await verdicts.submit(db, row, item_key, target, body.proposal_id, gh=_gh, cwd=cwd,
                                     authorize=lambda: _owner_verdict_authority(db, row))
@@ -920,7 +928,7 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce))
+  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce), db, principal.owner.id)
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",
