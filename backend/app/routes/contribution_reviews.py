@@ -414,27 +414,43 @@ def _takeover_refusal(db, row, actor) -> str | None:
   return None
 
 
+async def _announce_one(db, row, cwd, item_key, notice, target, caller) -> str:
+  """One takeover comment, from its last proof to its saved receipt; returns the receipt's state.
+
+  The proof and the dispatch happen under the connection lock and the run's admission lock, which Stop
+  also takes to save its flag, so a Stop is either seen here or comes after the comment.
+  """
+  async with _github_connection_transaction():
+    # The connection lock keeps the account still but does not say whose it is.
+    actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
+    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+      refusal = _takeover_refusal(db, row, actor)
+      if refusal is None and caller.cancelling():
+        refusal = "The request was cancelled before the comment began."
+      if refusal is not None:
+        result = DispatchResult.not_dispatched(refusal)
+      else:
+        result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
+  fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
+            **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
+  _save_notice(db, row, item_key, {**notice, **fields})
+  if result.state != "confirmed":
+    reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": "platform",
+                                                     "reason": "The takeover comment was not confirmed."})
+  return fields["state"]
+
+
 async def _announce_takeover(db, row, cwd) -> None:
   """Post each armed takeover comment once. Unless GitHub confirms it, the run is stopped
   (it holds nothing) and the start is refused."""
+  caller = asyncio.current_task()
   for item_key, notice in list(((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).items()):
     target = next(t for t in row.targets_json if reviews.key(t) == item_key)
-    async with _github_connection_transaction():
-      # The connection lock keeps the account still but does not say whose it is, and Stop saves its
-      # flag under the run's admission lock: the proof and the comment's dispatch happen under both.
-      actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
-      async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-        refusal = _takeover_refusal(db, row, actor)
-        if refusal is not None:
-          result = DispatchResult.not_dispatched(refusal)
-        else:
-          result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
-    fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
-              **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
-    _save_notice(db, row, item_key, {**notice, **fields})
-    if result.state != "confirmed":
-      reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": "platform",
-                                                       "reason": "The takeover comment was not confirmed."})
+    # Dispatch and its receipt are one unit: a cancelled request still records what GitHub answered
+    # instead of stranding the notice as "posting", which would refuse the same start for good.
+    state = await settled.settle(_announce_one(db, row, cwd, item_key, notice, target, caller),
+                                 what="Takeover comment and its receipt")
+    if state != "posted":
       _require_takeover_announced(row)
 
 
