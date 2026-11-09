@@ -18,6 +18,11 @@ for (const provider of ['claude', 'codex', 'mobius', 'responses']) {
   })
 }
 
+// Playwright's visibility ignores opacity, and the footer is transparent at
+// rest (still focusable), so these read its computed opacity.
+const footerOpacity = reply => reply.locator('.chat__msg-meta--start')
+  .evaluate(el => getComputedStyle(el).opacity)
+
 test.describe('reply footer', () => {
   test('Copy writes the answer as shown, with its Markdown for the composer', async ({ page }) => {
     await page.addInitScript(() => {
@@ -36,6 +41,7 @@ test.describe('reply footer', () => {
       + '| Plan | Price |\n|---|---|\n| Pro | \\$5 |\n\n```\nnpm test\n```'
     const f = await mountReplyFooter(page, BASE, { latestAnswer })
     await f.composer.fill('Keep my unfinished message')
+    await f.replies.last().hover()
     await f.replies.last().getByRole('button', { name: 'Copy message' }).click()
     await expect(f.replies.last().getByRole('button', { name: 'Copied' })).toBeVisible()
     const [copied] = await page.evaluate(() => window.__copied)
@@ -49,9 +55,15 @@ test.describe('reply footer', () => {
   for (const state of ['settled', 'running', 'pendingQuestion']) {
     test(`a ${state} conversation keeps footer actions only where appropriate`, async ({ page }) => {
       const f = await mountReplyFooter(page, BASE, state === 'settled' ? {} : { [state]: true })
-      const copy = f.replies.last().getByRole('button', { name: 'Copy message' })
-      if (state === 'running') await expect(copy).toBeHidden()
-      else await expect(copy).toBeVisible()
+      const latest = f.replies.last()
+      const copy = latest.getByRole('button', { name: 'Copy message' })
+      if (state === 'running') await expect(copy).toHaveCount(0)
+      else {
+        await expect.poll(() => footerOpacity(latest)).toBe('0')
+        await latest.hover()
+        await expect.poll(() => footerOpacity(latest)).toBe('1')
+        await expect(copy).toBeVisible()
+      }
       await expect(f.replies.getByRole('button', { name: 'Try again', includeHidden: true })).toHaveCount(0)
     })
   }
@@ -62,7 +74,19 @@ test.describe('reply footer', () => {
     await expect(older.locator('.chat__msg-meta')).toHaveCount(0)
     await older.locator('.chat__text--assistant').last().click()
     await expect(older.getByRole('button', { name: 'Copy message', includeHidden: true })).toHaveCount(0)
-    await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
+    await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toHaveCount(1)
+  })
+
+  test('a tap on the reply reveals its footer for a moment, as on owner messages', async ({ page }) => {
+    const f = await mountReplyFooter(page, BASE)
+    const latest = f.replies.last()
+    await page.mouse.move(0, 0)
+    await expect.poll(() => footerOpacity(latest)).toBe('0')
+    await latest.locator('.chat__text--assistant').first().click()
+    await expect(latest.locator('.chat__msg-meta--start')).toHaveClass(/chat__msg-meta--visible/)
+    await page.mouse.move(0, 0)
+    await expect.poll(() => footerOpacity(latest)).toBe('1')
+    await expect(latest.locator('.chat__msg-meta--start')).not.toHaveClass(/chat__msg-meta--visible/, { timeout: 7000 })
   })
 
   test('sending a message clears the footer before the send completes', async ({ page }) => {
@@ -77,9 +101,10 @@ test.describe('reply footer', () => {
       await route.fulfill({ status: 400, json: { detail: 'Fixture rejection; no provider starts.' } })
     })
     try {
-      await expect(copy).toBeVisible()
+      await expect(copy).toHaveCount(1)
       await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-      await expect(copy).toBeHidden({ timeout: 1000 })
+      // The footer clears outright, not merely by losing hover.
+      await expect(copy).toHaveCount(0, { timeout: 1000 })
     } finally { release() }
   })
 

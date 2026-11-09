@@ -500,8 +500,8 @@
     transition-delay: 0s;
   }
 }
-/* Owner messages reveal their row only on tap/click; the chat's last reply
-   keeps its footer visible. */
+/* A tap or click reveals a row for a moment: an owner message's, and the
+   reply footer's (which a fine pointer also reveals on hover). */
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: visible;
