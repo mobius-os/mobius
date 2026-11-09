@@ -39,6 +39,14 @@ def _app(db, slug, *, contract, store=True, accepted=None):
   return row
 
 
+@pytest.fixture(autouse=True)
+def _no_remembered_credits_questions():
+  # App ids repeat across tests; a question from one must not leak into the next.
+  app_consent.forget_credits_requests()
+  yield
+  app_consent.forget_credits_requests()
+
+
 def _owner_headers(client, owner_token):
   return {"Authorization": f"Bearer {owner_token}"}
 
@@ -109,6 +117,76 @@ def test_local_apps_are_not_gated(client, owner_token, db):
   headers = _owner_headers(client, owner_token)
   assert client.get(f"/api/apps/{app.id}/consent", headers=headers).json()["status"] == "not_applicable"
   assert client.post("/api/auth/app-token", json={"app_id": app.id}, headers=headers).status_code == 200
+
+
+def test_a_local_app_asking_for_credits_keeps_working(client, owner_token, db):
+  """Only its credits management waits for the owner; the app is never dormant."""
+  app = _app(db, "localpay", contract=_contract(spend_credits=["*/prompts"], credits_manage=True),
+             store=False)
+  headers = _owner_headers(client, owner_token)
+  assert not app_consent.gated(app) and not app_consent.dormant(app)
+  assert client.post("/api/auth/app-token", json={"app_id": app.id}, headers=headers).status_code == 200
+  view = client.get(f"/api/apps/{app.id}/credits-approval", headers=headers).json()
+  assert view["status"] == "unanswered"
+  # Spending is not a standing answer: every charge waits for Pay instead.
+  assert [r["id"] for r in view["rows"]] == ["credits_manage"]
+
+
+def test_a_local_app_that_only_spends_has_nothing_to_approve_once(client, owner_token, db):
+  app = _app(db, "localspend", contract=_contract(spend_credits=["*/prompts"]), store=False)
+  view = client.get(f"/api/apps/{app.id}/credits-approval",
+                    headers=_owner_headers(client, owner_token)).json()
+  assert view["status"] == "not_applicable"
+
+
+def test_the_owner_approves_and_revokes_a_local_apps_credits(client, owner_token, db):
+  app = _app(db, "localok", contract=_contract(credits_manage=True), store=False)
+  headers = _owner_headers(client, owner_token)
+  app_consent.request_credits(app)
+  view = client.get(f"/api/apps/{app.id}/credits-approval", headers=headers).json()
+  assert view["status"] == "requested"
+  assert [r["id"] for r in view["rows"]] == ["credits_manage"]
+
+  wrong = client.post(f"/api/apps/{app.id}/credits-approval", json={"digest": "nope"},
+                      headers=headers)
+  assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "consent_changed"
+  ok = client.post(f"/api/apps/{app.id}/credits-approval", json={"digest": view["digest"]},
+                   headers=headers)
+  assert ok.status_code == 200 and ok.json()["status"] == "approved"
+  db.refresh(app)
+  assert app_consent.credits_approved(app) and not app_consent.credits_requested(app)
+
+  gone = client.delete(f"/api/apps/{app.id}/credits-approval", headers=headers)
+  assert gone.status_code == 200
+  db.refresh(app)
+  assert not app_consent.credits_approved(app)
+
+
+def test_an_agent_cannot_approve_a_local_apps_credits(client, owner_token, db, chat):
+  app = _app(db, "localagent", contract=_contract(credits_manage=True), store=False)
+  digest = client.get(f"/api/apps/{app.id}/credits-approval",
+                      headers=_owner_headers(client, owner_token)).json()["digest"]
+  agent = auth.create_agent_token(chat.id, "test", 0)
+  refused = client.post(f"/api/apps/{app.id}/credits-approval", json={"digest": digest},
+                        headers={"Authorization": f"Bearer {agent}"})
+  assert refused.status_code == 403
+  db.refresh(app)
+  assert app.accepted_consent is None and not app_consent.credits_approved(app)
+
+
+def test_a_store_app_widening_its_credits_still_asks_again(db):
+  app = _accepted(db, "storewiden", _contract(credits_manage=True))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(credits_manage=True, spend_credits=["*/prompts"])
+  assert app_consent.status(app) == "required"
+
+
+def test_store_apps_answer_credits_with_first_open_consent(client, owner_token, db):
+  app = _app(db, "storepay", contract=_contract(spend_credits=["*/prompts"]))
+  headers = _owner_headers(client, owner_token)
+  assert client.get(f"/api/apps/{app.id}/credits-approval", headers=headers).json()["status"] == "not_applicable"
+  refused = client.post(f"/api/apps/{app.id}/credits-approval", json={"digest": "x"}, headers=headers)
+  assert refused.status_code == 409
 
 
 def test_update_asks_only_when_it_needs_more(db):
@@ -199,6 +277,12 @@ def test_spending_credits_is_a_critical_row_naming_who_it_pays():
     ("spend_credits", "Spend your credits on paid features", True, ["ana/prompts"]),
   ]
   assert "ana/prompts" in rows[0]["text"]
+
+
+def test_paying_any_creator_of_an_app_is_named_plainly():
+  rows = app_consent.rows_from_contract(_contract(spend_credits=["*/prompts", "bob/notes"]))
+  assert rows[0]["scope"] == ["*/prompts", "bob/notes"]
+  assert rows[0]["text"].endswith("to: any creator's prompts, bob/notes.")
 
 
 def test_acceptance_stores_rows_and_survives_a_rewording(db, monkeypatch):

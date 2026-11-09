@@ -21,17 +21,21 @@ where the app contract documents them.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from app import credits_client, models
+from app import app_consent, credits_client, credits_confirmations, models
+from app.database import get_db
 from app.deps import (
   get_credits_controller,
   get_credits_price_reader,
   get_credits_reader,
   get_credits_spender,
   reject_cross_site,
-  spend_credits_targets,
+  spend_credits_allows,
 )
 
 router = APIRouter(
@@ -72,6 +76,8 @@ class _ChargeRequest(BaseModel):
   idempotency_key: str = Field(min_length=8, max_length=200)
   # The price the app showed the owner; a higher current price refuses.
   max_price_micro: int = Field(ge=0)
+  # From the owner's credits, or by card on Stripe's page (at least $0.50).
+  method: Literal["credits", "card"] = "credits"
 
 
 def _credits(action, *args):
@@ -85,6 +91,26 @@ def _credits(action, *args):
 def read_credits(_owner: models.Owner = Depends(get_credits_reader)):
   """Balance and earnings from the paired credits service, never stored here."""
   return credits_client.summary()
+
+
+@router.get("/apps")
+def read_credits_apps(
+  _owner: models.Owner = Depends(get_credits_reader),
+  db: Session = Depends(get_db),
+):
+  """The local apps the owner allowed to use their credits, for Settings.
+
+  Store apps are not listed: their first-open consent is managed with the app.
+  """
+  apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).order_by(models.App.name).all()
+  return {"apps": [
+    {"app_id": app.id, "name": app.name, "slug": app.slug,
+     "rows": [{"id": row["id"], "title": row["title"], "scope": row.get("scope") or []}
+              for row in app_consent.credits_rows(app)]}
+    for app in apps
+    if not app_consent.gated(app) and app_consent.credits_rows(app) and app.accepted_consent
+    and app_consent.credits_approved(app)
+  ]}
 
 
 @router.post("/pair")
@@ -173,9 +199,10 @@ def charge_credits_for_call(
 
   The price is the seller's, read at the credits service, so the app cannot
   choose what a call costs; it can only refuse to pay more than it showed.
-  It pays only the ``"<seller>/<app>"`` entries the owner allowed at install.
+  It pays only the ``"<seller>/<app>"`` (or ``"*/<app>"``) entries the owner
+  allowed.
   """
-  if f"{body.seller}/{body.app}" not in spend_credits_targets(app):
+  if not spend_credits_allows(app, body.seller, body.app):
     raise HTTPException(403, {
       "code": "seller_not_allowed",
       "message": (
@@ -186,10 +213,65 @@ def charge_credits_for_call(
   # The permanent package id outlives reinstalls and slug changes; an
   # owner-built app has none, so its row id stands in.
   payer = f"package:{app.package_id}" if app.package_id else f"app:{app.id}"
-  return _credits(
+  # Nothing is charged until the owner has seen this payment and pressed Pay.
+  payment = credits_confirmations.require(
+    app_id=app.id, app_name=app.name,
+    key=credits_client.app_scoped_key(payer, body.idempotency_key),
+    seller=body.seller, priced_app=body.app, action=body.action,
+    max_price_micro=body.max_price_micro,
+    describe=lambda: _price_description(body.seller, body.app, body.action),
+    method=body.method, buyer_app=app.package_id or app.slug)
+  if payment.method == credits_confirmations.CARD:
+    return _card_payment(payment)
+  charged = _credits(
     lambda: credits_client.charge(
       body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro,
       payer=payer, buyer_app=app.package_id or app.slug))
+  credits_confirmations.settle(payment)
+  return charged
+
+
+def _card_payment(payment) -> dict:
+  """Where a confirmed card payment is: the charge receipt once Stripe paid.
+
+  The app retries the same charge while the owner is on Stripe's page; each
+  retry reads the purchase and answers ``payment_in_progress`` until it ends.
+  """
+  purchase = _credits(lambda: credits_client.read_purchase(payment.purchase_id))
+  status = purchase.get("status")
+  if status == "charged":
+    credits_confirmations.settle(payment)
+    return purchase["charge"]
+  if status == "pending":
+    raise HTTPException(409, {"code": "payment_in_progress", "message": "Finish paying on Stripe's page."})
+  credits_confirmations.settle(payment)
+  error = purchase.get("error") if isinstance(purchase.get("error"), dict) else None
+  if error:
+    # Paid, but the charge was refused (the price rose, it was switched off):
+    # the card payment stays in the owner's credits.
+    raise HTTPException(409, {
+      "code": str(error.get("code") or "charge_failed"),
+      "message": f"{error.get('message') or 'The purchase could not be completed.'} "
+                 "Your card payment was added to your credits.",
+    })
+  raise HTTPException(402, {"code": "payment_not_completed",
+                            "message": "The card payment wasn't completed."})
+
+
+def _price_description(seller: str, priced_app: str, action: str) -> str:
+  """What the seller calls this priced action, for the owner's question.
+
+  An action the seller never priced (or switched off) is refused here, before
+  the owner is asked to pay for something the credits service would refuse.
+  """
+  listed = credits_client.prices(seller, priced_app).get("prices") or []
+  match = next((p for p in listed if isinstance(p, dict) and p.get("action") == action), None)
+  if match is None or match.get("enabled") is False:
+    raise HTTPException(404, {
+      "code": "price_not_found",
+      "message": "The creator hasn't set this price up at mobius.you yet.",
+    })
+  return str(match.get("description") or "")
 
 
 @router.post("/connect")

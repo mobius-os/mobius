@@ -31,7 +31,11 @@ BOOLEAN_PERMISSIONS = (
 )
 # What an app's service may pay for from the owner's credits, as
 # ``"<seller handle>/<app>"`` entries naming the creators' priced apps.
-SPEND_CREDITS_TARGET = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+# ``"*/<app>"`` names every creator's app of that name: a marketplace pays
+# whichever creator listed what its buyer chose, so it cannot name them.
+SPEND_CREDITS_TARGET = re.compile(
+  r"(?:\*|[a-z0-9][a-z0-9_-]{0,39})/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
+)
 SPEND_CREDITS_MAX = 16
 RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits")
 SKILLS_COUNT_MAX = 5
@@ -836,7 +840,7 @@ def validate_manifest_contract(manifest) -> None:
   ):
     _fail(
       "Manifest `permissions.spend_credits` must list up to "
-      f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" entries it may pay for."
+      f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" or \"*/<app>\" entries it may pay for."
     )
   for field in BOOLEAN_PERMISSIONS:
     if field in permissions and not isinstance(permissions[field], bool):

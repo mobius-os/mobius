@@ -6,8 +6,11 @@ opened. The accepted rows are stored on the app; only a request that needs
 more than they cover asks again. Acceptance is all or nothing, but the rows are
 derived individually, so choosing rows later only needs a subset to be accepted.
 
-Scope of this first slice: Store-installed apps (``manifest_url`` set). Local
-and agent-built apps keep their present behaviour.
+Scope: Store-installed apps (``manifest_url`` set). A local or agent-built
+app keeps running unanswered, but its manifest is editable on this machine, so
+the credits it asks for wait for the owner: its first credits call asks
+(``request_credits``), and only the owner's answer (``approve_credits``)
+lets money move. For a local app ``accepted_consent`` holds just those rows.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -165,7 +169,7 @@ def rows_from_contract(
     rows.append(_row(
       "spend_credits", "Spend your credits on paid features",
       "Its service can pay for priced calls from your Möbius credits, at the "
-      "price each creator sets, to: " + ", ".join(targets) + ".",
+      "price each creator sets, to: " + ", ".join(_payee(t) for t in targets) + ".",
       scope=[str(target) for target in targets],
     ))
   background = contract.get("background")
@@ -349,8 +353,25 @@ def rows_for_manifest(manifest: dict[str, Any], contract: dict[str, Any]) -> lis
   )
 
 
+def asks_for_credits(contract: dict[str, Any]) -> bool:
+  """Whether a contract asks to see, manage or spend the owner's credits."""
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  targets = data.get("spend_credits")
+  return data.get("credits_manage") is True or (isinstance(targets, list) and bool(targets))
+
+
+def _payee(target: str) -> str:
+  """How the panel names one ``spend_credits`` entry."""
+  seller, _, priced_app = target.partition("/")
+  return f"any creator's {priced_app}" if seller == "*" else target
+
+
 def gated(app: models.App) -> bool:
-  """Only Store-installed apps with a reviewed contract use first-open consent."""
+  """Only Store-installed apps with a reviewed contract use first-open consent.
+
+  A local or agent-built app is never held dormant; if it asks for the
+  owner's credits, that alone waits for the owner (``credits_approved``).
+  """
   return app.manifest_url is not None and isinstance(app.capability_contract, dict)
 
 
@@ -443,6 +464,73 @@ def status(app: models.App) -> str:
   return "required" if needed_rows(app) else "accepted"
 
 
+# The credits rows a local app needs a standing answer for. Spending is not
+# one: every charge waits for the owner's Pay (credits_confirmations).
+CREDITS_ROWS = frozenset({"credits_manage"})
+# How long a credits call's question stays open for the shell to show.
+CREDITS_REQUEST_SECONDS = 15 * 60
+_credits_requested: dict[int, float] = {}
+
+
+def credits_rows(app: models.App) -> list[dict[str, Any]]:
+  return [row for row in current_rows(app) if row["id"] in CREDITS_ROWS]
+
+
+def credits_approved(app: models.App) -> bool:
+  """Whether the owner allowed every credits row this app asks for today."""
+  accepted = accepted_rows(app) or {}
+  return all(_covered(row, accepted) for row in credits_rows(app))
+
+
+def request_credits(app: models.App) -> None:
+  """A local app's credits call was refused for want of an answer: ask.
+
+  Remembered only for the shell to show the question; the answer itself is
+  what persists. A restart forgets the question and the app's next call asks
+  again.
+  """
+  _credits_requested[app.id] = time.monotonic()
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({"type": "credits_approval_requested", "appId": str(app.id)})
+
+
+def credits_requested(app: models.App) -> bool:
+  at = _credits_requested.get(app.id)
+  return at is not None and time.monotonic() - at < CREDITS_REQUEST_SECONDS
+
+
+def approve_credits(app: models.App, digest: str) -> bool:
+  """Record the owner's yes to exactly the credits rows they were shown."""
+  rows = credits_rows(app)
+  if not rows or digest != request_digest(rows):
+    return False
+  app.accepted_consent = _record(rows, via="credits")
+  _credits_requested.pop(app.id, None)
+  return True
+
+
+def revoke_credits(app: models.App) -> None:
+  app.accepted_consent = None
+  _credits_requested.pop(app.id, None)
+
+
+def forget_credits_requests() -> None:
+  """Drop every remembered question (tests; a restart does the same)."""
+  _credits_requested.clear()
+
+
+def credits_request(app: models.App) -> dict[str, Any]:
+  """What the shell's credits question shows for a local app."""
+  rows = [row for row in credits_rows(app) if not _covered(row, accepted_rows(app) or {})]
+  return {
+    "app_id": app.id,
+    "app_name": app.name,
+    "digest": request_digest(credits_rows(app)),
+    "is_update": accepted_rows(app) is not None,
+    "rows": rows,
+  }
+
+
 def dormant(app: models.App) -> bool:
   """Whether the app must do nothing until the owner answers: its tokens,
   jobs, service, agent tools and prompt fragment are all held back."""
@@ -463,7 +551,7 @@ def _holders(db: Session, app: models.App) -> dict[str, list[tuple[str, int]]]:
   for other in others:
     if never_accepted(other):
       continue
-    accepted = accepted_rows(other)
+    accepted = accepted_rows(other) if gated(other) else None
     if accepted is None:  # a local app: what its contract asks for today
       accepted = {r["id"]: {"rank": int(r.get("rank") or 1)} for r in current_rows(other)}
     for row_id, row in accepted.items():

@@ -369,3 +369,32 @@
   outline: 2px solid var(--accent, #8b6cf7);
   outline-offset: 2px;
 }
+
+/* An app's money question over the running app: a payment waiting for the
+   owner's Pay (AppCreditsPaymentDialog) or a local app's first credits call
+   (AppCreditsApprovalDialog). Both reuse the permission panel's sheet. */
+.canvas-credits {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .6);
+  backdrop-filter: blur(6px);
+}
+.canvas-credits__sheet { gap: 14px; }
+.canvas-credits__amount { display: flex; align-items: baseline; gap: 8px; padding: 2px 2px 0; }
+.canvas-credits__figure { font-size: 34px; font-weight: 800; line-height: 1; letter-spacing: -.02em; }
+.canvas-credits__unit { color: var(--muted, #a1a1aa); font-size: 14px; font-weight: 600; }
+.canvas-credits .app-consent__actions .app-consent__btn { flex: 1 1 0; }
+@media (max-width: 560px) {
+  .canvas-credits { place-items: end stretch; padding: 0; }
+  .canvas-credits__sheet {
+    width: 100%;
+    max-height: 92%;
+    margin: 0;
+    border-radius: 20px 20px 0 0;
+    padding: 20px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+  }
+}
