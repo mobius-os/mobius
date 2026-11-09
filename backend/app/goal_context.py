@@ -167,19 +167,22 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 
 
 # A task text and its display limit in the brief.
-_TASK_TEXT_LIMITS = (("title", TITLE_CHARS), ("completion_condition", TEXT_CHARS),
-                     ("note", TEXT_CHARS), ("result", TEXT_CHARS))
-_BRIEF_LISTS = ("ancestors", "children", "siblings", "dependencies", "open_blockers",
-                "other_open_goals")
+_TASK_TEXT_LIMITS = (("completion_condition", TEXT_CHARS), ("note", TEXT_CHARS),
+                     ("result", TEXT_CHARS))
+_BRIEF_LISTS = ("ancestors", "children", "siblings", "dependencies", "open_blockers")
+# A shortened title ends in this alone; the brief says once how to read it.
+_TITLE_MARKER = "…"
 
 
 def fit_brief(payload, task_id, *, role="coordinator"):
-  """Show the per-turn brief within the old input caps, as display limits.
+  """Show the per-turn brief's plan texts within their old input caps.
 
-  Each text over its limit becomes a marked excerpt naming the paged read
-  that returns it whole; lists show at most LIST_ITEMS entries and each task
-  at most DEPENDENCY_IDS dependency ids. A plan valid under the old caps is
-  shown exactly as before. The saved Goal and plan are untouched.
+  Each task text and the next action over its limit becomes a marked excerpt
+  naming the paged read that returns it whole (a title ends in a bare "…",
+  explained once); lists show at most LIST_ITEMS entries and each task at most
+  DEPENDENCY_IDS dependency ids. The objective and other open Goals were never
+  capped and stay whole. A plan valid under the old caps is shown exactly as
+  before. The saved Goal and plan are untouched.
   """
   goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
   overview = f"read_goal(task={task_id})" if task_id else goal_read
@@ -188,7 +191,13 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     if isinstance(holder.get(key), str):
       holder[key] = excerpt(holder[key], limit, read_full)
 
+  shortened_titles = []
+
   def clip_task(entry):
+    title = entry.get("title")
+    if isinstance(title, str) and len(title) > TITLE_CHARS:
+      entry["title"] = title[:TITLE_CHARS - len(_TITLE_MARKER)].rstrip() + _TITLE_MARKER
+      shortened_titles.append(entry["id"])
     for field, limit in _TASK_TEXT_LIMITS:
       clip(entry, field, limit, f"read_goal(task={entry['id']}, field={field}) reads it whole")
     ids = entry.get("depends_on") or []
@@ -197,7 +206,6 @@ def fit_brief(payload, task_id, *, role="coordinator"):
       entry["depends_on_omitted"] = (
         f"{len(ids) - DEPENDENCY_IDS} more; read_goal(task={entry['id']}) lists them all")
 
-  clip(payload, "objective", TEXT_CHARS, "read_goal(field=objective) reads it whole")
   clip(payload, "next_action", NEXT_ACTION_CHARS, "read_goal(field=next_action) reads it whole")
   if isinstance(payload.get("hold"), dict):
     payload["hold"] = dict(payload["hold"])
@@ -212,15 +220,14 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     kept = [dict(entry) for entry in (
       entries[-LIST_ITEMS:] if key == "ancestors" else entries[:LIST_ITEMS])]
     for entry in kept:
-      if key == "other_open_goals":
-        clip(entry, "objective", TEXT_CHARS, "the full objective is not readable from this Goal")
-      else:
-        clip_task(entry)
+      clip_task(entry)
     payload[key] = kept
     if len(kept) < len(entries):
-      payload[f"{key}_omitted"] = (
-        f"{len(entries) - len(kept)} more open Goals in this chat" if key == "other_open_goals"
-        else f"{len(entries) - len(kept)} more; {overview} lists them all")
+      payload[f"{key}_omitted"] = f"{len(entries) - len(kept)} more; {overview} lists them all"
+  if shortened_titles:
+    payload["titles_shortened"] = (
+      f"Titles ending in {_TITLE_MARKER} are shortened; "
+      "read_goal(task=<id>, field=title) reads one whole.")
   return payload
 
 

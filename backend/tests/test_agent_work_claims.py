@@ -1778,31 +1778,3 @@ def test_failed_handback_preserves_the_prior_notice_and_owner(db):
   assert [row.revision for row in pending_transfer_notices(db).all()] == [2]
   assert db.get(models.AgentWorkClaimRevocation, (initial["id"], 3)) is None
   assert db.query(models.GoalDependency).one().target_chat_id == second.id
-
-
-def test_a_long_takeover_reason_stays_whole_on_the_claim_and_fits_its_notice(db):
-  from app import agent_coordination as coordination
-
-  owner, first, second = _fixture(db)
-  key = "platform:test:long-reason"
-  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
-             work_key=key, summary="S" * 20_000)
-  reason = "The previous executor handed over the action. " * 500
-  moved = claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
-                     work_key=key, summary="Continue", takeover_reason=reason,
-                     expected_owner_chat_id=first.id)
-  # Another chat's long text arrives as an excerpt; the claim keeps it whole.
-  assert "the full text stays on the claim" in moved["takeover_reason"]
-  assert "the full text stays on the claim" in moved["summary"] or len(moved["summary"]) < 4000
-  stored = db.query(models.AgentWorkClaim).filter_by(work_key=key).one()
-  assert stored.takeover_reason == reason.strip()
-  notice = db.query(models.AgentWorkClaimRevocation).one()
-  assert len(notice.body) <= 4000
-  assert "the full reason is kept on the claim" in notice.body
-  assert "claim_agent_work" not in notice.body
-  # The capped peer-note path accepts the notice.
-  coordination.send_work_claim_transfer_notice(
-    db, owner_id=owner.id, claim_id=notice.claim_id, revision=notice.revision,
-    sender_chat_id=notice.sender_chat_id, recipients=[notice.recipient_chat_id],
-    body=notice.body,
-  )

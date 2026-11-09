@@ -831,11 +831,13 @@ def test_a_short_brief_is_identical_to_the_full_projection():
   assert fit_brief(project_goal(goal, "parent"), "parent") == project_goal(goal, "parent")
 
 
-def test_a_helper_brief_points_its_excerpts_at_read_goal():
-  goal = _goal([_task("parent", status="running")], objective="O" * 100_000,
-               hold_json=None)
-  brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
-  assert "read_goal(field=objective) reads it whole" in brief["objective"]
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_the_objective_is_never_clipped(role):
+  """An owner's /goal objective was never capped; the brief shows it whole."""
+  objective = "O" * 100_000
+  goal = _goal([_task("parent", status="running")], objective=objective, hold_json=None)
+  brief = fit_brief(project_goal(goal, "parent", role=role), "parent", role=role)
+  assert brief["objective"] == objective
 
 
 def test_brief_projection_walks_large_plans_once(monkeypatch):
@@ -957,9 +959,11 @@ def test_longer_texts_and_lists_show_within_the_old_caps_with_a_pointer():
   goal = _goal(tasks, objective=long, next_action=long)
   brief = fit_brief(project_goal(goal, "focus"), "focus")
 
-  assert len(brief["objective"]) <= 1_000 and "read_goal(field=objective)" in brief["objective"]
+  assert brief["objective"] == long
   assert len(brief["next_action"]) <= 2_000 and "read_goal(field=next_action)" in brief["next_action"]
-  assert len(brief["task"]["title"]) <= 160
+  # A shortened title ends in a bare marker; the brief explains it once.
+  assert len(brief["task"]["title"]) == 160 and brief["task"]["title"].endswith("…")
+  assert brief["titles_shortened"].startswith("Titles ending in … are shortened")
   assert "read_goal(task=focus, field=note) reads it whole" in brief["task"]["note"]
   assert len(brief["task"]["depends_on"]) == 16
   assert brief["task"]["depends_on_omitted"] == "14 more; read_goal(task=focus) lists them all"

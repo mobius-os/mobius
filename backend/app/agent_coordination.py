@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
-from app.context_budget import excerpt
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -34,7 +33,6 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-PEER_GOAL_PREVIEW_CHARS = 240
 # Notes are delivered whole: the send cap (4000 characters) already bounds
 # each one, and a clipped note forces the recipient to dig the rest out of the
 # activity log. The message count bounds the delivery.
@@ -679,11 +677,6 @@ def model_peer(
   result = {
     key: peer[key] for key in _MODEL_PEER_KEYS if peer.get(key) is not None
   }
-  # Goal objectives are uncapped; a peer's is a label here, in the per-turn
-  # roster and in list_agent_peers alike. Its chat holds the full objective.
-  if isinstance(result.get("goal"), str):
-    result["goal"] = excerpt(result["goal"], PEER_GOAL_PREVIEW_CHARS,
-                             "its own chat holds the full objective")
   if include_ended_at and peer.get("ended_at") is not None:
     result["ended_at"] = peer["ended_at"]
   return result
@@ -2132,6 +2125,10 @@ def build_coordination_context_delivery(
       "expires_at": row.expires_at.isoformat() if row.expires_at else None,
     } for row in claim_rows]
   snapshot["work_claims"] = claims
+  for peer in snapshot["collaborators"]:
+    goal = peer.get("goal")
+    if isinstance(goal, str) and len(goal) > 240:
+      peer["goal"] = goal[:240].rstrip() + "…"
   if (
     not snapshot["collaborators"]
     and not snapshot["messages"]

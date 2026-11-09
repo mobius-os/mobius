@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.decision_cards import fence_owner
-from app.context_budget import SUMMARY_CHARS, TEXT_CHARS, excerpt
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
 from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_outcome
@@ -45,13 +44,6 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
-def _claim_text(value: str | None, limit: int = TEXT_CHARS) -> str | None:
-  """A claim's text in a tool result, within its old cap; the claim keeps it whole."""
-  if value is None:
-    return None
-  return excerpt(value, limit, "the full text stays on the claim")
-
-
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   title = db.query(models.Chat.title).filter(
     models.Chat.id == row.owner_chat_id,
@@ -59,7 +51,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": _claim_text(row.summary, SUMMARY_CHARS),
+    "summary": row.summary,
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
@@ -68,9 +60,9 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "acquisition_id": row.acquisition_id,
     "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
-    "takeover_reason": _claim_text(row.takeover_reason),
+    "takeover_reason": row.takeover_reason,
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-    "outcome": _claim_text(row.outcome),
+    "outcome": row.outcome,
   }
   if state == "held_by_peer":
     result["next_action"] = (
@@ -180,12 +172,11 @@ def claim_work(
   """Acquire first claim, observe its owner, or deliberately transfer it."""
   key = clean_work_key(work_key)
   clean_summary = summary.strip()
-  if not clean_summary:
-    raise ValueError("summary must not be blank")
+  if not clean_summary or len(clean_summary) > 500:
+    raise ValueError("summary must be 1-500 characters")
   reason = takeover_reason.strip() if takeover_reason else None
-  # A takeover must explain itself; ten characters rules out "x" or "ok".
-  if reason is not None and len(reason) < 10:
-    raise ValueError("takeover_reason must be at least 10 characters")
+  if reason is not None and not 10 <= len(reason) <= 1000:
+    raise ValueError("takeover_reason must be 10-1000 characters")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
@@ -363,9 +354,7 @@ def claim_work(
     claim_id=row.id, revision=previous_revision + 1,
     acquisition_id=row.acquisition_id, owner_id=owner_id,
     sender_chat_id=chat_id, recipient_chat_id=previous,
-    # The notice is a capped peer note; a long reason stays whole on the claim.
-    body=(f"Work claim {key} transferred to {chat_id}: "
-          f"{excerpt(reason, TEXT_CHARS, 'the full reason is kept on the claim')} "
+    body=(f"Work claim {key} transferred to {chat_id}: {reason} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its
@@ -422,7 +411,7 @@ def _stage_settle(
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).update({
-    models.AgentWorkClaim.outcome: outcome,
+    models.AgentWorkClaim.outcome: outcome[:1000],
     models.AgentWorkClaim.updated_at: now,
     models.AgentWorkClaim.revision: previous_revision + 1,
     (
@@ -435,7 +424,7 @@ def _stage_settle(
   stage_stamp_claim_outcome(
     db, row, ("completed" if complete else
               "owner_deleted" if outcome == _DELETED_OWNER_OUTCOME else "released"),
-    outcome,
+    outcome[:1000],
   )
   db.expire(row)
   return ReleasedClaim(
@@ -443,7 +432,7 @@ def _stage_settle(
     work_key=work_key,
     revision=previous_revision + 1,
     state="completed" if complete else "released",
-    outcome=outcome,
+    outcome=outcome[:1000],
   )
 
 
@@ -640,8 +629,8 @@ def finish_work(
 ) -> dict:
   key = clean_work_key(work_key)
   clean_outcome = outcome.strip()
-  if not clean_outcome:
-    raise ValueError("outcome must not be blank")
+  if not clean_outcome or len(clean_outcome) > 1000:
+    raise ValueError("outcome must be 1-1000 characters")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,

@@ -1509,16 +1509,6 @@ def test_a_refusal_cut_at_the_transport_read_is_labelled_truncated(monkeypatch):
   assert "non-JSON" not in str(caught.value)
 
 
-def test_work_claim_text_fields_are_uncapped():
-  control = _control_module()
-  claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
-  finish = control._TOOL_DEFINITIONS["finish_agent_work"]["inputSchema"]["properties"]
-  assert "maxLength" not in claim["summary"]
-  assert "maxLength" not in claim["takeover_reason"]
-  assert claim["takeover_reason"]["minLength"] == 10
-  assert "maxLength" not in finish["outcome"]
-
-
 def _next_page(footer):
   tail = footer.rsplit("offset=", 1)[1].rstrip(")]")
   offset, version = tail.split(", version=")
@@ -1532,7 +1522,7 @@ def _read_all_pages(control, name, arguments):
     if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
       return pieces + [text]
     text, footer = text.rsplit("\n", 1)
-    assert len(text) <= control._CONTEXT_BUDGET.READ_PAGE_CHARS
+    assert len(text.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
     pieces.append(text)
     if "end of result" in footer:
       return pieces
@@ -1568,7 +1558,7 @@ def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
   monkeypatch.setattr(control, "_agent_api_call",
                       lambda method, path, body=None: sent.append(body) or payload)
   full = control._goal_report(payload, full=True)
-  assert len(full) > 2 * control._CONTEXT_BUDGET.READ_PAGE_CHARS
+  assert len(full) > 2 * control._CONTEXT_BUDGET.READ_PAGE_BYTES
 
   assert "".join(_read_all_pages(control, "update_goal", {})) == full
   # Every page is the plain read: no change is ever sent or re-run for a page.
@@ -1605,13 +1595,26 @@ def test_a_change_reply_bounds_what_it_echoes():
   payload = {"goal": {"status": "cannot_complete", "revision": 9, "result": "R" * 100_000},
              "plan": {"tasks": [], "summary": {"total": 3000, "running": running}}}
   reply = control._goal_report(payload, full=False)
-  assert len(reply) < control._CONTEXT_BUDGET.READ_PAGE_CHARS
+  assert len(reply.encode()) < control._CONTEXT_BUDGET.READ_PAGE_BYTES
   assert "update_goal with no arguments shows it whole" in reply
   payload["goal"]["status"] = "open"
   reply = control._goal_report(payload, full=False)
   assert "and 2950 more (update_goal with no arguments lists them all)" in reply
   # The paged full report still lists everything.
   assert all(task in control._goal_report(payload, full=True) for task in running[-3:])
+
+
+def test_read_pages_are_sized_in_bytes_so_cjk_text_fits_one_result(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  note = "目標達成のための詳細な記録。" * 6_000  # 3 bytes per character
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note}))
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note
+  assert len(pages) > 1
+  assert all(len(page.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES for page in pages)
 
 
 def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):

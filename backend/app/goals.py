@@ -119,7 +119,7 @@ def admit_goal(db, chat_id, goal_id, objective, message=None):
 
 
 def scoped_goal_context(db, goal, task_id=None, *, role="coordinator", brief=False):
-  """The Goal view; ``brief`` fits the per-turn copy to its context budget."""
+  """The Goal view; ``brief`` shows the per-turn copy within its display limits."""
   from app.goal_context import fit_brief, project_goal
   payload = project_goal(goal, task_id, role=role)
   if role == "coordinator":
@@ -220,8 +220,8 @@ def _helper_assignment(db, chat_id, delegation_id):
 def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
   """What read_goal returns: the turn brief's projection, whole.
 
-  The per-turn brief fits the context budget with marked excerpts; this read
-  is where those excerpts point, so it never clips.
+  The per-turn brief shows long plan texts as marked excerpts; this read is
+  where those excerpts point, so it never clips.
 
   read_goal(task) is the one per-task expansion at both levels. With no
   task a helper re-reads its assignment brief, its only Goal read. A

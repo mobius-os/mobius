@@ -2086,8 +2086,8 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "summary"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "summary": {"type": "string", "minLength": 1},
-        "takeover_reason": {"type": "string", "minLength": 10},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "takeover_reason": {"type": "string", "minLength": 10, "maxLength": 1000},
         "expected_owner_chat_id": {"type": "string", "minLength": 1, "maxLength": 64},
       },
     },
@@ -2108,7 +2108,7 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "outcome"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "outcome": {"type": "string", "minLength": 1},
+        "outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
         "release": {"type": "boolean"},
       },
     },
@@ -2211,7 +2211,8 @@ def _paged_read(name: str, handler, arguments: dict[str, Any]):
       f"{name} changed since the previous page (version {version}, now {current}); "
       "start again from offset 0"
     )
-  if offset == 0 and version is None and len(text) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
+  if offset == 0 and version is None and (
+      len(text.encode("utf-8", "surrogatepass")) <= _CONTEXT_BUDGET.READ_PAGE_BYTES):
     return value
   page = _CONTEXT_BUDGET.text_page(text, offset)
   end = page["offset"] + len(page["text"])

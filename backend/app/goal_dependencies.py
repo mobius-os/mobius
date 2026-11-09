@@ -14,7 +14,6 @@ import time
 from sqlalchemy.orm import Session
 
 from app import models, transcript_rows
-from app.context_budget import SUMMARY_CHARS, TEXT_CHARS, excerpt
 from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND
 from app.timeutil import now_naive_utc
 from app.prompt_blocks import json_block_data
@@ -96,29 +95,11 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
     if outcome is not None else None)
 
 
-def _notice_outcome(outcome: dict | None) -> dict | None:
-  """Show a claim's summary and outcome within their old caps.
-
-  A notice saved before these texts were uncapped is rebuilt byte for byte,
-  so startup orphan checks still match it. The follower has no read of a
-  longer text: it is kept on the source chat's work claim, visible to the
-  owner.
-  """
-  shared = _shared_outcome(outcome)
-  if not shared:
-    return shared
-  for key, limit in (("summary", SUMMARY_CHARS), ("outcome", TEXT_CHARS)):
-    if isinstance(shared.get(key), str):
-      shared[key] = excerpt(shared[key], limit,
-                            "the full text is kept on the source chat's work claim")
-  return shared
-
-
 def dependency_notice(row):
   # Startup orphan checks compare notice text; retain the existing JSON layout.
   body = json_block_data({"dependency_id": row.id, "goal_id": row.waiting_goal_id,
     "target_kind": row.target_kind, "target_key": row.target_key,
-    "outcome": _notice_outcome(row.outcome_json)}, separators=(", ", ": "))
+    "outcome": _shared_outcome(row.outcome_json)}, separators=(", ", ": "))
   return ("A dependency of this exact Goal has resolved. This is factual evidence, "
     "not permission to perform another chat's action or take over its work. "
     "Verify the result and continue or re-plan your own Goal.\n"

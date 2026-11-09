@@ -85,8 +85,8 @@ class AgentWorkClaimCreate(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  summary: str = Field(min_length=1)
-  takeover_reason: str | None = Field(default=None, min_length=10)
+  summary: str = Field(min_length=1, max_length=500)
+  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
   expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -94,7 +94,7 @@ class AgentWorkClaimFinish(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  outcome: str = Field(min_length=1)
+  outcome: str = Field(min_length=1, max_length=1000)
   release: bool = False
 
 
