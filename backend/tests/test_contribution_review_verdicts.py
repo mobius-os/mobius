@@ -257,6 +257,21 @@ def test_an_unconfirmed_verdict_that_github_shows_is_settled_as_posted_without_a
   assert [e[0] for e in events] == ["post"], "observing never posts again"
 
 
+def test_a_verdict_github_accepted_then_dismissed_is_posted_not_never_sent_and_is_no_live_approval(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  _hours_after_submit(setup, 2)  # past the dispatch window: an unmatched scan would now say never sent
+  review = {"id": 78, "html_url": "https://github.com/x/pull/7#pullrequestreview-78", "state": "DISMISSED"}
+  _look(monkeypatch, review)
+  settled = _observe(setup)
+  assert (settled["state"], settled["review_id"]) == ("posted", 78)
+  assert settled["dismissed_on_github"] is True and "dismissed" in settled["summary"]
+  assert [e[0] for e in events] == ["post"], "observing never posts again"
+  db, row, _ = setup
+  approval = {"verdict_proposal": {**settled, "event": "APPROVE"}}
+  row.mode, row.options_json = "review_merge", {"post_review": True, "propose_verdict": True}
+  assert "dismissed on GitHub" in routes.reviews.public_merge_blocker(row, approval)
+
+
 def test_an_unconfirmed_verdict_missing_from_github_is_held_until_the_dispatch_window_has_passed(setup, monkeypatch):
   events, _ = _unconfirmed_verdict(setup, monkeypatch)
   _look(monkeypatch)

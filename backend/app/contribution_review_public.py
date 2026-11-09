@@ -108,10 +108,15 @@ def post_review(gh, cwd, target, body, event="COMMENT"):
 
 
 REVIEW_STATES = {"COMMENT": "COMMENTED", "APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}
+# A maintainer can dismiss a review after it was sent. It still proves the dispatch landed.
+DISMISSED_STATE = "DISMISSED"
 
 
 def find_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
   """The exact review this armed attempt posted, and whether GitHub's whole list was read.
+
+  A review dismissed since it was sent still counts as found: callers read its
+  ``state`` to tell a live review from a dismissed one.
 
   ``(None, True)`` proves only that GitHub listed no such review. A failed read,
   a malformed page, a bounded scan that hit its page cap, or a receipt without a
@@ -130,7 +135,7 @@ def find_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
         if (isinstance(review, dict) and isinstance(review.get("user"), dict)
             and str(review["user"].get("id")) == str(actor_id)
             and review.get("commit_id") == target["head_sha"]
-            and review.get("state") == REVIEW_STATES[event]
+            and review.get("state") in (REVIEW_STATES[event], DISMISSED_STATE)
             and isinstance(review.get("body"), str) and marker in review["body"]
             and isinstance(review.get("id"), int) and not isinstance(review["id"], bool)):
           return review, True

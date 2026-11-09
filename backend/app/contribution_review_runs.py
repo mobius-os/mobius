@@ -706,6 +706,8 @@ def public_merge_blocker(row, item) -> str | None:
       return "You discarded the proposed approval, so nothing was posted or merged."
     if proposal.get("state") != "posted":
       return "The approval was not confirmed on GitHub, so this PR was not merged. Check GitHub; nothing was repeated."
+    if proposal.get("dismissed_on_github"):
+      return "The approval was dismissed on GitHub, so it no longer counts and this PR was not merged."
     return None
   receipt = item.get("public_review") or {}
   if receipt.get("state") != "posted":
