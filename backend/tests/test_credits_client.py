@@ -429,6 +429,24 @@ def test_a_local_app_spends_without_a_standing_grant(client, auth, db, paired):
   assert paid.status_code == 200 and paid.json()["charge_id"] == "c2"
 
 
+def test_a_local_app_that_manages_credits_asks_permission_before_any_payment(
+  client, auth, db, paired, real_payments,
+):
+  """Permission first, then Pay: never a payment the app cannot finish."""
+  app = _app(db, "local-manage-pay", spend_credits=("*/prompts",), store=False, credits_manage=True)
+  headers = _as(db, app, "private")
+  asked = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert asked.status_code == 403 and asked.json()["detail"]["code"] == "credits_approval_required"
+  assert app_consent.credits_requested(app)
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+  assert app_consent.approve_credits(app, app_consent.request_digest(app_consent.credits_rows(app)))
+  db.commit()
+  held = client.post("/api/identity/credits/charges", json=CHARGE, headers=_as(db, app, "private"))
+  assert held.status_code == 409 and held.json()["detail"]["code"] == "confirmation_required"
+
+
 def test_settings_lists_the_local_apps_allowed_to_manage_credits(client, auth, db, paired):
   app = _app(db, "local-manager", spend_credits=(), store=False, credits_manage=True)
   assert client.get("/api/identity/credits/apps", headers=auth).json()["apps"] == []

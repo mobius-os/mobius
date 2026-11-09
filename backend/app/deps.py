@@ -1550,9 +1550,11 @@ def get_credits_spender(
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
   # A Store app's first-open consent covers its spending. A local app needs
-  # no standing grant: every charge waits for the owner's Pay
-  # (credits_confirmations), which is the stronger answer.
-  if app_consent.gated(app):
+  # no standing grant just to spend: every charge waits for the owner's Pay
+  # (credits_confirmations). But one that also asks to manage credits is
+  # asked that first, before any Pay, so the owner never pays for something
+  # the app cannot then finish.
+  if app_consent.gated(app) or app_consent.credits_rows(app):
     _require_credits_app_consent(app)
   if not spend_credits_targets(app):
     raise HTTPException(
