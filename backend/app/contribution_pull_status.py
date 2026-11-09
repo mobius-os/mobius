@@ -98,9 +98,10 @@ def _head_after_posting(gh, cwd, target) -> str | None:
   return sha if isinstance(sha, str) else None
 
 
-def _refuse_a_repeated_note(gh, cwd, target, note: str) -> None:
+def _refuse_a_repeated_note(gh, cwd, target, body) -> None:
   """Raise NotDispatched when this exact note is already among the PR's recent comments.
 
+  A read, so it runs before the settled write (see StatusChange.prepare), never inside it.
   Best effort: a comment read that fails never blocks the post, except GitHub
   saying the pull request itself is not there, which nothing could post to.
   """
@@ -112,13 +113,12 @@ def _refuse_a_repeated_note(gh, cwd, target, note: str) -> None:
     if _gh_http_status(str(exc)) == 404:
       raise NotDispatched(UNREADABLE) from exc
     return
-  if isinstance(found, list) and any(isinstance(item, dict) and item.get("body") == note for item in found):
+  if isinstance(found, list) and any(isinstance(item, dict) and item.get("body") == body.note for item in found):
     raise NotDispatched(NOTE_ALREADY_THERE)
 
 
 def post_note(gh, cwd, target, body) -> str | None:
   """Post the owner's note as a comment on the PR, once; the head GitHub reports once it confirms the comment."""
-  _refuse_a_repeated_note(gh, cwd, target, body.note)
   posted = public.post_issue_comment(gh, cwd, target, body.note)
   if posted.state == "not_dispatched":
     raise NotDispatched(posted.reason)
@@ -156,6 +156,10 @@ def _nothing_more(facts: dict, pull: dict, body) -> None:
   return None
 
 
+def _nothing_to_read(gh, cwd, target, body) -> None:
+  return None
+
+
 @dataclass(frozen=True)
 class StatusChange:
   machine_action: str  # the PR machine action this tap is
@@ -163,6 +167,10 @@ class StatusChange:
   write: Callable  # (gh, cwd, target, body) -> the head GitHub reports, or None when unconfirmed
   unconfirmed: dict  # the 502 detail when the write's outcome cannot be read
   check: Callable = _nothing_more  # a rule beyond the machine, on the facts and the pull just read
+  # A GitHub read the write needs first, as (gh, cwd, target, body); raises NotDispatched to refuse. It runs
+  # unsettled, before the authority check that precedes the write, so a cancellation or a revoked permission
+  # during the read still stops the write.
+  prepare: Callable = _nothing_to_read
 
 
 def _unconfirmed(code: str, maybe: str) -> dict:
@@ -178,7 +186,8 @@ CHANGES = {
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
   "ask-approval": StatusChange("ask_approval", "asked", post_note,
-                               _unconfirmed("approval_unconfirmed", "posted the note"), _approval_note_check),
+                               _unconfirmed("approval_unconfirmed", "posted the note"), _approval_note_check,
+                               _refuse_a_repeated_note),
 }
 
 
@@ -201,6 +210,14 @@ def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"],
                               actor_login=str(actor.get("login") or ""), job=job)
   return target, pull, facts
+
+
+async def _prepare(change: StatusChange, gh, cwd, target, body) -> None:
+  """The write's own GitHub read, cancellable and unsettled: a refusal here changed nothing."""
+  try:
+    await asyncio.to_thread(change.prepare, gh, cwd, target, body)
+  except NotDispatched as exc:
+    raise HTTPException(409, str(exc)) from exc
 
 
 async def _dispatch(change: StatusChange, gh, cwd, target, body, authorize) -> DispatchResult:
@@ -234,6 +251,7 @@ async def _change(gh, cwd, change: StatusChange, body, authorize, job) -> dict:
     target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body, job)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
     pr_facts.require_allowed(facts, change.machine_action)
     change.check(facts, pull, body)
+    await _prepare(change, gh, cwd, target, body)
     result = await _dispatch(change, gh, cwd, target, body, authorize)
   # A cancellation before the write is a refusal here; the caller's cancellation still wins.
   if result.state == "not_dispatched" and asyncio.current_task().cancelling():
