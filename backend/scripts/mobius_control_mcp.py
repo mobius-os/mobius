@@ -222,6 +222,9 @@ _SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
 # approval and readiness checks; platform_tools.py is stdlib-only.
 _PLATFORM_TOOLS = _helper_module("../app/platform_tools.py", "mobius_platform_tools")
 _CONTEXT_BUDGET = _helper_module("../app/context_budget.py", "mobius_context_budget")
+# A change's reply echoes at most this much of one text and this many ids.
+_REPLY_TEXT_CHARS = 4_000
+_REPLY_IDS = 50
 
 
 def _promote_goal(objective: str) -> dict:
@@ -571,7 +574,22 @@ def _update_goal(arguments: dict[str, Any]) -> str:
 
 
 def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
-  """Compact plain-text Goal state: one status line, task lines when asked."""
+  """Compact plain-text Goal state: one status line, task lines when asked.
+
+  The full report is paged by the control server. A change's reply is one
+  result that is never re-run for a page, so it bounds what it echoes and
+  names the full report instead.
+  """
+  def ids(values: list[str]) -> str:
+    if full or len(values) <= _REPLY_IDS:
+      return ", ".join(values)
+    return (", ".join(values[:_REPLY_IDS])
+            + f" and {len(values) - _REPLY_IDS} more (update_goal with no arguments lists them all)")
+
+  def text(value: str) -> str:
+    return value if full else _CONTEXT_BUDGET.excerpt(
+      value, _REPLY_TEXT_CHARS, "update_goal with no arguments shows it whole")
+
   goal = payload.get("goal")
   if not isinstance(goal, dict):
     return "This chat has no Goal."
@@ -583,7 +601,7 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
   lines = [line + "."]
   for label, key in (("Running", "running"), ("Ready", "ready")):
     if goal.get("status") == "open" and summary.get(key):
-      lines.append(f"{label}: {', '.join(summary[key])}.")
+      lines.append(f"{label}: {ids(summary[key])}.")
   if goal.get("status") == "open":
     if summary.get("can_complete"):
       lines.append("Ready to complete after verification; omit next_action.")
@@ -592,13 +610,13 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
     if (full or summary.get("can_complete")) and goal.get("completable_work_keys"):
       lines.append(
         "Eligible work_keys for finished_claims (name only work performed): "
-        + ", ".join(goal["completable_work_keys"]) + "."
+        + ids(goal["completable_work_keys"]) + "."
       )
   elif isinstance(goal.get("hold"), dict) and goal["hold"].get("cause") == "deferred":
-    lines.append("On hold: " + goal["hold"]["reason"])
+    lines.append("On hold: " + text(goal["hold"]["reason"]))
     lines.append("End normally. Resume only when the owner asks to continue; no automatic retry.")
   elif goal.get("result") and (full or goal.get("status") != "completed"):
-    lines.append("Outcome: " + goal["result"] + ".")
+    lines.append("Outcome: " + text(goal["result"]) + ".")
   if full:
     lines.insert(0, f"Objective: {goal.get('objective')}")
     for task in (plan or {}).get("tasks") or []:

@@ -1316,11 +1316,17 @@ def _automatic_question_preview(view: dict, delegation_id: str) -> dict:
   ]
   if clipped == question and clipped_options == options:
     return view
-  return {
+  preview = {
     **view, "question": clipped, "options": clipped_options,
     "preview_truncated": True,
     "full_question_url": f"/api/delegations/{delegation_id}",
   }
+  if len(options) > len(clipped_options):
+    preview["options_omitted"] = (
+      f"{len(options) - len(clipped_options)} more choices; "
+      "full_question_url has the whole question and every choice"
+    )
+  return preview
 
 
 def helper_answer_content(question: models.DelegationQuestion, answer: str) -> str:

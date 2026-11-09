@@ -1,10 +1,10 @@
 """Deterministic hierarchical Goal views. No summaries, caches or extra state."""
 from collections import Counter
-import json
 
 from app.context_budget import (
-  GOAL_BRIEF_CHARS, GOAL_BRIEF_FIELD_CHARS, GOAL_BRIEF_LIST_ITEMS, TextBudget,
+  GOAL_BRIEF_CHARS, GOAL_BRIEF_FIELD_CHARS, GOAL_BRIEF_LIST_ITEMS, TextBudget, emitted_len,
 )
+from app.prompt_blocks import json_block_data
 
 ROLES = ("coordinator", "helper")
 # The coordinator owns the Goal outcome. A helper works one assigned branch
@@ -168,9 +168,6 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 
 
 _BRIEF_PROSE = ("title", "completion_condition", "note", "result")
-# In priority order after the objective, hold and focus: what constrains and
-# feeds the focus is kept first.
-_BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
 
 
 def fit_brief(payload, task_id, *, role="coordinator"):
@@ -196,9 +193,10 @@ def fit_brief(payload, task_id, *, role="coordinator"):
       if omitted:
         entry["depends_on_omitted"] = budget.charge(
           f"{omitted} more; read_goal(task={entry['id']}) lists them all")
-    prose = sum(len(entry[field]) for field in _BRIEF_PROSE if isinstance(entry.get(field), str))
-    ids = sum(len(value) + 3 for value in entry.get("depends_on") or [])
-    budget.remaining -= max(len(json.dumps(entry, ensure_ascii=False)) - prose - ids, 0)
+    prose = sum(emitted_len(entry[field]) for field in _BRIEF_PROSE
+                if isinstance(entry.get(field), str))
+    ids = sum(emitted_len(value) + 3 for value in entry.get("depends_on") or [])
+    budget.remaining -= max(len(json_block_data(entry)) - prose - ids, 0)
 
   def fit_list(key, entries, read_rest):
     # The nearest ancestors constrain the focus most, so they are kept first.
@@ -220,12 +218,17 @@ def fit_brief(payload, task_id, *, role="coordinator"):
   if isinstance((payload.get("hold") or {}).get("reason"), str):
     payload["hold"] = {**payload["hold"], "reason": budget.take(
       payload["hold"]["reason"], f"{goal_read} for the full reason")}
+  # What constrains and feeds the focus comes before the focus itself and the
+  # owner's next step, so a large focus cannot crowd out a small constraint.
+  for key in ("ancestors", "dependencies"):
+    if payload.get(key):
+      fit_list(key, payload[key], overview)
   if "task" in payload:
     fit(payload["task"])
   for key in ("next_action", "checkpoint"):
     if isinstance(payload.get(key), str):
       payload[key] = budget.take(payload[key], f"read_goal(field={key}) reads the full text")
-  for key in _BRIEF_LISTS:
+  for key in ("children", "siblings", "open_blockers"):
     if payload.get(key):
       fit_list(key, payload[key], overview)
   others = payload.get("other_open_goals")
@@ -236,7 +239,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
         break
       shown.append({**other, "objective": budget.take(
         other["objective"], "shown whole only by that Goal's own reads")})
-      budget.remaining -= len(other["id"]) + 30
+      budget.remaining -= emitted_len(other["id"]) + 30
     if len(shown) < len(others):
       payload["other_open_goals_omitted"] = budget.charge(
         f"{len(others) - len(shown)} more open Goals in this chat")

@@ -832,7 +832,9 @@ BRIEF_ALLOWANCE = 2_500
 
 def _within_budget(brief):
   from app.context_budget import GOAL_BRIEF_CHARS
-  return _chars(brief) <= GOAL_BRIEF_CHARS + BRIEF_ALLOWANCE
+  from app.prompt_blocks import json_block_data
+  # Measured as emitted into the prompt block, escapes included.
+  return len(json_block_data(brief)) <= GOAL_BRIEF_CHARS + BRIEF_ALLOWANCE
 
 
 def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
@@ -981,3 +983,51 @@ def test_sibling_filtering_is_linear_in_prerequisites():
   project_goal(_goal(tasks), "focus")
   # A list scan per sibling would compare about 6000 * 2000 times.
   assert CountingId.comparisons < 100_000
+
+
+def test_emitted_width_matches_the_prompt_block_encoding():
+  from app.context_budget import emitted_len
+  from app.prompt_blocks import json_block_data
+  for text in ("plain", "<tag> & \"quoted\"\n\t", "é → ü", "\x01\\"):
+    assert emitted_len(text) == len(json_block_data(text)) - 2
+
+
+def test_a_symbol_heavy_brief_stays_within_budget_as_emitted():
+  heavy = "<>&" * 20_000
+  tasks = [_task("parent", status="running", note=heavy, title="<b>" * 2000)]
+  tasks += [_task(f"c{i}", "parent", "blocked", note=heavy) for i in range(40)]
+  goal = _goal(tasks, objective="&" * 50_000, next_action="<" * 20_000)
+  brief = fit_brief(project_goal(goal, "parent"), "parent")
+  assert _within_budget(brief)
+
+
+def test_small_constraints_and_prerequisites_survive_a_large_focus():
+  big = "F" * 50_000
+  goal = _goal([
+    _task("root", status="running", completion_condition="Keep owner files"),
+    _task("dep", status="completed", result="Schema v2 is live"),
+    _task("focus", "root", "running", depends_on=["dep"],
+          title=big, note=big, result=big, completion_condition=big),
+  ], objective="O" * 50_000, next_action=big, checkpoint=big)
+  brief = fit_brief(project_goal(goal, "focus"), "focus")
+  assert brief["ancestors"][0]["completion_condition"] == "Keep owner files"
+  assert brief["dependencies"][0]["result"] == "Schema v2 is live"
+  assert _within_budget(brief)
+
+
+def test_a_page_past_the_end_is_refused():
+  from app.context_budget import text_page
+  assert text_page("abc", 0)["next_offset"] is None
+  with pytest.raises(ValueError, match="past the end"):
+    text_page("abc", 3)
+
+
+def test_a_helper_cannot_read_coordinator_only_goal_fields(client, owner_token, db):
+  chat = _goal_fixture(db)
+  helper = _helper(db, chat, "goal-a", "builder", task="build")
+  db.get(models.ChatGoal, "goal-a").next_action = "Owner step"
+  db.commit()
+  headers = _token(db, helper.child_chat_id, _helper_run(db, helper), helper.id)
+  url = f"/api/chats/{helper.child_chat_id}/goal-brief"
+  assert client.get(url, headers=headers, params={"field": "next_action"}).status_code == 403
+  assert client.get(url, headers=headers, params={"field": "objective"}).json()["text"] == "Objective A"

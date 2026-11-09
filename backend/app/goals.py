@@ -199,6 +199,24 @@ COORDINATOR_READ_GOAL_NEEDS_TASK = (
 )
 
 
+def _coordinator_goal(db, chat_id, run_id):
+  """A coordinator reads its run's Goal, else the chat's presented Goal."""
+  from app.goal_plans import presented_goal_rows
+  goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
+  if goal is None:
+    rows = presented_goal_rows(db, chat_id)
+    goal = rows[1] if rows is not None else None
+  return goal
+
+
+def _helper_assignment(db, chat_id, delegation_id):
+  from app.goal_plans import goal_assignment
+  assignment = goal_assignment(db, chat_id)
+  if assignment is not None and assignment.delegation_id != delegation_id:
+    raise PermissionError("This helper may read only its own assignment")
+  return assignment
+
+
 def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
   """What read_goal returns: the turn brief's projection, whole.
 
@@ -218,18 +236,11 @@ def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
   """
   from app.delegations import own_helper_statuses
   if delegation_id is not None:
-    from app.goal_plans import goal_assignment
-    assignment = goal_assignment(db, chat_id)
-    if assignment is not None and assignment.delegation_id != delegation_id:
-      raise PermissionError("This helper may read only its own assignment")
+    assignment = _helper_assignment(db, chat_id, delegation_id)
     view = helper_goal_view(db, assignment, task_id) if assignment else None
     role = "helper"
   else:
-    from app.goal_plans import presented_goal_rows
-    goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
-    if goal is None:
-      rows = presented_goal_rows(db, chat_id)
-      goal = rows[1] if rows is not None else None
+    goal = _coordinator_goal(db, chat_id, run_id)
     if goal is not None and task_id is None:
       raise ValueError(COORDINATOR_READ_GOAL_NEEDS_TASK)
     view = scoped_goal_context(db, goal, task_id) if goal is not None else None
@@ -243,25 +254,29 @@ TASK_TEXT_FIELDS = ("title", "note", "result", "completion_condition")
 
 
 def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, field):
-  """One Goal or task text, whole, from exactly what read_goal may show."""
+  """One Goal or task text, whole, as far as this agent may read it."""
+  from app.goal_context import COORDINATOR_ONLY_FIELDS
   allowed = TASK_TEXT_FIELDS if task_id else GOAL_TEXT_FIELDS
   if field not in allowed:
     raise ValueError(f"field must be one of: {', '.join(allowed)}")
-  if task_id is None and delegation_id is None:
-    from app.goal_plans import presented_goal_rows
-    goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
-    if goal is None:
-      rows = presented_goal_rows(db, chat_id)
-      goal = rows[1] if rows is not None else None
-    source = scoped_goal_context(db, goal) if goal is not None else None
+  if delegation_id is not None:
+    assignment = _helper_assignment(db, chat_id, delegation_id)
+    goal = assignment.goal if assignment is not None else None
+    if field in COORDINATOR_ONLY_FIELDS:
+      raise PermissionError("A helper does not read the owner's next step or checkpoint")
   else:
-    source = read_goal_view(
-      db, chat_id, run_id, delegation_id=delegation_id, task_id=task_id,
-    )["goal"]
-  if task_id and isinstance(source, dict):
-    source = source.get("task")
-  text = source.get(field) if isinstance(source, dict) else None
-  if not isinstance(text, str):
+    goal = _coordinator_goal(db, chat_id, run_id)
+  if goal is None:
+    raise LookupError("No Goal to read here.")
+  if task_id:
+    task = next((task for task in (goal.plan_json or {}).get("tasks") or []
+                 if task.get("id") == task_id), None)
+    if task is None:
+      raise ValueError("Task not found in this Goal")
+    text = task.get(field)
+  else:
+    text = getattr(goal, field, None)
+  if not isinstance(text, str) or not text:
     raise LookupError(f"No {field} to read here.")
   return {"field": field, "task": task_id, "text": text}
 

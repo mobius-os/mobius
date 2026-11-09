@@ -10,6 +10,8 @@ window. Text over budget becomes a marked excerpt that names where the full
 text is read.
 """
 
+import json
+
 # Combined prose fields (titles, notes, results, conditions, next action) in
 # one Goal brief, and the most any single field takes of it.
 GOAL_BRIEF_CHARS = 24_000
@@ -28,6 +30,11 @@ READ_PAGE_CHARS = 40_000
 def text_page(text: str, offset: int = 0) -> dict:
   """One character range of ``text``, with what the next read needs."""
   offset = max(int(offset), 0)
+  if offset and offset >= len(text):
+    raise ValueError(
+      f"offset {offset} is past the end of this {len(text)}-character result; "
+      "start again from offset 0"
+    )
   end = min(offset + READ_PAGE_CHARS, len(text))
   return {
     "text": text[offset:end], "offset": offset, "total_chars": len(text),
@@ -43,6 +50,30 @@ def excerpt(text: str, limit: int, read_full: str) -> str:
   return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
 
 
+def emitted_len(text: str) -> int:
+  """How many characters ``text`` takes once written into a prompt data block.
+
+  JSON escaping and the block's inert <, > and & escapes can multiply a
+  symbol-heavy text several times over; budgets count what is emitted. Same
+  encoding as ``app.prompt_blocks.json_block_data`` (a test pins them equal);
+  this module stays import-free because the control server loads it by path.
+  """
+  encoded = json.dumps(text, ensure_ascii=False)
+  return len(encoded) - 2 + 5 * sum(encoded.count(char) for char in "<>&")
+
+
+def _head_within(text: str, width: int) -> int:
+  """The longest prefix length of ``text`` whose emitted width fits ``width``."""
+  low, high = 0, min(len(text), max(width, 0))
+  while low < high:
+    middle = (low + high + 1) // 2
+    if emitted_len(text[:middle]) <= width:
+      low = middle
+    else:
+      high = middle - 1
+  return low
+
+
 class TextBudget:
   """Hand out whole texts while a combined character budget lasts."""
 
@@ -51,19 +82,23 @@ class TextBudget:
     self.field = field
 
   def take(self, text: str, read_full: str) -> str:
-    """Return ``text`` whole, or a marked excerpt naming ``read_full``."""
+    """Return ``text`` whole, or a marked excerpt naming ``read_full``.
+
+    Widths are emitted widths (see ``emitted_len``).
+    """
     allowance = self.remaining if self.field is None else min(self.remaining, self.field)
-    if len(text) <= allowance:
-      self.remaining -= len(text)
+    width = emitted_len(text)
+    if width <= allowance:
+      self.remaining -= width
       return text
     # The marker is charged too, so head plus marker must fit the allowance.
     # The marker names the head's length, and a head shorter than the
     # allowance never needs more digits, so reserving the marker as it would
     # read for a full-allowance head is enough. A marker longer than the text
     # it replaces is never used.
-    marker = len(f"… [excerpt: {allowance} of {len(text)} characters; {read_full}]")
-    shown = excerpt(text, max(allowance - marker, 0), read_full)
-    return self.charge(text if len(shown) >= len(text) else shown)
+    marker = emitted_len(f"… [excerpt: {allowance} of {len(text)} characters; {read_full}]")
+    shown = excerpt(text, _head_within(text, allowance - marker), read_full)
+    return self.charge(text if emitted_len(shown) >= width else shown)
 
   @property
   def spent(self) -> bool:
@@ -71,14 +106,14 @@ class TextBudget:
 
   def charge(self, text: str) -> str:
     """Count text the assembler adds itself, such as an omission marker."""
-    self.remaining -= len(text)
+    self.remaining -= emitted_len(text)
     return text
 
   def take_ids(self, ids: list[str]) -> tuple[list[str], int]:
     """Keep ids while the budget lasts; return them and how many were left out."""
     kept = []
     for value in ids:
-      cost = len(value) + 3  # its quotes and separator in the JSON block
+      cost = emitted_len(value) + 3  # its quotes and separator in the block
       if cost > self.remaining:
         break
       self.remaining -= cost

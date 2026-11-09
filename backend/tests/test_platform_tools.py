@@ -1599,6 +1599,21 @@ def test_read_goal_pages_a_long_task_view_and_a_long_field(monkeypatch):
   assert "".join(_read_all_pages(control, "read_goal", {"task": "parent", "field": "note"})) == note
 
 
+def test_a_change_reply_bounds_what_it_echoes():
+  control = _control_module()
+  running = [f"t{index:04d}" for index in range(3000)]
+  payload = {"goal": {"status": "cannot_complete", "revision": 9, "result": "R" * 100_000},
+             "plan": {"tasks": [], "summary": {"total": 3000, "running": running}}}
+  reply = control._goal_report(payload, full=False)
+  assert len(reply) < control._CONTEXT_BUDGET.READ_PAGE_CHARS
+  assert "update_goal with no arguments shows it whole" in reply
+  payload["goal"]["status"] = "open"
+  reply = control._goal_report(payload, full=False)
+  assert "and 2950 more (update_goal with no arguments lists them all)" in reply
+  # The paged full report still lists everything.
+  assert all(task in control._goal_report(payload, full=True) for task in running[-3:])
+
+
 def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
