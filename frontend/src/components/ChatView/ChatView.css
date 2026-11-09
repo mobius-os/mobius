@@ -4931,16 +4931,23 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   display: block;
 }
 
-/* Every action needs a fill of its own on hover: a colour change alone left
-   Edit without a highlight, unlike Send now and Cancel. */
 .queued__action:not(:disabled):hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--text) 9%, var(--surface-2)); /* CONTRACT: neutral raised fill on opaque surface */
-  border-color: color-mix(in srgb, var(--text) 22%, var(--border-light));
 }
 
-.queued__in-composer:hover {
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
+/* Every action needs a fill of its own on hover: a colour change alone left
+   Edit without a highlight, unlike Send now and Cancel. Fine pointers only: a
+   touch tap leaves :hover on the tapped button. Send now's and Cancel's own
+   fills follow and win. */
+@media (hover: hover) and (pointer: fine) {
+  .queued__action:not(:disabled):hover {
+    background: color-mix(in srgb, var(--text) 9%, var(--surface-2)); /* CONTRACT: neutral raised fill on opaque surface */
+    border-color: color-mix(in srgb, var(--text) 22%, var(--border-light));
+  }
+
+  .queued__in-composer:hover {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
+  }
 }
 
 .queued__steer:not(:disabled):hover {

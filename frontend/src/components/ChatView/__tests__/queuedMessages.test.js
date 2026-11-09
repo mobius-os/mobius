@@ -192,7 +192,8 @@ test('editing a queued message shows no strip unless it has to warn', async () =
   const { composerHistoryStripCopy } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
   const position = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
   assert.equal(composerHistoryStripCopy(position), null, 'the tray row marks it instead')
-  assert.equal(composerHistoryStripCopy(position, { saving: true }), null)
+  assert.deepEqual(composerHistoryStripCopy(position, { saving: true }),
+    { title: 'Saving the queued message…', srOnly: true }, 'a save in progress is still announced')
   assert.equal(composerHistoryStripCopy(position, { note: 'Could not save' }).warn, true,
     'a failed save still says so')
   assert.equal(composerHistoryStripCopy({ kind: 'sent' }).title, 'Earlier message',
@@ -204,5 +205,16 @@ test('every queued action, Edit included, lights its own fill on hover', async (
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   // The row's hover is the wells' resting fill, so a colour change alone left
   // Edit invisible against it.
-  assert.match(css, /\.queued__action:not\(:disabled\):hover \{\s*color: var\(--text\);\s*background: color-mix/)
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.queued__action:not\(:disabled\):hover \{\s*background: color-mix/,
+    'a fill of its own, for fine pointers only')
+})
+
+test('Stop editing reaches the chat box’s own return to the draft', async () => {
+  const { readFileSync } = await import('node:fs')
+  const bar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+  const view = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  // Esc and Stop editing share composerHistory.escape, so both restore the draft.
+  assert.match(bar, /escape: backToDraft \} = composerHistory/)
+  assert.match(bar, /back: backToDraft,/)
+  assert.match(view, /onStopEditing=\{\(\) => queuedComposerRef\.current\?\.back\(\)\}/)
 })

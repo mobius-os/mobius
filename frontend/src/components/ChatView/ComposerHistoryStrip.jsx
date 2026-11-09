@@ -2,7 +2,8 @@
  * earlier messages with ↑/↓, what Enter will do, and that the draft is kept.
  * Its × is the touch and pointer equivalent of Esc. A queued message being
  * edited needs no strip: the queue tray marks its row and offers Stop editing,
- * so the strip appears for it only to warn (a save that failed). */
+ * so the strip appears for it only to warn (a save that failed), and a save in
+ * progress is announced to screen readers alone. */
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 
 const DRAFT_PREVIEW_LENGTH = 34
@@ -29,7 +30,7 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
     }
   }
   if (position.kind === 'queued') {
-    if (!note) return null
+    if (!note) return saving ? { title: 'Saving the queued message…', srOnly: true } : null
     return {
       title: `Editing queued message ${position.queuedNumber} of ${position.queuedCount}`,
       hint: note || (saving
@@ -60,6 +61,7 @@ export default function ComposerHistoryStrip({
 }) {
   const copy = composerHistoryStripCopy(position, { touch, saving, note })
   if (!copy) return null
+  if (copy.srOnly) return <span className="chat__sr-only" role="status" aria-live="polite">{copy.title}</span>
   const draft = composerDraftPreview(position.draft, draftFileCount)
   return (
     <div
