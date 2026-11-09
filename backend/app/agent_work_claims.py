@@ -18,6 +18,10 @@ from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
 from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_outcome
 
+# Leaves room in the transfer notice (a peer note, capped at 4,000 characters)
+# for the work key, chat id and acquisition details around the reason.
+NOTICE_REASON_CHARS = 3_000
+
 
 # `#` and `+` appear naturally in PR references such as `mobius-os/mobius#1365`.
 WORK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9:._/@#+-]{2,255}$")
@@ -358,7 +362,7 @@ def claim_work(
     sender_chat_id=chat_id, recipient_chat_id=previous,
     # The notice is a capped peer note; a long reason stays whole on the claim.
     body=(f"Work claim {key} transferred to {chat_id}: "
-          f"{excerpt(reason, 3000, f'claim_agent_work(work_key={key}) shows the full reason')} "
+          f"{excerpt(reason, NOTICE_REASON_CHARS, 'the full reason is kept on the claim')} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its

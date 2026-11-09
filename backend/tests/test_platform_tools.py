@@ -1519,11 +1519,16 @@ def test_work_claim_text_fields_are_uncapped():
   assert "maxLength" not in finish["outcome"]
 
 
+def _next_page(footer):
+  tail = footer.rsplit("offset=", 1)[1].rstrip(")]")
+  offset, version = tail.split(", version=")
+  return {"offset": int(offset), "version": version}
+
+
 def _read_all_pages(control, name, arguments):
-  pieces, offset = [], 0
+  pieces, more = [], {}
   while True:
-    call = dict(arguments, **({"offset": offset} if offset else {}))
-    text = control._call_tool({"name": name, "arguments": call})["content"][0]["text"]
+    text = control._call_tool({"name": name, "arguments": {**arguments, **more}})["content"][0]["text"]
     if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
       return pieces + [text]
     text, footer = text.rsplit("\n", 1)
@@ -1531,7 +1536,24 @@ def _read_all_pages(control, name, arguments):
     pieces.append(text)
     if "end of result" in footer:
       return pieces
-    offset = int(footer.rsplit("offset=", 1)[1].rstrip(")]"))
+    more = _next_page(footer)
+
+
+def test_pages_of_a_plan_that_changed_in_between_are_refused(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": "x" * 200} for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: payload)
+  first = control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"]
+  page = _next_page(first.rsplit("\n", 1)[1])
+  payload["goal"]["revision"] = 4
+  tasks[0]["title"] = "changed"
+  refused = control._call_tool({"name": "update_goal", "arguments": page})
+  assert refused["isError"]
+  assert "start again from offset 0" in refused["content"][0]["text"]
 
 
 def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):

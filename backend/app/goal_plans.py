@@ -60,6 +60,13 @@ def _clean_text(value: Any, *, field: str, required: bool) -> str:
   return cleaned
 
 
+def _named(ids: list[str], shown: int = 10) -> str:
+  """Name a refusal's first few ids and count the rest, however many there are."""
+  if len(ids) <= shown:
+    return ", ".join(ids)
+  return f"{', '.join(ids[:shown])} and {len(ids) - shown} more ({len(ids)} in all)"
+
+
 def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   """Validate and normalize one complete plan snapshot.
 
@@ -225,7 +232,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     if task["status"] in {"running", "completed"} and not chain_settled[task["id"]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {', '.join(incomplete_dependencies(task['id']))}"
+        f"complete: {_named(incomplete_dependencies(task['id']))}"
       )
     if task["status"] == "completed":
       unfinished_children = [
@@ -235,7 +242,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       if unfinished_children:
         raise GoalPlanError(
           f"{task['id']} cannot complete before its children settle: "
-          f"{', '.join(unfinished_children)}"
+          f"{_named(unfinished_children)}"
         )
     progress = task.get("progress")
     if (

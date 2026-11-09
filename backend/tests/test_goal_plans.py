@@ -1804,3 +1804,15 @@ def test_serialized_waiting_lists_stay_linear_in_deep_plans(monkeypatch):
   assert plan["summary"]["ready"] == [f"g{depth - 1}"]
   assert all(task["waiting_on"] == [] for task in plan["tasks"])
   assert Counting.checks < 20 * len(tasks)
+
+
+def test_a_refusal_names_a_few_unsettled_dependencies_and_counts_the_rest():
+  from app.goal_plans import GoalPlanError, normalize_tasks
+  tasks = [{"id": f"d{i:04d}", "title": "Dep"} for i in range(1200)]
+  tasks.append({"id": "run", "title": "Run", "status": "running",
+                "depends_on": [task["id"] for task in tasks]})
+  with pytest.raises(GoalPlanError) as refused:
+    normalize_tasks(tasks)
+  message = str(refused.value)
+  assert "d0000, " in message and "d0009 and 1190 more (1200 in all)" in message
+  assert "d0010" not in message

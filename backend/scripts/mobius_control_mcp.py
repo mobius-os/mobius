@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import hashlib
 import importlib.util
 import io
 import subprocess
@@ -1860,6 +1861,8 @@ _TOOL_DEFINITIONS = {
         "goal_id": {"type": "string"},
         "offset": {"type": "integer", "minimum": 0,
                    "description": "Alone: read the next page of a long plan report, as its last page line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the report version its last page line names."},
       },
       "additionalProperties": False,
     },
@@ -1894,6 +1897,8 @@ _TOOL_DEFINITIONS = {
                   "description": "Read one text whole: a Goal field without task, or a task field with task."},
         "offset": {"type": "integer", "minimum": 0,
                    "description": "Page of a long result, as its last line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the result version its last line names."},
       },
       "additionalProperties": False,
     },
@@ -2168,27 +2173,36 @@ _PAGED_READ_TOOLS = frozenset({READ_GOAL_TOOL, UPDATE_GOAL_TOOL})
 def _paged_read(name: str, handler, arguments: dict[str, Any]):
   arguments = dict(arguments)
   offset = arguments.pop("offset", 0)
+  version = arguments.pop("version", None)
   if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
     raise ValueError(f"{name} offset must be a non-negative integer")
   if name == UPDATE_GOAL_TOOL and arguments:
     # A change is never re-run to fetch a page; only the plain read pages.
-    if offset:
+    if offset or version is not None:
       raise ValueError("update_goal offset pages the no-argument plan report; pass it alone")
     return handler(arguments)
   value = handler(arguments)
   text = value if isinstance(value, str) else json.dumps(
     value, ensure_ascii=False, separators=(",", ":"),
   )
-  if offset == 0 and len(text) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
+  # Each page re-reads the result. The version fingerprints the whole result,
+  # so pages of a plan that changed in between are never stitched together.
+  current = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+  if version is not None and version != current:
+    raise ValueError(
+      f"{name} changed since the previous page (version {version}, now {current}); "
+      "start again from offset 0"
+    )
+  if offset == 0 and version is None and len(text) <= _CONTEXT_BUDGET.READ_PAGE_CHARS:
     return value
   page = _CONTEXT_BUDGET.text_page(text, offset)
   end = page["offset"] + len(page["text"])
   call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)),
-                    f"offset={page['next_offset']}"])
+                    f"offset={page['next_offset']}", f"version={current}"])
   footer = (f"next page: {name}({call})" if page["next_offset"] is not None
             else "end of result")
   return (f"{page['text']}\n[Result characters {page['offset']}-{end} of "
-          f"{page['total_chars']}; {footer}]")
+          f"{page['total_chars']}, version {current}; {footer}]")
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:

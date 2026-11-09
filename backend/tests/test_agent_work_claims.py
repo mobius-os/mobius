@@ -1794,7 +1794,8 @@ def test_a_long_takeover_reason_stays_whole_on_the_claim_and_fits_its_notice(db)
   assert moved["takeover_reason"] == reason.strip()
   notice = db.query(models.AgentWorkClaimRevocation).one()
   assert len(notice.body) <= 4000
-  assert f"claim_agent_work(work_key={key}) shows the full reason" in notice.body
+  assert "the full reason is kept on the claim" in notice.body
+  assert "claim_agent_work" not in notice.body
   # The capped peer-note path accepts the notice.
   coordination.send_work_claim_transfer_notice(
     db, owner_id=owner.id, claim_id=notice.claim_id, revision=notice.revision,

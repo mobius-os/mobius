@@ -14,7 +14,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app import models, transcript_rows
-from app.context_budget import GOAL_BRIEF_CHARS, GOAL_BRIEF_FIELD_CHARS, TextBudget
+from app.context_budget import TextBudget
 from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND
 from app.timeutil import now_naive_utc
 from app.prompt_blocks import json_block_data
@@ -96,18 +96,25 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
     if outcome is not None else None)
 
 
+# A resolved dependency arrives as one turn message. A claim's summary and
+# outcome are uncapped, so each text keeps at most a field share of a total
+# that stays a small part of that turn's context.
+NOTICE_CHARS = 24_000
+NOTICE_FIELD_CHARS = 4_000
+
+
 def _notice_outcome(outcome: dict | None) -> dict | None:
   """Bound the outcome's texts for the turn that receives them.
 
-  A claim's summary and outcome are uncapped. The excerpt is deterministic, so
-  startup orphan checks still match the notice text; the full text stays in
-  storage and on the source chat's claim. No follower-facing read of it exists.
+  The excerpt is deterministic, so startup orphan checks still match the
+  notice text. The follower has no read of the full text: it is kept on the
+  source chat's work claim, visible to the owner.
   """
   shared = _shared_outcome(outcome)
   if not shared:
     return shared
-  budget = TextBudget(GOAL_BRIEF_CHARS, field=GOAL_BRIEF_FIELD_CHARS)
-  return {key: budget.take(value, "the full text stays with the source chat's work claim")
+  budget = TextBudget(NOTICE_CHARS, field=NOTICE_FIELD_CHARS)
+  return {key: budget.take(value, "the full text is kept on the source chat's work claim")
           if isinstance(value, str) else value for key, value in shared.items()}
 
 

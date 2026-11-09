@@ -56,10 +56,13 @@ class TextBudget:
     if len(text) <= allowance:
       self.remaining -= len(text)
       return text
-    # The marker is part of the brief too: leave room for it in the head, and
-    # never swap a text for a marker longer than the text itself.
-    room = allowance - len(excerpt("x" * (len(text) + 1), 0, read_full)) - len(str(allowance))
-    shown = excerpt(text, max(room, 0), read_full)
+    # The marker is charged too, so head plus marker must fit the allowance.
+    # The marker names the head's length, and a head shorter than the
+    # allowance never needs more digits, so reserving the marker as it would
+    # read for a full-allowance head is enough. A marker longer than the text
+    # it replaces is never used.
+    marker = len(f"… [excerpt: {allowance} of {len(text)} characters; {read_full}]")
+    shown = excerpt(text, max(allowance - marker, 0), read_full)
     return self.charge(text if len(shown) >= len(text) else shown)
 
   @property

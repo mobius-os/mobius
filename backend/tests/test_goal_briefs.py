@@ -625,7 +625,7 @@ def test_read_goal_tool_is_one_result_bearing_read_for_both_levels(monkeypatch):
   with pytest.raises(ValueError, match="does not take: page"):
     control._call_read_goal({"task": "build", "page": 2})
   schema = control._TOOL_DEFINITIONS[control.READ_GOAL_TOOL]["inputSchema"]
-  assert set(schema["properties"]) == {"task", "field", "offset"}
+  assert set(schema["properties"]) == {"task", "field", "offset", "version"}
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
