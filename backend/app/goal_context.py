@@ -2,8 +2,8 @@
 from collections import Counter
 
 from app.context_budget import (
-  FIELD_SHARE_CHARS, GOAL_BRIEF_LIST_ITEMS, TURN_SHARE_CHARS, Allowance, emitted_len,
-  fair_shares, fit_emitted,
+  FIELD_SHARE_CHARS, GOAL_BRIEF_LIST_ITEMS, TURN_SHARE_CHARS, emitted_len, excerpt,
+  fair_shares,
 )
 from app.prompt_blocks import json_block_data
 
@@ -171,118 +171,126 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 _BRIEF_PROSE = ("title", "completion_condition", "note", "result")
 
 
-# Of the brief's share, at most this part goes to structure: the listed
-# entries' ids, statuses and dependency ids. The texts share the rest fairly.
-_BRIEF_STRUCTURE_CHARS = TURN_SHARE_CHARS // 4
-# The least head an excerpt keeps besides its marker. While long texts would
-# get less, the lowest-priority list gives up an entry instead, so excerpts
-# stay readable rather than being markers alone.
+# Lists the brief may shorten, highest priority first: what feeds the focus,
+# then what it contains, then what surrounds it.
+_BRIEF_LISTS = ("dependencies", "children", "siblings", "open_blockers", "other_open_goals")
+# The least head an excerpted list text keeps besides its marker. Below it a
+# list gives up whole entries instead, lowest priority first.
 _MIN_EXCERPT_HEAD = 200
-_BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
 
 
 def fit_brief(payload, task_id, *, role="coordinator"):
   """Fit the per-turn brief to its share of the turn's context.
 
-  Lists keep their entries while the structure allowance lasts. Every text in
-  the brief then shares the rest fairly: short texts stay whole, long ones
-  split what remains (each at most FIELD_SHARE_CHARS) as marked excerpts, so
-  no section can starve another. If long texts would keep too little, the
-  lowest-priority list gives up entries first. A list that left entries out
-  says once how many and where to read them. Widths are measured as emitted.
-  The saved Goal and plan are untouched, and the reads named return
-  everything whole, so the brief never alters the outcome contract.
+  Tier 1 is the Goal and the work in hand: the objective, hold reason, next
+  action, checkpoint, the focused task and its ancestors' constraints. Each
+  text there shows whole up to FIELD_SHARE_CHARS and never shrinks to make
+  room for lists. Tier 2 is the lists, which share whatever of
+  TURN_SHARE_CHARS remains fairly; when their long texts would keep less than
+  a readable excerpt, the lowest-priority list gives up whole entries. Every
+  emitted character counts, so the brief stays within TURN_SHARE_CHARS unless
+  tier 1 alone exceeds it. Excerpts name the read that returns the full text;
+  the saved Goal and plan are untouched.
   """
-  structure = Allowance(_BRIEF_STRUCTURE_CHARS)
   goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
   overview = f"read_goal(task={task_id})" if task_id else goal_read
-  fixed_texts = []  # goal-level and focus texts: never dropped
-  listed = {key: [] for key in (*_BRIEF_LISTS, "other_open_goals")}  # (entry, cost, texts)
-  totals = {}
 
-  def text(holder, key, read_full):
-    """One shareable text, measured once: (holder, key, read, width, floor).
+  def fit(holder, key, read_full, limit=FIELD_SHARE_CHARS):
+    holder[key] = excerpt(holder[key], limit, read_full, width=emitted_len)
 
-    ``floor`` is the least share that still shows a readable excerpt.
-    """
-    value = holder[key]
-    marker = emitted_len(f"… [excerpt: {FIELD_SHARE_CHARS} of {len(value)} characters; {read_full}]")
-    return (holder, key, read_full, emitted_len(value), marker + _MIN_EXCERPT_HEAD)
+  def shorten_ids(entry):
+    ids = entry.get("depends_on") or []
+    if len(ids) > GOAL_BRIEF_LIST_ITEMS:
+      entry["depends_on"] = ids[:GOAL_BRIEF_LIST_ITEMS]
+      entry["depends_on_omitted"] = (
+        f"{len(ids) - GOAL_BRIEF_LIST_ITEMS} more; read_goal(task={entry['id']}) lists them all")
 
-  def entry_texts(entry):
-    return [text(entry, field, f"read_goal(task={entry['id']}, field={field}) reads the full text")
+  def task_texts(entry):
+    return [(entry, field, f"read_goal(task={entry['id']}, field={field}) reads the full text")
             for field in _BRIEF_PROSE if isinstance(entry.get(field), str)]
 
-  def admit(entry):
-    """Charge one entry's structure; return its cost."""
-    before = structure.remaining
-    if entry.get("depends_on"):
-      entry["depends_on"], omitted = structure.take_ids(entry["depends_on"])
-      if omitted:
-        entry["depends_on_omitted"] = structure.charge(
-          f"{omitted} more; read_goal(task={entry['id']}) lists them all")
-    skeleton = {key: value for key, value in entry.items()
-                if key not in _BRIEF_PROSE and key != "depends_on"}
-    structure.remaining -= len(json_block_data(skeleton))
-    return before - structure.remaining
-
-  fixed_texts.append(text(payload, "objective", "read_goal(field=objective) reads the full objective"))
+  # Tier 1.
+  fit(payload, "objective", "read_goal(field=objective) reads the full objective")
   if isinstance((payload.get("hold") or {}).get("reason"), str):
     payload["hold"] = dict(payload["hold"])
-    fixed_texts.append(text(payload["hold"], "reason", f"{goal_read} for the full reason"))
-  if "task" in payload:
-    admit(payload["task"])
-    fixed_texts.extend(entry_texts(payload["task"]))
+    fit(payload["hold"], "reason", f"{goal_read} for the full reason")
   for key in ("next_action", "checkpoint"):
     if isinstance(payload.get(key), str):
-      fixed_texts.append(text(payload, key, f"read_goal(field={key}) reads the full text"))
+      fit(payload, key, f"read_goal(field={key}) reads the full text")
+  if "task" in payload:
+    shorten_ids(payload["task"])
+    for holder, key, read in task_texts(payload["task"]):
+      fit(holder, key, read)
+  ancestors = payload.get("ancestors") or []
+  if ancestors:
+    nearest = ancestors[-GOAL_BRIEF_LIST_ITEMS:]
+    for entry in nearest:
+      for holder, key, read in task_texts(entry):
+        fit(holder, key, read)
+    payload["ancestors"] = nearest
+    if len(nearest) < len(ancestors):
+      payload["ancestors_omitted"] = (
+        f"{len(ancestors) - len(nearest)} more; {overview} lists them all")
+
+  # Tier 2: measure tier 1 once, then each list entry as structure plus texts.
+  lists = {}
   for key in _BRIEF_LISTS:
-    entries = payload.get(key) or []
-    totals[key] = len(entries)
-    # The nearest ancestors constrain the focus most, so they are kept first.
-    order = list(reversed(entries)) if key == "ancestors" else list(entries)
-    for entry in order[:GOAL_BRIEF_LIST_ITEMS]:
-      if structure.spent:
-        break
-      listed[key].append((entry, admit(entry), entry_texts(entry)))
-  others = payload.get("other_open_goals") or []
-  totals["other_open_goals"] = len(others)
-  for other in others[:GOAL_BRIEF_LIST_ITEMS]:
-    if structure.spent:
-      break
-    shown = dict(other)
-    cost = len(json_block_data({"id": shown["id"]}))
-    structure.remaining -= cost
-    listed["other_open_goals"].append(
-      (shown, cost, [text(shown, "objective", "shown whole only by that Goal's own reads")]))
+    entries = payload.pop(key, None)
+    if entries:
+      kept = [dict(entry) for entry in entries[:GOAL_BRIEF_LIST_ITEMS]]
+      for entry in kept:
+        shorten_ids(entry)
+      lists[key] = (len(entries), kept)
+  base = len(json_block_data(payload))
+
+  def omitted(key, count):
+    return (f"{count} more open Goals in this chat" if key == "other_open_goals"
+            else f"{count} more; {overview} lists them all")
+
+  measured = {}  # id(entry) -> (structure width, [(holder, field, read, width, floor)])
+
+  def measure(key, entry):
+    if id(entry) not in measured:
+      items = ([(entry, "objective", "the full objective is not readable from this Goal")]
+               if key == "other_open_goals" else task_texts(entry))
+      structure = len(json_block_data({**entry, **{field: "" for _, field, _ in items}}))
+      texts = []
+      for holder, field, read in items:
+        marker = emitted_len(f"… [excerpt: {FIELD_SHARE_CHARS} of {len(holder[field])} characters; {read}]")
+        texts.append((holder, field, read, emitted_len(holder[field]), marker + _MIN_EXCERPT_HEAD))
+      measured[id(entry)] = (structure, texts)
+    return measured[id(entry)]
+
+  def plan():
+    """Room left for list texts, and every list text with its width and floor."""
+    room = TURN_SHARE_CHARS - base
+    texts = []
+    for key, (total, kept) in lists.items():
+      # `,"key":[...]` with commas between entries, and `,"key_omitted":"..."`.
+      room -= len(json_block_data({key: []})) - 1 + max(len(kept) - 1, 0)
+      if len(kept) < total:
+        room -= len(json_block_data({f"{key}_omitted": omitted(key, total - len(kept))})) - 1
+      for entry in kept:
+        structure, items = measure(key, entry)
+        room -= structure
+        texts.extend(items)
+    return room, texts
 
   while True:
-    texts = fixed_texts + [item for key in listed for _, _, entry in listed[key] for item in entry]
-    available = max(TURN_SHARE_CHARS - (_BRIEF_STRUCTURE_CHARS - structure.remaining), 0)
-    shares = fair_shares([min(width, FIELD_SHARE_CHARS) for *_, width, _ in texts], available)
-    starved = any(share < width and share < floor
-                  for (*_, width, floor), share in zip(texts, shares))
-    droppable = next((key for key in ("other_open_goals", *reversed(_BRIEF_LISTS))
-                      if listed[key]), None)
-    if not starved or droppable is None:
+    room, texts = plan()
+    shares = fair_shares([min(width, FIELD_SHARE_CHARS) for *_, width, _ in texts], max(room, 0))
+    starved = room < 0 or any(share < width and share < floor
+                              for (*_, width, floor), share in zip(texts, shares))
+    lowest = next((key for key in reversed(_BRIEF_LISTS) if key in lists and lists[key][1]), None)
+    if not starved or lowest is None:
       break
-    _, cost, _ = listed[droppable].pop()
-    structure.remaining += cost
-
-  for (holder, key, read_full, _, _), share in zip(texts, shares):
-    holder[key] = fit_emitted(holder[key], share, read_full)
-  for key in (*_BRIEF_LISTS, "other_open_goals"):
-    if key not in payload and not totals.get(key):
-      continue
-    kept = [entry for entry, _, _ in listed[key]]
-    if key == "ancestors":
-      kept.reverse()
-    if kept or totals.get(key):
-      payload[key] = kept
-    if len(kept) < totals.get(key, 0):
-      payload[f"{key}_omitted"] = (
-        f"{totals[key] - len(kept)} more open Goals in this chat" if key == "other_open_goals"
-        else f"{totals[key] - len(kept)} more; {overview} lists them all")
+    lists[lowest][1].pop()
+  for (holder, field, read, _, _), share in zip(texts, shares):
+    holder[field] = excerpt(holder[field], share, read, width=emitted_len)
+  for key, (total, kept) in lists.items():
+    payload[key] = kept
+    if len(kept) < total:
+      payload[f"{key}_omitted"] = omitted(key, total - len(kept))
   return payload
 
 

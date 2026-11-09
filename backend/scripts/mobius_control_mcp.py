@@ -665,9 +665,9 @@ def _call_read_goal(arguments: dict[str, Any]) -> dict | str:
   if query:
     path += "?" + urlencode(query)
   payload = _agent_api_call("GET", path)
-  if "field" in arguments:
+  if arguments.get("field") is not None:
     # One text, plain, so its pages read as the text itself.
-    return payload["text"]
+    return payload.get("text") or ""
   if payload.get("goal") is None:
     payload["goal"] = (
       "This helper has no assigned Goal; complete the bounded task you were given."

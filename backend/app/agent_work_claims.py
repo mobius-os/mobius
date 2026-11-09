@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.decision_cards import fence_owner
-from app.context_budget import excerpt
+from app.context_budget import FIELD_SHARE_CHARS, excerpt
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
 from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_outcome
@@ -49,6 +49,13 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
+def _claim_text(value: str | None) -> str | None:
+  """A claim's text in a tool result; another chat's may be very long."""
+  if value is None:
+    return None
+  return excerpt(value, FIELD_SHARE_CHARS, "the full text stays on the claim")
+
+
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   title = db.query(models.Chat.title).filter(
     models.Chat.id == row.owner_chat_id,
@@ -56,7 +63,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": row.summary,
+    "summary": _claim_text(row.summary),
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
@@ -65,9 +72,9 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "acquisition_id": row.acquisition_id,
     "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
-    "takeover_reason": row.takeover_reason,
+    "takeover_reason": _claim_text(row.takeover_reason),
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-    "outcome": row.outcome,
+    "outcome": _claim_text(row.outcome),
   }
   if state == "held_by_peer":
     result["next_action"] = (

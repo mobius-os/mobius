@@ -16,8 +16,8 @@ import json
 
 TURN_SHARE_CHARS = 24_000
 FIELD_SHARE_CHARS = 4_000
-# Summary entries per list in a Goal brief (children, siblings, blockers,
-# dependencies, ancestors).
+# Entries per list and dependency ids per entry a Goal brief shows: a
+# summary needs the first ones; read_goal(task=…) lists them all.
 GOAL_BRIEF_LIST_ITEMS = 50
 
 
@@ -42,14 +42,6 @@ def text_page(text: str, offset: int = 0) -> dict:
   }
 
 
-def excerpt(text: str, limit: int, read_full: str) -> str:
-  """``text`` whole when it fits ``limit`` characters, else its head, marked."""
-  if len(text) <= limit:
-    return text
-  head = text[:max(limit, 0)].rstrip()
-  return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
-
-
 def emitted_len(text: str) -> int:
   """How many characters ``text`` takes once written into a prompt data block.
 
@@ -60,6 +52,32 @@ def emitted_len(text: str) -> int:
   """
   encoded = json.dumps(text, ensure_ascii=False)
   return len(encoded) - 2 + 5 * sum(encoded.count(char) for char in "<>&")
+
+
+def excerpt(text: str, limit: int, read_full: str, *, width=len) -> str:
+  """``text`` whole if it fits ``limit``, else its head and a marker that fit.
+
+  ``width`` measures text: plain characters by default, ``emitted_len`` for
+  text written into a prompt data block. Head plus marker fit ``limit``
+  whenever the marker alone does; a marker longer than the text it would
+  replace is never used.
+  """
+  full = width(text)
+  if full <= limit:
+    return text
+  # A shorter head never needs more digits than ``limit``, so reserving the
+  # marker as it reads for a ``limit``-long head is enough.
+  room = limit - width(f"… [excerpt: {limit} of {len(text)} characters; {read_full}]")
+  low, high = 0, min(len(text), max(room, 0))
+  while low < high:  # the longest head that fits the room
+    middle = (low + high + 1) // 2
+    if width(text[:middle]) <= room:
+      low = middle
+    else:
+      high = middle - 1
+  head = text[:low].rstrip()
+  shown = f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
+  return text if width(shown) >= full else shown
 
 
 def fair_shares(demands: list[int], total: int) -> list[int]:
@@ -75,51 +93,3 @@ def fair_shares(demands: list[int], total: int) -> list[int]:
     shares[index] = min(demands[index], remaining // (len(order) - position))
     remaining -= shares[index]
   return shares
-
-
-def fit_emitted(text: str, width: int, read_full: str) -> str:
-  """``text`` whole if its emitted width fits ``width``, else a marked excerpt.
-
-  The marker names the head's length; a head shorter than ``width`` never
-  needs more digits, so reserving the marker as it would read for a
-  full-width head is enough. A marker longer than the text is never used.
-  """
-  full = emitted_len(text)
-  if full <= width:
-    return text
-  marker = emitted_len(f"… [excerpt: {width} of {len(text)} characters; {read_full}]")
-  low, high = 0, min(len(text), max(width - marker, 0))
-  while low < high:  # the longest head whose emitted width fits
-    middle = (low + high + 1) // 2
-    if emitted_len(text[:middle]) <= width - marker:
-      low = middle
-    else:
-      high = middle - 1
-  shown = excerpt(text, low, read_full)
-  return text if emitted_len(shown) >= full else shown
-
-
-class Allowance:
-  """A running emitted-width allowance for structure an assembler adds."""
-
-  def __init__(self, total: int) -> None:
-    self.remaining = total
-
-  @property
-  def spent(self) -> bool:
-    return self.remaining <= 0
-
-  def charge(self, text: str) -> str:
-    self.remaining -= emitted_len(text)
-    return text
-
-  def take_ids(self, ids: list[str]) -> tuple[list[str], int]:
-    """Keep ids while the allowance lasts; return them and how many were left out."""
-    kept = []
-    for value in ids:
-      cost = emitted_len(value) + 3  # its quotes and separator in the block
-      if cost > self.remaining:
-        break
-      self.remaining -= cost
-      kept.append(value)
-    return kept, len(ids) - len(kept)

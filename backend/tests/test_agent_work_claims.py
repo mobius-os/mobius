@@ -1791,7 +1791,11 @@ def test_a_long_takeover_reason_stays_whole_on_the_claim_and_fits_its_notice(db)
   moved = claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
                      work_key=key, summary="Continue", takeover_reason=reason,
                      expected_owner_chat_id=first.id)
-  assert moved["takeover_reason"] == reason.strip()
+  # Another chat's long text arrives as an excerpt; the claim keeps it whole.
+  assert "the full text stays on the claim" in moved["takeover_reason"]
+  assert "the full text stays on the claim" in moved["summary"] or len(moved["summary"]) < 4000
+  stored = db.query(models.AgentWorkClaim).filter_by(work_key=key).one()
+  assert stored.takeover_reason == reason.strip()
   notice = db.query(models.AgentWorkClaimRevocation).one()
   assert len(notice.body) <= 4000
   assert "the full reason is kept on the claim" in notice.body

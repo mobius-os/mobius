@@ -825,16 +825,17 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
       turn.env_file.remove()
 
 
-# The brief's fixed shape (identity, outcome contract, totals) plus one
-# omission marker per list sits outside the prose budget.
-BRIEF_ALLOWANCE = 2_500
+_BRIEF_LISTS = ("dependencies", "children", "siblings", "open_blockers", "other_open_goals")
 
 
 def _within_budget(brief):
+  """Everything emitted, escapes included, fits the share. Only the Goal and
+  the work in hand alone may exceed it, and then every list has given way."""
   from app.context_budget import TURN_SHARE_CHARS
   from app.prompt_blocks import json_block_data
-  # Measured as emitted into the prompt block, escapes included.
-  return len(json_block_data(brief)) <= TURN_SHARE_CHARS + BRIEF_ALLOWANCE
+  if len(json_block_data(brief)) <= TURN_SHARE_CHARS:
+    return True
+  return not any(brief.get(key) for key in _BRIEF_LISTS)
 
 
 def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
@@ -877,9 +878,8 @@ def test_long_plans_stay_within_the_brief_budget(role):
   brief = fit_brief(project_goal(goal, "parent", role=role), "parent", role=role)
 
   assert _within_budget(brief), _chars(brief)
-  text_dump = json.dumps(brief)
-  # Lists stop once the budget is spent and say so once, not per entry.
-  assert text_dump.count("lists them all") <= 6
+  # Each shortened list says so once.
+  assert sum(key.endswith("_omitted") for key in brief) <= 6
 
 
 def test_many_short_entries_stop_listing_when_the_budget_is_spent():
@@ -909,7 +909,8 @@ def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
   assert _within_budget(brief)
   assert "read_goal(field=objective) reads the full objective" in brief["objective"]
   # Only the entry where the budget ran out marks its cut dependency list.
-  assert sum("depends_on_omitted" in child for child in brief["children"]) <= 1
+  assert all(len(child["depends_on"]) <= 50 and child["depends_on_omitted"].endswith(
+    f"read_goal(task={child['id']}) lists them all") for child in brief["children"])
   assert brief["children_omitted"].endswith("read_goal(task=parent) lists them all")
   assert brief["dependencies_omitted"].endswith("lists them all")
   # The excerpt never alters the outcome contract: storage and reads stay whole.
@@ -1009,10 +1010,30 @@ def test_small_constraints_and_prerequisites_survive_a_large_focus(role):
     _task("dep", status="completed", result="Schema v2 is live"),
     _task("focus", "root", "running", depends_on=["dep"],
           title=big, note=big, result=big, completion_condition=big),
-  ], objective="O" * 50_000, next_action=big, checkpoint=big)
+  ], objective="Ship the release", next_action="Run the checks")
   brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
   assert brief["ancestors"][0]["completion_condition"] == "Keep owner files"
   assert brief["dependencies"][0]["result"] == "Schema v2 is live"
+  assert "read_goal(task=focus, field=note) reads the full text" in brief["task"]["note"]
+  assert _within_budget(brief)
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_plan_shaped_by_the_old_caps_keeps_the_goal_and_work_in_hand_whole(role):
+  tier1 = "A" * 1_000
+  tasks = [_task("root", status="running", completion_condition=tier1, note=tier1),
+           _task("focus", "root", "running", title="F" * 150, note=tier1,
+                 completion_condition=tier1, result=tier1)]
+  tasks += [_task(f"c{i:02d}", "focus", note="c" * 3_000) for i in range(50)]
+  tasks += [_task(f"b{i:02d}", status="blocked", note="b" * 1_000) for i in range(40)]
+  goal = _goal(tasks, objective=tier1, next_action="N" * 2_000, checkpoint=tier1)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  assert brief["objective"] == tier1
+  if role == "coordinator":
+    assert brief["next_action"] == "N" * 2_000 and brief["checkpoint"] == tier1
+  assert all(brief["task"][field] == tier1 for field in ("note", "completion_condition", "result"))
+  assert brief["ancestors"][0]["completion_condition"] == tier1
+  assert brief["ancestors"][0]["note"] == tier1
   assert _within_budget(brief)
 
 

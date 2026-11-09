@@ -1621,6 +1621,8 @@ def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
     {"field": "objective", "task": None, "text": "Ship it"} if "field=" in path
     else {"role": "coordinator", "goal": None, "helpers": []}))
   assert control._call_read_goal({"field": "objective"}) == "Ship it"
+  # field=null is the whole view, never a missing-text failure.
+  assert control._call_read_goal({"task": "a", "field": None})["goal"] == "This chat has no Goal."
   assert control._call_read_goal({"task": "a"})["goal"] == "This chat has no Goal."
 
 def test_a_refusal_reason_is_shown_whole():
