@@ -393,13 +393,14 @@ def test_a_known_refusal_frees_the_attempt_so_the_owner_can_press_again():
   assert press(github)["state"] == "merged"
 
 
-def test_a_caller_that_goes_away_during_the_write_leaves_the_attempt_saved():
-  github = FakeGitHub()
+def cancel_during_the_write(github):
+  """The caller goes away while the write is in flight; the write then finishes with github's answer."""
   entered, release = threading.Event(), threading.Event()
+  answer = github._merge
   def hold_the_write(flags):
     entered.set()
     assert release.wait(5)
-    return FakeGitHub._answer(github.merge_answer)
+    return answer(flags)
   github._merge = hold_the_write
   async def scenario():
     task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"]))
@@ -409,8 +410,29 @@ def test_a_caller_that_goes_away_during_the_write_leaves_the_attempt_saved():
     with pytest.raises(asyncio.CancelledError):
       await task
   asyncio.run(scenario())
-  assert attempt_row().state == "attempting"
-  assert refused(github).detail == subject.UNFINISHED
+
+
+def test_a_caller_that_goes_away_during_a_write_github_refused_does_not_block_the_next_tap():
+  github = FakeGitHub()
+  github.merge_answer = ContributionSubmitError("gh: Pull Request is not mergeable (HTTP 405)")
+  cancel_during_the_write(github)
+  assert LEDGER["db"].query(models.DirectMergeAttempt).count() == 0
+  github.merge_answer = {"merged": True, "sha": MERGED_SHA}
+  assert press(github)["state"] == "merged" and len(github.merges) == 2
+
+
+def test_a_caller_that_goes_away_during_a_write_github_confirmed_leaves_it_recorded_as_done():
+  github = FakeGitHub()
+  cancel_during_the_write(github)
+  assert attempt_row().state == "merged" and len(github.merges) == 1
+
+
+def test_a_caller_that_goes_away_during_a_write_with_no_answer_keeps_the_fence():
+  github = FakeGitHub()
+  github.merge_answer = subprocess.TimeoutExpired("gh", 90)
+  cancel_during_the_write(github)
+  assert attempt_row().state == "unknown"
+  assert refused(github).detail == subject.UNFINISHED and len(github.merges) == 1
 
 
 def test_an_attempt_a_review_run_already_armed_for_this_head_is_not_sent_again():
