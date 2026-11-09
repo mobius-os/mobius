@@ -6417,6 +6417,7 @@ export default function ChatView({
             }}
             onRetry={handleRetryRejected}
             onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
+            onStopEditing={() => queuedComposerRef.current?.back()}
             inComposerCid={queuedInComposerCid}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}

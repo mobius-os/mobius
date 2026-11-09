@@ -36,7 +36,7 @@ import {
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onEditInComposer, inComposerCid = null, onRetry, onSteerOne,
+  items, onCancel, onEditInComposer, inComposerCid = null, onStopEditing, onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
   restarting = false, onSendHeld, sharedGuest = false,
 }) {
@@ -236,7 +236,17 @@ export default function QueuedMessages({
                   </button>
                 )}
                 {inComposer ? (
-                  <span className="queued__in-composer">In the chat box</span>
+                  // The chat box holds this message; this returns it to the
+                  // draft without saving (Esc on a keyboard).
+                  <button
+                    type="button"
+                    className="queued__in-composer"
+                    onPointerDown={(e) => e.preventDefault()}
+                    onClick={() => onStopEditing?.()}
+                    title="Back to your draft without saving (Esc)"
+                  >
+                    Stop editing
+                  </button>
                 ) : (
                   <button
                     type="button"

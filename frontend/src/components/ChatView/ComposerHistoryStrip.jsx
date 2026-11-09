@@ -1,6 +1,8 @@
 /* ComposerHistoryStrip — says which message the chat box holds while browsing
- * with ↑/↓ or the queue's pencil, what Enter will do, and that the draft is
- * kept. Its × is the touch and pointer equivalent of Esc. */
+ * earlier messages with ↑/↓, what Enter will do, and that the draft is kept.
+ * Its × is the touch and pointer equivalent of Esc. A queued message being
+ * edited needs no strip: the queue tray marks its row and offers Stop editing,
+ * so the strip appears for it only to warn (a save that failed). */
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 
 const DRAFT_PREVIEW_LENGTH = 34
@@ -27,6 +29,7 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
     }
   }
   if (position.kind === 'queued') {
+    if (!note) return null
     return {
       title: `Editing queued message ${position.queuedNumber} of ${position.queuedCount}`,
       hint: note || (saving
