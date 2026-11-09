@@ -14,7 +14,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app import models, transcript_rows
-from app.context_budget import FIELD_SHARE_CHARS, TURN_SHARE_CHARS, excerpt, fair_shares
+from app.context_budget import SUMMARY_CHARS, TEXT_CHARS, excerpt
 from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND
 from app.timeutil import now_naive_utc
 from app.prompt_blocks import json_block_data
@@ -97,25 +97,20 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
 
 
 def _notice_outcome(outcome: dict | None) -> dict | None:
-  """Bound the outcome's texts for the one turn that receives them.
+  """Show a claim's summary and outcome within their old caps.
 
-  A claim's summary and outcome are uncapped. Each text keeps a fair share of
-  the turn share, at most the field share, counted in plain characters: saved
-  notices from before these texts were uncapped (an outcome of at most 1,000
-  and a summary of at most 500 characters) always fit whole, so startup orphan
-  checks still match them. The excerpt is deterministic. The follower has no
-  read of the full text: it is kept on the source chat's work claim, visible to
-  the owner.
+  A notice saved before these texts were uncapped is rebuilt byte for byte,
+  so startup orphan checks still match it. The follower has no read of a
+  longer text: it is kept on the source chat's work claim, visible to the
+  owner.
   """
   shared = _shared_outcome(outcome)
   if not shared:
     return shared
-  keys = [key for key, value in shared.items() if isinstance(value, str)]
-  shares = fair_shares([min(len(shared[key]), FIELD_SHARE_CHARS) for key in keys],
-                       TURN_SHARE_CHARS)
-  for key, share in zip(keys, shares):
-    shared[key] = excerpt(shared[key], share,
-                          "the full text is kept on the source chat's work claim")
+  for key, limit in (("summary", SUMMARY_CHARS), ("outcome", TEXT_CHARS)):
+    if isinstance(shared.get(key), str):
+      shared[key] = excerpt(shared[key], limit,
+                            "the full text is kept on the source chat's work claim")
   return shared
 
 

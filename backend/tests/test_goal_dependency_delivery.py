@@ -598,8 +598,7 @@ def test_a_long_claim_outcome_is_excerpted_in_its_one_notice():
                           "summary": "S" * 50_000, "outcome": "O" * 50_000,
                           "source_diagnostics": {"secret": True}})
   notice = deps_module.dependency_notice(row)
-  from app.context_budget import TURN_SHARE_CHARS
-  assert len(notice) < TURN_SHARE_CHARS + 2_000
+  assert len(notice) < 3_000  # summary within 500 and outcome within 1,000
   assert "the full text is kept on the source chat's work claim" in notice
   assert "source_diagnostics" not in notice
   # Deterministic, so startup orphan checks still match the saved notice.

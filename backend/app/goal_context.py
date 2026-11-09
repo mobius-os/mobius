@@ -2,10 +2,8 @@
 from collections import Counter
 
 from app.context_budget import (
-  FIELD_SHARE_CHARS, GOAL_BRIEF_LIST_ITEMS, TURN_SHARE_CHARS, emitted_len, excerpt,
-  fair_shares,
+  DEPENDENCY_IDS, LIST_ITEMS, NEXT_ACTION_CHARS, TEXT_CHARS, TITLE_CHARS, excerpt,
 )
-from app.prompt_blocks import json_block_data
 
 ROLES = ("coordinator", "helper")
 # The coordinator owns the Goal outcome. A helper works one assigned branch
@@ -168,129 +166,61 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   return payload
 
 
-_BRIEF_PROSE = ("title", "completion_condition", "note", "result")
-
-
-# Lists the brief may shorten, highest priority first: what feeds the focus,
-# then what it contains, then what surrounds it.
-_BRIEF_LISTS = ("dependencies", "children", "siblings", "open_blockers", "other_open_goals")
-# The least head an excerpted list text keeps besides its marker. Below it a
-# list gives up whole entries instead, lowest priority first.
-_MIN_EXCERPT_HEAD = 200
+# A task text and its display limit in the brief.
+_TASK_TEXT_LIMITS = (("title", TITLE_CHARS), ("completion_condition", TEXT_CHARS),
+                     ("note", TEXT_CHARS), ("result", TEXT_CHARS))
+_BRIEF_LISTS = ("ancestors", "children", "siblings", "dependencies", "open_blockers",
+                "other_open_goals")
 
 
 def fit_brief(payload, task_id, *, role="coordinator"):
-  """Fit the per-turn brief to its share of the turn's context.
+  """Show the per-turn brief within the old input caps, as display limits.
 
-  Tier 1 is the Goal and the work in hand: the objective, hold reason, next
-  action, checkpoint, the focused task and its ancestors' constraints. Each
-  text there shows whole up to FIELD_SHARE_CHARS and never shrinks to make
-  room for lists. Tier 2 is the lists, which share whatever of
-  TURN_SHARE_CHARS remains fairly; when their long texts would keep less than
-  a readable excerpt, the lowest-priority list gives up whole entries. Every
-  emitted character counts, so the brief stays within TURN_SHARE_CHARS unless
-  tier 1 alone exceeds it. Excerpts name the read that returns the full text;
-  the saved Goal and plan are untouched.
+  Each text over its limit becomes a marked excerpt naming the paged read
+  that returns it whole; lists show at most LIST_ITEMS entries and each task
+  at most DEPENDENCY_IDS dependency ids. A plan valid under the old caps is
+  shown exactly as before. The saved Goal and plan are untouched.
   """
   goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
   overview = f"read_goal(task={task_id})" if task_id else goal_read
 
-  def fit(holder, key, read_full, limit=FIELD_SHARE_CHARS):
-    holder[key] = excerpt(holder[key], limit, read_full, width=emitted_len)
+  def clip(holder, key, limit, read_full):
+    if isinstance(holder.get(key), str):
+      holder[key] = excerpt(holder[key], limit, read_full)
 
-  def shorten_ids(entry):
+  def clip_task(entry):
+    for field, limit in _TASK_TEXT_LIMITS:
+      clip(entry, field, limit, f"read_goal(task={entry['id']}, field={field}) reads it whole")
     ids = entry.get("depends_on") or []
-    if len(ids) > GOAL_BRIEF_LIST_ITEMS:
-      entry["depends_on"] = ids[:GOAL_BRIEF_LIST_ITEMS]
+    if len(ids) > DEPENDENCY_IDS:
+      entry["depends_on"] = ids[:DEPENDENCY_IDS]
       entry["depends_on_omitted"] = (
-        f"{len(ids) - GOAL_BRIEF_LIST_ITEMS} more; read_goal(task={entry['id']}) lists them all")
+        f"{len(ids) - DEPENDENCY_IDS} more; read_goal(task={entry['id']}) lists them all")
 
-  def task_texts(entry):
-    return [(entry, field, f"read_goal(task={entry['id']}, field={field}) reads the full text")
-            for field in _BRIEF_PROSE if isinstance(entry.get(field), str)]
-
-  # Tier 1.
-  fit(payload, "objective", "read_goal(field=objective) reads the full objective")
-  if isinstance((payload.get("hold") or {}).get("reason"), str):
+  clip(payload, "objective", TEXT_CHARS, "read_goal(field=objective) reads it whole")
+  clip(payload, "next_action", NEXT_ACTION_CHARS, "read_goal(field=next_action) reads it whole")
+  if isinstance(payload.get("hold"), dict):
     payload["hold"] = dict(payload["hold"])
-    fit(payload["hold"], "reason", f"{goal_read} for the full reason")
-  for key in ("next_action", "checkpoint"):
-    if isinstance(payload.get(key), str):
-      fit(payload, key, f"read_goal(field={key}) reads the full text")
+    clip(payload["hold"], "reason", NEXT_ACTION_CHARS, f"{goal_read} shows it whole")
   if "task" in payload:
-    shorten_ids(payload["task"])
-    for holder, key, read in task_texts(payload["task"]):
-      fit(holder, key, read)
-  ancestors = payload.get("ancestors") or []
-  if ancestors:
-    nearest = ancestors[-GOAL_BRIEF_LIST_ITEMS:]
-    for entry in nearest:
-      for holder, key, read in task_texts(entry):
-        fit(holder, key, read)
-    payload["ancestors"] = nearest
-    if len(nearest) < len(ancestors):
-      payload["ancestors_omitted"] = (
-        f"{len(ancestors) - len(nearest)} more; {overview} lists them all")
-
-  # Tier 2: measure tier 1 once, then each list entry as structure plus texts.
-  lists = {}
+    clip_task(payload["task"])
   for key in _BRIEF_LISTS:
-    entries = payload.pop(key, None)
-    if entries:
-      kept = [dict(entry) for entry in entries[:GOAL_BRIEF_LIST_ITEMS]]
-      for entry in kept:
-        shorten_ids(entry)
-      lists[key] = (len(entries), kept)
-  base = len(json_block_data(payload))
-
-  def omitted(key, count):
-    return (f"{count} more open Goals in this chat" if key == "other_open_goals"
-            else f"{count} more; {overview} lists them all")
-
-  measured = {}  # id(entry) -> (structure width, [(holder, field, read, width, floor)])
-
-  def measure(key, entry):
-    if id(entry) not in measured:
-      items = ([(entry, "objective", "the full objective is not readable from this Goal")]
-               if key == "other_open_goals" else task_texts(entry))
-      structure = len(json_block_data({**entry, **{field: "" for _, field, _ in items}}))
-      texts = []
-      for holder, field, read in items:
-        marker = emitted_len(f"… [excerpt: {FIELD_SHARE_CHARS} of {len(holder[field])} characters; {read}]")
-        texts.append((holder, field, read, emitted_len(holder[field]), marker + _MIN_EXCERPT_HEAD))
-      measured[id(entry)] = (structure, texts)
-    return measured[id(entry)]
-
-  def plan():
-    """Room left for list texts, and every list text with its width and floor."""
-    room = TURN_SHARE_CHARS - base
-    texts = []
-    for key, (total, kept) in lists.items():
-      # `,"key":[...]` with commas between entries, and `,"key_omitted":"..."`.
-      room -= len(json_block_data({key: []})) - 1 + max(len(kept) - 1, 0)
-      if len(kept) < total:
-        room -= len(json_block_data({f"{key}_omitted": omitted(key, total - len(kept))})) - 1
-      for entry in kept:
-        structure, items = measure(key, entry)
-        room -= structure
-        texts.extend(items)
-    return room, texts
-
-  while True:
-    room, texts = plan()
-    shares = fair_shares([min(width, FIELD_SHARE_CHARS) for *_, width, _ in texts], max(room, 0))
-    starved = room < 0 or any(share < width and share < floor
-                              for (*_, width, floor), share in zip(texts, shares))
-    lowest = next((key for key in reversed(_BRIEF_LISTS) if key in lists and lists[key][1]), None)
-    if not starved or lowest is None:
-      break
-    lists[lowest][1].pop()
-  for (holder, field, read, _, _), share in zip(texts, shares):
-    holder[field] = excerpt(holder[field], share, read, width=emitted_len)
-  for key, (total, kept) in lists.items():
+    entries = payload.get(key)
+    if not entries:
+      continue
+    # The nearest ancestors constrain the focus most.
+    kept = [dict(entry) for entry in (
+      entries[-LIST_ITEMS:] if key == "ancestors" else entries[:LIST_ITEMS])]
+    for entry in kept:
+      if key == "other_open_goals":
+        clip(entry, "objective", TEXT_CHARS, "the full objective is not readable from this Goal")
+      else:
+        clip_task(entry)
     payload[key] = kept
-    if len(kept) < total:
-      payload[f"{key}_omitted"] = omitted(key, total - len(kept))
+    if len(kept) < len(entries):
+      payload[f"{key}_omitted"] = (
+        f"{len(entries) - len(kept)} more open Goals in this chat" if key == "other_open_goals"
+        else f"{len(entries) - len(kept)} more; {overview} lists them all")
   return payload
 
 

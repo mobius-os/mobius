@@ -1,24 +1,24 @@
-"""Budgets for agent-written text that Möbius assembles into provider context.
+"""Display limits for agent-written text that Möbius repeats into a turn.
 
-Agent input is not capped where it is written: the store keeps it whole and an
-explicit read returns it whole. Text Möbius assembles into a turn (the
-per-turn Goal brief, a resolved-dependency notice) is bounded where it is
-assembled, so one long plan or outcome can never crowd out the owner's work
-or make every turn fail.
-
-TURN_SHARE_CHARS (24,000 characters, roughly 6k tokens) is a few percent of a
-provider context window: the most one assembled block takes of a turn.
-FIELD_SHARE_CHARS is the most any single text takes of that block. Text over
-its share becomes a marked excerpt that names where the full text is read.
+Agent input is not capped where it is written: the store keeps it whole and
+the paged reads return it whole. Where Möbius repeats a text into a turn (the
+per-turn Goal brief, a resolved-dependency notice, a claim notice or result),
+it shows at most these display limits. They equal the input caps those fields
+had before inputs became uncapped, so anything valid then is shown exactly as
+before; a longer text becomes a marked excerpt naming the paged read.
 """
 
-import json
-
-TURN_SHARE_CHARS = 24_000
-FIELD_SHARE_CHARS = 4_000
-# Entries per list and dependency ids per entry a Goal brief shows: a
-# summary needs the first ones; read_goal(task=…) lists them all.
-GOAL_BRIEF_LIST_ITEMS = 50
+TITLE_CHARS = 160
+# A task's note, result and completion condition; a Goal objective; a claim's
+# outcome and takeover reason.
+TEXT_CHARS = 1_000
+# A Goal's next action and a deferral (hold) reason.
+NEXT_ACTION_CHARS = 2_000
+# A work claim's summary.
+SUMMARY_CHARS = 500
+# Entries per brief list and dependency ids per task, as a plan held them.
+LIST_ITEMS = 64
+DEPENDENCY_IDS = 16
 
 
 # One page of a long control-tool result. Providers cap a tool result (Claude
@@ -42,54 +42,16 @@ def text_page(text: str, offset: int = 0) -> dict:
   }
 
 
-def emitted_len(text: str) -> int:
-  """How many characters ``text`` takes once written into a prompt data block.
+def excerpt(text: str, limit: int, read_full: str) -> str:
+  """``text`` whole if it fits ``limit`` characters, else a marked excerpt.
 
-  JSON escaping and the block's inert <, > and & escapes can multiply a
-  symbol-heavy text several times over; budgets count what is emitted. Same
-  encoding as ``app.prompt_blocks.json_block_data`` (a test pins them equal);
-  this module stays import-free because the control server loads it by path.
+  The excerpt is its head plus a marker naming ``read_full``, together within
+  ``limit`` whenever the marker alone fits.
   """
-  encoded = json.dumps(text, ensure_ascii=False)
-  return len(encoded) - 2 + 5 * sum(encoded.count(char) for char in "<>&")
-
-
-def excerpt(text: str, limit: int, read_full: str, *, width=len) -> str:
-  """``text`` whole if it fits ``limit``, else its head and a marker that fit.
-
-  ``width`` measures text: plain characters by default, ``emitted_len`` for
-  text written into a prompt data block. Head plus marker fit ``limit``
-  whenever the marker alone does; a marker longer than the text it would
-  replace is never used.
-  """
-  full = width(text)
-  if full <= limit:
+  if len(text) <= limit:
     return text
   # A shorter head never needs more digits than ``limit``, so reserving the
   # marker as it reads for a ``limit``-long head is enough.
-  room = limit - width(f"… [excerpt: {limit} of {len(text)} characters; {read_full}]")
-  low, high = 0, min(len(text), max(room, 0))
-  while low < high:  # the longest head that fits the room
-    middle = (low + high + 1) // 2
-    if width(text[:middle]) <= room:
-      low = middle
-    else:
-      high = middle - 1
-  head = text[:low].rstrip()
-  shown = f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
-  return text if width(shown) >= full else shown
-
-
-def fair_shares(demands: list[int], total: int) -> list[int]:
-  """Split ``total`` so short texts stay whole and long ones share the rest.
-
-  Shortest first, each gets at most an equal share of what is left, so the
-  result does not depend on order and no text can starve another.
-  """
-  shares = [0] * len(demands)
-  remaining = total
-  order = sorted(range(len(demands)), key=demands.__getitem__)
-  for position, index in enumerate(order):
-    shares[index] = min(demands[index], remaining // (len(order) - position))
-    remaining -= shares[index]
-  return shares
+  room = limit - len(f"… [excerpt: {limit} of {len(text)} characters; {read_full}]")
+  head = text[:max(room, 0)].rstrip()
+  return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"

@@ -825,105 +825,17 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
       turn.env_file.remove()
 
 
-_BRIEF_LISTS = ("dependencies", "children", "siblings", "open_blockers", "other_open_goals")
-
-
-def _within_budget(brief):
-  """Everything emitted, escapes included, fits the share. Only the Goal and
-  the work in hand alone may exceed it, and then every list has given way."""
-  from app.context_budget import TURN_SHARE_CHARS
-  from app.prompt_blocks import json_block_data
-  if len(json_block_data(brief)) <= TURN_SHARE_CHARS:
-    return True
-  return not any(brief.get(key) for key in _BRIEF_LISTS)
-
-
-def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
-  huge = "N" * 50_000
-  children = [_task(f"c{i:03d}", "parent", "blocked", note=f"{i} " + huge) for i in range(120)]
-  goal = _goal([_task("dep", status="completed", result="R" * 50_000),
-                _task("parent", status="running", depends_on=["dep"], note=huge),
-                *children], next_action="A" * 50_000)
-
-  brief = fit_brief(project_goal(goal, "parent"), "parent")
-  full = project_goal(goal, "parent")
-
-  assert _within_budget(brief)
-  shown = len(brief["children"])
-  assert 0 < shown < 120
-  assert brief["children_omitted"] == f"{120 - shown} more; read_goal(task=parent) lists them all"
-  assert "read_goal(task=parent, field=note) reads the full text" in brief["task"]["note"]
-  assert "read_goal(task=dep, field=result) reads the full text" in brief["dependencies"][0]["result"]
-  assert "read_goal(field=next_action) reads the full text" in brief["next_action"]
-  assert full["task"]["note"] == huge
-  assert len(full["children"]) == 120
-  assert full["children"][119]["note"] == "119 " + huge
-  assert full["dependencies"][0]["result"] == "R" * 50_000
-
-
-@pytest.mark.parametrize("role", ["coordinator", "helper"])
-def test_long_plans_stay_within_the_brief_budget(role):
-  title, text = "T" * 5_000, "F" * 5_000
-  tasks = [_task("root", status="running", title=title, note=text, completion_condition=text)]
-  tasks += [_task(f"dep{i}", status="completed", title=title, result=text, note=text)
-            for i in range(60)]
-  tasks.append(_task("parent", "root", "running", title=title, note=text,
-                     depends_on=[f"dep{i}" for i in range(60)]))
-  tasks += [_task(f"c{i}", "parent", "blocked", title=title, note=text,
-                  depends_on=[f"dep{j}" for j in range(60)]) for i in range(60)]
-  tasks += [_task(f"s{i}", "root", "blocked", title=title, note=text) for i in range(60)]
-  tasks += [_task(f"x{i}", status="failed", title=title, note=text) for i in range(60)]
-  goal = _goal(tasks, objective="O" * 30_000, next_action="A" * 5_000, checkpoint="C" * 5_000)
-
-  brief = fit_brief(project_goal(goal, "parent", role=role), "parent", role=role)
-
-  assert _within_budget(brief), _chars(brief)
-  # Each shortened list says so once.
-  assert sum(key.endswith("_omitted") for key in brief) <= 6
-
-
-def test_many_short_entries_stop_listing_when_the_budget_is_spent():
-  tasks = [_task("parent", status="running")]
-  tasks += [_task(f"c{i:04d}", "parent") for i in range(3000)]
-  brief = fit_brief(project_goal(_goal(tasks), "parent"), "parent")
-  assert _within_budget(brief)
-  # Short titles are never swapped for a longer excerpt marker.
-  assert all("excerpt" not in child["title"] for child in brief["children"])
-
-
 def test_a_short_brief_is_identical_to_the_full_projection():
   goal = _goal([_task("parent", status="running", note="Keep files"),
                 _task("leaf", "parent", "blocked", note="Waiting on review")])
   assert fit_brief(project_goal(goal, "parent"), "parent") == project_goal(goal, "parent")
 
 
-def test_a_huge_objective_and_wide_dependency_lists_fit_the_brief():
-  objective = "Deliver the outcome. " * 10_000
-  deps = [_task(f"d{i:04d}", status="completed", result="ok") for i in range(2000)]
-  children = [_task(f"c{i:02d}", "parent", depends_on=[d["id"] for d in deps]) for i in range(50)]
-  goal = _goal([*deps, _task("parent", status="running"), *children], objective=objective)
-  saved = copy.deepcopy(goal.plan_json)
-
-  brief = fit_brief(project_goal(goal, "parent"), "parent")
-
-  assert _within_budget(brief)
-  assert "read_goal(field=objective) reads the full objective" in brief["objective"]
-  # Only the entry where the budget ran out marks its cut dependency list.
-  assert all(len(child["depends_on"]) <= 50 and child["depends_on_omitted"].endswith(
-    f"read_goal(task={child['id']}) lists them all") for child in brief["children"])
-  assert brief["children_omitted"].endswith("read_goal(task=parent) lists them all")
-  assert brief["dependencies_omitted"].endswith("lists them all")
-  # The excerpt never alters the outcome contract: storage and reads stay whole.
-  assert goal.objective == objective
-  assert project_goal(goal, "parent")["objective"] == objective
-  assert goal.plan_json == saved
-
-
 def test_a_helper_brief_points_its_excerpts_at_read_goal():
   goal = _goal([_task("parent", status="running")], objective="O" * 100_000,
                hold_json=None)
   brief = fit_brief(project_goal(goal, "parent", role="helper"), "parent", role="helper")
-  assert "read_goal(field=objective) reads the full objective" in brief["objective"]
+  assert "read_goal(field=objective) reads it whole" in brief["objective"]
 
 
 def test_brief_projection_walks_large_plans_once(monkeypatch):
@@ -986,74 +898,6 @@ def test_sibling_filtering_is_linear_in_prerequisites():
   assert CountingId.comparisons < 100_000
 
 
-def test_emitted_width_matches_the_prompt_block_encoding():
-  from app.context_budget import emitted_len
-  from app.prompt_blocks import json_block_data
-  for text in ("plain", "<tag> & \"quoted\"\n\t", "é → ü", "\x01\\"):
-    assert emitted_len(text) == len(json_block_data(text)) - 2
-
-
-def test_a_symbol_heavy_brief_stays_within_budget_as_emitted():
-  heavy = "<>&" * 20_000
-  tasks = [_task("parent", status="running", note=heavy, title="<b>" * 2000)]
-  tasks += [_task(f"c{i}", "parent", "blocked", note=heavy) for i in range(40)]
-  goal = _goal(tasks, objective="&" * 50_000, next_action="<" * 20_000)
-  brief = fit_brief(project_goal(goal, "parent"), "parent")
-  assert _within_budget(brief)
-
-
-@pytest.mark.parametrize("role", ["coordinator", "helper"])
-def test_small_constraints_and_prerequisites_survive_a_large_focus(role):
-  big = "F" * 50_000
-  goal = _goal([
-    _task("root", status="running", completion_condition="Keep owner files"),
-    _task("dep", status="completed", result="Schema v2 is live"),
-    _task("focus", "root", "running", depends_on=["dep"],
-          title=big, note=big, result=big, completion_condition=big),
-  ], objective="Ship the release", next_action="Run the checks")
-  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
-  assert brief["ancestors"][0]["completion_condition"] == "Keep owner files"
-  assert brief["dependencies"][0]["result"] == "Schema v2 is live"
-  assert "read_goal(task=focus, field=note) reads the full text" in brief["task"]["note"]
-  assert _within_budget(brief)
-
-
-@pytest.mark.parametrize("role", ["coordinator", "helper"])
-def test_a_plan_shaped_by_the_old_caps_keeps_the_goal_and_work_in_hand_whole(role):
-  tier1 = "A" * 1_000
-  tasks = [_task("root", status="running", completion_condition=tier1, note=tier1),
-           _task("focus", "root", "running", title="F" * 150, note=tier1,
-                 completion_condition=tier1, result=tier1)]
-  tasks += [_task(f"c{i:02d}", "focus", note="c" * 3_000) for i in range(50)]
-  tasks += [_task(f"b{i:02d}", status="blocked", note="b" * 1_000) for i in range(40)]
-  goal = _goal(tasks, objective=tier1, next_action="N" * 2_000, checkpoint=tier1)
-  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
-  assert brief["objective"] == tier1
-  if role == "coordinator":
-    assert brief["next_action"] == "N" * 2_000 and brief["checkpoint"] == tier1
-  assert all(brief["task"][field] == tier1 for field in ("note", "completion_condition", "result"))
-  assert brief["ancestors"][0]["completion_condition"] == tier1
-  assert brief["ancestors"][0]["note"] == tier1
-  assert _within_budget(brief)
-
-
-@pytest.mark.parametrize("role", ["coordinator", "helper"])
-def test_a_short_focus_and_next_step_survive_many_large_prerequisites(role):
-  deps = [_task(f"dep{i}", status="completed", result="R" * 5_000) for i in range(7)]
-  condition = "C" * 1_000
-  goal = _goal([*deps, _task("focus", status="running", depends_on=[d["id"] for d in deps],
-                             completion_condition=condition)],
-               next_action="N" * 360)
-  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
-  assert brief["task"]["completion_condition"] == condition
-  if role == "coordinator":
-    assert brief["next_action"] == "N" * 360
-  # The long prerequisite results share what remains, each keeping a share.
-  assert all("excerpt" in dep["result"] and len(dep["result"]) > 1_000
-             for dep in brief["dependencies"])
-  assert _within_budget(brief)
-
-
 def test_a_page_past_the_end_is_refused():
   from app.context_budget import text_page
   assert text_page("abc", 0)["next_offset"] is None
@@ -1070,3 +914,57 @@ def test_a_helper_cannot_read_coordinator_only_goal_fields(client, owner_token, 
   url = f"/api/chats/{helper.child_chat_id}/goal-brief"
   assert client.get(url, headers=headers, params={"field": "next_action"}).status_code == 403
   assert client.get(url, headers=headers, params={"field": "objective"}).json()["text"] == "Objective A"
+
+
+def _old_cap_plan():
+  """A plan at every old input cap: 64 tasks, 160-character titles, 1,000-
+  character notes, results and conditions, 16 dependencies per task."""
+  text = lambda char: char * 1_000
+  tasks = [_task("root", status="running", title="R" * 160, completion_condition=text("c"),
+                 note=text("n"))]
+  tasks += [_task(f"d{i:02d}", status="completed", title="D" * 160, result=text("r"))
+            for i in range(16)]
+  tasks.append(_task("focus", "root", "running", title="F" * 160, note=text("f"),
+                     completion_condition=text("k"), result=text("s"),
+                     depends_on=[f"d{i:02d}" for i in range(16)]))
+  tasks += [_task(f"c{i:02d}", "focus", title="C" * 160, note=text("x"),
+                  depends_on=[f"d{j:02d}" for j in range(16)]) for i in range(26)]
+  tasks += [_task(f"b{i:02d}", status="blocked", title="B" * 160, note=text("b"))
+            for i in range(64 - len(tasks))]
+  assert len(tasks) == 64
+  return _goal(normalize_tasks(tasks), objective="O" * 1_000, next_action="N" * 2_000,
+               checkpoint="Plan saved.")
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_plan_valid_under_the_old_caps_shows_exactly_as_before(role):
+  from app.prompt_blocks import json_block_data
+  goal = _old_cap_plan()
+  projection = project_goal(goal, "focus", role=role)
+  before = json_block_data(projection)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  # The display limits equal the old caps: nothing such a plan holds changes.
+  assert brief == projection
+  assert json_block_data(brief) == before
+
+
+def test_longer_texts_and_lists_show_within_the_old_caps_with_a_pointer():
+  long = "L" * 50_000
+  tasks = [_task(f"d{i:02d}", status="completed", result=long) for i in range(30)]
+  tasks.append(_task("focus", status="running", title="T" * 500, note=long,
+                     depends_on=[f"d{i:02d}" for i in range(30)]))
+  tasks += [_task(f"c{i:03d}", "focus", note=long) for i in range(100)]
+  goal = _goal(tasks, objective=long, next_action=long)
+  brief = fit_brief(project_goal(goal, "focus"), "focus")
+
+  assert len(brief["objective"]) <= 1_000 and "read_goal(field=objective)" in brief["objective"]
+  assert len(brief["next_action"]) <= 2_000 and "read_goal(field=next_action)" in brief["next_action"]
+  assert len(brief["task"]["title"]) <= 160
+  assert "read_goal(task=focus, field=note) reads it whole" in brief["task"]["note"]
+  assert len(brief["task"]["depends_on"]) == 16
+  assert brief["task"]["depends_on_omitted"] == "14 more; read_goal(task=focus) lists them all"
+  assert len(brief["children"]) == 64
+  assert brief["children_omitted"] == "36 more; read_goal(task=focus) lists them all"
+  assert all(len(dep["result"]) <= 1_000 for dep in brief["dependencies"])
+  # The saved plan and the full read stay whole.
+  assert project_goal(goal, "focus")["task"]["note"] == long

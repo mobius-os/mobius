@@ -13,14 +13,10 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.decision_cards import fence_owner
-from app.context_budget import FIELD_SHARE_CHARS, excerpt
+from app.context_budget import SUMMARY_CHARS, TEXT_CHARS, excerpt
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
 from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_outcome
-
-# Leaves room in the transfer notice (a peer note, capped at 4,000 characters)
-# for the work key, chat id and acquisition details around the reason.
-NOTICE_REASON_CHARS = 3_000
 
 
 # `#` and `+` appear naturally in PR references such as `mobius-os/mobius#1365`.
@@ -49,11 +45,11 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
-def _claim_text(value: str | None) -> str | None:
-  """A claim's text in a tool result; another chat's may be very long."""
+def _claim_text(value: str | None, limit: int = TEXT_CHARS) -> str | None:
+  """A claim's text in a tool result, within its old cap; the claim keeps it whole."""
   if value is None:
     return None
-  return excerpt(value, FIELD_SHARE_CHARS, "the full text stays on the claim")
+  return excerpt(value, limit, "the full text stays on the claim")
 
 
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
@@ -63,7 +59,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": _claim_text(row.summary),
+    "summary": _claim_text(row.summary, SUMMARY_CHARS),
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
@@ -369,7 +365,7 @@ def claim_work(
     sender_chat_id=chat_id, recipient_chat_id=previous,
     # The notice is a capped peer note; a long reason stays whole on the claim.
     body=(f"Work claim {key} transferred to {chat_id}: "
-          f"{excerpt(reason, NOTICE_REASON_CHARS, 'the full reason is kept on the claim')} "
+          f"{excerpt(reason, TEXT_CHARS, 'the full reason is kept on the claim')} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its
