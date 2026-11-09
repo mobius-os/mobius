@@ -3447,7 +3447,7 @@ def test_mobius_gateway_max_request_cost_points_to_mobius_you():
   message = codex_sdk_runner._codex_user_error(error)
 
   assert message == MOBIUS_MAX_REQUEST_COST_MESSAGE
-  assert "[Open Möbius · You](/shell/?app=identity)" in message
+  assert "[Open Settings](/shell/?settings=mobius-models)" in message
 
 
 def test_unknown_codex_error_stays_verbatim():

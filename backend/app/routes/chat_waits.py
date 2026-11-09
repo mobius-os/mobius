@@ -130,7 +130,7 @@ def cancel(
       status_code=409,
       detail="Use the Restart card or Stop the chat instead.",
     )
-  return serialize_wait(cancel_wait(db, row), db=db)
+  return cancel_wait(db, row)
 
 
 class DecisionFollow(BaseModel):

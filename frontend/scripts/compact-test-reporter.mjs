@@ -13,7 +13,9 @@
 // assert.match dumps the whole file).
 //
 // Log path: $MOBIUS_TEST_LOG when set, otherwise one file per checkout and
-// npm script under $TMPDIR/mobius-test-logs, overwritten by the next run.
+// npm script under $MOBIUS_TEST_LOG_DIR (default $TMPDIR/mobius-test-logs),
+// overwritten by the next run. scripts/wt-npm.sh points TMPDIR at a scratch
+// directory it deletes, so it keeps the log in the caller's own TMPDIR.
 
 import { createHash } from 'node:crypto'
 import { createWriteStream, mkdirSync } from 'node:fs'
@@ -34,7 +36,8 @@ function logPath() {
   if (process.env.MOBIUS_TEST_LOG) return path.resolve(process.env.MOBIUS_TEST_LOG)
   const label = (process.env.npm_lifecycle_event || 'node-test').replace(/[^A-Za-z0-9._-]+/g, '-')
   const checkout = createHash('sha256').update(process.cwd()).digest('hex').slice(0, 10)
-  return path.join(os.tmpdir(), 'mobius-test-logs', `${label}-${checkout}.log`)
+  const directory = process.env.MOBIUS_TEST_LOG_DIR || path.join(os.tmpdir(), 'mobius-test-logs')
+  return path.join(directory, `${label}-${checkout}.log`)
 }
 
 function clip(text, limit) {

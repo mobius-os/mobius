@@ -154,6 +154,7 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "      */api/owner/timezone*) printf '%s\\n' \"$FAKE_AUTH_OUTPUT\" ;;\n"
     "      *src.split*) python3 -c 'import json,os; print(json.dumps(os.environ[\"FAKE_LOADED_ASSET\"]))' ;;\n"
     "      *matchMedia*hover*) cat \"$FAKE_POINTER_STATE\" ;;\n"
+    "      location.href) printf '\"%s\"\\n' \"${FAKE_CURRENT_HREF:-http://mobius.test/shell/}\" ;;\n"
     "      *serviceWorker*) printf '%s\\n' true ;;\n"
     "      *) printf '%s\\n' true ;;\n"
     "    esac\n"
@@ -266,6 +267,9 @@ def _run_helper(
     **os.environ,
     "CHAT_ID": "",
     "AGENT_BROWSER_CONFIG": "",
+    # A desktop agent turn exports the pointer wrapper; tests choose their own.
+    "AGENT_BROWSER_EXECUTABLE_PATH": "",
+    "MOBIUS_SCREENSHOT_REAL_BROWSER": "",
     "BASH_ENV": "",
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
     "TMPDIR": str(tmp_path),
@@ -1619,6 +1623,22 @@ def test_desktop_then_phone_capture_resets_pointer_capabilities(tmp_path: Path):
   assert phone.returncode == 0, phone.stderr
   assert (tmp_path / "browser-profile.pointer").read_text().strip() == "false"
   assert (tmp_path / "browser-profile.resets").read_text().count("\n") == 1
+
+
+def test_current_page_capture_of_a_blank_page_fails_fast_instead_of_waiting_for_paint(
+  tmp_path: Path,
+):
+  # about:blank never records a first paint; the capture must say there is
+  # nothing prepared rather than spend its whole budget on the paint gate.
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, current_page=True,
+    extra_env={"FAKE_CURRENT_HREF": "about:blank"},
+  )
+  assert result.returncode != 0
+  assert "no prepared page (about:blank)" in result.stderr
+  assert not output.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert not any(command.startswith("wait ") for command in commands)
 
 
 def test_current_page_pointer_mismatch_preserves_open_session(tmp_path: Path):

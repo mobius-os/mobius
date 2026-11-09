@@ -199,6 +199,89 @@ def test_continuation_card_save_does_not_interrupt_its_own_receipt(
     registry.unregister(chat.id, handle.kind)
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_codex_post_tool_rendezvous_waits_for_interrupt_ack(
+  client, chat, approval_run, failed,
+):
+  from app.runner_registry import RunnerKind, registry
+
+  class HookHandle(_FakeCardHandle):
+    def __init__(self):
+      super().__init__(chat.id)
+      self.kind = RunnerKind.CODEX_SDK
+      self.owner_card_requested = False
+      self.acknowledged = False
+
+    def begin_finish_after_owner_card(self):
+      if self.owner_card_requested:
+        return None
+      self.owner_card_requested = True
+      self.finishes += 1
+      return self._finish()
+
+    async def _finish(self):
+      await asyncio.sleep(0)
+      if failed:
+        raise RuntimeError("provider interrupt failed")
+      self.acknowledged = True
+
+    async def wait_for_owner_card_end(self):
+      assert self.acknowledged
+
+  handle = HookHandle()
+  registry.register(handle)
+  try:
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    assert handle.finishes == 0  # Save must never cancel its own result.
+    url = f"/api/chats/{chat.id}/turn-end"
+    headers = approval_run[1]
+    wrong = client.post(url, json={"receipt_id": "old-card"}, headers=headers)
+    assert wrong.status_code == 409
+    assert handle.finishes == 0
+    ended = client.post(url, json={"receipt_id": qid}, headers=headers)
+    if failed:
+      assert ended.status_code == 503
+      assert handle.acknowledged is False
+    else:
+      assert ended.status_code == 200
+      assert ended.json() == {"ended": True}
+      assert handle.acknowledged is True
+      assert client.post(url, json={"receipt_id": qid}, headers=headers).status_code == 200
+      assert handle.finishes == 1
+    assert _row(chat.id)[0] == qid
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_card_end_rejects_browser_other_chat_and_stale_run(client, chat, approval_run, auth, db):
+  from app.runner_registry import RunnerKind, registry
+
+  qid = _ask(client, chat, approval_run).json()["question_id"]
+  url = f"/api/chats/{chat.id}/turn-end"
+  body = {"receipt_id": qid}
+  assert client.post(url, json=body, headers=auth).status_code == 403
+  assert client.post("/api/chats/another-chat/turn-end", json=body,
+                     headers=approval_run[1]).status_code == 403
+  assert client.post(url, json=body, headers=approval_run[1]).status_code == 409
+  owner = db.query(models.Owner).first()
+  stale = auth_mod.create_agent_token(
+    chat_id=chat.id, owner_username=owner.username, token_epoch=owner.token_epoch,
+    run_id="previous-physical-run", expires_delta=timedelta(minutes=5),
+  )
+  handle = _FakeCardHandle(chat.id)
+  handle.kind = RunnerKind.CODEX_SDK
+  registry.register(handle)
+  try:
+    # Existing authentication rejects a nonexistent/stale physical run before
+    # the card route can inspect its sink. Do not weaken that earlier guard.
+    assert client.post(url, json=body, headers={"Authorization": f"Bearer {stale}"}).status_code == 401
+    assert handle.finishes == 0
+    assert _row(chat.id)[0] == qid
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_completed_receipt_ends_only_the_exact_saved_card_turn(
   client, chat, approval_run,
 ):
@@ -440,35 +523,30 @@ def approval_run_id(chat):
 
 
 def test_racing_approval_requests_on_one_key_save_exactly_one_card(
-  client, chat, approval_run, db,
+  client, chat, approval_run, db, monkeypatch,
 ):
   """The other chat's claim lands between this request's check and insert."""
-  from sqlalchemy import event
-  from sqlalchemy.orm import Session
+  from app import agent_work_claims
   from app.agent_work_claims import claim_work
 
   other, sink, headers = _second_approval_chat(db)
-  owner_id = db.query(models.Owner).first().id
   raced = []
+  original_fence = agent_work_claims.fence_owner
 
-  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
-    if raced or not any(
-      isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == other.id
-      for row in session.new
-    ):
-      return
-    raced.append(True)
-    with SessionLocal() as competing:
-      claim_work(competing, owner_id=owner_id, chat_id=chat.id,
-                 run_id=approval_run_id(chat), work_key=SHARED_KEY,
-                 summary="Merge the reviewed PR")
+  def first_chat_wins_before_the_fence(session, owner_id):
+    # Compete after the collision read, before acquisition holds the fence;
+    # another writer cannot commit from inside its protected flush anymore.
+    if not raced:
+      raced.append(True)
+      with SessionLocal() as competing:
+        claim_work(competing, owner_id=owner_id, chat_id=chat.id,
+                   run_id=approval_run_id(chat), work_key=SHARED_KEY,
+                   summary="Merge the reviewed PR")
+    original_fence(session, owner_id)
 
   keyed = {**PROMPT, "work_key": SHARED_KEY}
-  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
-  try:
-    lost = _ask_as(client, other, sink, headers, keyed)
-  finally:
-    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+  monkeypatch.setattr(agent_work_claims, "fence_owner", first_chat_wins_before_the_fence)
+  lost = _ask_as(client, other, sink, headers, keyed)
   won = _ask(client, chat, approval_run, keyed)
 
   assert raced == [True]
@@ -786,6 +864,14 @@ def test_question_helper_leaves_canonicalization_to_server(monkeypatch):
     "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
   }]})]
 
+  captured.clear()
+  helper.request_question([{"question": "Ship it?"}], message="Tests pass.")
+  helper.request_restart(message="The fix is committed.")
+  assert captured == [
+    ("question", {"questions": [{"question": "Ship it?"}], "message": "Tests pass."}),
+    ("restart-request", {"message": "The fix is committed."}),
+  ]
+
 
 def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypatch):
   import io
@@ -903,6 +989,52 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
                         json={"content": "Skip past the card"})
   assert blocked.status_code == 409
   assert _row(chat.id)[0] == receipt["question_id"]
+
+
+@pytest.mark.parametrize("route", ["question", "approval"])
+def test_card_carries_the_turns_closing_message_outside_its_identity(
+  client, chat, approval_run, route,
+):
+  payload = PROMPT if route == "approval" else {"questions": [QUESTION_PROMPT]}
+  message = "I tested the change.\n\n- It **passes** locally."
+  first = client.post(f"/api/chats/{chat.id}/{route}",
+                      json={**payload, "message": f"  {message}\n"}, headers=approval_run[1])
+  assert first.status_code == 200, first.text
+  # Rewording the prose on a retry addresses the same saved card, and the
+  # first saved message is kept.
+  again = client.post(f"/api/chats/{chat.id}/{route}",
+                      json={**payload, "message": "Reworded."}, headers=approval_run[1])
+  assert again.json() == first.json()
+  saved = _row(chat.id)[1][-1]
+  cards = [block for block in saved["blocks"] if block["type"] == "question"]
+  assert [card["message"] for card in cards] == [message]
+  assert "message" not in cards[0]["questions"][0]
+  assert saved["content"].endswith(message)
+
+
+def test_blank_card_message_is_ignored_and_an_over_long_one_refused(client, chat, approval_run):
+  response = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": "   ",
+  }, headers=approval_run[1])
+  assert response.status_code == 200, response.text
+  assert "message" not in _row(chat.id)[1][-1]["blocks"][-1]
+  too_long = client.post(f"/api/chats/{chat.id}/approval", json={
+    **PROMPT, "message": "x" * 20_001,
+  }, headers=approval_run[1])
+  assert too_long.status_code == 422
+
+
+def test_card_message_limit_is_exactly_twenty_thousand_characters(client, chat, approval_run):
+  over = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": "x" * 20_001,
+  }, headers=approval_run[1])
+  assert over.status_code == 422
+  at_limit = "y" * 20_000
+  saved = client.post(f"/api/chats/{chat.id}/question", json={
+    "questions": [QUESTION_PROMPT], "message": at_limit,
+  }, headers=approval_run[1])
+  assert saved.status_code == 200, saved.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["message"] == at_limit
 
 
 def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, approval_run):

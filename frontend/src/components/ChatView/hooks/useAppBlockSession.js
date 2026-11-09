@@ -10,16 +10,16 @@
    again. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import useConfirmArming from './useConfirmArming.js'
-import { blockActions } from '../markdown/appBlock.js'
+import { blockActions, blockItems } from '../markdown/appBlock.js'
 import {
-  sessionDocumentReset, sessionRetained, sessionState, sessionStateUpdate,
+  ASK_FEATURE, SESSION_FEATURES, sessionDocumentReset, sessionRetained, sessionState, sessionStateUpdate,
 } from '../markdown/appBlockSession.js'
 
 const UNNEGOTIATED = Object.freeze({ generation: null, supported: null })
 export { CONFIRM_ARM_MS } from './useConfirmArming.js'
 
-export default function useAppBlockSession({ block, near, revision = null, confirmView = null, listEndView = null,
-  admitted = true }) {
+export default function useAppBlockSession({ block, near, revision = null, confirmView = null, listStartView = null,
+  listEndView = null, admitted = true, context = null, refresh = null, ask = false }) {
   const [sessionId] = useState(() => crypto.randomUUID())
   const [state, setState] = useState(null)
   const [event, setEvent] = useState(null)
@@ -28,9 +28,14 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   // Callbacks read the latest negotiation synchronously, before React commits.
   const negotiationRef = useRef(UNNEGOTIATED)
   const actions = useMemo(() => blockActions(block), [block])
+  const items = useMemo(() => blockItems(block), [block])
   const keys = useMemo(() => new Set(actions.map(action => action.key)), [actions])
+  const intents = useMemo(() => new Set(items.map(item => item.intent)), [items])
+  // `ask-v1` is advertised, and an ask accepted, only for an app admitted to
+  // `chat.blocks.ask` (appBlockSession.js passiveAskAllowed).
+  const features = useMemo(() => ask ? [...SESSION_FEATURES, ASK_FEATURE] : SESSION_FEATURES, [ask])
   const arming = useConfirmArming({ state, generation: negotiation.generation, supported: negotiation.supported,
-    confirmView, listEndView })
+    confirmView, listStartView, listEndView })
   const { disarm, noteReport, mayConfirm } = arming
   const retained = sessionRetained(state, event)
   const frameWanted = near || retained
@@ -83,12 +88,12 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const onBlockState = useCallback((message, { generation }) => {
     const current = negotiationRef.current
     if (current.supported !== true || generation !== current.generation) return
-    const safe = sessionState(message, sessionId, keys)
+    const safe = sessionState(message, sessionId, keys, intents, block.app, { ask })
     if (!safe) return
     noteReport(safe)
     setState(previous => sessionStateUpdate(previous, safe))
     if (!safe.checkpointInvalid && safe.ackNonce && safe.ackNonce === eventRef.current?.nonce) clearEvent()
-  }, [sessionId, keys, clearEvent, noteReport])
+  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport])
 
   // Reserve synchronously: a second click before React commits, or before
   // the app acknowledges this exact nonce, cannot send another event.
@@ -111,14 +116,38 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const checkpointId = state?.checkpoint?.id ?? null
   const checkpointData = state?.checkpoint?.data ?? null
   const recoveryError = state?.recoveryError ?? null
+  // Host-attested: which chat renders this block and whether it is that
+  // chat's newest block of its app and intent. Never read from block JSON.
+  const chatId = typeof context?.chatId === 'string' && context.chatId ? context.chatId : null
+  const latest = context?.latest !== false
+  // `intent` names the group `latest` is computed in: this block's app and
+  // its parsed block intent.
+  const blockIntent = block.intent
   const blockSession = useMemo(() => ({
-    sessionId, actions, retain: retained, recoveryError,
+    sessionId, actions, items, features, retain: retained, recoveryError,
     checkpoint: checkpointId ? { id: checkpointId, data: checkpointData } : null,
-  }), [sessionId, actions, retained, recoveryError, checkpointId, checkpointData])
+    ...(chatId ? { context: { chatId, latest, intent: blockIntent } } : {}),
+  }), [sessionId, actions, items, features, retained, recoveryError, checkpointId, checkpointData, chatId, latest, blockIntent])
+
+  // A refresh hint reaches only a document that is mounted and supported when
+  // the hint is raised; a document that loads later reads on its own start.
+  const [blockRefresh, setBlockRefresh] = useState(null)
+  const frameMountedRef = useRef(frameMounted)
+  frameMountedRef.current = frameMounted
+  const refreshSeq = refresh?.seq ?? 0
+  const refreshReason = refresh?.reason ?? ''
+  const seenRefreshRef = useRef(refreshSeq)
+  useEffect(() => {
+    if (refreshSeq === seenRefreshRef.current) return
+    seenRefreshRef.current = refreshSeq
+    const current = negotiationRef.current
+    if (current.supported !== true || !frameMountedRef.current) return
+    setBlockRefresh({ seq: refreshSeq, reason: refreshReason, sessionId, generation: current.generation })
+  }, [refreshSeq, refreshReason, sessionId])
 
   return {
     sessionId, state, event, awaitingAck: event !== null, supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,
-    generation: negotiation.generation, retained, frameMounted, blockSession,
+    generation: negotiation.generation, retained, frameMounted, blockSession, blockRefresh,
     onBlockCapability, onBlockState, dispatch,
   }
 }

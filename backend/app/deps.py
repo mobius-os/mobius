@@ -106,6 +106,8 @@ class Principal:
   embed_role: str | None = None
   operations: frozenset[str] = frozenset()
   delegation_id: str | None = None
+  # Restrictive provenance, not the chat/run identity of an app caller.
+  delegation_chat: str | None = None
   app_is_service: bool = False
   # Signed supervised-job identity/grant; never copied into frame bearers.
   app_job_secrets: frozenset[str] = frozenset()
@@ -736,15 +738,22 @@ def get_principal(
 def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Principal:
   if payload.get("scope") not in (None, "app"):
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
+  # A partial signed lineage cannot be forwarded without either a mint-time
+  # error or dropping the caller's restrictions. Refuse it at resolution.
+  if (payload.get("delegation_id") is None) != (payload.get("delegation_chat") is None):
+    raise HTTPException(status_code=401, detail="Incomplete delegation lineage.")
   app_id = _enforce_app_scope(payload, db)
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
-    chat_id=payload.get("agent_chat") or payload.get("delegation_chat"),
-    run_id=payload.get("agent_run"),
+    # App tokens retain the initiating helper's restrictions, never its agent
+    # identity. Consumers of chat_id/run_id must not mistake an app for it.
+    chat_id=(payload.get("agent_chat") or payload.get("delegation_chat")) if app_id is None else None,
+    run_id=payload.get("agent_run") if app_id is None else None,
     delegation_id=payload.get("delegation_id"),
+    delegation_chat=payload.get("delegation_chat"),
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
     app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
@@ -800,6 +809,13 @@ def _owner_principal_or_403(principal: Principal) -> models.Owner:
   return principal.owner
 
 
+def get_owner_principal(principal: Principal = Depends(get_principal)) -> Principal:
+  """``get_current_owner``'s caller, for owner-only routes that also need its
+  lineage."""
+  _owner_principal_or_403(principal)
+  return principal
+
+
 def get_current_owner_for_lifecycle_control(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
@@ -809,10 +825,16 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
+def acts_for_guest(principal: Principal) -> bool:
+  """Whether this bearer acts for a shared-browser guest: the guest's own
+  session, or an app, service, agent or helper working for one."""
+  return principal.browser is not None
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
   require_nondelegated_owner_control(principal)
-  if principal.browser is not None:
+  if acts_for_guest(principal):
     raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
@@ -826,7 +848,7 @@ def get_owner_or_delegated_owner_for_app_token(
   already presents (scoped to one app), and a delegated helper can already read
   that app's frame/module/storage with its owner-scoped bearer. So a delegated
   child is admitted here — unlike ``get_current_owner_for_lifecycle_control`` —
-  but the caller MUST forward ``principal.delegation_id``/``principal.chat_id``
+  but the caller MUST forward ``principal.delegation_id``/``principal.delegation_chat``
   into ``auth.create_app_token`` so the down-scoped token stays a delegated
   bearer. Without that lineage a child could launder its inherited access into a
   CLEAN app credential and bypass the delegation boundary that
@@ -911,7 +933,11 @@ def get_delegation_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve owner/app plus the route-confined delegated-child bearer."""
+  """Resolve owner/app plus the route-confined delegated-child bearer.
+
+  An app carrying a helper's lineage is restricted by it, not authorized to
+  observe or drive that helper's children. Refuse it across this route family.
+  """
   owner, payload = _resolve_owner(token, db)
   if payload.get("scope") == "delegation":
     delegation_id = payload.get("delegation_id")
@@ -929,7 +955,13 @@ def get_delegation_principal(
       chat_id=str(chat_id), delegation_id=str(delegation_id),
       browser=BrowserLineage.from_claims(payload),
     )
-  return _generic_principal(owner, payload, db)
+  principal = _generic_principal(owner, payload, db)
+  if principal.scope == "app" and principal.delegation_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegated app tokens cannot act as helper agents.",
+    )
+  return principal
 
 
 def get_chat_view_principal(
@@ -1253,10 +1285,38 @@ def get_owner_or_app_with_connect_manage(
   )
 
 
+def require_account_owner(principal: Principal = Depends(get_principal)) -> None:
+  """The owner's own accounts (the Möbius account's profile, sign-in email,
+  deployments and credit; the GitHub connection; their public Store
+  identity) are theirs alone, like their own device: the API never serves
+  them to a shared-browser guest or work it started, whatever workspace
+  access the guest holds."""
+  if acts_for_guest(principal):
+    raise HTTPException(403, "Only the installation owner can use this account.")
+
+
+def require_account_owner_control(principal: Principal = Depends(get_principal)) -> None:
+  """``require_account_owner`` for changes, which a delegated helper may not
+  make either. Deliberately independent of how much workspace access a guest
+  holds, unlike ``require_installation_owner_control``.
+
+  Linking the owner's Möbius account, and writes to GitHub or the Community
+  Store under the owner's identity, require this: Contribute's PR sends,
+  updates, assignments, merges and replies,
+  project pushes, Reviewer grants and manual posts, and Store publishing,
+  reviews and install receipts. Reviewer's automatic posts under an existing
+  grant require only ``require_account_owner``, so a delegated helper may
+  still consume that grant. A guest's apps may read GitHub through the
+  owner's connection but never act on it as the owner."""
+  require_nondelegated_owner_control(principal)
+  require_account_owner(principal)
+
+
 def get_owner_or_app_with_identity_manage(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
+  require_account_owner(principal)
   return _identity_manager(principal, db)
 
 
@@ -1265,6 +1325,17 @@ def get_identity_reader(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """``get_owner_or_app_with_identity_manage`` for reads a public service makes."""
+  require_account_owner(principal)
+  return _identity_manager(principal, db)
+
+
+def get_handle_directory_reader(
+  principal: Principal = Depends(get_principal_or_public_service),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """``get_identity_reader`` for the public handle directory. It resolves
+  other accounts' handles rather than reading this owner's account, so the
+  apps a guest uses may look collaborators up too."""
   return _identity_manager(principal, db)
 
 
@@ -1300,6 +1371,7 @@ def get_owner_or_app_with_railway_manage(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """Owner JWT, or an app with reviewed Railway deployment authority."""
+  require_account_owner(principal)
   owner = principal.owner
   if principal.app_id is None:
     return owner
@@ -1319,12 +1391,191 @@ def get_owner_or_app_with_railway_manage(
   )
 
 
+def get_owner_or_app_with_location_history_read(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with the reviewed location-history grant.
+
+  Like ``identity_manage``, the grant lives in the accepted capability
+  contract, so an app version that stops declaring it loses access on the
+  next request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("location_history_read") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.location_history_read=true in its manifest "
+      "to read your location history."
+    ),
+  )
+
+
+def get_credits_reader(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Who may see the owner's credits: the balance, earnings and history.
+
+  The owner, or an app holding the reviewed ``credits_manage`` grant; never a
+  shared-browser guest or work a guest started, since these are the
+  installation owner's private finances. Every credits route that reads the
+  owner's account uses this or ``get_credits_controller``, so the grant and the
+  guest refusal cannot be applied one without the other.
+  """
+  if principal.browser is not None:
+    raise HTTPException(403, "Only the installation owner can see their credits.")
+  return _require_credits_manage(principal, db)
+
+
+def get_credits_controller(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Who may move the owner's credits: pair, buy, fund, publish, withdraw.
+
+  As ``get_credits_reader``, and never a delegated helper either: these are
+  installation-owner controls (``require_installation_owner_control``).
+  """
+  require_installation_owner_control(principal)
+  return _require_credits_manage(principal, db)
+
+
+def _require_credits_manage(principal: Principal, db: Session) -> models.Owner:
+  """The owner, or a Store app's accepted ``credits_manage`` contract.
+
+  The owner's credits are money at the paired credits service. That is its own
+  critical grant, never implied by ``identity_manage``, whose consent covers
+  only the sign-in link. Like that grant it lives in the accepted capability
+  contract, so an app version that stops declaring it loses access on the next
+  request.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if _contract_data(app).get("credits_manage") is True:
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.credits_manage=true in its manifest "
+      "to see or manage your credits."
+    ),
+  )
+
+
+def _contract_data(app: models.App) -> dict:
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data")
+  return data if isinstance(data, dict) else {}
+
+
+def _require_credits_app_consent(app: models.App) -> None:
+  """Local manifests never self-grant access to the owner's credits.
+
+  Use the same Store/consent boundary as first-open approval, not package
+  identity: local apply can copy these permissions into a contract without
+  ever showing the owner a consent card.
+  """
+  if not app_consent.gated(app) or app_consent.status(app) != "accepted":
+    raise HTTPException(
+      status_code=403,
+      detail="App credits permissions need an installed Store app with accepted consent.",
+    )
+
+
+def spend_credits_targets(app: models.App) -> list[str]:
+  """The ``"<seller>/<app>"`` entries the owner allowed this app to pay for."""
+  targets = _contract_data(app).get("spend_credits")
+  return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
+
+
+def get_credits_spender(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.App:
+  """The paying app: its own service, with a reviewed ``spend_credits`` grant.
+
+  A charge spends the owner's money, so only the app's reviewed backend may
+  make one: never its browser frame, which untrusted page content can drive,
+  and never a public invocation (``get_principal`` refuses that scope), whose
+  caller is a visitor. A service a shared-browser guest or delegated helper
+  invoked is refused too: neither may spend the installation owner's credits.
+  Only consent-gated Store apps qualify. The route then refuses a seller the
+  accepted grant does not name.
+  """
+  require_nondelegated_owner_control(principal)
+  if principal.app_id is None or not principal.app_is_service:
+    raise HTTPException(
+      status_code=403,
+      detail="Only an app's own service can spend credits for the owner.",
+    )
+  if principal.browser is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner's own use of an app can spend their credits.",
+    )
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if not spend_credits_targets(app):
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "This app needs permissions.spend_credits in its manifest, listing the "
+        "\"<seller>/<app>\" it pays for, to spend credits."
+      ),
+    )
+  return app
+
+
+def get_credits_price_reader(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or a consented Store app's credits-management/spending grant.
+
+  A paying app reads the seller's published price to show the owner before it
+  charges. Prices are public at the credits service, so reading one grants no
+  spending or account authority and needs no credits-management grant.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  _require_credits_app_consent(app)
+  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail="This app needs permissions.spend_credits in its manifest to read credit prices.",
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, or an app token with live GitHub credential authority."""
-  require_nondelegated_owner_control(principal)
+  """Owner JWT, or an app token with live GitHub credential authority.
+
+  The connection is the owner's credential: neither a delegated helper nor a
+  shared-browser guest, or work it started, may read or change it."""
+  require_account_owner_control(principal)
   owner = principal.owner
   if principal.app_id is None:
     db.close()
@@ -1378,7 +1629,7 @@ def revocable_browser_stream(iterator, principal: Principal):
   changed (``access_signal``), so streamed events cost no queries and an idle
   stream still closes promptly on revocation or logout.
   """
-  if principal.browser is None:
+  if not acts_for_guest(principal):
     return iterator
   # Read plain values now, while the request's ORM session is still open.
   return _until_browser_revoked(

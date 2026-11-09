@@ -248,6 +248,38 @@ async def test_publication_lifecycle_reads_through_identity_broker(monkeypatch):
   }
 
 
+def test_app_listing_forwards_only_known_registry_rankings(monkeypatch):
+  from fastapi import FastAPI
+  from fastapi.testclient import TestClient
+
+  from app.deps import get_owner_or_app_with_manage_apps
+
+  forwarded = []
+
+  async def fake_request(method, path, **kwargs):
+    forwarded.append((method, path, kwargs["params"]))
+    return {"items": [], "sort": kwargs["params"]["sort"] or "updated"}
+
+  monkeypatch.setattr(community, "_request", fake_request)
+  app = FastAPI()
+  app.include_router(community.router)
+  app.dependency_overrides[get_owner_or_app_with_manage_apps] = lambda: SimpleNamespace()
+  client = TestClient(app)
+
+  assert client.get("/api/community/apps?sort=trending&limit=12").status_code == 200
+  assert client.get("/api/community/apps").status_code == 200
+  assert client.get("/api/community/apps?sort=updated").status_code == 200
+  assert client.get("/api/community/apps?sort=rating").status_code == 422
+  assert forwarded == [
+    ("GET", "/v1/community/apps",
+     {"q": "", "limit": 12, "offset": 0, "sort": "trending"}),
+    ("GET", "/v1/community/apps",
+     {"q": "", "limit": 50, "offset": 0, "sort": None}),
+    ("GET", "/v1/community/apps",
+     {"q": "", "limit": 50, "offset": 0, "sort": None}),
+  ]
+
+
 @pytest.mark.asyncio
 async def test_review_routes_forward_account_review_payload_and_list(
   monkeypatch,

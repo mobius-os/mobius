@@ -1,3 +1,4 @@
+import { openChatWithAppDraft, openExistingChat } from '../../lib/appChatNavigation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -196,19 +197,24 @@ export default function StandaloneApp({ initialApp }) {
         return
       }
       if (request.type === 'moebius:open-chat') {
-        stageComposerHandoff(request.chatId, request.draft)
-        if (request.view === 'changes') requestChatChanges(request.chatId)
-        window.location.href = shellUrl({ chat: request.chatId })
+        // The workspace restores the staged draft from storage after this load.
+        const open = () => {
+          if (request.view === 'changes') requestChatChanges(request.chatId)
+          window.location.href = shellUrl({ chat: request.chatId })
+        }
+        if (request.requireExisting) return openExistingChat(request, open)
+        await openChatWithAppDraft(request.chatId, request.draft, { open, openNew: openNewChat })
         return
       }
-      if (request.type === 'moebius:new-chat') {
-        const response = await api.chats.create({})
-        if (!response.ok) throw new Error(`chat create ${response.status}`)
-        const chat = await response.json()
-        stageComposerHandoff(chat.id, request.draft)
-        window.location.href = shellUrl({ chat: chat.id })
-      }
+      if (request.type === 'moebius:new-chat') await openNewChat(request.draft)
       return null
+    }
+    async function openNewChat(draft) {
+      const response = await api.chats.create({})
+      if (!response.ok) throw new Error(`chat create ${response.status}`)
+      const chat = await response.json()
+      stageComposerHandoff(chat.id, draft)
+      window.location.href = shellUrl({ chat: chat.id })
     }
     const outcome = run()
     if (request.requestId) return outcome

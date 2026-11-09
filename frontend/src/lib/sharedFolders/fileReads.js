@@ -1,7 +1,8 @@
 /* Reading files and listing entries, shared by remembered and one-visit folders. */
 import { FolderError } from './folderPaths.js'
 
-export const DEFAULT_READ_BYTES = 256 * 1024
+// Kept in step with DEFAULT_READ_BYTES in backend/scripts/folders.py.
+export const DEFAULT_READ_BYTES = 24 * 1024
 // Kept in step with MAX_READ_BYTES in backend/app/routes/shared_folders.py.
 export const MAX_READ_BYTES = 4 * 1024 * 1024
 export const DEFAULT_LIST_LIMIT = 200

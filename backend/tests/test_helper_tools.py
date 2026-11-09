@@ -465,8 +465,8 @@ def test_claude_stop_does_not_wake_an_unread_helper_result(
       await delegations_mod.wake_parent_after_child_settled(child_id)
       assert interrupts == []
       handle.mark_finished()  # Simulate the runner's completed SDK drain.
-      stopped, cleared = await chat_mod.stop_chat_for(parent_id)
-      assert stopped is True and cleared == []
+      outcome = await chat_mod.stop_chat_for(parent_id)
+      assert outcome.stopped is True
       assert handle.interrupt_requested is True
     finally:
       registry.unregister(parent_id, handle.kind)

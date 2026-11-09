@@ -30,11 +30,112 @@ function tagOf(node) {
   return String(node?.tagName || '').toLowerCase()
 }
 
-function escapeMarkdownText(text) {
-  return String(text || '')
+/** Escape only what Markdown would actually reinterpret, so copied prose stays
+ * readable: inline delimiters and table pipes anywhere, block and setext
+ * markers only at a line start, `_` only off a word boundary, `&` only where
+ * it would form an entity. "well-known", "1. item" mid-sentence, and
+ * "A & B" copy unchanged. Copy trimming strips every Unicode space, so any
+ * non-newline whitespace counts as indentation before a marker.
+ *
+ * `linePrefix` is what already precedes the text on its output line (only
+ * indentation or digits), or null when the text continues a line, as after
+ * "**Term**"; then only lines after its own newlines start a line. */
+function escapeMarkdownText(text, linePrefix = '') {
+  const inline = String(text || '')
     .replace(/\\/g, '\\\\')
-    .replace(/([`*_[\]~<>#+\-!|&])/g, '\\$1')
-    .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')
+    .replace(/[`*[\]~<|]/g, '\\$&')
+    .replace(/_/g, (match, offset, value) => (
+      /[\p{L}\p{N}]/u.test(value[offset - 1] || '') && /[\p{L}\p{N}]/u.test(value[offset + 1] || '')
+        ? match : '\\_'
+    ))
+    .replace(/&(?=#?\w+;)/g, '\\&')
+  // A NUL stands in for mid-line text: it is neither indentation nor a digit,
+  // so no line-start rule matches before it.
+  const prefix = linePrefix ?? '\0'
+  return `${prefix}${inline}`
+    .replace(/(^|\n)([^\S\n]*)([#>+=-])/g, '$1$2\\$3')
+    .replace(/(^|\n)([^\S\n]*\d+)([.)])(?=\s|$)/g, '$1$2\\$3')
+    .slice(prefix.length)
+}
+
+const BLOCK_TAGS = new Set([
+  'p', 'ul', 'ol', 'li', 'pre', 'blockquote', 'table', 'hr',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div',
+])
+
+/** Join serialized children, starting a block on its own line when it follows
+ * inline text in the same parent (a list item's text and its nested list).
+ * Each child learns what precedes it on its line, or null mid-line (see
+ * escapeMarkdownText). `adjoin` may adjust the text so far before a part is
+ * appended. */
+function joinChildren(node, serialize, adjoin = out => out) {
+  let out = ''
+  for (const child of childrenOf(node)) {
+    const lineTail = out.slice(out.lastIndexOf('\n') + 1)
+    const part = serialize(child, /^[^\S\n]*\d*$/.test(lineTail) ? lineTail : null)
+    if (!part) continue
+    out = adjoin(out, part)
+    if (out && !out.endsWith('\n') && BLOCK_TAGS.has(tagOf(child))) out += '\n'
+    out += part
+  }
+  return out
+}
+
+/** Whether a cloned node holds anything copy would emit. Chrome the copy
+ * ignores (a code block's language label, buttons) does not count. */
+function hasSelectedContent(node) {
+  if (!node) return false
+  if (node.nodeType === TEXT_NODE) return /\S/.test(node.nodeValue ?? node.textContent ?? '')
+  if (node.nodeType === DOCUMENT_FRAGMENT_NODE) return childrenOf(node).some(hasSelectedContent)
+  if (node.nodeType !== ELEMENT_NODE || ignoredElement(node)) return false
+  if (tagOf(node) === 'img' || tagOf(node) === 'annotation') return true
+  return childrenOf(node).some(hasSelectedContent)
+}
+
+function listItemsOf(node) {
+  const start = Number(node.getAttribute?.('start') || 1)
+  return childrenOf(node)
+    .filter(child => tagOf(child) === 'li')
+    .map((item, index) => {
+      const value = item.getAttribute?.('value')
+      return { item, number: value ? Number(value) : start + index }
+    })
+    // A drag that ends at the very start of the next item (or begins at the
+    // end of the previous one) selects no text there; it is not a list row.
+    .filter(({ item }) => hasSelectedContent(item))
+}
+
+/** A partial selection inside one list item or one table cell is just that
+ * text: strip the list and table structure that only encloses it. Structure
+ * stays when the selection really spans several items or cells, and a quote
+ * keeps its quote marker. Only partial selections unwrap: a whole block that
+ * is a one-item list or a one-cell table keeps its structure. */
+export function unwrapEnclosingStructure(node) {
+  let current = node
+  for (;;) {
+    const tag = tagOf(current)
+    let next = null
+    if (tag === 'ul' || tag === 'ol') {
+      const items = listItemsOf(current)
+      if (items.length === 1) next = items[0].item
+    } else if (tag === 'table') {
+      const cells = [
+        ...Array.from(current.querySelectorAll?.('th') || []),
+        ...Array.from(current.querySelectorAll?.('td') || []),
+      ].filter(hasSelectedContent)
+      if (cells.length === 1) next = cells[0]
+    } else if (tag !== 'blockquote') {
+      // The selection fragment itself, a layout wrapper, or the single item
+      // or cell found above: descend only through layout wrappers into one
+      // enclosing list or table.
+      const meaningful = childrenOf(current).filter(hasSelectedContent)
+      if (meaningful.length === 1 && ['ul', 'ol', 'table', 'div'].includes(tagOf(meaningful[0]))) {
+        next = meaningful[0]
+      }
+    }
+    if (!next) return current
+    current = next
+  }
 }
 
 /** Backtick delimiters that keep `text` one inline code span: longer than any
@@ -86,18 +187,32 @@ function texFrom(node) {
 }
 
 function markdownChildren(node) {
-  return childrenOf(node).map(markdownNode).join('')
+  // Copy never emits an image, and literal "[" is escaped, so a part starting
+  // with "[" is a link: a bare "!" just before it would make it an image.
+  return joinChildren(node, markdownNode, (out, part) => (
+    part.startsWith('[') ? out.replace(/(\\*)!$/, (match, slashes) => (
+      slashes.length % 2 ? match : `${slashes}\\!`
+    )) : out
+  ))
 }
 
 function listMarkdown(node, ordered) {
-  const start = ordered ? Number(node.getAttribute?.('start') || 1) : 1
-  const items = childrenOf(node).filter(child => tagOf(child) === 'li')
-  return items.map((item, index) => {
-    const marker = ordered ? `${start + index}. ` : '- '
+  return listItemsOf(node).map(({ item, number }) => {
+    const marker = ordered ? `${number}. ` : '- '
+    const indent = ' '.repeat(marker.length)
     const content = markdownChildren(item).trim()
     const lines = content.split('\n')
-    return `${marker}${lines[0] || ''}${lines.slice(1).map(line => `\n  ${line}`).join('')}`
+    return `${marker}${lines[0] || ''}${lines.slice(1).map(line => (line ? `\n${indent}${line}` : '\n')).join('')}`
   }).join('\n') + '\n\n'
+}
+
+/** A GFM row splits on a pipe preceded by an even number of backslashes, so
+ * escape exactly those; text pipes arrive escaped already, code pipes do not.
+ * (GFM cannot keep a single literal backslash right before a code pipe.) */
+function escapeCellPipes(cell) {
+  return cell.replace(/(\\*)\|/g, (match, slashes) => (
+    slashes.length % 2 ? match : `${slashes}\\|`
+  ))
 }
 
 function tableMarkdown(node) {
@@ -105,7 +220,7 @@ function tableMarkdown(node) {
   if (rows.length === 0) return ''
   const cells = row => childrenOf(row)
     .filter(cell => ['th', 'td'].includes(tagOf(cell)))
-    .map(cell => markdownChildren(cell).trim().replace(/\|/g, '\\|').replace(/\n/g, ' '))
+    .map(cell => escapeCellPipes(markdownChildren(cell).trim()).replace(/\n/g, ' '))
   const head = cells(rows[0])
   if (head.length === 0) return ''
   const body = rows.slice(1).map(cells)
@@ -123,9 +238,9 @@ export function markdownFromFragment(node) {
   return markdownNode(node).trim()
 }
 
-function markdownNode(node) {
+function markdownNode(node, linePrefix = '') {
   if (!node) return ''
-  if (node.nodeType === TEXT_NODE) return escapeMarkdownText(node.nodeValue ?? node.textContent)
+  if (node.nodeType === TEXT_NODE) return escapeMarkdownText(node.nodeValue ?? node.textContent, linePrefix)
   if (node.nodeType === DOCUMENT_FRAGMENT_NODE) return markdownChildren(node)
   if (node.nodeType !== ELEMENT_NODE || ignoredElement(node)) return ''
 
@@ -138,7 +253,11 @@ function markdownNode(node) {
     return classHas(node, 'md-math-block') ? `$$\n${tex}\n$$\n\n` : `$${tex}$`
   }
 
-  if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${childMarkdown().trim()}\n\n`
+  if (/^h[1-6]$/.test(tag)) {
+    // A trailing "#" run after a space would close the heading and vanish.
+    const content = childMarkdown().trim().replace(/(^|\s)(#+)$/, '$1\\$2')
+    return `${'#'.repeat(Number(tag[1]))} ${content}\n\n`
+  }
   if (tag === 'p') return `${childMarkdown().trim()}\n\n`
   if (tag === 'strong' || tag === 'b') return `**${childMarkdown()}**`
   if (tag === 'em' || tag === 'i') return `_${childMarkdown()}_`
@@ -166,7 +285,7 @@ function markdownNode(node) {
     const alt = node.getAttribute?.('alt') || ''
     // Rendered media URLs may carry short-lived authorization. Never copy a
     // transformed DOM URL; whole-block copies use the original source instead.
-    return alt ? escapeMarkdownText(alt) : ''
+    return alt ? escapeMarkdownText(alt, linePrefix) : ''
   }
   if (tag === 'blockquote') {
     const value = childMarkdown().trim()
@@ -180,16 +299,14 @@ function markdownNode(node) {
 }
 
 function plainChildren(node) {
-  return childrenOf(node).map(plainNode).join('')
+  return joinChildren(node, plainNode)
 }
 
 function plainList(node, ordered) {
-  const start = ordered ? Number(node.getAttribute?.('start') || 1) : 1
-  const items = childrenOf(node).filter(child => tagOf(child) === 'li')
-  return items.map((item, index) => {
-    const marker = ordered ? `${start + index}. ` : '- '
+  return listItemsOf(node).map(({ item, number }) => {
+    const marker = ordered ? `${number}. ` : '- '
     const content = plainChildren(item).trim()
-    return `${marker}${content.replace(/\n/g, '\n  ')}`
+    return `${marker}${content.replace(/\n/g, `\n${' '.repeat(marker.length)}`)}`
   }).join('\n') + '\n\n'
 }
 
@@ -291,14 +408,20 @@ function selectedMarkdownPayload(root, selection, markdownForBlock) {
   const markdown = []
   const plain = []
   let covered = ''
-  for (const block of blocks) {
-    const overlap = rangeInsideNode(range, block)
-    if (!overlap) continue
+  const overlaps = blocks
+    .map(block => ({ block, overlap: rangeInsideNode(range, block) }))
+    .filter(({ overlap }) => overlap)
+  for (const { block, overlap } of overlaps) {
     covered += overlap.toString()
-    const fragment = cloneRangeWithContext(overlap, block)
     const fullRange = block.ownerDocument.createRange()
     fullRange.selectNodeContents(block)
     const selectedAllRenderedText = overlap.toString() === fullRange.toString()
+    const clone = cloneRangeWithContext(overlap, block)
+    // Only a selection wholly inside one block is "just this item's text"; a
+    // selection reaching another block keeps the list or table it cuts through.
+    const fragment = overlaps.length === 1 && !selectedAllRenderedText
+      ? unwrapEnclosingStructure(clone)
+      : clone
     const raw = selectedAllRenderedText ? markdownForBlock(block) : ''
     const markdownPart = raw?.trim() || markdownFromFragment(fragment)
     const plainPart = plainTextFromFragment(fragment)

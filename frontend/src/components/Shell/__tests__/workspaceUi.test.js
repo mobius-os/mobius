@@ -269,11 +269,12 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
-  // The AppCanvas wrapper is wrapped in its own inline ErrorBoundary so one
-  // canvas throw degrades locally instead of replacing the whole shell.
+  // The AppCanvas wrapper is wrapped in its own LazySurface (an inline
+  // ErrorBoundary by default) so one canvas throw or failed chunk download
+  // degrades locally instead of replacing the whole shell.
   assert.match(
     shell,
-    /<ErrorBoundary[^>]*key=\{`ab-\$\{id\}`\}[^>]*variant="inline"[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
+    /<LazySurface[^>]*key=\{`ab-\$\{id\}`\}[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
   )
 })
 
@@ -1516,9 +1517,9 @@ test('complete and scoped reads both preserve pending archive intent', () => {
 })
 
 function deferred() {
-  let resolve
-  const promise = new Promise(r => { resolve = r })
-  return { promise, resolve }
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
 }
 
 function harness() {
@@ -1605,6 +1606,33 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('unreachable archive says so and offers Try again', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].reject(new TypeError('Load failed'))
+  assert.equal(await first, false)
+  assert.equal(h.row.archived_at, null, 'failure settles from the server row')
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius couldn’t be reached\./)
+  assert.equal(h.notices[0].options.variant, 'error')
+  assert.equal(h.notices[0].options.action.label, 'Try again')
+  const retry = h.notices[0].options.action.onAction()
+  await tick()
+  assert.deepEqual(h.calls, ['archive', 'archive'])
+  h.requests[1].resolve({ ok: true })
+  assert.equal(await retry, true)
+  assert.equal(h.row.archived_at, 'server-archive')
+})
+
+test('a server error reads differently from an unreachable server', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].resolve({ ok: false })
+  await first
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius hit an error\./)
 })
 
 test('Undo reverses a committed archive without creating another Undo', async () => {

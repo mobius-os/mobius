@@ -4,7 +4,7 @@ import ProjectCreateMenu from './ProjectCreateMenu.jsx'
 import ProjectActions from './ProjectActions.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
-import { formatDateTime } from '../../lib/dateTimeFormat.js'
+import { formatProjectDate } from '../../lib/relativeTime.js'
 import './Projects.css'
 
 // The Projects launcher: one readable list plus the focused creation menu.
@@ -29,7 +29,7 @@ export default function ProjectsDirectory({
     <section className="projects-directory" aria-label="Projects">
       <header className="projects-directory__header">
         <div>
-          <h1>Projects</h1><p>Your files, chats and Creations.</p>
+          <h1>Projects</h1><p>Your files, chats and results.</p>
         </div>
         <div className="projects-directory__actions">
           <ProjectCreateMenu showLabel templates={templates} onCreate={onCreate} onImportGithub={onImportGithub} onImportSource={onImportSource} className="projects-add-menu" />
@@ -47,7 +47,7 @@ export default function ProjectsDirectory({
         ) : projects.length === 0 ? (
           <div className="projects-empty">
             <ProjectTypeIcon value="blank" size={42} strokeWidth={1.4} aria-hidden="true" />
-            <h2>A place to make something.</h2><p>Start with a template, then use project chats to shape it. Files and Creations stay together.</p>
+            <h2>A place to make something.</h2><p>Start with a template, then use project chats to shape it. Files and results stay together.</p>
             <button type="button" onClick={() => onCreate?.(templates[0] || { key: 'blank', name: 'Blank project' })}>Create a project</button>
           </div>
         ) : visible.length === 0 ? (
@@ -72,6 +72,7 @@ export default function ProjectsDirectory({
 }
 
 function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onDelete }) {
+  const updated = formatProjectDate(project.updated_at)
   const [renaming, setRenaming] = useState(false)
   const [value, setValue] = useState(project.name)
   const [busy, setBusy] = useState(false)
@@ -132,7 +133,7 @@ function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onDelete }) {
           <ProjectIdentityIcon project={project} size={36} />
           <span className="projects-collection__copy">
             <strong>{project.name}</strong>
-            <small>{project.template?.name || 'Project'}{project.updated_at && ` · ${formatDateTime(project.updated_at)}`}</small>
+            <small>{project.template?.name || 'Project'}{updated && ` · ${updated}`}</small>
           </span>
         </button>
       )}

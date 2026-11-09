@@ -272,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -286,6 +289,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
@@ -950,6 +958,7 @@ RUN_END_REASONS = frozenset((
   "superseded",           # a new turn started while this row was still open
   "provider_switch",      # a provider handoff retired the run
   "dependency_withdrawn", # its Goal dependency result was withdrawn
+  "wait_withdrawn",       # its never-admitted Wait follow-up was withdrawn
   "chat_deleted",         # the chat was deleted mid-turn
   "recovered",            # the turn wedged and was closed by recovery
 ))
@@ -1661,6 +1670,8 @@ class AgentWorkClaim(Base):
   )
   owner_run_id = Column(String(64), nullable=False)
   owner_goal_id = Column(String(64), nullable=True, index=True)
+  # Last-transfer projection, never the recovery source for revocations.
+  # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
   takeover_reason = Column(String(1000), nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
@@ -1673,6 +1684,34 @@ class AgentWorkClaim(Base):
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
   outcome = Column(String(1000), nullable=True)
+
+
+class AgentWorkClaimRevocation(Base):
+  """One immutable former-executor notice, committed with its transfer.
+
+  Delivery acknowledgement records a peer delivery path, not that execution
+  stopped. Keep the snapshot even if the claim finishes, is reacquired, or a
+  recipient becomes unreachable; chat identities deliberately have no FK.
+  """
+
+  __tablename__ = "agent_work_claim_revocations"
+
+  claim_id = Column(
+    String(64), ForeignKey("agent_work_claims.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  revision = Column(Integer, primary_key=True)
+  acquisition_id = Column(String(64), nullable=True)
+  owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
+                    nullable=False)
+  sender_chat_id = Column(String(64), nullable=False)
+  recipient_chat_id = Column(String(64), nullable=False)
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  # Outcome is the state; the timestamp records when that outcome was stored.
+  # NULL is owed; closure need not mean a notice was delivered.
+  outcome = Column(String(32), nullable=True, index=True)
+  closed_at = Column(DateTime, nullable=True)
 
 
 class AgentWorkInterest(Base):
@@ -1898,6 +1937,46 @@ class ChatAppArtifact(Base):
   )
   touched_at = Column(DateTime, nullable=False, default=now_naive_utc)
   seen_at = Column(DateTime, nullable=True, default=None)
+
+
+class AppChatScopeStart(Base):
+  """The one first turn an app's scoped handoff may admit for a scope.
+
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
+
+  Admission is recorded here too, not inferred from the chat alone: an owner
+  Stop or queued-message removal can leave an admitted chat with no messages,
+  queue, or run, and a replay must still find it started.
+  """
+
+  __tablename__ = "app_chat_scope_starts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  scope = Column(String(160), primary_key=True)
+  # The chat this scope admitted; NULL only when cancelled before admission.
+  chat_id = Column(String(64), nullable=True)
+  # Set once by the app's cancellation; a cancelled scope never admits a turn.
+  cancelled_at = Column(DateTime, nullable=True)
+  # Set once, in the chat writer commit that accepted the chat's first turn
+  # (see app_chat_scopes); never cleared.
+  admitted_at = Column(DateTime, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (
+    CheckConstraint(
+      "chat_id IS NOT NULL OR cancelled_at IS NOT NULL",
+      name="ck_app_chat_scope_starts_outcome",
+    ),
+    CheckConstraint(
+      "admitted_at IS NULL OR (chat_id IS NOT NULL AND cancelled_at IS NULL)",
+      name="ck_app_chat_scope_starts_admitted",
+    ),
+  )
 
 
 class PushSubscription(Base):
@@ -2401,3 +2480,76 @@ class ChatTranscriptDamage(Base):
   raw = Column(LargeBinary, nullable=False)
   error = Column(Text, nullable=False)
   recorded_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationPosition(Base):
+  """One device location fix uploaded by the native mobile app's web view.
+
+  The native app hands positions to the top-frame page through
+  ``window.MobiusNative``; the page is the only route to the server, so it
+  queues fixes and POSTs them to ``/api/location/batch``. Positions arrive in
+  batches, out of order, and a rare batch can be delivered twice — so storage
+  is idempotent on ``(owner_id, device_id, device_timestamp_ms)``. The device
+  fix time is the identity key, not arrival order.
+
+  ``device_id`` is optional; it defaults to the empty string rather than NULL
+  so the uniqueness key stays well-defined (SQLite treats NULLs as distinct,
+  which would defeat deduplication for the common single-device case). All
+  fields the device could not determine are stored as NULL, except latitude
+  and longitude, which a stored fix always has.
+
+  This is a new table, so ``create_all`` adds it to existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "location_positions"
+  __table_args__ = (
+    UniqueConstraint(
+      "owner_id", "device_id", "device_timestamp_ms",
+      name="uq_location_owner_device_ts",
+    ),
+    Index("ix_location_owner_ts", "owner_id", "device_timestamp_ms"),
+  )
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  # Opaque client-chosen device identifier; "" when the page did not supply one.
+  device_id = Column(String(128), nullable=False, default="", server_default="")
+  # Milliseconds since the epoch, from the device's location fix. The dedup key.
+  device_timestamp_ms = Column(Integer, nullable=False)
+  latitude = Column(Float, nullable=False)
+  longitude = Column(Float, nullable=False)
+  accuracy = Column(Float, nullable=True)
+  altitude = Column(Float, nullable=True)
+  speed = Column(Float, nullable=True)
+  heading = Column(Float, nullable=True)
+  # When this server received and stored the fix; distinct from the fix time so
+  # delayed offline uploads cannot be mistaken for when the device was there.
+  received_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class LocationTrackingDevice(Base):
+  """Whether one phone is tracking, and its options, as that phone reported.
+
+  Each phone writes only its own row when tracking starts, stops, or changes
+  pace, so other surfaces (a viewer on a laptop) can show the current state:
+  tracking is on when any phone's row says so. A row never starts or stops a
+  phone; each phone resumes only its own tracking after a reload in the same
+  app session. ``reported_at`` is the phone's own clock when it decided the
+  change, so a slower, older report cannot overwrite a newer one.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "location_tracking_devices"
+
+  owner_id = Column(Integer, ForeignKey("owner.id"), primary_key=True)
+  # The same opaque phone id the phone stamps on its uploaded fixes.
+  device_id = Column(String(128), primary_key=True)
+  enabled = Column(Boolean, nullable=False, default=False, server_default=false())
+  # The phone's last startLocation options: {background, interval, distance}.
+  # JSON so option shape can grow without a migration.
+  options_json = Column(JSON, nullable=False, default=dict)
+  # Milliseconds since the epoch on the phone when it made this change.
+  reported_at_ms = Column(Integer, nullable=False)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)

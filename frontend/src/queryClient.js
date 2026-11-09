@@ -96,34 +96,45 @@ export const persistOptions = {
   // returns, and logout explicitly deletes this owner-scoped database.
   maxAge: Infinity,
   buster: QUERY_CACHE_BUSTER,
-  dehydrateOptions: {
-    shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
-  },
+  dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
 }
 
 // Decide whether a query's cache entry is mirrored to IndexedDB.
 //
-// Top-level domains (chats, messages, theme, apps, app-consent) match on the first
-// key segment. The Settings view's provider/CLI-version/status queries
-// are persisted too so the panel paints from disk on open instead of
-// flashing empty details while the live probes revalidate:
+// Top-level domains (chats, messages, theme, apps, app-consent) match on the
+// first key segment. Settings persists what its overview paints, so it opens
+// from disk with every row filled while the live reads revalidate:
 //   - ['settings']                          → provider config + CLI versions
+//   - ['settings','provider-usage',<id>]    → each provider's usage snapshot
 //   - ['auth','providers','status']         → canonical provider state
 //   - ['platform','status']                 → last-known release identity
-// Matched by full key, not by ['auth'] alone, so the short-lived
-// setup-status query (['auth','setup','status']) is NOT persisted.
+//   - ['github','status']                   → GitHub login and scope flags
+//   - ['identity-summary']                  → Möbius handle, avatar fingerprint, mode
+// Everything else under ['auth'] and ['identity'] stays in memory: the
+// setup-status gate is short-lived, and the full Möbius identity carries the
+// private email, the avatar address and the account's deployments. A shared-browser guest uses
+// its own memory-only client (App.jsx), so it never reads or writes this cache.
+const PERSISTED_HEADS = new Set(['chats', 'chat-messages', 'theme', 'apps', 'app-consent'])
 const PERSISTED_FULL_KEYS = new Set([
   JSON.stringify(['settings']),
   JSON.stringify(['auth', 'providers', 'status']),
   JSON.stringify(['platform', 'status']),
+  JSON.stringify(['github', 'status']),
+  JSON.stringify(['identity-summary']),
 ])
 
 export function shouldPersistQueryKey(queryKey) {
-  const head = queryKey[0]
-  if (head === 'chats' || head === 'chat-messages' || head === 'theme' || head === 'apps' || head === 'app-consent') {
-    return true
-  }
+  if (PERSISTED_HEADS.has(queryKey[0])) return true
+  if (queryKey[0] === 'settings' && queryKey[1] === 'provider-usage') return true
   return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
+}
+
+/** Which cache entries both saves (the throttled one and the reload handoff)
+ * write. A query still on its first fetch has nothing to keep, and TanStack
+ * dehydrates it with its in-flight Promise, which IndexedDB cannot clone: one
+ * such entry would fail the whole write and save nothing. */
+export function shouldPersistQuery(query) {
+  return query.state.status !== 'pending' && shouldPersistQueryKey(query.queryKey)
 }
 
 /** Force the current in-memory cache to IndexedDB before an intentional shell
@@ -138,9 +149,7 @@ export async function flushPersistedQueryCache(client = queryClient) {
   const persistedClient = {
     buster: QUERY_CACHE_BUSTER,
     timestamp: Date.now(),
-    clientState: dehydrate(client, {
-      shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
-    }),
+    clientState: dehydrate(client, persistOptions.dehydrateOptions),
   }
   await idbStorage.setItem(QUERY_CACHE_KEY, persistedClient)
 }

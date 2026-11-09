@@ -400,7 +400,7 @@ def test_completed_retry_with_failed_receipt_exposes_recovery_and_manual_resume_
   assert wait.result_disposition == "delivered" and wait.received_run_id == resumed.id
 
 
-@pytest.mark.parametrize("outcome", ["completed", "cancelled", "withdrawn"])
+@pytest.mark.parametrize("outcome", ["completed", "cancelled", "withdrawn", "withdrawn_after_attempt"])
 def test_non_receipt_history_stays_with_owning_answer_not_unrelated_next_answer(db, chat, outcome):
   from datetime import timedelta, UTC
   source = _run(db, chat, "declaring", "goal")
@@ -409,8 +409,8 @@ def test_non_receipt_history_stays_with_owning_answer_not_unrelated_next_answer(
   base = now_naive_utc()
   wait.created_at = base - timedelta(seconds=10)
   wait.met_at = base
-  if outcome == "withdrawn":
-    wait.result_disposition = "withdrawn"
+  if outcome in {"withdrawn", "withdrawn_after_attempt"}:
+    wait.result_disposition = outcome
     wait.result_disposed_at = base + timedelta(seconds=10)
   else:
     chat_waits.stage_retire_fired_goal_waits(db, chat.id, source.goal_id)
@@ -468,3 +468,21 @@ def test_retirement_history_can_use_visible_own_goal_answer_when_declaration_is_
   assert set(summaries) == {0}
   assert summaries[0][0]["result_disposition"] == "retired_by_goal_outcome"
   assert summaries[0][0]["id"] == wait.id
+
+
+def test_a_wait_result_starts_while_a_stop_holds_the_owner_queue(db, chat, monkeypatch):
+  """Held rows wait for the owner, not for this result: it starts now and
+  leaves them held, instead of waiting for the idle-queue sweep."""
+  a = _run(db, chat, "held-source", "goal-held")
+  wait = _wait(db, chat, a)
+  chat.pending_messages = [{"role": "user", "content": "later", "cid": "held", "ts": 1,
+                            "held": True, "_owner_input_at": "2020-01-01T00:00:00+00:00"}]
+  db.commit()
+  scheduled = []
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw))
+  assert asyncio.run(chat_waits._deliver_resume(wait.id)) is True
+  db.expire_all()
+  assert len(scheduled) == 1
+  assert [(m["cid"], m.get("held")) for m in db.get(models.Chat, chat.id).pending_messages] == [
+    ("held", True),
+  ]

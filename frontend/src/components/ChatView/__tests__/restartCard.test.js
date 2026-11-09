@@ -11,9 +11,6 @@ import {
   restartCardStatusLabel,
 } from '../restartCard.js'
 import QuestionCard from '../QuestionCard.jsx'
-import {
-  chatDetailCacheValue, shouldRefetchTranscriptForRuntime,
-} from '../../../lib/chatDetailCache.js'
 import { carryDurableBlockState } from '../streamPromotion.js'
 
 
@@ -260,24 +257,6 @@ test('observation distinguishes restoring work, waiting, and delivered continuat
       observation: { observed_at: '2025-01-01T12:00:00Z', continuation },
     }), copy)
   }
-})
-
-
-test('reopening a cached card refreshes missed restart receipts and hold changes', () => {
-  const detail = {
-    updated_at: '2025-01-01T11:55:00Z', messages: [], total: 0, offset: 0,
-    restart_observation_key: '[[],null]',
-  }
-  const cached = chatDetailCacheValue(detail)
-  const runtime = { ...detail, running: false }
-  assert.equal(shouldRefetchTranscriptForRuntime(cached, runtime), false)
-  for (const key of ['observed-restoring', 'observed-restart-required', 'observed-pending']) {
-    const changed = { ...runtime, restart_observation_key: key }
-    assert.equal(shouldRefetchTranscriptForRuntime(cached, changed), true)
-    const refreshed = chatDetailCacheValue({ ...detail, restart_observation_key: key })
-    assert.equal(shouldRefetchTranscriptForRuntime(refreshed, changed), false)
-  }
-  assert.equal(shouldRefetchTranscriptForRuntime({ ...cached, restartObservationKey: null }, runtime), true)
 })
 
 
