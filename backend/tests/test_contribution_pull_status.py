@@ -125,6 +125,16 @@ def test_ask_for_rereview_only_of_people_whose_review_is_of_an_older_version():
   assert refused(current, "request-reviewers", asking(["sam"])) == (409, "Nobody reviewed an older version.")
 
 
+@pytest.mark.parametrize("asked", ["Alice", "alice", "ALICE"])
+def test_ask_for_rereview_matches_a_reviewer_whatever_the_case_of_their_login(asked):
+  github = StatusGitHub()
+  github.reviews = [{**APPROVAL, "author": {"login": "Alice", "__typename": "User"}, "commit": {"oid": OLDER}}]
+  assert change(github, "request-reviewers", asking([asked]))["state"] == "requested"
+  assert github.writes_seen == [("reviewers", [asked])]
+  status, reason = refused(github, "request-reviewers", asking(["bob"]))
+  assert status == 409 and "Alice" in reason  # the refusal still names her as GitHub spells her
+
+
 def test_a_head_that_moved_since_the_owner_looked_is_refused_before_any_write():
   github = StatusGitHub(draft=True)
   github.pull["head"] = {"sha": MOVED}
