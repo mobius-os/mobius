@@ -10,6 +10,7 @@ from app import contribution_pull_status as subject
 from app.contribution_errors import ContributionSubmitError
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
+from tests.pr_job_helpers import holding
 from tests.test_contribution_direct_merge import FakeGitHub, NAME, NUMBER, _flags
 from tests.test_contribution_review_runs import APPROVAL, PULL, SHA
 
@@ -58,7 +59,7 @@ def asking(reviewers, **changes):
 
 
 def change(github, name, request=None, job=None):
-  return asyncio.run(subject.change_pull_status(github, None, name, request or body(), lambda: None, job=job))
+  return asyncio.run(subject.change_pull_status(github, None, name, request or body(), lambda: None, pr_job=holding(job)))
 
 
 def refused(github, name, request=None, job=None):

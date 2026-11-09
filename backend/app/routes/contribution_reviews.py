@@ -7,7 +7,7 @@ import subprocess
 import logging
 import time
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -788,7 +788,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       _require_ready_attempt_resolved(previous, target)
       await merge_actions.merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
         gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal),
-        job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id, app_id=row.app_id))
+        pr_job=partial(_pr_job_held, db, row.owner_id, target["repo"], target["number"],
+                       exclude_run_id=row.id, app_id=row.app_id))
       return {"run": _run_view(db, row)}
     if outcome.get("merge_attempted") or outcome.get("public_review"):
       reviews.save_effect_outcome(db, row, item_key, outcome)
@@ -961,6 +962,21 @@ def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None, app_id=None) -> 
   jobs = [job for job in jobs if job]
   live = next((job for job in jobs if job["state"] != "stalled"), None)
   return live or _respond_job(db, app_id, repo, number) or (jobs[0] if jobs else None)
+
+
+@asynccontextmanager
+async def _pr_job_held(db, owner_id, repo, number, *, exclude_run_id=None, app_id=None):
+  """Hold the owner's PR-job admission and hand over a lookup of the PR's job as it is now.
+
+  A status change or merge asks the PR machine after waiting for the GitHub connection, so a job fact
+  read when the request began proves nothing then. Under admission's own lock no review run can enter
+  between the caller's last look and its write. A Respond chat starts through the ordinary app-chat
+  start, which this lock does not guard: every look reads the chats afresh, and only a chat started
+  after the last look escapes it.
+  """
+  async with chat_queue.get_transition_lock(f"review-pr-admission:{owner_id}"):
+    db.rollback()  # as admission does: read the job as it is now, not as this request's snapshot saw it
+    yield lambda: _pr_job(db, owner_id, repo, number, exclude_run_id=exclude_run_id, app_id=app_id)
 
 
 # Contribute starts "Respond to feedback" as an ordinary app chat under this scope. No run row
@@ -1252,9 +1268,9 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce),
-                                             db, principal.owner.id,
-                                             job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
+  return await direct_merge.merge_exact_pull(
+    _gh, cwd, body, partial(_assert_app_current, db, app_id, nonce), db, principal.owner.id,
+    pr_job=partial(_pr_job_held, db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 class PullStatusChange(PullIdentity):
@@ -1284,8 +1300,9 @@ async def _owner_status_change(app_id, name, body, db, principal):
   _require_owner_hands(principal, "Only you can change a pull request's status from here. An agent cannot press it.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await pull_status.change_pull_status(_gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
-                                              job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
+  return await pull_status.change_pull_status(
+    _gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
+    pr_job=partial(_pr_job_held, db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 @router.post(APP_PREFIX + "/{app_id}/pulls/ready",

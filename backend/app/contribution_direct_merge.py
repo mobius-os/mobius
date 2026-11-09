@@ -83,12 +83,12 @@ def _require_clear(target: dict, repo: dict, pull: dict, checks: dict, facts: di
     raise HTTPException(409, blocker)
 
 
-def _read_mergeable_pull(gh, cwd, body, job) -> tuple[dict, dict, dict]:
-  """Read GitHub now and refuse, in plain words, unless the exact head named can be merged.
+def _read_mergeable_pull(gh, cwd, body) -> tuple[dict, dict, dict, dict, dict]:
+  """Read GitHub now and refuse, in plain words, unless the exact head named is the open pull request.
 
-  Returns what dispatch_merge takes: the merge target, the repository and the
-  pull request's checks. This only reads. ``job`` is the agent job a review
-  run holds on this PR, if any.
+  Returns the merge target, the repository, the pull request, its checks and its
+  machine facts, which carry no agent job: that is local and asked for later,
+  right at the merge guard. This only reads.
   """
   try:
     repo = _read_object(gh, cwd, f"repos/{body.repo}")
@@ -100,9 +100,8 @@ def _read_mergeable_pull(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   except _READ_FAILURES as exc:
     raise HTTPException(404, UNREADABLE) from exc
   # The merge guard does not depend on who presses Merge, so no account read is needed.
-  facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=None, job=job, checks=checks)
-  _require_clear(target, repo, pull, checks, facts)
-  return target, repo, checks
+  facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=None, job=None, checks=checks)
+  return target, repo, pull, checks, facts
 
 
 def _method_to_send(requested: str | None, repo: dict, checks: dict) -> str | None:
@@ -161,15 +160,19 @@ def _settle(db, owner_id: int, target: dict, result) -> None:
   db.commit()
 
 
-async def _merge(gh, cwd, body, authorize, job, db, owner_id) -> dict:
+async def _merge(gh, cwd, body, authorize, pr_job, db, owner_id) -> dict:
   authorize()
   async with _github_connection_transaction():
-    target, repo, checks = await asyncio.to_thread(_read_mergeable_pull, gh, cwd, body, job)  # unsettled: read-only (GitHub pull request, reviews, checks and base tip)
-    method = _method_to_send(body.method, repo, checks)
-    _arm(db, owner_id, target)
-    # A cancellation here leaves the saved attempt in place: the write may have landed.
-    result = await merge_actions.dispatch_merge(gh, cwd, target, repo, checks, authorize, method)
-    _settle(db, owner_id, target, result)
+    target, repo, pull, checks, facts = await asyncio.to_thread(_read_mergeable_pull, gh, cwd, body)  # unsettled: read-only (GitHub pull request, reviews, checks and base tip)
+    # The agent job is local, so GitHub's reads cannot show it change: ask for it now, after every wait,
+    # and keep review admission out until the merge is sent.
+    async with pr_job() as job_now:
+      _require_clear(target, repo, pull, checks, {**facts, "job": job_now()})
+      method = _method_to_send(body.method, repo, checks)
+      _arm(db, owner_id, target)
+      # A cancellation here leaves the saved attempt in place: the write may have landed.
+      result = await merge_actions.dispatch_merge(gh, cwd, target, repo, checks, authorize, method)
+      _settle(db, owner_id, target, result)
   # dispatch_merge turns a cancellation before the write into a refusal. The
   # caller's cancellation still wins, as in every review merge.
   if result.state == "not_dispatched" and asyncio.current_task().cancelling():
@@ -182,20 +185,21 @@ def _refusal_summary(exc: HTTPException) -> str:
   return f"HTTP {exc.status_code}, {detail}"
 
 
-async def merge_exact_pull(gh, cwd, body, authorize, db, owner_id: int, *, job: dict | None) -> dict:
+async def merge_exact_pull(gh, cwd, body, authorize, db, owner_id: int, *, pr_job) -> dict:
   """Merge or enqueue the exact head the owner named, once, and report what GitHub confirmed.
 
   `body` carries repo, number, head_sha and an optional method. `authorize`
   raises an HTTPException once the caller's authority no longer stands; it runs
   before any GitHub call and again right before the write. `db` and `owner_id`
-  hold the saved attempt; `job` is the agent job a review run holds on this PR
-  (the PR machine's job fact). Raises HTTPException: 404 when GitHub cannot be
-  read, 409 for a refusal that changed nothing and 502 when the write's outcome
-  is unconfirmed. Logs one line per attempt.
+  hold the saved attempt; `pr_job` opens the PR's agent job as it is at the
+  merge guard (the PR machine's job fact), holding review admission until the
+  merge is sent. Raises HTTPException: 404 when GitHub cannot be read, 409 for
+  a refusal that changed nothing and 502 when the write's outcome is
+  unconfirmed. Logs one line per attempt.
   """
   outcome = "ended without an answer; GitHub may or may not have applied it"
   try:
-    answer = await _merge(gh, cwd, body, authorize, job, db, owner_id)
+    answer = await _merge(gh, cwd, body, authorize, pr_job, db, owner_id)
     outcome = answer["state"]
     return answer
   except HTTPException as exc:

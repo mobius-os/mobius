@@ -14,6 +14,7 @@ from app import auth as auth_mod, contribution_direct_merge as subject, contribu
 from app.chat_writer import create_chat
 from app.contribution_errors import ContributionSubmitError
 from app.routes import contribution_reviews as routes
+from tests.pr_job_helpers import holding
 from tests.test_contribution_review_runs import APPROVAL, BASE, CHECKS, ITEM, PULL, REPO, SHA, TARGET
 
 NAME, NUMBER = ITEM["repo"], ITEM["number"]
@@ -134,7 +135,7 @@ LEDGER = {}
 
 
 def press(github, authorize=lambda: None, **changes):
-  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize, LEDGER["db"], LEDGER["owner_id"], job=None))
+  return asyncio.run(subject.merge_exact_pull(github, None, body(**changes), authorize, LEDGER["db"], LEDGER["owner_id"], pr_job=holding()))
 
 
 def refused(github, authorize=lambda: None, **changes):
@@ -280,10 +281,10 @@ def test_a_pull_request_that_cannot_be_merged_is_refused_in_plain_words_and_noth
 def test_a_merge_waits_while_an_agent_works_on_the_pull_request_but_not_for_a_stalled_one():
   github = FakeGitHub()
   with pytest.raises(HTTPException) as refusal:
-    asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], job={"state": "running"}))
+    asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], pr_job=holding({"state": "running"})))
   assert (refusal.value.status_code, refusal.value.detail) == (409, "An agent is already working on this PR.")
   assert github.writes == 0
-  answer = asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], job={"state": "stalled"}))
+  answer = asyncio.run(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], pr_job=holding({"state": "stalled"})))
   assert answer["state"] == "merged"
 
 
@@ -428,7 +429,7 @@ def test_a_caller_that_goes_away_during_the_write_leaves_the_attempt_saved():
     return FakeGitHub._answer(github.merge_answer)
   github._merge = hold_the_write
   async def scenario():
-    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], job=None))
+    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], pr_job=holding()))
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     release.set()
@@ -504,7 +505,7 @@ def test_a_cancelled_request_never_starts_the_write_and_its_cancellation_is_not_
       assert release.wait(5)
   github.on_base_read = hold_the_final_base_check
   async def scenario():
-    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], job=None))
+    task = asyncio.create_task(subject.merge_exact_pull(github, None, body(), lambda: None, LEDGER["db"], LEDGER["owner_id"], pr_job=holding()))
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     release.set()

@@ -1,15 +1,26 @@
 """A live "Respond to feedback" chat is its PR's one agent job, though no review run tracks it."""
+import asyncio
+from contextlib import asynccontextmanager
+from functools import partial
+
 import pytest
+from fastapi import HTTPException
 
 import app.chat as chat_module
-from app import models
+from app import (chat_queue, contribution_direct_merge as direct_merge, contribution_pull_status as pull_status,
+                 contribution_review_merge_actions as merge_actions, contribution_review_runs as domain, models)
 from app.chat_writer import create_chat
+from app.database import SessionLocal
+from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from app.timeutil import now_naive_utc
-from tests.test_contribution_review_admission import owner, refusal, start  # noqa: F401  (fixture)
-from tests.test_contribution_review_runs import settle_fixture_review, setup  # noqa: F401  (fixture)
+from tests.test_contribution_direct_merge import FakeGitHub
+from tests.test_contribution_pull_status import StatusGitHub
+from tests.test_contribution_review_admission import owner, refusal, start, start_body  # noqa: F401  (fixture)
+from tests.test_contribution_review_runs import ITEM, report, settle_fixture_review, setup  # noqa: F401  (fixture)
 
 BUSY = (409, "An agent is already working on this PR.")
+THE_PULL = {key: ITEM[key] for key in ("repo", "number", "head_sha")}
 
 
 @pytest.fixture
@@ -109,3 +120,86 @@ def test_the_job_is_a_respond_job_only_for_an_app(owner, working):
   job = routes._pr_job(db, principal.owner.id, "Example/Project", 7, app_id=1)
   assert job == {"kind": "respond", "state": "running", "chat_id": "respond-7"}
   assert routes._pr_job(db, principal.owner.id, "example/project", 7) is None
+
+
+@pytest.fixture
+def plain(fresh_db, monkeypatch):
+  """The owner's own session with Contribute installed and nothing else faked: GitHub is each test's fake."""
+  db = SessionLocal()
+  owner = models.Owner(username="status-owner", hashed_password="unused")
+  db.add(owner)
+  db.add(models.App(id=1, name="Contribute", slug="contribute", source_dir="test-contribute",
+                    github_access=True, token_nonce="nonce"))
+  db.commit()
+  monkeypatch.setattr(routes, "_validate_submit_app", lambda *args: "nonce")
+  yield db, Principal(owner=owner, app_id=None)
+  db.close()
+
+
+def respond_started_while_waiting_for_the_connection(monkeypatch, module, db, working):
+  """The owner starts Respond for the PR while the request waits for the GitHub connection."""
+  real = module._github_connection_transaction
+
+  @asynccontextmanager
+  async def waiting():
+    async with real():
+      working.add(respond_chat(db).id)
+      yield
+
+  monkeypatch.setattr(module, "_github_connection_transaction", waiting)
+
+
+def test_a_status_change_is_refused_when_a_respond_chat_started_during_its_wait_for_the_connection(
+    plain, working, monkeypatch):
+  db, principal = plain
+  github = StatusGitHub()
+  monkeypatch.setattr(routes, "_gh", github)
+  respond_started_while_waiting_for_the_connection(monkeypatch, pull_status, db, working)
+  request = routes.PullStatusChange(**THE_PULL)
+  with pytest.raises(HTTPException) as refused:
+    asyncio.run(routes.close_pull_now(1, request, db, principal))
+  assert (refused.value.status_code, refused.value.detail) == BUSY
+  assert github.writes_seen == []
+
+
+def test_merge_now_is_refused_when_a_respond_chat_started_during_its_wait_for_the_connection(
+    plain, working, monkeypatch):
+  db, principal = plain
+  github = FakeGitHub()
+  monkeypatch.setattr(routes, "_gh", github)
+  respond_started_while_waiting_for_the_connection(monkeypatch, direct_merge, db, working)
+  with pytest.raises(HTTPException) as refused:
+    asyncio.run(routes.merge_pull_now(1, routes.DirectMerge(**THE_PULL), db, principal))
+  assert (refused.value.status_code, refused.value.detail) == BUSY
+  assert github.merges == [] and github.enqueues == []
+
+
+def test_a_review_merge_is_refused_when_a_respond_chat_started_during_its_wait_for_the_connection(
+    setup, working, monkeypatch):
+  respond_started_while_waiting_for_the_connection(monkeypatch, merge_actions, setup[0], working)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged under a Respond chat"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", BUSY[1])
+
+
+def test_the_held_job_lookup_reads_the_chats_when_asked_and_keeps_review_admission_out(owner, working):
+  db, fixture_run, principal, _ = owner
+  settle_fixture_review(db, fixture_run)
+  hold = partial(routes._pr_job_held, db, principal.owner.id, "Example/Project", 7, app_id=1)
+  admission = chat_queue.get_transition_lock(f"review-pr-admission:{principal.owner.id}")  # kept: the registry is weak
+
+  async def scenario():
+    async with hold() as job_now:
+      assert admission._lock.locked() and job_now() is None
+      working.add(respond_chat(db).id)
+      assert job_now() == {"kind": "respond", "state": "running", "chat_id": "respond-7"}
+      # A review run being admitted waits for the write this hold covers.
+      other = asyncio.create_task(routes.start_reviews(1, start_body(db, principal, request_id="entering"), db, principal))
+      await asyncio.sleep(.05)
+      assert not other.done()
+    assert not admission._lock.locked()
+    with pytest.raises(HTTPException) as refused:
+      await other  # and once admitted, it meets the Respond chat that started meanwhile
+    assert (refused.value.status_code, refused.value.detail) == BUSY
+
+  asyncio.run(scenario())

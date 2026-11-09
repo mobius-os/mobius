@@ -85,8 +85,7 @@ async def _merge_refusal(gh, cwd, row, target, repo, pull, checks, job) -> str |
   return machine.action_blocker(facts, "merge") or None
 
 
-async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize,
-                                job: dict | None):
+async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize, pr_job):
   """Persist the current gate result or one typed public effect, never replay."""
   if pull.get("merged"):
     reviews.save_effect_outcome(db, row, reviews.key(target), {
@@ -99,20 +98,13 @@ async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
     authorize()
     reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "queued", **reviews.queue_receipt(entry)})
     return
-  blocker = await _merge_refusal(gh, cwd, row, target, repo, pull, checks, job)
+  async with pr_job() as job_now:
+    blocker = await _merge_refusal(gh, cwd, row, target, repo, pull, checks, job_now())
   if blocker:
     authorize()
     reviews.save_outcome(db, row, reviews.key(target), {**outcome, "state": "needs_you", "summary": blocker})
     return
   method = reviews.merge_method(repo) if not checks.get("isMergeQueueEnabled") else None
-
-  async def still_clear() -> str | None:
-    """The gates above on what GitHub says now: they were answered before the waits for the connection
-    and this run's lock, and an approval can be dismissed meanwhile."""
-    repo_now, pull_now = await asyncio.to_thread(reviews.current_pull, gh, cwd, target)  # unsettled: read-only (GitHub pull request)
-    checks_now = await asyncio.to_thread(reviews.pull_checks, gh, cwd, target)  # unsettled: read-only (GitHub PR checks)
-    return await _merge_refusal(gh, cwd, row, target, repo_now, pull_now, checks_now, job)
-
   async with _github_connection_transaction():
     actor = await asyncio.to_thread(reviews.read, gh, cwd, "user")  # unsettled: read-only (GitHub actor identity)
     if str(actor.get("id") or "") != row.github_actor_id:
@@ -121,7 +113,16 @@ async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
         "summary": "The connected GitHub account changed. Approve a new review selection."})
       return
     await asyncio.to_thread(reviews.assert_current_base, gh, cwd, target)  # unsettled: read-only (GitHub target base)
-    result = await _reserve_and_dispatch(db, row, target, outcome, repo, checks, principal,
-      gh=gh, cwd=cwd, authorize=authorize, method=method, still_clear=still_clear)
+    # The gates and the job were answered before the waits for the connection and this run's lock, and an
+    # approval can be dismissed or a Respond chat started meanwhile: ask again right before the merge,
+    # with review admission kept out until it is sent.
+    async with pr_job() as job_now:
+      async def still_clear() -> str | None:
+        repo_now, pull_now = await asyncio.to_thread(reviews.current_pull, gh, cwd, target)  # unsettled: read-only (GitHub pull request)
+        checks_now = await asyncio.to_thread(reviews.pull_checks, gh, cwd, target)  # unsettled: read-only (GitHub PR checks)
+        return await _merge_refusal(gh, cwd, row, target, repo_now, pull_now, checks_now, job_now())
+
+      result = await _reserve_and_dispatch(db, row, target, outcome, repo, checks, principal,
+        gh=gh, cwd=cwd, authorize=authorize, method=method, still_clear=still_clear)
     if result is not None:
       reviews.save_effect_outcome(db, row, reviews.key(target), result)
