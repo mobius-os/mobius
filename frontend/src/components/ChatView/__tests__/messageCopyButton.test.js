@@ -95,10 +95,12 @@ test('every row reads time, then Copy, then Branch; the reply footer appears on 
     && metaRow.indexOf('<MessageCopyButton read={copy} />') < metaRow.indexOf('<MessageBranchButton branch={branch} />'),
   'time, Copy, Branch')
   const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) and \(not \(any-pointer: coarse\)\) \{\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible \{ opacity: 0; \}/,
-    'with a fine pointer the whole footer waits for hover')
-  assert.match(footerCss, /\.chat__reply:hover > \.chat__msg-meta--start\.chat__msg-meta--visible,\s*\.chat__reply > \.chat__msg-meta--start\.chat__msg-meta--visible:focus-within \{ opacity: 1; \}/,
+  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) and \(not \(any-pointer: coarse\)\) \{\s*\.chat__reply > \.chat__msg-meta--start \{ visibility: inherit; \}/,
+    'with a fine pointer the transparent footer stays focusable')
+  assert.match(footerCss, /\.chat__reply:hover > \.chat__msg-meta--start,\s*\.chat__reply > \.chat__msg-meta--start:focus-within \{\s*opacity: 1;\s*pointer-events: auto;/,
     'hovering the reply or focusing a control reveals it')
+  assert.match(chatView, /metaVisible=\{group === footerGroup && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'a tap reveals the footer for a moment, as on owner rows')
   assert.match(footerCss, /\.chat__msg-meta--start > :is\(\.chat__msg-copy, \.chat__msg-branch\):not\(\.chat__msg-copy--failed\) \{\s*width: 24px;\s*height: 24px;\s*padding: 0;/,
     'Copy and Branch are equal square buttons with centred icons')
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)

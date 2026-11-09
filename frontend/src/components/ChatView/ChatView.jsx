@@ -6025,6 +6025,8 @@ export default function ChatView({
       // The footer clears the moment a new turn starts (an answered card
       // included) and fills again where the agent next stops.
       footer={group === footerGroup ? footerState : null}
+      metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={group === footerGroup ? showMessageMeta : undefined}
       stretchStartKey={group === footerGroup ? footerStretch?.startKey : undefined}
       stretchCopyable={group === footerGroup && stretchCopyable}
       stretchClipboard={group === footerGroup && footerStretch?.truncated ? truncatedClipboard : null}

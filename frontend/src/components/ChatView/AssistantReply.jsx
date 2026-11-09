@@ -51,6 +51,8 @@ function AssistantReply({
   stretchStartKey,
   stretchCopyable = false,
   stretchClipboard = null,
+  metaVisible = false,
+  onRevealMeta,
   stretchSourceRows = [],
   onBranch,
   pendingQuestionRef,
@@ -116,6 +118,8 @@ function AssistantReply({
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     ref={replyRef}
     className="chat__reply"
+    // A tap on the reply reveals its footer for a moment, as on owner rows.
+    onClick={settled && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
     data-reply-key={metaKey}
     // The whole active reply is the current response: activity presentation may
     // move its live tools into an earlier row than the streaming one.
@@ -185,7 +189,7 @@ function AssistantReply({
       branch={settled && onBranch && branchThroughId != null
         ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
-      visible
+      visible={metaVisible}
     />}
   </li></PeerTimelineContext.Provider>
 }

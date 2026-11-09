@@ -486,14 +486,19 @@
   padding: 0;
 }
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
-/* With a fine pointer the footer waits for its reply to be hovered (or a
-   control in it focused, which stays reachable by keyboard); touch shows it,
-   having no hover, including a touchscreen laptop. Its line stays reserved,
-   so revealing it moves nothing. */
+/* The footer is hidden until wanted, like an owner message's row: a tap on
+   the reply reveals it for a moment (ChatView's tap reveal), and with a fine
+   pointer hovering the reply, or focusing a control in it, shows it too. It
+   stays focusable while transparent so a keyboard can reach it. Its line
+   stays reserved, so revealing it moves nothing. */
 @media (hover: hover) and (pointer: fine) and (not (any-pointer: coarse)) {
-  .chat__reply > .chat__msg-meta--start.chat__msg-meta--visible { opacity: 0; }
-  .chat__reply:hover > .chat__msg-meta--start.chat__msg-meta--visible,
-  .chat__reply > .chat__msg-meta--start.chat__msg-meta--visible:focus-within { opacity: 1; }
+  .chat__reply > .chat__msg-meta--start { visibility: inherit; }
+  .chat__reply:hover > .chat__msg-meta--start,
+  .chat__reply > .chat__msg-meta--start:focus-within {
+    opacity: 1;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
 }
 /* Owner messages reveal their row only on tap/click; the chat's last reply
    keeps its footer visible. */

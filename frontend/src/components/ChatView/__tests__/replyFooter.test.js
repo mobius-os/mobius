@@ -56,7 +56,9 @@ const actionRow = html => html.slice(html.indexOf('class="chat__msg-meta'))
 test('the footer reply ends with exactly one start-edge action row holding Copy', () => {
   const html = renderReply([turn])
   assert.equal(metaRows(html).length, 1)
-  assert.match(html, /chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"/)
+  assert.match(html, /chat__msg-meta chat__msg-meta--start"/, 'hidden until tapped or hovered')
+  assert.match(renderReply([turn], { metaVisible: true }), /chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"/,
+    'a tap reveals it, as on owner rows')
   assert.match(html, /aria-label="Copy message"/)
   assert.ok(html.indexOf('chat__msg-meta') > html.indexOf('Nothing else is pending.'),
     'the action row sits after the reply’s last text, not beside any earlier part')
@@ -101,7 +103,7 @@ test('a stretch lists its References once, after its last reply', () => {
 test('while the agent works the footer line is reserved but empty', () => {
   // Settling must fill the line, not add one: a followed transcript would
   // grow and jump at the end of every turn (streaming-cursor.spec).
-  const empty = /<div class="chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"><\/div>/
+  const empty = /<div class="chat__msg-meta chat__msg-meta--start"><\/div>/
   assert.match(renderReply([turn], { footer: 'working' }), empty,
     'a new turn clears the footer, an answered card included')
   assert.match(renderReply([turn], { isStreaming: true }), empty,
