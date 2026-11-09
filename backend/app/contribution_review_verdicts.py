@@ -30,8 +30,12 @@ def own_pull(row, pull) -> bool:
 
 def propose(outcome, target) -> dict:
   event = EVENTS[outcome["state"]]
-  body = public.review_comment_body(outcome, event=event)
-  return {"id": uuid.uuid4().hex, "state": "proposed", "event": event, "body": body,
+  proposal_id = uuid.uuid4().hex
+  # The marker is part of the frozen wording: GitHub's body limit is applied to
+  # exactly what will be posted, so submitting can never overflow it.
+  marker = f"<!-- mobius-review:{proposal_id} -->"
+  body = public.review_comment_body(outcome, marker=marker, event=event)
+  return {"id": proposal_id, "state": "proposed", "event": event, "marker": marker, "body": body,
           "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
           "proposed_at": reviews.utc_now_iso()}
@@ -47,7 +51,7 @@ def _settle(db, row, item_key, proposal_id, fields):
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
-def _arm(db, row, item_key, proposal_id, marker, authorize):
+def _arm(db, row, item_key, proposal_id, authorize):
   """Reserve the one dispatch for this proposal, fenced across grants."""
   fence_owner(db, row.owner_id)
   try:
@@ -70,7 +74,7 @@ def _arm(db, row, item_key, proposal_id, marker, authorize):
     db.rollback()
     raise HTTPException(409, f"Another review run ({holder.id}) already submitted a verdict for this exact version.")
   current = row.outcomes_json[item_key]
-  armed = {**current, "verdict_proposal": {**saved, "state": "posting", "marker": marker,
+  armed = {**current, "verdict_proposal": {**saved, "state": "posting",
                                            "submitted_at": reviews.utc_now_iso()}}
   if not reviews._cas_outcome(db, row, item_key, armed):
     raise HTTPException(409, "This review changed. Refresh before submitting.")
@@ -95,16 +99,14 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
       await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
     except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
       raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
-    marker = f"<!-- mobius-review:{uuid.uuid4().hex} -->"
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      armed = _arm(db, row, item_key, proposal_id, marker, authorize)
+      armed = _arm(db, row, item_key, proposal_id, authorize)
     try:
       authorize()
     except HTTPException as exc:
       _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
       raise
-    body = f"{armed['body']}\n\n{marker}"
-    result = await settled.run_settled(public.post_review, gh, cwd, target, body, armed["event"])
+    result = await settled.run_settled(public.post_review, gh, cwd, target, armed["body"], armed["event"])
   fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state]}
   receipt = result.receipt or {}
   # The proposal id is its identity; GitHub's review id is a separate fact.

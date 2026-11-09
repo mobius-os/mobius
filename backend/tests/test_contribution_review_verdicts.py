@@ -1,5 +1,6 @@
 """Posting and merging in one grant, and owner-submitted formal verdicts."""
 import asyncio
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -125,13 +126,33 @@ def test_owner_submit_posts_the_exact_proposal_then_the_run_merges(setup, monkey
   assert result["verdict"]["state"] == "posted" and result["merge_resumed"] is True
   (kind, event, head, body), = events
   assert (kind, event, head) == ("post", "APPROVE", ITEM["head_sha"])
-  assert body.startswith(proposal["body"]) and "mobius-review:" in body
+  assert body == proposal["body"] and proposal["marker"] in body
   assert resumed and resumed[0]["chat_id"] == row.chat_id
   item = report(setup, publish=True)["run"]["items"][0]
   assert [e[0] for e in events] == ["post", "merge"] and item["state"] == "merged"
   with pytest.raises(HTTPException) as again:
     _decide(setup, "submit", proposal["id"])
   assert again.value.status_code == 409 and len(events) == 2
+
+
+def test_a_maximum_length_proposal_is_still_submittable(setup, monkeypatch):
+  """The saved wording already holds its marker, so GitHub's real limit check passes."""
+  from types import SimpleNamespace
+  _grant(setup, propose_verdict=True)
+  real_post, sent = public.post_review, []
+  def fake_gh(_cwd, *args, input_text=None):
+    sent.append(json.loads(input_text))
+    return SimpleNamespace(stdout=json.dumps({"id": 7, "html_url": "https://github.com/x"}))
+  monkeypatch.setattr(public, "post_review", lambda _gh, cwd, target, body, event="COMMENT":
+                      real_post(fake_gh, cwd, target, body, event))
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
+  _resumes(monkeypatch)
+  proposal = report(setup, publish=True, summary="x" * (public.GITHUB_REVIEW_BODY_MAX + 500))["run"]["items"][0]["verdict_proposal"]
+  assert public._body_units(proposal["body"]) <= public.GITHUB_REVIEW_BODY_MAX
+  assert proposal["body"].endswith(proposal["marker"])
+  result = _decide(setup, "submit", proposal["id"])
+  assert result["verdict"]["state"] == "posted"
+  assert sent[0]["body"] == proposal["body"]
 
 
 def test_the_review_agent_cannot_submit_its_own_proposal(setup, monkeypatch):
