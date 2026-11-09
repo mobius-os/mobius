@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, models
+from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from tests.test_contribution_review_runs import (CHECKS, ITEM, PULL, REPO, TARGET, VERDICTS, settle_fixture_review,
@@ -185,6 +186,32 @@ def test_a_takeover_never_posts_from_an_account_other_than_the_one_that_approved
   monkeypatch.setattr(domain, "read", lambda *args: {"id": 42})
   assert refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)[0] == 409
   assert posted == [] and started == []
+
+
+def test_a_takeover_stopped_while_its_account_was_read_never_posts(owner, monkeypatch):
+  db, fixture_run, principal, started = owner
+  settle_fixture_review(db, fixture_run)
+  posted = comments(monkeypatch)
+
+  def stopped_meanwhile(*args):
+    # The owner's durable Stop, from another request, lands while the connected account is being read.
+    if args[2] == "user":
+      other = SessionLocal()
+      try:
+        run = other.query(models.ContributionReviewRun).filter_by(request_id="machine-admission").first()
+        if run is not None:  # the admission read comes before the run exists
+          domain.save_outcome(other, run, routes.REVIEW_STOP_KEY, {"state": "requested", "actor": "owner"})
+      finally:
+        other.close()
+    return {"id": 42}
+
+  monkeypatch.setattr(domain, "read", stopped_meanwhile)
+  status, detail = refusal(db, principal, mode="review_fix_merge", takeover_reason=REASON)
+  assert status == 409 and "was stopped" in detail
+  assert posted == [] and started == []
+  row = db.query(models.ContributionReviewRun).filter_by(request_id="machine-admission").one()
+  notice = row.outcomes_json[routes.TAKEOVER_NOTICE_KEY]["example/project#7"]
+  assert notice["state"] == "not_dispatched" and "stopped" in notice["summary"]
 
 
 def test_finishing_the_owners_own_pr_posts_nothing(owner, monkeypatch):

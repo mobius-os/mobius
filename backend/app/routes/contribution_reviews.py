@@ -402,19 +402,33 @@ def _require_takeover_announced(row) -> None:
       raise HTTPException(502, TAKEOVER_NOTICE_UNCONFIRMED)
 
 
+def _takeover_refusal(db, row, actor) -> str | None:
+  """Why the comment must not go out now, or None: the connected account is not the one that approved
+  the run, the owner stopped it, or Contribute's permission was withdrawn since admission."""
+  if str(actor.get("id") or "") != row.github_actor_id:
+    return TAKEOVER_ACTOR_CHANGED
+  try:
+    _owner_decision_authority(db, row)
+  except HTTPException as exc:
+    return str(exc.detail)
+  return None
+
+
 async def _announce_takeover(db, row, cwd) -> None:
   """Post each armed takeover comment once. Unless GitHub confirms it, the run is stopped
   (it holds nothing) and the start is refused."""
   for item_key, notice in list(((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).items()):
     target = next(t for t in row.targets_json if reviews.key(t) == item_key)
     async with _github_connection_transaction():
-      # The lock keeps the connection still, but only this read says whose it is: the comment goes out
-      # from the account that was approved at admission, never from one connected since.
+      # The connection lock keeps the account still but does not say whose it is, and Stop saves its
+      # flag under the run's admission lock: the proof and the comment's dispatch happen under both.
       actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
-      if str(actor.get("id") or "") != row.github_actor_id:
-        result = DispatchResult.not_dispatched(TAKEOVER_ACTOR_CHANGED)
-      else:
-        result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
+      async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+        refusal = _takeover_refusal(db, row, actor)
+        if refusal is not None:
+          result = DispatchResult.not_dispatched(refusal)
+        else:
+          result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
     fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
               **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
     _save_notice(db, row, item_key, {**notice, **fields})
