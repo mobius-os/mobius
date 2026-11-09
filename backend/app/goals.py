@@ -249,6 +249,10 @@ def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
           "helpers": own_helper_statuses(db, chat_id, run_id) if run_id else []}
 
 
+class GoalTextNotFound(Exception):
+  """read_goal(field) names a text this Goal or task does not have."""
+
+
 GOAL_TEXT_FIELDS = ("objective", "next_action", "checkpoint")
 TASK_TEXT_FIELDS = ("title", "note", "result", "completion_condition")
 
@@ -267,7 +271,7 @@ def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, fie
   else:
     goal = _coordinator_goal(db, chat_id, run_id)
   if goal is None:
-    raise LookupError("No Goal to read here.")
+    raise GoalTextNotFound("No Goal to read here.")
   if task_id:
     task = next((task for task in (goal.plan_json or {}).get("tasks") or []
                  if task.get("id") == task_id), None)
@@ -277,7 +281,7 @@ def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, fie
   else:
     text = getattr(goal, field, None)
   if not isinstance(text, str) or not text:
-    raise LookupError(f"No {field} to read here.")
+    raise GoalTextNotFound(f"No {field} to read here.")
   return {"field": field, "task": task_id, "text": text}
 
 

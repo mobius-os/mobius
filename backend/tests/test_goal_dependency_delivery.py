@@ -598,8 +598,30 @@ def test_a_long_claim_outcome_is_excerpted_in_its_one_notice():
                           "summary": "S" * 50_000, "outcome": "O" * 50_000,
                           "source_diagnostics": {"secret": True}})
   notice = deps_module.dependency_notice(row)
-  assert len(notice) < deps_module.NOTICE_CHARS + 2_000
+  from app.context_budget import TURN_SHARE_CHARS
+  assert len(notice) < TURN_SHARE_CHARS + 2_000
   assert "the full text is kept on the source chat's work claim" in notice
   assert "source_diagnostics" not in notice
   # Deterministic, so startup orphan checks still match the saved notice.
   assert deps_module.dependency_notice(row) == notice
+
+
+def test_a_saved_symbol_heavy_notice_from_before_the_upgrade_still_matches():
+  """Outcomes were capped at 1,000 and summaries at 500 characters; such a
+  notice, however symbol-heavy, is rebuilt byte for byte."""
+  from types import SimpleNamespace
+  from app import goal_dependencies as deps_module
+  from app.prompt_blocks import json_block_data
+
+  outcome = {"kind": "completed", "work_key": "test:<&>", "summary": "<&>" * 166,
+             "outcome": "<b>&amp;" * 125, "source_chat_title": "A & B <team>"}
+  row = SimpleNamespace(id="dep-1", waiting_goal_id="goal-1", target_kind="claim_acquisition",
+                        target_key="test:<&>", outcome_json=outcome)
+  saved = ("A dependency of this exact Goal has resolved. This is factual evidence, "
+    "not permission to perform another chat's action or take over its work. "
+    "Verify the result and continue or re-plan your own Goal.\n"
+    "<goal_dependency_result>" + json_block_data({
+      "dependency_id": row.id, "goal_id": row.waiting_goal_id,
+      "target_kind": row.target_kind, "target_key": row.target_key,
+      "outcome": outcome}, separators=(", ", ": ")) + "</goal_dependency_result>")
+  assert deps_module.dependency_notice(row) == saved

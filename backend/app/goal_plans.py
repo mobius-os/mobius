@@ -60,6 +60,32 @@ def _clean_text(value: Any, *, field: str, required: bool) -> str:
   return cleaned
 
 
+def fold_parent_chain(by_id: dict, task_id: str, memo: dict, step) -> Any:
+  """``memo[task_id]`` from its parent's value, walking each chain once.
+
+  ``step(key, parent_value)`` gets ``None`` for a top-level task. Every
+  unmemoized ancestor on the way is filled too, so repeated calls across a
+  plan stay linear in its size.
+  """
+  chain = []
+  current = task_id
+  while current is not None and current not in memo:
+    chain.append(current)
+    current = by_id[current].get("parent_id")
+  value = None if current is None else memo[current]
+  for key in reversed(chain):
+    value = memo[key] = step(key, value)
+  return memo[task_id]
+
+
+def unsettled_chain(by_id: dict, key: str, inherited: list[str] | None) -> list[str]:
+  """``key``'s unsettled dependencies, then its parent groups' (``inherited``)."""
+  own = [dependency for dependency in by_id[key].get("depends_on", [])
+         if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES]
+  inherited = inherited or []
+  return list(dict.fromkeys(own + inherited)) if own else inherited
+
+
 def _named(ids: list[str], shown: int = 10) -> str:
   """Name a refusal's first few ids and count the rest, however many there are."""
   if len(ids) <= shown:
@@ -199,34 +225,19 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
         by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])))
 
   # Whether every dependency of a task and of its parent groups has settled.
-  # Parentage is acyclic (checked above), so one memoized walk per chain keeps
-  # this linear in the plan size however deep the groups nest.
+  # Parentage is acyclic (checked above), so the memoized walk keeps this
+  # linear in the plan size however deep the groups nest.
   chain_settled: dict[str, bool] = {}
   for task in tasks:
-    chain = []
-    current: str | None = task["id"]
-    while current is not None and current not in chain_settled:
-      chain.append(current)
-      current = by_id[current].get("parent_id")
-    settled = True if current is None else chain_settled[current]
-    for key in reversed(chain):
-      settled = settled and all(
+    fold_parent_chain(by_id, task["id"], chain_settled, lambda key, parent: (
+      parent is not False and all(
         by_id[dependency]["status"] in SETTLED_TASK_STATUSES
-        for dependency in by_id[key]["depends_on"]
-      )
-      chain_settled[key] = settled
+        for dependency in by_id[key]["depends_on"])))
 
   def incomplete_dependencies(task_id: str) -> list[str]:
     """Unsettled direct and inherited dependencies, for a refusal only."""
-    dependencies: list[str] = []
-    current: str | None = task_id
-    while current is not None:
-      dependencies.extend(
-        dependency for dependency in by_id[current]["depends_on"]
-        if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
-      )
-      current = by_id[current].get("parent_id")
-    return list(dict.fromkeys(dependencies))
+    return fold_parent_chain(by_id, task_id, {}, lambda key, parent: unsettled_chain(
+      by_id, key, parent))
 
   for task in tasks:
     if task["status"] in {"running", "completed"} and not chain_settled[task["id"]]:
@@ -703,20 +714,8 @@ def serialize_plan(
   waiting: dict[str, list[str]] = {}
 
   def effective_waiting(task: dict[str, Any]) -> list[str]:
-    chain = []
-    current: str | None = task["id"]
-    while current is not None and current not in waiting:
-      chain.append(current)
-      current = by_id[current].get("parent_id")
-    inherited = [] if current is None else waiting[current]
-    for key in reversed(chain):
-      own = [
-        dependency for dependency in by_id[key].get("depends_on", [])
-        if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES
-      ]
-      inherited = list(dict.fromkeys(own + inherited)) if own else inherited
-      waiting[key] = inherited
-    return list(waiting[task["id"]])
+    return list(fold_parent_chain(by_id, task["id"], waiting, lambda key, parent: (
+      unsettled_chain(by_id, key, parent))))
   delegations = _delegation_tree(db, physical, root)
   active_helpers = _active_helper_nodes(delegations)
   active_execution_keys = [_helper_key(node) for node in active_helpers]

@@ -1,23 +1,23 @@
-"""Budgets for agent-written text that Möbius repeats into provider context.
+"""Budgets for agent-written text that Möbius assembles into provider context.
 
 Agent input is not capped where it is written: the store keeps it whole and an
-explicit read returns it whole. What Möbius re-sends on every turn (and again
-after compaction) is bounded where that context is assembled, so one long plan
-or outcome can never crowd out the owner's work or make every turn fail.
+explicit read returns it whole. Text Möbius assembles into a turn (the
+per-turn Goal brief, a resolved-dependency notice) is bounded where it is
+assembled, so one long plan or outcome can never crowd out the owner's work
+or make every turn fail.
 
-24,000 characters is roughly 6k tokens, a few percent of a provider context
-window. Text over budget becomes a marked excerpt that names where the full
-text is read.
+TURN_SHARE_CHARS (24,000 characters, roughly 6k tokens) is a few percent of a
+provider context window: the most one assembled block takes of a turn.
+FIELD_SHARE_CHARS is the most any single text takes of that block. Text over
+its share becomes a marked excerpt that names where the full text is read.
 """
 
 import json
 
-# Combined prose fields (titles, notes, results, conditions, next action) in
-# one Goal brief, and the most any single field takes of it.
-GOAL_BRIEF_CHARS = 24_000
-GOAL_BRIEF_FIELD_CHARS = 4_000
+TURN_SHARE_CHARS = 24_000
+FIELD_SHARE_CHARS = 4_000
 # Summary entries per list in a Goal brief (children, siblings, blockers,
-# dependencies). Each entry's own prose is still charged to the budget above.
+# dependencies, ancestors).
 GOAL_BRIEF_LIST_ITEMS = 50
 
 
@@ -43,7 +43,7 @@ def text_page(text: str, offset: int = 0) -> dict:
 
 
 def excerpt(text: str, limit: int, read_full: str) -> str:
-  """``text`` whole when it fits ``limit``, else its head marked as an excerpt."""
+  """``text`` whole when it fits ``limit`` characters, else its head, marked."""
   if len(text) <= limit:
     return text
   head = text[:max(limit, 0)].rstrip()
@@ -62,55 +62,59 @@ def emitted_len(text: str) -> int:
   return len(encoded) - 2 + 5 * sum(encoded.count(char) for char in "<>&")
 
 
-def _head_within(text: str, width: int) -> int:
-  """The longest prefix length of ``text`` whose emitted width fits ``width``."""
-  low, high = 0, min(len(text), max(width, 0))
-  while low < high:
+def fair_shares(demands: list[int], total: int) -> list[int]:
+  """Split ``total`` so short texts stay whole and long ones share the rest.
+
+  Shortest first, each gets at most an equal share of what is left, so the
+  result does not depend on order and no text can starve another.
+  """
+  shares = [0] * len(demands)
+  remaining = total
+  order = sorted(range(len(demands)), key=demands.__getitem__)
+  for position, index in enumerate(order):
+    shares[index] = min(demands[index], remaining // (len(order) - position))
+    remaining -= shares[index]
+  return shares
+
+
+def fit_emitted(text: str, width: int, read_full: str) -> str:
+  """``text`` whole if its emitted width fits ``width``, else a marked excerpt.
+
+  The marker names the head's length; a head shorter than ``width`` never
+  needs more digits, so reserving the marker as it would read for a
+  full-width head is enough. A marker longer than the text is never used.
+  """
+  full = emitted_len(text)
+  if full <= width:
+    return text
+  marker = emitted_len(f"… [excerpt: {width} of {len(text)} characters; {read_full}]")
+  low, high = 0, min(len(text), max(width - marker, 0))
+  while low < high:  # the longest head whose emitted width fits
     middle = (low + high + 1) // 2
-    if emitted_len(text[:middle]) <= width:
+    if emitted_len(text[:middle]) <= width - marker:
       low = middle
     else:
       high = middle - 1
-  return low
+  shown = excerpt(text, low, read_full)
+  return text if emitted_len(shown) >= full else shown
 
 
-class TextBudget:
-  """Hand out whole texts while a combined character budget lasts."""
+class Allowance:
+  """A running emitted-width allowance for structure an assembler adds."""
 
-  def __init__(self, total: int, *, field: int | None = None) -> None:
+  def __init__(self, total: int) -> None:
     self.remaining = total
-    self.field = field
-
-  def take(self, text: str, read_full: str) -> str:
-    """Return ``text`` whole, or a marked excerpt naming ``read_full``.
-
-    Widths are emitted widths (see ``emitted_len``).
-    """
-    allowance = self.remaining if self.field is None else min(self.remaining, self.field)
-    width = emitted_len(text)
-    if width <= allowance:
-      self.remaining -= width
-      return text
-    # The marker is charged too, so head plus marker must fit the allowance.
-    # The marker names the head's length, and a head shorter than the
-    # allowance never needs more digits, so reserving the marker as it would
-    # read for a full-allowance head is enough. A marker longer than the text
-    # it replaces is never used.
-    marker = emitted_len(f"… [excerpt: {allowance} of {len(text)} characters; {read_full}]")
-    shown = excerpt(text, _head_within(text, allowance - marker), read_full)
-    return self.charge(text if emitted_len(shown) >= width else shown)
 
   @property
   def spent(self) -> bool:
     return self.remaining <= 0
 
   def charge(self, text: str) -> str:
-    """Count text the assembler adds itself, such as an omission marker."""
     self.remaining -= emitted_len(text)
     return text
 
   def take_ids(self, ids: list[str]) -> tuple[list[str], int]:
-    """Keep ids while the budget lasts; return them and how many were left out."""
+    """Keep ids while the allowance lasts; return them and how many were left out."""
     kept = []
     for value in ids:
       cost = emitted_len(value) + 3  # its quotes and separator in the block

@@ -360,7 +360,7 @@ def read_goal_brief(
   if principal.chat_id != chat_id:
     raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
   get_active_chat_for_principal(db, chat_id, principal)
-  from app.goals import read_goal_text, read_goal_view
+  from app.goals import GoalTextNotFound, read_goal_text, read_goal_view
   try:
     if field is not None:
       return read_goal_text(
@@ -373,7 +373,7 @@ def read_goal_brief(
     )
   except PermissionError as exc:
     raise HTTPException(status_code=403, detail=str(exc)) from exc
-  except LookupError as exc:
+  except GoalTextNotFound as exc:
     raise HTTPException(status_code=404, detail=str(exc)) from exc
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -411,7 +411,7 @@ async def take_goal_brief_after_compaction(
   db.close()  # The brief loads in its own short session; hold no connection.
   try:
     context = await handle.goal_brief_after_compaction(body.thread_id)
-  except LookupError as exc:
+  except GoalTextNotFound as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
   return {"context": context}
 

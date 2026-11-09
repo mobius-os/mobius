@@ -2006,6 +2006,6 @@ def test_peer_goal_objectives_are_previewed_wherever_agents_see_them():
   from app.agent_coordination import PEER_GOAL_PREVIEW_CHARS
   peer = {"id": "peer", "status": "running", "goal": "Objective " * 1000}
   shown = model_peer(peer)
-  assert len(shown["goal"]) <= PEER_GOAL_PREVIEW_CHARS + 1
-  assert shown["goal"].endswith("…")
+  assert len(shown["goal"]) <= PEER_GOAL_PREVIEW_CHARS + 100
+  assert shown["goal"].endswith("characters; its own chat holds the full objective]")
   assert model_peer({"id": "peer", "goal": "Short goal"})["goal"] == "Short goal"

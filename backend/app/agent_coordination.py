@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
+from app.context_budget import excerpt
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -680,9 +681,9 @@ def model_peer(
   }
   # Goal objectives are uncapped; a peer's is a label here, in the per-turn
   # roster and in list_agent_peers alike. Its chat holds the full objective.
-  goal = result.get("goal")
-  if isinstance(goal, str) and len(goal) > PEER_GOAL_PREVIEW_CHARS:
-    result["goal"] = goal[:PEER_GOAL_PREVIEW_CHARS].rstrip() + "…"
+  if isinstance(result.get("goal"), str):
+    result["goal"] = excerpt(result["goal"], PEER_GOAL_PREVIEW_CHARS,
+                             "its own chat holds the full objective")
   if include_ended_at and peer.get("ended_at") is not None:
     result["ended_at"] = peer["ended_at"]
   return result

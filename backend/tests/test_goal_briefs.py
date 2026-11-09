@@ -831,10 +831,10 @@ BRIEF_ALLOWANCE = 2_500
 
 
 def _within_budget(brief):
-  from app.context_budget import GOAL_BRIEF_CHARS
+  from app.context_budget import TURN_SHARE_CHARS
   from app.prompt_blocks import json_block_data
   # Measured as emitted into the prompt block, escapes included.
-  return len(json_block_data(brief)) <= GOAL_BRIEF_CHARS + BRIEF_ALLOWANCE
+  return len(json_block_data(brief)) <= TURN_SHARE_CHARS + BRIEF_ALLOWANCE
 
 
 def test_the_turn_brief_fits_its_budget_while_read_goal_stays_whole():
@@ -1001,7 +1001,8 @@ def test_a_symbol_heavy_brief_stays_within_budget_as_emitted():
   assert _within_budget(brief)
 
 
-def test_small_constraints_and_prerequisites_survive_a_large_focus():
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_small_constraints_and_prerequisites_survive_a_large_focus(role):
   big = "F" * 50_000
   goal = _goal([
     _task("root", status="running", completion_condition="Keep owner files"),
@@ -1009,9 +1010,26 @@ def test_small_constraints_and_prerequisites_survive_a_large_focus():
     _task("focus", "root", "running", depends_on=["dep"],
           title=big, note=big, result=big, completion_condition=big),
   ], objective="O" * 50_000, next_action=big, checkpoint=big)
-  brief = fit_brief(project_goal(goal, "focus"), "focus")
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
   assert brief["ancestors"][0]["completion_condition"] == "Keep owner files"
   assert brief["dependencies"][0]["result"] == "Schema v2 is live"
+  assert _within_budget(brief)
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_short_focus_and_next_step_survive_many_large_prerequisites(role):
+  deps = [_task(f"dep{i}", status="completed", result="R" * 5_000) for i in range(7)]
+  condition = "C" * 1_000
+  goal = _goal([*deps, _task("focus", status="running", depends_on=[d["id"] for d in deps],
+                             completion_condition=condition)],
+               next_action="N" * 360)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  assert brief["task"]["completion_condition"] == condition
+  if role == "coordinator":
+    assert brief["next_action"] == "N" * 360
+  # The long prerequisite results share what remains, each keeping a share.
+  assert all("excerpt" in dep["result"] and len(dep["result"]) > 1_000
+             for dep in brief["dependencies"])
   assert _within_budget(brief)
 
 
