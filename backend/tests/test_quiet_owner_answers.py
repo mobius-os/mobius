@@ -7,7 +7,7 @@ import pytest
 
 from app import auth as auth_mod
 from app import chat as chat_mod, models, questions
-from app.chat_writer import AppendPending, PersistTranscript, get_writer
+from app.chat_writer import AppendPending, HoldPending, PersistTranscript, get_writer
 from app.database import SessionLocal
 from app.routes import chats_stream
 from tests.test_owner_approvals import approval_run, _ask, _finish, _row, PROMPT, QUESTION_PROMPT
@@ -255,6 +255,23 @@ def test_quiet_answer_releases_only_preexisting_followup_via_normal_queue(
   assert scheduled[0]['next_user']['content'] == 'B: queued follow-up'
   assert not scheduled[0]['next_user'].get('continuation_reason')
   assert _row(chat.id)[2] == []
+
+
+def test_quiet_close_leaves_a_held_followup_for_the_owner(
+    client, chat, auth, approval_run, monkeypatch):
+  """Rows a Stop held are not runnable work: closing a card starts nothing
+  and keeps them held, instead of failing to resume an empty queue."""
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
+  get_writer().submit(AppendPending(chat_id=chat.id, owner_input=True,
+      user_msg={'role': 'user', 'content': 'B', 'cid': 'held-b'})).result(timeout=5)
+  get_writer().submit(HoldPending(chat_id=chat.id)).result(timeout=5)
+  _finish(chat, approval_run[0])
+  scheduled = []
+  monkeypatch.setattr(chats_stream, '_schedule_continuation', lambda **kw: scheduled.append(kw))
+  response = _quiet(client, chat, auth, qid)
+  assert response.status_code == 200, response.text
+  assert scheduled == []
+  assert [(row['cid'], row.get('held')) for row in _row(chat.id)[2]] == [('held-b', True)]
 
 
 def test_failed_quiet_commit_keeps_card_open_for_identical_retry(

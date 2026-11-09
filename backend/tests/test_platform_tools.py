@@ -27,17 +27,24 @@ def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
   assert 'maxLength' not in complete
 
 
-def test_checkpoint_chat_saves_a_short_summary_and_a_cumulative_digest_uncapped():
+def test_checkpoint_guidance_names_the_layers_and_leaves_them_uncapped():
   control = _control_module()
   definition = control._TOOL_DEFINITIONS["checkpoint_chat"]
   description = definition["description"]
   properties = definition["inputSchema"]["properties"]
 
-  assert "chat_summary replaces its short Summary" in description
-  assert "digest_entry appends one entry to its cumulative Digest" in description
+  assert "chat_summary replaces the Chat summary" in description
+  assert "digest_entry appends one entry to the Full digest" in description
+  assert "two short, connected paragraphs" in description
+  assert "important earlier outcomes" in description
+  assert "recent phase and open work" in description
+  assert "not an execution diary" in description
   assert set(properties) == {"title", "chat_summary", "digest_entry"}
+  # Length is guided by the instructions, not enforced by a cap.
   assert "maxLength" not in properties["chat_summary"]
   assert "maxLength" not in properties["digest_entry"]
+  assert properties["chat_summary"]["description"].startswith("Chat summary.")
+  assert properties["digest_entry"]["description"].startswith("Full digest entry.")
   # A save written for the old plain field names is refused, not misfiled.
   with pytest.raises(ValueError, match="chat_summary, digest_entry"):
     control._call_checkpoint_chat({"summary": "Facts written for the old meaning."})
@@ -211,7 +218,9 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
     "MOBIUS_DELEGATION_ID",
     # Non-secret capture context for the screenshot tool.
     "VIEWPORT_WIDTH", "VIEWPORT_HEIGHT", "VIEWPORT_PIXEL_RATIO",
-    "AGENT_BROWSER_SESSION",
+    "AGENT_BROWSER_SESSION", "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_ARGS",
+    "AGENT_BROWSER_CONFIG", "AGENT_BROWSER_EXECUTABLE_PATH",
+    "MOBIUS_SCREENSHOT_REAL_BROWSER",
   }
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {
@@ -276,17 +285,19 @@ def _control_module():
   return module
 
 
-def test_promote_goal_tool_returns_verified_platform_identity(monkeypatch):
+@pytest.mark.parametrize("state", ["promoted", "active"])
+def test_promote_goal_tool_returns_goal_identity_not_execution_root(monkeypatch, state):
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
-    "state": "promoted",
+    "state": state,
     "objective": objective,
-    "root_run_id": "goal-1",
+    "goal_id": "goal-1",
+    "root_run_id": "root-1",
     "run_id": "run-1",
   })
 
-  assert control._promote_goal("Ship and verify") == {
-    "state": "promoted",
+  assert control._call_promote_goal({"objective": "Ship and verify"}) == {
+    "state": state,
     "objective": "Ship and verify",
     "goal_id": "goal-1",
     "run_id": "run-1",
@@ -299,15 +310,15 @@ def test_promote_goal_result_names_the_real_plan_tool():
   control = _control_module()
   next_action = control._GOALS.PLAN_NEXT_ACTION
   assert "update_goal" in next_action
-  assert control.UPDATE_GOAL_TOOL in control.OWNER_TOOLS
-  assert control.UPDATE_GOAL_TOOL not in control.DELEGATED_TOOLS
+  assert control.UPDATE_GOAL_TOOL in platform_tools.OWNER_CONTROL_TOOL_NAMES
+  assert control.UPDATE_GOAL_TOOL not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_promote_goal_with_tasks_publishes_the_plan_in_the_same_call(monkeypatch):
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
     "state": "promoted", "objective": objective,
-    "root_run_id": "goal-1", "run_id": "run-1",
+    "goal_id": "goal-1", "root_run_id": "root-1", "run_id": "run-1",
   })
   sent = []
   monkeypatch.setenv("CHAT_ID", "chat-1")
@@ -353,22 +364,43 @@ def test_update_goal_reports_compactly_and_rejects_unknown_arguments(monkeypatch
 def test_goal_report_supplies_completion_keys_without_bloating_progress_updates():
   control = _control_module()
   payload = {
-    "goal": {"status": "open", "revision": 1, "held_work_keys": ["test:verified"]},
+    "goal": {
+      "status": "open", "revision": 1,
+      "held_work_keys": ["test:verified"],
+      "completable_work_keys": ["test:before-goal", "test:verified"],
+    },
     "plan": {"tasks": [], "summary": {"can_complete": False, "completion_blockers": ["verify"]}},
   }
   compact = control._goal_report(payload, full=False)
   assert "test:verified" not in compact
+  assert "test:before-goal" not in compact
   full = control._goal_report(payload, full=True)
   assert "Completion blocked by: verify" in full
   assert "test:verified" in full
+  assert "test:before-goal" in full
+  assert "Eligible work_keys for finished_claims (name only work performed):" in full
+  assert "Held work_keys" not in full
   payload["plan"]["summary"]["can_complete"] = True
   ready = control._goal_report(payload, full=False)
   assert "Ready to complete after verification" in ready
   assert "test:verified" in ready
+  assert "test:before-goal" in ready
   payload["goal"]["status"] = "completed"
   settled = control._goal_report(payload, full=True)
   assert "Ready to complete" not in settled
   assert "test:verified" not in settled
+  assert "test:before-goal" not in settled
+
+
+def test_goal_report_lists_goal_less_completion_keys_without_goal_owned_claims():
+  control = _control_module()
+  text = control._goal_report({
+    "goal": {"status": "open", "revision": 1, "held_work_keys": [],
+             "completable_work_keys": ["test:before-goal"]},
+    "plan": {"summary": {"can_complete": True}},
+  }, full=False)
+  assert "Eligible work_keys for finished_claims" in text
+  assert "test:before-goal" in text
 
 
 def test_a_compile_refusal_carries_its_diagnostic_not_just_that_it_failed():
@@ -475,6 +507,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   monkeypatch.delenv("MOBIUS_COORDINATION_ENABLED", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   initialized = control._dispatch_message({
     "jsonrpc": "2.0",
@@ -504,7 +538,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   ]
   restart = tools[platform_tools.RESTART_TOOL_NAME]
   assert restart["inputSchema"] == {
-    "type": "object", "properties": {}, "additionalProperties": False,
+    "type": "object", "properties": {"message": control.CARD_MESSAGE_PROPERTY},
+    "additionalProperties": False,
   }
   assert "platform derives" in restart["description"]
   assert "without waking an agent" in restart["description"]
@@ -608,7 +643,7 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
-    control.LIST_AGENT_PEERS_TOOL, *control.HELPER_TOOLS,
+    control.LIST_AGENT_PEERS_TOOL, *platform_tools.HELPER_TOOL_NAMES,
   ):
     assert len(tools[name]["description"]) <= 1000, name
 
@@ -645,6 +680,8 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 1, "method": "tools/list",
@@ -682,7 +719,7 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert "unavailable" in denied_cancel["content"][0]["text"]
 
 
-def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
+def test_request_restart_takes_only_a_closing_message(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   receipt = {
@@ -694,7 +731,7 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   monkeypatch.setattr(
     control._APPROVALS,
     "request_restart",
-    lambda: calls.append("request_restart") or receipt,
+    lambda **arguments: calls.append(arguments) or receipt,
   )
 
   response = control._call_tool({
@@ -703,14 +740,19 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   })
   assert response["isError"] is False
   assert json.loads(response["content"][0]["text"]) == receipt
-  assert calls == ["request_restart"]
+  with_message = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {"message": "The fix is committed."},
+  })
+  assert with_message["isError"] is False
+  assert calls == [{}, {"message": "The fix is committed."}]
 
   invalid = control._call_tool({
     "name": platform_tools.RESTART_TOOL_NAME,
     "arguments": {"command": "restart"},
   })
   assert invalid["isError"] is True
-  assert "takes no arguments" in invalid["content"][0]["text"]
+  assert "takes only message" in invalid["content"][0]["text"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -1049,17 +1091,31 @@ def test_question_tool_requires_only_owner_facing_meaning():
 
 
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """Every exposed saved-card tool carries the same complete instruction."""
+  """Every exposed saved-card tool carries the same complete instruction, and
+  the closing message travels in the card call itself where the card has one."""
   control = _control_module()
   instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
   for name in (
     control.REQUEST_APPROVAL_TOOL,
     control.REQUEST_QUESTION_TOOL,
     control.REQUEST_RESTART_TOOL,
-    control.REQUEST_SECRET_TOOL,
   ):
-    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    definition = control._TOOL_DEFINITIONS[name]
+    description = definition["description"].lower()
     assert description.count(instruction) == 1
+    assert "closeout before this call" not in description
+    message = definition["inputSchema"]["properties"]["message"]
+    assert message is control.CARD_MESSAGE_PROPERTY
+    assert "message" not in definition["inputSchema"].get("required", [])
+  assert "put your closing message in `message`" in instruction
+  assert "where things stand" in instruction
+  assert "at most a one-sentence lead-in" in control.CARD_MESSAGE_PROPERTY["description"]
+  # The sealed card has no message field, so its closing message stays prose.
+  secret = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]
+  secret_instruction = control.SECRET_CARD_TERMINAL_INSTRUCTION.lower()
+  assert secret["description"].lower().count(secret_instruction) == 1
+  assert "message" not in secret["inputSchema"]["properties"]
+  assert "before this call, write your closing message" in secret_instruction
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
@@ -1332,12 +1388,13 @@ def test_apply_app_publishes_the_directory_and_returns_where_to_open_it(
 
 def test_helpers_may_build_apps_but_not_reach_the_owner(monkeypatch):
   control = _control_module()
-  for name in control.APP_TOOLS:
-    assert name in control.DELEGATED_TOOLS
+  for name in platform_tools.APP_BUILD_TOOL_NAMES:
+    assert name in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   for name in (
     control.NOTIFY_OWNER_TOOL, control.OPEN_ITEM_TOOL, control.REQUEST_SECRET_TOOL,
   ):
-    assert name in control.OWNER_TOOLS and name not in control.DELEGATED_TOOLS
+    assert name in platform_tools.OWNER_CONTROL_TOOL_NAMES
+    assert name not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_screenshot_returns_the_image_and_the_owner_embed_line(monkeypatch, tmp_path):
@@ -1550,3 +1607,4 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert not result.get('isError'), result
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
+

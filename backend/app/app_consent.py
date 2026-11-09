@@ -20,7 +20,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app import models
+from app import cron_tz, models
 
 ROWS_VERSION = 1
 
@@ -33,8 +33,9 @@ BASELINE = (
 # cannot mark itself harmless because it never supplies this.
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
-  "connect_manage", "identity_manage", "railway_manage", "agent_start",
-  "project_builders", "workspace.screen-control",
+  "connect_manage", "identity_manage", "credits_manage", "railway_manage",
+  "spend_credits",
+  "agent_start", "project_builders", "workspace.screen-control",
 })
 
 _CHAT_TEXT = {
@@ -62,7 +63,7 @@ _SHARE_TEXT = {
 # One flag per row; title and text are the single owner-facing wording.
 _FLAGS = (
   ("filesystem_api", "filesystem_access", "Use your files",
-   "Can use the guarded owner-filesystem API."),
+   "Can read and change files on your Möbius through its guarded file access."),
   ("manage_apps", "manage_apps", "Install and remove apps",
    "Can install and uninstall apps on your behalf."),
   ("manage_skills", "manage_skills", "Install and remove agent skills",
@@ -77,8 +78,17 @@ _FLAGS = (
    "Can pair, unpair and manage computers that run work for you."),
   ("identity_manage", "identity_manage", "Manage your sign-in identity",
    "Can manage the mobius.you sign-in link and identity."),
+  ("credits_manage", "credits_manage", "Manage your credits and earnings",
+   "Can see your credits balance, earnings and history, connect this Möbius "
+   "to a credits service, buy credits, spend them on hosted models, set the "
+   "prices of your apps, and keep or withdraw your earnings."),
   ("railway_manage", "railway_manage", "Manage Railway deployments",
    "Can manage deployments on your Railway account."),
+  ("location_history_read", "location_history_read", "See your location history",
+   "Can read the locations your phone recorded."),
+  ("helper_activity_read", "helper_activity_read", "Read helper activity",
+   "Can see every helper agent's chat, status, open questions, working folder "
+   "and full final report."),
 )
 
 
@@ -87,7 +97,7 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read"} | {key for key, *_ in _FLAGS}
+   "job_secret_read", "spend_credits"} | {key for key, *_ in _FLAGS}
 )
 
 
@@ -150,27 +160,35 @@ def rows_from_contract(
       "Its background job can read the secrets it names: " + ", ".join(names) + ".",
       scope=[str(name) for name in names],
     ))
+  targets = data.get("spend_credits")
+  if isinstance(targets, list) and targets:
+    rows.append(_row(
+      "spend_credits", "Spend your credits on paid features",
+      "Its service can pay for priced calls from your Möbius credits, at the "
+      "price each creator sets, to: " + ", ".join(targets) + ".",
+      scope=[str(target) for target in targets],
+    ))
   background = contract.get("background")
   if isinstance(background, dict):
     scheduled = background.get("mode") == "scheduled"
     timing = (
-      f"Runs on schedule {background.get('cron') or ''}".strip()
-      if scheduled else "Runs only on demand"
+      f"Runs by itself {describe_schedule(background.get('cron'))}"
+      if scheduled else "Runs in the background when the app asks"
     )
     initialize = bool(background.get("initialize_on_install"))
     rows.append(_row(
-      "background_job", "Run a background job",
-      f"{timing}{' and starts a run as soon as you allow it' if initialize else ''}. "
-      "It runs as reviewed owner-installed code with Möbius process access and "
-      "receives a short-lived app token for API calls.",
+      "background_job", "Run on a schedule" if scheduled else "Run in the background",
+      f"{timing}{', starting with one run as soon as you allow it' if initialize else ''}. "
+      "Each run executes this app's code directly on your Möbius, with broad "
+      "access to it.",
       rank=2 if scheduled else 1,
       scope=["initialize_on_install"] if initialize else None,
     ))
   if agent.get("embeds_agent"):
     rows.append(_row(
       "agent_start", "Start agent chats on its own",
-      "Can start and drive agent chats that run commands as Möbius, with "
-      "tool calls approved automatically.",
+      "Can open agent chats on its own. Commands in those chats run on your "
+      "Möbius without asking you first.",
     ))
   if agent.get("system_prompt"):
     rows.append(_row(
@@ -220,15 +238,79 @@ def rows_from_contract(
   return rows
 
 
+# Every limit key the runtime catalog declares, in reading order; the first,
+# overall size, stays unqualified so the per-file and per-chunk sizes read as
+# its refinements. Another key is shown by its own words.
+_LIMIT_WORDS = {
+  "max_bytes": "up to {}",
+  "max_asset_bytes": "up to {} per file",
+  "max_chunk_bytes": "up to {} per download chunk",
+  "max_text_chars": "up to {} characters",
+}
+
+
 def _limit_text(key: str, value: Any) -> str:
+  """One reviewed limit in plain words, e.g. ``up to 50,000 characters``."""
+  amount = f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else str(value)
   if key.endswith("_bytes") and isinstance(value, (int, float)) and not isinstance(value, bool):
     size, unit = float(value), "bytes"
     for unit in ("bytes", "KiB", "MiB", "GiB"):
       if size < 1024 or unit == "GiB":
         break
       size /= 1024
-    return f"{round(size, 1):g} {unit}"
-  return str(value)
+    amount = f"{round(size, 1):g} {unit}"
+  words = _LIMIT_WORDS.get(key)
+  if words is None:
+    return f"{key.removeprefix('max_').replace('_', ' ')} up to {amount}"
+  return words.format(amount)
+
+
+_WEEKDAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+
+def _even_step(field: str, period: int) -> int | None:
+  """N for ``*`` (1) or ``*/N`` when N divides ``period``, so the gaps really
+  are all N; ``*/45`` minutes alternates 45 and 15 and gets no interval wording."""
+  if field == "*":
+    return 1
+  step = field.removeprefix("*/")
+  if field.startswith("*/") and step.isdecimal() and int(step) and period % int(step) == 0:
+    return int(step)
+  return None
+
+
+def describe_schedule(cron: Any) -> str:
+  """A cron schedule in plain words, or quoted as written when no short
+  wording is exact.
+
+  Clock times name no zone on purpose: a fixed wall time runs in the owner's
+  timezone once Möbius knows it and in server time before that
+  (``install._manifest_default_timezone``), so no single zone is always true.
+  """
+  text = " ".join(str(cron or "").split())
+  if not text:
+    return "on a schedule"
+  fixed = cron_tz.parse_wall_clock_cron(text)
+  if fixed is not None:
+    minute, hour, days = fixed
+    at = f"at {hour:02d}:{minute:02d}"
+    if len(days) == 7:
+      return f"every day {at}"
+    if days == {1, 2, 3, 4, 5}:
+      return f"every weekday {at}"
+    names = [_WEEKDAYS[day] for day in sorted(days, key=lambda day: (day + 6) % 7)]
+    listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    return f"every {listed} {at}"
+  fields = text.split()
+  if len(fields) == 5 and fields[2:] == ["*", "*", "*"]:
+    minute, hour = fields[:2]
+    minutes = _even_step(minute, 60)
+    if hour == "*" and minutes:
+      return "every minute" if minutes == 1 else f"every {minutes} minutes"
+    hours = _even_step(hour, 24)
+    if minute.isdecimal() and int(minute) < 60 and hours:
+      return "every hour" if hours == 1 else f"every {hours} hours"
+  return f"on the schedule \u201c{text}\u201d"
 
 
 def _runtime_text(capability: str, declaration: dict[str, Any]) -> str:
@@ -238,13 +320,13 @@ def _runtime_text(capability: str, declaration: dict[str, Any]) -> str:
   duration = limits.pop("max_duration_ms", None)
   text = str(declaration.get("description") or capability)
   if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-    text += f" for up to {round(duration / 1000, 1):g} seconds per request"
+    text = f"{text.rstrip('.')} for up to {round(duration / 1000, 1):g} seconds per request."
   if limits:
-    text += " Limits: " + ", ".join(
-      f"{key} {_limit_text(key, value)}" for key, value in sorted(limits.items())
-    ) + "."
+    ordered = [key for key in _LIMIT_WORDS if key in limits]
+    ordered += sorted(key for key in limits if key not in _LIMIT_WORDS)
+    text += " Limits: " + ", ".join(_limit_text(key, limits[key]) for key in ordered) + "."
   if declaration.get("reason"):
-    text += f" Reason: {declaration['reason']}"
+    text += f" Why: {declaration['reason']}"
   return text
 
 

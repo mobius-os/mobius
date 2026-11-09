@@ -832,6 +832,12 @@ else
   if ! browser_set_viewport_retry; then
     die "no open browser page was available for current-page capture"
   fi
+  # A blank page never records a first paint, so the paint gate below would
+  # spend the whole capture budget on a page that has nothing to capture.
+  BROWSER_PHASE="current page presence"
+  if [ "$(browser_eval_retry "location.href" || true)" = '"about:blank"' ]; then
+    die "the browser has no prepared page (about:blank); open and prepare the page in this chat's browser session again before capturing"
+  fi
 fi
 
 # The URL can canonicalize before the replacement document has committed.

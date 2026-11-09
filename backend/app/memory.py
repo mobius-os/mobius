@@ -2,7 +2,7 @@
 
 The platform owns only per-chat summaries under
 ``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives the
-short Summary of the most recently active chats, never their cumulative Digest,
+Chat summary of the most recently active chats, never their Full digest,
 facts, or knowledge-graph files. Optional installed apps may use the sibling
 directory for richer data, but they activate and retrieve that data
 through their own system-prompt contribution and reader.
@@ -21,7 +21,7 @@ from pathlib import Path
 from app.chat_notes import extract_chat_summary
 
 # How many recent per-chat notes to inject at session start. Each contributes
-# the agent's whole short Summary, with no size cap or budget; the most
+# the agent's whole Chat summary, with no size cap or budget; the most
 # recently active ones open a fresh session with recent conversational context.
 RECENT_CHAT_NOTES = 10
 
@@ -29,10 +29,11 @@ RECENT_CHAT_NOTES = 10
 # Keeping retrieval guidance here makes the structured entry contract and its
 # single shared instruction one source of truth.
 RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
-  "Each recent-chat entry gives a Name, Location, and Summary. "
-  "When more detail would materially help, read "
-  "/data/shared/memory/<Location> for that chat's complete cumulative "
-  "digest. The platform alone publishes those files; do not edit them."
+  "Each recent-chat entry gives a Name, Location, and Summary, "
+  "not its Full digest. When more detail would materially help, read "
+  "/data/shared/memory/<Location> for that chat's Full digest "
+  "(stored under ## Digest; ## Summary holds the Chat summary). "
+  "The platform alone publishes those files; do not edit them."
 )
 
 

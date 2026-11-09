@@ -4,7 +4,9 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
+import useElapsedWhile from '../../hooks/useElapsedWhile.js'
+import { elapsedLabel } from '../ChatView/toolTasks.js'
+import { retiredLocalCopies, shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
 import { deploymentKindLabel, platformActivationLabel, reviewedUpdateUsesContainerRebuild } from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import UpdateRepairAction from './UpdateRepairAction.jsx'
@@ -14,6 +16,7 @@ import './UpdateReviewModal.css'
 const UPDATE_PHASE_LABELS = {
   preparing: 'Preparing the update…', fetching: 'Getting the reviewed version…',
   reconciling: 'Combining the update with your local changes…',
+  testing: 'Checking that your local changes still work on this version. This can take several minutes…',
   validating: 'Checking the update…', building: 'Getting everything ready…',
   finalizing: 'Finishing the update…',
 }
@@ -29,6 +32,19 @@ function localImagePathLabel(path) {
   return 'System setup'
 }
 
+export function RetiredLocalCopies({ copies }) {
+  if (!copies.length) return null
+  return (
+    <section className="urm__retired">
+      <h3>Local copies that will be replaced</h3>
+      <p>These changes were merged into Möbius, so the update uses the released version. Your old copies stay in the server’s history, so they can be recovered.</p>
+      <ul>{copies.map(copy => <li key={copy.path}>
+        <code>{copy.path}</code> · from <a href={copy.url} target="_blank" rel="noopener noreferrer">#{copy.pr}</a>
+      </li>)}</ul>
+    </section>
+  )
+}
+
 export default function UpdateReviewModal({
   intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
@@ -38,12 +54,20 @@ export default function UpdateReviewModal({
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [resultState, setResultState] = useState('')
+  const [parking, setParking] = useState(false)
+  const parkingRef = useRef(false)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const resultActionRef = useRef(null)
   const applyAttemptedRef = useRef(false)
-  const inFlight = applying || rebuilding || resolving
+  const inFlight = applying || rebuilding || resolving || parking
   const busy = inFlight || observing
+  const applyElapsed = useElapsedWhile(applying)
 
   const loadPreview = useCallback(async () => {
     setLoading(true); setLoadError(''); setPreview(null); onRefreshReview?.()
@@ -72,15 +96,33 @@ export default function UpdateReviewModal({
   // never on the live checkout: park the update, then open its resolver chat.
   const [fixError, setFixError] = useState('')
   async function handleFixWithAgent() {
+    // A ref closes the same-tick double-click gap before React paints disabled.
+    if (parkingRef.current || busy || !preview?.plan_id) return
+    parkingRef.current = true
+    setParking(true)
     setFixError('')
-    const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
-      current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
-    if (!response.ok) {
-      const body = await response.json().catch(() => null)
-      setFixError(body?.detail?.message || 'Couldn’t prepare this update for an agent. Try again.')
-      return
+    try {
+      const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
+        current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
+      if (!response.ok) {
+        const body = await response.json().catch(() => null)
+        const detail = body?.detail
+        throw new Error(detail?.message || (typeof detail === 'string' && detail)
+          || 'Couldn’t prepare this update for an agent. Check its status before trying again.')
+      }
+      if (mountedRef.current) {
+        const resolution = onResolve()
+        setParking(false)
+        await resolution
+      }
+    } catch (error) {
+      if (mountedRef.current) setFixError(error instanceof TypeError
+        ? 'Couldn’t reach Möbius. Check the update status before trying again.'
+        : error.message || 'Couldn’t confirm whether this update was prepared. Check its status before trying again.')
+    } finally {
+      parkingRef.current = false
+      if (mountedRef.current) setParking(false)
     }
-    onResolve()
   }
 
   async function handleApply() {
@@ -104,6 +146,7 @@ export default function UpdateReviewModal({
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
   const localImagePaths = preview?.local_image_paths || []
+  const retiredCopies = retiredLocalCopies(preview)
   // Predicted with the same merge Apply runs: an agent merges these instead
   // of Apply stopping on them.
   const overlaps = !finish && preview?.conflict_paths?.length > 0
@@ -112,8 +155,9 @@ export default function UpdateReviewModal({
   // must not turn this into a "needs repair" offer — that is the contradictory
   // "already complete + agent repair" state. Show a single Done instead.
   const nothingToApply = !!preview && actionable === false && !hasResult
+  const phaseLabel = (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
   const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed system update…'
-    : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
+    : `${phaseLabel} ${elapsedLabel(applyElapsed)}`
   const needsRestart = activation?.level === 'server_restart'
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
@@ -157,7 +201,7 @@ export default function UpdateReviewModal({
                     <p>{overlaps
                       ? 'Some of your local changes overlap this update.'
                       : repairReason || (finish ? 'Finish setting up the installed update.'
-                      : 'Install this reviewed update while keeping your changes. If anything overlaps, Möbius pauses and asks you to resolve it.')}</p>
+                      : `Install this reviewed update while keeping your changes${retiredCopies.length ? ', except local copies this release already includes (listed below)' : ''}. If anything overlaps, Möbius pauses and asks you to resolve it.`)}</p>
                     <h3>What to expect</h3>
                     <p>{overlaps
                       ? 'Möbius will keep running as it is. An agent merges the overlapping files on a separate copy, checks the result, and finishes the update.'
@@ -171,6 +215,7 @@ export default function UpdateReviewModal({
                     {localImagePaths.length > 0 && !repairReason && <p>Your changes to how Möbius itself runs stay saved, but the official system doesn’t run them. Afterwards, ask Möbius to set up anything you still need another way.</p>}
                     {rebuildUpdate && !repairReason && <p>If the updated system does not pass its checks, Möbius tries to restore the previous system image. Your chats, apps, data, and newly installed source stay in place, so that combination may still need attention.</p>}
                   </section>
+                  <RetiredLocalCopies copies={retiredCopies} />
                   <details className="urm__technical">
                     <summary>Technical details{summary.fileCount ? ` · ${summary.fileCount} files` : ''}</summary>
                     <p>Reviewed version <code className="urm__sha">{target}</code> · {activation && deploymentKindLabel(activation)}</p>
@@ -196,7 +241,7 @@ export default function UpdateReviewModal({
                     {files.length > 0 && <UnifiedDiff diff={preview?.diff} summaryOverrides={files} diffTruncated={!!preview?.diff_truncated} />}
                   </details>
                 </>}
-          {busy && <p className="urm__notice" role="status">{progressLabel}</p>}
+          {busy && <p className="urm__notice" role="status">{parking ? 'Preparing the reviewed update for an agent…' : progressLabel}</p>}
         </div>
         {fixError && <div className="urm__error"><Alert color="danger" variant="soft" description={fixError} /></div>}
         {applyError && <div className="urm__error">{repairReason
@@ -206,7 +251,7 @@ export default function UpdateReviewModal({
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
           : needsAgent && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
-            onClick={handleFixWithAgent} disabled={busy || loading}>{resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
+            onClick={handleFixWithAgent} disabled={busy || loading}>{parking ? 'Preparing…' : resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
           : repairReason ? <>
             <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" label="Fix with an agent" />
           </>

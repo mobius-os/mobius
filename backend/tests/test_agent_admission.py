@@ -217,3 +217,35 @@ async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
       working_set_ratio=0.5,
     ),
   )
+
+
+@pytest.mark.asyncio
+async def test_warned_storage_override_admits_the_turn_under_storage_pressure():
+  await require_agent_turn_admission(
+    "/data", allow_low_storage=True,
+    status_reader=lambda _path: _status("critical"), scratch_sweeper=_no_sweep,
+  )
+  with pytest.raises(AgentTurnDeferred) as waiting:
+    await require_agent_turn_admission(
+      "/data", status_reader=lambda _path: _status("critical"),
+      scratch_sweeper=_no_sweep,
+    )
+  assert waiting.value.resource == "storage", "later turns retain normal admission"
+
+
+async def _no_sweep():
+  return {}
+
+
+@pytest.mark.asyncio
+async def test_storage_override_does_not_override_critical_memory():
+  status = _status("critical")
+  status["pressure"]["memory"] = _memory_status(
+    "critical", working_set_ratio=0.94,
+  )["pressure"]["memory"]
+  with pytest.raises(AgentTurnDeferred) as waiting:
+    await require_agent_turn_admission(
+      "/data", allow_low_storage=True,
+      status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
+    )
+  assert waiting.value.resource == "memory"

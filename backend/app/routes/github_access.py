@@ -275,7 +275,8 @@ async def github_status(
   app paired with an older backend hides that UI. ``frozen_publication_binding``
   advertises that publication accepts the confirmed frozen record(s) and names
   the record fields its server-owned approval digest covers; an older backend
-  omits it.
+  omits it. ``screenshot_upload`` advertises that staging accepts screenshots
+  and Send hosts them in the owner's fork.
   """
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
@@ -303,10 +304,75 @@ async def github_status(
     "gh_version": github_auth.gh_version(),
     "active_attempt": active_attempt,
     "autopilot_available": True,
+    "screenshot_upload": True,
     "frozen_publication_binding": {
       "record_fields": list(PUBLICATION_APPROVAL_FIELDS),
     },
   }
+
+
+_GITHUB_LOGIN_SHAPE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_AVATAR_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_AVATAR_MAX_BYTES = 512 * 1024
+_AVATAR_HOLD_SECONDS = 6 * 60 * 60
+# login -> (fetched_at, media_type, bytes). One connected account at a time, so
+# this never holds more than a handful of small images.
+_avatar_cache: dict[str, tuple[float, str, bytes]] = {}
+
+
+@router.get("/avatar/{login}")
+@_limiter.limit("30/minute")
+async def github_avatar(
+  request: Request,
+  login: str,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
+):
+  """The connected account's public GitHub avatar, served same-origin.
+
+  The shell's image policy allows only same-origin images, so Settings shows
+  the avatar through this narrow read instead of widening ``img-src`` to a
+  third-party host. The address names the login, so the browser's cache of it
+  follows the account: any login but the connected one is absent. Only that
+  login is ever fetched; the request carries no token, and the bytes are
+  bounded while they stream and are type-checked.
+  """
+  state = github_auth.read_state() or {}
+  connected = state.get("login") if state.get("token") else None
+  if (not isinstance(connected, str) or connected != login
+      or not _GITHUB_LOGIN_SHAPE.fullmatch(login)):
+    raise HTTPException(status_code=404, detail="No GitHub account is connected.")
+  cached = _avatar_cache.get(login)
+  if cached is None or time.monotonic() - cached[0] > _AVATAR_HOLD_SECONDS:
+    unavailable = HTTPException(status_code=502, detail="GitHub avatar is unavailable.")
+    try:
+      async with httpx.AsyncClient(follow_redirects=False, timeout=10) as client:
+        async with client.stream(
+          "GET",
+          f"https://avatars.githubusercontent.com/{login}",
+          params={"s": "96"},
+          headers={"User-Agent": "mobius"},
+        ) as response:
+          media_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+          if response.status_code != 200 or media_type not in _AVATAR_TYPES:
+            raise unavailable
+          content = bytearray()
+          async for chunk in response.aiter_bytes():
+            content += chunk
+            if len(content) > _AVATAR_MAX_BYTES:
+              raise unavailable
+    except httpx.HTTPError:
+      raise unavailable
+    _avatar_cache.clear()
+    cached = (time.monotonic(), media_type, bytes(content))
+    _avatar_cache[login] = cached
+  return Response(
+    content=cached[2],
+    media_type=cached[1],
+    headers={
+      "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+    },
+  )
 
 
 @router.get("/source-status")

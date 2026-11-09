@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { button, click, renderHook } from './confirmationHarness.mjs'
+
+const { PlatformUpdatesView } = await import('../../components/SettingsView/PlatformUpdates.jsx')
 
 const view = readFileSync(
   new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
@@ -8,6 +11,14 @@ const view = readFileSync(
 )
 const css = readFileSync(
   new URL('../../components/SettingsView/SettingsView.css', import.meta.url),
+  'utf8',
+)
+const pageCss = readFileSync(
+  new URL('../../components/SettingsView/SettingsPage.css', import.meta.url),
+  'utf8',
+)
+const providerPage = readFileSync(
+  new URL('../../components/SettingsView/ProviderPage.jsx', import.meta.url),
   'utf8',
 )
 
@@ -33,8 +44,9 @@ test('appearance keeps one icon switch in the header without making the section 
   assert.match(css, /\.settings__appearance-toggle\s*\{[^}]*grid-template-columns:\s*repeat\(2, 34px\);/s)
 })
 
-test('provider priority does not override the last-picked new-chat model', () => {
-  assert.match(view, /New chats still use your last-picked chat model/)
+test('provider priority copy is short and does not override the last-picked new-chat model', () => {
+  assert.match(view, /Drag to set background-task priority\./)
+  assert.doesNotMatch(view, /Disconnected providers stay below|New chats still use your last-picked chat model/)
   assert.doesNotMatch(view, /settings__priority-summary|firstBackgroundLabel|lastModelLabel/)
 })
 
@@ -59,13 +71,7 @@ test('update versions paint from the persisted status cache without an Unknown f
   assert.match(updates, /versionPlatform \? 'Unavailable' : 'Checking…'/)
 })
 
-test('restart confirms on the same button for four seconds without a cancel button', () => {
-  assert.match(updates, /setTimeout\(\(\) => setConfirmRestart\(null\), 4000\)/)
-  assert.match(updates, /if \(confirmRestart !== source\) \{[\s\S]*?return setConfirmRestart\(source\)[\s\S]*?update\.restart\(\)/)
-  // A double-click must not arm and confirm in one gesture.
-  assert.match(updates, /if \(performance\.now\(\) - armedAt\.current < RESTART_CONFIRM_MIN_MS\) return[\s\S]*?update\.restart\(\)/)
-  assert.match(updates, /act: \(\) => pressRestart\('primary'\)/)
-  assert.match(updates, /onClick=\{\(\) => pressRestart\('dedicated'\)\}/)
+test('restart keeps interruption guidance without a cancel or unreviewed rebuild action', () => {
   assert.doesNotMatch(updates, /Not now|Restart server/)
   assert.match(updates, /briefly pauses active chats/)
   assert.match(updates, /page will reconnect automatically/)
@@ -74,6 +80,81 @@ test('restart confirms on the same button for four seconds without a cancel butt
   // second unreviewed maintenance action beside the server restart.
   assert.doesNotMatch(updates, /Rebuild now|Rebuild container|Replace now/)
 })
+
+function mountUpdates(t) {
+  let now = 0
+  let restarts = 0
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(performance, 'now', () => now)
+  const update = {
+    platform: {
+      state: 'restart_needed', needs_restart: true, available: false,
+      activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    },
+    rebuild: null, version: null, phase: 'idle', busy: false,
+    clearError() {}, restart() { restarts++ },
+  }
+  const view = renderHook(() => PlatformUpdatesView({ update }))
+  t.after(() => view.unmount())
+  return {
+    view,
+    restarts: () => restarts,
+    advance(ms) { now += ms; t.mock.timers.tick(ms) },
+  }
+}
+
+for (const label of ['Restart to finish', 'Restart']) {
+  test(`${label}: first click arms, a double-click cannot restart, later confirmation restarts once`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, label)
+    assert.equal(restarts(), 0)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'an immediate second click is the same gesture')
+    advance(499)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'confirmation must wait the full 500ms')
+    advance(1)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+    assert.ok(button(view, label), 'successful confirmation disarms the button')
+    click(view, label)
+    assert.equal(restarts(), 1, 'another click must arm a new confirmation, not replay restart')
+  })
+
+  test(`${label}: confirmation expires at four seconds and a later click only re-arms`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, label)
+    advance(3999)
+    assert.ok(button(view, 'Confirm restart'))
+    assert.equal(restarts(), 0)
+    advance(1)
+    assert.ok(button(view, label), 'the four-second timeout must disarm')
+    click(view, label)
+    assert.equal(restarts(), 0, 'an expired confirmation must never restart')
+    advance(500)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+  })
+}
+
+for (const [first, other] of [['Restart to finish', 'Restart'], ['Restart', 'Restart to finish']]) {
+  test(`arming ${first} cannot be confirmed by ${other}`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, first)
+    advance(600)
+    click(view, other)
+    assert.equal(restarts(), 0, 'a different button must arm itself, never confirm its neighbour')
+    assert.ok(button(view, first), 'only the newly armed button may show confirmation')
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'switching buttons must reset the double-click guard')
+    advance(3400)
+    assert.ok(button(view, 'Confirm restart'), 'the old button’s expiry must not disarm the new prompt')
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+    assert.ok(button(view, first))
+    assert.ok(button(view, other))
+  })
+}
 
 test('Settings omits historical container diagnostics but keeps current action errors', () => {
   assert.doesNotMatch(updates, /Last container update|Update details|rebuild\.expected_sha|rebuild\.updated_at/)
@@ -94,43 +175,50 @@ test('status failures project unknown rather than retaining an unchecked current
 })
 
 test('provider rows keep six-dot background priority without reorder chrome', () => {
-  assert.match(view, /settings-bg-row__effort-visual[\s\S]*settings-bg-row__effort-dot/)
-  assert.match(view, /efforts=\{efforts\}[\s\S]*onEffortChange=\{onEffortChange\}/)
-  assert.doesNotMatch(view, /settings-bg-row__effort-picker|<EffortStepper/)
-  assert.doesNotMatch(view, /\{effortLabel\} effort<\/span>/)
+  assert.match(providerPage, /settings-bg-row__effort-visual[\s\S]*settings-bg-row__effort-dot/)
+  assert.match(providerPage, /efforts=\{efforts\}[\s\S]*onEffortChange=\{onEffortChange\}/)
+  assert.doesNotMatch(providerPage, /settings-bg-row__effort-picker|<EffortStepper/)
   assert.match(view, /<GripVertical size=\{18\} strokeWidth=\{2\}/)
   assert.doesNotMatch(view, /settings-agent-group__reorder|>Reorder<|model-trigger__caret/)
   assert.match(view, /background-task priority/)
-  assert.match(css, /\.settings-bg-row\s*\{[^}]*border:\s*1px solid var\(--border\);[^}]*background:\s*var\(--surface\);/s)
+  assert.match(css, /\.settings-bg-row\s*\{[^}]*background:\s*var\(--surface\);/s)
   assert.match(css, /\.settings-bg-row__effort-visual\s*\{[^}]*min-width:\s*68px;/s)
   assert.doesNotMatch(view, /dropPosition|settings-bg-row--drop-before|settings-bg-row--drop-after/)
   assert.doesNotMatch(css, /settings-bg-row--drop-before|settings-bg-row--drop-after/)
 })
 
-test('provider usage is fetched only for the open provider page', () => {
-  assert.match(view, /&& selectedProvider === 'codex'/)
-  assert.match(view, /&& selectedProvider === 'claude'/)
+test('provider usage is read for connected providers on the overview and only the open page on a provider page', () => {
+  assert.match(view, /configuredProviders\.has\(provider\)[\s\S]*\(!detailPage \|\| selectedProvider === provider\)/)
+  assert.match(view, /useQuery\('codex', \{\s*enabled: usageWanted\('codex'\)/)
+  assert.match(view, /useQuery\('claude', \{\s*enabled: usageWanted\('claude'\)/)
+  assert.match(view, /useQuery\('mobius', \{\s*enabled: usageWanted\('mobius'\)/)
+  assert.match(view, /usage=\{rowUsage\(usageQueries\[row\.provider\]\?\.data\)\}/)
   assert.doesNotMatch(view, /PlanUsageToggle|expandedUsage/)
 })
 
-test('the Möbius account and Möbius sign-in hand off to Möbius · You', () => {
-  assert.match(view, /onOpenApp\?\.\('identity'\)/)
-  assert.match(view, /onOpenAccount=\{openMobiusYou\}/)
-  assert.doesNotMatch(view, /IdentityAccount|SettingsView\/identity\/|useIdentityQuery/)
+test('the Möbius account lives in Settings, with no hand-off to an app', () => {
+  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} \/>/)
+  assert.match(view, /onClick=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}/)
+  assert.match(view, /useMobiusAccountSummary\(\)/)
+  assert.doesNotMatch(view, /onOpenApp\?\.\('identity'\)|openMobiusYou|Möbius · You|Möbius account<\/strong>/)
 })
 
 test('provider-dependent model controls stay unavailable until connected', () => {
-  assert.match(view, /disabled=\{!configuredProviders\.has\(row\.provider\)\}/)
-  assert.match(view, /disabled=\{!configured\}/)
+  // An unconnected provider page is only its Connection section.
+  assert.match(providerPage, /if \(!configured\) return <>\{connectionSection\}\{access\}<\/>/)
+  assert.match(providerPage, /<ChatModelsList provider=\{provider\} \/>/)
+  assert.doesNotMatch(providerPage, /ratesUrl|See current rates|Token rates are a reference/)
   assert.match(view, /configuredProviders=\{configuredProviders\}/)
 })
 
-test('Settings detail back button has a 44px touch target and keeps the shared 18px icon', () => {
-  assert.match(view, /className="settings__back"[\s\S]*<ArrowLeft width=\{18\} height=\{18\}/)
-  assert.match(css, /\.settings__back\s*\{[^}]*display:\s*grid;[^}]*place-items:\s*center;/s)
-  const backStyle = css.match(/\.settings__back\s*\{([^}]+)\}/s)[1]
-  assert.match(backStyle, /width:\s*44px;/)
-  assert.match(backStyle, /height:\s*44px;/)
+test('Settings sub-page back button has a 44px touch target and keeps the shared 18px icon', () => {
+  assert.match(view, /className="settings-subhead__back"[\s\S]*<ArrowLeft width=\{18\} height=\{18\}/)
+  const backStyle = pageCss.match(/\.settings-subhead__back\s*\{([^}]+)\}/s)[1]
+  assert.match(backStyle, /display:\s*grid;/)
+  assert.match(backStyle, /width:\s*36px;/)
+  assert.match(backStyle, /height:\s*36px;/)
+  // 36px button + 4px on every side = a 44px touch target.
+  assert.match(pageCss, /\.settings-subhead__back::before\s*\{[^}]*inset:\s*-4px;/s)
   assert.doesNotMatch(view, />←<\/button>/)
 })
 
@@ -144,7 +232,7 @@ test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /await persistBackgroundAgents\([\s\S]*providersBefore\.size === 0 \? \{ provider \} : \{\}/)
   assert.match(view, /api\.settings\.save\(\{[\s\S]*\.\.\.companionSettings,[\s\S]*background_agents: payload/)
   assert.match(view, /await settleBackgroundAgentSave\([\s\S]*if \(stale\) return true/)
-  assert.match(view, /if \(!saved\) return[\s\S]*setExpandedAuth\(null\)/)
+  assert.match(view, /if \(!saved\) return[\s\S]*setConnectionEpoch\(epoch => epoch \+ 1\)/)
   assert.doesNotMatch(view, /api\.settings\.save\(\{ provider \}\)/)
   assert.match(view, /effort: defaultEffort\(provider\)/)
 })
@@ -156,14 +244,13 @@ test('appearance indicator waits for the same seeded theme repaint as the palett
 })
 
 
-test('original Settings keeps spacious rounded cards and full model summaries', () => {
+test('Settings keeps spacious grouped lists and full model summaries', () => {
   assert.match(css, /\.settings\s*\{[^}]*padding:\s*28px 22px 20px;/s)
-  assert.match(css, /\.settings__section\s*\{[^}]*border-radius:\s*8px;[^}]*padding:\s*17px;/s)
-  assert.doesNotMatch(css, /\.settings \.provider-row\s*\{/)
-  assert.match(css, /\.settings-bg-row\s*\{[^}]*min-height:\s*50px;/s)
-  assert.match(view, /title=\{selectedModel \|\| triggerLabel\}/)
-  assert.match(view, /className="model-trigger__id"/)
-  assert.match(view, /<ModelSheet[\s\S]*onEffortChange=\{onEffortChange\}/)
+  assert.match(pageCss, /\.settings-list\s*\{[^}]*border-radius:\s*12px;/s)
+  assert.match(pageCss, /\.settings-item\s*\{[^}]*min-height:\s*56px;/s)
+  assert.match(css, /\.settings-bg-row\s*\{[^}]*min-height:\s*64px;/s)
+  assert.match(providerPage, /title=\{selectedModel \|\| triggerLabel\}/)
+  assert.match(providerPage, /<ModelSheet[\s\S]*onEffortChange=\{onEffortChange\}/)
 })
 
 test('compact Updates pairs its status with actions without redundant success copy', () => {

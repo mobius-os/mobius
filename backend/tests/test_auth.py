@@ -7,9 +7,11 @@ import time
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import bcrypt
 import httpx
+from app import setup_code
 from test_app_fixtures import create_local_app
 
 
@@ -239,7 +241,7 @@ def test_managed_web_login_rejects_a_different_local_model_identity(monkeypatch,
 
 
 def test_setup_creates_owner(client):
-  r = client.post("/api/auth/setup", json={
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -271,7 +273,7 @@ def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
   configure_managed_sso(monkeypatch)
 
   status = client.get("/api/auth/setup/status")
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "attacker",
     "password": "not-the-owner",
   })
@@ -356,7 +358,7 @@ def test_managed_bootstrap_repairs_an_accidental_local_owner(
 ):
   from app import auth as auth_service, models
 
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "accidental-local-owner",
     "password": "securepassword123",
   })
@@ -392,7 +394,7 @@ def test_managed_bootstrap_repairs_an_accidental_local_owner(
 def test_managed_configuration_blocks_local_login_before_broker_recovery(
   client, monkeypatch,
 ):
-  setup = client.post("/api/auth/setup", json={
+  setup = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "accidental-local-owner",
     "password": "securepassword123",
   })
@@ -416,7 +418,7 @@ def test_managed_bootstrap_never_rebinds_a_local_owner(
 ):
   from app import models
 
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "owner",
     "password": "securepassword123",
   })
@@ -483,12 +485,12 @@ def test_managed_bootstrap_rejects_a_mismatched_broker_identity(
 
 
 def test_setup_rejects_duplicate(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
   # Owner already exists, so a second setup is rejected.
-  r = client.post("/api/auth/setup", json={
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin2",
     "password": "anotherpassword",
   })
@@ -553,7 +555,7 @@ def test_mobius_login_secret_cannot_cross_into_shell_install_protocol(client, db
 
 
 def test_login_success(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -566,7 +568,7 @@ def test_login_success(client):
 
 
 def test_login_wrong_password(client):
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "admin",
     "password": "securepassword123",
   })
@@ -696,37 +698,23 @@ def test_providers_status_accepts_app_token(client, auth):
   assert "codex" in body
   assert "configured" in body["claude"]
   assert body["claude"]["authenticated"] == body["claude"]["configured"]
-  assert body["mobius"]["available"] is False
+  # No broker link in tests: the platform provider is listed, not signed in.
+  assert body["mobius"]["available"] is True
   assert body["mobius"]["configured"] is False
+  assert body["mobius"]["error"] == (
+    "Sign in to your Möbius account in Settings to use Möbius models."
+  )
 
 
-def test_mobius_provider_is_available_only_with_identity_app_installed(
+def test_mobius_provider_is_available_without_identity_app_and_owner_switches_it(
   client, auth,
 ):
-  from app import models
-  from app.config import get_settings
-  from app.database import SessionLocal
-
-  absent = client.get("/api/auth/providers/status", headers=auth).json()
-  assert absent["mobius"]["available"] is False
-
-  app = create_local_app(
-    client, auth, name="Möbius · You", description="Account",
-  )
-  from app import providers
-  with SessionLocal() as session:
-    row = session.query(models.App).filter(models.App.id == app["id"]).one()
-    row.slug = "identity"
-    row.capability_contract = {"model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
-
+  """The Möbius provider is platform-owned; the owner turns it off in Settings."""
   installed = client.get("/api/auth/providers/status", headers=auth).json()
   assert installed["mobius"]["available"] is True
+  assert client.get(
+    "/api/auth/providers/mobius/enabled", headers=auth,
+  ).json() == {"enabled": True}
 
   disabled = client.patch(
     "/api/auth/providers/mobius/enabled",
@@ -738,6 +726,7 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   assert hidden["mobius"]["available"] is False
   assert hidden["mobius"]["configured"] is False
   assert hidden["mobius"]["authenticated"] is False
+  assert hidden["mobius"]["error"] == "Möbius models are turned off in Settings."
   assert hidden["claude"] == installed["claude"]
   assert hidden["codex"] == installed["codex"]
   assert client.patch(
@@ -753,26 +742,9 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   """The owner's Möbius trial balance is owner-only. App/embed principals share
   the endpoint for model-picker availability, so they must see the same
   provider fields without the owner's credit units and grant expiries."""
-  from app import models
-  from app.config import get_settings
-  from app.database import SessionLocal
   from app.providers import MobiusProvider
 
-  # Install the identity app so mobius reports as available.
-  app = create_local_app(
-    client, auth, name="Möbius · You", description="Account",
-  )
-  from app import providers
-  with SessionLocal() as session:
-    row = session.query(models.App).filter(models.App.id == app["id"]).one()
-    row.slug = "identity"
-    row.capability_contract = {"model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  app = create_local_app(client, auth, name="Picker host", description="x")
 
   # Fake a linked subscription carrying a real trial balance.
   balance = {
@@ -801,6 +773,26 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   assert app_body["mobius"]["available"] is True
   assert app_body["mobius"]["configured"] is True
   assert "trial" not in app_body["mobius"]
+
+  # A shared-browser guest uses the same models, but not the owner's credit.
+  from app import models
+  from app.browser_access import BrowserLineage, redeem_invitation
+  from app.database import SessionLocal
+  from tests.browser_access_fixtures import link_grant
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    grant, invitation = link_grant(session, owner, "Guest")
+    _, browser_session, _, _ = redeem_invitation(session, invitation)
+    guest_token = create_access_token(
+      {"sub": owner.username}, token_epoch=owner.token_epoch,
+      browser=BrowserLineage(grant.id, browser_session.id),
+    )
+  guest_body = client.get(
+    "/api/auth/providers/status",
+    headers={"Authorization": f"Bearer {guest_token}"},
+  ).json()
+  assert guest_body["mobius"]["configured"] is True
+  assert "trial" not in guest_body["mobius"]
 
 
 def test_providers_status_rejects_empty_claude_oauth_record(
@@ -868,6 +860,20 @@ def test_claude_auth_accepts_current_access_or_refreshable_session(tmp_path):
   }))
   assert ClaudeProvider().check_auth(str(tmp_path)) is None
 
+  # A stored end outside the range the CLI accepts (here before 2025) is no
+  # end under the CLI's storage rule, which Möbius follows: the refresh then
+  # decides, and drops the bad end. (The CLI's own usability check would
+  # count it as ended.)
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "refresh-token",
+      "expiresAt": 0,
+      "refreshTokenExpiresAt": 0,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
 
 def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
   from app.providers import ClaudeProvider
@@ -891,7 +897,7 @@ def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
       "accessToken": "expired-token",
       "refreshToken": "expired-refresh-token",
       "expiresAt": 0,
-      "refreshTokenExpiresAt": 0,
+      "refreshTokenExpiresAt": int(time.time() * 1000) - 120_000,
     },
   }))
 
@@ -948,7 +954,10 @@ def test_providers_models_returns_known_models_on_missing_creds(
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  assert set(body) == {"claude", "codex"}
+  # The platform-owned Möbius catalogue is listed with no app installed.
+  assert set(body) == {"claude", "codex", "mobius"}
+  from app.providers import known_model_ids
+  assert [m["id"] for m in body["mobius"]] == known_model_ids("mobius")
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5-1",
@@ -1075,7 +1084,7 @@ def test_providers_models_respects_hidden_model_prefs(client, auth):
   r0 = client.patch(
     "/api/owner/model-prefs",
     headers=auth,
-    json={"hidden_ids": ["claude-opus-4-8", "gpt-5.5"]},
+    json={"hidden": {"claude-opus-4-8": True, "gpt-5.5": True}},
   )
   assert r0.status_code == 200, r0.text
 
@@ -1098,7 +1107,7 @@ def test_setup_rejects_cross_site_request(client):
   send Sec-Fetch-Site at all, so the guard passes the request through."""
   r = client.post(
     "/api/auth/setup",
-    json={"username": "admin", "password": "securepassword123"},
+    json={"setup_code": setup_code.current(), "username": "admin", "password": "securepassword123"},
     headers={"Sec-Fetch-Site": "cross-site"},
   )
   assert r.status_code == 403
@@ -1108,7 +1117,7 @@ def test_setup_rejects_opaque_cross_site_request_without_bearer(client):
   """Origin null alone is not the authenticated app-sandbox exception."""
   r = client.post(
     "/api/auth/setup",
-    json={"username": "admin", "password": "securepassword123"},
+    json={"setup_code": setup_code.current(), "username": "admin", "password": "securepassword123"},
     headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"},
   )
   assert r.status_code == 403
@@ -1118,7 +1127,7 @@ def test_setup_allows_curl_style_request(client):
   """Setup with no Sec-Fetch-Site header (e.g. curl) must still work."""
   r = client.post(
     "/api/auth/setup",
-    json={
+    json={"setup_code": setup_code.current(),
       "username": "admin",
       "password": "securepassword123",
     },
@@ -1185,9 +1194,10 @@ def test_concurrent_first_setups_leave_exactly_one_owner(client, monkeypatch):
 
   monkeypatch.setattr(Session, "add", add_after_both_checked)
   statuses = {}
+  code = setup_code.current()
 
   def setup(username):
-    statuses[username] = client.post("/api/auth/setup", json={
+    statuses[username] = client.post("/api/auth/setup", json={"setup_code": code,
       "username": username, "password": "testpassword123",
     }).status_code
 
@@ -1202,3 +1212,88 @@ def test_concurrent_first_setups_leave_exactly_one_owner(client, monkeypatch):
     owners = [row.username for row in db.query(models.Owner).all()]
   winner = next(name for name, status in statuses.items() if status == 200)
   assert owners == [winner]
+
+
+def test_setup_requires_the_one_time_code_from_the_server(client):
+  """Reaching the URL first is not enough to claim a self-hosted instance."""
+  body = {"username": "admin", "password": "securepassword123"}
+  assert client.post("/api/auth/setup", json=body).status_code == 403
+  assert client.post(
+    "/api/auth/setup", json={**body, "setup_code": "AAAA-AAAA-AAAA-AAAA"},
+  ).status_code == 403
+  assert client.get("/api/auth/setup/status").json()["configured"] is False
+
+
+def test_setup_rejects_a_non_ascii_code_as_an_ordinary_wrong_code(client):
+  """Unicode letters must fail like any wrong code, not crash the comparison."""
+  code = setup_code.current()
+  body = {"username": "admin", "password": "securepassword123"}
+  for typed in ("é", "Ａ" * 16, code[:15] + "é", code + "é"):
+    r = client.post("/api/auth/setup", json={**body, "setup_code": typed})
+    assert r.status_code == 403, (typed, r.status_code, r.text)
+  assert client.get("/api/auth/setup/status").json()["configured"] is False
+  assert setup_code.code_path().exists()
+
+
+def test_setup_code_is_forgiving_about_case_and_dashes_and_works_once(client):
+  code = setup_code.current()
+  assert len(code) == 16
+  typed = " " + "-".join(code[i:i + 4] for i in range(0, 16, 4)).lower() + " "
+  r = client.post("/api/auth/setup", json={
+    "username": "admin", "password": "securepassword123", "setup_code": typed,
+  })
+  assert r.status_code == 200, r.text
+  assert not setup_code.code_path().exists()
+  assert client.post("/api/auth/setup", json={
+    "username": "other", "password": "securepassword123", "setup_code": typed,
+  }).status_code == 400
+
+
+def test_setup_status_issues_a_stable_owner_only_code(client):
+  setup_code.retire()
+  client.get("/api/auth/setup/status")
+  path = setup_code.code_path()
+  assert path.exists()
+  assert path.stat().st_mode & 0o777 == 0o600
+  first = setup_code.current()
+  client.get("/api/auth/setup/status")
+  assert setup_code.current() == first
+
+
+def test_setup_code_is_logged_for_the_operator(client, caplog):
+  setup_code.retire()
+  with caplog.at_level("WARNING", logger="moebius.auth"):
+    code = setup_code.current()
+  formatted = "-".join(code[i:i + 4] for i in range(0, 16, 4))
+  assert formatted in caplog.text
+
+
+def test_boot_announces_the_code_only_while_a_self_hosted_owner_is_missing(
+  client, monkeypatch, caplog,
+):
+  import logging
+  from app import startup
+
+  ctx = SimpleNamespace(logger=logging.getLogger("test.startup"))
+  setup_code.retire()
+  with caplog.at_level("WARNING", logger="moebius.auth"):
+    startup._announce_setup_code(ctx)
+  assert setup_code.code_path().exists()
+  assert "Möbius setup code" in caplog.text
+
+  client.post("/api/auth/setup", json={
+    "setup_code": setup_code.current(),
+    "username": "admin", "password": "securepassword123",
+  })
+  setup_code.current()  # a stray code left behind must not survive a boot
+  startup._announce_setup_code(ctx)
+  assert not setup_code.code_path().exists()
+
+
+def test_managed_boot_never_issues_a_setup_code(client, monkeypatch):
+  from app import startup
+
+  configure_managed_sso(monkeypatch)
+  setup_code.retire()
+  startup._announce_setup_code(SimpleNamespace(logger=None))
+  assert not setup_code.code_path().exists()
