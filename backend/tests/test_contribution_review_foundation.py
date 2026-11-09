@@ -16,12 +16,15 @@ from app.contribution_review_effects import NotDispatched, classify_dispatch_err
 from app.contribution_errors import ContributionSubmitError
 
 
+CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
+                "review_fix_merge": True, "draft_takeover": True}
+
 def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
   assert "/api/github/review-preview" in paths
   assert "/api/github/review-runs/{run_id}/outcomes" in paths
   assert "/api/github/review-runs/{run_id}/repairs" in paths
-  assert routes.REVIEW_CAPABILITIES == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
+  assert routes.REVIEW_CAPABILITIES == CAPABILITIES
   assert "/api/github/review-runs/{run_id}/ready" in paths
 
 
