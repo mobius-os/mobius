@@ -2,6 +2,7 @@
 owner-only, asked of the PR machine on GitHub's live answer, and never repeated when unconfirmed."""
 import asyncio
 import json
+import threading
 
 import pytest
 from fastapi import HTTPException
@@ -10,6 +11,7 @@ from app import contribution_pull_status as subject
 from app.contribution_errors import ContributionSubmitError
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
+from tests.pr_job_helpers import holding
 from tests.test_contribution_direct_merge import FakeGitHub, NAME, NUMBER, _flags
 from tests.test_contribution_review_runs import APPROVAL, PULL, SHA
 
@@ -32,6 +34,7 @@ class StatusGitHub(FakeGitHub):
     self.after_write = lambda name: None
     self.recent_comments = []  # what GitHub answers to the read of the PR's recent comments, or an exception
     self.comment_reads = []
+    self.during_comment_read = lambda: None  # runs while GitHub has not yet answered the comments read
 
   def __call__(self, cwd, *args, check=True, input_text=None, **_ignored):
     self.calls.append(args)
@@ -42,6 +45,7 @@ class StatusGitHub(FakeGitHub):
       return self._write("reviewers", {**self.pull, "requested_reviewers": [{"login": login} for login in asked]}, asked)
     if len(args) == 2 and args[0] == "api" and args[1].startswith(f"{COMMENTS_ENDPOINT}?"):
       self.comment_reads.append(args[1])
+      self.during_comment_read()
       return self._answer(self.recent_comments)
     if args[:3] == ("api", "--method", "POST") and args[3] == COMMENTS_ENDPOINT:
       note = json.loads(input_text)["body"]
@@ -83,7 +87,7 @@ def looked_again(login="sam"):
 
 
 def change(github, name, request=None, job=None):
-  return asyncio.run(subject.change_pull_status(github, None, name, request or body(), lambda: None, job=job))
+  return asyncio.run(subject.change_pull_status(github, None, name, request or body(), lambda: None, pr_job=holding(job)))
 
 
 def refused(github, name, request=None, job=None):
@@ -266,6 +270,39 @@ def test_a_repeat_check_that_cannot_read_comments_never_blocks_the_post_which_st
   assert github.writes_seen == [("comment", NOTE)]
 
 
+def test_a_caller_cancelled_during_the_repeat_check_never_posts_the_note():
+  github = looked_again()
+  reading, release = threading.Event(), threading.Event()
+  github.during_comment_read = lambda: (reading.set(), release.wait(5))
+
+  async def cancel_while_reading():
+    task = asyncio.ensure_future(subject.change_pull_status(github, None, "ask-approval", approving(["sam"]),
+                                                            lambda: None, pr_job=holding()))
+    await asyncio.to_thread(reading.wait, 5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(cancel_while_reading())
+  assert github.writes_seen == []
+
+
+def test_permission_revoked_during_the_repeat_check_never_posts_the_note():
+  github = looked_again()
+  revoked = []
+  github.during_comment_read = lambda: revoked.append(True)
+
+  def authorize():
+    if revoked:
+      raise HTTPException(403, "App access was turned off.")
+
+  with pytest.raises(HTTPException) as refusal:
+    asyncio.run(subject.change_pull_status(github, None, "ask-approval", approving(["sam"]), authorize, pr_job=holding()))
+  assert (refusal.value.status_code, refusal.value.detail) == (409, "App access was turned off.")
+  assert len(github.comment_reads) == 1 and github.writes_seen == []
+
+
 def test_a_pull_request_githubs_comment_read_says_is_not_there_is_refused_and_nothing_is_posted():
   github = looked_again()
   github.recent_comments = ContributionSubmitError("gh: Not Found (HTTP 404)")
@@ -279,6 +316,16 @@ def test_a_note_that_posted_is_never_reported_as_refused_when_the_head_cannot_be
   status, detail = refused(github, "ask-approval", approving(["sam"]))
   assert status == 502 and detail["code"] == "approval_unconfirmed"
   assert len(github.writes_seen) == 1
+
+
+@pytest.mark.parametrize("asked", ["Alice", "alice", "ALICE"])
+def test_ask_for_rereview_matches_a_reviewer_whatever_the_case_of_their_login(asked):
+  github = StatusGitHub()
+  github.reviews = [{**APPROVAL, "author": {"login": "Alice", "__typename": "User"}, "commit": {"oid": OLDER}}]
+  assert change(github, "request-reviewers", asking([asked]))["state"] == "requested"
+  assert github.writes_seen == [("reviewers", [asked])]
+  status, reason = refused(github, "request-reviewers", asking(["bob"]))
+  assert status == 409 and "Alice" in reason  # the refusal still names her as GitHub spells her
 
 
 def test_a_head_that_moved_since_the_owner_looked_is_refused_before_any_write():

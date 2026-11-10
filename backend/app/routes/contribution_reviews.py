@@ -7,7 +7,7 @@ import subprocess
 import logging
 import time
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -33,6 +33,7 @@ from app.chat_start import start_programmatic_chat_turn
 from app.chat_visibility import coerce_agent_settings
 from app.config import get_settings
 from app.contribution_autopilot import resolve_round_choice
+from app.contribution_review_effects import DispatchResult
 from app.database import get_db
 from app.deps import (Principal, get_agent_run_principal, get_principal, is_owner_input_principal,
                       reject_cross_site, require_account_owner, require_account_owner_control,
@@ -292,6 +293,8 @@ _ADMISSION_ACTIONS = {("review", "author"): "check_my_pr", ("review", "reviewer"
 # The one comment admitting a takeover of someone else's PR posts from the owner's
 # account, with their own reason; the app's confirm sheet shows these exact words.
 TAKEOVER_NOTICE_KEY = "_takeover_notice"
+TAKEOVER_ACTOR_CHANGED = ("The connected GitHub account changed after you approved this, so nothing was posted. "
+                          "Reconnect the account you approved and start it again.")
 TAKEOVER_NOTICE_UNCONFIRMED = {"code": "takeover_comment_unconfirmed", "message": (
   "GitHub may have posted the takeover comment. Check the pull request: it is never sent twice, "
   "and nothing was started.")}
@@ -394,24 +397,60 @@ def _require_takeover_announced(row) -> None:
   """A takeover starts only once GitHub confirmed its comment; a lost answer is never resent."""
   for notice in ((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).values():
     if notice.get("state") == "not_dispatched":
-      raise HTTPException(409, f"GitHub refused the takeover comment, so nothing was started. {notice.get('summary', '')}".strip())
+      raise HTTPException(409, f"The takeover comment was not posted, so nothing was started. {notice.get('summary', '')}".strip())
     if notice.get("state") != "posted":
       raise HTTPException(502, TAKEOVER_NOTICE_UNCONFIRMED)
+
+
+def _takeover_refusal(db, row, actor) -> str | None:
+  """Why the comment must not go out now, or None: the connected account is not the one that approved
+  the run, the owner stopped it, or Contribute's permission was withdrawn since admission."""
+  if str(actor.get("id") or "") != row.github_actor_id:
+    return TAKEOVER_ACTOR_CHANGED
+  try:
+    _owner_decision_authority(db, row)
+  except HTTPException as exc:
+    return str(exc.detail)
+  return None
+
+
+async def _announce_one(db, row, cwd, item_key, notice, target, caller) -> str:
+  """One takeover comment, from its last proof to its saved receipt; returns the receipt's state.
+
+  The proof and the dispatch happen under the connection lock and the run's admission lock, which Stop
+  also takes to save its flag, so a Stop is either seen here or comes after the comment.
+  """
+  async with _github_connection_transaction():
+    # The connection lock keeps the account still but does not say whose it is.
+    actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
+    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+      refusal = _takeover_refusal(db, row, actor)
+      if refusal is None and caller.cancelling():
+        refusal = "The request was cancelled before the comment began."
+      if refusal is not None:
+        result = DispatchResult.not_dispatched(refusal)
+      else:
+        result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
+  fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
+            **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
+  _save_notice(db, row, item_key, {**notice, **fields})
+  if result.state != "confirmed":
+    reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": "platform",
+                                                     "reason": "The takeover comment was not confirmed."})
+  return fields["state"]
 
 
 async def _announce_takeover(db, row, cwd) -> None:
   """Post each armed takeover comment once. Unless GitHub confirms it, the run is stopped
   (it holds nothing) and the start is refused."""
+  caller = asyncio.current_task()
   for item_key, notice in list(((row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY) or {}).items()):
     target = next(t for t in row.targets_json if reviews.key(t) == item_key)
-    async with _github_connection_transaction():
-      result = await settled.run_settled(public.post_issue_comment, _gh, cwd, target, notice["body"])
-    fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state],
-              **(result.receipt or {}), **({"summary": result.reason} if result.reason else {})}
-    _save_notice(db, row, item_key, {**notice, **fields})
-    if result.state != "confirmed":
-      reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": "platform",
-                                                       "reason": "The takeover comment was not confirmed."})
+    # Dispatch and its receipt are one unit: a cancelled request still records what GitHub answered
+    # instead of stranding the notice as "posting", which would refuse the same start for good.
+    state = await settled.settle(_announce_one(db, row, cwd, item_key, notice, target, caller),
+                                 what="Takeover comment and its receipt")
+    if state != "posted":
       _require_takeover_announced(row)
 
 
@@ -749,7 +788,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       _require_ready_attempt_resolved(previous, target)
       await merge_actions.merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
         gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal),
-        job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id, app_id=row.app_id))
+        pr_job=partial(_pr_job_held, db, row.owner_id, target["repo"], target["number"],
+                       exclude_run_id=row.id, app_id=row.app_id))
       return {"run": _run_view(db, row)}
     if outcome.get("merge_attempted") or outcome.get("public_review"):
       reviews.save_effect_outcome(db, row, item_key, outcome)
@@ -922,6 +962,21 @@ def _pr_job(db, owner_id, repo, number, *, exclude_run_id=None, app_id=None) -> 
   jobs = [job for job in jobs if job]
   live = next((job for job in jobs if job["state"] != "stalled"), None)
   return live or _respond_job(db, app_id, repo, number) or (jobs[0] if jobs else None)
+
+
+@asynccontextmanager
+async def _pr_job_held(db, owner_id, repo, number, *, exclude_run_id=None, app_id=None):
+  """Hold the owner's PR-job admission and hand over a lookup of the PR's job as it is now.
+
+  A status change or merge asks the PR machine after waiting for the GitHub connection, so a job fact
+  read when the request began proves nothing then. Under admission's own lock no review run can enter
+  between the caller's last look and its write. A Respond chat starts through the ordinary app-chat
+  start, which this lock does not guard: every look reads the chats afresh, and only a chat started
+  after the last look escapes it.
+  """
+  async with chat_queue.get_transition_lock(f"review-pr-admission:{owner_id}"):
+    db.rollback()  # as admission does: read the job as it is now, not as this request's snapshot saw it
+    yield lambda: _pr_job(db, owner_id, repo, number, exclude_run_id=exclude_run_id, app_id=app_id)
 
 
 # Contribute starts "Respond to feedback" as an ordinary app chat under this scope. No run row
@@ -1100,7 +1155,7 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
 
 class VerdictDecision(PullIdentity):
   proposal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
-  decision: Literal["submit", "discard", "dismiss"]
+  decision: Literal["submit", "discard", "dismiss", "continue_merge"]
   # Submit the proposal's findings as a plain comment instead of its approve or request-changes.
   event: Literal["COMMENT"] | None = None
 
@@ -1148,7 +1203,8 @@ def _merge_resume_note(item) -> str:
              dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
 async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
                          db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
-  """The owner's own submit or discard of one exact proposed verdict, or dismissal of an unconfirmed one."""
+  """The owner's own submit or discard of one exact proposed verdict, dismissal of an unconfirmed one,
+  or continuing the merge of an approval GitHub already holds."""
   _require_owner_hands(principal, "Only you can submit, discard or dismiss a verdict. An agent cannot decide its own proposal.")
   row = _row(db, app_id, run_id, principal)
   item_key = reviews.key(body.model_dump())
@@ -1167,6 +1223,13 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
     if body.decision in {"discard", "dismiss"}:
       (verdicts.discard if body.decision == "discard" else verdicts.dismiss)(db, row, item_key, body.proposal_id)
       return {"run": _run_view(db, row)}
+    if body.decision == "continue_merge":
+      # The owner's own tap re-arranges the guarded merge of an approval GitHub already holds.
+      if not reviews.approved_merge_waiting(row, item):
+        raise HTTPException(409, "No confirmed approval is waiting for its merge. Refresh to see the current state.")
+      resumed = await _resume_run(db, row, _merge_resume_note({**original, "head_sha": target["head_sha"]}))
+      db.refresh(row)
+      return {"run": _run_view(db, row), "merge_resumed": resumed}
     cwd = Path(get_settings().data_dir) / "platform"
     receipt = await verdicts.submit(db, row, item_key, target, body.proposal_id, gh=_gh, cwd=cwd,
                                     authorize=lambda: _owner_decision_authority(db, row), event=body.event)
@@ -1205,8 +1268,9 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await direct_merge.merge_exact_pull(_gh, cwd, body, partial(_assert_app_current, db, app_id, nonce),
-                                             job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
+  return await direct_merge.merge_exact_pull(
+    _gh, cwd, body, partial(_assert_app_current, db, app_id, nonce), db, principal.owner.id,
+    pr_job=partial(_pr_job_held, db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 class PullStatusChange(PullIdentity):
@@ -1256,8 +1320,9 @@ async def _owner_status_change(app_id, name, body, db, principal):
   _require_owner_hands(principal, "Only you can change a pull request's status from here. An agent cannot press it.")
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
-  return await pull_status.change_pull_status(_gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
-                                              job=_pr_job(db, principal.owner.id, body.repo, body.number, app_id=app_id))
+  return await pull_status.change_pull_status(
+    _gh, cwd, name, body, partial(_assert_app_current, db, app_id, nonce),
+    pr_job=partial(_pr_job_held, db, principal.owner.id, body.repo, body.number, app_id=app_id))
 
 
 @router.post(APP_PREFIX + "/{app_id}/pulls/ready",

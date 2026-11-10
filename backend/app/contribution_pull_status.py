@@ -98,9 +98,10 @@ def _head_after_posting(gh, cwd, target) -> str | None:
   return sha if isinstance(sha, str) else None
 
 
-def _refuse_a_repeated_note(gh, cwd, target, note: str) -> None:
+def _refuse_a_repeated_note(gh, cwd, target, body) -> None:
   """Raise NotDispatched when this exact note is already among the PR's recent comments.
 
+  A read, so it runs before the settled write (see StatusChange.prepare), never inside it.
   Best effort: a comment read that fails never blocks the post, except GitHub
   saying the pull request itself is not there, which nothing could post to.
   """
@@ -112,13 +113,12 @@ def _refuse_a_repeated_note(gh, cwd, target, note: str) -> None:
     if _gh_http_status(str(exc)) == 404:
       raise NotDispatched(UNREADABLE) from exc
     return
-  if isinstance(found, list) and any(isinstance(item, dict) and item.get("body") == note for item in found):
+  if isinstance(found, list) and any(isinstance(item, dict) and item.get("body") == body.note for item in found):
     raise NotDispatched(NOTE_ALREADY_THERE)
 
 
 def post_note(gh, cwd, target, body) -> str | None:
   """Post the owner's note as a comment on the PR, once; the head GitHub reports once it confirms the comment."""
-  _refuse_a_repeated_note(gh, cwd, target, body.note)
   posted = public.post_issue_comment(gh, cwd, target, body.note)
   if posted.state == "not_dispatched":
     raise NotDispatched(posted.reason)
@@ -156,6 +156,10 @@ def _nothing_more(facts: dict, pull: dict, body) -> None:
   return None
 
 
+def _nothing_to_read(gh, cwd, target, body) -> None:
+  return None
+
+
 def _not_yet(pull: dict) -> bool:
   return False
 
@@ -175,6 +179,10 @@ class StatusChange:
   write: Callable  # (gh, cwd, target, body) -> the head GitHub reports, or None when unconfirmed
   unconfirmed: dict  # the 502 detail when the write's outcome cannot be read
   check: Callable = _nothing_more  # a rule beyond the machine, on the facts and the pull just read
+  # A GitHub read the write needs first, as (gh, cwd, target, body); raises NotDispatched to refuse. It runs
+  # unsettled, before the authority check that precedes the write, so a cancellation or a revoked permission
+  # during the read still stops the write.
+  prepare: Callable = _nothing_to_read
   already: Callable = _not_yet  # the pull just read is already what this tap makes it: confirmed with no write
 
 
@@ -191,12 +199,15 @@ CHANGES = {
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
   "ask-approval": StatusChange("ask_approval", "asked", post_note,
-                               _unconfirmed("approval_unconfirmed", "posted the note"), _approval_note_check),
+                               _unconfirmed("approval_unconfirmed", "posted the note"), _approval_note_check,
+                               _refuse_a_repeated_note),
 }
 
 
-def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
-  """Read GitHub now: the connected account, the exact pull request the owner saw, and its machine facts."""
+def _read_pull_facts(gh, cwd, body) -> tuple[dict, dict, dict]:
+  """Read GitHub now: the connected account, the exact pull request the owner saw, and its machine facts.
+
+  The agent job is not among them: it is a local fact, asked for later, right at the check."""
   try:
     actor = _read_object(gh, cwd, "user")
     repo = _read_object(gh, cwd, f"repos/{body.repo}")
@@ -212,8 +223,16 @@ def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   target = {"repo": repo.get("full_name") or body.repo, "number": body.number,
             "head_sha": body.head_sha, "pr_id": pr_id}
   facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"],
-                              actor_login=str(actor.get("login") or ""), job=job)
+                              actor_login=str(actor.get("login") or ""), job=None)
   return target, pull, facts
+
+
+async def _prepare(change: StatusChange, gh, cwd, target, body) -> None:
+  """The write's own GitHub read, cancellable and unsettled: a refusal here changed nothing."""
+  try:
+    await asyncio.to_thread(change.prepare, gh, cwd, target, body)
+  except NotDispatched as exc:
+    raise HTTPException(409, str(exc)) from exc
 
 
 async def _dispatch(change: StatusChange, gh, cwd, target, body, authorize) -> DispatchResult:
@@ -241,30 +260,38 @@ def _answer(result: DispatchResult, change: StatusChange, body) -> dict:
           "repo": body.repo, "number": body.number, "head_sha": body.head_sha}
 
 
-async def _change(gh, cwd, change: StatusChange, body, authorize, job) -> dict:
+async def _change(gh, cwd, change: StatusChange, body, authorize, pr_job) -> dict:
   authorize()
   async with _github_connection_transaction():
-    target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body, job)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
-    pr_facts.require_allowed(facts, change.machine_action)
-    if change.already(pull):
-      # Nothing to write, so nothing can be unconfirmed: the head the owner saw is the one GitHub holds.
-      result = DispatchResult.confirmed({"observed_head_sha": body.head_sha})
-    else:
-      change.check(facts, pull, body)
-      result = await _dispatch(change, gh, cwd, target, body, authorize)
+    target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
+    # The write's own GitHub read waits too, so it comes before the job is asked for.
+    await _prepare(change, gh, cwd, target, body)
+    # The agent job is local, so GitHub's reads cannot show it change: ask for it now, after every wait,
+    # and keep review admission out until the write is sent.
+    async with pr_job() as job_now:
+      facts = {**facts, "job": job_now()}
+      pr_facts.require_allowed(facts, change.machine_action)
+      if change.already(pull):
+        # Nothing to write, so nothing can be unconfirmed: the head the owner saw is the one GitHub holds.
+        result = DispatchResult.confirmed({"observed_head_sha": body.head_sha})
+      else:
+        change.check(facts, pull, body)
+        result = await _dispatch(change, gh, cwd, target, body, authorize)
   # A cancellation before the write is a refusal here; the caller's cancellation still wins.
   if result.state == "not_dispatched" and asyncio.current_task().cancelling():
     raise asyncio.CancelledError()
   return _answer(result, change, body)
 
 
-async def change_pull_status(gh, cwd, name: str, body, authorize, job: dict | None = None) -> dict:
+async def change_pull_status(gh, cwd, name: str, body, authorize, pr_job) -> dict:
   """Apply one owner status change (a key of CHANGES) to the exact pull request named, once.
 
   `body` carries repo, number and head_sha (and reviewers for
   request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
   authority no longer stands; it runs before any GitHub call and again right
-  before the write. `job` is the agent job a review run holds on this PR.
+  before the write. `pr_job` opens the PR's agent job as it is at the final
+  check (a review run's or a Respond chat's), holding review admission until
+  the write is sent.
   Raises HTTPException: 404 when GitHub cannot be read, 409 for a refusal
   that changed nothing (the PR machine's own words when it refuses) and 502
   with CHANGES[name].unconfirmed when the write's outcome is unknown. Logs
@@ -272,7 +299,7 @@ async def change_pull_status(gh, cwd, name: str, body, authorize, job: dict | No
   """
   outcome = "ended without an answer; GitHub may or may not have applied it"
   try:
-    answer = await _change(gh, cwd, CHANGES[name], body, authorize, job)
+    answer = await _change(gh, cwd, CHANGES[name], body, authorize, pr_job)
     moved = "" if answer["observed_head_sha"] == body.head_sha else f" at head {answer['observed_head_sha']}"
     outcome = answer["state"] + moved
     return answer
