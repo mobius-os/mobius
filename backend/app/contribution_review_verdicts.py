@@ -170,6 +170,9 @@ def settle_observed(db, row, item_key, proposal, review, *, complete_scan, read_
   if review is not None:
     fields = {"state": "posted", "review_id": review["id"], "url": review.get("html_url"),
               "summary": "The exact public review was confirmed by a read-only observation."}
+    if review.get("state") == public.DISMISSED_STATE:
+      # It was sent, so it is not "never sent"; but it is no longer a live verdict.
+      fields.update(dismissed_on_github=True, summary="The review was sent, then dismissed on GitHub.")
   elif complete_scan and reviews.dispatch_window_closed(proposal.get("submitted_at"), read_at):
     fields = {"state": "not_dispatched", "summary": NEVER_SENT}
   else:

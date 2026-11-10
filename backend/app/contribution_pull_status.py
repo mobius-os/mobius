@@ -191,8 +191,10 @@ CHANGES = {
 }
 
 
-def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
-  """Read GitHub now: the connected account, the exact pull request the owner saw, and its machine facts."""
+def _read_pull_facts(gh, cwd, body) -> tuple[dict, dict, dict]:
+  """Read GitHub now: the connected account, the exact pull request the owner saw, and its machine facts.
+
+  The agent job is not among them: it is a local fact, asked for later, right at the check."""
   try:
     actor = _read_object(gh, cwd, "user")
     repo = _read_object(gh, cwd, f"repos/{body.repo}")
@@ -208,7 +210,7 @@ def _read_pull_facts(gh, cwd, body, job) -> tuple[dict, dict, dict]:
   target = {"repo": repo.get("full_name") or body.repo, "number": body.number,
             "head_sha": body.head_sha, "pr_id": pr_id}
   facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"],
-                              actor_login=str(actor.get("login") or ""), job=job)
+                              actor_login=str(actor.get("login") or ""), job=None)
   return target, pull, facts
 
 
@@ -245,27 +247,34 @@ def _answer(result: DispatchResult, change: StatusChange, body) -> dict:
           "repo": body.repo, "number": body.number, "head_sha": body.head_sha}
 
 
-async def _change(gh, cwd, change: StatusChange, body, authorize, job) -> dict:
+async def _change(gh, cwd, change: StatusChange, body, authorize, pr_job) -> dict:
   authorize()
   async with _github_connection_transaction():
-    target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body, job)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
-    pr_facts.require_allowed(facts, change.machine_action)
-    change.check(facts, pull, body)
+    target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
+    # The write's own GitHub read waits too, so it comes before the job is asked for.
     await _prepare(change, gh, cwd, target, body)
-    result = await _dispatch(change, gh, cwd, target, body, authorize)
+    # The agent job is local, so GitHub's reads cannot show it change: ask for it now, after every wait,
+    # and keep review admission out until the write is sent.
+    async with pr_job() as job_now:
+      facts = {**facts, "job": job_now()}
+      pr_facts.require_allowed(facts, change.machine_action)
+      change.check(facts, pull, body)
+      result = await _dispatch(change, gh, cwd, target, body, authorize)
   # A cancellation before the write is a refusal here; the caller's cancellation still wins.
   if result.state == "not_dispatched" and asyncio.current_task().cancelling():
     raise asyncio.CancelledError()
   return _answer(result, change, body)
 
 
-async def change_pull_status(gh, cwd, name: str, body, authorize, job: dict | None = None) -> dict:
+async def change_pull_status(gh, cwd, name: str, body, authorize, pr_job) -> dict:
   """Apply one owner status change (a key of CHANGES) to the exact pull request named, once.
 
   `body` carries repo, number and head_sha (and reviewers for
   request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
   authority no longer stands; it runs before any GitHub call and again right
-  before the write. `job` is the agent job a review run holds on this PR.
+  before the write. `pr_job` opens the PR's agent job as it is at the final
+  check (a review run's or a Respond chat's), holding review admission until
+  the write is sent.
   Raises HTTPException: 404 when GitHub cannot be read, 409 for a refusal
   that changed nothing (the PR machine's own words when it refuses) and 502
   with CHANGES[name].unconfirmed when the write's outcome is unknown. Logs
@@ -273,7 +282,7 @@ async def change_pull_status(gh, cwd, name: str, body, authorize, job: dict | No
   """
   outcome = "ended without an answer; GitHub may or may not have applied it"
   try:
-    answer = await _change(gh, cwd, CHANGES[name], body, authorize, job)
+    answer = await _change(gh, cwd, CHANGES[name], body, authorize, pr_job)
     moved = "" if answer["observed_head_sha"] == body.head_sha else f" at head {answer['observed_head_sha']}"
     outcome = answer["state"] + moved
     return answer

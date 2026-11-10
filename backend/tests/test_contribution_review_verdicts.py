@@ -257,6 +257,44 @@ def test_an_unconfirmed_verdict_that_github_shows_is_settled_as_posted_without_a
   assert [e[0] for e in events] == ["post"], "observing never posts again"
 
 
+def test_a_verdict_github_accepted_then_dismissed_is_posted_not_never_sent_and_is_no_live_approval(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  _hours_after_submit(setup, 2)  # past the dispatch window: an unmatched scan would now say never sent
+  review = {"id": 78, "html_url": "https://github.com/x/pull/7#pullrequestreview-78", "state": "DISMISSED"}
+  _look(monkeypatch, review)
+  settled = _observe(setup)
+  assert (settled["state"], settled["review_id"]) == ("posted", 78)
+  assert settled["dismissed_on_github"] is True and "dismissed" in settled["summary"]
+  assert [e[0] for e in events] == ["post"], "observing never posts again"
+  db, row, _ = setup
+  approval = {"verdict_proposal": {**settled, "event": "APPROVE"}}
+  row.mode, row.options_json = "review_merge", {"post_review": True, "propose_verdict": True}
+  assert "dismissed on GitHub" in routes.reviews.public_merge_blocker(row, approval)
+
+
+def test_an_approval_observation_recovers_keeps_its_merge_visible_until_the_owner_continues_it(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events, state="unknown")
+  resumes = _resumes(monkeypatch)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  _decide(setup, "submit", proposal["id"])
+  assert resumes == [], "an unknown answer resumes nothing yet"
+  _look(monkeypatch, {"id": 79, "html_url": "https://github.com/x/pull/7#pullrequestreview-79", "state": "APPROVED"})
+  assert _observe(setup)["state"] == "posted"
+  assert resumes == [], "observation is read-only: it never starts an agent"
+  run = routes.get_review(1, row.id, db, _owner(setup))["run"]
+  assert run["state"] == "needs_you" and run["items"][0]["state"] == "needs_you"
+  assert run["items"][0]["summary"].startswith(domain.MERGE_WAITING)
+  result = _decide(setup, "continue_merge", proposal["id"])
+  assert result["merge_resumed"] is True and len(resumes) == 1 and resumes[0]["chat_id"] == row.chat_id
+  merged = report(setup, publish=True)["run"]["items"][0]
+  assert merged["state"] == "merged" and [e[0] for e in events] == ["post", "merge"]
+  with pytest.raises(HTTPException) as nothing_waiting:
+    _decide(setup, "continue_merge", proposal["id"])
+  assert nothing_waiting.value.status_code == 409
+
+
 def test_an_unconfirmed_verdict_missing_from_github_is_held_until_the_dispatch_window_has_passed(setup, monkeypatch):
   events, _ = _unconfirmed_verdict(setup, monkeypatch)
   _look(monkeypatch)
