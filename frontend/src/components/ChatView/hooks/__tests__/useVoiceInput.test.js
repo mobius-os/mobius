@@ -280,3 +280,101 @@ test("an app that can't start dictation turns the mic back off", async () => {
     delete globalThis.window
   }
 })
+
+// Like the desktop app: one dictation session, one listener. Starting again
+// replaces the listener; stopping ends the session and drops it.
+function installSingleNativeSession() {
+  const native = {
+    listener: null,
+    stops: 0,
+    startDictation(listener) {
+      native.listener = listener
+      return Promise.resolve(true)
+    },
+    stopDictation() {
+      native.stops += 1
+      native.listener = null
+      return Promise.resolve(true)
+    },
+    say(text) { native.listener?.({ type: 'text', text }) },
+  }
+  globalThis.window = { MobiusNative: native }
+  return native
+}
+
+function renderTwoPanes() {
+  const drafts = { a: [], b: [] }
+  const rendered = renderHook(() => ({
+    a: useVoiceInput({ onTranscript: t => drafts.a.push(t), inputRef: { current: { value: '' } } }),
+    b: useVoiceInput({ onTranscript: t => drafts.b.push(t), inputRef: { current: { value: '' } } }),
+  }))
+  return { ...rendered, drafts }
+}
+
+test("starting the app's dictation in another chat moves it there, and the first chat can't stop it", () => {
+  const native = installSingleNativeSession()
+  try {
+    const { result, drafts } = renderTwoPanes()
+    result.current.a.startVoice()
+    native.say('for a')
+    result.current.b.startVoice()
+    assert.equal(result.current.a.listening, false, 'the first chat stops showing the mic as on')
+    assert.equal(result.current.b.listening, true)
+
+    result.current.a.stopVoice()
+    assert.equal(native.stops, 0, "the first chat's stop leaves the session running")
+    native.say('for b')
+    assert.deepEqual(drafts, { a: ['for a'], b: ['for b'] })
+
+    result.current.b.stopVoice()
+    assert.equal(native.stops, 1)
+  } finally {
+    delete globalThis.window
+  }
+})
+
+test("closing a chat whose dictation moved elsewhere leaves the other chat listening", () => {
+  const native = installSingleNativeSession()
+  try {
+    const { result, unmount } = renderTwoPanes()
+    result.current.a.startVoice()
+    result.current.b.startVoice()
+    result.current.a.stopVoice()
+    assert.equal(native.stops, 0)
+    // The shim unmounts both panes, the first one first: only the owner stops.
+    unmount()
+    assert.equal(native.stops, 1)
+  } finally {
+    delete globalThis.window
+  }
+})
+
+test("another chat starting during a manual-edit pause takes over and the pause doesn't take it back", () => {
+  const native = installSingleNativeSession()
+  const timers = new Map()
+  let timerId = 0
+  const prevTimeout = globalThis.setTimeout
+  const prevClearTimeout = globalThis.clearTimeout
+  globalThis.setTimeout = fn => {
+    const id = ++timerId
+    timers.set(id, fn)
+    return id
+  }
+  globalThis.clearTimeout = id => timers.delete(id)
+  try {
+    const { result, drafts } = renderTwoPanes()
+    result.current.a.startVoice()
+    result.current.a.acceptManualEdit('edited')
+    assert.equal(timers.size, 1)
+    result.current.b.startVoice()
+    assert.equal(timers.size, 0, "the first chat's restart is cancelled")
+    assert.equal(result.current.a.listening, false)
+
+    native.say('for b')
+    assert.deepEqual(drafts.b, ['for b'])
+  } finally {
+    globalThis.setTimeout = prevTimeout
+    globalThis.clearTimeout = prevClearTimeout
+    delete globalThis.window
+  }
+})

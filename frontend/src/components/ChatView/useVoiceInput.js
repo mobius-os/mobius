@@ -33,6 +33,11 @@ function nativeDictation() {
     : null
 }
 
+// The app has one dictation session for the whole shell, but every chat pane
+// has its own mic. The pane that started it last owns it: starting in another
+// pane first ends the owner's listening, and only the owner may stop it.
+let nativeOwner = null
+
 function speechRecognition() {
   return window.SpeechRecognition || window.webkitSpeechRecognition
 }
@@ -85,6 +90,9 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   // Handle for the restart setTimeout in onend. Stored so unmount can
   // cancel it and prevent a session restart from firing after teardown.
   const restartTimerRef = useRef(null)
+  // This pane's claim on the app's dictation session (see nativeOwner).
+  const nativeClaim = useRef({}).current
+  nativeClaim.displace = endListening
 
   // Each mounted chat owns its own voice session. Keeping the wake lock and
   // recording audio session here avoids a shell-wide boolean race when
@@ -94,14 +102,8 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   useEffect(() => (listening ? acquireAudioSession('play-and-record') : undefined), [listening])
 
   // Cleanup on unmount.
-  useEffect(() => () => {
-    listeningRef.current = false
-    if (restartTimerRef.current !== null) {
-      clearTimeout(restartTimerRef.current)
-      restartTimerRef.current = null
-    }
-    recognitionRef.current?.abort()
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- stopVoice reads only refs and stable setters.
+  useEffect(() => () => stopVoice(), [])
 
   function appendNote(note) {
     const prev = inputRef.current?.value || ''
@@ -110,18 +112,31 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
 
   function endListening() {
     listeningRef.current = false
+    if (restartTimerRef.current !== null) {
+      clearTimeout(restartTimerRef.current)
+      restartTimerRef.current = null
+    }
     setListening(false)
     recognitionRef.current = null
     voiceFinalRef.current = ''
+    if (nativeOwner === nativeClaim) nativeOwner = null
   }
 
   // The app keeps listening across pauses and reports everything heard since
   // this start, so a session only needs the draft it began from. A manual
   // edit retires the session and starts another from the edited draft.
+  // The claim outlives a manual-edit restart, so another pane starting during
+  // that pause still takes over from this one.
   function startNativeSession(native) {
+    if (nativeOwner !== nativeClaim) {
+      nativeOwner?.displace()
+      nativeOwner = nativeClaim
+    }
     const base = voiceFinalRef.current
     const session = {
-      abort: () => { native.stopDictation().catch(() => {}) },
+      abort: () => {
+        if (nativeOwner === nativeClaim) native.stopDictation().catch(() => {})
+      },
     }
     recognitionRef.current = session
     const ended = (error) => {
@@ -211,15 +226,10 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   }
 
   function stopVoice() {
-    listeningRef.current = false
-    if (restartTimerRef.current !== null) {
-      clearTimeout(restartTimerRef.current)
-      restartTimerRef.current = null
-    }
-    recognitionRef.current?.abort()
+    const rec = recognitionRef.current
     recognitionRef.current = null
-    setListening(false)
-    voiceFinalRef.current = ''
+    rec?.abort()
+    endListening()
   }
 
   function toggleVoice() {
