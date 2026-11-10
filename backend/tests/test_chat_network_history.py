@@ -129,7 +129,7 @@ def test_history_never_loads_a_whole_body(db, monkeypatch):
   assert all(len(row['body']) <= 4000 for row in page['messages'])
   selects = [statement for statement in seen
              if 'agent_coordination_messages.body' in statement and 'count(' not in statement]
-  assert selects and all('substr(CAST(agent_coordination_messages.body AS BLOB)' in statement
+  assert selects and all('substr(CAST(coalesce(' in statement
                          for statement in selects)
 
 

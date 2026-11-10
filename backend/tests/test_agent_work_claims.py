@@ -1989,21 +1989,74 @@ def test_an_old_excerpt_reads_its_own_text_or_refuses_after_the_claim_moves_on(d
                          field="summary") == "Later work"
 
 
-def test_owner_goal_view_carries_long_claim_texts_whole(db):
+def test_owner_goal_views_show_long_claim_texts_in_part_and_read_them_whole(client, auth, db):
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
   from app.goal_plans import presented_goal
 
   owner, first, second = _fixture(db)
-  key = "github:mobius-os/mobius:pr:2006:owner"
-  summary = "Owner sees" + " the whole summary" * 100
+  key = "github:mobius-os/mobius:pr:2007:owner-view"
   claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
-             work_key=key, summary=summary)
+             work_key=key, summary="Ship it")
   claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
              work_key=key, summary="Follow")
-  outcome = "Owner sees" + " the whole outcome" * 200
   finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
-              outcome=outcome, release=False)
+              outcome="Done", release=False)
+  # A text stored by a release without the input caps.
+  dependency = db.query(models.GoalDependency).one()
+  summary, outcome = "S" * 9_000, "O" * 20_000
+  dependency.outcome_json = {**dependency.outcome_json, "summary": summary, "outcome": outcome}
+  db.commit()
+
   goal = presented_goal(db, second.id)
-  dependencies = goal.get("dependencies") or goal.get("dependency_history")
-  assert dependencies, goal
-  assert dependencies[0]["outcome"]["outcome"] == outcome
-  assert dependencies[0]["outcome"]["summary"] == summary
+  shown = (goal.get("dependencies") or goal.get("dependency_history"))[0]
+  assert shown["condition"] == summary[:CLAIM_SUMMARY_CHARS]
+  assert shown["outcome"]["outcome"] == outcome[:CLAIM_TEXT_CHARS]
+  assert shown["truncated"] is True
+  # The stored outcome is untouched, and the owner reads it whole.
+  assert db.get(models.GoalDependency, dependency.id).outcome_json["outcome"] == outcome
+  full = client.get(f"/api/chat-waits/dependencies/{dependency.id}/text", headers=auth)
+  assert full.status_code == 200, full.text
+  assert full.json() == {"id": dependency.id, "condition": summary, "outcome": outcome}
+  assert client.get("/api/chat-waits/dependencies/missing/text", headers=auth).status_code == 404
+
+
+def test_owner_goal_views_keep_claim_texts_within_the_limits_as_before(db):
+  from app.goal_plans import presented_goal
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2008:owner-view"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="s" * 500)
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="o" * 1000, release=False)
+  goal = presented_goal(db, second.id)
+  shown = (goal.get("dependencies") or goal.get("dependency_history"))[0]
+  assert shown["condition"] == "s" * 500 and shown["outcome"]["outcome"] == "o" * 1000
+  assert "truncated" not in shown
+
+
+def test_settled_dependency_history_shows_long_claim_texts_in_part(db):
+  """The transcript receipt and settled history read the same bounded view."""
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_dependencies import goal_dependency_history
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2009:history"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="Ship it")
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="Done", release=False)
+  dependency = db.query(models.GoalDependency).one()
+  dependency.outcome_json = {**dependency.outcome_json, "summary": "S" * 9_000, "outcome": "O" * 20_000}
+  dependency.result_disposition = "delivered"
+  db.commit()
+  goal = db.get(models.ChatGoal, "claim-goal-second")
+  for include_foreign_context in (True, False):
+    [shown] = goal_dependency_history(db, goal, include_foreign_context=include_foreign_context)
+    assert shown["condition"] == "S" * CLAIM_SUMMARY_CHARS
+    assert shown["outcome"]["outcome"] == "O" * CLAIM_TEXT_CHARS
+    assert shown["truncated"] is True
