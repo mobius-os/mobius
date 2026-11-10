@@ -1,5 +1,7 @@
 """Posting and merging in one grant, and owner-submitted formal verdicts."""
 import asyncio
+import json
+import threading
 
 import pytest
 from fastapi import HTTPException
@@ -8,6 +10,8 @@ from app import contribution_review_runs as domain, contribution_review_public a
 from app.contribution_review_effects import DispatchResult
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
+from app.contribution_review_runs import current_pull as real_current_pull
+from app import contribution_review_verdicts as verdicts
 from tests.test_contribution_review_runs import CHECKS, ITEM, PULL, REPO, report, setup  # noqa: F401
 
 KEY = domain.key(ITEM)
@@ -125,13 +129,90 @@ def test_owner_submit_posts_the_exact_proposal_then_the_run_merges(setup, monkey
   assert result["verdict"]["state"] == "posted" and result["merge_resumed"] is True
   (kind, event, head, body), = events
   assert (kind, event, head) == ("post", "APPROVE", ITEM["head_sha"])
-  assert body.startswith(proposal["body"]) and "mobius-review:" in body
+  assert body == proposal["body"] and proposal["marker"] in body
   assert resumed and resumed[0]["chat_id"] == row.chat_id
   item = report(setup, publish=True)["run"]["items"][0]
   assert [e[0] for e in events] == ["post", "merge"] and item["state"] == "merged"
   with pytest.raises(HTTPException) as again:
     _decide(setup, "submit", proposal["id"])
   assert again.value.status_code == 409 and len(events) == 2
+
+
+def test_a_maximum_length_proposal_is_still_submittable(setup, monkeypatch):
+  """The saved wording already holds its marker, so GitHub's real limit check passes."""
+  from types import SimpleNamespace
+  _grant(setup, propose_verdict=True)
+  real_post, sent = public.post_review, []
+  def fake_gh(_cwd, *args, input_text=None):
+    sent.append(json.loads(input_text))
+    return SimpleNamespace(stdout=json.dumps({"id": 7, "html_url": "https://github.com/x"}))
+  monkeypatch.setattr(public, "post_review", lambda _gh, cwd, target, body, event="COMMENT":
+                      real_post(fake_gh, cwd, target, body, event))
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
+  _resumes(monkeypatch)
+  proposal = report(setup, publish=True, summary="x" * (public.GITHUB_REVIEW_BODY_MAX + 500))["run"]["items"][0]["verdict_proposal"]
+  assert public._body_units(proposal["body"]) <= public.GITHUB_REVIEW_BODY_MAX
+  assert proposal["body"].endswith(proposal["marker"])
+  result = _decide(setup, "submit", proposal["id"])
+  assert result["verdict"]["state"] == "posted"
+  assert sent[0]["body"] == proposal["body"]
+
+
+def test_a_head_that_moves_while_the_dispatch_is_reserved_posts_nothing(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events)
+  _resumes(monkeypatch)
+  moved = {"now": False}
+  def read(_gh, _cwd, path):
+    if path == "user":
+      return {"id": 42}
+    if path.endswith("/pulls/7"):
+      return {**PULL, "head": {"sha": "f" * 40}} if moved["now"] else PULL
+    return REPO
+  monkeypatch.setattr(domain, "read", read)
+  monkeypatch.setattr(domain, "current_pull", real_current_pull)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  real_arm = verdicts._arm
+  def arm_then_move(*args):
+    armed = real_arm(*args)
+    moved["now"] = True  # the head moves while admission or the writer fence was waited on
+    return armed
+  monkeypatch.setattr(verdicts, "_arm", arm_then_move)
+  with pytest.raises(HTTPException) as refused:
+    _decide(setup, "submit", proposal["id"])
+  assert refused.value.status_code == 409 and events == []
+  db, row, _ = setup
+  db.refresh(row)
+  assert row.outcomes_json[KEY]["verdict_proposal"]["state"] == "not_dispatched"
+
+
+def test_a_cancelled_submit_still_records_the_confirmed_review(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  _resumes(monkeypatch)
+  started, release = threading.Event(), threading.Event()
+  def post(_gh, _cwd, _target, _body, event="COMMENT"):
+    started.set()
+    release.wait(5)
+    return DispatchResult.confirmed({"id": 123, "url": "https://github.com/x/review/123"})
+  monkeypatch.setattr(public, "post_review", post)
+  db, row, _ = setup
+  async def cancelled_submit():
+    body = routes.VerdictDecision(**{k: ITEM[k] for k in ("repo", "number", "head_sha")},
+                                  proposal_id=proposal["id"], decision="submit")
+    task = asyncio.ensure_future(routes.decide_verdict(1, row.id, body, db, _owner(setup)))
+    while not started.is_set():
+      await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+  asyncio.run(cancelled_submit())
+  db.refresh(row)
+  saved = row.outcomes_json[KEY]["verdict_proposal"]
+  assert saved["state"] == "posted" and saved["review_id"] == 123
 
 
 def test_the_review_agent_cannot_submit_its_own_proposal(setup, monkeypatch):
