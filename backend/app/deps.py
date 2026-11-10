@@ -1534,7 +1534,11 @@ def spend_credits_allows(app: models.App, seller: str, priced_app: str) -> bool:
   """Whether the owner allowed this app to pay ``seller``'s ``priced_app``.
 
   ``"*/<app>"`` allows every creator of that app name, as a marketplace needs.
+  ``*`` is that wildcard only in the grant: no creator is literally named
+  ``*``, so a charge naming that seller is never allowed.
   """
+  if seller == "*":
+    return False
   targets = spend_credits_targets(app)
   return f"{seller}/{priced_app}" in targets or f"*/{priced_app}" in targets
 
@@ -1594,7 +1598,7 @@ def get_credits_price_reader(
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
   spending or account authority and needs no credits-management grant. A
-  local app therefore reads them unasked; it asks when it first pays.
+  local app therefore reads them unasked; each charge waits for the owner's Pay.
   """
   owner = principal.owner
   if principal.app_id is None:

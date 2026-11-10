@@ -30,7 +30,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import AppConsentPanel from './AppConsentPanel.jsx'
-import AppIcon from '../AppIcon.jsx'
+import { AppCreditsApprovalDialog, AppCreditsPaymentDialog } from './AppCreditsDialogs.jsx'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   accountLinkCompletion,
@@ -57,6 +57,7 @@ import {
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import { checkoutPage, openStripeWindow } from '../../lib/creditsWallet.js'
+import { answerRefusal, asksForCredits } from '../../lib/creditsPayment.js'
 import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
@@ -99,116 +100,6 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
           </button>
         </div>
       </div>
-    </div>
-  )
-}
-
-// The header both credits sheets share: the app's icon, a label and the question.
-function CreditsSheetHead({ appId, name, eyebrow, titleId, title }) {
-  const { data: apps } = appQueries.list.useQuery()
-  const app = (apps || []).find(item => String(item.id) === String(appId))
-  return (
-    <header className="app-consent__head">
-      <AppIcon className="app-consent__icon" item={app || { slug: appId }} label={name} size={null} />
-      <div>
-        <p className="app-consent__eyebrow">{eyebrow}</p>
-        <h2 className="app-consent__title" id={titleId}>{title}</h2>
-      </div>
-    </header>
-  )
-}
-
-// Every credits charge an app makes waits here for the owner's Pay: nothing
-// leaves their credits until they have seen who is paid, for what, and how much.
-function AppCreditsPaymentDialog({ appId, appName, payment, busy, error, onCancel, onPay }) {
-  const dialogRef = useRef(null)
-  const cancelRef = useRef(null)
-  const titleId = useId()
-  useDialogFocus({
-    containerRef: dialogRef, initialFocusRef: cancelRef, onClose: onCancel,
-  })
-  const name = appName || payment.app_name || 'This app'
-  const byCard = payment.method === 'card'
-  const amount = byCard ? `$${payment.max_price}` : payment.max_price
-  return (
-    <div className="canvas-credits" role="dialog" aria-modal="true"
-      aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
-      <section className="app-consent canvas-credits__sheet">
-        <CreditsSheetHead appId={appId} name={name} titleId={titleId}
-          eyebrow={byCard ? 'Card payment' : 'Credits payment'} title="Confirm your purchase" />
-        <div className="canvas-credits__amount">
-          <span className="canvas-credits__figure">{amount}</span>
-          <span className="canvas-credits__unit">{byCard ? 'by card' : 'credits'}</span>
-        </div>
-        <ul className="app-consent__list">
-          <li className="app-consent__row">
-            <div>
-              <strong>{payment.description || payment.action}</strong>
-              <span>By @{payment.seller} · in {name}</span>
-            </div>
-          </li>
-          <li className="app-consent__row">
-            <div>
-              <strong>{byCard ? 'Card' : 'Möbius credits'}</strong>
-              <span>{byCard
-                ? 'You finish on Stripe’s secure page.'
-                : 'Taken from your Möbius credits balance.'}</span>
-            </div>
-          </li>
-        </ul>
-        <p className="app-consent__meta">{byCard
-          ? 'You get it as soon as it’s paid, so it can’t be cancelled after.'
-          : 'Nothing is paid until you confirm.'}</p>
-        {error && <p className="app-consent__error" role="alert">{error}</p>}
-        <div className="app-consent__actions">
-          <button type="button" className="app-consent__btn" ref={cancelRef}
-            onClick={onCancel} disabled={busy}>Cancel</button>
-          <button type="button" className="app-consent__btn app-consent__btn--primary"
-            onClick={onPay} disabled={busy}>
-            {busy ? (byCard ? 'Opening Stripe…' : 'Paying…') : `Pay ${amount}`}
-          </button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-// A local app's first credits call asks here, over the running app: the app
-// keeps working, only its money waits. Allow records exactly these rows.
-function AppCreditsApprovalDialog({ appId, appName, request, busy, error, onNotNow, onAllow }) {
-  const dialogRef = useRef(null)
-  const notNowRef = useRef(null)
-  const titleId = useId()
-  useDialogFocus({
-    containerRef: dialogRef, initialFocusRef: notNowRef, onClose: onNotNow,
-  })
-  const name = appName || request.app_name || 'This app'
-  return (
-    <div className="canvas-credits" role="dialog" aria-modal="true"
-      aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
-      <section className="app-consent canvas-credits__sheet">
-        <CreditsSheetHead appId={appId} name={name} titleId={titleId}
-          eyebrow="Credits" title={`Allow ${name} to use your credits?`} />
-        <ul className="app-consent__list">
-          {request.rows.map(row => (
-            <li className="app-consent__row" key={row.id}>
-              <div>
-                <strong>{row.title}</strong>
-                <span>{row.text}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-        <p className="app-consent__meta">You can take this back anytime in Settings → Credits.</p>
-        {error && <p className="app-consent__error" role="alert">{error}</p>}
-        <div className="app-consent__actions">
-          <button type="button" className="app-consent__btn" ref={notNowRef} onClick={onNotNow}>Not now</button>
-          <button type="button" className="app-consent__btn app-consent__btn--primary"
-            onClick={onAllow} disabled={busy}>
-            {busy ? 'Allowing…' : 'Allow'}
-          </button>
-        </div>
-      </section>
     </div>
   )
 }
@@ -572,32 +463,43 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [cameraPreview, setCameraPreview] = useState(null)
   const [pendingFileExport, setPendingFileExport] = useState(null)
   const pendingFileExportRef = useRef(null)
-  // A charge waiting for the owner's Pay (see AppCreditsPaymentDialog).
-  const paymentsQuery = appQueries.creditsPayments.useQuery(appId)
+  // A charge waiting for the owner's Pay (see AppCreditsPaymentDialog). Only
+  // an app whose contract asks for credits can raise one, so no other app's
+  // opening reads either credits question.
+  const usesCredits = asksForCredits(capabilityContract)
+  const paymentsQuery = appQueries.creditsPayments.useQuery(appId, { enabled: usesCredits })
   const waitingPayment = paymentsQuery.data?.payments?.[0] || null
   const [paymentBusy, setPaymentBusy] = useState(false)
   const [paymentError, setPaymentError] = useState('')
+  // A payment the server refused (a card payment Stripe could not start, or
+  // one no longer waiting) leaves the waiting list at once, so its reason is
+  // kept here until the owner closes it.
+  const [paymentRefusal, setPaymentRefusal] = useState(null)
+  const shownPayment = paymentRefusal?.payment || waitingPayment
   async function answerPayment(pay) {
-    if (!waitingPayment) return
+    const payment = waitingPayment
+    if (!payment) return
     // A card payment's Stripe window opens inside the tap, before the page is
     // known, or the browser blocks it; it is pointed at Stripe once known.
-    const popup = pay && waitingPayment.method === 'card' ? openStripeWindow() : null
-    if (pay && waitingPayment.method === 'card' && !popup) {
+    const popup = pay && payment.method === 'card' ? openStripeWindow() : null
+    if (pay && payment.method === 'card' && !popup) {
       setPaymentError('Your browser blocked the Stripe window. Allow popups for this Möbius, then try again.')
       return
     }
     setPaymentBusy(true)
     setPaymentError('')
     try {
-      const res = await api.apps.answerPayment(appId, waitingPayment.id, pay)
+      const res = await api.apps.answerPayment(appId, payment.id, pay)
       const body = await res.json().catch(() => ({}))
       if (res.ok && popup) {
         const page = checkoutPage(body?.checkout_url)
         if (page) popup.location.href = page
         else popup.close()
-      } else {
+      } else if (!res.ok) {
         popup?.close()
-        if (!res.ok && res.status !== 409) setPaymentError('That could not be saved. Try again.')
+        // 409: the server settled this payment (refused it, or it lapsed).
+        if (res.status === 409) setPaymentRefusal({ payment, message: answerRefusal(body) })
+        else setPaymentError('That could not be saved. Try again.')
       }
     } catch {
       popup?.close()
@@ -608,7 +510,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
   }
   // A local app's credits question (see AppCreditsApprovalDialog).
-  const creditsApprovalQuery = appQueries.creditsApproval.useQuery(appId)
+  const creditsApprovalQuery = appQueries.creditsApproval.useQuery(appId, { enabled: usesCredits })
   const [creditsDismissed, setCreditsDismissed] = useState(null)
   const [creditsBusy, setCreditsBusy] = useState(false)
   const [creditsError, setCreditsError] = useState('')
@@ -2232,13 +2134,16 @@ const AppCanvas = forwardRef(function AppCanvas({
           onCancel={cancelFileExport}
           onConfirm={confirmFileExport} />
       )}
-      {waitingPayment && visible && !pendingFileExport && (
-        <AppCreditsPaymentDialog appId={appId} appName={appName} payment={waitingPayment}
-          busy={paymentBusy} error={paymentError}
-          onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)} />
+      {shownPayment && visible && !pendingFileExport && (
+        <AppCreditsPaymentDialog key={`${shownPayment.id}:${paymentRefusal ? 'refused' : 'waiting'}`}
+          appId={appId} appName={appName} payment={shownPayment}
+          busy={paymentBusy} error={paymentError} refusal={paymentRefusal?.message || ''}
+          onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
+          onClose={() => setPaymentRefusal(null)} />
       )}
-      {creditsQuestion && visible && !pendingFileExport && !waitingPayment && (
-        <AppCreditsApprovalDialog appId={appId} appName={appName} request={creditsQuestion}
+      {creditsQuestion && visible && !pendingFileExport && !shownPayment && (
+        <AppCreditsApprovalDialog key={creditsQuestion.digest} appId={appId} appName={appName}
+          request={creditsQuestion}
           busy={creditsBusy} error={creditsError}
           onNotNow={() => { setCreditsError(''); setCreditsDismissed(creditsQuestion.digest) }}
           onAllow={allowCredits} />

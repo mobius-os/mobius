@@ -347,20 +347,20 @@ async function fetchAppCreditsApproval(appId) {
 }
 
 // Whether a local app may use the owner's credits, or the question it raised.
-function useAppCreditsApprovalQuery(appId) {
+function useAppCreditsApprovalQuery(appId, { enabled = true } = {}) {
   return useQuery({
     queryKey: ['app-credits-approval', appId],
-    enabled: !!appId,
+    enabled: !!appId && enabled,
     queryFn: () => fetchAppCreditsApproval(appId),
     staleTime: 60_000,
   })
 }
 
 // The app's credits charges waiting for the owner's Pay or Cancel.
-function useAppWaitingPaymentsQuery(appId) {
+function useAppWaitingPaymentsQuery(appId, { enabled = true } = {}) {
   return useQuery({
     queryKey: ['app-credits-payments', appId],
-    enabled: !!appId,
+    enabled: !!appId && enabled,
     queryFn: async () => jsonOrThrow(await api.apps.waitingPayments(appId), 'waiting payments fetch failed:'),
     staleTime: 30_000,
   })

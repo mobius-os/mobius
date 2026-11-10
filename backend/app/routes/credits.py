@@ -220,7 +220,7 @@ def charge_credits_for_call(
     key=credits_client.app_scoped_key(payer, body.idempotency_key),
     seller=body.seller, priced_app=body.app, action=body.action,
     max_price_micro=body.max_price_micro,
-    describe=lambda: _price_description(body.seller, body.app, body.action),
+    describe=lambda: _quote(body.seller, body.app, body.action, body.max_price_micro, body.method),
     method=body.method, buyer_app=app.package_id or app.slug)
   # A payer may read its own charge; only an app that also manages the owner's
   # credits may read the owner's balance the service returns alongside it.
@@ -268,11 +268,14 @@ def _card_payment(payment, manages: bool) -> dict:
                             "message": "The card payment wasn't completed."})
 
 
-def _price_description(seller: str, priced_app: str, action: str) -> str:
-  """What the seller calls this priced action, for the owner's question.
+def _quote(seller: str, priced_app: str, action: str, max_price_micro: int,
+           method: str) -> credits_confirmations.Quote:
+  """What the owner is asked to pay: the seller's own description and price.
 
-  An action the seller never priced (or switched off) is refused here, before
-  the owner is asked to pay for something the credits service would refuse.
+  Anything the credits service would refuse is refused here, before the owner
+  is asked to pay for it: an action the seller never priced (or switched off),
+  or a price above what the app agreed to pay. A card payment also names the
+  currency the service sells in, so the owner sees the amount their card pays.
   """
   listed = credits_client.prices(seller, priced_app).get("prices") or []
   match = next((p for p in listed if isinstance(p, dict) and p.get("action") == action), None)
@@ -281,7 +284,20 @@ def _price_description(seller: str, priced_app: str, action: str) -> str:
       "code": "price_not_found",
       "message": "The creator hasn't set this price up at mobius.you yet.",
     })
-  return str(match.get("description") or "")
+  price_micro = match.get("price_micro")
+  if not isinstance(price_micro, int) or isinstance(price_micro, bool) or price_micro < 0:
+    price_micro = max_price_micro  # the service did not say: the most it can cost
+  if price_micro > max_price_micro:
+    raise HTTPException(409, {
+      "code": "price_changed",
+      "message": "The creator's price is higher than this app agreed to pay.",
+      "price_micro": price_micro, "max_price_micro": max_price_micro,
+    })
+  currency = ""
+  if method == credits_confirmations.CARD:
+    currency = str(credits_client.purchase_terms().get("currency") or "")
+  return credits_confirmations.Quote(
+    description=str(match.get("description") or ""), price_micro=price_micro, currency=currency)
 
 
 @router.post("/connect")

@@ -53,7 +53,8 @@ def real_payments(service):
   replace that answer to see an unpriced action refused.
   """
   service.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [
-    {"action": "run", "description": "Run: Meeting notes"}]})
+    {"action": "run", "description": "Run: Meeting notes", "price_micro": 400_000}]})
+  service.answers["purchase-terms"] = (200, {"currency": "gbp", "amounts_cents": [500]})
   return credits_confirmations
 
 
@@ -1074,6 +1075,63 @@ def test_an_unpriced_action_is_refused_without_asking(client, auth, db, paired, 
   assert _charges_upstream(paired) == []
 
 
+@pytest.mark.parametrize("prices_answer", [
+  (503, "Server down"),
+  (401, {"detail": {"code": "invalid_api_key", "message": "Invalid API key."}}),
+], ids=["service-down", "key-refused"])
+def test_a_failed_price_lookup_refuses_without_asking(
+  client, auth, db, paired, real_payments, prices_answer,
+):
+  """A price that could not be read is never put to the owner as a Pay."""
+  app = _app(db, "payer")
+  paired.answers["prices/ana?app_slug=prompts"] = prices_answer
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code >= 400 and refused.json()["detail"]["code"] != "confirmation_required"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+
+def test_a_charge_before_pairing_refuses_without_asking(client, auth, db, service, real_payments):
+  app = _app(db, "payer")
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.json()["detail"]["code"] == "not_paired"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_a_marketplace_cannot_name_the_wildcard_as_its_seller(client, auth, db, paired, real_payments):
+  """``*`` in a grant means any creator; no creator is literally called ``*``."""
+  app = _app(db, "marketplace", spend_credits=("*/prompts",))
+  assert not deps.spend_credits_allows(app, "*", "prompts")
+  assert deps.spend_credits_allows(app, "ana", "prompts")
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "seller": "*"},
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 403 and refused.json()["detail"]["code"] == "seller_not_allowed"
+  assert len(paired.calls) == calls  # not even a price lookup
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_the_question_shows_the_creators_price_and_the_apps_ceiling(
+  client, auth, db, paired, real_payments,
+):
+  app = _app(db, "payer")
+  assert client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private")).status_code == 409
+  [shown] = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
+  assert (shown["price"], shown["price_micro"], shown["max_price"]) == ("0.40", 400_000, "0.50")
+  assert shown["currency"] == ""  # paid from credits: no money currency
+
+
+def test_a_price_above_the_apps_ceiling_refuses_without_asking(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "max_price_micro": 300_000},
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 409 and refused.json()["detail"]["code"] == "price_changed"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
 def test_a_cancelled_payment_is_refused_and_asks_again_next_time(client, auth, db, paired, real_payments):
   app = _app(db, "payer")
   headers = _as(db, app, "private")
@@ -1111,14 +1169,44 @@ def test_another_apps_payment_cannot_be_answered_through_this_app(client, auth, 
   assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "payment_gone"
 
 
-def test_only_the_newest_payment_from_an_app_waits(client, auth, db, paired, real_payments):
+def test_two_charges_at_once_both_wait_and_the_oldest_is_shown_first(
+  client, auth, db, paired, real_payments,
+):
+  """An app's concurrent charges queue rather than evict each other, so
+  paying one never strands the other as "no longer waiting"."""
   app = _app(db, "payer")
   headers = _as(db, app, "private")
-  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
-  newer = {**CHARGE, "idempotency_key": "run-00000002"}
-  assert client.post("/api/identity/credits/charges", json=newer, headers=headers).status_code == 409
+  first, second = CHARGE, {**CHARGE, "idempotency_key": "run-00000002"}
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40"})
+  # Each retries while the other waits: neither question replaces the other.
+  for _ in range(2):
+    for charge in (first, second):
+      held = client.post("/api/identity/credits/charges", json=charge, headers=headers)
+      assert held.json()["detail"]["code"] == "confirmation_required"
+  path = f"/api/apps/{app.id}/credits-charges"
+  waiting = client.get(path, headers=auth).json()["payments"]
+  assert len(waiting) == 2
+  oldest = waiting[0]["id"]
+  assert client.post(f"{path}/{oldest}", json={"pay": True}, headers=auth).status_code == 200
+  assert client.post("/api/identity/credits/charges", json=first, headers=headers).status_code == 200
+  still = client.get(path, headers=auth).json()["payments"]
+  assert [p["id"] for p in still] == [waiting[1]["id"]]
+  assert client.post(f"{path}/{still[0]['id']}", json={"pay": True}, headers=auth).status_code == 200
+  assert client.post("/api/identity/credits/charges", json=second, headers=headers).status_code == 200
+
+
+def test_an_apps_waiting_payments_are_bounded(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  for n in range(credits_confirmations.MAX_WAITING_PER_APP):
+    held = client.post("/api/identity/credits/charges",
+                       json={**CHARGE, "idempotency_key": f"run-0000010{n}"}, headers=headers)
+    assert held.json()["detail"]["code"] == "confirmation_required"
+  over = client.post("/api/identity/credits/charges",
+                     json={**CHARGE, "idempotency_key": "run-00000199"}, headers=headers)
+  assert over.status_code == 429 and over.json()["detail"]["code"] == "too_many_payments_waiting"
   waiting = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
-  assert len(waiting) == 1
+  assert len(waiting) == credits_confirmations.MAX_WAITING_PER_APP
 
 
 def test_a_card_payment_opens_stripe_and_returns_the_same_charge(client, auth, db, paired, real_payments):
@@ -1129,6 +1217,8 @@ def test_a_card_payment_opens_stripe_and_returns_the_same_charge(client, auth, d
   assert held.status_code == 409 and held.json()["detail"]["code"] == "confirmation_required"
   waiting = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
   assert waiting[0]["method"] == "card"
+  # The card pays in the currency the credits service sells in.
+  assert waiting[0]["currency"] == "gbp"
 
   paired.answers["purchases"] = (200, {"purchase_id": TOPUP_ID, "status": "pending",
                                        "checkout_url": "https://checkout.stripe.com/c/pay/cs_1"})
@@ -1164,6 +1254,85 @@ def test_a_card_payment_stripe_cannot_take_reaches_the_app(client, auth, db, pai
   assert refused.status_code == 409 and refused.json()["detail"]["code"] == "card_minimum"
   told = client.post("/api/identity/credits/charges", json=card, headers=headers)
   assert told.status_code == 409 and told.json()["detail"]["code"] == "card_minimum"
+
+
+def _pay_by_card(client, auth, db, paired):
+  """A card payment the owner has confirmed, now open on Stripe's page."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  card = {**CHARGE, "method": "card"}
+  assert client.post("/api/identity/credits/charges", json=card, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  paired.answers["purchases"] = (200, {"purchase_id": TOPUP_ID, "status": "pending",
+                                       "checkout_url": "https://checkout.stripe.com/c/pay/cs_1"})
+  assert client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True},
+                     headers=auth).status_code == 200
+  paired.answers[f"purchases/{TOPUP_ID}"] = (200, {"purchase_id": TOPUP_ID, "status": "pending"})
+  return app, headers, card
+
+
+def test_a_confirmed_card_payment_outlives_the_ten_minute_window(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  """A Stripe checkout can stay open for hours: the owner who finishes late is
+  not asked to pay again, which would open a second purchase."""
+  clock, wall = [credits_confirmations.time.monotonic()], [credits_confirmations.time.time()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  monkeypatch.setattr(credits_confirmations.time, "time", lambda: wall[0])
+  app, headers, card = _pay_by_card(client, auth, db, paired)
+  clock[0] += 3 * 60 * 60
+  wall[0] += 3 * 60 * 60
+  late = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert late.json()["detail"]["code"] == "payment_in_progress"
+  paired.answers[f"purchases/{TOPUP_ID}"] = (200, {"purchase_id": TOPUP_ID, "status": "charged",
+                                                   "charge": {"charge_id": "c9", "amount_micro": 400_000}})
+  done = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert done.status_code == 200 and done.json()["charge_id"] == "c9"
+  purchases = [c for c in paired.calls if c["url"].endswith("/api/billing/purchases")]
+  assert len(purchases) == 1
+
+  # Once no Stripe page could still be paid, the payment is let go.
+  wall[0] += credits_confirmations.CARD_PURCHASE_SECONDS
+  lapsed = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert lapsed.json()["detail"]["code"] == "confirmation_required"
+
+
+def test_a_confirmed_card_payment_survives_a_restart(client, auth, db, paired, real_payments, tmp_path):
+  app, headers, card = _pay_by_card(client, auth, db, paired)
+  stored = tmp_path / "credits-client" / "card-payments.json"
+  assert stored.stat().st_mode & 0o777 == 0o600
+  credits_confirmations.clear()  # what a restart forgets
+  after_restart = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert after_restart.json()["detail"]["code"] == "payment_in_progress"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+  # A purchase that ended unpaid is forgotten on disk too.
+  paired.answers[f"purchases/{TOPUP_ID}"] = (200, {"purchase_id": TOPUP_ID, "status": "expired"})
+  assert client.post("/api/identity/credits/charges", json=card, headers=headers).status_code == 402
+  assert json.loads(stored.read_text()) == []
+  credits_confirmations.clear()
+  again = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert again.json()["detail"]["code"] == "confirmation_required"
+
+
+@pytest.mark.parametrize("started", [
+  {"status": "pending", "checkout_url": "https://checkout.stripe.com/c/pay/cs_1"},
+  {"purchase_id": TOPUP_ID, "status": "pending"},
+], ids=["no-purchase-id", "no-checkout-page"])
+def test_a_card_payment_stripe_never_opened_refuses_at_once(
+  client, auth, db, paired, real_payments, started,
+):
+  """With no purchase to follow, the app is told now, not after the question lapses."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  card = {**CHARGE, "method": "card"}
+  assert client.post("/api/identity/credits/charges", json=card, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  paired.answers["purchases"] = (200, started)
+  refused = client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  assert refused.status_code == 409 and refused.json()["detail"]["code"] == "payment_failed"
+  told = client.post("/api/identity/credits/charges", json=card, headers=headers)
+  assert told.status_code == 409 and told.json()["detail"]["code"] == "payment_failed"
 
 
 def test_an_unfinished_card_payment_tells_the_app(client, auth, db, paired, real_payments):

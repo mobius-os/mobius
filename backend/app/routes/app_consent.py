@@ -251,6 +251,12 @@ def answer_payment(
       raise HTTPException(status_code=409, detail=refusal) from error
     purchase_id = str(started.get("purchase_id") or "")
     checkout_url = started.get("checkout_url")
+    if not purchase_id or not checkout_url:
+      # Without both there is nothing to pay and nothing to follow: refuse now
+      # rather than leave the app retrying until the question lapses.
+      refusal = {"code": "payment_failed", "message": "Stripe's page could not be opened. Try again."}
+      credits_confirmations.answer(app.id, payment_id, True, error=refusal)
+      raise HTTPException(status_code=409, detail=refusal)
   if not credits_confirmations.answer(app.id, payment_id, body.pay, purchase_id=purchase_id):
     raise gone
   activity.log_event("app_credits_payment", app_id=app.id, slug=app.slug,

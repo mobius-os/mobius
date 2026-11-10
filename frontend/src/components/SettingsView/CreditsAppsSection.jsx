@@ -1,9 +1,10 @@
 /**
  * Settings → Credits: the local apps the owner allowed to use their credits.
  *
- * A local app asks the first time it pays (AppCanvas's credits question);
- * this is where that answer stays visible and can be taken back. Store apps
- * are not listed: their first-open consent is managed with the app.
+ * A local app that manages credits asks before it first does (AppCanvas's
+ * credits question); this is where that answer stays visible and can be taken
+ * back. Paying needs no standing answer: every payment waits for Pay. Store
+ * apps are not listed: their first-open consent is managed with the app.
  */
 
 import { useState } from 'react'
@@ -41,7 +42,7 @@ export default function CreditsAppsSection() {
   return (
     <section className="settings__section credits" aria-labelledby="credits-apps-title">
       <h2 className="settings__section-title" id="credits-apps-title">Apps that can use your credits</h2>
-      <p className="credits__quiet">They ask the first time they pay. Remove one and it asks again.</p>
+      <p className="credits__quiet">Each one asked before it first managed your credits. Remove one and it asks again. Every payment still waits for your Pay.</p>
       <ul className="credits__apps">
         {apps.map(app => (
           <li key={app.app_id} className="credits__app">
