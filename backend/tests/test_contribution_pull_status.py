@@ -261,6 +261,32 @@ def test_request_review_is_refused_on_a_pull_request_that_is_no_longer_open():
   assert status == 409 and reason == "This PR is no longer open." and github.writes_seen == []
 
 
+def without_write_access(state, commit=OLDER, login="pat"):
+  """Someone with no write access reviewed: GitHub's writers-only opinions leave them out, its newest-review list does not."""
+  github = StatusGitHub()
+  github.reviews = []
+  github.comments = [{"state": state, "author": {"login": login, "__typename": "User"}, "commit": {"oid": commit}}]
+  return github
+
+
+@pytest.mark.parametrize("state", ["APPROVED", "CHANGES_REQUESTED"])
+def test_both_ask_actions_reach_a_reviewer_without_write_access_whose_opinion_is_of_an_older_version(state):
+  rereview = without_write_access(state)
+  assert change(rereview, "request-reviewers", asking(["Pat"]))["state"] == "requested"
+  assert rereview.writes_seen == [("reviewers", ["Pat"])]
+  approval = without_write_access(state)
+  assert change(approval, "ask-approval", approving(["pat"], "@pat could you approve this version?"))["state"] == "asked"
+  assert approval.writes_seen == [("comment", "@pat could you approve this version?")]
+
+
+def test_a_reviewer_without_write_access_who_approved_this_version_is_not_asked_and_the_refusal_says_why():
+  github = without_write_access("APPROVED", SHA)
+  words = (409, "Everyone who reviewed it has already approved this version.")
+  assert refused(github, "request-reviewers", asking(["pat"])) == words
+  assert refused(github, "ask-approval", approving(["pat"])) == words
+  assert github.writes_seen == []
+
+
 def test_ask_for_approval_posts_one_note_to_people_who_looked_again_without_approving():
   github = looked_again()
   note = "@Sam thank you for coming back. Could you approve this now?"

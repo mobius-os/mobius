@@ -97,6 +97,27 @@ def test_anyone_who_reviewed_or_commented_can_be_asked_except_who_approved_this_
   assert action(approved, "ask_rereview")["reason"] == "Everyone who reviewed it has already approved this version."
 
 
+def test_reviewers_without_write_access_can_be_asked_but_never_count_toward_merging():
+  def everyone(*items):
+    return [{"bot": False, **item} for item in items]
+  pat = {"by": "pat", "state": "APPROVED", "commit": "h1"}
+  kim = {"by": "kim", "state": "CHANGES_REQUESTED", "commit": "h2"}
+  zed = {"by": "zed", "state": "COMMENTED", "commit": "h1"}
+  decision = machine.decide(facts([CHANGES], reviewers=everyone(
+    {**CHANGES}, pat, kim, zed, {"by": "alex", "state": "APPROVED", "commit": "h1"},
+    {"by": "qa-bot", "state": "APPROVED", "commit": "h1", "bot": True})))
+  assert decision["askable"] == [
+    {"by": "sam", "reason": "changes_older", "commit": "h1"}, {"by": "pat", "reason": "approved_older", "commit": "h1"},
+    {"by": "kim", "reason": "changes_here", "commit": "h2"}, {"by": "zed", "reason": "commented_older", "commit": "h1"}]
+  assert decision["approved_by"] == [] and machine.not_ready_to_merge(facts([CHANGES], reviewers=everyone(pat))) != ""
+  assert action(decision, "ask_approval")["enabled"] is True
+  here = machine.decide(facts([], reviewers=everyone({**pat, "commit": "h2"})))
+  assert here["askable"] == [] and here["approved_by"] == [], "approved this very version: nobody left to ask"
+  assert action(here, "ask_rereview")["reason"] == "Everyone who reviewed it has already approved this version."
+  assert machine.decide(facts([], reviewers=everyone(kim)))["askable"] == [
+    {"by": "kim", "reason": "changes_here", "commit": "h2"}]
+
+
 def test_a_comment_never_approves_and_one_from_a_bot_or_from_nobody_holding_a_request_changes_nothing():
   assert machine.not_ready_to_merge(facts([comment("h2")])) == "Nobody but the author has approved it yet."
   assert machine.decide(facts([comment("h2")]))["state"] == "author.commented"

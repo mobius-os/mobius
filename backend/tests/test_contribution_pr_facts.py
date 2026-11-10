@@ -78,6 +78,18 @@ def test_a_missing_or_malformed_comment_read_leaves_no_comments_and_never_makes_
     assert found["readComplete"] is True and [r["state"] for r in found["reviews"]] == ["APPROVED"]
 
 
+def test_everyone_who_reviewed_is_listed_apart_from_the_writers_opinions_that_decide_merging():
+  newest = [review("Pat", "APPROVED", OLD), review("Kim", "CHANGES_REQUESTED", OLD), review("Sam", "COMMENTED"),
+            review("Lou", "PENDING"), review("qa-bot", "COMMENTED", kind="Bot")]
+  found = facts([], checks=read_with([], latestReviews={"nodes": newest}))
+  assert found["reviews"] == [{"by": "Sam", "state": "COMMENTED", "commit": SHA, "bot": False},
+                              {"by": "qa-bot", "state": "COMMENTED", "commit": SHA, "bot": True}]
+  assert [(r["by"], r["state"]) for r in found["reviewers"]] == [
+    ("Pat", "APPROVED"), ("Kim", "CHANGES_REQUESTED"), ("Sam", "COMMENTED"), ("qa-bot", "COMMENTED")], "a pending draft is nobody's review"
+  assert machine.not_ready_to_merge({**found, "head": SHA}) != "", "a non-writer's approval never makes it ready to merge"
+  assert facts([], checks=read_with([]))["reviewers"] == []
+
+
 def test_the_check_read_asks_for_every_persons_latest_review_but_only_writers_opinions():
   asked = []
 

@@ -8,9 +8,11 @@ the app's copy, so the two evaluators cannot drift. Change a rule in both
 places and in that corpus together.
 
 Facts use the app's keys (role, author, head, lifecycle, checks, mergeable,
-permission, reviews[{by, state, commit, bot, sameWork}], myReview, openThreads,
-job, result, outbox, readComplete). A fact that could not be read is 'unknown'
-(or readComplete is False) and never enables anything that needs it.
+permission, reviews[{by, state, commit, bot, sameWork}], reviewers[{by, state, commit, bot}], myReview,
+openThreads, job, result, outbox, readComplete). A fact that could not be read is 'unknown'
+(or readComplete is False) and never enables anything that needs it. `reviewers` is the platform's
+own list of everyone's newest review, writers or not: it only widens who the Ask actions may name, and is
+absent in the app's facts and in the shared corpus (then the askable pool is the people in `reviews`).
 A review's state is APPROVED or CHANGES_REQUESTED (a person's standing opinion)
 or COMMENTED (their newest review, only when it is a plain comment: evidence
 that they looked, never an opinion). `sameWork` is the fact reader's proof, on
@@ -119,7 +121,26 @@ def _review_standing(people: list[dict], head) -> dict:
   }
 
 
-def _askable(people: list[dict], standing: dict) -> list[dict]:
+def _others_who_reviewed(facts: dict, people: list[dict]) -> list[dict]:
+  """Reviewers the standing opinions leave out (no write access): everyone's newest review, minus bots, the author
+  and anyone already among ``people``. They can be asked; what they said never counts toward merging."""
+  known = _names(people, lambda review: True)
+  return [r for r in facts.get("reviewers") or []
+          if not r.get("bot") and not _same(r.get("by"), facts.get("author"))
+          and not any(_same(other, r.get("by")) for other in known)]
+
+
+def _other_reason(review: dict, head) -> str:
+  """What is true of a reviewer who holds no standing opinion here, in the words of the standing ones."""
+  here = review.get("commit") == head
+  if review.get("state") == "CHANGES_REQUESTED":
+    return "changes_here" if here else "changes_older"
+  if review.get("state") == "APPROVED":
+    return "approved_older"
+  return "commented_here" if here else "commented_older"
+
+
+def _askable(people: list[dict], standing: dict, others: list[dict], head) -> list[dict]:
   """Who could be asked to look at this version: everyone who reviewed or commented, except those whose approval
   already counts for it. ``reason`` is what is true of them (it words the public note), ``commit`` the version
   their review was of."""
@@ -138,6 +159,10 @@ def _askable(people: list[dict], standing: dict) -> list[dict]:
     reason, state = next(((why, kind) for why, kind, names in reasons if has(names, name)), ("commented_older", "COMMENTED"))
     review = next((r for r in people if _same(r.get("by"), name) and r.get("state") == state), None)
     askable.append({"by": name, "reason": reason, "commit": (review or {}).get("commit") or ""})
+  for review in others:
+    if review.get("state") == "APPROVED" and review.get("commit") == head:
+      continue  # approved this very version: nothing left to ask, though it never counted toward merging
+    askable.append({"by": review.get("by"), "reason": _other_reason(review, head), "commit": review.get("commit") or ""})
   return askable
 
 
@@ -149,9 +174,11 @@ def derive(facts: dict) -> dict:
   mine = _record(facts.get("myReview"))
   result = _for_this_head(facts.get("result"), head)
   standing = _review_standing(people, head)
+  others = _others_who_reviewed(facts, people)
   return {
     **standing,
-    "askable": _askable(people, standing),
+    "askable": _askable(people, standing, others, head),
+    "approved_by_others": any(r.get("state") == "APPROVED" and r.get("commit") == head for r in others),
     "mine": mine,
     "mine_at_head": mine is not None and mine.get("commit") == head,
     "result": result,
@@ -390,7 +417,7 @@ def _set_aside_guard(facts: dict, d: dict) -> str:
 
 def _ask_stops(facts: dict, d: dict) -> str:
   """The two Ask actions need someone to name: anyone who reviewed or commented, except who already approved this version."""
-  nobody = "Everyone who reviewed it has already approved this version." if d["approved_at_head"] else "Nobody has reviewed this PR yet."
+  nobody = "Everyone who reviewed it has already approved this version." if d["approved_at_head"] or d["approved_by_others"] else "Nobody has reviewed this PR yet."
   return _first_reason(_readable(facts), _still_open(facts), "" if d["askable"] else nobody)
 
 

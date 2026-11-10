@@ -123,6 +123,17 @@ def approvers_at(gh, cwd, target: dict) -> set[str]:
   raise HTTPException(409, "GitHub showed too many reviews to tell who approved this pull request.")
 
 
+def everyone_who_reviewed(checks: dict | None) -> list[dict]:
+  """Each person's newest review, whoever they are and whatever it said: who can be asked, never who may merge.
+
+  Merge standing is the writers' opinions alone (`opinions`). A person without write access still reviewed
+  the PR, and GitHub lets anyone be asked, so the two Ask actions read this list instead. A draft they have
+  not submitted (PENDING) is nobody's review. A missing answer is nobody, never a reason to call the PR unread.
+  """
+  return [_opinion(node) for node in _review_nodes(checks, "latestReviews") or []
+          if isinstance(node, dict) and node.get("state") and node["state"] != "PENDING"]
+
+
 def my_review(checks: dict | None, review_list: list[dict], login: str) -> dict | None:
   """The connected account's latest review (the app's myReviewOf): a later comment or a
   pending draft never hides its standing opinion."""
@@ -194,6 +205,7 @@ def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks:
     "lifecycle": lifecycle_of(pull), "checks": checks_of(checks, head),
     "mergeable": mergeable_of(checks, head), "permission": permission_of(repo),
     "reviews": [*(review_list or []), *comments(checks)],
+    "reviewers": everyone_who_reviewed(checks),
     "myReview": None if own else my_review(checks, review_list or [], actor_login),
     "openThreads": 0, "job": job, "result": None, "outbox": None,
     "readComplete": review_list is not None,
