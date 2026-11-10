@@ -2205,7 +2205,7 @@ def _paged_read(name: str, handler, arguments: dict[str, Any]):
   )
   # Each page re-reads the result. The version fingerprints the whole result,
   # so pages of a plan that changed in between are never stitched together.
-  current = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+  current = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
   if version is not None and version != current:
     raise ValueError(
       f"{name} changed since the previous page (version {version}, now {current}); "

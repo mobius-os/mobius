@@ -1522,7 +1522,7 @@ def _read_all_pages(control, name, arguments):
     if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
       return pieces + [text]
     text, footer = text.rsplit("\n", 1)
-    assert len(text.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
+    assert len(text.encode("utf-8", "surrogatepass")) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
     pieces.append(text)
     if "end of result" in footer:
       return pieces
@@ -1617,6 +1617,21 @@ def test_read_pages_are_sized_in_bytes_so_cjk_text_fits_one_result(monkeypatch):
   assert all(len(page.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES for page in pages)
 
 
+def test_a_saved_lone_surrogate_does_not_break_goal_reads(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  # Request validation accepts a lone surrogate, so a saved text may hold one.
+  note = "half \ud800 pair"
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note * 20_000} if "field=" in path
+    else {"role": "coordinator", "helpers": [], "goal": {"focus": "a", "note": note}}))
+  view = control._call_tool({"name": "read_goal", "arguments": {"task": "a"}})
+  assert not view.get("isError"), view
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note * 20_000
+
+
 def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
@@ -1627,6 +1642,7 @@ def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
   # field=null is the whole view, never a missing-text failure.
   assert control._call_read_goal({"task": "a", "field": None})["goal"] == "This chat has no Goal."
   assert control._call_read_goal({"task": "a"})["goal"] == "This chat has no Goal."
+
 
 def test_a_refusal_reason_is_shown_whole():
   control = _control_module()

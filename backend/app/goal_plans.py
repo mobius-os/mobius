@@ -86,7 +86,7 @@ def unsettled_chain(by_id: dict, key: str, inherited: list[str] | None) -> list[
   return list(dict.fromkeys(own + inherited)) if own else inherited
 
 
-def _named(ids: list[str], shown: int = 10) -> str:
+def named_ids(ids: list[str], shown: int = 10) -> str:
   """Name a refusal's first few ids and count the rest, however many there are."""
   if len(ids) <= shown:
     return ", ".join(ids)
@@ -243,7 +243,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     if task["status"] in {"running", "completed"} and not chain_settled[task["id"]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {_named(incomplete_dependencies(task['id']))}"
+        f"complete: {named_ids(incomplete_dependencies(task['id']))}"
       )
     if task["status"] == "completed":
       unfinished_children = [
@@ -253,7 +253,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       if unfinished_children:
         raise GoalPlanError(
           f"{task['id']} cannot complete before its children settle: "
-          f"{_named(unfinished_children)}"
+          f"{named_ids(unfinished_children)}"
         )
     progress = task.get("progress")
     if (
@@ -343,7 +343,7 @@ def helper_plan_task(
       branch = _branch_members(assignment.plan_task, parent_of)
       ids = [task_id for task_id in ids if task_id in branch]
     if requested not in ids:
-      known = _named(ids) if ids else "none (no active Goal plan)"
+      known = named_ids(ids) if ids else "none (no active Goal plan)"
       raise GoalPlanError(
         f"plan_task {requested!r} is not a task of this chat's Goal plan; "
         f"plan tasks: {known}"
@@ -1199,7 +1199,7 @@ def staged_task_edits(root: models.ChatGoal, edits: list[dict[str, Any]]) -> dic
       raise GoalPlanError(f"task edit {position + 1} needs a string id")
     unknown = set(edit) - TASK_EDIT_FIELDS - {"id"}
     if unknown:
-      raise GoalPlanError(f"unknown fields for {edit['id']}: {_named(sorted(unknown))}")
+      raise GoalPlanError(f"unknown fields for {edit['id']}: {named_ids(sorted(unknown))}")
     target = by_id.get(edit["id"])
     if target is None:
       target = {"id": edit["id"]}

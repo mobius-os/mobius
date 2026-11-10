@@ -473,7 +473,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
-    GoalPlanConflict, GoalPlanError, _named, normalize_tasks, staged_task_edits,
+    GoalPlanConflict, GoalPlanError, named_ids, normalize_tasks, staged_task_edits,
   )
   # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (
@@ -594,7 +594,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         "Goal has unfinished tasks, unexplained settlements, active delegations, "
         "or results it has not received yet (read helpers with list_agents; "
         "Wait and dependency results arrive on the next exact-Goal turn): "
-        + _named(blockers),
+        + named_ids(blockers),
         code="goal_completion_blocked", completion_blockers=blockers,
       )
     from app.agent_work_claims import completable_claim_keys, held_claims_hint
@@ -602,7 +602,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     unknown = set(finished_claims) - held
     if unknown:
       raise GoalPlanError(
-        "Not an open work claim of this Goal: " + _named(sorted(unknown))
+        "Not an open work claim of this Goal: " + named_ids(sorted(unknown))
         + ". " + held_claims_hint(held)
       )
     values.update(status=status, result=outcome_text, next_action=None,

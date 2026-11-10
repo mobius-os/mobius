@@ -504,11 +504,8 @@ def test_long_task_notes_and_next_action_are_kept_whole(client, owner_token, db)
 def test_goal_prose_and_claim_lists_have_no_guessed_budgets():
   from app.routes.goal_plans import GoalPromotionRequest, GoalUpdateRequest
 
-  objective = "Deliver the outcome " * 50
+  objective = "Deliver the outcome " * 500
   assert GoalPromotionRequest(objective=objective).objective == objective.strip()
-  # An agent-promoted objective keeps its cap: it repeats whole in every brief.
-  with pytest.raises(ValueError):
-    GoalPromotionRequest(objective="o" * 1001)
   keys = [f"test:work-{index}" for index in range(80)]
   assert GoalUpdateRequest(
     complete="done " * 2000, finished_claims=keys,
