@@ -170,8 +170,10 @@ async def _merge(gh, cwd, body, authorize, pr_job, db, owner_id) -> dict:
       _require_clear(target, repo, pull, checks, {**facts, "job": job_now()})
       method = _method_to_send(body.method, repo, checks)
       _arm(db, owner_id, target)
-      # A cancellation here leaves the saved attempt in place: the write may have landed.
-      result = await merge_actions.dispatch_merge(gh, cwd, target, repo, checks, authorize, method)
+      # A caller cancelled during the write still gets the answer recorded: a refusal
+      # frees the key, a confirmed write ends it, and only silence keeps the fence.
+      result = await merge_actions.dispatch_merge(gh, cwd, target, repo, checks, authorize, method,
+                                                  on_abandoned=lambda late: _settle(db, owner_id, target, late))
       _settle(db, owner_id, target, result)
   # dispatch_merge turns a cancellation before the write into a refusal. The
   # caller's cancellation still wins, as in every review merge.

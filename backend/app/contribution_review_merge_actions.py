@@ -9,11 +9,16 @@ from app.contribution_review_effects import DispatchResult, NotDispatched, class
 from app.github_connection import _github_connection_transaction
 
 
-async def dispatch_merge(gh, cwd, target, repo, checks, authorize, method=None, still_clear=None):
+async def dispatch_merge(gh, cwd, target, repo, checks, authorize, method=None, still_clear=None, on_abandoned=None):
   """Authority refusal precedes dispatch; a received remote fact survives Stop.
 
   ``still_clear`` is for a caller that decided before waiting for the connection and the run's lock:
   it returns why the merge is refused on what GitHub says now, or None.
+
+  Once the write has started it is awaited to its end. A caller cancelled
+  meanwhile still gets its cancellation, but the finished result goes to
+  ``on_abandoned`` first, so a definite answer is recorded as definite and only
+  a genuinely unknown one keeps its fence.
   """
   try:
     authorize()
@@ -30,6 +35,18 @@ async def dispatch_merge(gh, cwd, target, repo, checks, authorize, method=None, 
     return DispatchResult.not_dispatched("The review was cancelled before any merge request began.")
   except Exception:
     return DispatchResult.not_dispatched("The final check failed before merge dispatch.")
+
+  def finished(task):
+    if task.cancelled() or task.exception() is not None:
+      settled.log_abandoned_failure(task, "merge dispatch")
+    elif on_abandoned is not None:
+      on_abandoned(task.result())
+
+  return await settled.settle(_write(gh, cwd, target, repo, checks, method), what="merge dispatch", abandoned=finished)
+
+
+async def _write(gh, cwd, target, repo, checks, method):
+  """The one public write, classified; it never raises for a failed request."""
   try:
     if checks.get("isMergeQueueEnabled") is True:
       receipt = await settled.run_settled(reviews.enqueue, gh, cwd, target)
@@ -61,12 +78,26 @@ async def _reserve_and_dispatch(db, row, target, outcome, repo, checks, principa
       return None
   db.refresh(row)
   armed = dict(row.outcomes_json[reviews.key(target)])
-  result = await dispatch_merge(gh, cwd, target, repo, checks, authorize, method, still_clear)
+
+  def record_late(late):
+    # The caller was cancelled during the write: a definite answer still settles the arm.
+    if late.state == "not_dispatched":
+      reviews.disarm_merge(db, row, target, late.reason)
+    else:
+      reviews.save_effect_outcome(db, row, reviews.key(target), _after_dispatch(armed, late))
+
+  result = await dispatch_merge(gh, cwd, target, repo, checks, authorize, method, still_clear,
+                                 on_abandoned=record_late)
   if result.state == "not_dispatched":
     reviews.disarm_merge(db, row, target, result.reason)
     if asyncio.current_task().cancelling():
       raise asyncio.CancelledError()
     return None
+  return _after_dispatch(armed, result)
+
+
+def _after_dispatch(armed, result):
+  """The saved item for a write that was sent: confirmed, or kept as unknown."""
   if result.state == "confirmed":
     return {**armed, **result.receipt}
   return {**armed, "state": "merge_unknown", "summary": result.reason}
