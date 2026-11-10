@@ -42,7 +42,7 @@ from app.deps import (
   reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal
+from app.resource_access import get_active_chat_for_principal, require_active_chat_access
 from app import models
 
 
@@ -299,7 +299,7 @@ def read_current_message(
   """One whole note this agent's chat sent, received or can see broadcast."""
   if principal.chat_id is None or principal.run_id is None:
     raise HTTPException(403, "Current chat-bound agent run required.")
-  get_active_chat_for_principal(db, principal.chat_id, principal)
+  require_active_chat_access(db, principal.chat_id, principal)
   message = peer_message_for_agent(db, principal.chat_id, message_id)
   if message is None:
     raise HTTPException(404, "Peer note not found for this agent.")
@@ -377,7 +377,7 @@ def inspect_chat_message(
   The same exact-chat visibility as this chat's history.
   """
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   message = peer_message_for_chat(db, chat_id, message_id)
   if message is None:
     raise HTTPException(404, "Peer note not found for this chat.")

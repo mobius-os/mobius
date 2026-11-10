@@ -19,6 +19,7 @@ from sqlalchemy import JSON, Text, case, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
 from app import chat_writer, transcript_rows
 from app.app_chat_scopes import SCOPE_MAX, ScopedStartRefused, chat_scope
 from app.chat_handoffs import project_handoff
@@ -159,9 +160,9 @@ def _latest_run_snapshot(
   return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
-# The longest claim text a Goal card shows (context_budget.CLAIM_TEXT_CHARS)
-# plus room for the outcome's other fields.
-_KEY_TEXT_CHARS = 4_000
+# A dependency outcome's head that covers what a Goal card shows of it (the
+# claim summary and outcome at their display limits) and its other fields.
+_KEY_TEXT_CHARS = 2 * (CLAIM_SUMMARY_CHARS + CLAIM_TEXT_CHARS)
 
 
 def _lifecycle_projection_key(

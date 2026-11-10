@@ -2,6 +2,7 @@
 import { api, jsonOrThrow } from '../../api/client.js'
 import PeerNoteBody, { FullNoteText, ReadFullAction } from './PeerNoteBody.jsx'
 import useFullPeerNote from './hooks/useFullPeerNote.js'
+import { goalDependencyOutcomeLabel } from './goalProgress'
 
 async function readDependencyTexts(dependencyId) {
   return jsonOrThrow(await api.chatWaits.dependencyText(dependencyId), 'Could not load the full text')
@@ -30,7 +31,9 @@ export function DependencyRowTexts({ dependency, actions, meta }) {
   return <>
     <span className="chat__goal-task-title">{full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition}</span>
     {actions}
-    <span className="chat__goal-task-meta">{full?.outcome ? <FullNoteText text={`Outcome: ${full.outcome}`} /> : meta}</span>
+    <span className="chat__goal-task-meta">{full?.outcome
+      ? <FullNoteText text={goalDependencyOutcomeLabel({ ...dependency, outcome: { ...dependency.outcome, outcome: full.outcome } })} />
+      : meta}</span>
     {dependency.truncated && !full && <ReadFullAction note={texts} noun="text" />}
   </>
 }
