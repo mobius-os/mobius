@@ -1,13 +1,13 @@
 /**
- * The sheets an app's credits raise over the running app (AppCanvas): a charge
- * waiting for the owner's Pay, and a local app's credits question. Both reuse
- * the permission panel's sheet styles.
+ * The sheet a credits charge raises over the running app (AppCanvas): the
+ * charge waits here for the owner's Pay. It reuses the permission panel's
+ * sheet styles.
  *
- * The app's service chooses when either appears, so its main button arms only
- * after a short pause and counts only a press that started after that
- * (`useArmedPress`, rules in lib/creditsPayment.js): a tap meant for the app
- * never pays or allows by landing on a sheet that just slid in under it. Give
- * each sheet a `key` per question so the next one arms afresh.
+ * The app's service chooses when it appears, so Pay arms only after a short
+ * pause and counts only a press that started after that (`useArmedPress`,
+ * rules in lib/creditsPayment.js): a tap meant for the app never pays by
+ * landing on a sheet that just slid in under it. Give the sheet a `key` per
+ * payment so the next one arms afresh.
  */
 
 import { useEffect, useId, useRef, useState } from 'react'
@@ -20,7 +20,7 @@ function now() {
   return typeof performance !== 'undefined' ? performance.now() : Date.now()
 }
 
-// The main button's handlers, and whether it has armed yet.
+// Pay's handlers, and whether it has armed yet.
 function useArmedPress(onPress) {
   const [armedAt, setArmedAt] = useState(null)
   const pressStartedAt = useRef(null)
@@ -39,7 +39,7 @@ function useArmedPress(onPress) {
   }
 }
 
-// The header both credits sheets share: the app's icon, a label and the question.
+// The sheet's header: the app's icon, a label and the question.
 function CreditsSheetHead({ appId, name, eyebrow, titleId, title }) {
   const { data: apps } = appQueries.list.useQuery()
   const app = (apps || []).find(item => String(item.id) === String(appId))
@@ -127,47 +127,6 @@ export function AppCreditsPaymentDialog({
             </div>
           </>
         )}
-      </section>
-    </div>
-  )
-}
-
-// A local app's first credits call asks here, over the running app: the app
-// keeps working, only its money waits. Allow records exactly these rows.
-export function AppCreditsApprovalDialog({ appId, appName, request, busy, error, onNotNow, onAllow }) {
-  const dialogRef = useRef(null)
-  const notNowRef = useRef(null)
-  const titleId = useId()
-  const allow = useArmedPress(onAllow)
-  useDialogFocus({
-    containerRef: dialogRef, initialFocusRef: notNowRef, onClose: onNotNow,
-  })
-  const name = appName || request.app_name || 'This app'
-  return (
-    <div className="canvas-credits" role="dialog" aria-modal="true"
-      aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
-      <section className="app-consent canvas-credits__sheet">
-        <CreditsSheetHead appId={appId} name={name} titleId={titleId}
-          eyebrow="Credits" title={`Allow ${name} to use your credits?`} />
-        <ul className="app-consent__list">
-          {request.rows.map(row => (
-            <li className="app-consent__row" key={row.id}>
-              <div>
-                <strong>{row.title}</strong>
-                <span>{row.text}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-        <p className="app-consent__meta">You can take this back anytime in Settings → Credits.</p>
-        {error && <p className="app-consent__error" role="alert">{error}</p>}
-        <div className="app-consent__actions">
-          <button type="button" className="app-consent__btn" ref={notNowRef} onClick={onNotNow}>Not now</button>
-          <button type="button" className="app-consent__btn app-consent__btn--primary"
-            onPointerDown={allow.onPointerDown} onClick={allow.onClick} disabled={busy || !allow.armed}>
-            {busy ? 'Allowing…' : 'Allow'}
-          </button>
-        </div>
       </section>
     </div>
   )

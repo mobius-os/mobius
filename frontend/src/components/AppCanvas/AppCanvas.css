@@ -370,9 +370,8 @@
   outline-offset: 2px;
 }
 
-/* An app's money question over the running app: a payment waiting for the
-   owner's Pay (AppCreditsPaymentDialog) or a local app's first credits call
-   (AppCreditsApprovalDialog). Both reuse the permission panel's sheet. */
+/* A credits charge waiting for the owner's Pay over the running app
+   (AppCreditsPaymentDialog). It reuses the permission panel's sheet. */
 .canvas-credits {
   position: absolute;
   inset: 0;

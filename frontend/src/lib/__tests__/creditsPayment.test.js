@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  answerRefusal, asksForCredits, paymentAmount, pressCounts,
+  answerRefusal, paymentAmount, paysWithCredits, pressCounts,
 } from '../creditsPayment.js'
 
 test('Pay ignores a press while the sheet is still arming', () => {
@@ -59,10 +59,11 @@ test('a refused payment tells the owner the server reason', () => {
   assert.equal(answerRefusal(null), 'That could not be saved. Try again.')
 })
 
-test('only an app whose contract asks for credits reads credits questions', () => {
-  assert.equal(asksForCredits(null), false)
-  assert.equal(asksForCredits({ data: {} }), false)
-  assert.equal(asksForCredits({ data: { spend_credits: [] } }), false)
-  assert.equal(asksForCredits({ data: { spend_credits: ['*/prompts'] } }), true)
-  assert.equal(asksForCredits({ data: { credits_manage: true } }), true)
+test('only an app whose contract may spend credits reads its waiting payments', () => {
+  assert.equal(paysWithCredits(null), false)
+  assert.equal(paysWithCredits({ data: {} }), false)
+  assert.equal(paysWithCredits({ data: { spend_credits: [] } }), false)
+  // Managing credits raises no payment, and a local app never manages them.
+  assert.equal(paysWithCredits({ data: { credits_manage: true } }), false)
+  assert.equal(paysWithCredits({ data: { spend_credits: ['*/prompts'] } }), true)
 })

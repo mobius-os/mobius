@@ -1495,33 +1495,27 @@ def _contract_data(app: models.App) -> dict:
 
 
 def app_manages_credits(app: models.App) -> bool:
-  """Whether the app holds the ``credits_manage`` grant, so a charge answer may
-  still reveal the owner's balance to it. The spender gate checks its consent."""
-  return _contract_data(app).get("credits_manage") is True
+  """Whether the app holds an accepted ``credits_manage`` grant, so a charge
+  answer may still reveal the owner's balance to it. Only a Store app's
+  accepted first-open consent grants it; a local app that merely declares it
+  is a spend-only payer."""
+  return (_contract_data(app).get("credits_manage") is True
+          and app_consent.gated(app) and app_consent.status(app) == "accepted")
 
 
 def _require_credits_app_consent(app: models.App) -> None:
-  """No manifest grants itself the owner's credits: the owner answers first.
+  """Local manifests never self-grant access to the owner's credits.
 
-  A Store app's first-open answer covers them. A local app's manifest is
-  editable here (by an agent too), so its first credits call is refused and
-  asks the owner, and later calls work only while the owner's answer still
-  covers every credits row it asks for.
+  Use the same Store/consent boundary as first-open approval, not package
+  identity: local apply can copy these permissions into a contract without
+  ever showing the owner a consent card. So ``credits_manage`` is Store-only:
+  a local app never gets it, whatever its manifest declares.
   """
-  if app_consent.gated(app):
-    if app_consent.status(app) != "accepted":
-      raise HTTPException(
-        status_code=403,
-        detail="App credits permissions need an installed Store app with accepted consent.",
-      )
-    return
-  if app_consent.credits_approved(app):
-    return
-  app_consent.request_credits(app)
-  raise HTTPException(status_code=403, detail={
-    "code": "credits_approval_required",
-    "message": f"Allow {app.name} to use your credits in Möbius, then try again.",
-  })
+  if not app_consent.gated(app) or app_consent.status(app) != "accepted":
+    raise HTTPException(
+      status_code=403,
+      detail="App credits permissions need an installed Store app with accepted consent.",
+    )
 
 
 def spend_credits_targets(app: models.App) -> list[str]:
@@ -1573,10 +1567,8 @@ def get_credits_spender(
     raise HTTPException(status_code=401, detail="App not found.")
   # A Store app's first-open consent covers its spending. A local app needs
   # no standing grant just to spend: every charge waits for the owner's Pay
-  # (credits_confirmations). But one that also asks to manage credits is
-  # asked that first, before any Pay, so the owner never pays for something
-  # the app cannot then finish.
-  if app_consent.gated(app) or app_consent.credits_rows(app):
+  # (credits_confirmations). It never manages credits, even if it asks to.
+  if app_consent.gated(app):
     _require_credits_app_consent(app)
   if not spend_credits_targets(app):
     raise HTTPException(
@@ -1608,7 +1600,7 @@ def get_credits_price_reader(
     raise HTTPException(status_code=401, detail="App not found.")
   if app_consent.gated(app):
     _require_credits_app_consent(app)
-  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
+  if app_manages_credits(app) or spend_credits_targets(app):
     return owner
   raise HTTPException(
     status_code=403,

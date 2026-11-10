@@ -36,7 +36,6 @@ def owner_pays(request, monkeypatch):
   fixture go through the question as the shell does.
   """
   credits_confirmations.clear()
-  app_consent.forget_credits_requests()
   if "real_payments" in request.fixturenames:
     return
   confirmed = credits_confirmations.Payment(
@@ -423,39 +422,29 @@ def test_a_marketplace_pays_any_creator_of_its_app_and_nothing_else(client, auth
 def test_a_local_app_spends_without_a_standing_grant(client, auth, db, paired):
   """Spending needs no one-time answer: every charge waits for the owner's Pay."""
   app = _app(db, "local-payer", spend_credits=("*/prompts",), store=False)
-  assert app_consent.credits_rows(app) == []
+  assert not app_consent.gated(app)
   paired.answers["charges"] = (200, {"charge_id": "c2", "amount": "0.50"})
   paid = client.post("/api/identity/credits/charges", json=CHARGE,
                      headers=_as(db, app, "private"))
   assert paid.status_code == 200 and paid.json()["charge_id"] == "c2"
 
 
-def test_a_local_app_that_manages_credits_asks_permission_before_any_payment(
+def test_a_local_app_that_declares_credits_manage_is_only_a_payer(
   client, auth, db, paired, real_payments,
 ):
-  """Permission first, then Pay: never a payment the app cannot finish."""
+  """``credits_manage`` is Store-only. A local app that declares it still
+  pays, each charge waiting for Pay, but never learns the owner's balance."""
   app = _app(db, "local-manage-pay", spend_credits=("*/prompts",), store=False, credits_manage=True)
+  assert not deps.app_manages_credits(app)
   headers = _as(db, app, "private")
-  asked = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
-  assert asked.status_code == 403 and asked.json()["detail"]["code"] == "credits_approval_required"
-  assert app_consent.credits_requested(app)
-  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
-  assert _charges_upstream(paired) == []
-
-  assert app_consent.approve_credits(app, app_consent.request_digest(app_consent.credits_rows(app)))
-  db.commit()
-  held = client.post("/api/identity/credits/charges", json=CHARGE, headers=_as(db, app, "private"))
+  held = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
   assert held.status_code == 409 and held.json()["detail"]["code"] == "confirmation_required"
-
-
-def test_settings_lists_the_local_apps_allowed_to_manage_credits(client, auth, db, paired):
-  app = _app(db, "local-manager", spend_credits=(), store=False, credits_manage=True)
-  assert client.get("/api/identity/credits/apps", headers=auth).json()["apps"] == []
-  assert app_consent.approve_credits(app, app_consent.request_digest(app_consent.credits_rows(app)))
-  db.commit()
-  listed = client.get("/api/identity/credits/apps", headers=auth).json()["apps"]
-  assert [(a["slug"], [r["id"] for r in a["rows"]]) for a in listed] == [
-    ("local-manager", ["credits_manage"])]
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40", "balance": "9.60",
+                                     "balance_micro": 9_600_000})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert paid.status_code == 200 and paid.json() == {"charge_id": "c1", "amount": "0.40"}
 
 
 @pytest.mark.parametrize("through_frame", [False, True], ids=["agent", "app-frame"])
@@ -600,7 +589,6 @@ def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
 OWNER_CREDIT_ROUTES = [
   ("GET", "/api/identity/credits", None),
   ("GET", "/api/identity/credits/transactions", None),
-  ("GET", "/api/identity/credits/apps", None),
   ("GET", "/api/identity/credits/purchase-terms", None),
   ("GET", f"/api/identity/credits/topups/{TOPUP_ID}", None),
   ("GET", "/api/identity/credits/prices/ana", None),
@@ -620,42 +608,42 @@ OWNER_CREDIT_ROUTES = [
 
 @pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
 @pytest.mark.parametrize("has_package_id", [False, True], ids=["local", "local-package"])
-def test_a_local_apps_credits_wait_for_the_owners_answer(
-  client, auth, db, paired, service_scope, has_package_id, monkeypatch,
+@pytest.mark.parametrize("consented", [False, True], ids=["unanswered", "after-consent"])
+def test_local_manifest_credits_manage_never_grants_credits_access(
+  client, auth, db, paired, service_scope, has_package_id, consented,
 ):
-  """An editable local manifest never grants itself the owner's credits."""
+  """``credits_manage`` stays Store-only: an editable local manifest never
+  reaches the owner's credits account, even with an accepted consent record."""
   from app.app_capabilities import contract_from_manifest
 
-  published = []
-  monkeypatch.setattr("app.broadcast.get_system_broadcast",
-                      lambda: type("B", (), {"publish": staticmethod(published.append)})())
   app = _app(db, "local-credits", store=False,
              package_id="local-package" if has_package_id else None)
   app.capability_contract = contract_from_manifest({
     "permissions": {"credits_manage": True, "spend_credits": ["ana/prompts"]},
   })
+  if consented:
+    # Whatever answer a local app's record holds, it grants no management.
+    assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
+    assert app.accepted_consent is not None
   db.commit()
-  assert not app_consent.gated(app) and not app_consent.credits_approved(app)
+  assert not app_consent.gated(app) and not deps.app_manages_credits(app)
   headers = _as(db, app, service_scope)
   calls = len(paired.calls)
   for method, path, body in OWNER_CREDIT_ROUTES:
     answer = client.request(method, path, json=body, headers=headers)
     if path.endswith("/prices/ana"):
-      # Prices are public: reading one asks nothing.
+      # Prices are public, and a paying app shows one before it charges.
       assert answer.status_code == 200, answer.text
       continue
     assert answer.status_code == 403, (path, answer.text)
-    assert answer.json()["detail"]["code"] == "credits_approval_required"
+    assert "installed Store app with accepted consent" in answer.json()["detail"]
   assert [c["url"].rsplit("/", 2)[-2:] for c in paired.calls[calls:]] == [["prices", "ana"]]
   assert credits_client.load_credentials()["key"] == "mbc_example_key"
-  # The refusal asked: the shell is told to show the question.
-  assert app_consent.credits_requested(app)
-  assert {"type": "credits_approval_requested", "appId": str(app.id)} in published
 
 
 @pytest.mark.parametrize("gate", [deps.get_credits_reader, deps.get_credits_controller,
                                   deps.get_credits_spender, deps.get_credits_price_reader])
-def test_credits_gates_require_the_owners_accepted_answer(auth, db, gate):
+def test_credits_gates_require_the_store_contract_to_be_accepted(auth, db, gate):
   app = _app(db, "credits-manager", credits_manage=True)
   owner = db.query(models.Owner).first()
   principal = deps.Principal(owner=owner, app_id=app.id, app_is_service=True)

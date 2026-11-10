@@ -25,14 +25,3 @@
 
 .credits__activity-amount { font-variant-numeric: tabular-nums; color: var(--text); }
 .credits__activity-amount--in { color: var(--green-text, var(--green)); }
-
-.credits__apps { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
-.credits__app {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 2px 12px;
-}
-.credits__app-name { font-weight: 600; }
-.credits__app-what { grid-column: 1; color: var(--text-muted, var(--text)); font-size: .9em; }
-.credits__app button { grid-column: 2; grid-row: 1 / span 2; }

@@ -1,20 +1,19 @@
 /**
- * Rules for the sheets an app's credits raise over the running app: a charge
- * waiting for the owner's Pay, and a local app's credits question. Kept here
- * so they are tested rather than eyeballed.
+ * Rules for the sheet a credits charge raises over the running app, where it
+ * waits for the owner's Pay. Kept here so they are tested rather than eyeballed.
  */
 
 import { money } from './creditsWallet.js'
 
 /**
- * How long Pay (or Allow) stays off after its sheet appears. An app's service
+ * How long Pay stays off after its sheet appears. An app's service
  * chooses when to raise a charge, so the sheet can land under a tap meant for
  * the app; browsers hold their own permission prompts back the same way.
  */
 export const PRESS_ARM_MS = 700
 
 /**
- * Whether a press on the sheet's main button counts as the owner's answer.
+ * Whether a press on Pay counts as the owner's answer.
  *
  * A pointer press counts only when it started on the button after the button
  * armed (`armedAt`): a finger already down when the sheet appeared, lifted
@@ -59,14 +58,11 @@ export function answerRefusal(body) {
 }
 
 /**
- * Whether an app's contract asks to see, manage or spend the owner's credits.
- * Only such an app can have a payment or a credits question to show, so the
- * shell asks about neither for any other app. Mirrors the backend's
- * `app_consent.asks_for_credits`.
+ * Whether an app's contract may spend the owner's credits. Only such an app
+ * can have a payment waiting, so the shell reads waiting payments for no
+ * other app.
  */
-export function asksForCredits(contract) {
-  const data = contract?.data
-  if (!data || typeof data !== 'object') return false
-  const targets = data.spend_credits
-  return data.credits_manage === true || (Array.isArray(targets) && targets.length > 0)
+export function paysWithCredits(contract) {
+  const targets = contract?.data?.spend_credits
+  return Array.isArray(targets) && targets.length > 0
 }

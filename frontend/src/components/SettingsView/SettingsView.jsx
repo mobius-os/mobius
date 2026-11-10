@@ -28,7 +28,6 @@ import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import WalletSection from './WalletSection.jsx'
-import CreditsAppsSection from './CreditsAppsSection.jsx'
 import { useWallet } from './useWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
@@ -1160,7 +1159,6 @@ export default function SettingsView({
             onBuy={wallet.buy}
           />
         )}
-        {showOwnerAccounts && wallet.summary?.mode === 'customer' && <CreditsAppsSection />}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

@@ -1091,11 +1091,12 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use `credits_manage`
-or `spend_credits`, even if their `mobius.json` declares them: account, price
-and charge requests receive 403. A delegated helper cannot spend credits,
-including through an otherwise approved app service.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. An owner-built local app never gets it, even if its `mobius.json`
+declares it: its account requests receive 403. A local app may still pay with
+`spend_credits` (below): it needs no standing grant, because every charge
+waits for the owner's Pay. A delegated helper cannot spend credits, including
+through an otherwise approved app service.
 
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
@@ -1145,8 +1146,8 @@ figures too.
 
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
-`identity_manage` does not include it; an app with it keeps seeing the balance
-in a charge answer.
+`identity_manage` does not include it, and only a Store app can hold it. An
+app with it keeps seeing the balance in a charge answer.
 
 ## Managed-app update events
 

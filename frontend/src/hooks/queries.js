@@ -341,21 +341,6 @@ function useAppConsentQuery(appId) {
   })
 }
 
-async function fetchAppCreditsApproval(appId) {
-  const res = await api.apps.creditsApproval(appId)
-  return jsonOrThrow(res, 'app credits approval fetch failed:')
-}
-
-// Whether a local app may use the owner's credits, or the question it raised.
-function useAppCreditsApprovalQuery(appId, { enabled = true } = {}) {
-  return useQuery({
-    queryKey: ['app-credits-approval', appId],
-    enabled: !!appId && enabled,
-    queryFn: () => fetchAppCreditsApproval(appId),
-    staleTime: 60_000,
-  })
-}
-
 // The app's credits charges waiting for the owner's Pay or Cancel.
 function useAppWaitingPaymentsQuery(appId, { enabled = true } = {}) {
   return useQuery({
@@ -684,13 +669,6 @@ export const appQueries = {
     useQuery: useAppWaitingPaymentsQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({
       predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
-    }),
-  },
-  creditsApproval: {
-    useQuery: useAppCreditsApprovalQuery,
-    // Event ids are strings; the canvas keys by whatever id it was given.
-    invalidate: (queryClient, appId) => queryClient.invalidateQueries({
-      predicate: q => q.queryKey[0] === 'app-credits-approval' && String(q.queryKey[1]) === String(appId),
     }),
   },
   uninstalled: {

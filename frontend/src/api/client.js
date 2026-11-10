@@ -1227,12 +1227,6 @@ export const api = {
     acceptConsent: (appId, digest) => apiFetch(`/apps/${appId}/consent`, {
       method: 'POST', body: JSON.stringify({ digest }),
     }),
-    // A local app's credits, asked at its first credits call.
-    creditsApproval: (appId) => apiFetch(`/apps/${appId}/credits-approval`),
-    approveCredits: (appId, digest) => apiFetch(`/apps/${appId}/credits-approval`, {
-      method: 'POST', body: JSON.stringify({ digest }),
-    }),
-    revokeCredits: (appId) => apiFetch(`/apps/${appId}/credits-approval`, { method: 'DELETE' }),
     // Every credits charge waits for the owner's Pay or Cancel.
     waitingPayments: (appId) => apiFetch(`/apps/${appId}/credits-charges`),
     answerPayment: (appId, paymentId, pay) => apiFetch(`/apps/${appId}/credits-charges/${encodeURIComponent(paymentId)}`, {

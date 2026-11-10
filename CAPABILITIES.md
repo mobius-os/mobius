@@ -86,10 +86,11 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use
-`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
-their account, price and charge requests receive 403.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. Owner-built local apps never get it, even if their `mobius.json`
+declares it; their account requests receive 403. A local app may still pay
+with `spend_credits`, with no standing grant, because every charge waits for
+the owner's Pay (below).
 
 A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
@@ -130,9 +131,9 @@ Balance, history and purchase reads refuse a shared-browser guest.
 
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing
-prices, and keeping or withdrawing earnings. Besides the owner, only an app
-with `permissions.credits_manage: true` reaches it, a separate critical
-consent row. `identity_manage` covers the sign-in link only and never includes
+prices, and keeping or withdrawing earnings. Besides the owner, only an
+installed Store app with accepted `permissions.credits_manage: true` reaches
+it, a separate critical consent row. `identity_manage` covers the sign-in link only and never includes
 it. Reading a seller's published prices also admits a `spend_credits` app.
 The summary and purchase terms carry a `pairing` id that changes when the
 service or its key does; a top-up that names an earlier `pairing` is refused

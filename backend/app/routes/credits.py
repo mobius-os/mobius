@@ -25,10 +25,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
-from app import app_consent, credits_client, credits_confirmations, models
-from app.database import get_db
+from app import credits_client, credits_confirmations, models
 from app.deps import (
   app_manages_credits,
   get_credits_controller,
@@ -92,26 +90,6 @@ def _credits(action, *args):
 def read_credits(_owner: models.Owner = Depends(get_credits_reader)):
   """Balance and earnings from the paired credits service, never stored here."""
   return credits_client.summary()
-
-
-@router.get("/apps")
-def read_credits_apps(
-  _owner: models.Owner = Depends(get_credits_reader),
-  db: Session = Depends(get_db),
-):
-  """The local apps the owner allowed to use their credits, for Settings.
-
-  Store apps are not listed: their first-open consent is managed with the app.
-  """
-  apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).order_by(models.App.name).all()
-  return {"apps": [
-    {"app_id": app.id, "name": app.name, "slug": app.slug,
-     "rows": [{"id": row["id"], "title": row["title"], "scope": row.get("scope") or []}
-              for row in app_consent.credits_rows(app)]}
-    for app in apps
-    if not app_consent.gated(app) and app_consent.credits_rows(app) and app.accepted_consent
-    and app_consent.credits_approved(app)
-  ]}
 
 
 @router.post("/pair")

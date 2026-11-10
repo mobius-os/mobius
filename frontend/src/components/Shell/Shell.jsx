@@ -3354,10 +3354,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     } else if (ev.type === 'credits_charge_requested' || ev.type === 'credits_charge_answered') {
       // An app asked to charge the owner's credits, or a device answered it.
       if (ev.appId) void appQueries.creditsPayments.invalidate(queryClient, ev.appId)
-    } else if (ev.type === 'credits_approval_requested' || ev.type === 'credits_approval_changed') {
-      // A local app's credits call asked, or the owner answered elsewhere.
-      if (ev.appId) void appQueries.creditsApproval.invalidate(queryClient, ev.appId)
-      if (ev.type === 'credits_approval_changed') void queryClient.invalidateQueries({ queryKey: ['credits-apps'] })
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void chatAppArtifactQueries.invalidateAll(queryClient)

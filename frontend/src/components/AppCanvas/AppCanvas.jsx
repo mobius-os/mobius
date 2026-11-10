@@ -30,7 +30,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import AppConsentPanel from './AppConsentPanel.jsx'
-import { AppCreditsApprovalDialog, AppCreditsPaymentDialog } from './AppCreditsDialogs.jsx'
+import { AppCreditsPaymentDialog } from './AppCreditsDialogs.jsx'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   accountLinkCompletion,
@@ -57,7 +57,7 @@ import {
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import { checkoutPage, openStripeWindow } from '../../lib/creditsWallet.js'
-import { answerRefusal, asksForCredits } from '../../lib/creditsPayment.js'
+import { answerRefusal, paysWithCredits } from '../../lib/creditsPayment.js'
 import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
@@ -464,10 +464,11 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [pendingFileExport, setPendingFileExport] = useState(null)
   const pendingFileExportRef = useRef(null)
   // A charge waiting for the owner's Pay (see AppCreditsPaymentDialog). Only
-  // an app whose contract asks for credits can raise one, so no other app's
-  // opening reads either credits question.
-  const usesCredits = asksForCredits(capabilityContract)
-  const paymentsQuery = appQueries.creditsPayments.useQuery(appId, { enabled: usesCredits })
+  // an app whose contract may spend credits can raise one, so no other app's
+  // opening reads the waiting payments.
+  const paymentsQuery = appQueries.creditsPayments.useQuery(appId, {
+    enabled: paysWithCredits(capabilityContract),
+  })
   const waitingPayment = paymentsQuery.data?.payments?.[0] || null
   const [paymentBusy, setPaymentBusy] = useState(false)
   const [paymentError, setPaymentError] = useState('')
@@ -507,32 +508,6 @@ const AppCanvas = forwardRef(function AppCanvas({
     } finally {
       setPaymentBusy(false)
       void appQueries.creditsPayments.invalidate(queryClient, appId)
-    }
-  }
-  // A local app's credits question (see AppCreditsApprovalDialog).
-  const creditsApprovalQuery = appQueries.creditsApproval.useQuery(appId, { enabled: usesCredits })
-  const [creditsDismissed, setCreditsDismissed] = useState(null)
-  const [creditsBusy, setCreditsBusy] = useState(false)
-  const [creditsError, setCreditsError] = useState('')
-  const creditsQuestion = creditsApprovalQuery.data?.status === 'requested'
-    && creditsApprovalQuery.data.digest !== creditsDismissed
-    ? creditsApprovalQuery.data : null
-  async function allowCredits() {
-    if (!creditsQuestion) return
-    setCreditsBusy(true)
-    setCreditsError('')
-    try {
-      const res = await api.apps.approveCredits(appId, creditsQuestion.digest)
-      if (!res.ok) {
-        setCreditsError(res.status === 409
-          ? 'The app’s request changed. Review it again.'
-          : 'That could not be saved. Try again.')
-      }
-    } catch {
-      setCreditsError('That could not be saved. Try again.')
-    } finally {
-      setCreditsBusy(false)
-      void appQueries.creditsApproval.invalidate(queryClient, appId)
     }
   }
   const canvasWrapRef = useRef(null)
@@ -2140,13 +2115,6 @@ const AppCanvas = forwardRef(function AppCanvas({
           busy={paymentBusy} error={paymentError} refusal={paymentRefusal?.message || ''}
           onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
           onClose={() => setPaymentRefusal(null)} />
-      )}
-      {creditsQuestion && visible && !pendingFileExport && !shownPayment && (
-        <AppCreditsApprovalDialog key={creditsQuestion.digest} appId={appId} appName={appName}
-          request={creditsQuestion}
-          busy={creditsBusy} error={creditsError}
-          onNotNow={() => { setCreditsError(''); setCreditsDismissed(creditsQuestion.digest) }}
-          onAllow={allowCredits} />
       )}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it
