@@ -30,7 +30,7 @@ from app.deps import (
   get_principal,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
+from app.resource_access import get_active_chat_or_404, require_active_chat_access
 from app.wait_checks import GitHubChecks
 
 router = APIRouter(prefix="/api/chat-waits", tags=["chat-waits"])
@@ -196,7 +196,7 @@ def read_dependency_text(
   row = db.get(models.GoalDependency, dependency_id)
   if row is None:
     raise HTTPException(status_code=404, detail="No such follow.")
-  get_active_chat_for_principal(db, row.waiting_chat_id, principal)
+  require_active_chat_access(db, row.waiting_chat_id, principal)
   from app.goal_dependencies import dependency_full_texts
   return dependency_full_texts(
     db, row, include_foreign_context=principal.scope != "chat_embed",

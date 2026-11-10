@@ -3,7 +3,8 @@ import { useState } from 'react'
 
 // `readers` are the ways to read it, tried in order: a Project view can read a
 // note through either end of it, and one end may since have been deleted
-// (404). Each resolves to the whole text.
+// (404). Each resolves to the whole text. When every reader finds nothing the
+// text is "unavailable": retrying could never succeed.
 export default function useFullPeerNote(readers) {
   const [full, setFull] = useState(null)
   const [state, setState] = useState('idle')
@@ -15,10 +16,13 @@ export default function useFullPeerNote(readers) {
         setState('idle')
         return
       } catch (error) {
-        if (error?.status !== 404) break
+        if (error?.status !== 404) {
+          setState('error')
+          return
+        }
       }
     }
-    setState('error')
+    setState('unavailable')
   }
-  return { full, state, load, readable: readers.length > 0 }
+  return { full, state, load, readable: readers.length > 0 && state !== 'unavailable' }
 }

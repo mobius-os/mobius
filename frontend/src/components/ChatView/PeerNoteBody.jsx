@@ -2,12 +2,12 @@
 import { useState } from 'react'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useFullPeerNote from './hooks/useFullPeerNote.js'
+import { PEER_NOTE_CHARS } from './peerMessageCard.js'
 import './PeerNoteBody.css'
 
-// Views carry only a note's head, within this limit (the backend's
-// context_budget.PEER_NOTE_CHARS). A full note beyond it is shown as plain
-// text, revealed a page at a time, so a very long note never freezes the view.
-const HEAD_CHARS = 4000
+// Views carry only a note's head, within PEER_NOTE_CHARS. A full note beyond
+// it is shown as plain text, revealed a page at a time, so a very long note
+// never freezes the view.
 const REVEAL_CHARS = 20_000
 
 /** The ways to read one note whole: through each chat that can see it. */
@@ -33,7 +33,7 @@ export function FullNoteText({ text }) {
 export default function PeerNoteBody({ readers = [], body, truncated, render, noun = 'note' }) {
   const note = useFullPeerNote(readers)
   if (note.full != null) {
-    return note.full.length > HEAD_CHARS ? <FullNoteText text={note.full} /> : (note.full && render(note.full))
+    return note.full.length > PEER_NOTE_CHARS ? <FullNoteText text={note.full} /> : (note.full && render(note.full))
   }
   return <>
     {body && render(body)}

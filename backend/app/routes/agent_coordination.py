@@ -14,11 +14,11 @@ from app.agent_coordination import (
   MAX_PEERS,
   MESSAGE_DELIVERIES,
   chat_message_history,
+  context_message,
   deliver_peer_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
-  model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
   peer_message_for_agent,
@@ -31,8 +31,8 @@ from app.agent_work_claims import (
   pending_transfer_notices,
   claim_work,
   finish_work,
+  read_claim_text,
 )
-from app.context_budget import PEER_NOTE_CHARS
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -42,7 +42,7 @@ from app.deps import (
   reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal
+from app.resource_access import get_active_chat_for_principal, require_active_chat_access
 from app import models
 
 
@@ -52,11 +52,11 @@ router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"]
 class AgentMessageCreate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  recipients: list[str] = Field(default_factory=list, max_length=24)
+  recipients: list[str] = Field(default_factory=list)
   broadcast: bool = False
   kind: str = "note"
   delivery: str = "next_turn"
-  body: str = Field(min_length=1, max_length=4000)
+  body: str = Field(min_length=1)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("body")
@@ -65,8 +65,6 @@ class AgentMessageCreate(BaseModel):
     value = value.strip()
     if not value:
       raise ValueError("body must not be blank")
-    if "\x00" in value:
-      raise ValueError("body must not contain U+0000")
     return value
 
   @field_validator("kind")
@@ -90,8 +88,9 @@ class AgentWorkClaimCreate(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  summary: str = Field(min_length=1, max_length=500)
-  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+  summary: str = Field(min_length=1)
+  # A takeover must explain itself; ten characters rules out "x" or "ok".
+  takeover_reason: str | None = Field(default=None, min_length=10)
   expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -99,7 +98,7 @@ class AgentWorkClaimFinish(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  outcome: str = Field(min_length=1, max_length=1000)
+  outcome: str = Field(min_length=1)
   release: bool = False
 
 
@@ -144,6 +143,29 @@ async def _deliver_finished_claim_dependencies():
     await deliver_pending_dependencies()
   except Exception:
     logging.getLogger(__name__).exception("Finished claim dependencies were not nudged")
+
+
+@router.get("/work-claims/text")
+def read_current_work_claim_text(
+  work_key: str = Query(min_length=3, max_length=256),
+  field: str = Query(),
+  digest: str | None = Query(default=None, min_length=1, max_length=64),
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """One work-claim text whole, for an excerpt a claim result or notice named."""
+  if principal.chat_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  try:
+    text = read_claim_text(
+      db, owner_id=principal.owner.id, chat_id=principal.chat_id,
+      work_key=work_key, field=field, digest=digest,
+    )
+  except LookupError as exc:
+    raise HTTPException(404, str(exc)) from exc
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
+  return {"work_key": work_key, "field": field, "text": text}
 
 
 @router.post("/work-claims/finish", dependencies=[Depends(reject_cross_site)])
@@ -232,16 +254,16 @@ async def send_current_message(
     if not body.broadcast else None
   )
   # One row is stored per recipient inbox. The sender already knows the note,
-  # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated per recipient.
-  # A stored note longer than the send cap comes back as a head the card
-  # labels as truncated.
-  receipt = [model_message(row) for row in rows[:1]]
-  for row in receipt:
-    body = row.get("body") or ""
-    if len(body) > PEER_NOTE_CHARS:
-      row.update(body=body[:PEER_NOTE_CHARS], body_truncated=True,
-                 body_chars=len(body))
+  # so return one canonical row, its body under the same excerpt rule as turn
+  # context, plus the exact recipient count and names the owner-visible
+  # activity card needs, not the body repeated per recipient. An excerpted
+  # body is marked as the owner views mark it (truncated, body_chars), and
+  # send_id lets the owner's timeline join the card to the stored rows.
+  receipt = [context_message(row) for row in rows[:1]]
+  for shown, stored in zip(receipt, rows):
+    shown["send_id"] = stored["send_id"]
+    if shown.get("body") != stored.get("body"):
+      shown.update(truncated=True, body_chars=len(stored["body"]))
   result = {
     "messages": receipt,
     "recipient_count": len(rows),
@@ -277,7 +299,7 @@ def read_current_message(
   """One whole note this agent's chat sent, received or can see broadcast."""
   if principal.chat_id is None or principal.run_id is None:
     raise HTTPException(403, "Current chat-bound agent run required.")
-  get_active_chat_for_principal(db, principal.chat_id, principal)
+  require_active_chat_access(db, principal.chat_id, principal)
   message = peer_message_for_agent(db, principal.chat_id, message_id)
   if message is None:
     raise HTTPException(404, "Peer note not found for this agent.")
@@ -355,7 +377,7 @@ def inspect_chat_message(
   The same exact-chat visibility as this chat's history.
   """
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   message = peer_message_for_chat(db, chat_id, message_id)
   if message is None:
     raise HTTPException(404, "Peer note not found for this chat.")

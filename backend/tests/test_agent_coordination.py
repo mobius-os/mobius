@@ -152,6 +152,13 @@ def _network_fixture(db):
   return chats, runs
 
 
+def _note_body(db, row) -> str:
+  """A stored note's text: its shared body when it references one."""
+  if row.body_id:
+    return db.get(models.AgentCoordinationNoteBody, row.body_id).body
+  return row.body
+
+
 def _next_turn_context(db, chat, run_id: str) -> str:
   """Start one later physical turn and return its injected peer context."""
   previous_started = max(
@@ -551,7 +558,7 @@ def test_interrupt_delivery_steers_ordered_backlog_once(
   assert carrier["hidden"] is True
   assert carrier["kind"] == "peer_message"
   request_row = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.body == "Now re-check the exact build.",
+    agent_coordination.note_text() == "Now re-check the exact build.",
   ).one()
   assert carrier["peer_message_through"] == {
     "created_at": request_row.created_at.isoformat(),
@@ -922,7 +929,7 @@ def test_transfer_after_crash_recovers_every_former_owner_notice(
   }
   first = next(row for row in notices if row.to_chat_id == chats["root"].id)
   assert first.from_chat_id == chats["outsider"].id
-  assert "original executor" in first.body
+  assert "original executor" in _note_body(db, first)
 
 
 def test_work_claim_transfer_acknowledges_only_after_delivery(
@@ -1156,7 +1163,7 @@ def test_network_retention_is_per_recipient_and_does_not_prune_broadcasts(
     models.AgentCoordinationMessage.room_kind == "workspace",
     models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
   ).order_by(models.AgentCoordinationMessage.created_at.asc()).all()
-  assert [row.body for row in directs] == ["Direct 1", "Direct 2"]
+  assert [_note_body(db, row) for row in directs] == ["Direct 1", "Direct 2"]
   assert db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.room_kind == "delegation",
     models.AgentCoordinationMessage.to_chat_id.is_(None),
@@ -1607,7 +1614,7 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
   assert again.json()["woken"] == []
   assert len(started) == 1
   message = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.body == "Again.",
+    agent_coordination.note_text() == "Again.",
   ).one()
   successor = make_goal_run(db,
     id="builder-successor", root_run_id="builder-successor",
@@ -2128,7 +2135,7 @@ def test_retention_prunes_notes_stored_beyond_the_send_cap_by_count(
     models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
   ).order_by(models.AgentCoordinationMessage.created_at.asc()).all()
   assert [row.id for row in kept][0] == "stored-1"
-  assert [row.body for row in kept][1] == "Newest"
+  assert _note_body(db, kept[1]) == "Newest"
   assert db.query(models.ChatActivityPosition).filter(
     models.ChatActivityPosition.event_id == "peer:stored-0",
   ).count() == 0
@@ -2137,39 +2144,64 @@ def test_retention_prunes_notes_stored_beyond_the_send_cap_by_count(
   ).count() == 1
 
 
-def test_send_receipt_and_card_mark_a_note_longer_than_the_send_cap(
+def test_long_note_to_many_recipients_is_stored_bounded_and_read_whole(
   client, auth, db, monkeypatch,
 ):
+  """No size or recipient count limit; every repetition stays bounded."""
   from app import peer_message
   from app.context_budget import PEER_NOTE_CHARS
 
-  chats, _ = _network_fixture(db)
-  huge = "z" * (PEER_NOTE_CHARS * 3)
-  monkeypatch.setattr(
-    "app.routes.agent_coordination.send_agent_message",
-    lambda **_kwargs: [{
-      "id": "receipt-note", "kind": "note", "sender_chat_id": chats["scout"].id,
-      "recipient_chat_id": chats["builder"].id, "recipient_name": "Builder",
-      "broadcast": False, "delivery": "next_turn", "body": huge,
-    }],
-  )
+  chats, runs = _network_fixture(db)
+  # Exercise the batched recipient queries with a small batch.
+  monkeypatch.setattr(agent_coordination, "_ID_BATCH", 3)
+  extra = []
+  for index in range(10):
+    chat = create_chat(id=f"fan-{index:02d}", title=f"Fan {index}", messages=[], provider="codex")
+    db.add(chat)
+    db.flush()
+    db.add(make_goal_run(db, id=f"fan-run-{index:02d}", root_run_id=f"fan-run-{index:02d}",
+                         chat_id=chat.id, status="running", provider="codex"))
+    extra.append(chat.id)
+  db.commit()
+  recipients = [chats["builder"].id, *extra]
+  huge = "Shared finding " + "evidence " * 10_000 + "END"
   sent = client.post(
     "/api/agent-coordination/messages",
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-    json={"recipients": [chats["builder"].id], "body": "short input"},
+    json={"recipients": recipients, "body": huge},
   )
   assert sent.status_code == 200, sent.text
-  receipt = sent.json()["messages"][0]
-  assert receipt["body"] == huge[:PEER_NOTE_CHARS]
-  assert (receipt["body_truncated"], receipt["body_chars"]) == (True, len(huge))
+  data = sent.json()
+  assert data["recipient_count"] == len(recipients)
+  assert sorted(data["queued"]) == sorted(recipients)
+  assert len(data["recipient_names"]) == len(recipients)
+  receipt = data["messages"][0]
+  # The receipt follows the same excerpt rule as turn context.
+  assert len(receipt["body"]) <= PEER_NOTE_CHARS
+  assert f"read_agent_message(message_id={receipt['id']}) pages the full note" in receipt["body"]
   card = peer_message.settle_peer_message(
-    {"direction": "send", "status": "sending"}, json.dumps(sent.json()),
+    {"direction": "send", "status": "sending"}, json.dumps(data),
   )
-  assert card["body"] == huge[:PEER_NOTE_CHARS]
-  assert card["body_truncated"] is True
+  assert card["body_truncated"] is True and huge.startswith(card["body"][:-1])
+  rows = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.from_chat_id == chats["scout"].id,
+    models.AgentCoordinationMessage.room_kind == "workspace",
+  ).all()
+  assert sorted(row.to_chat_id for row in rows) == sorted(recipients)
+  assert all(_note_body(db, row) == huge for row in rows)
+
+  builder_row = next(row for row in rows if row.to_chat_id == chats["builder"].id)
+  runs["builder"].provider_execution_admitted = True
+  db.commit()
+  context = _next_turn_context(db, chats["builder"], "builder-after-huge")
+  assert huge not in context
+  assert f"read_agent_message(message_id={builder_row.id}) pages the full note" in context
+  read = client.get(f"/api/agent-coordination/messages/{builder_row.id}",
+                    headers=_delegated_auth(db, chats["builder"].id, "builder-run"))
+  assert read.status_code == 200 and read.json()["body"] == huge
 
 
-def test_send_receipt_at_the_send_cap_is_unchanged(client, auth, db):
+def test_send_receipt_within_the_display_limit_is_unchanged(client, auth, db):
   chats, _ = _network_fixture(db)
   body = "w" * 4000
   sent = client.post(
@@ -2180,13 +2212,86 @@ def test_send_receipt_at_the_send_cap_is_unchanged(client, auth, db):
   assert sent.status_code == 200, sent.text
   receipt = sent.json()["messages"][0]
   assert receipt["body"] == body
-  assert "body_truncated" not in receipt and "body_chars" not in receipt
-  # The input cap itself is unchanged in this release.
-  assert client.post(
+  assert "truncated" not in receipt and "body_chars" not in receipt
+  longer = client.post(
     "/api/agent-coordination/messages",
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
     json={"recipients": [chats["builder"].id], "body": body + "w"},
-  ).status_code == 422
+  )
+  assert longer.status_code == 200, longer.text
+  assert "pages the full note" in longer.json()["messages"][0]["body"]
+
+
+def test_read_work_claim_route_returns_one_text_whole(client, auth, db):
+  chats, _ = _network_fixture(db)
+  scout = _delegated_auth(db, chats["scout"].id, "scout-run")
+  summary = "Ship" + " the change" * 300
+  claimed = client.post("/api/agent-coordination/work-claims", headers=scout,
+                        json={"work_key": "pr:2004:merge", "summary": summary})
+  assert claimed.status_code == 200, claimed.text
+  assert "read_work_claim(work_key=pr:2004:merge, field=summary, digest=" in claimed.json()["summary"]
+  read = client.get("/api/agent-coordination/work-claims/text", headers=scout,
+                    params={"work_key": "pr:2004:merge", "field": "summary"})
+  assert read.status_code == 200 and read.json()["text"] == summary
+  assert client.get("/api/agent-coordination/work-claims/text", headers=scout,
+                    params={"work_key": "pr:2004:none", "field": "summary"}).status_code == 404
+  assert client.get("/api/agent-coordination/work-claims/text", headers=scout,
+                    params={"work_key": "pr:2004:merge", "field": "owner_run_id"}).status_code == 422
+  short = client.post("/api/agent-coordination/work-claims", headers=scout,
+                      json={"work_key": "pr:2004:merge", "summary": "x",
+                            "takeover_reason": "too short", "expected_owner_chat_id": "a"})
+  assert short.status_code == 422
+
+
+def test_owner_card_labels_a_long_note_without_the_agent_marker(client, auth, db):
+  from app import peer_message
+  from app.context_budget import PEER_NOTE_CHARS
+
+  chats, _ = _network_fixture(db)
+  huge = "Long " + "owner-visible detail " * 1_000
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": huge},
+  )
+  receipt = sent.json()["messages"][0]
+  # The receipt marks its excerpt as owner views do and names its send.
+  assert (receipt["truncated"], receipt["body_chars"]) == (True, len(huge.strip()))
+  assert "read_agent_message(" in receipt["body"]  # the sender's own excerpt
+  stored = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.id == receipt["id"],
+  ).one()
+  assert receipt["send_id"] == stored.send_id
+  card = peer_message.settle_peer_message(
+    {"direction": "send", "status": "sending"}, json.dumps(sent.json()),
+  )
+  assert card["body_truncated"] is True and card["send_id"] == stored.send_id
+  assert peer_message.bounded_peer_message(card)["send_id"] == stored.send_id
+  assert "read_agent_message" not in card["body"] and card["body"].endswith("…")
+  assert huge.startswith(card["body"][:-1]) and len(card["body"]) <= PEER_NOTE_CHARS
+
+
+def test_a_send_to_many_recipients_reloads_no_stored_row(client, auth, db, monkeypatch):
+  from sqlalchemy.orm import Session
+
+  chats, _ = _network_fixture(db)
+  refreshed = []
+  original = Session.refresh
+  monkeypatch.setattr(Session, "refresh", lambda self, obj, *a, **k: (
+    refreshed.append(type(obj).__name__), original(self, obj, *a, **k))[1])
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  body = {"recipients": [chats["builder"].id, chats["root"].id],
+          "body": "x" * 10_000, "send_id": "fan-send"}
+  first = client.post("/api/agent-coordination/messages", headers=headers, json=body)
+  assert first.status_code == 200, first.text
+  assert "AgentCoordinationMessage" not in refreshed
+  assert first.json()["recipient_count"] == 2
+  # An exact retry is answered from the database without loading bodies.
+  again = client.post("/api/agent-coordination/messages", headers=headers, json=body)
+  assert again.status_code == 200 and again.json()["messages"] == first.json()["messages"]
+  changed = client.post("/api/agent-coordination/messages", headers=headers,
+                        json={**body, "body": "y" * 10_000})
+  assert changed.status_code == 422
 
 
 def test_owner_and_embed_snapshots_carry_only_long_note_heads(client, auth, db):
@@ -2360,3 +2465,58 @@ def test_a_prune_cleans_only_its_own_bodies_and_the_sweep_converges(client, auth
   db.expire_all()
   assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is None
   assert db.get(models.AgentCoordinationNoteBody, "body-kept") is not None
+
+
+def test_a_send_stores_its_body_once_for_every_recipient(client, auth, db):
+  chats, _ = _network_fixture(db)
+  body = "Stored once " + "z" * 50_000
+  recipients = [chats["builder"].id, chats["root"].id, chats["nested"].id]
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  sent = client.post("/api/agent-coordination/messages", headers=headers,
+                     json={"recipients": recipients, "body": body, "send_id": "once"})
+  assert sent.status_code == 200, sent.text
+  rows = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "once").all()
+  assert len(rows) == 3 and {row.body for row in rows} == {""}
+  assert len({row.body_id for row in rows}) == 1
+  shared = db.get(models.AgentCoordinationNoteBody, rows[0].body_id)
+  assert shared.body == body
+  assert db.query(models.AgentCoordinationNoteBody).count() == 1
+  # Retries match the shared body; a different body is still refused.
+  again = client.post("/api/agent-coordination/messages", headers=headers,
+                      json={"recipients": recipients, "body": body, "send_id": "once"})
+  assert again.status_code == 200 and again.json()["messages"] == sent.json()["messages"]
+  assert db.query(models.AgentCoordinationNoteBody).count() == 1
+  assert client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": recipients, "body": body + "!", "send_id": "once"}).status_code == 422
+  read = client.get(f"/api/agent-coordination/messages/{rows[0].id}",
+                    headers=_delegated_auth(db, rows[0].to_chat_id, {
+                      chats["builder"].id: "builder-run", chats["root"].id: "root-run",
+                      chats["nested"].id: "nested-run"}[rows[0].to_chat_id]))
+  assert read.json()["body"] == body
+
+
+def test_a_send_never_points_at_an_already_stored_body(client, auth, db):
+  """Each send writes its own body with its rows; a retry adds nothing."""
+  chats, _ = _network_fixture(db)
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  recipients = [chats["builder"].id, chats["root"].id]
+  first = client.post("/api/agent-coordination/messages", headers=headers,
+                      json={"recipients": recipients, "body": "Same text", "send_id": "first"})
+  assert first.status_code == 200, first.text
+  older = {row.body_id for row in db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "first")}
+  assert len(older) == 1
+  # The same text in a new send is stored again, never shared across sends.
+  second = client.post("/api/agent-coordination/messages", headers=headers,
+                       json={"recipients": recipients, "body": "Same text", "send_id": "second"})
+  assert second.status_code == 200, second.text
+  newer = {row.body_id for row in db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "second")}
+  assert len(newer) == 1 and newer.isdisjoint(older)
+  bodies = db.query(models.AgentCoordinationNoteBody).count()
+  for send_id in ("first", "second"):
+    retry = client.post("/api/agent-coordination/messages", headers=headers,
+                        json={"recipients": recipients, "body": "Same text", "send_id": send_id})
+    assert retry.status_code == 200, retry.text
+  assert db.query(models.AgentCoordinationNoteBody).count() == bodies == 2

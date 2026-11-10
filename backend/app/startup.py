@@ -334,9 +334,11 @@ def _purge_expired_chats(context: StartupContext) -> None:
 
   with SessionLocal() as db:
     purged = purge_expired_chat_tombstones(db)
-    # Converge any shared peer-note body that concurrent prunes left behind.
-    delete_unreferenced_bodies(db)
-    db.commit()
+    if not purged:
+      # A purge already swept; otherwise converge any shared peer-note body
+      # that concurrent prunes left behind.
+      delete_unreferenced_bodies(db)
+      db.commit()
   if purged:
     context.logger.info("purged %s expired chat tombstone(s)", len(purged))
 

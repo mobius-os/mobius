@@ -66,9 +66,17 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
     for (const block of msg.blocks || []) {
       const pm = block.peer_message
       if (pm?.status !== 'sent' || !block.tool_use_id || tools.has(block.tool_use_id)) continue
+      // A receipt names its send, which joins the card to that send's rows
+      // whatever their text; older markers match one exact body. A send id is
+      // chosen by the agent and unique only within one run, so either way the
+      // rows must fall in this segment's time range and match its audience.
+      // A card names at most a few recipients, so their names are checked
+      // only when it names them all.
+      const named = !pm.peers?.length || (pm.send_id && (pm.count || 1) > pm.peers.length)
       const matches = ordered.filter(note => !represented.has(note.id)
-        && note.sender_chat_id === chatId && note.body === pm.body
-        && (pm.broadcast ? note.broadcast : !note.broadcast && (!pm.peers?.length || pm.peers.includes(note.recipient_name)))
+        && note.sender_chat_id === chatId
+        && (pm.send_id ? note.send_id === pm.send_id : note.body === pm.body)
+        && (pm.broadcast ? note.broadcast : !note.broadcast && (named || pm.peers.includes(note.recipient_name)))
         && peerTime(note.created_at) >= msg.ts && peerTime(note.created_at) <= next).slice(0, pm.count || 1)
       if (!matches.length) continue
       tools.set(block.tool_use_id, matches)

@@ -987,7 +987,7 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
 
   with pytest.raises(ValueError) as target:
     control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
-  assert "list of at most 24 agent/chat ids" in str(target.value)
+  assert "list of agent/chat ids" in str(target.value)
   assert "secret-peer" not in str(target.value)
 
   send = control._TOOL_DEFINITIONS["send_agent_message"]
@@ -1826,3 +1826,42 @@ def test_read_agent_message_returns_a_note_plain_and_pages_a_long_one(monkeypatc
   refused = control._call_tool({"name": "read_agent_message", "arguments": {"id": "n"}})
   assert refused["isError"] and "needs message_id" in refused["content"][0]["text"]
   assert platform_tools.READ_MESSAGE_TOOL_NAME in platform_tools.PEER_TOOL_NAMES
+
+
+def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):
+  control = _control_module()
+  send = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
+  claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
+  finish = control._TOOL_DEFINITIONS["finish_agent_work"]["inputSchema"]["properties"]
+  assert "maxLength" not in send["body"] and "maxItems" not in send["recipients"]
+  assert "maxLength" not in claim["summary"] and "maxLength" not in finish["outcome"]
+  assert claim["takeover_reason"] == {"type": "string", "minLength": 10}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or {"messages": []})
+  recipients = [f"peer-{index}" for index in range(100)]
+  control._call_send_agent_message({"recipients": recipients, "body": "x" * 50_000})
+  assert sent[0]["recipients"] == recipients and len(sent[0]["body"]) == 50_000
+
+
+def test_read_work_claim_pages_one_claim_text(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  outcome = "".join(f"{index:07d}\n" for index in range(20_000))
+  paths = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    paths.append(path) or {"text": outcome}))
+  arguments = {"work_key": "pr:1#merge", "field": "outcome"}
+  assert "".join(_read_all_pages(control, "read_work_claim", arguments)) == outcome
+  assert set(paths) == {"/api/agent-coordination/work-claims/text?work_key=pr%3A1%23merge&field=outcome"}
+  refused = control._call_tool({"name": "read_work_claim", "arguments": {"work_key": "pr:1"}})
+  assert refused["isError"] and "needs work_key and field" in refused["content"][0]["text"]
+  digested = {**arguments, "digest": "abc123def456"}
+  paths.clear()
+  control._call_tool({"name": "read_work_claim", "arguments": digested})
+  assert paths[0].endswith("&field=outcome&digest=abc123def456")
+  for bad in ({**arguments, "field": 3}, {**arguments, "digest": ""}):
+    refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
+    assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
+  assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES

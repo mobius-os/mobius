@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -57,7 +57,6 @@ class GoalDependencyHandoff:
 
   def view(self) -> dict:
     """The presented shape: ``truncated`` appears only when it is true."""
-    from dataclasses import asdict
     return {key: value for key, value in asdict(self).items()
             if key != "truncated" or value}
 

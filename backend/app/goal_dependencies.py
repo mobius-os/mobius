@@ -96,7 +96,7 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
 
 
 def _notice_outcome(row):
-  """The shared outcome with a claim's texts within their input caps.
+  """The shared outcome with a claim's texts within their display limits.
 
   The excerpt is deterministic, so startup orphan checks still match the
   notice text; the stored outcome and the claim keep the whole texts.
@@ -105,9 +105,9 @@ def _notice_outcome(row):
   if outcome is None or row.target_kind != "claim_acquisition":
     return outcome
   from app.agent_work_claims import claim_text
-  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
-  return {**outcome, **{key: claim_text(outcome[key], limit) for key, limit in (
-    ("summary", CLAIM_SUMMARY_CHARS), ("outcome", CLAIM_TEXT_CHARS)) if key in outcome}}
+  work_key = outcome.get("work_key")
+  return {**outcome, **{field: claim_text(outcome[field], work_key, field)
+                        for field in ("summary", "outcome") if field in outcome}}
 
 
 def dependency_notice(row):

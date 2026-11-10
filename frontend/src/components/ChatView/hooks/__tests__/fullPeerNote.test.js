@@ -46,6 +46,15 @@ test('a reader that finds nothing (404) falls back to the next one', async () =>
   assert.equal(hook.result.current.full, 'via recipient')
 })
 
+test('when no reader can find the text any more there is no endless retry', async () => {
+  const asked = []
+  const hook = renderHook(() => useFullPeerNote([async () => { asked.push('gone-sender'); throw notFound() }]))
+  await hook.result.current.load()
+  assert.deepEqual(asked, ['gone-sender'])
+  assert.equal(hook.result.current.state, 'unavailable')
+  assert.equal(hook.result.current.readable, false)
+})
+
 test('without a reader there is nothing to read', () => {
   assert.equal(renderHook(() => useFullPeerNote([])).result.current.readable, false)
 })

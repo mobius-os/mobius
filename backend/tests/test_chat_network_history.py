@@ -158,9 +158,6 @@ def test_a_stored_note_with_u0000_is_shown_whole_or_marked_truncated(client, aut
 
 def test_a_note_body_with_u0000_is_refused(client, db):
   from app.agent_coordination import _clean_message
-  from app.routes.agent_coordination import AgentMessageCreate
 
   with pytest.raises(ValueError, match='U\\+0000'):
     _clean_message('note', 'one\x00two')
-  with pytest.raises(ValueError, match='U\\+0000'):
-    AgentMessageCreate(recipients=['peer'], body='one\x00two')
