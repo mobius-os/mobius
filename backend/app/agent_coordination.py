@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import json
 import logging
 import time
+from types import SimpleNamespace
 from typing import Any
 import uuid
 
@@ -1287,6 +1288,19 @@ def _clean_delivery(delivery: str, *, broadcast: bool) -> str:
   return delivery
 
 
+# A send's rows, as plain values. Every recipient row of one send carries the
+# same body, so a send returns them sharing the one body string the caller
+# already holds rather than loading and copying it once per recipient.
+_SEND_COLUMNS = (
+  "id", "send_id", "room_kind", "room_id", "from_chat_id", "from_run_id",
+  "to_chat_id", "delivery", "kind", "created_at",
+)
+
+
+def _send_snapshot(row, body: str) -> SimpleNamespace:
+  return SimpleNamespace(**{key: getattr(row, key) for key in _SEND_COLUMNS}, body=body)
+
+
 def _matching_retry(
   db: Session,
   *,
@@ -1298,13 +1312,18 @@ def _matching_retry(
   kind: str,
   delivery: str,
   body: str,
-) -> list[models.AgentCoordinationMessage] | None:
+) -> list[SimpleNamespace] | None:
   if sender_run_id is None or send_id is None:
     return None
-  rows = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.from_run_id == sender_run_id,
-    models.AgentCoordinationMessage.send_id == send_id,
-  ).order_by(models.AgentCoordinationMessage.id.asc()).all()
+  message = models.AgentCoordinationMessage
+  # The database compares each body; none is loaded.
+  rows = db.query(
+    *(getattr(message, key) for key in _SEND_COLUMNS),
+    (message.body == body).label("same_body"),
+  ).filter(
+    message.from_run_id == sender_run_id,
+    message.send_id == send_id,
+  ).order_by(message.id.asc()).all()
   if not rows:
     return None
   expected_targets = {None} if broadcast else set(recipients)
@@ -1317,13 +1336,16 @@ def _matching_retry(
       and row.room_id == channel.id
       and row.kind == kind
       and row.delivery == delivery
-      and row.body == body
+      and row.same_body
       for row in rows
     )
   )
   if not exact:
     raise ValueError("send_id is already bound to a different peer message.")
-  return rows
+  # Answer in the original send's recipient order, as its receipt was.
+  position = {target: index for index, target in enumerate(recipients)}
+  return [_send_snapshot(row, body) for row in sorted(
+    rows, key=lambda row: position.get(row.to_chat_id, -1))]
 
 
 def _delete_beyond(db: Session, query, keep: int) -> None:
@@ -1454,6 +1476,8 @@ def _persist_send(
       _prune_direct_inboxes(db, channel, recipients)
     else:
       _prune_scope_channel(db, channel)
+    # Flushed values, before commit expires them: no row is reloaded.
+    sent = [_send_snapshot(row, clean_body) for row in rows]
     db.commit()
   except IntegrityError:
     db.rollback()
@@ -1474,15 +1498,13 @@ def _persist_send(
   except Exception:
     db.rollback()
     raise
-  for row in rows:
-    db.refresh(row)
   _publish_message_hint(
     channel,
     sender_chat_id=sender_chat_id,
     recipients=recipients,
     broadcast=broadcast,
   )
-  return serialize_messages(db, rows)
+  return serialize_messages(db, sent)
 
 
 def send_scope_message(

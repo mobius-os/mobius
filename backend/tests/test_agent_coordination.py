@@ -2175,7 +2175,7 @@ def test_long_note_to_many_recipients_is_stored_bounded_and_read_whole(
   card = peer_message.settle_peer_message(
     {"direction": "send", "status": "sending"}, json.dumps(data),
   )
-  assert card["body"] == receipt["body"]
+  assert card["body_truncated"] is True and huge.startswith(card["body"][:-1])
   rows = db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.from_chat_id == chats["scout"].id,
     models.AgentCoordinationMessage.room_kind == "workspace",
@@ -2222,7 +2222,7 @@ def test_read_work_claim_route_returns_one_text_whole(client, auth, db):
   claimed = client.post("/api/agent-coordination/work-claims", headers=scout,
                         json={"work_key": "pr:2004:merge", "summary": summary})
   assert claimed.status_code == 200, claimed.text
-  assert "read_work_claim(work_key=pr:2004:merge, field=summary)" in claimed.json()["summary"]
+  assert "read_work_claim(work_key=pr:2004:merge, field=summary, digest=" in claimed.json()["summary"]
   read = client.get("/api/agent-coordination/work-claims/text", headers=scout,
                     params={"work_key": "pr:2004:merge", "field": "summary"})
   assert read.status_code == 200 and read.json()["text"] == summary
@@ -2234,3 +2234,48 @@ def test_read_work_claim_route_returns_one_text_whole(client, auth, db):
                       json={"work_key": "pr:2004:merge", "summary": "x",
                             "takeover_reason": "too short", "expected_owner_chat_id": "a"})
   assert short.status_code == 422
+
+
+def test_owner_card_labels_a_long_note_without_the_agent_marker(client, auth, db):
+  from app import peer_message
+  from app.context_budget import PEER_NOTE_CHARS
+
+  chats, _ = _network_fixture(db)
+  huge = "Long " + "owner-visible detail " * 1_000
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": huge},
+  )
+  receipt = sent.json()["messages"][0]
+  assert receipt["body_truncated"] is True
+  assert "read_agent_message(" in receipt["body"]  # the sender's own excerpt
+  card = peer_message.settle_peer_message(
+    {"direction": "send", "status": "sending"}, json.dumps(sent.json()),
+  )
+  assert card["body_truncated"] is True
+  assert "read_agent_message" not in card["body"] and card["body"].endswith("…")
+  assert huge.startswith(card["body"][:-1]) and len(card["body"]) <= PEER_NOTE_CHARS
+
+
+def test_a_send_to_many_recipients_reloads_no_stored_row(client, auth, db, monkeypatch):
+  from sqlalchemy.orm import Session
+
+  chats, _ = _network_fixture(db)
+  refreshed = []
+  original = Session.refresh
+  monkeypatch.setattr(Session, "refresh", lambda self, obj, *a, **k: (
+    refreshed.append(type(obj).__name__), original(self, obj, *a, **k))[1])
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  body = {"recipients": [chats["builder"].id, chats["root"].id],
+          "body": "x" * 10_000, "send_id": "fan-send"}
+  first = client.post("/api/agent-coordination/messages", headers=headers, json=body)
+  assert first.status_code == 200, first.text
+  assert "AgentCoordinationMessage" not in refreshed
+  assert first.json()["recipient_count"] == 2
+  # An exact retry is answered from the database without loading bodies.
+  again = client.post("/api/agent-coordination/messages", headers=headers, json=body)
+  assert again.status_code == 200 and again.json()["messages"] == first.json()["messages"]
+  changed = client.post("/api/agent-coordination/messages", headers=headers,
+                        json={**body, "body": "y" * 10_000})
+  assert changed.status_code == 422

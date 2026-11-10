@@ -10,6 +10,7 @@ but next-turn context is now the only inbound delivery path.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.context_budget import PEER_NOTE_CHARS
@@ -27,9 +28,11 @@ MAX_RESULT_MESSAGES = 200  # bounds both current receipts and historic markers
 MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
 # The card shows a note whole within the display limit notes share with turn
-# context; a longer note's receipt already carries the marked excerpt, which
-# fits. body_truncated only trips on a defensive over-limit row.
+# context. A longer note's receipt carries the agents' marked excerpt and
+# body_truncated; the card drops the agent-facing marker and labels the
+# excerpt for the owner instead.
 MAX_BODY_CHARS = PEER_NOTE_CHARS
+_AGENT_EXCERPT_MARKER = re.compile(r"… \[excerpt: \d+ of \d+ characters; [^\]]*\]$")
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.
 MAX_COMPACTION_BODY_CHARS = 400
@@ -206,8 +209,12 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
     # expandable card from a malformed empty row.
     if not body:
       continue
+    truncated = bool(message.get("body_truncated"))
+    if truncated:
+      body = _AGENT_EXCERPT_MARKER.sub("…", body)
     rows.append({
-      **message, "body": body, "body_truncated": len(stripped) > MAX_BODY_CHARS,
+      **message, "body": body,
+      "body_truncated": truncated or len(stripped) > MAX_BODY_CHARS,
     })
   return rows
 

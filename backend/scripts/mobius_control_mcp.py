@@ -875,10 +875,12 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
 
 
 def _call_read_work_claim(arguments: dict[str, Any]) -> str:
-  if set(arguments) != {"work_key", "field"}:
-    raise ValueError("read_work_claim needs work_key and field")
-  payload = _agent_api_call("GET", "/api/agent-coordination/work-claims/text?" + urlencode(
-    {"work_key": arguments["work_key"], "field": arguments["field"]}))
+  if not {"work_key", "field"} <= set(arguments) <= {"work_key", "field", "digest"}:
+    raise ValueError("read_work_claim needs work_key and field, and may take digest")
+  if any(not isinstance(value, str) or not value for value in arguments.values()):
+    raise ValueError("read_work_claim work_key, field and digest must be non-empty strings")
+  payload = _agent_api_call(
+    "GET", "/api/agent-coordination/work-claims/text?" + urlencode(arguments))
   # The text alone, plain, so its pages read as the text itself.
   return payload.get("text") or ""
 
@@ -2155,8 +2157,9 @@ _TOOL_DEFINITIONS = {
     "name": READ_WORK_CLAIM_TOOL,
     "description": (
       "Read one work claim's summary, takeover_reason or outcome whole when a "
-      "claim result or notice showed only its excerpt. A long text comes in "
-      "pages; its last line names the next page."
+      "claim result or notice showed only its excerpt; pass the digest the "
+      "excerpt names. A long text comes in pages; its last line names the "
+      "next page."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
@@ -2164,6 +2167,8 @@ _TOOL_DEFINITIONS = {
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
         "field": {"type": "string", "enum": ["summary", "takeover_reason", "outcome"]},
+        "digest": {"type": "string", "minLength": 1, "maxLength": 64,
+                   "description": "The digest the excerpt names: that exact text."},
         "offset": {"type": "integer", "minimum": 0,
                    "description": "Page of a long text, as its last line names."},
         "version": {"type": "string",

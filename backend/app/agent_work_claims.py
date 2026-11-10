@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import hashlib
 import re
 import uuid
 
@@ -47,30 +48,67 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
 
 # A claim's texts are stored whole. Where Möbius repeats them (claim tool
 # results, transfer and dependency notices) a longer text is a marked excerpt
-# naming read_work_claim, which pages the claim's current text.
+# naming read_work_claim with the digest of that exact text. A claim's texts
+# change as it is refreshed, transferred, released and re-acquired, so the
+# read returns the text with that digest or refuses; it never substitutes
+# another holder's text.
 CLAIM_TEXT_FIELDS = ("summary", "takeover_reason", "outcome")
+
+
+def claim_text_digest(value: str) -> str:
+  return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
 
 def claim_text(value: str | None, work_key: str | None, field: str) -> str | None:
   if not isinstance(value, str):
     return value
   limit = CLAIM_SUMMARY_CHARS if field == "summary" else CLAIM_TEXT_CHARS
-  read_full = (f"read_work_claim(work_key={work_key}, field={field}) pages the full text"
-               if work_key else "the work claim keeps the full text")
+  read_full = (
+    f"read_work_claim(work_key={work_key}, field={field}, "
+    f"digest={claim_text_digest(value)}) pages the full text"
+    if work_key else "the work claim keeps the full text"
+  )
   return excerpt(value, limit, read_full)
 
 
-def read_claim_text(db: Session, *, owner_id: int, work_key: str, field: str) -> str:
-  """One claim text whole, by the same owner-wide key the claim tools use."""
+def read_claim_text(
+  db: Session, *, owner_id: int, chat_id: str, work_key: str, field: str,
+  digest: str | None = None,
+) -> str:
+  """One claim text whole: the exact text a marker's digest names.
+
+  The claim's current text is one source. A follower's dependency keeps the
+  summary and outcome stamped for its exact acquisition, so a dependency
+  notice's text stays readable after the claim moves on. Without a digest the
+  claim's current text is returned.
+  """
   if field not in CLAIM_TEXT_FIELDS:
     raise ValueError(f"field must be one of: {', '.join(CLAIM_TEXT_FIELDS)}")
+  key = clean_work_key(work_key)
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
-    models.AgentWorkClaim.work_key == clean_work_key(work_key),
+    models.AgentWorkClaim.work_key == key,
   ).first()
-  if row is None:
-    raise LookupError("No work claim exists for this key.")
-  return getattr(row, field) or ""
+  current = getattr(row, field) if row is not None else None
+  if digest is None:
+    if not current:
+      raise LookupError(f"This work claim has no {field}.")
+    return current
+  if current and claim_text_digest(current) == digest:
+    return current
+  if field != "takeover_reason":
+    for (outcome,) in db.query(models.GoalDependency.outcome_json).filter(
+      models.GoalDependency.waiting_chat_id == chat_id,
+      models.GoalDependency.target_kind == "claim_acquisition",
+    ).all():
+      text = outcome.get(field) if isinstance(outcome, dict) else None
+      if (isinstance(text, str) and outcome.get("work_key") == key
+          and claim_text_digest(text) == digest):
+        return text
+  raise LookupError(
+    f"The {field} that excerpt named is no longer stored: the claim was "
+    "updated, transferred or re-acquired since. The excerpt is what remains."
+  )
 
 
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:

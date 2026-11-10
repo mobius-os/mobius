@@ -148,12 +148,18 @@ async def _deliver_finished_claim_dependencies():
 def read_current_work_claim_text(
   work_key: str = Query(min_length=3, max_length=256),
   field: str = Query(),
+  digest: str | None = Query(default=None, min_length=1, max_length=64),
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
   """One work-claim text whole, for an excerpt a claim result or notice named."""
+  if principal.chat_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
   try:
-    text = read_claim_text(db, owner_id=principal.owner.id, work_key=work_key, field=field)
+    text = read_claim_text(
+      db, owner_id=principal.owner.id, chat_id=principal.chat_id,
+      work_key=work_key, field=field, digest=digest,
+    )
   except LookupError as exc:
     raise HTTPException(404, str(exc)) from exc
   except ValueError as exc:
@@ -249,9 +255,14 @@ async def send_current_message(
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row, its body under the same excerpt rule as turn
   # context, plus the exact recipient count and names the owner-visible
-  # activity card needs, not the body repeated per recipient.
+  # activity card needs, not the body repeated per recipient. body_truncated
+  # lets the owner's card label an excerpt in its own words.
+  receipt = [context_message(row) for row in rows[:1]]
+  for shown, stored in zip(receipt, rows):
+    if shown.get("body") != stored.get("body"):
+      shown["body_truncated"] = True
   result = {
-    "messages": [context_message(row) for row in rows[:1]],
+    "messages": receipt,
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)

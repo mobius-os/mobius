@@ -1857,4 +1857,11 @@ def test_read_work_claim_pages_one_claim_text(monkeypatch):
   assert set(paths) == {"/api/agent-coordination/work-claims/text?work_key=pr%3A1%23merge&field=outcome"}
   refused = control._call_tool({"name": "read_work_claim", "arguments": {"work_key": "pr:1"}})
   assert refused["isError"] and "needs work_key and field" in refused["content"][0]["text"]
+  digested = {**arguments, "digest": "abc123def456"}
+  paths.clear()
+  control._call_tool({"name": "read_work_claim", "arguments": digested})
+  assert paths[0].endswith("&field=outcome&digest=abc123def456")
+  for bad in ({**arguments, "field": 3}, {**arguments, "digest": ""}):
+    refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
+    assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
   assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES
