@@ -631,21 +631,28 @@ def with_note_heads(query):
   )
 
 
-def delete_unreferenced_bodies(db: Session) -> None:
-  """Delete every shared body no message references, without loading any.
+def delete_unreferenced_bodies(db: Session, body_ids=None) -> None:
+  """Delete shared bodies no message references, without loading any.
 
-  Set-based rather than per deleted row, so it converges: two transactions
-  that each delete one of a body's last two references both still see the
-  other's row and keep the body, and the next sweep (any prune that deletes a
-  note, or a chat purge) removes it. No writer
-  adds a reference to a committed body (a send inserts its body and rows in
-  one transaction, and a retry reuses existing rows), so the sweep cannot
-  remove a body a writer is about to reference.
+  A prune passes the bodies its deleted rows referenced, so it touches only
+  those. Two prunes that each delete one of a body's last two references
+  concurrently both still see the other's row and keep it; the full sweep
+  (``body_ids`` None, run by chat purge and at startup) removes any such
+  body later, so cleanup converges. No writer adds a reference to a
+  committed body (a send inserts its body and rows in one transaction, and a
+  retry reuses existing rows), so neither can remove a body a writer is
+  about to reference.
   """
   message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
-  db.query(shared).filter(
-    ~select(message.id).where(message.body_id == shared.id).exists(),
-  ).delete(synchronize_session=False)
+  unreferenced = ~select(message.id).where(message.body_id == shared.id).exists()
+  if body_ids is None:
+    db.query(shared).filter(unreferenced).delete(synchronize_session=False)
+    return
+  ids = sorted({value for value in body_ids if value})
+  for start in range(0, len(ids), 500):  # below SQLite's bound-parameter limit
+    db.query(shared).filter(
+      shared.id.in_(ids[start:start + 500]), unreferenced,
+    ).delete(synchronize_session=False)
 
 
 def _note_head(row) -> tuple[str, int]:
@@ -1421,7 +1428,7 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
   Retention counts notes; it never loads or measures their bodies.
   """
   message = models.AgentCoordinationMessage
-  rows = query.with_entities(message.id).order_by(
+  rows = query.with_entities(message.id, message.body_id).order_by(
     message.created_at.desc(), message.id.desc(),
   ).offset(keep).all()
   if not rows:
@@ -1431,7 +1438,7 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
     models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
   ).delete(synchronize_session=False)
   db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
-  delete_unreferenced_bodies(db)
+  delete_unreferenced_bodies(db, [row.body_id for row in rows])
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:

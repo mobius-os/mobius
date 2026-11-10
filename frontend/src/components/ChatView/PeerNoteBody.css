@@ -33,6 +33,7 @@
 
 /* A full note beyond the display limit is plain text, never markdown. */
 .peer-note-full {
+  display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

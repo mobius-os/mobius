@@ -21,7 +21,7 @@ export function noteReaders(chatIds, messageId) {
 export function FullNoteText({ text }) {
   const [shown, setShown] = useState(REVEAL_CHARS)
   return <>
-    <div className="peer-note-full">{text.slice(0, shown)}</div>
+    <span className="peer-note-full">{text.slice(0, shown)}</span>
     {shown < text.length && <button type="button" className="peer-note-more" onClick={() => setShown(shown + REVEAL_CHARS)}>
       Show more ({(text.length - shown).toLocaleString()} characters left)
     </button>}
@@ -37,9 +37,15 @@ export default function PeerNoteBody({ readers = [], body, truncated, render, no
   }
   return <>
     {body && render(body)}
-    {truncated && note.readable && <button type="button" className="peer-note-more" disabled={note.state === 'loading'} onClick={note.load}>
-      {note.state === 'loading' ? `Loading full ${noun}…` : note.state === 'error' ? `Could not load the full ${noun}. Retry` : `Show full ${noun}`}
-    </button>}
-    {truncated && !note.readable && <span className="peer-note-excerpt">{`Excerpt — full ${noun} not shown`}</span>}
+    {truncated && <ReadFullAction note={note} noun={noun} />}
   </>
+}
+
+/** The "Show full …" action for a text shown in part (or its label when it
+ *  cannot be read here); `note` is useFullPeerNote's state. */
+export function ReadFullAction({ note, noun = 'note' }) {
+  if (!note.readable) return <span className="peer-note-excerpt">{`Excerpt — full ${noun} not shown`}</span>
+  return <button type="button" className="peer-note-more" disabled={note.state === 'loading'} onClick={note.load}>
+    {note.state === 'loading' ? `Loading full ${noun}…` : note.state === 'error' ? `Could not load the full ${noun}. Retry` : `Show full ${noun}`}
+  </button>
 }

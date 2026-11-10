@@ -2,7 +2,7 @@
 import DependencyBacklinks from './DependencyBacklinks.jsx'
 import DependencyLink from './DependencyLink.jsx'
 import StopFollowingAction from './StopFollowingAction.jsx'
-import DependencyFullText from './DependencyFullText.jsx'
+import { DependencyRowTexts } from './DependencyFullText.jsx'
 
 import { Check, Clock } from '@openai/apps-sdk-ui/components/Icon'
 import { goalTaskDisplayStatus, goalDependencyOutcomeLabel } from './goalProgress'
@@ -139,18 +139,17 @@ export default function GoalPlanDetails({ plan, holdReason = null, dependencies 
           return <div role="listitem" key={dependency.id} className="chat__goal-task">
             <Clock width={14} height={14} aria-hidden="true" />
             <span className="chat__goal-task-copy">
-              <span className="chat__goal-task-title">{dependency.condition}</span>
-              <span className="chat__dependency-actions">
-                <DependencyLink dependency={dependency} onInternalNav={onInternalNav} />
-                {!settled && onStopFollowing && <StopFollowingAction dependency={dependency} onStopFollowing={onStopFollowing} />}
-              </span>
-              <span className="chat__goal-task-meta">{dependency.outcome || settled
-                ? goalDependencyOutcomeLabel(dependency)
-                : dependency.source_deleted ? 'The chat was deleted'
-                : SOURCE_RECOVERY_BLOCKERS.has(dependency.resume_blocker)
-                  ? `This work needs recovery in ${dependency.source_chat_title || 'the other chat'}`
-                  : dependency.automatic ? 'Continues automatically' : 'Saved until you continue this Goal'}</span>
-              {dependency.truncated && <DependencyFullText dependencyId={dependency.id} />}
+              <DependencyRowTexts dependency={dependency}
+                actions={<span className="chat__dependency-actions">
+                  <DependencyLink dependency={dependency} onInternalNav={onInternalNav} />
+                  {!settled && onStopFollowing && <StopFollowingAction dependency={dependency} onStopFollowing={onStopFollowing} />}
+                </span>}
+                meta={dependency.outcome || settled
+                  ? goalDependencyOutcomeLabel(dependency)
+                  : dependency.source_deleted ? 'The chat was deleted'
+                  : SOURCE_RECOVERY_BLOCKERS.has(dependency.resume_blocker)
+                    ? `This work needs recovery in ${dependency.source_chat_title || 'the other chat'}`
+                    : dependency.automatic ? 'Continues automatically' : 'Saved until you continue this Goal'} />
             </span>
           </div>
         })}

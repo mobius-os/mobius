@@ -195,3 +195,10 @@ test('a settled dependency receipt whose claim text was shown in part offers its
  assert.equal(dependencyFullText({ condition: 'Ship', outcome: 'Done' }), 'Shared work:\nShip\n\nOutcome:\nDone')
  assert.equal(dependencyFullText({ condition: 'Ship', outcome: null }), 'Shared work:\nShip')
 })
+
+test('a full text past the display limit nests validly inside an inline row', async () => {
+ const { FullNoteText } = await vite.ssrLoadModule('/src/components/ChatView/PeerNoteBody.jsx')
+ const html = render(h('span', null, h(FullNoteText, { text: 'y'.repeat(30_000) })))
+ assert.doesNotMatch(html, /<div/)
+ assert.match(html, /<span class="peer-note-full">/)
+})
