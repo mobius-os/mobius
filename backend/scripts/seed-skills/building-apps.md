@@ -1126,11 +1126,15 @@ and explain each refusal by its `detail.code`: `not_paired`
 `price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
 (the credits service refused the key; the owner needs to pair again).
 The key is scoped to your app, so another app's identical key never replays
-your charge.
+your charge. A 200 answer tells your app only about its own charge — the
+`charge_id`, the amount charged, and `replayed` when the service replayed an
+earlier identical call — never the owner's balance, and a refusal omits balance
+figures too.
 
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
-`identity_manage` does not include it.
+`identity_manage` does not include it; an app with it keeps seeing the balance
+in a charge answer.
 
 ## Managed-app update events
 

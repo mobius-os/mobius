@@ -138,17 +138,6 @@ def require(*, app_id: int, app_name: str, key: str, seller: str, priced_app: st
   })
 
 
-def settle(payment: Payment) -> None:
-  """The confirmed charge went through.
-
-  Its answer stays until it expires, so the app retrying the same charge
-  (because a later step of its own failed) replays that charge at the credits
-  service instead of asking the owner to pay again.
-  """
-  with _lock:
-    payment.at = time.monotonic()
-
-
 def forget(payment: Payment) -> None:
   """The confirmed payment ended without a charge: the next try asks again."""
   with _lock:
@@ -187,6 +176,9 @@ def answer(app_id: int, payment_id: str, pay: bool, *, purchase_id: str = "",
     payment.state = FAILED if error else (CONFIRMED if pay else DECLINED)
     payment.purchase_id = purchase_id
     payment.error = error
+    # A confirmed payment lives ``CONFIRM_SECONDS`` from this answer, not from
+    # its first charge: replaying the charge reads the live answer but never
+    # pushes the expiry out, so the owner is asked anew once it lapses.
     payment.at = time.monotonic()
   from app.broadcast import get_system_broadcast
   get_system_broadcast().publish({"type": "credits_charge_answered", "appId": str(app_id)})

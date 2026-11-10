@@ -71,6 +71,35 @@ def as_http(error: CreditsUnavailable) -> HTTPException:
     error.status, {**error.extra, "code": error.code, "message": error.message})
 
 
+# A server/transport failure or unreadable receipt on ``charges`` may follow a
+# committed charge, so its retry must replay the same payment rather than ask
+# again (see ``_charge_outcome_unknown``). Every other charge refusal is
+# definite: nothing was charged.
+CHARGE_OUTCOME_UNKNOWN = "charge_outcome_unknown"
+
+# A charge answer from the service carries the owner's running balance
+# (``balance``/``balance_micro``), and a refusal can carry it too
+# (``available_micro`` on ``insufficient_credits``). A paying app learns only
+# its own charge, never the owner's balance, unless it also holds
+# ``credits_manage``.
+_PAYER_CHARGE_FIELDS = ("charge_id", "amount_micro", "amount", "replayed")
+_BALANCE_FIELDS = ("balance", "balance_micro", "available_micro")
+
+
+def payer_charge_view(answer: dict) -> dict:
+  """A charge answer with only the fields its paying app needs to act on it:
+  the charge's id, what it paid, and whether the service replayed an earlier
+  identical charge. The card path's receipt carries the same id and amount."""
+  return {name: answer[name] for name in _PAYER_CHARGE_FIELDS if name in answer}
+
+
+def without_balance(error: CreditsUnavailable) -> CreditsUnavailable:
+  """The same refusal with any figure that would reveal the owner's balance
+  removed from its fields."""
+  extra = {name: value for name, value in error.extra.items() if name not in _BALANCE_FIELDS}
+  return CreditsUnavailable(error.message, status=error.status, code=error.code, extra=extra)
+
+
 # --- The stored key ----------------------------------------------------------
 
 
@@ -181,7 +210,7 @@ def _charge_outcome_unknown() -> CreditsUnavailable:
   # charge. Never present it as a refusal or retry it with a different key.
   return CreditsUnavailable(
     "The charge outcome is unknown. Retry with the same idempotency key.",
-    status=503, code="charge_outcome_unknown")
+    status=503, code=CHARGE_OUTCOME_UNKNOWN)
 
 
 def _call(method: str, path: str, credentials: dict, payload: dict | None = None) -> dict:

@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app import app_consent, credits_client, credits_confirmations, models
 from app.database import get_db
 from app.deps import (
+  app_manages_credits,
   get_credits_controller,
   get_credits_price_reader,
   get_credits_reader,
@@ -221,17 +222,26 @@ def charge_credits_for_call(
     max_price_micro=body.max_price_micro,
     describe=lambda: _price_description(body.seller, body.app, body.action),
     method=body.method, buyer_app=app.package_id or app.slug)
+  # A payer may read its own charge; only an app that also manages the owner's
+  # credits may read the owner's balance the service returns alongside it.
+  manages = app_manages_credits(app)
   if payment.method == credits_confirmations.CARD:
-    return _card_payment(payment)
-  charged = _credits(
-    lambda: credits_client.charge(
+    return _card_payment(payment, manages)
+  try:
+    charged = credits_client.charge(
       body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro,
-      payer=payer, buyer_app=app.package_id or app.slug))
-  credits_confirmations.settle(payment)
-  return charged
+      payer=payer, buyer_app=app.package_id or app.slug)
+  except credits_client.CreditsUnavailable as error:
+    # A definite refusal charged nothing, so forget the confirmation and ask the
+    # owner again next time. An unknown outcome may have charged: its retry must
+    # replay the same confirmed payment, so leave the confirmation in place.
+    if error.code != credits_client.CHARGE_OUTCOME_UNKNOWN:
+      credits_confirmations.forget(payment)
+    raise credits_client.as_http(error if manages else credits_client.without_balance(error)) from error
+  return charged if manages else credits_client.payer_charge_view(charged)
 
 
-def _card_payment(payment) -> dict:
+def _card_payment(payment, manages: bool) -> dict:
   """Where a confirmed card payment is: the charge receipt once Stripe paid.
 
   The app retries the same charge while the owner is on Stripe's page; each
@@ -240,8 +250,8 @@ def _card_payment(payment) -> dict:
   purchase = _credits(lambda: credits_client.read_purchase(payment.purchase_id))
   status = purchase.get("status")
   if status == "charged":
-    credits_confirmations.settle(payment)
-    return purchase["charge"]
+    charge = purchase["charge"]
+    return charge if manages else credits_client.payer_charge_view(charge)
   if status == "pending":
     raise HTTPException(409, {"code": "payment_in_progress", "message": "Finish paying on Stripe's page."})
   credits_confirmations.forget(payment)

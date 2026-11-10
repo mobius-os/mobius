@@ -1482,6 +1482,12 @@ def _contract_data(app: models.App) -> dict:
   return data if isinstance(data, dict) else {}
 
 
+def app_manages_credits(app: models.App) -> bool:
+  """Whether the app holds the ``credits_manage`` grant, so a charge answer may
+  still reveal the owner's balance to it. The spender gate checks its consent."""
+  return _contract_data(app).get("credits_manage") is True
+
+
 def _require_credits_app_consent(app: models.App) -> None:
   """No manifest grants itself the owner's credits: the owner answers first.
 

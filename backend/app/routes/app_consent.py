@@ -13,7 +13,8 @@ from app.app_jobs import launch_app_job
 from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
-  Principal, get_current_owner, get_current_owner_for_owner_input, get_principal,
+  Principal, get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_owner_input, get_principal,
   reject_cross_site, require_installation_owner_control,
 )
 
@@ -199,10 +200,14 @@ class PaymentAnswer(BaseModel):
 @router.get("/{app_id}/credits-charges")
 def read_waiting_payments(
   app_id: int,
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  """The app's charges waiting for the owner's Pay or Cancel."""
+  """The app's charges waiting for the owner's Pay or Cancel.
+
+  These are the owner's own pending payments, so the read is owner-only like the
+  rest of the credits surface: never a shared-browser guest or delegated helper.
+  """
   app = _live_app(db, app_id)
   return {"payments": credits_confirmations.waiting(app.id)}
 

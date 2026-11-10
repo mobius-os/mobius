@@ -523,15 +523,55 @@ def test_a_shared_browser_guest_cannot_spend_the_owners_credits(client, auth, db
   (409, {"code": "price_changed", "message": "the price is higher than the caller agreed to",
          "price_micro": 750_000, "max_price_micro": 500_000}),
 ])
-def test_a_refused_charge_reaches_the_app_with_its_details(
+def test_a_refused_charge_reaches_a_credits_manager_with_its_full_details(
   client, auth, db, paired, status, detail
 ):
-  app = _app(db, "granted")
+  app = _app(db, "granted", credits_manage=True)
   paired.answers["charges"] = (status, {"detail": detail})
   refused = client.post("/api/identity/credits/charges", json=CHARGE,
                         headers=_as(db, app, "private"))
   assert refused.status_code == status
   assert refused.json()["detail"] == detail
+
+
+def test_a_spend_only_app_never_learns_the_balance_from_its_charge(client, auth, db, paired):
+  """A payer sees only its own charge, never the owner's running balance."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (200, {
+    "charge_id": "c1", "amount_micro": 500_000, "amount": "0.50",
+    "seller_micro": 450_000, "platform_micro": 50_000,
+    "balance_micro": 9_500_000, "balance": "9.50", "replayed": False})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private"))
+  assert paid.status_code == 200
+  assert paid.json() == {
+    "charge_id": "c1", "amount_micro": 500_000, "amount": "0.50", "replayed": False}
+
+
+def test_a_refused_charge_hides_the_balance_from_a_spend_only_app(client, auth, db, paired):
+  """A refusal reaches a payer without the figure that reveals the balance."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "insufficient_credits", "message": "not enough credits",
+    "required_micro": 500_000, "available_micro": 250_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 402
+  detail = refused.json()["detail"]
+  assert detail["code"] == "insufficient_credits" and detail["required_micro"] == 500_000
+  assert "available_micro" not in detail
+
+
+def test_a_credits_manager_still_sees_the_balance_on_its_charge(client, auth, db, paired):
+  """An app that manages credits keeps the balance a charge answer carries."""
+  app = _app(db, "manager", credits_manage=True)
+  paired.answers["charges"] = (200, {
+    "charge_id": "c1", "amount": "0.50", "balance_micro": 9_500_000,
+    "balance": "9.50", "replayed": False})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private"))
+  assert paid.status_code == 200
+  assert paid.json()["balance_micro"] == 9_500_000 and paid.json()["balance"] == "9.50"
 
 
 def test_charging_before_pairing_says_so(client, auth, db, service):
@@ -1138,3 +1178,77 @@ def test_an_unfinished_card_payment_tells_the_app(client, auth, db, paired, real
   paired.answers[f"purchases/{TOPUP_ID}"] = (200, {"purchase_id": TOPUP_ID, "status": "expired"})
   ended = client.post("/api/identity/credits/charges", json=card, headers=headers)
   assert ended.status_code == 402 and ended.json()["detail"]["code"] == "payment_not_completed"
+
+
+def test_a_replay_does_not_extend_a_confirmations_life(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  """After Pay, the confirmation expires ten minutes later however often the
+  app replays the charge, so a stale app is asked to pay again."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.50"})
+
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 200
+
+  # A replay just before ten minutes still reads the confirmed answer.
+  clock[0] += credits_confirmations.CONFIRM_SECONDS - 1
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 200
+  # Past ten minutes from Pay, the confirmation is gone: the owner is asked anew.
+  clock[0] += 2
+  again = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert again.status_code == 409 and again.json()["detail"]["code"] == "confirmation_required"
+
+
+def test_a_definite_refusal_forgets_the_confirmation(client, auth, db, paired, real_payments):
+  """After Pay, a charge the service definitely refuses is forgotten, so the
+  owner is asked again instead of the refusal replaying silently."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "insufficient_credits", "message": "not enough credits", "required_micro": 500_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert refused.status_code == 402 and refused.json()["detail"]["code"] == "insufficient_credits"
+  again = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert again.status_code == 409 and again.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired)  # the refused charge did reach the service
+
+
+def test_an_unknown_charge_outcome_keeps_the_confirmation_for_a_replay(
+  client, auth, db, paired, real_payments,
+):
+  """An unknown outcome may have charged, so the same confirmed payment stays
+  for the retry to replay rather than ask the owner to pay twice."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+
+  paired.answers["charges"] = (503, "Server down")
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert unknown.status_code == 503 and unknown.json()["detail"]["code"] == "charge_outcome_unknown"
+  paired.answers["charges"] = (200, {"charge_id": "c1", "replayed": True})
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["replayed"] is True
+
+
+def test_waiting_payments_are_the_owners_own_to_read(client, auth, db, paired, real_payments):
+  """Listing an app's waiting payments is owner-only, like the rest of the
+  credits surface: not a shared-browser guest or a delegated helper."""
+  app = _app(db, "payer")
+  assert client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private")).status_code == 409
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.get(path, headers=auth).status_code == 200
+  assert client.get(path, headers=_guest(db)).status_code == 403
+  assert client.get(path, headers=_delegated_helper(db)).status_code == 403
