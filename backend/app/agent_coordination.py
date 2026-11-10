@@ -664,11 +664,10 @@ def delete_unreferenced_bodies(db: Session, body_ids=None) -> None:
   if body_ids is None:
     db.query(shared).filter(unreferenced).delete(synchronize_session=False)
     return
-  ids = sorted({value for value in body_ids if value})
-  for start in range(0, len(ids), 500):  # below SQLite's bound-parameter limit
-    db.query(shared).filter(
-      shared.id.in_(ids[start:start + 500]), unreferenced,
-    ).delete(synchronize_session=False)
+  for batch in _batches(value for value in body_ids if value):
+    db.query(shared).filter(shared.id.in_(batch), unreferenced).delete(
+      synchronize_session=False,
+    )
 
 
 def _note_head(row) -> tuple[str, int]:
@@ -836,11 +835,47 @@ def peer_message_for_chat(
   return serialize_messages(db, [row])[0]
 
 
-def peer_message_for_agent(
-  db: Session, chat_id: str, message_id: str,
+def _utf8_page(page: bytes, *, at_end: bool) -> tuple[str, int]:
+  """Decode a byte page, ending on a character boundary unless it is the end."""
+  if not at_end:
+    for cut in range(len(page), max(len(page) - 4, 0), -1):
+      try:
+        return page[:cut].decode("utf-8"), cut
+      except UnicodeDecodeError:
+        continue
+  return page.decode("utf-8", "replace"), len(page)
+
+
+def peer_message_page_for_agent(
+  db: Session, chat_id: str, message_id: str, *, offset: int, page_bytes: int,
 ) -> dict[str, Any] | None:
-  message = peer_message_for_chat(db, chat_id, message_id)
-  return model_message(message) if message is not None else None
+  """One page of one note this chat may read, by the chat's history
+  visibility. Only the page's bytes are read, at a UTF-8 byte offset, so a
+  long note is never loaded whole to serve one page."""
+  text = note_text()
+  binary = (cast(text, LargeBinary) if db.get_bind().dialect.name == "sqlite"
+            else func.convert_to(text, "UTF8"))
+  row = chat_message_history_query(db, chat_id).filter(
+    models.AgentCoordinationMessage.id == message_id,
+  ).with_entities(
+    *_message_columns(),
+    func.substr(binary, offset + 1, page_bytes).label("page"),
+    func.length(binary).label("total_bytes"),
+  ).first()
+  if row is None:
+    return None
+  if offset and offset >= row.total_bytes:
+    raise ValueError(
+      f"offset {offset} is past the end of this {row.total_bytes}-byte note; "
+      "start again from offset 0"
+    )
+  page = bytes(row.page or b"")
+  body, used = _utf8_page(page, at_end=offset + len(page) >= row.total_bytes)
+  end = offset + used
+  values = {key: getattr(row, key) for key in row._fields if key not in ("page", "total_bytes")}
+  message = model_message(serialize_messages(db, [SimpleNamespace(**values, body=body)])[0])
+  return {**message, "offset": offset, "total_bytes": row.total_bytes,
+          "next_offset": end if end < row.total_bytes else None}
 
 
 def visible_peer_messages(
@@ -1531,6 +1566,11 @@ def _publish_message_hint(
     )
 
 
+def _retried(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Mark rows an exact retry found already stored: nothing is sent again."""
+  return [{**row, "retry": True} for row in rows]
+
+
 def _persist_send(
   db: Session,
   channel: CoordinationScope,
@@ -1559,7 +1599,7 @@ def _persist_send(
     body=clean_body,
   )
   if retry is not None:
-    return serialize_messages(db, retry)
+    return _retried(serialize_messages(db, retry))
 
   resolved_send_id = requested_send_id or str(uuid.uuid4())
   targets: list[str | None] = [None] if broadcast else recipients
@@ -1615,7 +1655,7 @@ def _persist_send(
       body=clean_body,
     )
     if retry is not None:
-      return serialize_messages(db, retry)
+      return _retried(serialize_messages(db, retry))
     raise
   except Exception:
     db.rollback()
@@ -2098,6 +2138,53 @@ async def _steer_running_recipient(chat_id: str) -> str:
     return "steered" if accepted else "queued"
 
 
+def _has_undelivered_interrupt(
+  db: Session, chat_id: str, *, chat: models.Chat,
+) -> bool:
+  """Whether an interrupting note to this chat is past every delivery it had:
+  its admitted turns' cursor and any contiguous steer carrier."""
+  admitted = db.query(
+    models.ChatRun.peer_message_through_created_at,
+    models.ChatRun.peer_message_through_id,
+  ).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.peer_message_through_created_at.isnot(None),
+    models.ChatRun.peer_message_through_id.isnot(None),
+  ).order_by(
+    models.ChatRun.peer_message_through_created_at.desc(),
+    models.ChatRun.peer_message_through_id.desc(),
+  ).first()
+  cursors = [cursor for cursor in (
+    PeerMessageCursor(created_at=admitted.peer_message_through_created_at,
+                      message_id=str(admitted.peer_message_through_id)) if admitted else None,
+    _peer_carrier_cursor(db, chat_id, chat=chat, contiguous_only=True),
+  ) if cursor is not None]
+  message = models.AgentCoordinationMessage
+  query = db.query(message.id).filter(
+    message.to_chat_id == chat_id,
+    message.from_chat_id != chat_id,
+    message.delivery == DELIVERY_INTERRUPT,
+  )
+  if cursors:
+    through = max(cursors)
+    query = query.filter(or_(
+      message.created_at > through.created_at,
+      and_(message.created_at == through.created_at, message.id > through.message_id),
+    ))
+  return query.first() is not None
+
+
+def unreachable_for_interrupt(db: Session, chat_ids: list[str]) -> dict[str, str]:
+  """Recorded reasons nothing will read a note soon, for an interrupt: a chat
+  whose latest run failed can still be woken under its paused Goal."""
+  reasons = unreachable_reasons(db, chat_ids)
+  for chat_id in list(reasons):
+    if reasons[chat_id] != "the chat is deleted" and paused_goal_run(db, chat_id) is not None:
+      del reasons[chat_id]
+  return reasons
+
+
 async def _wake_idle_recipient(
   *, chat_id: str, kind: str, sender_chat_id: str,
 ) -> bool:
@@ -2119,6 +2206,10 @@ async def _wake_idle_recipient(
         return False
       goal_run = paused_goal_run(db, chat_id)
       if goal_run is None:
+        return False
+      # Wake only for an interrupt not yet delivered, so attempting delivery
+      # again (a retried send) never wakes the same note twice.
+      if not _has_undelivered_interrupt(db, chat_id, chat=chat):
         return False
       sender = db.query(models.Chat.title).filter(
         models.Chat.id == sender_chat_id,
@@ -2176,20 +2267,43 @@ def unreachable_reasons(
   return reasons
 
 
-def _classify_undelivered(chat_ids: list[str]) -> tuple[list[str], dict[str, str]]:
-  """Split undelivered recipients into queued and (reasoned) unreachable."""
+def classify_undelivered(
+  chat_ids: list[str], *, interrupt: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+  """Split undelivered recipients into queued and (reasoned) unreachable.
+
+  For an interrupt, a recipient its wake can still reach is not unreachable.
+  """
   if not chat_ids:
     return [], {}
   from app.database import SessionLocal
 
   try:
     with SessionLocal() as db:
-      reasons = unreachable_reasons(db, chat_ids)
+      reasons = (unreachable_for_interrupt if interrupt else unreachable_reasons)(db, chat_ids)
   except Exception:
     # Reporting must never fail a committed send; queued is the safe claim.
     log.warning("peer reachability check failed", exc_info=True)
     reasons = {}
   return [chat_id for chat_id in chat_ids if chat_id not in reasons], reasons
+
+
+async def interrupt_recipients(
+  *, recipients: list[str], kind: str, sender_chat_id: str,
+) -> None:
+  """Steer or wake each recipient of a stored interrupt, after the send.
+
+  Each recipient is attempted on its own: one that fails is logged and the
+  rest are still attempted. One that cannot take the interrupt now reads
+  the note on its next turn, which needs nothing from here.
+  """
+  for chat_id in dict.fromkeys(recipients):
+    try:
+      state = await _steer_running_recipient(chat_id)
+      if state == "idle":
+        await _wake_idle_recipient(chat_id=chat_id, kind=kind, sender_chat_id=sender_chat_id)
+    except Exception:
+      log.exception("peer interrupt delivery failed chat=%s", chat_id)
 
 
 async def deliver_peer_recipients(
@@ -2221,7 +2335,7 @@ async def deliver_peer_recipients(
       woken.append(chat_id)
       continue
     undelivered.append(chat_id)
-  queued, reasons = _classify_undelivered(undelivered)
+  queued, reasons = classify_undelivered(undelivered)
   return PeerDeliveryResult(
     steered=steered, woken=woken, queued=queued,
     unreachable=[chat_id for chat_id in undelivered if chat_id in reasons],

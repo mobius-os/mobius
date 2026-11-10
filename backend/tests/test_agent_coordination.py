@@ -152,6 +152,19 @@ def _network_fixture(db):
   return chats, runs
 
 
+def _read_note(client, headers, message_id) -> str:
+  """A note read through the agent route, page by page."""
+  pages, offset = [], 0
+  while True:
+    page = client.get(f"/api/agent-coordination/messages/{message_id}",
+                      headers=headers, params={"offset": offset})
+    assert page.status_code == 200, page.text
+    pages.append(page.json()["body"])
+    if page.json()["next_offset"] is None:
+      return "".join(pages)
+    offset = page.json()["next_offset"]
+
+
 def _note_body(db, row) -> str:
   """A stored note's text: its shared body when it references one."""
   if row.body_id:
@@ -382,8 +395,6 @@ def test_scope_broadcast_never_reaches_an_unrelated_peer(client, auth, db):
     },
   )
   assert sent.status_code == 200, sent.text
-  assert sent.json()["steered"] == []
-  assert sent.json()["woken"] == []
   row = sent.json()["messages"][0]
   assert row["broadcast"] is True
   retry = client.post(
@@ -527,7 +538,6 @@ def test_interrupt_delivery_steers_ordered_backlog_once(
     },
   )
   assert quiet.status_code == 200, quiet.text
-  assert quiet.json()["steered"] == []
   assert quiet.json()["queued"] == [builder.id]
   assert quiet.json()["messages"][0]["delivery"] == "next_turn"
 
@@ -540,8 +550,7 @@ def test_interrupt_delivery_steers_ordered_backlog_once(
     },
   )
   assert interrupting.status_code == 200, interrupting.text
-  assert interrupting.json()["steered"] == [builder.id]
-  assert interrupting.json()["woken"] == []
+  assert interrupting.json()["interrupt_requested"] == [builder.id]
   assert interrupting.json()["queued"] == []
   assert interrupting.json()["messages"][0]["delivery"] == "interrupt"
 
@@ -615,7 +624,7 @@ def test_interrupt_overflow_marks_one_ordered_cut_without_late_reordering(
     },
   )
   assert urgent.status_code == 200, urgent.text
-  assert urgent.json()["steered"] == [builder.id]
+  assert urgent.json()["interrupt_requested"] == [builder.id]
   assert len(carriers) == 1
   assert "messages_truncated" in carriers[0]["content"]
   assert carriers[0]["content"].index("quiet-3") < (
@@ -696,7 +705,7 @@ def test_mid_turn_interrupt_cannot_skip_pre_turn_overflow(
     },
   )
   assert response.status_code == 200, response.text
-  assert response.json()["steered"] == [builder.id]
+  assert response.json()["interrupt_requested"] == [builder.id]
   assert len(carriers) == 1
   assert carriers[0]["peer_message_contiguous"] is False
 
@@ -756,8 +765,9 @@ def test_rapid_interrupts_keep_distinct_ordered_reservations(
       "delivery": "interrupt", "body": "second-ask",
     },
   )
-  assert first.json()["steered"] == [builder.id]
-  assert second.json()["queued"] == [builder.id]
+  assert first.json()["interrupt_requested"] == [builder.id]
+  # Requested again; the turn refused a second steer (see the calls below).
+  assert second.json()["interrupt_requested"] == [builder.id]
   assert len(calls) == 2
   assert "first-ask" in calls[0][0] and "second-ask" not in calls[0][0]
   assert "second-ask" in calls[1][0] and "first-ask" not in calls[1][0]
@@ -802,8 +812,8 @@ def test_interrupting_peer_never_jumps_a_queued_owner_message(
     },
   )
   assert response.status_code == 200, response.text
-  assert response.json()["steered"] == []
-  assert response.json()["queued"] == [builder.id]
+  # The interrupt was requested; the live barrier deferred it, so no steer.
+  assert response.json()["interrupt_requested"] == [builder.id]
   assert steers == []
   db.expire_all()
   assert db.get(models.Chat, builder.id).pending_messages == [{
@@ -847,8 +857,8 @@ def test_interrupting_peer_respects_live_product_barriers(
     },
   )
   assert response.status_code == 200, response.text
-  assert response.json()["steered"] == []
-  assert response.json()["queued"] == [builder.id]
+  # The interrupt was requested; the live barrier deferred it, so no steer.
+  assert response.json()["interrupt_requested"] == [builder.id]
   assert steers == []
   db.expire_all()
   assert db.get(models.Chat, builder.id).pending_messages in (None, [])
@@ -908,7 +918,6 @@ def test_transfer_after_crash_recovers_every_former_owner_notice(
     return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
 
   monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
-  monkeypatch.setattr("app.routes.agent_coordination.deliver_peer_recipients", delivered)
   moved = client.post(
     "/api/agent-coordination/work-claims",
     headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
@@ -1129,7 +1138,7 @@ def test_delivery_intent_controls_wait_wake_without_cancelling_wait(
     },
   )
   assert interrupting.status_code == 200, interrupting.text
-  assert interrupting.json()["woken"] == [builder.id]
+  assert interrupting.json()["interrupt_requested"] == [builder.id]
   assert len(starts) == 1
   db.expire_all()
   assert db.get(models.ChatWait, wait.id).status == "armed"
@@ -1568,7 +1577,6 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
     json={"recipients": [builder.id], "kind": kind, "body": "fyi"},
   )
   assert quiet.status_code == 200, quiet.text
-  assert quiet.json()["woken"] == []
   assert started == []
 
   interrupted = client.post(
@@ -1579,7 +1587,7 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
     },
   )
   assert interrupted.status_code == 200, interrupted.text
-  assert interrupted.json()["woken"] == [builder.id]
+  assert interrupted.json()["interrupt_requested"] == [builder.id]
   # The wake resumes under the paused Goal, not as Goal-less work.
   assert started[-1]["goal_id"] == runs["builder"].goal_id
   assert started[-1]["source_work_id"] == "builder-goal-run"
@@ -1611,7 +1619,6 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
     },
   )
   assert again.status_code == 200, again.text
-  assert again.json()["woken"] == []
   assert len(started) == 1
   message = db.query(models.AgentCoordinationMessage).filter(
     agent_coordination.note_text() == "Again.",
@@ -1658,7 +1665,6 @@ def test_interrupt_does_not_wake_a_chat_without_unfinished_goal_work(
   )
 
   assert response.status_code == 200, response.text
-  assert response.json()["woken"] == []
   assert started == []
 
 
@@ -1690,8 +1696,8 @@ def test_send_names_a_recipient_whose_latest_run_failed_as_unreachable(
     body = response.json()
     assert body["unreachable"] == [outsider.id]
     assert "failed" in body["unreachable_reasons"][outsider.id]
-    assert outsider.id not in body["queued"] + body["steered"] + body["woken"]
-    assert builder.id in body["queued"] + body["steered"]
+    assert outsider.id not in body["queued"] + body["interrupt_requested"]
+    assert builder.id in body["queued"] + body["interrupt_requested"]
     assert "Do not resend" in body["next_action"]
 
 
@@ -2058,7 +2064,7 @@ def test_notes_stored_beyond_the_send_cap_arrive_bounded_and_read_whole(
   scout = _delegated_auth(db, chats["scout"].id, "scout-run")
   read = client.get("/api/agent-coordination/messages/stored-0", headers=scout)
   assert read.status_code == 200, read.text
-  assert read.json()["body"] == huge
+  assert _read_note(client, scout, "stored-0") == huge
   assert read.json()["sender_chat_id"] == chats["outsider"].id
   # Only a chat that may see the note can read it.
   builder = _delegated_auth(db, chats["builder"].id, "builder-run")
@@ -2196,9 +2202,8 @@ def test_long_note_to_many_recipients_is_stored_bounded_and_read_whole(
   context = _next_turn_context(db, chats["builder"], "builder-after-huge")
   assert huge not in context
   assert f"read_agent_message(message_id={builder_row.id}) pages the full note" in context
-  read = client.get(f"/api/agent-coordination/messages/{builder_row.id}",
-                    headers=_delegated_auth(db, chats["builder"].id, "builder-run"))
-  assert read.status_code == 200 and read.json()["body"] == huge
+  assert _read_note(client, _delegated_auth(db, chats["builder"].id, "builder-run"),
+                    builder_row.id) == huge
 
 
 def test_send_receipt_within_the_display_limit_is_unchanged(client, auth, db):
@@ -2379,9 +2384,8 @@ def test_a_shared_body_is_the_text_of_every_row_that_references_it(client, auth,
 
   assert client.get(f"/api/agent-coordination/chats/{chats['scout'].id}/messages/huge-scout",
                     headers=auth).json()["body"] == huge
-  agent = client.get("/api/agent-coordination/messages/huge-scout",
-                     headers=_delegated_auth(db, chats["scout"].id, "scout-run"))
-  assert agent.status_code == 200 and agent.json()["body"] == huge
+  assert _read_note(client, _delegated_auth(db, chats["scout"].id, "scout-run"),
+                    "huge-scout") == huge
 
 
 def test_a_retry_matches_a_send_stored_once(client, auth, db):
@@ -2489,11 +2493,10 @@ def test_a_send_stores_its_body_once_for_every_recipient(client, auth, db):
   assert db.query(models.AgentCoordinationNoteBody).count() == 1
   assert client.post("/api/agent-coordination/messages", headers=headers, json={
     "recipients": recipients, "body": body + "!", "send_id": "once"}).status_code == 422
-  read = client.get(f"/api/agent-coordination/messages/{rows[0].id}",
-                    headers=_delegated_auth(db, rows[0].to_chat_id, {
-                      chats["builder"].id: "builder-run", chats["root"].id: "root-run",
-                      chats["nested"].id: "nested-run"}[rows[0].to_chat_id]))
-  assert read.json()["body"] == body
+  reader = _delegated_auth(db, rows[0].to_chat_id, {
+    chats["builder"].id: "builder-run", chats["root"].id: "root-run",
+    chats["nested"].id: "nested-run"}[rows[0].to_chat_id])
+  assert _read_note(client, reader, rows[0].id) == body
 
 
 def test_a_send_never_points_at_an_already_stored_body(client, auth, db):
@@ -2520,3 +2523,171 @@ def test_a_send_never_points_at_an_already_stored_body(client, auth, db):
                         json={"recipients": recipients, "body": "Same text", "send_id": send_id})
     assert retry.status_code == 200, retry.text
   assert db.query(models.AgentCoordinationNoteBody).count() == bodies == 2
+
+
+
+def test_an_interrupt_to_many_recipients_returns_before_any_is_steered(client, auth, db, monkeypatch):
+  """The note is stored and the send answers; steering and waking follow it."""
+  import app.routes.agent_coordination as route
+
+  chats, _ = _network_fixture(db)
+  delivered = []
+
+  async def deliver(**kwargs):
+    delivered.append(kwargs["recipients"])
+
+  monkeypatch.setattr(route, "interrupt_recipients", deliver)
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  recipients = [chats["builder"].id, chats["root"].id, chats["nested"].id]
+  sent = client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": recipients, "delivery": "interrupt", "body": "Stop and re-check.",
+    "send_id": "fan-interrupt"})
+  assert sent.status_code == 200, sent.text
+  assert sorted(sent.json()["interrupt_requested"]) == sorted(recipients)
+  # Delivery ran once, after the response, for every recipient together.
+  assert delivered == [recipients]
+  assert db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "fan-interrupt").count() == 3
+
+  # A retry with the same send id stores nothing new.
+  again = client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": recipients, "delivery": "interrupt", "body": "Stop and re-check.",
+    "send_id": "fan-interrupt"})
+  assert again.status_code == 200, again.text
+  assert "already stored" in again.json()["retry"]
+  # The retry attempts the interrupt again; a wake needs an undelivered note,
+  # so nothing arrives twice (see the retry test with real delivery).
+  assert sorted(again.json()["interrupt_requested"]) == sorted(recipients)
+  assert delivered == [recipients, recipients]
+  assert db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "fan-interrupt").count() == 3
+  assert db.query(models.AgentCoordinationNoteBody).count() == 1
+
+
+def test_the_send_response_is_sent_before_delivery_runs(auth, db, monkeypatch):
+  """The whole reply reaches the client before any recipient is steered."""
+  from fastapi.testclient import TestClient
+  import app.routes.agent_coordination as route
+  from app.main import app
+
+  chats, _ = _network_fixture(db)
+  order = []
+
+  async def deliver(**kwargs):
+    order.append("delivered")
+
+  async def recorded(scope, receive, send):
+    async def tracked(message):
+      if message["type"] == "http.response.body" and not message.get("more_body"):
+        order.append("responded")
+      await send(message)
+    await app(scope, receive, tracked)
+
+  monkeypatch.setattr(route, "interrupt_recipients", deliver)
+  sent = TestClient(recorded).post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "delivery": "interrupt", "body": "Now."})
+  assert sent.status_code == 200, sent.text
+  assert order == ["responded", "delivered"]
+
+
+def test_one_failing_recipient_does_not_stop_the_others(monkeypatch):
+  import app.agent_coordination as coordination
+
+  attempted = []
+
+  async def steer(chat_id):
+    attempted.append(chat_id)
+    if chat_id == "broken":
+      raise RuntimeError("database went away")
+    return "steered"
+
+  monkeypatch.setattr(coordination, "_steer_running_recipient", steer)
+  asyncio.run(coordination.interrupt_recipients(
+    recipients=["first", "broken", "last"], kind="note", sender_chat_id="sender"))
+  assert attempted == ["first", "broken", "last"]
+
+
+def test_read_agent_message_reads_only_the_requested_page(client, auth, db):
+  from app.routes.agent_coordination import NOTE_PAGE_BYTES
+
+  chats, runs = _network_fixture(db)
+  body = "é" * 30_000 + "END"  # two bytes per character, so pages cut mid-text
+  db.add(_stored_note(chats, 0, body, runs["scout"].started_at, to="scout"))
+  db.commit()
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  first = client.get("/api/agent-coordination/messages/stored-0", headers=headers).json()
+  assert len(first["body"].encode()) <= NOTE_PAGE_BYTES
+  assert first["total_bytes"] == len(body.encode()) and first["next_offset"]
+  assert _read_note(client, headers, "stored-0") == body
+  assert client.get("/api/agent-coordination/messages/stored-0", headers=headers,
+                    params={"offset": 10**9}).status_code == 422
+
+
+
+def _wakeable_builder(db, chats, runs, monkeypatch, *, latest_failed=False):
+  """Builder idle with a paused Goal; returns it and the turns started."""
+  builder = chats["builder"]
+  _park_goal(db, builder, runs["builder"])
+  if latest_failed:
+    runs["builder"].status = "failed"
+    db.commit()
+  started = []
+
+  async def start(**kwargs):
+    started.append(kwargs)
+    return True
+
+  # Starting the provider turn is the boundary; reachability, the paused Goal
+  # and the wake decision are the real ones.
+  monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", start)
+  return builder, started
+
+
+def test_an_interrupt_wakes_a_paused_goal_whose_latest_run_failed(client, auth, db, monkeypatch):
+  chats, runs = _network_fixture(db)
+  builder, started = _wakeable_builder(db, chats, runs, monkeypatch, latest_failed=True)
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  sent = client.post("/api/agent-coordination/messages", headers=headers,
+                     json={"recipients": [builder.id], "delivery": "interrupt", "body": "Resume."})
+  assert sent.status_code == 200, sent.text
+  assert sent.json()["unreachable"] == [] and sent.json()["interrupt_requested"] == [builder.id]
+  assert len(started) == 1 and started[0]["goal_id"] == runs["builder"].goal_id
+  # A quiet note to the same chat is still reported unreachable: nothing wakes it.
+  quiet = client.post("/api/agent-coordination/messages", headers=headers,
+                      json={"recipients": [builder.id], "body": "Later."})
+  assert quiet.json()["unreachable"] == [builder.id]
+
+
+def test_a_retry_delivers_an_interrupt_only_while_it_is_undelivered(client, auth, db, monkeypatch):
+  import app.routes.agent_coordination as route
+
+  chats, runs = _network_fixture(db)
+  builder, started = _wakeable_builder(db, chats, runs, monkeypatch)
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  send = {"recipients": [builder.id], "delivery": "interrupt", "body": "Resume.", "send_id": "lost"}
+  real_interrupt = route.interrupt_recipients
+
+  async def died(**kwargs):  # the process stopped before delivery ran
+    return None
+
+  monkeypatch.setattr(route, "interrupt_recipients", died)
+  assert client.post("/api/agent-coordination/messages", headers=headers, json=send).status_code == 200
+  assert started == []
+  monkeypatch.setattr(route, "interrupt_recipients", real_interrupt)
+  retried = client.post("/api/agent-coordination/messages", headers=headers, json=send)
+  assert retried.status_code == 200 and "attempted again" in retried.json()["retry"]
+  assert len(started) == 1
+  # The woken turn received the note: its admitted cursor reaches it.
+  note = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "lost").one()
+  runs["builder"].provider_execution_admitted = True
+  runs["builder"].peer_message_through_created_at = note.created_at
+  runs["builder"].peer_message_through_id = note.id
+  db.commit()
+  again = client.post("/api/agent-coordination/messages", headers=headers, json=send)
+  assert again.status_code == 200
+  assert len(started) == 1
+  assert db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "lost").count() == 1
