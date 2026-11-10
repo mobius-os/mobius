@@ -175,3 +175,30 @@ test('a resume marker shows when the work continued', () => {
  assert.match(older, /3rd Jan 2026, 14:30<\/time>/, 'an earlier day keeps its date')
  assert.doesNotMatch(render(h(Resume, { msg: { continuation_reason: 'restart' } })), /<time/)
 })
+
+test('a Goal dependency whose claim text was shown in part offers its full text', async () => {
+ const GoalPlanDetails = await load('GoalPlanDetails')
+ const dependency = { id: 'dep-1', target_kind: 'claim_acquisition', condition: 'Ship the change', automatic: true, outcome: null }
+ const html = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [{ ...dependency, truncated: true }] }))
+ assert.match(html, /Ship the change/)
+ assert.match(html, /<button[^>]*>Show full text<\/button>/)
+ const whole = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [dependency] }))
+ assert.doesNotMatch(whole, /Show full text/)
+})
+
+test('a settled dependency receipt whose claim text was shown in part offers its full text', async () => {
+ const WaitHistoryCard = await load('WaitHistoryCard')
+ const summary = { id: 'dep-2', target_kind: 'claim_acquisition', condition: 'Ship the change', disposition: 'delivered', outcome: { kind: 'completed', outcome: 'Done' } }
+ assert.match(render(h(WaitHistoryCard, { summary: { ...summary, truncated: true } })), /<button[^>]*>Show full text<\/button>/)
+ assert.doesNotMatch(render(h(WaitHistoryCard, { summary })), /Show full text/)
+ const { dependencyFullText } = await vite.ssrLoadModule('/src/components/ChatView/DependencyFullText.jsx')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: 'Done' }), 'Shared work:\nShip\n\nOutcome:\nDone')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: null }), 'Shared work:\nShip')
+})
+
+test('a full text past the display limit nests validly inside an inline row', async () => {
+ const { FullNoteText } = await vite.ssrLoadModule('/src/components/ChatView/PeerNoteBody.jsx')
+ const html = render(h('span', null, h(FullNoteText, { text: 'y'.repeat(30_000) })))
+ assert.doesNotMatch(html, /<div/)
+ assert.match(html, /<span class="peer-note-full">/)
+})

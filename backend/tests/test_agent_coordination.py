@@ -2226,3 +2226,137 @@ def test_turn_delivery_and_send_handle_u0000(client, auth, db):
     json={"recipients": [chats["builder"].id], "body": "one\u0000two"},
   )
   assert refused.status_code == 422
+
+
+def _shared_send(db, chats, body, *, recipients, send_id="shared-send", run_id="outside-run",
+                 created_at=None, sender="outsider", kind="finding"):
+  """A send stored once: one shared body, one empty-bodied row per recipient."""
+  from app.timeutil import now_naive_utc
+
+  shared = models.AgentCoordinationNoteBody(id=f"body-{send_id}", body=body)
+  rows = [models.AgentCoordinationMessage(
+    id=f"{send_id}-{name}", room_kind="workspace", room_id="1",
+    from_chat_id=chats[sender].id, from_run_id=run_id, send_id=send_id,
+    send_target_key=chats[name].id, to_chat_id=chats[name].id, kind=kind,
+    body="", body_id=shared.id, created_at=created_at or now_naive_utc(),
+  ) for name in recipients]
+  db.add_all([shared, *rows])
+  db.commit()
+  return shared, rows
+
+
+def test_a_shared_body_is_the_text_of_every_row_that_references_it(client, auth, db):
+  from app.context_budget import PEER_NOTE_CHARS
+
+  chats, runs = _network_fixture(db)
+  runs["scout"].provider_execution_admitted = True
+  short = "Stored once for both recipients"
+  huge = "Stored once " + "y" * 30_000
+  _shared_send(db, chats, short, recipients=["scout", "builder"], send_id="short",
+               created_at=runs["scout"].started_at + timedelta(seconds=1))
+  _shared_send(db, chats, huge, recipients=["scout"], send_id="huge",
+               created_at=runs["scout"].started_at + timedelta(seconds=2))
+
+  history = client.get(f"/api/agent-coordination/chats/{chats['scout'].id}/history", headers=auth)
+  rows = {row["id"]: row for row in history.json()["messages"]}
+  assert rows["short-scout"]["body"] == short and "truncated" not in rows["short-scout"]
+  assert rows["huge-scout"]["body"] == huge[:PEER_NOTE_CHARS]
+  assert (rows["huge-scout"]["truncated"], rows["huge-scout"]["body_chars"]) == (True, len(huge))
+  activity = client.get(f"/api/chats/{chats['scout'].id}/activity", headers=auth).json()["events"]
+  assert {event["message_id"]: event["body"] for event in activity
+          if event["type"] == "peer_message"}["short-scout"] == short
+  snapshot = client.get(f"/api/agent-coordination/chats/{chats['builder'].id}", headers=auth).json()
+  assert short in [row["body"] for row in snapshot["messages"]]
+
+  context = _next_turn_context(db, chats["scout"], "scout-after-shared")
+  assert short in context
+  assert f"of {len(huge)} characters; read_agent_message(message_id=huge-scout)" in context
+
+  assert client.get(f"/api/agent-coordination/chats/{chats['scout'].id}/messages/huge-scout",
+                    headers=auth).json()["body"] == huge
+  agent = client.get("/api/agent-coordination/messages/huge-scout",
+                     headers=_delegated_auth(db, chats["scout"].id, "scout-run"))
+  assert agent.status_code == 200 and agent.json()["body"] == huge
+
+
+def test_a_retry_matches_a_send_stored_once(client, auth, db):
+  chats, _ = _network_fixture(db)
+  _shared_send(db, chats, "Same note", recipients=["builder"], send_id="retry-me",
+               run_id="scout-run", sender="scout", kind="note")
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  again = client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": [chats["builder"].id], "body": "Same note", "send_id": "retry-me"})
+  assert again.status_code == 200, again.text
+  assert again.json()["messages"][0]["id"] == "retry-me-builder"
+  assert again.json()["messages"][0]["body"] == "Same note"
+  changed = client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": [chats["builder"].id], "body": "Different", "send_id": "retry-me"})
+  assert changed.status_code == 422
+
+
+def test_retention_deletes_a_shared_body_once_nothing_references_it(client, auth, db, monkeypatch):
+  from app.chat_retention import purge_expired_chat_tombstones
+  from app.timeutil import now_naive_utc
+
+  chats, _ = _network_fixture(db)
+  monkeypatch.setattr("app.agent_coordination.MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
+  start = now_naive_utc() - timedelta(minutes=5)
+  _shared_send(db, chats, "Old shared", recipients=["builder", "root"], send_id="old",
+               created_at=start)
+  sent = client.post("/api/agent-coordination/messages",
+                     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+                     json={"recipients": [chats["builder"].id], "body": "Newer"})
+  assert sent.status_code == 200, sent.text
+  db.expire_all()
+  # The builder's copy is pruned; the root's row still references the body.
+  assert db.get(models.AgentCoordinationMessage, "old-builder") is None
+  assert db.get(models.AgentCoordinationNoteBody, "body-old") is not None
+  sent = client.post("/api/agent-coordination/messages",
+                     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+                     json={"recipients": [chats["root"].id], "body": "Newer"})
+  assert sent.status_code == 200, sent.text
+  db.expire_all()
+  assert db.get(models.AgentCoordinationMessage, "old-root") is None
+  assert db.get(models.AgentCoordinationNoteBody, "body-old") is None
+
+  # Purging the sender's chat removes its rows and then their shared body.
+  gone = create_chat(id="gone-sender", title="Gone", messages=[], provider="codex")
+  gone.deleted_at = now_naive_utc() - timedelta(days=30)
+  db.add(gone)
+  chats["gone"] = gone
+  db.commit()
+  _shared_send(db, chats, "Purged with its chat", recipients=["builder"], send_id="purge",
+               sender="gone")
+  assert gone.id in purge_expired_chat_tombstones(db)
+  db.expire_all()
+  assert db.get(models.AgentCoordinationNoteBody, "body-purge") is None
+
+
+def test_a_prune_cleans_only_its_own_bodies_and_the_sweep_converges(client, auth, db, monkeypatch):
+  """A prune touches only the bodies it dereferenced; the full sweep at
+  startup (and in chat purge) removes any body a race left behind."""
+  from app.startup import _purge_expired_chats
+  import logging
+
+  chats, _ = _network_fixture(db)
+  monkeypatch.setattr("app.agent_coordination.MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
+  _shared_send(db, chats, "Kept", recipients=["root"], send_id="kept")
+  _shared_send(db, chats, "Orphaned", recipients=["builder"], send_id="orphan")
+  _shared_send(db, chats, "Pruned", recipients=["nested"], send_id="pruned")
+  # As if two prunes each deleted one of its last rows concurrently.
+  db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "orphan",
+  ).delete(synchronize_session=False)
+  db.commit()
+  sent = client.post("/api/agent-coordination/messages",
+                     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+                     json={"recipients": [chats["nested"].id], "body": "Prunes the old note"})
+  assert sent.status_code == 200, sent.text
+  db.expire_all()
+  # The prune removed the body it dereferenced and left the unrelated orphan.
+  assert db.get(models.AgentCoordinationNoteBody, "body-pruned") is None
+  assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is not None
+  _purge_expired_chats(SimpleNamespace(logger=logging.getLogger("test")))
+  db.expire_all()
+  assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is None
+  assert db.get(models.AgentCoordinationNoteBody, "body-kept") is not None

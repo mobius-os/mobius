@@ -6,7 +6,7 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { networkSummary } from './ChatAgentNetwork.jsx'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
-import PeerNoteBody from './PeerNoteBody.jsx'
+import PeerNoteBody, { noteReaders } from './PeerNoteBody.jsx'
 import './ChatUsageInspector.css'
 import './ChatNetworkInspector.css'
 
@@ -30,7 +30,7 @@ export function NetworkMessage({ message, chatId }) {
       </span>
       <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
     </div>
-    <PeerNoteBody chatId={chatId} messageId={message.id} body={message.body}
+    <PeerNoteBody readers={noteReaders(chatId, message.id)} body={message.body}
       truncated={Boolean(message.truncated)}
       render={text => <p className="cni-message__body">{text}</p>} />
   </li>

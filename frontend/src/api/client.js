@@ -1271,6 +1271,13 @@ export const api = {
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
+  chatWaits: {
+    // The whole claim texts a Goal or wait view showed in part.
+    dependencyText: (dependencyId, options = {}) => apiFetch(
+      `/chat-waits/dependencies/${encodeURIComponent(dependencyId)}/text`,
+      options,
+    ),
+  },
   agentCoordination: {
     history: (chatId, { before, limit = 50 } = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
