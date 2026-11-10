@@ -13,7 +13,8 @@ caller and applies the whole rule for what it may do:
 - ``get_credits_price_reader``: a seller's public prices, which a paying app
   shows before it charges.
 - ``get_credits_receipt_reader``: one charge's receipt, which a marketplace
-  checks before it unlocks what a buyer says they paid for.
+  checks before it unlocks what a buyer says they paid for, under its
+  read-only ``check_credits_charges`` grant.
 
 This is money, so ``credits_manage`` is its own critical grant: the
 ``identity_manage`` grant the identity routes accept covers the sign-in link
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from app import credits_client, models
 from app.deps import (
+  credits_charge_apps,
   get_credits_controller,
   get_credits_price_reader,
   get_credits_reader,
@@ -198,15 +200,16 @@ def charge_credits_for_call(
 @router.get("/charges/{charge_id}")
 def read_credits_charge_receipt(
   charge_id: str,
-  _app: models.App = Depends(get_credits_receipt_reader),
+  app: models.App = Depends(get_credits_receipt_reader),
 ):
-  """Who paid whom, for which call, and how much: a claimed charge, checked.
+  """Who paid this owner, for which call, and how much: a claimed sale, checked.
 
   A marketplace unlocks an item for a buyer on another Möbius only after its
   service confirms the charge id that buyer's Möbius reports. Either lane
-  may ask; reading a receipt moves no money.
+  may ask; reading a receipt moves no money. Only a charge that paid this
+  owner for one of the apps the grant names is shown; any other is not found.
   """
-  return _credits(credits_client.charge_receipt, charge_id)
+  return _credits(credits_client.own_sale_receipt, charge_id, credits_charge_apps(app))
 
 
 @router.post("/connect")

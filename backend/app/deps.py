@@ -1,6 +1,6 @@
 """FastAPI dependency functions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -94,6 +94,10 @@ class Principal:
   JWT claim), never for the app's browser-frame bearer or a public invocation. It lets a route trust that the
   caller is the app's reviewed backend code, not its untrusted frame, without
   granting it anything beyond `app_id`'s existing app-scoped authority.
+
+  `app_is_public_service` is set only by `get_principal_or_public_service`,
+  for the app's service answering an anonymous visitor. Every other resolver
+  refuses that lane, so a route reading it already chose to admit visitors.
   """
   owner: models.Owner
   app_id: int | None
@@ -109,6 +113,7 @@ class Principal:
   # Restrictive provenance, not the chat/run identity of an app caller.
   delegation_chat: str | None = None
   app_is_service: bool = False
+  app_is_public_service: bool = False
   # Signed supervised-job identity/grant; never copied into frame bearers.
   app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
@@ -774,9 +779,10 @@ def get_principal_or_public_service(
   resolve through here, where it is an ordinary app caller.
   """
   owner, payload = _resolve_owner(token, db)
-  if payload.get("scope") == auth.PUBLIC_SERVICE_SCOPE:
-    payload = {**payload, "scope": "app"}
-  return _generic_principal(owner, payload, db)
+  if payload.get("scope") != auth.PUBLIC_SERVICE_SCOPE:
+    return _generic_principal(owner, payload, db)
+  principal = _generic_principal(owner, {**payload, "scope": "app"}, db)
+  return replace(principal, app_is_public_service=principal.app_id is not None)
 
 
 def require_nondelegated_owner_control(principal: Principal) -> None:
@@ -1542,24 +1548,33 @@ def get_credits_spender(
   return app
 
 
+def credits_charge_apps(app: models.App) -> list[str]:
+  """The owner's priced apps whose charges this app may check."""
+  apps = _contract_data(app).get("check_credits_charges")
+  return [a for a in apps if isinstance(a, str)] if isinstance(apps, list) else []
+
+
 def get_credits_receipt_reader(
-  token: str = Depends(_oauth2),
+  principal: Principal = Depends(get_principal_or_public_service),
   db: Session = Depends(get_db),
 ) -> models.App:
-  """An app service with a reviewed ``spend_credits`` grant, on either lane.
+  """An app service that checks sales of the apps its ``check_credits_charges``
+  grant names, on either lane.
 
-  Checking a charge spends nothing, and the caller that most needs it is the
-  public lane: a marketplace answering a visitor who says they paid. The
-  browser frame stays excluded, as for every credits action, and the app's
-  credits consent applies as for ``get_credits_spender``. A public
-  invocation resolves as an ordinary app caller
-  (``get_principal_or_public_service``), so its own scope is read from the
-  token here, before that.
+  Checking a charge moves no money, and the caller that most needs it is the
+  public lane: a marketplace answering a visitor who says they paid. So,
+  unlike ``get_credits_spender``, a service a delegated helper or a
+  shared-browser guest invoked may check one too. The browser frame stays
+  excluded, as for every credits action. A Store app's token resolves only
+  under its accepted consent (``app_consent.session_valid``), so the owner has
+  seen this grant's row. A local app's manifest is the owner's own, and the
+  read is limited to payments made to this owner for the apps it names
+  (``credits_client.own_sale_receipt``), so it may check one without managing
+  credits.
   """
-  owner, payload = _resolve_owner(token, db)
-  public = payload.get("scope") == auth.PUBLIC_SERVICE_SCOPE
-  principal = _generic_principal(owner, {**payload, "scope": "app"} if public else payload, db)
-  if principal.app_id is None or not (principal.app_is_service or public):
+  if principal.app_id is None or not (
+    principal.app_is_service or principal.app_is_public_service
+  ):
     raise HTTPException(
       status_code=403,
       detail="Only an app's own service can check a credits charge.",
@@ -1567,11 +1582,13 @@ def get_credits_receipt_reader(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  _require_credits_app_consent(app)
-  if not spend_credits_targets(app):
+  if not credits_charge_apps(app):
     raise HTTPException(
       status_code=403,
-      detail="This app needs permissions.spend_credits in its manifest to check a credits charge.",
+      detail=(
+        "This app needs permissions.check_credits_charges in its manifest, "
+        "listing the priced apps whose charges it checks."
+      ),
     )
   return app
 

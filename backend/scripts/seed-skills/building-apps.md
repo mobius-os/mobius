@@ -1092,10 +1092,11 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 
 For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use `credits_manage`
-or `spend_credits`, even if their `mobius.json` declares them: account, price
-and charge requests receive 403. A delegated helper cannot spend credits,
-including through an otherwise approved app service.
+accepted owner consent, except checking a charge (below). Owner-built local
+apps cannot use `credits_manage` or `spend_credits`, even if their
+`mobius.json` declares them: account, price and charge requests receive 403.
+A delegated helper cannot spend credits, including through an otherwise
+approved app service.
 
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
@@ -1130,12 +1131,19 @@ your charge.
 
 A marketplace that unlocks an item for a buyer on another Möbius checks the
 charge id that buyer's Möbius reports before unlocking:
-`GET /api/identity/credits/charges/<charge_id>` answers who paid whom, for
-which `{app, action}`, and how much. Its own service may ask on either lane
-(the public lane is where a visitor says they paid) under the same
-`spend_credits` grant; it moves no money. Unlock only for a charge that paid
-this creator for this item, and record each charge id once so one payment
-never unlocks twice.
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
 
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
