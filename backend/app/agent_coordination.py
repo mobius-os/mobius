@@ -2232,6 +2232,24 @@ def classify_undelivered(chat_ids: list[str]) -> tuple[list[str], dict[str, str]
   return [chat_id for chat_id in chat_ids if chat_id not in reasons], reasons
 
 
+async def interrupt_recipients(
+  *, recipients: list[str], kind: str, sender_chat_id: str,
+) -> None:
+  """Steer or wake each recipient of a stored interrupt, after the send.
+
+  Each recipient is attempted on its own: one that fails is logged and the
+  rest are still attempted. One that cannot take the interrupt now reads
+  the note on its next turn, which needs nothing from here.
+  """
+  for chat_id in dict.fromkeys(recipients):
+    try:
+      state = await _steer_running_recipient(chat_id)
+      if state == "idle":
+        await _wake_idle_recipient(chat_id=chat_id, kind=kind, sender_chat_id=sender_chat_id)
+    except Exception:
+      log.exception("peer interrupt delivery failed chat=%s", chat_id)
+
+
 async def deliver_peer_recipients(
   *, recipients: list[str], delivery: str, kind: str, sender_chat_id: str,
 ) -> PeerDeliveryResult:

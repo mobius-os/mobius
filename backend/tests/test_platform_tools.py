@@ -1855,21 +1855,21 @@ def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
   def backend(method, path, body=None):
     sent.append(body)
     return {"messages": [], "recipient_count": 120, "recipient_names": recipients,
-            "interrupting": recipients[:100], "queued": [], "unreachable": recipients[100:],
+            "interrupt_requested": recipients[:100], "queued": [], "unreachable": recipients[100:],
             "unreachable_reasons": {chat_id: "the chat is deleted" for chat_id in recipients[100:]}}
 
   monkeypatch.setattr(control, "_agent_api_call", backend)
   result = control._call_send_agent_message({"recipients": recipients, "body": "Note"})
   shown = control._CONTEXT_BUDGET.REPLY_IDS
   assert result["recipient_names"] == recipients[:shown] and result["recipient_names_more"] == 70
-  assert len(result["interrupting"]) == shown and result["interrupting_more"] == 50
+  assert len(result["interrupt_requested"]) == shown and result["interrupt_requested_more"] == 50
   assert result["unreachable"] == recipients[100:] and "unreachable_more" not in result
   assert set(result["unreachable_reasons"]) == set(recipients[100:])
   assert sent[0]["send_id"]
 
   def times_out(method, path, body=None):
     sent.append(body)
-    raise RuntimeError("coordination request failed: request timed out")
+    raise control.TransportFailure("coordination request failed: request timed out")
 
   monkeypatch.setattr(control, "_agent_api_call", times_out)
   with pytest.raises(RuntimeError) as timed_out:
@@ -1880,6 +1880,23 @@ def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
   with pytest.raises(RuntimeError):
     control._call_send_agent_message({"recipients": ["peer"], "body": "Note", "send_id": send_id})
   assert sent[-1]["send_id"] == send_id
+
+  def resets(method, path, body=None):
+    sent.append(body)
+    raise control.TransportFailure("coordination request failed: Connection reset by peer")
+
+  monkeypatch.setattr(control, "_agent_api_call", resets)
+  with pytest.raises(RuntimeError) as reset:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert f"send_id={sent[-1]['send_id']}" in str(reset.value)
+
+  def refuses(method, path, body=None):
+    raise RuntimeError("Refused (422): body must not be blank")
+
+  monkeypatch.setattr(control, "_agent_api_call", refuses)
+  with pytest.raises(RuntimeError) as refused:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert "send_id=" not in str(refused.value)
 
 
 def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):

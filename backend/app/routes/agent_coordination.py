@@ -15,7 +15,7 @@ from app.agent_coordination import (
   MESSAGE_DELIVERIES,
   chat_message_history,
   context_message,
-  deliver_peer_recipients,
+  interrupt_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
@@ -249,18 +249,20 @@ async def send_current_message(
   # Meaning and delivery are independent. A direct interrupt steers a live
   # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
   # stay quiet so one broad note cannot manufacture a wave of model work.
-  # The note is stored now and every recipient will read it; steering and
-  # waking run after this response, recipient by recipient, so the send
-  # returns at once however many it reaches. An exact retry found the note
-  # already stored and sends nothing again.
+  # The note is stored now and every recipient will read it. An interrupt is
+  # attempted after this response, recipient by recipient, so the send
+  # returns at once however many it reaches; whether it lands is not known
+  # here (owner input, a held queue or no unfinished Goal can defer it to the
+  # recipient's next turn). Recipients recorded facts show as unreachable
+  # are not woken. An exact retry found the note stored and sends nothing.
   retry = bool(rows and rows[0].get("retry"))
   recipients = [] if body.broadcast else list(dict.fromkeys(body.recipients))
   reachable, reasons = await asyncio.to_thread(classify_undelivered, recipients)
-  interrupting = body.delivery == DELIVERY_INTERRUPT and not retry
-  if interrupting and recipients:
+  interrupt = body.delivery == DELIVERY_INTERRUPT and not retry
+  if interrupt and reachable:
     background_tasks.add_task(
-      deliver_peer_recipients, recipients=recipients, delivery=body.delivery,
-      kind=body.kind, sender_chat_id=principal.chat_id,
+      interrupt_recipients, recipients=reachable, kind=body.kind,
+      sender_chat_id=principal.chat_id,
     )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row, its body under the same excerpt rule as turn
@@ -280,8 +282,9 @@ async def send_current_message(
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
       if name
     ],
-    "interrupting": reachable if interrupting else [],
-    "queued": [] if interrupting else reachable,
+    # Requested, not confirmed: the interrupt is attempted after this reply.
+    "interrupt_requested": reachable if interrupt else [],
+    "queued": [] if interrupt else reachable,
     "unreachable": [chat_id for chat_id in recipients if chat_id in reasons],
   }
   if retry:
