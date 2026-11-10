@@ -160,8 +160,12 @@ def _latest_run_snapshot(
   return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
-# A dependency outcome's head that covers what a Goal card shows of it (the
-# claim summary and outcome at their display limits) and its other fields.
+# The version key detects change in a dependency's outcome without reading
+# it whole: its first _KEY_TEXT_CHARS characters plus its total length. An
+# outcome is written whole once, when the dependency resolves (or its source
+# is retained), so a later write changes its length or its head. The head
+# is sized to hold what a Goal card shows of a claim (its summary and outcome
+# at their display limits) with room for the outcome's other fields.
 _KEY_TEXT_CHARS = 2 * (CLAIM_SUMMARY_CHARS + CLAIM_TEXT_CHARS)
 
 

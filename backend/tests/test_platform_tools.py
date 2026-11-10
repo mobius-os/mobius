@@ -1806,26 +1806,80 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
 
 
 def test_read_agent_message_returns_a_note_plain_and_pages_a_long_one(monkeypatch):
+  """The backend serves one byte page at a time; the tool names the next one."""
+  import re
+  from urllib.parse import parse_qs, urlparse
+
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
-  note = "".join(f"{index:07d}\n" for index in range(20_000))
+  note = "".join(f"{index:07d}\n" for index in range(5_000))
   paths = []
-  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
-    paths.append((method, path)) or {"id": "note/1", "kind": "finding", "body": note}))
 
-  assert "".join(_read_all_pages(control, "read_agent_message", {"message_id": "note/1"})) == note
-  assert set(paths) == {("GET", "/api/agent-coordination/messages/note%2F1")}
-  first = control._call_tool({"name": "read_agent_message", "arguments": {"message_id": "note/1"}})
-  assert "next page: read_agent_message(message_id=note/1, offset=" in (
-    first["content"][0]["text"].rsplit("\n", 1)[1])
+  def backend(method, path):
+    paths.append((method, path))
+    offset = int(parse_qs(urlparse(path).query).get("offset", ["0"])[0])
+    end = min(offset + 10_000, len(note))
+    return {"id": "note/1", "kind": "finding", "body": note[offset:end], "offset": offset,
+            "total_bytes": len(note), "next_offset": end if end < len(note) else None}
 
-  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {"id": "n", "body": "Short"})
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  pieces, arguments = [], {"message_id": "note/1"}
+  while True:
+    text = control._call_tool({"name": "read_agent_message", "arguments": arguments})["content"][0]["text"]
+    body, footer = text.rsplit("\n", 1)
+    pieces.append(body)
+    found = re.search(r"next page: read_agent_message\(message_id=note/1, offset=(\d+)\)", footer)
+    if not found:
+      assert "end of note" in footer
+      break
+    arguments = {"message_id": "note/1", "offset": int(found.group(1))}
+  assert "".join(pieces) == note
+  assert paths[0] == ("GET", "/api/agent-coordination/messages/note%2F1")
+  assert paths[1] == ("GET", "/api/agent-coordination/messages/note%2F1?offset=10000")
+
+  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {
+    "id": "n", "body": "Short", "offset": 0, "total_bytes": 5, "next_offset": None})
   assert control._call_tool({"name": "read_agent_message",
                              "arguments": {"message_id": "n"}})["content"][0]["text"] == "Short"
   refused = control._call_tool({"name": "read_agent_message", "arguments": {"id": "n"}})
   assert refused["isError"] and "needs message_id" in refused["content"][0]["text"]
   assert platform_tools.READ_MESSAGE_TOOL_NAME in platform_tools.PEER_TOOL_NAMES
+
+
+def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
+  control = _control_module()
+  sent = []
+  recipients = [f"peer-{index:03d}" for index in range(120)]
+
+  def backend(method, path, body=None):
+    sent.append(body)
+    return {"messages": [], "recipient_count": 120, "recipient_names": recipients,
+            "interrupting": recipients[:100], "queued": [], "unreachable": recipients[100:],
+            "unreachable_reasons": {chat_id: "the chat is deleted" for chat_id in recipients[100:]}}
+
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  result = control._call_send_agent_message({"recipients": recipients, "body": "Note"})
+  shown = control._CONTEXT_BUDGET.REPLY_IDS
+  assert result["recipient_names"] == recipients[:shown] and result["recipient_names_more"] == 70
+  assert len(result["interrupting"]) == shown and result["interrupting_more"] == 50
+  assert result["unreachable"] == recipients[100:] and "unreachable_more" not in result
+  assert set(result["unreachable_reasons"]) == set(recipients[100:])
+  assert sent[0]["send_id"]
+
+  def times_out(method, path, body=None):
+    sent.append(body)
+    raise RuntimeError("coordination request failed: request timed out")
+
+  monkeypatch.setattr(control, "_agent_api_call", times_out)
+  with pytest.raises(RuntimeError) as timed_out:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  send_id = sent[-1]["send_id"]
+  assert f"send_id={send_id}" in str(timed_out.value)
+  assert "may already be stored" in str(timed_out.value)
+  with pytest.raises(RuntimeError):
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note", "send_id": send_id})
+  assert sent[-1]["send_id"] == send_id
 
 
 def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):

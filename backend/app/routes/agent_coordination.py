@@ -21,7 +21,8 @@ from app.agent_coordination import (
   embedded_chat_snapshot,
   owner_chat_snapshot,
   owner_project_snapshot,
-  peer_message_for_agent,
+  classify_undelivered,
+  peer_message_page_for_agent,
   peer_message_for_chat,
   send_agent_message,
   deliver_work_claim_revocation,
@@ -33,6 +34,7 @@ from app.agent_work_claims import (
   finish_work,
   read_claim_text,
 )
+from app.context_budget import READ_PAGE_BYTES
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -220,6 +222,7 @@ def current_network(
 @router.post("/messages", dependencies=[Depends(reject_cross_site)])
 async def send_current_message(
   body: AgentMessageCreate,
+  background_tasks: BackgroundTasks,
   principal: Principal = Depends(get_agent_run_principal),
 ):
   if principal.chat_id is None or principal.run_id is None:
@@ -246,13 +249,19 @@ async def send_current_message(
   # Meaning and delivery are independent. A direct interrupt steers a live
   # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
   # stay quiet so one broad note cannot manufacture a wave of model work.
-  delivery = (
-    await deliver_peer_recipients(
-      recipients=body.recipients, delivery=body.delivery, kind=body.kind,
-      sender_chat_id=principal.chat_id,
+  # The note is stored now and every recipient will read it; steering and
+  # waking run after this response, recipient by recipient, so the send
+  # returns at once however many it reaches. An exact retry found the note
+  # already stored and sends nothing again.
+  retry = bool(rows and rows[0].get("retry"))
+  recipients = [] if body.broadcast else list(dict.fromkeys(body.recipients))
+  reachable, reasons = await asyncio.to_thread(classify_undelivered, recipients)
+  interrupting = body.delivery == DELIVERY_INTERRUPT and not retry
+  if interrupting and recipients:
+    background_tasks.add_task(
+      deliver_peer_recipients, recipients=recipients, delivery=body.delivery,
+      kind=body.kind, sender_chat_id=principal.chat_id,
     )
-    if not body.broadcast else None
-  )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row, its body under the same excerpt rule as turn
   # context, plus the exact recipient count and names the owner-visible
@@ -271,16 +280,17 @@ async def send_current_message(
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
       if name
     ],
-    "steered": delivery.steered if delivery else [],
-    "woken": delivery.woken if delivery else [],
-    "queued": delivery.queued if delivery else [],
-    "unreachable": delivery.unreachable if delivery else [],
+    "interrupting": reachable if interrupting else [],
+    "queued": [] if interrupting else reachable,
+    "unreachable": [chat_id for chat_id in recipients if chat_id in reasons],
   }
-  if delivery is not None and delivery.unreachable:
+  if retry:
+    result["retry"] = "This send was already stored; nothing was sent again."
+  if result["unreachable"]:
     # Recorded facts, never a timeout: the sender learns that nothing will
     # read this note soon instead of streaming more notes into a dead chat.
     result["unreachable_reasons"] = {
-      chat_id: delivery.reasons[chat_id] for chat_id in delivery.unreachable
+      chat_id: reasons[chat_id] for chat_id in result["unreachable"]
     }
     result["next_action"] = (
       "The note is stored, but no turn will read it soon at the unreachable "
@@ -290,17 +300,28 @@ async def send_current_message(
   return result
 
 
+# One page of a note, with room in a control-tool result for its footer.
+NOTE_PAGE_BYTES = READ_PAGE_BYTES - 400
+
+
 @router.get("/messages/{message_id}")
 def read_current_message(
   message_id: str,
+  offset: int = Query(default=0, ge=0),
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  """One whole note this agent's chat sent, received or can see broadcast."""
+  """One page of a note this agent's chat sent, received or can see
+  broadcast, from a UTF-8 byte offset; next_offset names the next page."""
   if principal.chat_id is None or principal.run_id is None:
     raise HTTPException(403, "Current chat-bound agent run required.")
   require_active_chat_access(db, principal.chat_id, principal)
-  message = peer_message_for_agent(db, principal.chat_id, message_id)
+  try:
+    message = peer_message_page_for_agent(
+      db, principal.chat_id, message_id, offset=offset, page_bytes=NOTE_PAGE_BYTES,
+    )
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
   if message is None:
     raise HTTPException(404, "Peer note not found for this agent.")
   return message
