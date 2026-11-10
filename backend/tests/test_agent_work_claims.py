@@ -1634,7 +1634,9 @@ def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypat
     )
   db.expire_all()
   inbox = db.query(models.AgentCoordinationMessage).filter_by(to_chat_id=first.id).all()
-  assert {row.body for row in inbox} == (
+  def text(row):
+    return db.get(models.AgentCoordinationNoteBody, row.body_id).body if row.body_id else row.body
+  assert {text(row) for row in inbox} == (
     {"Ordinary later note 1"} if closed else {notice.body, "Ordinary later note 1"}
   )
   # Mailbox retention never erases the immutable obligation/closure history.

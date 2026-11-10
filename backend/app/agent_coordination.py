@@ -1563,6 +1563,9 @@ def _persist_send(
 
   resolved_send_id = requested_send_id or str(uuid.uuid4())
   targets: list[str | None] = [None] if broadcast else recipients
+  # The body is stored once per send; each recipient row references it and
+  # keeps an empty body of its own.
+  shared = models.AgentCoordinationNoteBody(id=str(uuid.uuid4()), body=clean_body)
   rows = [
     models.AgentCoordinationMessage(
       id=str(uuid.uuid4()),
@@ -1575,10 +1578,12 @@ def _persist_send(
       send_target_key=target or "",
       kind=kind,
       delivery=clean_delivery,
-      body=clean_body,
+      body="",
+      body_id=shared.id,
     )
     for target in targets
   ]
+  db.add(shared)
   db.add_all(rows)
   try:
     db.flush()

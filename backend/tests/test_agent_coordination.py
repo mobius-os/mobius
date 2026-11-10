@@ -152,6 +152,13 @@ def _network_fixture(db):
   return chats, runs
 
 
+def _note_body(db, row) -> str:
+  """A stored note's text: its shared body when it references one."""
+  if row.body_id:
+    return db.get(models.AgentCoordinationNoteBody, row.body_id).body
+  return row.body
+
+
 def _next_turn_context(db, chat, run_id: str) -> str:
   """Start one later physical turn and return its injected peer context."""
   previous_started = max(
@@ -551,7 +558,7 @@ def test_interrupt_delivery_steers_ordered_backlog_once(
   assert carrier["hidden"] is True
   assert carrier["kind"] == "peer_message"
   request_row = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.body == "Now re-check the exact build.",
+    agent_coordination.note_text() == "Now re-check the exact build.",
   ).one()
   assert carrier["peer_message_through"] == {
     "created_at": request_row.created_at.isoformat(),
@@ -922,7 +929,7 @@ def test_transfer_after_crash_recovers_every_former_owner_notice(
   }
   first = next(row for row in notices if row.to_chat_id == chats["root"].id)
   assert first.from_chat_id == chats["outsider"].id
-  assert "original executor" in first.body
+  assert "original executor" in _note_body(db, first)
 
 
 def test_work_claim_transfer_acknowledges_only_after_delivery(
@@ -1156,7 +1163,7 @@ def test_network_retention_is_per_recipient_and_does_not_prune_broadcasts(
     models.AgentCoordinationMessage.room_kind == "workspace",
     models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
   ).order_by(models.AgentCoordinationMessage.created_at.asc()).all()
-  assert [row.body for row in directs] == ["Direct 1", "Direct 2"]
+  assert [_note_body(db, row) for row in directs] == ["Direct 1", "Direct 2"]
   assert db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.room_kind == "delegation",
     models.AgentCoordinationMessage.to_chat_id.is_(None),
@@ -1607,7 +1614,7 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
   assert again.json()["woken"] == []
   assert len(started) == 1
   message = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.body == "Again.",
+    agent_coordination.note_text() == "Again.",
   ).one()
   successor = make_goal_run(db,
     id="builder-successor", root_run_id="builder-successor",
@@ -2128,7 +2135,7 @@ def test_retention_prunes_notes_stored_beyond_the_send_cap_by_count(
     models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
   ).order_by(models.AgentCoordinationMessage.created_at.asc()).all()
   assert [row.id for row in kept][0] == "stored-1"
-  assert [row.body for row in kept][1] == "Newest"
+  assert _note_body(db, kept[1]) == "Newest"
   assert db.query(models.ChatActivityPosition).filter(
     models.ChatActivityPosition.event_id == "peer:stored-0",
   ).count() == 0
@@ -2181,7 +2188,7 @@ def test_long_note_to_many_recipients_is_stored_bounded_and_read_whole(
     models.AgentCoordinationMessage.room_kind == "workspace",
   ).all()
   assert sorted(row.to_chat_id for row in rows) == sorted(recipients)
-  assert all(row.body == huge for row in rows)
+  assert all(_note_body(db, row) == huge for row in rows)
 
   builder_row = next(row for row in rows if row.to_chat_id == chats["builder"].id)
   runs["builder"].provider_execution_admitted = True
@@ -2458,3 +2465,58 @@ def test_a_prune_cleans_only_its_own_bodies_and_the_sweep_converges(client, auth
   db.expire_all()
   assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is None
   assert db.get(models.AgentCoordinationNoteBody, "body-kept") is not None
+
+
+def test_a_send_stores_its_body_once_for_every_recipient(client, auth, db):
+  chats, _ = _network_fixture(db)
+  body = "Stored once " + "z" * 50_000
+  recipients = [chats["builder"].id, chats["root"].id, chats["nested"].id]
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  sent = client.post("/api/agent-coordination/messages", headers=headers,
+                     json={"recipients": recipients, "body": body, "send_id": "once"})
+  assert sent.status_code == 200, sent.text
+  rows = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "once").all()
+  assert len(rows) == 3 and {row.body for row in rows} == {""}
+  assert len({row.body_id for row in rows}) == 1
+  shared = db.get(models.AgentCoordinationNoteBody, rows[0].body_id)
+  assert shared.body == body
+  assert db.query(models.AgentCoordinationNoteBody).count() == 1
+  # Retries match the shared body; a different body is still refused.
+  again = client.post("/api/agent-coordination/messages", headers=headers,
+                      json={"recipients": recipients, "body": body, "send_id": "once"})
+  assert again.status_code == 200 and again.json()["messages"] == sent.json()["messages"]
+  assert db.query(models.AgentCoordinationNoteBody).count() == 1
+  assert client.post("/api/agent-coordination/messages", headers=headers, json={
+    "recipients": recipients, "body": body + "!", "send_id": "once"}).status_code == 422
+  read = client.get(f"/api/agent-coordination/messages/{rows[0].id}",
+                    headers=_delegated_auth(db, rows[0].to_chat_id, {
+                      chats["builder"].id: "builder-run", chats["root"].id: "root-run",
+                      chats["nested"].id: "nested-run"}[rows[0].to_chat_id]))
+  assert read.json()["body"] == body
+
+
+def test_a_send_never_points_at_an_already_stored_body(client, auth, db):
+  """Each send writes its own body with its rows; a retry adds nothing."""
+  chats, _ = _network_fixture(db)
+  headers = _delegated_auth(db, chats["scout"].id, "scout-run")
+  recipients = [chats["builder"].id, chats["root"].id]
+  first = client.post("/api/agent-coordination/messages", headers=headers,
+                      json={"recipients": recipients, "body": "Same text", "send_id": "first"})
+  assert first.status_code == 200, first.text
+  older = {row.body_id for row in db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "first")}
+  assert len(older) == 1
+  # The same text in a new send is stored again, never shared across sends.
+  second = client.post("/api/agent-coordination/messages", headers=headers,
+                       json={"recipients": recipients, "body": "Same text", "send_id": "second"})
+  assert second.status_code == 200, second.text
+  newer = {row.body_id for row in db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "second")}
+  assert len(newer) == 1 and newer.isdisjoint(older)
+  bodies = db.query(models.AgentCoordinationNoteBody).count()
+  for send_id in ("first", "second"):
+    retry = client.post("/api/agent-coordination/messages", headers=headers,
+                        json={"recipients": recipients, "body": "Same text", "send_id": send_id})
+    assert retry.status_code == 200, retry.text
+  assert db.query(models.AgentCoordinationNoteBody).count() == bodies == 2
