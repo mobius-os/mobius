@@ -60,8 +60,7 @@ export default function AgentCoordinationFeed({
               </div>
               {/* The sender's chat can always see the note it sent. */}
               <PeerNoteBody chatId={message.sender_chat_id} messageId={message.id}
-                body={message.body} truncated={Boolean(message.truncated)}
-                className="agent-relay__more" render={text => <p>{text}</p>} />
+                body={message.body} truncated={Boolean(message.truncated)} render={text => <p>{text}</p>} />
             </li>
           ))}
         </ol>

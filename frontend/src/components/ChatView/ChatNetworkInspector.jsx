@@ -31,7 +31,7 @@ export function NetworkMessage({ message, chatId }) {
       <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
     </div>
     <PeerNoteBody chatId={chatId} messageId={message.id} body={message.body}
-      truncated={Boolean(message.truncated)} className="cni-message__more"
+      truncated={Boolean(message.truncated)}
       render={text => <p className="cni-message__body">{text}</p>} />
   </li>
 }
