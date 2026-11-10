@@ -10,8 +10,12 @@ import './PeerNoteBody.css'
 const HEAD_CHARS = 4000
 const REVEAL_CHARS = 20_000
 
-async function readNote(chatId, messageId) {
-  return jsonOrThrow(await api.agentCoordination.message(chatId, messageId), 'Peer note failed:')
+/** The ways to read one note whole: through each chat that can see it. */
+export function noteReaders(chatIds, messageId) {
+  if (!messageId) return []
+  return (Array.isArray(chatIds) ? chatIds : [chatIds]).filter(Boolean).map(chatId => async () => (
+    await jsonOrThrow(await api.agentCoordination.message(chatId, messageId), 'Peer note failed:')
+  ).body)
 }
 
 export function FullNoteText({ text }) {
@@ -24,9 +28,10 @@ export function FullNoteText({ text }) {
   </>
 }
 
-// `noun` names what is read ("note", or "text" for a Goal's claim texts).
-export default function PeerNoteBody({ chatId, messageId, body, truncated, render, read = readNote, noun = 'note' }) {
-  const note = useFullPeerNote(chatId, messageId, read)
+// `readers` (see noteReaders) read the whole text; `noun` names it ("note",
+// or "text" for a dependency's claim texts).
+export default function PeerNoteBody({ readers = [], body, truncated, render, noun = 'note' }) {
+  const note = useFullPeerNote(readers)
   if (note.full != null) {
     return note.full.length > HEAD_CHARS ? <FullNoteText text={note.full} /> : (note.full && render(note.full))
   }

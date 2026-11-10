@@ -2330,3 +2330,25 @@ def test_retention_deletes_a_shared_body_once_nothing_references_it(client, auth
   assert gone.id in purge_expired_chat_tombstones(db)
   db.expire_all()
   assert db.get(models.AgentCoordinationNoteBody, "body-purge") is None
+
+
+def test_an_orphaned_shared_body_is_removed_by_the_next_prune(client, auth, db, monkeypatch):
+  """Cleanup converges: a body a race left unreferenced goes on the next prune."""
+  chats, _ = _network_fixture(db)
+  monkeypatch.setattr("app.agent_coordination.MAX_DIRECT_MESSAGES_PER_RECIPIENT", 1)
+  _shared_send(db, chats, "Kept", recipients=["root"], send_id="kept")
+  _shared_send(db, chats, "Orphaned", recipients=["builder"], send_id="orphan")
+  # As if two prunes each deleted one of its last rows concurrently.
+  db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.send_id == "orphan",
+  ).delete(synchronize_session=False)
+  db.commit()
+  assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is not None
+  for body in ("First", "Second, which prunes the first"):
+    sent = client.post("/api/agent-coordination/messages",
+                       headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+                       json={"recipients": [chats["nested"].id], "body": body})
+    assert sent.status_code == 200, sent.text
+  db.expire_all()
+  assert db.get(models.AgentCoordinationNoteBody, "body-orphan") is None
+  assert db.get(models.AgentCoordinationNoteBody, "body-kept") is not None

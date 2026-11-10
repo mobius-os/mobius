@@ -185,3 +185,13 @@ test('a Goal dependency whose claim text was shown in part offers its full text'
  const whole = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [dependency] }))
  assert.doesNotMatch(whole, /Show full text/)
 })
+
+test('a settled dependency receipt whose claim text was shown in part offers its full text', async () => {
+ const WaitHistoryCard = await load('WaitHistoryCard')
+ const summary = { id: 'dep-2', target_kind: 'claim_acquisition', condition: 'Ship the change', disposition: 'delivered', outcome: { kind: 'completed', outcome: 'Done' } }
+ assert.match(render(h(WaitHistoryCard, { summary: { ...summary, truncated: true } })), /<button[^>]*>Show full text<\/button>/)
+ assert.doesNotMatch(render(h(WaitHistoryCard, { summary })), /Show full text/)
+ const { dependencyFullText } = await vite.ssrLoadModule('/src/components/ChatView/DependencyFullText.jsx')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: 'Done' }), 'Shared work:\nShip\n\nOutcome:\nDone')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: null }), 'Shared work:\nShip')
+})

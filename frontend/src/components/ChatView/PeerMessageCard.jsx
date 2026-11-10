@@ -11,7 +11,7 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import { openInternalLink } from './internalLink.js'
-import PeerNoteBody from './PeerNoteBody.jsx'
+import PeerNoteBody, { noteReaders } from './PeerNoteBody.jsx'
 
 const KIND_LABEL = {
   note: 'Note',
@@ -153,7 +153,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                     <KindBadge kind={model.kind} />
                     <DeliveryBadge delivery={model.delivery} record={record} />
                   </span>
-                  <PeerNoteBody chatId={chatId} messageId={peerNoteMessageId(record)}
+                  <PeerNoteBody readers={noteReaders(chatId, peerNoteMessageId(record))}
                     body={model.body} truncated={model.bodyTruncated}
                     render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                 </div>
@@ -177,7 +177,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                           </span>
                         )}
                       </span>
-                      <PeerNoteBody chatId={chatId} messageId={peerNoteMessageId(records[index])}
+                      <PeerNoteBody readers={noteReaders(chatId, peerNoteMessageId(records[index]))}
                         body={note.body} truncated={note.bodyTruncated}
                         render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                     </li>

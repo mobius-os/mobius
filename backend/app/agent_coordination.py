@@ -631,16 +631,21 @@ def with_note_heads(query):
   )
 
 
-def delete_unreferenced_bodies(db: Session, body_ids) -> None:
-  """Delete these shared bodies once no message references them, by id."""
+def delete_unreferenced_bodies(db: Session) -> None:
+  """Delete every shared body no message references, without loading any.
+
+  Set-based rather than per deleted row, so it converges: two transactions
+  that each delete one of a body's last two references both still see the
+  other's row and keep the body, and the next sweep (any prune that deletes a
+  note, or a chat purge) removes it. No writer
+  adds a reference to a committed body (a send inserts its body and rows in
+  one transaction, and a retry reuses existing rows), so the sweep cannot
+  remove a body a writer is about to reference.
+  """
   message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
-  ids = sorted({value for value in body_ids if value})
-  for start in range(0, len(ids), 500):  # below SQLite's bound-parameter limit
-    batch = ids[start:start + 500]
-    db.query(shared).filter(
-      shared.id.in_(batch),
-      ~select(message.id).where(message.body_id == shared.id).exists(),
-    ).delete(synchronize_session=False)
+  db.query(shared).filter(
+    ~select(message.id).where(message.body_id == shared.id).exists(),
+  ).delete(synchronize_session=False)
 
 
 def _note_head(row) -> tuple[str, int]:
@@ -660,7 +665,7 @@ def _note_head(row) -> tuple[str, int]:
 
 
 def serialize_message(
-  row: models.AgentCoordinationMessage,
+  row: Any,  # a message, or a row selected through with_note_text or with_note_heads
   names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
   """One note for an owner, embed or agent view.
@@ -715,7 +720,7 @@ def _oldest_message_rows(query, *, limit: int) -> list[Any]:
 
 
 def _message_names(
-  db: Session, rows: list[models.AgentCoordinationMessage],
+  db: Session, rows: list[Any],
 ) -> dict[str, str]:
   chat_ids = {
     str(value)
@@ -741,7 +746,7 @@ def _message_names(
 
 
 def serialize_messages(
-  db: Session, rows: list[models.AgentCoordinationMessage],
+  db: Session, rows: list[Any],
 ) -> list[dict[str, Any]]:
   names = _message_names(db, rows)
   return [serialize_message(row, names) for row in rows]
@@ -1380,7 +1385,9 @@ def _matching_retry(
   kind: str,
   delivery: str,
   body: str,
-) -> list[models.AgentCoordinationMessage] | None:
+) -> list[Any] | None:
+  """The rows of an exact earlier send with this identity, each one's text
+  resolved as ``body``; None when there is none."""
   if sender_run_id is None or send_id is None:
     return None
   rows = with_note_text(db.query(models.AgentCoordinationMessage).filter(
@@ -1414,7 +1421,7 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
   Retention counts notes; it never loads or measures their bodies.
   """
   message = models.AgentCoordinationMessage
-  rows = query.with_entities(message.id, message.body_id).order_by(
+  rows = query.with_entities(message.id).order_by(
     message.created_at.desc(), message.id.desc(),
   ).offset(keep).all()
   if not rows:
@@ -1424,7 +1431,7 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
     models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
   ).delete(synchronize_session=False)
   db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
-  delete_unreferenced_bodies(db, [row.body_id for row in rows])
+  delete_unreferenced_bodies(db)
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
