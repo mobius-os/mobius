@@ -1279,6 +1279,10 @@ export const api = {
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
       options,
     ),
+    message: (chatId, messageId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+      options,
+    ),
     project: (projectId, options = {}) => apiFetch(
       `/agent-coordination/projects/${encodeURIComponent(projectId)}`,
       options,

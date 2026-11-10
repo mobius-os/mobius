@@ -22,6 +22,7 @@ from app.agent_coordination import (
   owner_chat_snapshot,
   owner_project_snapshot,
   peer_message_for_agent,
+  peer_message_for_chat,
   send_agent_message,
   deliver_work_claim_revocation,
   visible_peer_messages,
@@ -64,6 +65,8 @@ class AgentMessageCreate(BaseModel):
     value = value.strip()
     if not value:
       raise ValueError("body must not be blank")
+    if "\x00" in value:
+      raise ValueError("body must not contain U+0000")
     return value
 
   @field_validator("kind")
@@ -338,6 +341,25 @@ def inspect_project_room(
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/chats/{chat_id}/messages/{message_id}")
+def inspect_chat_message(
+  chat_id: str,
+  message_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """One whole note, for a view that showed its head marked truncated.
+
+  The same exact-chat visibility as this chat's history.
+  """
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  message = peer_message_for_chat(db, chat_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this chat.")
+  return message
 
 
 @router.get("/chats/{chat_id}/history")
