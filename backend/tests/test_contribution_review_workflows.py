@@ -20,7 +20,7 @@ NEW = "c" * 40
 
 
 CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
-                "review_fix_merge": True, "draft_takeover": True}
+                "review_fix_merge": True, "draft_takeover": True, "merge_now": True}
 
 def takeover(setup, monkeypatch):
   db, row, principal = setup
@@ -657,6 +657,39 @@ def test_durable_reviewer_reports_after_spawning_turn_completes(setup, monkeypat
   db.get(models.ChatRun, parent.run_id).status = "completed"
   db.commit()
   assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+
+
+def owner_run_views(db, row, parent):
+  owner = Principal(owner=parent.owner, app_id=None)
+  return routes.get_review(1, row.id, db, owner)["run"], routes.list_reviews(1, db, owner)["runs"][0]
+
+
+def test_review_whose_reviewer_died_is_not_called_reviewing(setup, monkeypatch):
+  """An unplanned restart interrupts the reviewer after the chat's own turn has ended."""
+  db, row, parent, _, _, _ = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.get(models.ChatRun, "registered-review-run").status = "interrupted"
+  db.commit()
+  for view in owner_run_views(db, row, parent):
+    assert (view["state"], view["execution_state"]) == ("needs_you", "interrupted")
+    assert "Nothing is working on this review" in view["summary"]
+
+
+def test_review_waiting_on_a_live_reviewer_still_reads_reviewing(setup, monkeypatch):
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  child.notify_parent_on_complete = True  # as /reviewers creates it: the helper's report wakes the chat
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.commit()
+  for view in owner_run_views(db, row, parent):
+    assert (view["state"], view["execution_state"]) == ("reviewing", "completed")
+
+
+def test_review_whose_turn_ended_with_no_helper_and_no_outcome_is_not_called_reviewing(setup):
+  db, row, principal = setup
+  db.get(models.ChatRun, principal.run_id).status = "completed"
+  db.commit()
+  for view in owner_run_views(db, row, principal):
+    assert (view["state"], view["execution_state"]) == ("needs_you", "interrupted")
 
 
 def test_durable_wait_does_not_revoke_completed_parent_reviewer(setup, monkeypatch):

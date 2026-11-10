@@ -108,6 +108,42 @@ def post_review(gh, cwd, target, body, event="COMMENT"):
 
 
 REVIEW_STATES = {"COMMENT": "COMMENTED", "APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}
+# A maintainer can dismiss a review after it was sent. It still proves the dispatch landed.
+DISMISSED_STATE = "DISMISSED"
+
+
+def find_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
+  """The exact review this armed attempt posted, and whether GitHub's whole list was read.
+
+  A review dismissed since it was sent still counts as found: callers read its
+  ``state`` to tell a live review from a dismissed one.
+
+  ``(None, True)`` proves only that GitHub listed no such review. A failed read,
+  a malformed page, a bounded scan that hit its page cap, or a receipt without a
+  unique marker returns ``(None, False)``: no proof of absence.
+  """
+  marker = receipt.get("marker")
+  if not marker:
+    return None, False
+  try:
+    for page in range(1, 11):
+      response = gh(cwd, "api", f"repos/{target['repo']}/pulls/{target['number']}/reviews?per_page=100&page={page}")
+      rows = json.loads(response.stdout)
+      if not isinstance(rows, list):
+        return None, False
+      for review in rows:
+        if (isinstance(review, dict) and isinstance(review.get("user"), dict)
+            and str(review["user"].get("id")) == str(actor_id)
+            and review.get("commit_id") == target["head_sha"]
+            and review.get("state") in (REVIEW_STATES[event], DISMISSED_STATE)
+            and isinstance(review.get("body"), str) and marker in review["body"]
+            and isinstance(review.get("id"), int) and not isinstance(review["id"], bool)):
+          return review, True
+      if len(rows) < 100:
+        return None, True
+  except (ContributionSubmitError, subprocess.SubprocessError, OSError, json.JSONDecodeError):
+    pass
+  return None, False
 
 
 def reconcile_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
@@ -116,26 +152,10 @@ def reconcile_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
   A bounded scan may miss a very old review; that leaves uncertainty intact.
   Legacy receipts without a unique marker cannot be attributed to this grant.
   """
-  marker = receipt.get("marker")
-  if not marker:
+  if not receipt.get("marker"):
     return {**receipt, "state": "unknown", "summary": "This older receipt lacks a unique review marker; inspect GitHub without repeating the write."}
-  try:
-    for page in range(1, 11):
-      response = gh(cwd, "api", f"repos/{target['repo']}/pulls/{target['number']}/reviews?per_page=100&page={page}")
-      rows = json.loads(response.stdout)
-      if not isinstance(rows, list):
-        break
-      for review in rows:
-        if (isinstance(review, dict) and isinstance(review.get("user"), dict)
-            and str(review["user"].get("id")) == str(actor_id)
-            and review.get("commit_id") == target["head_sha"]
-            and review.get("state") == REVIEW_STATES[event]
-            and isinstance(review.get("body"), str) and marker in review["body"]
-            and isinstance(review.get("id"), int) and not isinstance(review["id"], bool)):
-          return {**receipt, "state": "posted", "id": review["id"], "url": review.get("html_url"),
-                  "summary": "The exact public review was confirmed by a read-only observation."}
-      if len(rows) < 100:
-        break
-  except (ContributionSubmitError, subprocess.SubprocessError, OSError, json.JSONDecodeError):
-    pass
+  review, _ = find_review(gh, cwd, target, receipt, actor_id, event)
+  if review is not None:
+    return {**receipt, "state": "posted", "id": review["id"], "url": review.get("html_url"),
+            "summary": "The exact public review was confirmed by a read-only observation."}
   return {**receipt, "state": "unknown", "summary": "The exact public review is not confirmed; no write was repeated."}

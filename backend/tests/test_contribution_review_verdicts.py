@@ -248,14 +248,26 @@ def test_request_changes_is_submitted_but_never_merges(setup, monkeypatch):
   assert [e[:2] for e in events] == [("post", "REQUEST_CHANGES")]
 
 
-def test_own_pull_request_falls_back_to_a_comment(setup, monkeypatch):
+def test_own_pull_request_is_never_reviewed_in_public(setup, monkeypatch):
   _grant(setup, propose_verdict=True)
   events = []
   _record(monkeypatch, events)
   monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42}}))
-  item = report(setup, publish=True)["run"]["items"][0]
-  assert [e[:2] for e in events] == [("post", "COMMENT"), ("merge",)]
-  assert "verdict_proposal" not in item
+  run = report(setup, publish=True)["run"]
+  item = run["items"][0]
+  assert events == []
+  assert item["state"] == "all_clear" and "verdict_proposal" not in item and "public_review" not in item
+
+
+def test_own_pull_request_findings_stay_private_even_for_a_plain_comment_grant(setup, monkeypatch):
+  _grant(setup)
+  events = []
+  _record(monkeypatch, events)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "user": {"id": 42}}))
+  item = report(setup, publish=True, state="needs_you", summary="Blocking bug")["run"]["items"][0]
+  assert events == []
+  assert item["state"] == "needs_you" and item["summary"] == "Blocking bug"
+  assert "public_review" not in item and "verdict_proposal" not in item
 
 
 def test_a_stale_or_stopped_decision_posts_nothing(setup, monkeypatch):
@@ -271,6 +283,176 @@ def test_a_stale_or_stopped_decision_posts_nothing(setup, monkeypatch):
   with pytest.raises(HTTPException) as stopped:
     _decide(setup, "submit", proposal["id"])
   assert stopped.value.status_code == 409 and events == []
+
+
+def _unconfirmed_verdict(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events, state="unknown")
+  _resumes(monkeypatch)
+  proposal = report(setup, publish=True, state="needs_you", summary="Blocking bug")["run"]["items"][0]["verdict_proposal"]
+  _decide(setup, "submit", proposal["id"])
+  assert _observe_saved(setup)["state"] == "unknown"
+  return events, proposal
+
+
+def _observe_saved(setup):
+  db, row, _ = setup
+  db.refresh(row)
+  return row.outcomes_json[KEY]["verdict_proposal"]
+
+
+def _observe(setup):
+  db, row, _ = setup
+  return asyncio.run(routes.observe_review(1, row.id, db, _owner(setup)))["run"]["items"][0]["verdict_proposal"]
+
+
+def _look(monkeypatch, review=None, complete=True):
+  """What GitHub's reviews list showed this observation: (exact review or None, whole list read)."""
+  seen = []
+  def find(gh, cwd, target, receipt, actor_id, event="COMMENT"):
+    seen.append((target["head_sha"], receipt["marker"], event))
+    return review, complete
+  monkeypatch.setattr(public, "find_review", find)
+  return seen
+
+
+def _hours_after_submit(setup, hours):
+  """Age the saved attempt: the dispatch window is measured from when it was armed."""
+  from datetime import datetime, timedelta, timezone
+  db, row, _ = setup
+  item = {**row.outcomes_json[KEY]}
+  armed = datetime.now(timezone.utc) - timedelta(hours=hours)
+  item["verdict_proposal"] = {**item["verdict_proposal"], "submitted_at": armed.isoformat().replace("+00:00", "Z")}
+  assert domain._cas_outcome(db, row, KEY, item), 'a test clock edit, not a product write'
+
+
+def test_an_unconfirmed_verdict_that_github_shows_is_settled_as_posted_without_a_second_post(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  review = {"id": 77, "html_url": "https://github.com/x/pull/7#pullrequestreview-77"}
+  seen = _look(monkeypatch, review)
+  settled = _observe(setup)
+  assert (settled["state"], settled["review_id"], settled["id"]) == ("posted", 77, proposal["id"])
+  assert settled["url"].endswith("pullrequestreview-77") and "read-only" in settled["summary"]
+  assert seen[0][0] == ITEM["head_sha"] and seen[0][2] == "REQUEST_CHANGES" and "mobius-review:" in seen[0][1]
+  assert [e[0] for e in events] == ["post"], "observing never posts again"
+
+
+def test_a_verdict_github_accepted_then_dismissed_is_posted_not_never_sent_and_is_no_live_approval(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  _hours_after_submit(setup, 2)  # past the dispatch window: an unmatched scan would now say never sent
+  review = {"id": 78, "html_url": "https://github.com/x/pull/7#pullrequestreview-78", "state": "DISMISSED"}
+  _look(monkeypatch, review)
+  settled = _observe(setup)
+  assert (settled["state"], settled["review_id"]) == ("posted", 78)
+  assert settled["dismissed_on_github"] is True and "dismissed" in settled["summary"]
+  assert [e[0] for e in events] == ["post"], "observing never posts again"
+  db, row, _ = setup
+  approval = {"verdict_proposal": {**settled, "event": "APPROVE"}}
+  row.mode, row.options_json = "review_merge", {"post_review": True, "propose_verdict": True}
+  assert "dismissed on GitHub" in routes.reviews.public_merge_blocker(row, approval)
+
+
+def test_an_approval_observation_recovers_keeps_its_merge_visible_until_the_owner_continues_it(setup, monkeypatch):
+  db, row = _grant(setup, propose_verdict=True)
+  events = []
+  _record(monkeypatch, events, state="unknown")
+  resumes = _resumes(monkeypatch)
+  proposal = report(setup, publish=True)["run"]["items"][0]["verdict_proposal"]
+  _decide(setup, "submit", proposal["id"])
+  assert resumes == [], "an unknown answer resumes nothing yet"
+  _look(monkeypatch, {"id": 79, "html_url": "https://github.com/x/pull/7#pullrequestreview-79", "state": "APPROVED"})
+  assert _observe(setup)["state"] == "posted"
+  assert resumes == [], "observation is read-only: it never starts an agent"
+  run = routes.get_review(1, row.id, db, _owner(setup))["run"]
+  assert run["state"] == "needs_you" and run["items"][0]["state"] == "needs_you"
+  assert run["items"][0]["summary"].startswith(domain.MERGE_WAITING)
+  result = _decide(setup, "continue_merge", proposal["id"])
+  assert result["merge_resumed"] is True and len(resumes) == 1 and resumes[0]["chat_id"] == row.chat_id
+  merged = report(setup, publish=True)["run"]["items"][0]
+  assert merged["state"] == "merged" and [e[0] for e in events] == ["post", "merge"]
+  with pytest.raises(HTTPException) as nothing_waiting:
+    _decide(setup, "continue_merge", proposal["id"])
+  assert nothing_waiting.value.status_code == 409
+
+
+def test_an_unconfirmed_verdict_missing_from_github_is_held_until_the_dispatch_window_has_passed(setup, monkeypatch):
+  events, _ = _unconfirmed_verdict(setup, monkeypatch)
+  _look(monkeypatch)
+  assert _observe(setup)["state"] == "unknown", "just submitted: a request could still land"
+  assert _observe(setup)["state"] == "unknown"
+  assert [e[0] for e in events] == ["post"]
+
+
+def test_a_verdict_absent_from_github_an_hour_on_is_released_as_never_sent_and_the_card_returns_to_its_findings(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  _hours_after_submit(setup, 2)
+  _look(monkeypatch)
+  released = _observe(setup)
+  assert (released["state"], released["id"]) == ("not_dispatched", proposal["id"])
+  assert released["summary"] == "This verdict was never sent to GitHub, so nothing is waiting on you."
+  db, row, _ = setup
+  run = routes.get_review(1, row.id, db, _owner(setup))["run"]
+  assert run["items"][0]["state"] == "needs_you", "findings stand; no verdict banner is left waiting"
+  assert [e[0] for e in events] == ["post"], "releasing never sends"
+  with pytest.raises(HTTPException) as again:
+    _decide(setup, "submit", proposal["id"])
+  assert again.value.status_code == 409, "a released verdict cannot be submitted either"
+
+
+def test_the_owner_can_dismiss_an_unconfirmed_verdict_and_nothing_is_sent(setup, monkeypatch):
+  events, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  db, row, _ = setup
+  run = _decide(setup, "dismiss", proposal["id"])["run"]
+  saved = row.outcomes_json[KEY]["verdict_proposal"]
+  assert (saved["state"], saved["summary"]) == ("not_dispatched", "You dismissed this verdict. GitHub never confirmed it and nothing more will be sent.")
+  assert run["items"][0]["state"] == "needs_you"
+  assert [e[0] for e in events] == ["post"]
+  with pytest.raises(HTTPException) as again:
+    _decide(setup, "dismiss", proposal["id"])
+  assert again.value.status_code == 409
+
+
+def test_a_stopped_review_can_still_have_its_unconfirmed_verdict_dismissed(setup, monkeypatch):
+  _, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  db, row, _ = setup
+  domain.save_outcome(db, row, routes.REVIEW_STOP_KEY, {"state": "requested", "actor": "owner"})
+  assert _decide(setup, "dismiss", proposal["id"])["run"]["items"][0]["state"] == "needs_you"
+
+
+def test_the_review_agent_cannot_dismiss_a_verdict(setup, monkeypatch):
+  _, proposal = _unconfirmed_verdict(setup, monkeypatch)
+  with pytest.raises(HTTPException) as agent:
+    _decide(setup, "dismiss", proposal["id"], principal=setup[2])
+  assert agent.value.status_code == 403
+  assert _observe_saved(setup)["state"] == "unknown"
+
+
+def test_a_verdict_still_waiting_for_the_owner_is_discarded_not_dismissed(setup, monkeypatch):
+  _grant(setup, propose_verdict=True)
+  _record(monkeypatch, [])
+  proposal = report(setup, publish=True, state="needs_you", summary="Blocking bug")["run"]["items"][0]["verdict_proposal"]
+  with pytest.raises(HTTPException) as refused:
+    _decide(setup, "dismiss", proposal["id"])
+  assert refused.value.status_code == 409
+  db, row, _ = setup
+  db.refresh(row)
+  assert row.outcomes_json[KEY]["verdict_proposal"]["state"] == "proposed"
+
+
+def test_a_failed_or_partial_read_of_github_never_releases_an_unconfirmed_verdict(setup, monkeypatch):
+  _unconfirmed_verdict(setup, monkeypatch)
+  _hours_after_submit(setup, 2)
+  _look(monkeypatch, complete=False)
+  assert _observe(setup)["state"] == "unknown", "no proof of absence: a failed read or a capped scan"
+
+
+def test_a_confirmed_verdict_is_never_rewound_by_a_later_observation(setup, monkeypatch):
+  _unconfirmed_verdict(setup, monkeypatch)
+  _look(monkeypatch, {"id": 5, "html_url": None})
+  assert _observe(setup)["state"] == "posted"
+  monkeypatch.setattr(public, "find_review", lambda *a, **k: pytest.fail("a posted verdict is not observed again"))
+  assert _observe(setup)["state"] == "posted"
 
 
 def test_a_writer_that_never_saw_the_proposal_cannot_drop_it(setup, monkeypatch):
