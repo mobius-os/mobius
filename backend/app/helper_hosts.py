@@ -25,6 +25,11 @@ it, so nothing run- or helper-specific may live there. Each helper turn gets:
   the file's path is ever handed to the provider, which may persist settings in
   its session history.
 
+Claude's shared control server discovers installed-app tools before any child
+call supplies an identity. Its host-lifetime catalogue file contains reviewed
+metadata only, never a bearer; calls still authenticate as the exact child
+against the live backend catalogue (see ``claude_helper_host._host_options``).
+
 Hosts are keyed by (parent chat, provider, working directory,
 connected-services plan), so one chat's crash, secrets, or permissions never
 reach another chat's helpers. A host shuts down after it has been idle for

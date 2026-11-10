@@ -457,33 +457,26 @@
    conversation gap: it keeps its space while hidden and while the reply is
    still streaming, so settling, revealing or pinning it never moves the
    transcript, and it always sits the same distance below the reply's last
-   line (its fixed height comes from .chat__msg-meta). Pulled left by the
-   copy button's padding so the glyph lines up with the reply's text. */
+   line (its fixed height comes from .chat__msg-meta). Time and Copy stay
+   together, inset to match the reply's prose. */
 .chat__msg-meta--start {
   display: flex;
   width: fit-content;
   align-self: flex-start;
-  margin: 6px 0 0 -5px;
-  padding-top: 0;
+  margin: 6px 0 0;
+  padding: 0 8px;
 }
-/* Actions first, then the quiet time, reading from the reply's edge. */
-.chat__msg-meta--start .chat__ts { order: 1; margin-left: 4px; }
+/* An earlier reply in a stretch has no time: pull Copy back by its own
+   padding so its glyph still lines up with the reply's prose. */
+.chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
+/* Older replies reveal actions only on tap/click; hovering must not expose
+   another reply's Copy above the current answer. ChatView keeps the latest
+   reply's row visible. */
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
-}
-/* With a mouse, hovering a reply reveals its row; touch keeps the tap reveal
-   above, and owner messages keep tap only. Only the latest reply keeps its
-   row visible (ChatView). */
-@media (hover: hover) and (pointer: fine) {
-  .chat__reply:hover > .chat__msg-meta {
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    transition-delay: 0s;
-  }
 }
 .chat__ts {
   font-size: 11px;
@@ -495,9 +488,9 @@
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
    see chatUiPolish.test), but a single tap reveals a quiet ghost button
-   beside the timestamp when one is present. */
+   below a reply or beside an owner message. */
 .chat__msg-copy,
-.chat__msg-retry {
+.chat__msg-branch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -515,19 +508,19 @@
   transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
 }
 .chat__msg-copy:active,
-.chat__msg-retry:active { transform: scale(0.94); }
-.chat__msg-retry:disabled { cursor: default; opacity: 0.4; transform: none; }
+.chat__msg-branch:active { transform: scale(0.94); }
+.chat__msg-branch--busy { opacity: 0.4; cursor: progress; }
 .chat__msg-copy--copied { color: var(--accent); opacity: 1; }
 .chat__msg-copy--failed { color: var(--danger); opacity: 1; }
 .chat__msg-copy:focus-visible,
-.chat__msg-retry:focus-visible {
+.chat__msg-branch:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
   opacity: 1;
 }
 @media (hover: hover) and (pointer: fine) {
   .chat__msg-copy:hover,
-  .chat__msg-retry:hover:not(:disabled) {
+  .chat__msg-branch:hover {
     background: var(--surface-2); /* CONTRACT: secondary opaque fill */
     color: var(--text);
   }
@@ -2062,18 +2055,6 @@
   100% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
 }
 
-/* Rotating disclosure chevron for the MARKER card (the activity line dropped
-   its chevron — the quiet line itself is the affordance), matching the
-   queued-tray idiom: the SVG points down when open and rotates to point right
-   when collapsed, easing the transform so the state change reads as motion
-   rather than an instant glyph swap. */
-.chat__chevron {
-  transition: transform 0.15s;
-}
-.chat__chevron--collapsed {
-  transform: rotate(-90deg);
-}
-
 /* A quiet rail makes the expanded parent/child hierarchy scannable. */
 .chat__activity-timeline {
   display: flex;
@@ -2317,13 +2298,6 @@
   line-height: 1.3;
   overflow: hidden;
   overflow-wrap: anywhere;
-}
-
-.chat__marker-toggle {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
-  display: inline-flex;
 }
 
 .chat__marker-body {
@@ -4330,6 +4304,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
+.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 
@@ -4723,13 +4698,21 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
+.queued__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  margin-bottom: 4px;
+}
+
 .queued__hdr {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px 6px;
-  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  margin-bottom: 4px;
   gap: 8px;
   cursor: pointer;
   border-radius: 6px;
@@ -4746,9 +4729,13 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   outline-offset: -2px;
 }
 
-.queued--collapsed .queued__hdr {
+.queued--collapsed .queued__bar {
   border-bottom: 0;
   margin-bottom: 0;
+}
+
+.queued__send-held {
+  margin-top: 0;
 }
 
 .queued--collapsed {
@@ -5083,3 +5070,50 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 .chat__dependency-stop { display: flex; flex-direction: column; gap: 4px; }
 button.chat__dependency-link { cursor: pointer; background: none; border: 0; text-align: left; }
 button.chat__dependency-link:disabled { cursor: default; opacity: .55; }
+
+/* ── Branch origin ─────────────────────────────────────
+   Where a branch's copied history ends: a quiet full-width rule with a
+   centred "Branched from <chat>" label; the title opens the source. */
+.chat__branch-origin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 6px;
+  list-style: none;
+}
+.chat__branch-origin::before,
+.chat__branch-origin::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border); /* CONTRACT: 1px line on opaque fill */
+}
+.chat__branch-origin-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 75%;
+  font-size: 12px;
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  white-space: nowrap;
+}
+.chat__branch-origin-link,
+.chat__branch-origin-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat__branch-origin-link {
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.chat__branch-origin-link:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: 2px;
+}

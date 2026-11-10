@@ -12,14 +12,14 @@ const {
   providerInfoFor,
   providerOrderFor,
 } = await vite.ssrLoadModule('/src/components/ChatView/providerRegistry.jsx')
-const { default: ManageModelsModal } = await vite.ssrLoadModule(
-  '/src/components/ChatView/ManageModelsModal.jsx',
+const { default: ChatModelsList } = await vite.ssrLoadModule(
+  '/src/components/SettingsView/ChatModelsList.jsx',
 )
 const { modelQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 
 after(() => vite.close())
 
-function renderModelManager() {
+function renderChatModels(provider) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -34,25 +34,14 @@ function renderModelManager() {
     React.createElement(
       QueryClientProvider,
       { client },
-      React.createElement(ManageModelsModal, {
-        onClose() {},
-        providerOrder: PROVIDER_ORDER,
-        providerInfo: PROVIDER_INFO,
-        configuredProviders: new Set(PROVIDER_ORDER),
-      }),
+      React.createElement(ChatModelsList, { provider }),
     ),
   )
 }
 
-test('chat model surfaces expose the connected providers before Möbius', () => {
+test('the provider order lists Codex and Claude before Möbius', () => {
   assert.deepEqual(PROVIDER_ORDER, ['codex', 'claude', 'mobius'])
   assert.equal(PROVIDER_INFO.mobius.label, 'Möbius')
-
-  const markup = renderModelManager()
-  const codexAt = markup.indexOf('OpenAI Codex')
-  const claudeAt = markup.indexOf('Claude Code')
-  const mobiusAt = markup.indexOf('Möbius')
-  assert.ok(codexAt >= 0 && claudeAt > codexAt && mobiusAt > claudeAt)
 })
 
 test('accepted app providers extend the same model order and metadata', () => {
@@ -85,11 +74,11 @@ test('shared provider metadata preserves each provider-specific effort sequence'
 })
 
 test('public Möbius rows hide internal wire ids', () => {
-  const markup = renderModelManager()
-  assert.match(markup, />Möbius Max</)
-  assert.doesNotMatch(markup, />mobius-max</)
-  assert.match(markup, />gpt-5\.6</)
-  assert.match(markup, />claude-opus-4-7</)
+  const mobius = renderChatModels('mobius')
+  assert.match(mobius, />Möbius Max</)
+  assert.doesNotMatch(mobius, />mobius-max</)
+  assert.match(renderChatModels('codex'), />gpt-5\.6</)
+  assert.match(renderChatModels('claude'), />claude-opus-4-7</)
 })
 
 for (const [name, query, path, body, expected] of [
@@ -118,7 +107,7 @@ for (const [name, query, path, body, expected] of [
   })
 }
 
-test('real preference query degrades only after four failed reads', async () => {
+test('real preference query degrades to show-all, marked unavailable, only after four failed reads', async () => {
   const originalFetch = globalThis.fetch
   const client = new QueryClient()
   let attempts = 0
@@ -128,7 +117,7 @@ test('real preference query degrades only after four failed reads', async () => 
     return Response.json({ detail: 'unavailable' }, { status: 503 })
   }
   try {
-    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [] })
+    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [], unavailable: true })
     assert.equal(attempts, 4, 'query retry must not multiply the read budget')
   } finally {
     client.clear()

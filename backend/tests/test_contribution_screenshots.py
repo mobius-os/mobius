@@ -275,6 +275,18 @@ def test_send_stops_when_github_does_not_serve_the_images_publicly(fork):
   assert raised.value.code == "screenshot_not_public"
 
 
+def test_a_failed_public_readback_follows_a_real_image_push(fork):
+  """The known screenshot error is raised after the images are already public."""
+  with pytest.raises(ContributionSubmitError) as raised:
+    fork["publish"](read_public=lambda _url: None)
+  assert raised.value.code == "screenshot_not_public"
+  pushed = subprocess.run(
+    ["git", "rev-parse", "--verify", f"refs/heads/{shots.ASSETS_BRANCH}"],
+    cwd=fork["remote"], capture_output=True, text=True,
+  )
+  assert pushed.returncode == 0  # the upload landed before the error
+
+
 def test_an_open_pr_update_cannot_carry_screenshots(fork):
   with pytest.raises(ContributionSubmitError) as raised:
     _publish_reviewed_screenshots(
@@ -600,8 +612,8 @@ def submit(tmp_path, monkeypatch):
   monkeypatch.setattr(git_ops + "_git", fake_git)
   monkeypatch.setattr(git_ops + "_gh", fake_gh)
 
-  def send(upstream_repo):
-    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path)
+  def send(upstream_repo, **kwargs):
+    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path, **kwargs)
 
   return {"send": send, "events": events, "push": push}
 
@@ -635,6 +647,23 @@ def test_a_failed_push_after_the_upload_keeps_the_upload_for_the_retry(submit):
   assert raised.value.record_patch["last_submit_screenshots"] == {
     "repo": "octocat/project", "commit": "c" * 40,
   }
+
+
+def test_an_upload_before_the_first_signed_push_phase_leaves_the_attempt_armed(submit, monkeypatch):
+  """The images can be public while the receipt still says armed.
+
+  Send's failure mapping therefore never treats an armed attempt with
+  screenshots as certainly unpublished.
+  """
+  phases = []
+  def unreadable_tip(*_a, **_k):
+    raise RuntimeError("remote tip read failed after the image push")
+  monkeypatch.setattr("app.github_contribution_git._authoritative_upstream_branch_sha", unreadable_tip)
+  with pytest.raises(RuntimeError):
+    submit["send"]("octocat/project", attempt_event=lambda phase, *_a: phases.append(phase))
+  assert ("upload", "octocat/project") in submit["events"]
+  assert not any(event[0] == "push" for event in submit["events"] if isinstance(event, tuple))
+  assert set(phases) <= {"armed"}
 
 
 # --- Stacks ---------------------------------------------------------------------

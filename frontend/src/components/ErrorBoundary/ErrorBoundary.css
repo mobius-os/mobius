@@ -1,5 +1,5 @@
 /* Error-boundary fallback. Uses theme tokens so it themes correctly, but
-   carries CURRENT-palette fallbacks (theme.js) because a crash may itself be
+   carries CURRENT-palette fallbacks (the server's shipped palette) because a crash may itself be
    theme-related or pre-injection — this surface must always be legible.
    Fallbacks are the live dark palette, not the stale literals scattered
    elsewhere in the codebase. */

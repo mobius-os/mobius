@@ -51,14 +51,14 @@ export default function ProviderConnection({ provider, name, connected, onDiscon
             This does not cancel your subscription or sign out other devices.
           </p>
           <div className="provider-connection__actions">
-            <button type="button" className="pa__btn pa__btn--sm" disabled={busy} onClick={() => { setAction('manage'); setError('') }}>Cancel</button>
-            <button type="button" className="pa__btn pa__btn--sm provider-connection__disconnect" disabled={busy} onClick={disconnect}>{busy ? 'Disconnecting…' : 'Disconnect'}</button>
+            <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" disabled={busy} onClick={() => { setAction('manage'); setError('') }}>Cancel</button>
+            <button type="button" className="settings__btn settings__btn--sm settings__btn--danger" disabled={busy} onClick={disconnect}>{busy ? 'Disconnecting…' : 'Disconnect'}</button>
           </div>
         </>
       ) : (
         <div className="provider-connection__actions">
-          <button type="button" className="pa__btn pa__btn--sm" onClick={() => setAction('reconnect')}>Reconnect</button>
-          <button type="button" className="pa__btn pa__btn--sm" onClick={() => setAction('disconnect')}>Disconnect…</button>
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={() => setAction('reconnect')}>Reconnect</button>
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--danger" onClick={() => setAction('disconnect')}>Disconnect…</button>
         </div>
       )}
       {error && <p className="pa__error" role="alert">{error}</p>}

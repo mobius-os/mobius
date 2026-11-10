@@ -818,6 +818,91 @@ def test_owner_message_queues_behind_future_limit_park(
   }]
 
 
+def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
+  client, auth, db, monkeypatch,
+):
+  """Send queued messages takes an owner message's admission: the held rows
+  rejoin the queue behind the park instead of spending a provider attempt."""
+  cid = "park-owner-queue-send"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  parked_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+  _seed_run(
+    cid, "rt-park-owner-queue-send", status="parked",
+    parked_until=parked_until, park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  response = client.post(
+    f"/api/chats/{cid}/messages", json={"content": "", "continuation": "queue"}, headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert _run_row("rt-park-owner-queue-send")["status"] == "parked"
+  assert [(row["cid"], row.get("held")) for row in _chat_row(cid)["pending"]] == [
+    ("held-owner", None),
+  ]
+
+
+def test_an_embedded_owners_empty_send_waits_and_keeps_the_park_resuming(
+  db, monkeypatch,
+):
+  """An embedded chat's principal carries its app's id. Its empty Send only
+  releases the owner's own held rows, which carry no app stamp, so it waits
+  for the park and the park still resumes by itself afterwards."""
+  from app.chat import _future_auto_resuming_limit_park_for_chat
+  from app.deps import Principal
+  from app.routes import chats_stream
+  cid = "park-embedded-owner-empty"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-embedded-empty", status="parked",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+    park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  owner = db.query(models.Owner).first()
+  embedded = Principal(
+    owner=owner, app_id=42, scope="chat_embed", chat_id=cid,
+    embed_instance_id="frame", operations=("chat:send",),
+  )
+
+  response = asyncio.run(chats_stream._send_queue(cid, db, embedded, False))
+
+  assert response.status_code == 202
+  assert scheduled == []
+  assert _run_row("rt-park-embedded-empty")["status"] == "parked"
+  db.expire_all()
+  assert _future_auto_resuming_limit_park_for_chat(db, cid) is not None, (
+    "the released rows must not switch off the park's automatic resume"
+  )
+
+
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
   client, auth, db, monkeypatch,
 ):

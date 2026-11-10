@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from app import models
 from app.chat_message_identity import assistant_message_run_id
+from app.context_budget import REFUSAL_IDS
 
 
 _LOG = logging.getLogger(__name__)
@@ -30,11 +31,6 @@ TASK_STATUSES = frozenset({
 })
 ACTIVE_TASK_STATUSES = frozenset({"running"})
 SETTLED_TASK_STATUSES = frozenset({"completed", "cancelled"})
-MAX_TASKS = 64
-MAX_DEPENDENCIES = 16
-MAX_TITLE = 160
-MAX_NOTE = 1000
-MAX_RESULT = 1000
 
 
 class GoalPlanError(ValueError):
@@ -54,7 +50,7 @@ class GoalPlanConflict(RuntimeError):
   """Another writer advanced the plan revision first."""
 
 
-def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
+def _clean_text(value: Any, *, field: str, required: bool) -> str:
   if value is None and not required:
     return ""
   if not isinstance(value, str):
@@ -62,9 +58,40 @@ def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
   cleaned = " ".join(value.split())
   if required and not cleaned:
     raise GoalPlanError(f"{field} must not be empty")
-  if len(cleaned) > maximum:
-    raise GoalPlanError(f"{field} must be at most {maximum} characters")
   return cleaned
+
+
+def fold_parent_chain(by_id: dict, task_id: str, memo: dict, step) -> Any:
+  """``memo[task_id]`` from its parent's value, walking each chain once.
+
+  ``step(key, parent_value)`` gets ``None`` for a top-level task. Every
+  unmemoized ancestor on the way is filled too, so repeated calls across a
+  plan stay linear in its size.
+  """
+  chain = []
+  current = task_id
+  while current is not None and current not in memo:
+    chain.append(current)
+    current = by_id[current].get("parent_id")
+  value = None if current is None else memo[current]
+  for key in reversed(chain):
+    value = memo[key] = step(key, value)
+  return memo[task_id]
+
+
+def unsettled_chain(by_id: dict, key: str, inherited: list[str] | None) -> list[str]:
+  """``key``'s unsettled dependencies, then its parent groups' (``inherited``)."""
+  own = [dependency for dependency in by_id[key].get("depends_on", [])
+         if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES]
+  inherited = inherited or []
+  return list(dict.fromkeys(own + inherited)) if own else inherited
+
+
+def named_ids(ids: list[str], shown: int = REFUSAL_IDS) -> str:
+  """Name a refusal's first few ids and count the rest, however many there are."""
+  if len(ids) <= shown:
+    return ", ".join(ids)
+  return f"{', '.join(ids[:shown])} and {len(ids) - shown} more ({len(ids)} in all)"
 
 
 def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
@@ -78,8 +105,6 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   """
   if not isinstance(raw_tasks, list) or not raw_tasks:
     raise GoalPlanError("a goal plan needs at least one task")
-  if len(raw_tasks) > MAX_TASKS:
-    raise GoalPlanError(f"a goal plan supports at most {MAX_TASKS} tasks")
 
   tasks: list[dict[str, Any]] = []
   ids: set[str] = set()
@@ -104,10 +129,6 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     ):
       raise GoalPlanError(f"depends_on for {task_id} must be a list of ids")
     depends_on = list(dict.fromkeys(depends_on))
-    if len(depends_on) > MAX_DEPENDENCIES:
-      raise GoalPlanError(
-        f"{task_id} supports at most {MAX_DEPENDENCIES} dependencies"
-      )
     progress = raw.get("progress")
     normalized_progress = None
     if progress is not None:
@@ -127,8 +148,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     task = {
       "id": task_id,
       "title": _clean_text(
-        raw.get("title"), field=f"title for {task_id}",
-        maximum=MAX_TITLE, required=True,
+        raw.get("title"), field=f"title for {task_id}", required=True,
       ),
       "status": status,
       "depends_on": depends_on,
@@ -140,20 +160,17 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       task["parent_id"] = parent_id
     completion_condition = _clean_text(
       raw.get("completion_condition"),
-      field=f"completion_condition for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      field=f"completion_condition for {task_id}", required=False,
     )
     if completion_condition:
       task["completion_condition"] = completion_condition
     note = _clean_text(
-      raw.get("note"), field=f"note for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      raw.get("note"), field=f"note for {task_id}", required=False,
     )
     if note:
       task["note"] = note
     result = _clean_text(
-      raw.get("result"), field=f"result for {task_id}",
-      maximum=MAX_RESULT, required=False,
+      raw.get("result"), field=f"result for {task_id}", required=False,
     )
     if result:
       task["result"] = result
@@ -189,7 +206,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     if start in visited:
       continue
     # Explicit frames keep dependency validation independent of recursion
-    # depth within the bounded plan.
+    # depth, however deep the plan nests.
     stack = [(start, False)]
     while stack:
       task_id, leaving = stack.pop()
@@ -208,38 +225,37 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       stack.extend((dependency, False) for dependency in reversed(
         by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])))
 
-  def effective_dependencies(task_id: str) -> list[str]:
-    """Return direct dependencies plus those inherited from parent groups."""
-    dependencies: list[str] = []
-    current = by_id[task_id]
-    while True:
-      dependencies.extend(current["depends_on"])
-      parent_id = current.get("parent_id")
-      if parent_id is None:
-        break
-      current = by_id[parent_id]
-    return list(dict.fromkeys(dependencies))
+  # Whether every dependency of a task and of its parent groups has settled.
+  # Parentage is acyclic (checked above), so the memoized walk keeps this
+  # linear in the plan size however deep the groups nest.
+  chain_settled: dict[str, bool] = {}
+  for task in tasks:
+    fold_parent_chain(by_id, task["id"], chain_settled, lambda key, parent: (
+      parent is not False and all(
+        by_id[dependency]["status"] in SETTLED_TASK_STATUSES
+        for dependency in by_id[key]["depends_on"])))
+
+  def incomplete_dependencies(task_id: str) -> list[str]:
+    """Unsettled direct and inherited dependencies, for a refusal only."""
+    return fold_parent_chain(by_id, task_id, {}, lambda key, parent: unsettled_chain(
+      by_id, key, parent))
 
   for task in tasks:
-    incomplete = [
-      dependency for dependency in effective_dependencies(task["id"])
-      if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] in {"running", "completed"} and incomplete:
+    if task["status"] in {"running", "completed"} and not chain_settled[task["id"]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {', '.join(incomplete)}"
+        f"complete: {named_ids(incomplete_dependencies(task['id']))}"
       )
-    unfinished_children = [
-      child["id"] for child in tasks
-      if child.get("parent_id") == task["id"]
-      and child["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] == "completed" and unfinished_children:
-      raise GoalPlanError(
-        f"{task['id']} cannot complete before its children settle: "
-        f"{', '.join(unfinished_children)}"
-      )
+    if task["status"] == "completed":
+      unfinished_children = [
+        child for child in children_by_parent.get(task["id"], [])
+        if by_id[child]["status"] not in SETTLED_TASK_STATUSES
+      ]
+      if unfinished_children:
+        raise GoalPlanError(
+          f"{task['id']} cannot complete before its children settle: "
+          f"{named_ids(unfinished_children)}"
+        )
     progress = task.get("progress")
     if (
       task["status"] == "completed" and progress is not None
@@ -325,12 +341,10 @@ def helper_plan_task(
     if assignment is not None and assignment.plan_task is not None:
       # A branch helper splits only its own branch, as its brief is scoped.
       parent_of = {str(task.get("id")): task.get("parent_id") for task in tasks}
-      ids = [
-        task_id for task_id in ids
-        if _within_branch(task_id, assignment.plan_task, parent_of)
-      ]
+      branch = _branch_members(assignment.plan_task, parent_of)
+      ids = [task_id for task_id in ids if task_id in branch]
     if requested not in ids:
-      known = ", ".join(ids) if ids else "none (no active Goal plan)"
+      known = named_ids(ids) if ids else "none (no active Goal plan)"
       raise GoalPlanError(
         f"plan_task {requested!r} is not a task of this chat's Goal plan; "
         f"plan tasks: {known}"
@@ -346,17 +360,20 @@ def helper_plan_task(
   return leaves[0] if len(leaves) == 1 else None
 
 
-def _within_branch(task_id: str, branch: str, parent_of: dict) -> bool:
-  """Whether ``task_id`` is ``branch`` or nested beneath it."""
-  seen: set[str] = set()
-  current: str | None = task_id
-  while current is not None and current not in seen:
-    if current == branch:
-      return True
-    seen.add(current)
-    parent = parent_of.get(current)
-    current = str(parent) if parent is not None else None
-  return False
+def _branch_members(branch: str, parent_of: dict) -> set[str]:
+  """``branch`` and every task nested beneath it, in one pass over the plan."""
+  children: dict[str, list[str]] = {}
+  for task_id, parent in parent_of.items():
+    if parent is not None:
+      children.setdefault(str(parent), []).append(str(task_id))
+  members: set[str] = set()
+  pending = [branch] if branch in parent_of else []
+  while pending:
+    current = pending.pop()
+    if current not in members:
+      members.add(current)
+      pending.extend(children.get(current, []))
+  return members
 
 
 @dataclass(frozen=True)
@@ -663,16 +680,18 @@ def _helper_key(node: dict[str, Any]) -> str:
   return str(node.get("task_key") or node["id"])
 
 
-def active_goal_helpers(
+def goal_helper_tree(
   db: Session, physical: models.ChatRun, root: models.ChatGoal,
-) -> list[str]:
-  """Task keys of this Goal's helpers still working, with or without a plan."""
-  return [
-    _helper_key(node)
-    # Presentation folds superseded attempts, but settlement cannot abandon
-    # an older child merely because a newer attempt used the same task key.
-    for node in _active_helper_nodes(_delegation_tree(db, physical, root, all_attempts=True))
-  ]
+) -> list[dict[str, Any]]:
+  """Every helper attempt under this Goal, at any depth, for settlement."""
+  # Presentation folds superseded attempts, but settlement cannot abandon
+  # an older child merely because a newer attempt used the same task key.
+  return _delegation_tree(db, physical, root, all_attempts=True)
+
+
+def active_goal_helpers(tree: list[dict[str, Any]]) -> dict[str, str]:
+  """Delegation id to task key of each helper in tree still working."""
+  return {node["id"]: _helper_key(node) for node in _active_helper_nodes(tree)}
 
 
 def serialize_plan(
@@ -692,19 +711,13 @@ def serialize_plan(
     if parent_id is not None:
       children_by_parent.setdefault(parent_id, []).append(task["id"])
 
+  # Unsettled direct and inherited dependencies, memoized per parent chain so
+  # each task's own dependencies are checked once however deep groups nest.
+  waiting: dict[str, list[str]] = {}
+
   def effective_waiting(task: dict[str, Any]) -> list[str]:
-    dependencies: list[str] = []
-    current = task
-    while True:
-      dependencies.extend(current.get("depends_on", []))
-      parent_id = current.get("parent_id")
-      if parent_id is None:
-        break
-      current = by_id[parent_id]
-    return [
-      dependency for dependency in dict.fromkeys(dependencies)
-      if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES
-    ]
+    return list(fold_parent_chain(by_id, task["id"], waiting, lambda key, parent: (
+      unsettled_chain(by_id, key, parent))))
   delegations = _delegation_tree(db, physical, root)
   active_helpers = _active_helper_nodes(delegations)
   active_execution_keys = [_helper_key(node) for node in active_helpers]
@@ -1187,7 +1200,7 @@ def staged_task_edits(root: models.ChatGoal, edits: list[dict[str, Any]]) -> dic
       raise GoalPlanError(f"task edit {position + 1} needs a string id")
     unknown = set(edit) - TASK_EDIT_FIELDS - {"id"}
     if unknown:
-      raise GoalPlanError(f"unknown fields for {edit['id']}: {', '.join(sorted(unknown))}")
+      raise GoalPlanError(f"unknown fields for {edit['id']}: {named_ids(sorted(unknown))}")
     target = by_id.get(edit["id"])
     if target is None:
       target = {"id": edit["id"]}
@@ -1222,12 +1235,13 @@ def stage_helper_task_edits(assignment: GoalAssignment, edits: list[dict[str, An
     current = parents[current]
   document = staged_task_edits(goal, edits)
   after = {task["id"]: task for task in document["tasks"]}
-  after_parents = {key: task.get("parent_id") for key, task in after.items()}
+  before_branch = _branch_members(branch, parents)
+  after_branch = _branch_members(branch, {key: task.get("parent_id") for key, task in after.items()})
   for key, task in after.items():
     old = before.get(key)
     if old == task:
       continue
-    if (old is not None and not _within_branch(key, branch, parents)) or not _within_branch(key, branch, after_parents):
+    if (old is not None and key not in before_branch) or key not in after_branch:
       raise GoalPlanError("Helpers may edit only their assigned checklist branch")
     if key == branch:
       contract = ("title", "parent_id", "depends_on", "completion_condition")
