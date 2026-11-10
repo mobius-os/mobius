@@ -71,7 +71,12 @@ The vault's use path keeps its earlier rules: HTTPS on port 443 only, one
 injection slot (a header with an optional prefix, or a query parameter),
 default-deny site/method/path globs on the decoded path with dot segments,
 encoded slashes and empty segments refused first, public-address DNS pinning,
-no redirects, identity encoding and redaction of echoed values. A destination
+no redirects, identity encoding and redaction of echoed values. The method
+rule checks the wire method, so the vault drops the caller's method-override
+headers (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`)
+rather than let a site run another method with the key; a site that reads the
+method from the body or query cannot be policed this way, so allow only the
+methods you would accept for any of its requests. A destination
 given as a NAT64 address must embed a public IPv4 address. A value with line
 breaks (a PEM file, JSON credentials) can be stored and read but is never sent
 in a header. The server
@@ -86,13 +91,19 @@ survives for one release only as the adapter described under *Transition*. A
 manifest that still declares the grant is refused with a pointer to the
 handshake. An app's model provider names its vault key in
 `model_provider.secret_name`; the platform reads that key at turn launch
-(logged as `platform:app-<id>`) when it is the app's own key, or when the
-owner granted it to the app and its sites allow `POST <base_url>/responses`.
+(logged as `platform:app-<id>`) when it is the app's own key or one the owner
+granted to the app, and in either case its sites allow
+`POST <base_url>/responses`. A new key an app saves for its own provider's
+`secret_name` starts with exactly that site, so the provider works at once and
+the owner sees, and can narrow, where the key goes. An app update that moves
+its provider to another address does not move the key: the owner adds the new
+site.
 
 **Upgrade.** Once per server start, after the vault answers, values in
 `/data/app-secrets/<id>/<name>` move into the vault (`import_legacy_app_secrets`):
 each becomes a key granted to its own app and the owner's agents, sent as a
-bearer token, with no sites until the owner adds them. Each key records its
+bearer token, with no sites until the owner adds them, except that the app's
+model-provider key starts on its provider's site. Each key records its
 origin (the app and its exact old name), set at creation. The vault
 finds or creates that key in one locked step (`Vault.save_owned`), at the
 first free name (`api.key` → `api-key`, then `app<id>-api-key`, then
@@ -108,6 +119,18 @@ stays for them), as the per-app store did. A ledger
 never re-imported, unreadable values are retried, and a purged app's leftover
 values are skipped because its id may be reused. The old ciphertext stays in
 place for one release.
+
+**Provider keys saved before site checks.** Earlier builds of the vault sent
+an app's own model-provider key to its provider without checking the key's
+sites, and saved it with none. Checking sites would have silently broken those
+providers, and skipping the check would leave them unrestricted, so the
+vault's one-time `provider-sites` store upgrade
+(`give_provider_keys_their_sites`, run after the import) gives each such key
+that still has no sites exactly its provider's `POST <base_url>/responses`
+site. A key the owner already gave sites keeps them, even if they leave the
+provider out. The vault records the upgrade in its store (a new store starts
+with it done), so it runs once: a site the owner removes afterwards stays
+removed.
 
 **Transition.** For one release, `/api/apps/{id}/secrets/{name}`
 (`routes/app_secrets_compat.py`, marked `Deprecation: true`) answers from the

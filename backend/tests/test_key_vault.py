@@ -407,6 +407,49 @@ def test_use_injects_the_key_and_redacts_the_echo(vault, client):
   assert DUMMY not in vault.usage_path.read_text()
 
 
+class _MethodOverrideSite(BaseHTTPRequestHandler):
+  """A site that, like Google's JSON APIs, runs the method an override header names."""
+  ran: list = []
+
+  def log_message(self, *args):
+    pass
+
+  def do_POST(self):
+    effective = self.command
+    for header in ("X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"):
+      effective = self.headers.get(header) or effective
+    type(self).ran.append((effective, self.headers.get("Authorization")))
+    self.rfile.read(int(self.headers.get("Content-Length") or 0))
+    self.send_response(200)
+    self.send_header("Content-Length", "0")
+    self.end_headers()
+
+
+@pytest.mark.parametrize("override", ["X-HTTP-Method-Override", "X-HTTP-Method", "x-method-override"])
+def test_a_post_only_grant_cannot_override_the_method_the_site_runs(vault, override):
+  vault.put_key("echo", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants(
+    sites=[{"host": "echo.example.com", "methods": ["POST"], "paths": ["/anything/*"]}],
+  )})
+  _MethodOverrideSite.ran = []
+  site = ThreadingHTTPServer(("127.0.0.1", 0), _MethodOverrideSite)
+  threading.Thread(target=site.serve_forever, daemon=True).start()
+  local = lambda host, timeout: http.client.HTTPConnection(  # noqa: E731
+    "127.0.0.1", site.server_address[1], timeout=timeout,
+  )
+  try:
+    with _vault_socket(vault, local) as client:
+      response = client.post(
+        "/use/echo/echo.example.com/anything/item", content=b"{}",
+        headers={"X-Vault-Caller": "app:7", override: "PATCH"},
+      )
+  finally:
+    site.shutdown()
+    site.server_close()
+  assert response.status_code == 200, response.text
+  # The site received the key, so it ran exactly the method the grant allows.
+  assert _MethodOverrideSite.ran == [("POST", f"Bearer {DUMMY}")]
+
+
 def test_denied_use_never_reaches_upstream(vault, client):
   response = client.get(
     "/use/echo/echo.example.com/admin", headers={"X-Vault-Caller": "agent"},
@@ -528,6 +571,47 @@ def test_the_apps_own_save_keeps_its_ownership(vault):
   vault.save_owned(9, "api.key", "first")
   assert vault.save_owned(9, "api.key", "second") == {"name": "api-key", "created": False}
   assert {k["name"]: k["origin"] for k in vault.list_keys()}["api-key"] == {"app": 9, "name": "api.key"}
+
+
+PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/responses"]}
+
+
+def test_provider_sites_upgrade_runs_once_per_store_and_only_on_an_older_store(tmp_path):
+  fresh = kv.Vault(tmp_path / "fresh")
+  fresh.save_owned(9, "api_key", DUMMY)
+  entry = [{"app": 9, "name": "api_key", "sites": [PROVIDER_SITE]}]
+  # A store this version created has nothing to upgrade.
+  assert fresh.seed_owned_sites(entry) == {"seeded": [], "done": True}
+  assert fresh.list_keys()[0]["grants"]["sites"] == []
+
+  older = kv.Vault(tmp_path / "older")
+  older.save_owned(9, "api_key", DUMMY)
+  payload = json.loads(older.store_path.read_text())
+  del payload["upgrades"]                    # as an earlier version wrote it
+  older.store_path.write_text(json.dumps(payload))
+  reloaded = kv.Vault(tmp_path / "older")
+  unusable = {"app": 9, "name": "api_key", "sites": [{"host": "bad host"}]}
+  assert reloaded.seed_owned_sites([unusable, *entry]) == {"seeded": ["api_key"], "done": True}
+  assert reloaded.list_keys()[0]["grants"]["sites"] == [PROVIDER_SITE]
+  # Recorded with the store: a restart never runs it again.
+  again = kv.Vault(tmp_path / "older")
+  record = again.list_keys()[0]
+  again.put_key("api_key", {"inject": record["inject"], "grants": {**record["grants"], "sites": []}})
+  assert kv.Vault(tmp_path / "older").seed_owned_sites(entry) == {"seeded": [], "done": True}
+  assert kv.Vault(tmp_path / "older").list_keys()[0]["grants"]["sites"] == []
+
+
+def test_a_new_own_key_starts_on_the_sites_the_server_names_and_a_resave_keeps_the_owners(vault):
+  created = vault.save_owned(9, "api_key", DUMMY, sites=[PROVIDER_SITE])
+  assert created == {"name": "api_key", "created": True}
+  record = next(k for k in vault.list_keys() if k["name"] == "api_key")
+  assert record["grants"]["sites"] == [PROVIDER_SITE]
+  narrowed = {"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]}
+  vault.put_key("api_key", {"inject": record["inject"],
+                            "grants": {**record["grants"], "sites": [narrowed]}})
+  vault.save_owned(9, "api_key", "rotated-dummy", sites=[PROVIDER_SITE])
+  record = next(k for k in vault.list_keys() if k["name"] == "api_key")
+  assert record["grants"]["sites"] == [narrowed]
 
 
 def test_save_owned_finds_or_creates_by_origin_under_one_lock(vault):

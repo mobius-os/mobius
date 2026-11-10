@@ -115,13 +115,16 @@ notifies the owner. Apps never receive a value: an app asks once for a key by
 name, the owner approves it, and the app then sends requests through
 `/api/keys/use/…`, where the server identifies the app from its own
 platform-issued token and the vault adds the key on the way out (default-deny
-sites, methods and paths; public-address pinning; no redirects; echoed values
+sites, methods and paths, with method-override headers dropped;
+public-address pinning; no redirects; echoed values
 redacted; answers sandboxed). The vault listens only on a mode-0600 socket
 and trusts any process that can open it (the server, and owner tools running
 as the same user). Approving requests and changing grants is refused to apps,
 shared-browser guests and delegated helpers. A key an app saved for itself
-stops being the app's, and the app loses its grant, once the owner or an
-agent stores a new value in it.
+obeys its sites too, including when the platform sends it to the app's model
+provider (a new provider key starts on that provider's site). It stops being
+the app's, and the app loses its grant, once the owner or an agent stores a
+new value in it.
 App ids are reused after a purge, so a purge removes that app's grants and,
 like a data wipe, erases the keys it saved for itself. Backups carry the vault only in the
 encrypted secrets archive (skipped when no backup recipient is configured),

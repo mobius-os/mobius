@@ -32,8 +32,9 @@ SPEC.loader.exec_module(kv)
 
 DUMMY = "dummy-route-key-0123456789"
 SITE = {"host": "api.example.com", "methods": ["GET", "POST"], "paths": ["/v1/*"]}
-# A model provider an app declares; an app's own key may be sent to it.
+# A model provider an app declares; an app's own key starts allowed there.
 PROVIDER = "https://models.example.net/v1"
+PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/responses"]}
 
 
 class _Echo(BaseHTTPRequestHandler):
@@ -98,12 +99,19 @@ def pushes(monkeypatch):
   return sent
 
 
-def _app(db, slug, app_id=None):
+def _app(db, slug, app_id=None, provider_key=None, base_url=PROVIDER):
+  """An installed app; ``provider_key`` declares its model provider's secret name."""
+  contract = None
+  if provider_key is not None:
+    contract = {"model_provider": {
+      "name": slug.title(), "base_url": base_url, "secret_name": provider_key,
+      "models": [{"id": f"{slug}-model"}], "default_model": f"{slug}-model",
+    }}
   app = models.App(
     id=app_id,
     source_dir=f"/tmp/mobius-tests/{slug}", name=slug.title(), slug=slug, description="test",
     jsx_source="export default function App() { return null }",
-    compiled_path=f"/tmp/{slug}.js",
+    compiled_path=f"/tmp/{slug}.js", capability_contract=contract,
   )
   db.add(app)
   db.commit()
@@ -300,7 +308,8 @@ def _legacy_secret(app_id, name, value):
 
 def test_saved_app_secrets_move_into_the_vault_once(client, auth, db, vault):
   import asyncio
-  first, second = _app(db, "first"), _app(db, "second")
+  first = _app(db, "first", provider_key="api_key")
+  second = _app(db, "second", provider_key="api_key")
   _legacy_secret(first.id, "api_key", "first-secret")
   _legacy_secret(second.id, "api_key", "second-secret")   # same name, another app
   _legacy_secret(second.id, "bot.token", "x")              # dotted and short
@@ -317,6 +326,9 @@ def test_saved_app_secrets_move_into_the_vault_once(client, auth, db, vault):
   assert keys["api_key"]["grants"]["apps"] == [first.id]
   assert keys[f"app{second.id}-api_key"]["grants"]["apps"] == [second.id]
   assert vault.reveal(f"app{second.id}-api_key", ("owner", "")) == "second-secret"
+  # Each provider key starts allowed on its provider's site only; others on none.
+  assert keys["api_key"]["grants"]["sites"] == [PROVIDER_SITE]
+  assert keys["bot-token"]["grants"]["sites"] == []
   # Model providers and the adapter find each app's own value by its old name.
   assert key_vault.reveal_model_provider_key(second.id, "api_key", PROVIDER) == "second-secret"
   assert key_vault.reveal_model_provider_key(first.id, "api_key", PROVIDER) == "first-secret"
@@ -445,15 +457,17 @@ def test_distinct_old_names_stay_distinct_keys(client, auth, db, vault):
   _legacy_secret(app.id, long_b, "long-b-value")
   moved = asyncio.run(key_vault.import_legacy_app_secrets({app.id}))
   assert len(set(moved.values())) == 4
+  keys = vault.list_keys()
   for name, value in (("api.key", "dotted-value"), ("api-key", "dashed-value"),
                       (long_a, "long-a-value"), (long_b, "long-b-value")):
-    assert key_vault.reveal_model_provider_key(app.id, name, PROVIDER) == value
+    own = key_vault.owned_key_in(keys, app.id, name)
+    assert vault.reveal(own["name"], ("owner", "")) == value
   assert vault.reveal(long_a, ("owner", "")) == DUMMY    # the occupied names were untouched
 
 
 def test_simultaneous_saves_leave_one_key_per_app_secret(client, auth, db, vault):
   import asyncio
-  app = _app(db, "racer")
+  app = _app(db, "racer", provider_key="provider-key")
 
   async def save_all():
     return await asyncio.gather(*(
@@ -484,11 +498,76 @@ def test_a_borrowed_key_reaches_only_a_model_provider_on_its_sites(client, auth,
   assert reveal(other.id, "shared-provider", "https://api.example.com/v1") is None
 
 
+def test_narrowing_an_apps_own_provider_key_stops_its_provider(client, auth, db, vault):
+  """An app-saved provider key obeys its sites like a borrowed one: narrowed
+  to another site in Settings › Keys, it is no longer sent to the provider."""
+  provider = "https://other.example.com/v1"
+  app = _app(db, "own-provider", provider_key="api_key", base_url=provider)
+  path = f"/api/apps/{app.id}/secrets/api_key"
+  assert client.put(path, headers=_app_auth(db, app), json={"value": DUMMY}).status_code == 204
+  [record] = client.get("/api/keys", headers=auth).json()["keys"]
+  # A new provider key starts allowed on its provider's own endpoint only.
+  assert record["grants"]["sites"] == [
+    {"host": "other.example.com", "methods": ["POST"], "paths": ["/v1/responses"]},
+  ]
+  reveal = key_vault.reveal_model_provider_key
+  assert reveal(app.id, "api_key", provider) == DUMMY
+  assert reveal(app.id, "api_key", "https://elsewhere.example.com/v1") is None
+  narrowed = client.put(f"/api/keys/{record['name']}", headers=auth, json={
+    "inject": record["inject"], "revision": record["revision"],
+    "grants": {**record["grants"], "sites": [
+      {"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]},
+    ]},
+  })
+  assert narrowed.status_code == 200, narrowed.text
+  assert key_vault.model_provider_key_sync(app.id, "api_key", provider) is None
+  assert reveal(app.id, "api_key", provider) is None
+  # Still the app's own key: narrowing changed where it goes, not whose it is.
+  assert key_vault.owned_key_in(vault.list_keys(), app.id, "api_key") is not None
+
+
+def test_upgrade_gives_earlier_siteless_provider_keys_their_providers_site(client, auth, db, vault):
+  """Provider keys an earlier version saved with no sites keep working, now
+  on their provider's site; keys the owner already restricted keep their
+  sites; and the upgrade runs once, so a site removed later stays removed."""
+  import asyncio
+  quiet = _app(db, "quiet", provider_key="api_key")
+  narrowed = _app(db, "narrowed", provider_key="token", base_url="https://other.example.com/v1")
+  plain = _app(db, "plain")
+  # As earlier versions stored them: no sites, on a store from before the upgrade.
+  vault.save_owned(quiet.id, "api_key", "quiet-value")
+  vault.save_owned(narrowed.id, "token", "narrowed-value",
+                   sites=[{"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]}])
+  vault.save_owned(plain.id, "api_key", "plain-value")
+  vault._upgrades.discard("provider-sites")
+  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) is None
+
+  seeded = asyncio.run(key_vault.give_provider_keys_their_sites())
+  keys = vault.list_keys()
+  quiet_key = key_vault.owned_key_in(keys, quiet.id, "api_key")
+  assert seeded == [quiet_key["name"]]
+  assert quiet_key["grants"]["sites"] == [PROVIDER_SITE]
+  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) == "quiet-value"
+  # The owner's narrowing wins over the provider's address.
+  assert key_vault.owned_key_in(keys, narrowed.id, "token")["grants"]["sites"][0]["host"] == "safe.example.com"
+  assert key_vault.reveal_model_provider_key(
+    narrowed.id, "token", "https://other.example.com/v1",
+  ) is None
+  assert key_vault.owned_key_in(keys, plain.id, "api_key")["grants"]["sites"] == []
+
+  # The owner removes the site afterwards; a later start never puts it back.
+  vault.put_key(quiet_key["name"], {"inject": quiet_key["inject"],
+                                    "grants": {**quiet_key["grants"], "sites": []}})
+  assert asyncio.run(key_vault.give_provider_keys_their_sites()) == []
+  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) is None
+
+
 def test_an_owner_filled_key_is_no_longer_the_apps_to_replace_delete_or_send(client, auth, db, vault):
   """An app that created a key under a plain name loses it once the owner
   fills in the value: it can no longer swap the value, delete the key, or
   have the platform send it to the app's own model provider host."""
-  app = _app(db, "squatter")
+  attacker = "https://attacker.example/v1"
+  app = _app(db, "squatter", provider_key="OPENAI_API_KEY", base_url=attacker)
   app_auth = _app_auth(db, app)
   path = f"/api/apps/{app.id}/secrets/OPENAI_API_KEY"
   assert client.put(path, headers=app_auth, json={"value": "app-dummy"}).status_code == 204
@@ -499,7 +578,6 @@ def test_an_owner_filled_key_is_no_longer_the_apps_to_replace_delete_or_send(cli
     "value": "owners-real-key", "inject": record["inject"], "grants": record["grants"],
   })
   assert filled.status_code == 200
-  attacker = "https://attacker.example/v1"
   assert key_vault.reveal_model_provider_key(app.id, "OPENAI_API_KEY", attacker) is None
   assert client.head(path, headers=app_auth).status_code == 404
   assert client.delete(path, headers=app_auth).status_code == 404

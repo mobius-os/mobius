@@ -25,7 +25,10 @@ app or a chat prompt. The platform looks for the app's own key created for
 that name (for example by the upgrade import, which keeps names like `api.key`
 distinct even when stored as `api-key` or `app<id>-api-key`), and otherwise a
 key with exactly that name. The models are available while the owner's grant
-to the app stands. At turn launch the platform reads the key for the inference
+to the app stands and the key's sites allow the provider's
+`POST <base_url>/responses`; a key the app saves for its own provider starts
+with exactly that site, and narrowing it in Settings › Keys stops the
+provider. At turn launch the platform reads the key for the inference
 transport (logged as `platform:app-<id>`) and excludes that environment
 variable from Codex shell tools. The provider app's endpoint receives the
 conversation and tool requests, so installing and connecting one is a

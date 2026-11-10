@@ -57,6 +57,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 STORE_VERSION = 1
+# One-time changes to keys an earlier version stored, by name. A new store
+# starts with every one done; an older store runs each once, when the server
+# supplies what it needs, and records it so it never runs again.
+#   provider-sites: earlier versions created an app's own model-provider key
+#   with no sites and sent it to the provider unchecked (Vault.seed_owned_sites).
+STORE_UPGRADES = frozenset({"provider-sites"})
 SOCKET_NAME = "vault.sock"
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 HOST_RE = re.compile(
@@ -92,6 +98,12 @@ HOP_BY_HOP = frozenset({
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
   "proxy-connection", "te", "trailer", "trailers", "transfer-encoding",
   "upgrade",
+})
+# Headers some APIs (Google's among them) read as the real method. The site
+# rule checks the wire method, so a caller allowed only POST could otherwise
+# have the site run PATCH or DELETE with the key.
+METHOD_OVERRIDE_HEADERS = frozenset({
+  "x-http-method-override", "x-http-method", "x-method-override",
 })
 
 
@@ -458,9 +470,10 @@ def build_upstream_request(
   for name, header_value in caller_headers:
     lowered = name.lower()
     if (
+      lowered in HOP_BY_HOP or lowered in METHOD_OVERRIDE_HEADERS
       # A ranged answer could carry an echoed key in slices that redaction,
       # which matches the whole value, would never recognise.
-      lowered in HOP_BY_HOP or lowered in ("host", "content-length", "accept-encoding", "range", "if-range")
+      or lowered in ("host", "content-length", "accept-encoding", "range", "if-range")
       or lowered.startswith("x-vault-") or lowered.startswith("proxy-")
       or lowered == slot
     ):
@@ -520,7 +533,7 @@ class Vault:
     self._lock = threading.RLock()
     self._prepare_folder()
     self._aead = AESGCM(self._load_master_key())
-    self._records = self._load_records()
+    self._records, self._upgrades = self._load_store()
     self._requests = self._load_requests()
     # Earlier builds kept an origin after its app lost the grant; never let
     # one stored that way confer ownership.
@@ -557,16 +570,18 @@ class Vault:
     _atomic_write(self.master_path, key)
     return key
 
-  def _load_records(self) -> dict:
+  def _load_store(self) -> tuple[dict, set]:
+    """The stored keys and the store upgrades already done."""
     if not self.store_path.exists():
-      return {}
+      return {}, set(STORE_UPGRADES)
     payload = json.loads(self.store_path.read_text())
     if payload.get("version") != STORE_VERSION:
       raise SystemExit("key vault: unknown store version; refusing to start")
-    return payload.get("keys") or {}
+    return payload.get("keys") or {}, set(payload.get("upgrades") or [])
 
   def _save(self) -> None:
-    payload = {"version": STORE_VERSION, "keys": self._records}
+    payload = {"version": STORE_VERSION, "keys": self._records,
+               "upgrades": sorted(self._upgrades)}
     _atomic_write(self.store_path, json.dumps(payload, indent=1, sort_keys=True).encode())
 
   def _load_requests(self) -> dict:
@@ -671,25 +686,35 @@ class Vault:
     self.log_usage(name, "owner", "-", "-", "-", "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
 
-  def save_owned(self, app_id: int, secret_name: str, value: str) -> dict:
+  def _owned_name(self, origin: dict) -> str | None:
+    """The key the app in ``origin`` created for that secret and still holds."""
+    return next(
+      (n for n, r in self._records.items()
+       if r.get("origin") == origin and origin["app"] in r["grants"]["apps"]),
+      None,
+    )
+
+  def save_owned(self, app_id: int, secret_name: str, value: str, sites=None) -> dict:
     """Save an app's own secret by its origin, in one locked step.
 
     The key ``app_id`` created for ``secret_name`` and still holds is
-    replaced; otherwise a new key is created at the first free name (plain,
-    then app-scoped, then numbered), granted to the app and the owner's
-    agents, sent as a bearer token, with no sites yet. An app holds at most
-    ``MAX_OWNED_PER_APP`` such keys, as in the per-app store. Doing both under
-    the vault's lock means simultaneous saves can never leave two keys for one
-    app secret.
+    replaced, keeping the owner's choices; otherwise a new key is created at
+    the first free name (plain, then app-scoped, then numbered), granted to
+    the app and the owner's agents, sent as a bearer token, on ``sites`` (none
+    unless the server names the app's model-provider site). An app holds at
+    most ``MAX_OWNED_PER_APP`` such keys, as in the per-app store. Doing both
+    under the vault's lock means simultaneous saves can never leave two keys
+    for one app secret.
     """
     origin = validate_origin({"app": app_id, "name": secret_name})
     value = validate_value(value)
     with self._lock:
-      for name, record in self._records.items():
-        if record.get("origin") == origin and app_id in record["grants"]["apps"]:
-          self.put_key(name, {"value": value, "inject": record["inject"],
-                              "grants": record["grants"], "origin": origin})
-          return {"name": name, "created": False}
+      name = self._owned_name(origin)
+      if name is not None:
+        record = self._records[name]
+        self.put_key(name, {"value": value, "inject": record["inject"],
+                            "grants": record["grants"], "origin": origin})
+        return {"name": name, "created": False}
       owned = sum(1 for r in self._records.values()
                   if (r.get("origin") or {}).get("app") == app_id and app_id in r["grants"]["apps"])
       if owned >= MAX_OWNED_PER_APP:
@@ -699,7 +724,7 @@ class Vault:
           self.put_key(name, {
             "value": value,
             "inject": dict(DEFAULT_INJECT),
-            "grants": {"apps": [app_id], "agents": True, "sites": []},
+            "grants": {"apps": [app_id], "agents": True, "sites": sites or []},
             "origin": origin,
             "create_only": True,
           })
@@ -718,11 +743,7 @@ class Vault:
     """
     origin = validate_origin({"app": app_id, "name": secret_name})
     with self._lock:
-      name = next(
-        (n for n, r in self._records.items()
-         if r.get("origin") == origin and app_id in r["grants"]["apps"]),
-        None,
-      )
+      name = self._owned_name(origin)
       if name is None:
         return None
       deleted = self._release_locked(name, app_id)
@@ -737,6 +758,42 @@ class Vault:
   def _touch(record: dict) -> None:
     record["updated_at"] = _now()
     record["revision"] = record.get("revision", 0) + 1
+
+  def seed_owned_sites(self, entries) -> dict:
+    """Run the ``provider-sites`` store upgrade, once per store.
+
+    Each entry names an app, its model provider's secret name and the site the
+    provider sends the key to. That app's own key for the secret gets the site
+    when it still has none, so a provider that worked before keeps working,
+    now within a site the owner can see and narrow. A key the owner already
+    gave sites keeps them. Once recorded, the upgrade never runs again, so a
+    site the owner removes later is never put back.
+    """
+    if not isinstance(entries, list) or len(entries) > MAX_KEYS:
+      raise VaultError(400, "List each app's provider key and its sites.")
+    seeded = []
+    with self._lock:
+      if "provider-sites" in self._upgrades:
+        return {"seeded": [], "done": True}
+      for entry in entries:
+        try:
+          origin = validate_origin({"app": entry.get("app"), "name": entry.get("name")})
+          sites = validate_grants({"sites": entry.get("sites")})["sites"]
+        except (AttributeError, VaultError):
+          continue  # one unusable declaration must not block the rest
+        name = self._owned_name(origin)
+        record = self._records.get(name) if name else None
+        if record is None or record["grants"]["sites"] or not sites:
+          continue
+        record["grants"] = {**record["grants"], "sites": sites}
+        record["revision"] = record.get("revision", 0) + 1
+        record["updated_at"] = _now()
+        seeded.append((name, sites[0]["host"]))
+      self._upgrades.add("provider-sites")
+      self._save()
+    for name, host in seeded:
+      self.log_usage(name, "platform", "-", host, "-", "updated")
+    return {"seeded": [name for name, _ in seeded], "done": True}
 
   @staticmethod
   def _drop_orphaned_origin(record: dict) -> None:
@@ -1133,7 +1190,11 @@ class VaultHandler(BaseHTTPRequestHandler):
       body = self._json_body()
       if not isinstance(body.get("app"), int) or not isinstance(body.get("name"), str):
         raise VaultError(400, "Name the app id and its secret name.")
-      self._send_json(200, vault.save_owned(body["app"], body["name"], body.get("value")))
+      self._send_json(200, vault.save_owned(
+        body["app"], body["name"], body.get("value"), sites=body.get("sites"),
+      ))
+    elif method == "POST" and parts == ["upgrades", "provider-sites"]:
+      self._send_json(200, vault.seed_owned_sites(self._json_body().get("keys")))
     elif method == "POST" and parts == ["owned", "release"]:
       body = self._json_body()
       if not isinstance(body.get("app"), int) or not isinstance(body.get("name"), str):

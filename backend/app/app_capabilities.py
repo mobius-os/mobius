@@ -729,7 +729,7 @@ def contract_from_app_state(
   Store installs derive their complete contract from the reviewed manifest.
   Local apps are created and edited directly by their owner, so their durable
   database state is authoritative for server permissions while ``mobius.json``
-  is authoritative for host-mediated runtime capabilities — including an
+  is authoritative for host-mediated runtime capabilities — including a
   vault-key model provider, which reaches no turn until the owner approves its
   key request in Settings › Keys.
   """
