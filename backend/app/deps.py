@@ -831,11 +831,23 @@ def acts_for_guest(principal: Principal) -> bool:
   return principal.browser is not None
 
 
+def is_installation_owner_control(principal: Principal) -> bool:
+  """Whether this bearer may use installation-owner controls: the owner or the
+  owner's own top-level agent, never a delegated helper or a shared-browser
+  guest (or work one started). The non-raising form of
+  ``require_installation_owner_control``, for reads that stay private by
+  returning nothing rather than refusing."""
+  return principal.delegation_id is None and not acts_for_guest(principal)
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
+  if is_installation_owner_control(principal):
+    return
+  # A delegated helper and a shared-browser guest are refused separately so each
+  # learns which boundary it hit.
   require_nondelegated_owner_control(principal)
-  if acts_for_guest(principal):
-    raise HTTPException(403, "Only the installation owner can manage this access.")
+  raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
 def get_owner_or_delegated_owner_for_app_token(

@@ -1243,12 +1243,15 @@ def test_an_unknown_charge_outcome_keeps_the_confirmation_for_a_replay(
 
 
 def test_waiting_payments_are_the_owners_own_to_read(client, auth, db, paired, real_payments):
-  """Listing an app's waiting payments is owner-only, like the rest of the
-  credits surface: not a shared-browser guest or a delegated helper."""
+  """The owner and their own top-level agent see the pending payments; a
+  shared-browser guest or a delegated helper authenticates but reads an empty
+  list, never the owner's payments and never an error."""
   app = _app(db, "payer")
   assert client.post("/api/identity/credits/charges", json=CHARGE,
                      headers=_as(db, app, "private")).status_code == 409
   path = f"/api/apps/{app.id}/credits-charges"
-  assert client.get(path, headers=auth).status_code == 200
-  assert client.get(path, headers=_guest(db)).status_code == 403
-  assert client.get(path, headers=_delegated_helper(db)).status_code == 403
+  owner_view = client.get(path, headers=auth)
+  assert owner_view.status_code == 200 and len(owner_view.json()["payments"]) == 1
+  for headers in (_guest(db), _delegated_helper(db)):
+    hidden = client.get(path, headers=headers)
+    assert hidden.status_code == 200 and hidden.json()["payments"] == []
