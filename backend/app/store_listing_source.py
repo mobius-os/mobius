@@ -185,8 +185,9 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
 
   A save interrupted after writing, or one that failed after Git advanced,
   leaves listing files the next save may carry: the editor's hash-named art
-  and the declared icon, each a clean listing image, and mobius.json's icon
-  and store fields. So may the managed-ignore migration apply itself makes.
+  and the declared icon, each a clean listing image, mobius.json's icon,
+  store and offered license fields, and the license text a save writes. So
+  may the managed-ignore migration apply itself makes.
   Anything else (code, or other manifest fields) was never reviewed.
   """
   if tree is None:
@@ -215,20 +216,18 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
     _manifest_from(read("mobius.json", MANIFEST_MAX_BYTES)),
   ]
   icons = _carried_icon_paths(*manifests)
-  for path in changed:
+  license_paths = {path for path in changed if store_licenses.is_license_file(path)}
+  license_choice_changed = (
+    store_licenses.offered_license(manifests[0] or {})
+    != store_licenses.offered_license(manifests[1] or {})
+  )
+  if (license_paths or license_choice_changed) and not _saved_license_text_only(
+    root, accepted, changed, read, manifests[1] or {},
+  ):
+    return True
+  for path in changed - license_paths:
     if path == "mobius.json":
       if None in manifests or not _manifest_change_is_listing(*manifests):
-        return True
-      continue
-    if store_licenses.is_license_file(path):
-      # Only the exact LICENSE a save writes for the declared license counts,
-      # and a save removes another root license text only while writing it.
-      candidate = manifests[1] or {}
-      spdx = store_licenses.offered_license(candidate)
-      saved = read(store_licenses.LICENSE_FILE, MANIFEST_MAX_BYTES)
-      if not spdx or saved != store_licenses.license_text(spdx, candidate):
-        return True
-      if path != store_licenses.LICENSE_FILE and read(path, 0) is not None:
         return True
       continue
     # Only a listing file may differ; nothing else is even read.
@@ -244,6 +243,35 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
     ):
       return True
   return False
+
+
+def _saved_license_text_only(
+  root: Path,
+  accepted: str,
+  changed: set[str],
+  read: Callable[[str, int], bytes | None],
+  candidate: dict,
+) -> bool:
+  """Whether the candidate's root license texts are exactly what a save writes.
+
+  A save writes LICENSE only for a changed license choice, or when no root
+  license text exists, and always writes the generated text for the choice;
+  a changed choice also removes every other root license text. So a
+  touched license file, or a license choice that differs from the accepted
+  one, rides along only beside that exact LICENSE and no other license text.
+  Anything else, such as a manifest naming a new license above the old
+  terms, was never saved and would publish contradictory licenses.
+  """
+  spdx = store_licenses.offered_license(candidate)
+  if not spdx or read(store_licenses.LICENSE_FILE, MANIFEST_MAX_BYTES) != (
+    store_licenses.license_text(spdx, candidate)
+  ):
+    return False
+  others = {
+    path for path in app_git.ref_root_files(root, accepted) | changed
+    if store_licenses.is_license_file(path) and path != store_licenses.LICENSE_FILE
+  }
+  return all(read(path, 0) is None for path in others)
 
 
 # The store fields the editor writes. Any other store key is curated

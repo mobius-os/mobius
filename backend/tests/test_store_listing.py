@@ -1761,18 +1761,25 @@ def test_only_an_offered_license_can_be_saved(client, auth):
   assert not (source / "LICENSE").exists()
 
 
-@pytest.mark.parametrize("edit", ["license_text", "license_value", "license_deleted"])
+@pytest.mark.parametrize(
+  "edit", ["license_text", "license_value", "license_deleted", "license_switched"],
+)
 def test_unreviewed_license_edits_cannot_ride_along(client, auth, edit):
   source = _source()
-  if edit == "license_deleted":
+  author_text = "MIT License\n\nCopyright (c) 2026 Example Author\n"
+  if edit in ("license_deleted", "license_switched"):
     manifest = json.loads(_MANIFEST)
     manifest["license"] = "MIT"
     (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
-    (source / "LICENSE").write_text("MIT License\n\nCopyright (c) 2026 Example Author\n")
+    (source / "LICENSE").write_text(author_text)
   app_id = _create(client, auth, source)
   if edit == "license_deleted":
     # A save never deletes the license text.
     (source / "LICENSE").unlink()
+  elif edit == "license_switched":
+    # Only the manifest names the new license; the old MIT text stays, so
+    # saving the same new choice would keep it and publish both licenses.
+    manifest["license"] = "Apache-2.0"
   elif edit == "license_text":
     # Anything but the exact text a save writes was never reviewed.
     (source / "LICENSE").write_text("import os; os.system('x')\n")
@@ -1785,10 +1792,50 @@ def test_unreviewed_license_edits_cannot_ride_along(client, auth, edit):
   app_git._run(source, "add", "-A")
   app_git._run(source, "commit", "-qm", "committed, never applied")
 
-  refused = _save(client, auth, app_id, **_complete_listing())
+  saved_license = "Apache-2.0" if edit == "license_switched" else "MIT"
+  refused = _save(client, auth, app_id, **_complete_listing(license=saved_license))
 
   assert refused.status_code == 409, refused.text
   assert refused.json()["detail"]["code"] == "source_has_draft"
+  if edit == "license_switched":
+    assert (source / "LICENSE").read_text() == author_text
+
+
+@pytest.mark.parametrize("old_text", ["LICENSE", "COPYING"])
+def test_a_license_switch_rides_along_only_beside_its_new_text(tmp_path, old_text):
+  """A changed license choice counts as a listing save only with the exact
+  LICENSE a save writes and no old license text beside it, in the worktree
+  and in the exact tree apply accepts alike."""
+  from app import store_licenses
+
+  root = tmp_path / "app"
+  root.mkdir()
+  app_git.ensure_repo(root)
+  manifest = {"id": "demo", "name": "Demo", "license": "MIT"}
+  (root / "mobius.json").write_text(json.dumps(manifest))
+  (root / old_text).write_text("MIT License\n\nCopyright (c) 2026 Example Author\n")
+  subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+  subprocess.run(
+    ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+     "commit", "-q", "-m", "accepted"], check=True,
+  )
+  accepted = app_git.head_sha(root, "HEAD")
+
+  def rides_along() -> bool:
+    in_worktree = store_listing_source.changes_beyond_listing(root, accepted)
+    tree = app_git.snapshot_worktree(root).tree_oid
+    assert store_listing_source.changes_beyond_listing(root, accepted, tree) is in_worktree
+    return not in_worktree
+
+  manifest["license"] = "Apache-2.0"
+  (root / "mobius.json").write_text(json.dumps(manifest))
+  assert rides_along() is False
+  (root / "LICENSE").write_bytes(store_licenses.license_text("Apache-2.0", manifest))
+  # The old terms in COPYING still contradict the new LICENSE.
+  assert rides_along() is (old_text == "LICENSE")
+  if old_text == "COPYING":
+    (root / "COPYING").unlink()
+    assert rides_along() is True
 
 
 @pytest.mark.parametrize("license_written", [True, False])
