@@ -21,3 +21,18 @@
   outline-offset: 2px;
   border-radius: 2px;
 }
+
+/* A note shown only in part, with no way to read the rest from this view. */
+.peer-note-excerpt {
+  display: inline-block;
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted);
+}
+
+/* A full note beyond the display limit is plain text, never markdown. */
+.peer-note-full {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

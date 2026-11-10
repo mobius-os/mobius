@@ -4,7 +4,7 @@ import { useId, useRef } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { ArrowDown, ArrowUp } from '@openai/apps-sdk-ui/components/Icon'
 import { usePeerTimelineRecord } from './peerTimelineContext.js'
-import { peerTime } from './peerTimeline.js'
+import { peerNoteMessageId, peerTime } from './peerTimeline.js'
 import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
@@ -153,7 +153,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                     <KindBadge kind={model.kind} />
                     <DeliveryBadge delivery={model.delivery} record={record} />
                   </span>
-                  <PeerNoteBody chatId={chatId} messageId={record?.message_id ?? record?.id}
+                  <PeerNoteBody chatId={chatId} messageId={peerNoteMessageId(record)}
                     body={model.body} truncated={model.bodyTruncated}
                     render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                 </div>
@@ -177,7 +177,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                           </span>
                         )}
                       </span>
-                      <PeerNoteBody chatId={chatId} messageId={records[index]?.message_id ?? records[index]?.id}
+                      <PeerNoteBody chatId={chatId} messageId={peerNoteMessageId(records[index])}
                         body={note.body} truncated={note.bodyTruncated}
                         render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                     </li>

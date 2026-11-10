@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.agent_coordination import (
-  _with_note_heads,
+  with_note_heads,
   chat_message_history_query,
   serialize_messages,
 )
@@ -79,7 +79,7 @@ def _peer_events(
         event_id < cursor.event_id,
       ),
     ))
-  rows = _with_note_heads(query).order_by(
+  rows = with_note_heads(query).order_by(
     message.created_at.desc(), event_id.desc(),
   ).limit(limit).all()
   serialized = serialize_messages(db, rows)

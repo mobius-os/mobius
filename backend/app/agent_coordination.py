@@ -11,7 +11,7 @@ import time
 from typing import Any
 import uuid
 
-from sqlalchemy import String, and_, cast, func, literal, or_
+from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -586,18 +586,48 @@ def _channel_query(db: Session, scope: CoordinationScope):
   )
 
 
-def _with_note_heads(query):
+# SQLite's text functions stop at an embedded U+0000, which notes stored
+# before such bodies were refused may contain. Its byte functions do not: the
+# head is read as bytes, enough for PEER_NOTE_CHARS of any UTF-8 text.
+_HEAD_BYTES = 4 * PEER_NOTE_CHARS
+
+
+def with_note_heads(query):
   """Select each note's head and length instead of its whole body.
 
   Lists and snapshots show at most PEER_NOTE_CHARS of a note, so they never
-  load a longer body; one extra character proves a body is longer.
+  load a longer body. PostgreSQL text cannot hold U+0000.
   """
   message = models.AgentCoordinationMessage
+  if query.session.get_bind().dialect.name == "sqlite":
+    blob = cast(message.body, LargeBinary)
+    head = [
+      func.substr(blob, 1, _HEAD_BYTES).label("body"),
+      func.length(blob).label("body_bytes"),
+    ]
+  else:
+    head = [func.substr(message.body, 1, PEER_NOTE_CHARS).label("body")]
   return query.with_entities(
     *(column for column in message.__table__.columns if column.key != "body"),
-    func.substr(message.body, 1, PEER_NOTE_CHARS + 1).label("body"),
+    *head,
     func.length(message.body).label("body_chars"),
   )
+
+
+def _note_head(row) -> tuple[str, int]:
+  """A head row's text and its whole note's length in characters."""
+  head, chars = row.body, row.body_chars
+  if isinstance(head, bytes):
+    whole = row.body_bytes <= len(head)
+    # A cut through one character drops only that character.
+    head = head.decode("utf-8", "ignore")
+    if whole:
+      # The whole body was read, so count it, past any U+0000 too.
+      chars = len(head)
+    else:
+      # More than four bytes per displayed character is always longer.
+      chars = max(chars, PEER_NOTE_CHARS + 1)
+  return head, chars
 
 
 def serialize_message(
@@ -606,15 +636,17 @@ def serialize_message(
 ) -> dict[str, Any]:
   """One note for an owner, embed or agent view.
 
-  A row selected through _with_note_heads carries only its head: a note longer
+  A row selected through with_note_heads carries only its head: a note longer
   than PEER_NOTE_CHARS is returned as that head with truncated=true and its
   full length. A whole row (a full read) is returned whole.
   """
   names = names or {}
   result = _serialized(row, names)
-  chars = getattr(row, "body_chars", None)
-  if chars is not None and chars > PEER_NOTE_CHARS:
-    result.update(body=row.body[:PEER_NOTE_CHARS], truncated=True, body_chars=chars)
+  if getattr(row, "body_chars", None) is not None:
+    head, chars = _note_head(row)
+    result["body"] = head[:PEER_NOTE_CHARS]
+    if chars > PEER_NOTE_CHARS:
+      result.update(truncated=True, body_chars=chars)
   return result
 
 
@@ -637,21 +669,17 @@ def _serialized(row, names: dict[str, str]) -> dict[str, Any]:
   }
 
 
-def _recent_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _recent_message_rows(query, *, limit: int) -> list[Any]:
   """Return one bounded chronological window for context or owner history."""
-  return list(reversed(_with_note_heads(query).order_by(
+  return list(reversed(with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.desc(),
     models.AgentCoordinationMessage.id.desc(),
   ).limit(max(1, min(int(limit), 100))).all()))
 
 
-def _oldest_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _oldest_message_rows(query, *, limit: int) -> list[Any]:
   """Return the next bounded chronological page without skipping backlog."""
-  return _with_note_heads(query).order_by(
+  return with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.asc(),
     models.AgentCoordinationMessage.id.asc(),
   ).limit(max(1, min(int(limit), 100))).all()
@@ -1164,7 +1192,7 @@ def chat_message_history(
       and_(message.created_at == cursor.created_at, message.id < cursor.id),
     ))
   limit = max(1, min(int(limit), 100))
-  rows = _with_note_heads(query).order_by(
+  rows = with_note_heads(query).order_by(
     message.created_at.desc(), message.id.desc(),
   ).limit(limit + 1).all()
   messages = serialize_messages(db, rows[:limit])
@@ -1285,6 +1313,9 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
+  if "\x00" in clean_body:
+    # PostgreSQL text cannot store it and SQLite's text functions stop at it.
+    raise ValueError("Message body must not contain U+0000.")
   if len(clean_body) > 4000:
     raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
@@ -1693,7 +1724,8 @@ def send_work_claim_transfer_notice(
     broadcast=False,
     kind="handoff",
     delivery=DELIVERY_INTERRUPT,
-    body=body,
+    # A claim's reason was never refused for U+0000; a note cannot carry it.
+    body=body.replace("\x00", "\ufffd"),
     send_id=f"revision:{revision}",
   )
 

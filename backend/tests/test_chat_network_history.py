@@ -129,4 +129,38 @@ def test_history_never_loads_a_whole_body(db, monkeypatch):
   assert all(len(row['body']) <= 4000 for row in page['messages'])
   selects = [statement for statement in seen
              if 'agent_coordination_messages.body' in statement and 'count(' not in statement]
-  assert selects and all('substr(agent_coordination_messages.body' in statement for statement in selects)
+  assert selects and all('substr(CAST(agent_coordination_messages.body AS BLOB)' in statement
+                         for statement in selects)
+
+
+def test_a_stored_note_with_u0000_is_shown_whole_or_marked_truncated(client, auth, db):
+  """SQLite's text functions stop at U+0000; heads are read as bytes instead."""
+  from app.context_budget import PEER_NOTE_CHARS
+
+  db.add_all([create_chat(id=name, title=name, messages=[]) for name in ['nul-self', 'nul-peer']])
+  db.flush()
+  short = 'before\x00after the NUL'
+  long = 'a\x00' + 'é' * 9_000
+  db.add_all([
+    models.AgentCoordinationMessage(id=note_id, from_chat_id='nul-peer', to_chat_id='nul-self',
+      room_kind='workspace', room_id='owner', body=body, kind='note',
+      created_at=datetime(2026, 1, 1, 0, 0, index))
+    for index, (note_id, body) in enumerate([('nul-short', short), ('nul-long', long)])
+  ])
+  db.commit()
+  rows = {row['id']: row for row in chat_message_history(db, 'nul-self')['messages']}
+  assert rows['nul-short']['body'] == short and 'truncated' not in rows['nul-short']
+  assert rows['nul-long']['body'] == long[:PEER_NOTE_CHARS]
+  assert rows['nul-long']['truncated'] is True and rows['nul-long']['body_chars'] > PEER_NOTE_CHARS
+  full = client.get('/api/agent-coordination/chats/nul-self/messages/nul-long', headers=auth)
+  assert full.json()['body'] == long
+
+
+def test_a_note_body_with_u0000_is_refused(client, db):
+  from app.agent_coordination import _clean_message
+  from app.routes.agent_coordination import AgentMessageCreate
+
+  with pytest.raises(ValueError, match='U\\+0000'):
+    _clean_message('note', 'one\x00two')
+  with pytest.raises(ValueError, match='U\\+0000'):
+    AgentMessageCreate(recipients=['peer'], body='one\x00two')

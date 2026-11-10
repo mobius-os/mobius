@@ -65,6 +65,8 @@ class AgentMessageCreate(BaseModel):
     value = value.strip()
     if not value:
       raise ValueError("body must not be blank")
+    if "\x00" in value:
+      raise ValueError("body must not contain U+0000")
     return value
 
   @field_validator("kind")

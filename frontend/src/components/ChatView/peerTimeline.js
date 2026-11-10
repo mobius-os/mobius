@@ -101,6 +101,11 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
   return { slots, tools, positions }
 }
 
+/** The mailbox id of a timeline note: activity events carry it as message_id. */
+export function peerNoteMessageId(note) {
+  return note?.message_id ?? note?.id
+}
+
 export function peerRecordTool(note, chatId) {
   const sent = note.sender_chat_id === chatId
   return {

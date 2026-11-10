@@ -58,8 +58,8 @@ export default function AgentCoordinationFeed({
                 <span>{targetLabel(message, broadcastScope)}</span>
                 {message.created_at && <time dateTime={message.created_at}>{clockLabel(message.created_at)}</time>}
               </div>
-              {/* The sender's chat can always see the note it sent. */}
-              <PeerNoteBody chatId={message.sender_chat_id} messageId={message.id}
+              {/* Either end's chat can read the note; one may since be deleted. */}
+              <PeerNoteBody chatId={[message.sender_chat_id, message.recipient_chat_id]} messageId={message.id}
                 body={message.body} truncated={Boolean(message.truncated)} render={text => <p>{text}</p>} />
             </li>
           ))}
