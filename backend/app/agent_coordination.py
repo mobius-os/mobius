@@ -2138,6 +2138,53 @@ async def _steer_running_recipient(chat_id: str) -> str:
     return "steered" if accepted else "queued"
 
 
+def _has_undelivered_interrupt(
+  db: Session, chat_id: str, *, chat: models.Chat,
+) -> bool:
+  """Whether an interrupting note to this chat is past every delivery it had:
+  its admitted turns' cursor and any contiguous steer carrier."""
+  admitted = db.query(
+    models.ChatRun.peer_message_through_created_at,
+    models.ChatRun.peer_message_through_id,
+  ).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.peer_message_through_created_at.isnot(None),
+    models.ChatRun.peer_message_through_id.isnot(None),
+  ).order_by(
+    models.ChatRun.peer_message_through_created_at.desc(),
+    models.ChatRun.peer_message_through_id.desc(),
+  ).first()
+  cursors = [cursor for cursor in (
+    PeerMessageCursor(created_at=admitted.peer_message_through_created_at,
+                      message_id=str(admitted.peer_message_through_id)) if admitted else None,
+    _peer_carrier_cursor(db, chat_id, chat=chat, contiguous_only=True),
+  ) if cursor is not None]
+  message = models.AgentCoordinationMessage
+  query = db.query(message.id).filter(
+    message.to_chat_id == chat_id,
+    message.from_chat_id != chat_id,
+    message.delivery == DELIVERY_INTERRUPT,
+  )
+  if cursors:
+    through = max(cursors)
+    query = query.filter(or_(
+      message.created_at > through.created_at,
+      and_(message.created_at == through.created_at, message.id > through.message_id),
+    ))
+  return query.first() is not None
+
+
+def unreachable_for_interrupt(db: Session, chat_ids: list[str]) -> dict[str, str]:
+  """Recorded reasons nothing will read a note soon, for an interrupt: a chat
+  whose latest run failed can still be woken under its paused Goal."""
+  reasons = unreachable_reasons(db, chat_ids)
+  for chat_id in list(reasons):
+    if reasons[chat_id] != "the chat is deleted" and paused_goal_run(db, chat_id) is not None:
+      del reasons[chat_id]
+  return reasons
+
+
 async def _wake_idle_recipient(
   *, chat_id: str, kind: str, sender_chat_id: str,
 ) -> bool:
@@ -2159,6 +2206,10 @@ async def _wake_idle_recipient(
         return False
       goal_run = paused_goal_run(db, chat_id)
       if goal_run is None:
+        return False
+      # Wake only for an interrupt not yet delivered, so attempting delivery
+      # again (a retried send) never wakes the same note twice.
+      if not _has_undelivered_interrupt(db, chat_id, chat=chat):
         return False
       sender = db.query(models.Chat.title).filter(
         models.Chat.id == sender_chat_id,
@@ -2216,15 +2267,20 @@ def unreachable_reasons(
   return reasons
 
 
-def classify_undelivered(chat_ids: list[str]) -> tuple[list[str], dict[str, str]]:
-  """Split undelivered recipients into queued and (reasoned) unreachable."""
+def classify_undelivered(
+  chat_ids: list[str], *, interrupt: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+  """Split undelivered recipients into queued and (reasoned) unreachable.
+
+  For an interrupt, a recipient its wake can still reach is not unreachable.
+  """
   if not chat_ids:
     return [], {}
   from app.database import SessionLocal
 
   try:
     with SessionLocal() as db:
-      reasons = unreachable_reasons(db, chat_ids)
+      reasons = (unreachable_for_interrupt if interrupt else unreachable_reasons)(db, chat_ids)
   except Exception:
     # Reporting must never fail a committed send; queued is the safe claim.
     log.warning("peer reachability check failed", exc_info=True)

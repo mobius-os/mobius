@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import io
 import subprocess
+import http.client
 import json
 import os
 import sys
@@ -380,7 +381,9 @@ def _agent_api_json(
       f"Refused ({exc.code}): "
       f"{_refusal_message(raw, cut=len(body) > REFUSAL_READ_BYTES)}"
     ) from exc
-  except (URLError, TimeoutError, ConnectionError) as exc:
+  except (OSError, http.client.HTTPException) as exc:
+    # No complete HTTP status and body arrived (a timeout, a refused or reset
+    # connection, a body cut short): the request may still have taken effect.
     reason = exc.reason if isinstance(exc, URLError) else (
       "request timed out" if isinstance(exc, TimeoutError) else str(exc) or type(exc).__name__
     )

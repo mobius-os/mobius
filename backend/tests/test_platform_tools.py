@@ -1890,6 +1890,25 @@ def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
     control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
   assert f"send_id={sent[-1]['send_id']}" in str(reset.value)
 
+  # A body cut short after the server answered is a transport failure too.
+  import http.client
+
+  class CutShort:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def read(self):
+      raise http.client.IncompleteRead(b"{", 10)
+
+  monkeypatch.setattr(control, "urlopen", lambda *_args, **_kwargs: CutShort())
+  monkeypatch.setenv("API_BASE_URL", "http://backend.invalid")
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  with pytest.raises(control.TransportFailure):
+    control._agent_api_json("POST", "/api/agent-coordination/messages", {})
+
   def refuses(method, path, body=None):
     raise RuntimeError("Refused (422): body must not be blank")
 

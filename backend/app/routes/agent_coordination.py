@@ -250,18 +250,21 @@ async def send_current_message(
   # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
   # stay quiet so one broad note cannot manufacture a wave of model work.
   # The note is stored now and every recipient will read it. An interrupt is
-  # attempted after this response, recipient by recipient, so the send
-  # returns at once however many it reaches; whether it lands is not known
-  # here (owner input, a held queue or no unfinished Goal can defer it to the
-  # recipient's next turn). Recipients recorded facts show as unreachable
-  # are not woken. An exact retry found the note stored and sends nothing.
+  # attempted for every recipient after this response, one by one, so the
+  # send returns at once however many it reaches; whether it lands is not
+  # known here (owner input, a held queue or no unfinished Goal can defer it
+  # to the recipient's next turn). An exact retry stores nothing new and
+  # attempts the interrupt again: a steer carries only undelivered notes and
+  # a wake needs an undelivered interrupt, so nothing arrives twice.
   retry = bool(rows and rows[0].get("retry"))
   recipients = [] if body.broadcast else list(dict.fromkeys(body.recipients))
-  reachable, reasons = await asyncio.to_thread(classify_undelivered, recipients)
-  interrupt = body.delivery == DELIVERY_INTERRUPT and not retry
-  if interrupt and reachable:
+  interrupt = body.delivery == DELIVERY_INTERRUPT
+  reachable, reasons = await asyncio.to_thread(
+    classify_undelivered, recipients, interrupt=interrupt,
+  )
+  if interrupt and recipients:
     background_tasks.add_task(
-      interrupt_recipients, recipients=reachable, kind=body.kind,
+      interrupt_recipients, recipients=recipients, kind=body.kind,
       sender_chat_id=principal.chat_id,
     )
   # One row is stored per recipient inbox. The sender already knows the note,
@@ -288,7 +291,11 @@ async def send_current_message(
     "unreachable": [chat_id for chat_id in recipients if chat_id in reasons],
   }
   if retry:
-    result["retry"] = "This send was already stored; nothing was sent again."
+    result["retry"] = (
+      "This send was already stored; nothing was stored again"
+      + (", and its interrupt was attempted again where still undelivered."
+         if interrupt else ".")
+    )
   if result["unreachable"]:
     # Recorded facts, never a timeout: the sender learns that nothing will
     # read this note soon instead of streaming more notes into a dead chat.
