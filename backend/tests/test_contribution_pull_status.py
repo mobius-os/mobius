@@ -99,13 +99,24 @@ def test_the_owners_draft_opens_for_review_at_the_head_they_saw():
   assert [name for name, _ in github.writes_seen] == ["markPullRequestReadyForReview"]
 
 
-@pytest.mark.parametrize("world, reason", [
-  ({"mine": False, "draft": True}, "You can’t do that as the reviewer of this PR."),
-  ({"mine": True, "draft": False}, "It is already open for review."),
-])
-def test_open_for_review_is_refused_in_the_machines_words(world, reason):
-  github = StatusGitHub(**world)
-  assert refused(github, "ready") == (409, reason)
+def test_open_for_review_is_refused_to_a_reviewer_in_the_machines_words():
+  github = StatusGitHub(mine=False, draft=True)
+  assert refused(github, "ready") == (409, "You can’t do that as the reviewer of this PR.")
+  assert github.writes_seen == []
+
+
+@pytest.mark.parametrize("change_name, draft", [("ready", False), ("draft", True)])
+def test_a_status_change_to_the_state_the_pr_is_already_in_is_confirmed_without_a_write(change_name, draft):
+  github = StatusGitHub(draft=draft)
+  assert change(github, change_name) == {"state": change_name, "observed_head_sha": SHA,
+                                          "repo": NAME, "number": NUMBER, "head_sha": SHA}
+  assert github.writes_seen == []
+
+
+def test_an_already_open_pr_is_not_held_back_by_armed_auto_merge_because_nothing_is_written():
+  github = StatusGitHub(draft=False)
+  github.pull["auto_merge"] = {"merge_method": "squash"}
+  assert change(github, "ready")["state"] == "ready"
   assert github.writes_seen == []
 
 
@@ -126,28 +137,31 @@ def test_open_for_review_waits_while_auto_merge_is_armed():
 def test_back_to_draft_turns_the_owners_open_pr_into_a_draft():
   github = StatusGitHub()
   assert change(github, "draft")["state"] == "draft"
-  assert refused(StatusGitHub(draft=True), "draft") == (409, "It is not open for review.")
+  assert [name for name, _ in github.writes_seen] == ["convertPullRequestToDraft"]
 
 
-def test_close_is_the_authors_or_a_writers():
+def test_close_is_tried_for_the_author_or_a_writer_and_a_reader_gets_githubs_refusal():
   assert change(StatusGitHub(), "close")["state"] == "closed"
   theirs = StatusGitHub(mine=False)
   assert change(theirs, "close")["state"] == "closed"
+  # Rights are GitHub's to refuse: the write is tried and its refusal is the answer, in a 409 that changed nothing.
   reader = StatusGitHub(mine=False)
   reader.repo = {**reader.repo, "permissions": {"pull": True}}
-  assert refused(reader, "close") == (409, "Needs write access.")
-  assert reader.writes_seen == []
+  reader.answers["close"] = ContributionSubmitError("gh: Forbidden (HTTP 403)")
+  assert refused(reader, "close") == (409, "GitHub refused the request (HTTP 403); no effect was applied.")
 
 
-def test_ask_for_rereview_only_of_people_whose_review_is_of_an_older_version():
+def test_ask_for_rereview_is_for_anyone_who_reviewed_and_has_not_approved_this_version():
   github = StatusGitHub()
   github.reviews = [{**APPROVAL, "commit": {"oid": OLDER}}]
   assert change(github, "request-reviewers", asking(["Sam"]))["state"] == "requested"
   assert github.writes_seen == [("reviewers", ["Sam"])]
   status, reason = refused(github, "request-reviewers", asking(["bob"]))
-  assert status == 409 and "sam" in reason
+  assert status == 409 and "sam" in reason and "have not approved this version" in reason
+  again = looked_again()
+  assert change(again, "request-reviewers", asking(["sam"]))["state"] == "requested", "even someone who looked at this version"
   current = StatusGitHub()
-  assert refused(current, "request-reviewers", asking(["sam"])) == (409, "Nobody reviewed an older version.")
+  assert refused(current, "request-reviewers", asking(["sam"])) == (409, "Everyone who reviewed it has already approved this version.")
 
 
 def test_ask_for_approval_posts_one_note_to_people_who_looked_again_without_approving():
@@ -164,18 +178,18 @@ def test_ask_for_approval_posts_a_note_that_names_no_one():
   assert github.writes_seen == [("comment", "Ready for another look.")]
 
 
-def test_ask_for_approval_is_refused_for_a_person_who_has_not_looked_again():
+def test_ask_for_approval_is_refused_for_a_person_who_never_reviewed():
   github = looked_again()
   assert refused(github, "ask-approval", approving(["sam", "bob"])) == (
-    409, "Ask only people who commented without approving: sam.")
+    409, "Ask only people who reviewed this pull request and have not approved this version: sam.")
   assert github.writes_seen == []
 
 
-def test_ask_for_approval_is_refused_for_someone_who_has_not_commented_on_this_version():
+def test_ask_for_approval_reaches_someone_whose_change_request_is_of_an_older_version():
   github = looked_again()
   github.comments = []
-  assert refused(github, "ask-approval", approving(["sam"])) == (409, "Nobody has commented without approving.")
-  assert github.writes_seen == []
+  assert change(github, "ask-approval", approving(["sam"], "@sam could you approve?"))["state"] == "asked"
+  assert github.writes_seen == [("comment", "@sam could you approve?")]
 
 
 def test_ask_for_approval_posts_to_someone_who_only_commented_and_holds_no_change_request():
@@ -192,10 +206,10 @@ def test_ask_for_approval_is_refused_when_the_note_names_anyone_but_the_people_a
   assert github.writes_seen == []
 
 
-def test_ask_for_approval_is_refused_in_the_machines_words_when_nobody_commented():
+def test_ask_for_approval_is_refused_in_the_machines_words_when_nobody_reviewed():
   waiting = StatusGitHub()
-  waiting.reviews = [{"state": "CHANGES_REQUESTED", "author": {"login": "sam"}, "commit": {"oid": OLDER}}]
-  assert refused(waiting, "ask-approval", approving(["sam"])) == (409, "Nobody has commented without approving.")
+  waiting.reviews = []
+  assert refused(waiting, "ask-approval", approving(["sam"])) == (409, "Nobody has reviewed this PR yet.")
   theirs = looked_again()
   theirs.pull["user"] = {"id": 7, "login": "kim"}
   assert refused(theirs, "ask-approval", approving(["sam"])) == (409, "You can’t do that as the reviewer of this PR.")

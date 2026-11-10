@@ -25,6 +25,7 @@
    "next": "review",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -54,6 +55,7 @@
    "next": "",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -83,6 +85,7 @@
    "next": "review",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -112,6 +115,7 @@
    "next": "review",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -141,6 +145,7 @@
    "next": "",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -176,7 +181,11 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -205,7 +214,9 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -239,9 +250,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -275,7 +290,9 @@
    "next": "merge",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "merge",
     "close"
@@ -348,9 +365,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -390,9 +411,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -419,8 +444,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -454,8 +482,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -489,7 +520,9 @@
    "next": "merge",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "merge",
     "close"
@@ -525,7 +558,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -559,8 +596,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -596,7 +636,9 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -623,8 +665,11 @@
    "next": "check_my_pr",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
     "open_for_review",
+    "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -658,6 +703,8 @@
     "finish_it",
     "set_aside",
     "open_for_review",
+    "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -687,8 +734,11 @@
    "next": "open_for_review",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
     "open_for_review",
+    "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -719,8 +769,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -750,8 +803,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -788,6 +844,7 @@
     "review",
     "send_draft",
     "set_aside",
+    "merge",
     "close"
    ]
   },
@@ -854,6 +911,7 @@
    "next": "review",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -885,6 +943,7 @@
     "review",
     "draft_verdict",
     "set_aside",
+    "merge",
     "close"
    ]
   },
@@ -916,6 +975,7 @@
    "enabled": [
     "review",
     "draft_verdict",
+    "merge",
     "close"
    ]
   },
@@ -945,6 +1005,7 @@
    "next": "",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -979,6 +1040,7 @@
     "review",
     "draft_verdict",
     "set_aside",
+    "merge",
     "close"
    ]
   },
@@ -1009,6 +1071,7 @@
    "next": "check_github",
    "enabled": [
     "check_github",
+    "open_for_review",
     "back_to_draft",
     "close"
    ]
@@ -1036,7 +1099,11 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -1117,8 +1184,11 @@
    "next": "rerun_job",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close",
     "rerun_job"
    ]
@@ -1146,6 +1216,7 @@
    "next": "",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -1263,6 +1334,7 @@
    "next": "check_github",
    "enabled": [
     "check_github",
+    "open_for_review",
     "back_to_draft",
     "close"
    ]
@@ -1290,6 +1362,7 @@
    "next": "review",
    "enabled": [
     "review",
+    "merge",
     "close"
    ]
   },
@@ -1324,7 +1397,9 @@
    "next": "merge",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "merge",
     "close"
@@ -1361,9 +1436,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1398,9 +1477,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1441,9 +1524,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1480,7 +1567,9 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -1515,8 +1604,11 @@
    "next": "check_my_pr",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
     "open_for_review",
+    "back_to_draft",
+    "merge",
     "close"
    ]
   },
@@ -1594,9 +1686,13 @@
    "next": "ask_approval",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1674,9 +1770,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1716,10 +1816,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1759,9 +1862,13 @@
    "next": "",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1795,9 +1902,13 @@
    "next": "ask_approval",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1844,10 +1955,13 @@
    "next": "ask_approval",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
     "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1889,7 +2003,11 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
+    "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -1961,8 +2079,11 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -2002,8 +2123,11 @@
    "next": "merge",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
     "merge",
     "close"
@@ -2046,9 +2170,13 @@
    "next": "ask_approval",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -2084,8 +2212,11 @@
     "check_my_pr",
     "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   },
@@ -2125,9 +2256,13 @@
    "next": "ask_approval",
    "enabled": [
     "check_my_pr",
+    "respond",
     "finish_it",
+    "open_for_review",
     "back_to_draft",
+    "ask_rereview",
     "ask_approval",
+    "merge",
     "close"
    ]
   }

@@ -3,10 +3,11 @@
 There is no review run, agent or stored consent here: the owner's tap is the
 authority, so GitHub is read again right before the one write and the write is
 pinned to the head the owner saw. GitHub's own rules decide, through the review
-machinery's merge_blocker, and so does the PR machine's merge guard on the
-facts just read: someone other than the author approved this exact version, no
-change request still stands, and no agent is working on the PR. Never an admin
-bypass or a force. Nothing here approves, edits or comments, and one call
+machinery's merge_blocker, and the PR machine adds only its stops on the facts
+just read: the PR is open and no agent is working on it. Whether someone else
+approved this version or a change request still stands is not asked of the
+owner's own tap (the confirm sheet names it); the agent's unattended merge asks
+it. Never an admin bypass or a force. Nothing here approves, edits or comments, and one call
 touches one pull request. A write whose outcome cannot be read is reported as
 unconfirmed and is never repeated.
 """

@@ -74,7 +74,8 @@ async def _merge_refusal(gh, cwd, row, target, repo, pull, checks, job) -> str |
     return blocker
   facts = await asyncio.to_thread(pr_facts.read_facts, gh, cwd, target, repo, pull,  # unsettled: read-only (GitHub reviews)
                                   actor_id=row.github_actor_id, job=job, checks=checks)
-  return machine.action_blocker(facts, "merge") or None
+  # The agent merges with no tap at that moment, so it keeps the full readiness rules (approval, change requests, checks).
+  return machine.not_ready_to_merge(facts) or None
 
 
 async def merge_reviewed_target(db, row, target, outcome, repo, pull, principal, *, gh, cwd, authorize,

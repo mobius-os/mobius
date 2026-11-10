@@ -125,20 +125,21 @@ def post_note(gh, cwd, target, body) -> str | None:
   return _head_after_posting(gh, cwd, target) if posted.state == "confirmed" else None
 
 
+def _ask_only_askable(people: list[str], facts: dict) -> None:
+  """Anyone who reviewed or commented may be asked, except who already approved this version (and never a bot or the author)."""
+  askable = [item["by"] for item in machine.decide(facts)["askable"]]
+  allowed = {name.lower() for name in askable}
+  if any(login.lower() not in allowed for login in people):
+    raise HTTPException(409, "Ask only people who reviewed this pull request and have not approved this version: "
+                             f"{', '.join(askable) or 'nobody'}.")
+
+
 def _rereview_only(facts: dict, pull: dict, body) -> None:
-  allowed = machine.decide(facts)["rereview_from"]
-  others = [login for login in body.reviewers if login.lower() not in allowed]
-  if others:
-    raise HTTPException(409, "Ask only people whose review is of an older version: "
-                             f"{', '.join(allowed) or 'nobody'}.")
+  _ask_only_askable(body.reviewers, facts)
 
 
 def _approval_note_check(facts: dict, pull: dict, body) -> None:
-  approval_from = machine.decide(facts)["approval_from"]
-  allowed = {login.lower() for login in approval_from}
-  if any(login.lower() not in allowed for login in body.people):
-    raise HTTPException(409, "Ask only people who commented without approving: "
-                             f"{', '.join(approval_from) or 'nobody'}.")
+  _ask_only_askable(body.people, facts)
   asked = {login.lower() for login in body.people}
   if any(mention.lower() not in asked for mention in MENTION.findall(body.note)):
     raise HTTPException(409, "The note may only name the people asked.")
@@ -155,6 +156,18 @@ def _nothing_more(facts: dict, pull: dict, body) -> None:
   return None
 
 
+def _not_yet(pull: dict) -> bool:
+  return False
+
+
+def _is_ready(pull: dict) -> bool:
+  return pull.get("draft") is False
+
+
+def _is_draft(pull: dict) -> bool:
+  return pull.get("draft") is True
+
+
 @dataclass(frozen=True)
 class StatusChange:
   machine_action: str  # the PR machine action this tap is
@@ -162,6 +175,7 @@ class StatusChange:
   write: Callable  # (gh, cwd, target, body) -> the head GitHub reports, or None when unconfirmed
   unconfirmed: dict  # the 502 detail when the write's outcome cannot be read
   check: Callable = _nothing_more  # a rule beyond the machine, on the facts and the pull just read
+  already: Callable = _not_yet  # the pull just read is already what this tap makes it: confirmed with no write
 
 
 def _unconfirmed(code: str, maybe: str) -> dict:
@@ -170,9 +184,9 @@ def _unconfirmed(code: str, maybe: str) -> dict:
 
 CHANGES = {
   "ready": StatusChange("open_for_review", "ready", mark_ready,
-                        _unconfirmed("ready_unconfirmed", "opened it for review"), _no_auto_merge),
+                        _unconfirmed("ready_unconfirmed", "opened it for review"), check=_no_auto_merge, already=_is_ready),
   "draft": StatusChange("back_to_draft", "draft", convert_to_draft,
-                        _unconfirmed("draft_unconfirmed", "turned it back into a draft")),
+                        _unconfirmed("draft_unconfirmed", "turned it back into a draft"), already=_is_draft),
   "close": StatusChange("close", "closed", close_pull, _unconfirmed("close_unconfirmed", "closed it")),
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
@@ -232,8 +246,12 @@ async def _change(gh, cwd, change: StatusChange, body, authorize, job) -> dict:
   async with _github_connection_transaction():
     target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body, job)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
     pr_facts.require_allowed(facts, change.machine_action)
-    change.check(facts, pull, body)
-    result = await _dispatch(change, gh, cwd, target, body, authorize)
+    if change.already(pull):
+      # Nothing to write, so nothing can be unconfirmed: the head the owner saw is the one GitHub holds.
+      result = DispatchResult.confirmed({"observed_head_sha": body.head_sha})
+    else:
+      change.check(facts, pull, body)
+      result = await _dispatch(change, gh, cwd, target, body, authorize)
   # A cancellation before the write is a refusal here; the caller's cancellation still wins.
   if result.state == "not_dispatched" and asyncio.current_task().cancelling():
     raise asyncio.CancelledError()

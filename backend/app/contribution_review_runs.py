@@ -274,8 +274,9 @@ def merge_blocker(target, repo, pull, pr) -> str | None:
   if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") not in allowed_states:
     return "GitHub has not cleared this pull request for a normal merge; check its rules or merge queue."
   # GitHub's own review gate is a second safety net. It is empty (None) in a repository
-  # that requires no review: the PR machine's merge guard, asked right after this,
-  # closes that hole with an approval of this exact version by someone else.
+  # that requires no review: the agent's merge asks the PR machine's not_ready_to_merge right
+  # after this, which closes that hole with an approval of this exact version by someone else.
+  # The owner's own tap does not ask it: the confirm sheet names a missing approval instead.
   if pr.get("reviewDecision") not in (None, "APPROVED"):
     return "GitHub still requires a review or has requested changes."
   return checks_blocker(pr)
