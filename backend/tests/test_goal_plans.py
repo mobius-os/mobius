@@ -1729,6 +1729,10 @@ def test_saved_content_beyond_the_caps_is_kept_but_new_content_is_bounded(
   shorter = normalize_tasks(
     [{**saved[0], "depends_on": saved[0]["depends_on"][1:]}] + saved[2:], saved=saved)
   assert shorter[0]["depends_on"] == [f"t{i}" for i in range(2, 20)]
+  # A malformed saved list exempts nothing and stays a plan error.
+  for corrupt in (7, [{"id": "t1"}]):
+    with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
+      normalize_tasks(saved, saved=[{**saved[0], "depends_on": corrupt}] + saved[1:])
 
   _, _chat_id = _active_goal(client, owner_token, db)
   run = db.get(models.ChatRun, "goal-root")

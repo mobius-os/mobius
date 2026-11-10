@@ -122,8 +122,10 @@ def normalize_tasks(raw_tasks: Any, *, saved: Any = None) -> list[dict[str, Any]
       raise GoalPlanError(f"depends_on for {task_id} must be a list of ids")
     depends_on = list(dict.fromkeys(depends_on))
     # Keeping or shortening a saved list never grows it; only additions count.
-    if len(depends_on) > MAX_DEPENDENCIES and not set(depends_on) <= set(
-      before.get("depends_on") or ()
+    saved_dependencies = before.get("depends_on")
+    if len(depends_on) > MAX_DEPENDENCIES and not (
+      isinstance(saved_dependencies, list)
+      and set(depends_on) <= {d for d in saved_dependencies if isinstance(d, str)}
     ):
       raise GoalPlanError(
         f"{task_id} supports at most {MAX_DEPENDENCIES} dependencies"
