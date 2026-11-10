@@ -29,6 +29,7 @@ import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import WalletSection, { WalletConnect } from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
+import { creditsSection } from '../../lib/creditsWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -1148,7 +1149,7 @@ export default function SettingsView({
 
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
 
-        {showOwnerAccounts && wallet.summary?.mode === 'customer' && (
+        {showOwnerAccounts && creditsSection(wallet.summary) === 'wallet' && (
           <WalletSection
             summary={wallet.summary}
             terms={wallet.terms}
@@ -1159,7 +1160,7 @@ export default function SettingsView({
             onBuy={wallet.buy}
           />
         )}
-        {showOwnerAccounts && wallet.summary?.mode === 'unpaired' && wallet.summary.can_pair_with_account && (
+        {showOwnerAccounts && creditsSection(wallet.summary) === 'connect' && (
           <WalletConnect
             busy={wallet.busy}
             refusal={wallet.refusal}

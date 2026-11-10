@@ -1794,6 +1794,16 @@ def test_broker_forwards_only_the_display_cost_metrics_read_opt_in():
   assert broker_module.BROKER_ROUTE_EPOCH >= 11
 
 
+def test_broker_forwards_the_credits_key_route_account_pairing_depends_on():
+  # A served broker older than this route would 404 every one-tap pairing, so
+  # the epoch must reject it in favour of the baked copy.
+  from app.credits_client import ACCOUNT_KEY_ROUTE
+
+  upstream = ACCOUNT_KEY_ROUTE.removeprefix("/managed")
+  assert broker_module._managed_upstream_path("POST", ACCOUNT_KEY_ROUTE) == upstream
+  assert broker_module.BROKER_ROUTE_EPOCH >= 12
+
+
 @pytest.mark.parametrize("suffix", [
   "?", "?cost", "?cost=", "?cost=0", "?cost=true", "?cost=%31",
   "?%63ost=1", "?cost=1&", "?cost=1&cost=1", "?cost=1&next=evil",

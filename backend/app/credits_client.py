@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -279,6 +280,11 @@ def pair(operator_url: str, key: str) -> dict:
   return {"paired": True}
 
 
+# Serializes account pairing, so a second request waits and then finds the
+# installation paired instead of retiring the key the first one just saved.
+_ACCOUNT_PAIRING = threading.Lock()
+
+
 def pair_with_account() -> dict:
   """Connect to the owner's own wallet, with no key for anyone to copy.
 
@@ -286,25 +292,53 @@ def pair_with_account() -> dict:
   broker that holds its managed credential, for a key of its own. The
   launcher issues one and retires any key this installation had, and
   ``pair`` then checks it at the service and seals it like any other.
+  Because asking retires the current key before the new one is checked, a
+  paired installation is refused rather than asked for another, and one
+  request at a time asks.
   """
   if not get_settings().mobius_sso_enabled:
     raise CreditsUnavailable(
       "This Möbius was not launched from mobius.you, so it needs a credits key "
       "from the credits operator.", status=409, code="not_managed")
+  with _ACCOUNT_PAIRING:
+    if load_credentials() is not None:
+      raise CreditsUnavailable(
+        "This Möbius is already connected to its credits.",
+        status=409, code="already_paired")
+    operator_url, key = _launcher_key()
+    return pair(operator_url, key)
+
+
+def _launcher_key() -> tuple[str, str]:
+  """The service address and key the launcher issued for this installation.
+
+  Every way the launcher can fail to supply them reads as the launcher being
+  unavailable: the owner copied and entered nothing, so ``pair``'s
+  paste-a-key guidance would not apply.
+  """
+  unavailable = CreditsUnavailable(
+    "mobius.you could not connect your credits just now. Try again in a moment.",
+    status=503, code="credits_unavailable")
   try:
     with broker_client(timeout=TIMEOUT_SECONDS) as client:
       response = client.post(ACCOUNT_KEY_ROUTE)
   except (httpx.HTTPError, OSError) as error:
-    raise CreditsUnavailable("Could not reach mobius.you.", status=503) from error
+    raise unavailable from error
   try:
     body = response.json()
   except ValueError:
     body = None
   if response.status_code != 200 or not isinstance(body, dict):
-    raise CreditsUnavailable(
-      "mobius.you could not connect your credits just now. Try again in a moment.",
-      status=503, code="credits_unavailable")
-  return pair(str(body.get("service_url") or ""), str(body.get("key") or ""))
+    raise unavailable
+  service_url, key = body.get("service_url"), body.get("key")
+  key = key.strip() if isinstance(key, str) else ""
+  if not (key.startswith(KEY_PREFIX) and len(key) > len(KEY_PREFIX)
+          and isinstance(service_url, str)):
+    raise unavailable
+  try:
+    return normalise_service_url(service_url), key
+  except CreditsUnavailable as error:
+    raise unavailable from error
 
 
 def unpair() -> dict:

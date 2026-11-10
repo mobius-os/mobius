@@ -104,6 +104,17 @@ export function termsFor(terms, summary) {
 }
 
 /**
+ * Which Credits section Settings shows: the wallet once paired, the one-tap
+ * connect card for an unpaired Möbius launched from mobius.you, or none (an
+ * unpaired self-hosted Möbius pairs with a key from its credits operator).
+ */
+export function creditsSection(summary) {
+  if (summary?.mode === 'customer') return 'wallet'
+  if (summary?.mode === 'unpaired' && summary.can_pair_with_account === true) return 'connect'
+  return null
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the

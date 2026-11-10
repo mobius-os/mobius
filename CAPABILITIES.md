@@ -84,7 +84,14 @@ bots, send messages or make paid calls.
 The owner, or an installed Store app with accepted `credits_manage` consent
 (including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned. Shared-browser guests and delegated helpers cannot pair.
+control for pasting a key is planned. A Möbius launched from mobius.you (the
+summary's `can_pair_with_account`) can instead call
+`POST /api/identity/credits/pair/account` with no body, which Settings offers
+as **Connect credits**: the launcher issues this installation its own key. It
+answers 409 `not_managed` on a self-hosted Möbius, 409 `already_paired` once
+paired (asking would retire the current key), and 503 `credits_unavailable`
+when mobius.you cannot supply a usable key.
+Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
 For now, app credits permissions work only for installed Store apps with
 accepted owner consent. Owner-built local apps cannot use

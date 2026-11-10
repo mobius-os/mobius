@@ -86,6 +86,7 @@ class FakeLauncher:
     self.status = status
     self.body = body if body is not None else {
       "service_url": "https://www.mobius.you/credits", "key": "mbc_from_launcher"}
+    self.error = None  # raised instead of answering, as an unreachable broker does
     self.posts = []
 
   def __call__(self, *, timeout):
@@ -100,6 +101,8 @@ class FakeLauncher:
 
       def post(self, path):
         launcher.posts.append(path)
+        if launcher.error is not None:
+          raise launcher.error
         return httpx.Response(launcher.status, json=launcher.body,
                               request=httpx.Request("POST", "http://broker" + path))
 
@@ -148,22 +151,117 @@ def test_a_self_hosted_installation_is_not_offered_account_pairing(
   assert credits_client.load_credentials() is None
 
 
-@pytest.mark.parametrize("status, body, balance", [
-  (503, {"error": {"code": "credits_unavailable", "message": "unavailable"}}, (200, {})),
-  (200, {"service_url": "https://www.mobius.you/credits"}, (200, {})),
-  (200, {"service_url": "https://www.mobius.you/credits", "key": "mbc_from_launcher"},
-   (401, {"detail": {"code": "invalid_api_key", "message": "no"}})),
-], ids=["launcher-unavailable", "no-key", "service-refuses-key"])
-def test_account_pairing_that_does_not_complete_leaves_the_installation_unpaired(
-  client, auth, service, launcher, status, body, balance
+@pytest.mark.parametrize("status, body", [
+  (503, {"error": {"code": "credits_unavailable", "message": "unavailable"}}),
+  (200, ["not", "an", "object"]),
+  (200, {"service_url": "https://www.mobius.you/credits"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": ""}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": "mbc_"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": "sk_live_other"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": 12345}),
+  (200, {"key": "mbc_from_launcher"}),
+  (200, {"service_url": "", "key": "mbc_from_launcher"}),
+  (200, {"service_url": ["https://www.mobius.you/credits"], "key": "mbc_from_launcher"}),
+  (200, {"service_url": "http://credits.example", "key": "mbc_from_launcher"}),
+  (200, {"service_url": "https://user:pw@credits.example", "key": "mbc_from_launcher"}),
+], ids=["launcher-unavailable", "not-an-object", "no-key", "empty-key", "bare-prefix",
+        "not-a-credits-key", "key-not-text", "no-address", "empty-address",
+        "address-not-text", "plain-http-address", "address-with-userinfo"])
+def test_a_launcher_answer_without_a_usable_key_reads_as_mobius_you_unavailable(
+  client, auth, service, launcher, status, body
 ):
+  # The owner copied and entered nothing, so paste-a-key guidance would mislead.
   launcher.status, launcher.body = status, body
-  service.answers["balance"] = balance
 
   refused = client.post("/api/identity/credits/pair/account", headers=auth)
 
-  assert refused.status_code >= 400
+  assert refused.status_code == 503, refused.text
+  assert refused.json()["detail"]["code"] == "credits_unavailable"
+  assert "mobius.you" in refused.json()["detail"]["message"]
+  assert not service.calls  # nothing unusable is sent to any service
   assert credits_client.load_credentials() is None
+
+
+def test_an_unreachable_launcher_reads_as_mobius_you_unavailable(
+  client, auth, service, launcher
+):
+  launcher.error = httpx.ConnectError("broker socket missing")
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 503
+  assert refused.json()["detail"]["code"] == "credits_unavailable"
+  assert credits_client.load_credentials() is None
+
+
+def test_a_launcher_key_the_service_refuses_is_not_kept(client, auth, service, launcher):
+  service.answers["balance"] = (401, {"detail": {"code": "invalid_api_key", "message": "no"}})
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "invalid_api_key"
+  assert credits_client.load_credentials() is None
+
+
+@pytest.mark.parametrize("first", ["pasted", "account"])
+def test_a_paired_installation_is_not_asked_for_another_key(
+  client, auth, service, launcher, first
+):
+  # Asking the launcher retires this installation's current key before the new
+  # one is checked, and its answer could name another service: either would
+  # break a working pairing, so a paired installation never asks.
+  if first == "pasted":
+    credits_client.pair("https://credits.example", "mbc_pasted_key")
+  else:
+    assert client.post("/api/identity/credits/pair/account", headers=auth).status_code == 200
+  kept = credits_client.load_credentials()
+  asked = list(launcher.posts)
+  launcher.body = {"service_url": "https://other-operator.example", "key": "mbc_other"}
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "already_paired"
+  assert launcher.posts == asked
+  assert credits_client.load_credentials() == kept
+
+
+def test_concurrent_account_pairings_ask_the_launcher_once(service, launcher, monkeypatch):
+  # The second request waits for the first and then finds it paired, rather
+  # than retiring the key the first one is about to save.
+  from concurrent.futures import ThreadPoolExecutor
+  import threading
+
+  first_asked, second_asked, release = threading.Event(), threading.Event(), threading.Event()
+
+  def held_launcher(*, timeout):
+    client = launcher(timeout=timeout)
+    post = client.post
+
+    def held_post(path):
+      if first_asked.is_set():
+        second_asked.set()
+      first_asked.set()
+      assert release.wait(5)
+      return post(path)
+
+    client.post = held_post
+    return client
+
+  monkeypatch.setattr(credits_client, "broker_client", held_launcher)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    first = pool.submit(credits_client.pair_with_account)
+    assert first_asked.wait(5)
+    second = pool.submit(credits_client.pair_with_account)
+    assert not second_asked.wait(0.5)  # held back while the first is pairing
+    release.set()
+    assert first.result(timeout=5) == {"paired": True}
+    with pytest.raises(credits_client.CreditsUnavailable) as refused:
+      second.result(timeout=5)
+
+  assert refused.value.code == "already_paired"
+  assert launcher.posts == ["/managed/api/instance/v1/credits/key"]
 
 
 def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
