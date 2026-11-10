@@ -139,3 +139,144 @@ test('dictation holds the recording audio session only while listening', () => {
     delete globalThis.window
   }
 })
+
+test('a speech service that refuses this browser stops dictation with a note instead of spinning', () => {
+  const instances = installSpeechRecognition()
+  const transcripts = []
+  try {
+    const { result } = renderHook(() => useVoiceInput({
+      onTranscript: text => transcripts.push(text),
+      inputRef: { current: { value: 'draft' } },
+    }))
+    result.current.startVoice()
+    instances[0].onerror({ error: 'network' })
+    instances[0].onend()
+
+    assert.equal(result.current.listeningRef.current, false)
+    assert.equal(instances.length, 1, 'no restart after a refusal')
+    assert.match(transcripts.at(-1), /^draft \[Dictation couldn't reach the speech service\]$/)
+  } finally {
+    delete globalThis.window
+  }
+})
+
+function installNativeDictation() {
+  const sessions = []
+  const native = {
+    stops: 0,
+    startDictation(listener) {
+      sessions.push(listener)
+      return Promise.resolve(true)
+    },
+    stopDictation() {
+      native.stops += 1
+      return Promise.resolve(true)
+    },
+  }
+  // The app's dictation wins even where Web Speech exists but can't work.
+  installSpeechRecognition()
+  globalThis.window.MobiusNative = native
+  return { native, sessions }
+}
+
+test("the app's own dictation writes after the draft and stops through the app", () => {
+  const { native, sessions } = installNativeDictation()
+  const transcripts = []
+  try {
+    const { result } = renderHook(() => useVoiceInput({
+      onTranscript: text => transcripts.push(text),
+      inputRef: { current: { value: 'draft  ' } },
+    }))
+    result.current.startVoice()
+    assert.equal(sessions.length, 1)
+    sessions[0]({ type: 'text', text: 'hello' })
+    sessions[0]({ type: 'text', text: 'Hello, world.' })
+    assert.deepEqual(transcripts, ['draft hello', 'draft Hello, world.'])
+
+    result.current.stopVoice()
+    assert.equal(native.stops, 1)
+    sessions[0]({ type: 'text', text: 'late words' })
+    assert.equal(transcripts.length, 2, 'a stopped session writes nothing')
+  } finally {
+    delete globalThis.window
+  }
+})
+
+test("a manual edit restarts the app's dictation from the edited draft", () => {
+  const { native, sessions } = installNativeDictation()
+  const transcripts = []
+  const timers = new Map()
+  let timerId = 0
+  const prevTimeout = globalThis.setTimeout
+  const prevClearTimeout = globalThis.clearTimeout
+  globalThis.setTimeout = fn => {
+    const id = ++timerId
+    timers.set(id, fn)
+    return id
+  }
+  globalThis.clearTimeout = id => timers.delete(id)
+  try {
+    const { result } = renderHook(() => useVoiceInput({
+      onTranscript: text => transcripts.push(text),
+      inputRef: { current: { value: '' } },
+    }))
+    result.current.startVoice()
+    sessions[0]({ type: 'text', text: 'first try' })
+    result.current.acceptManualEdit('first try, fixed')
+    assert.equal(native.stops, 1)
+    sessions[0]({ type: 'text', text: 'first try stale' })
+    assert.equal(transcripts.at(-1), 'first try')
+
+    timers.values().next().value()
+    sessions[1]({ type: 'text', text: 'and more' })
+    assert.equal(transcripts.at(-1), 'first try, fixed and more')
+  } finally {
+    globalThis.setTimeout = prevTimeout
+    globalThis.clearTimeout = prevClearTimeout
+    delete globalThis.window
+  }
+})
+
+test("when the app's dictation ends by itself, only a fixable reason leaves a note", async () => {
+  for (const [error, note] of [
+    ['blocked', /^draft \[Dictation is off for Möbius/],
+    ['failed', /^draft \[Dictation stopped/],
+    ['declined', null],
+    [null, null],
+  ]) {
+    const { sessions } = installNativeDictation()
+    const transcripts = []
+    try {
+      const { result } = renderHook(() => useVoiceInput({
+        onTranscript: text => transcripts.push(text),
+        inputRef: { current: { value: 'draft' } },
+      }))
+      result.current.startVoice()
+      sessions[0]({ type: 'end', error })
+
+      assert.equal(result.current.listeningRef.current, false)
+      if (note) assert.match(transcripts.at(-1), note)
+      else assert.deepEqual(transcripts, [])
+    } finally {
+      delete globalThis.window
+    }
+  }
+})
+
+test("an app that can't start dictation turns the mic back off", async () => {
+  const { native } = installNativeDictation()
+  native.startDictation = () => Promise.reject(new Error('not allowed'))
+  const transcripts = []
+  try {
+    const { result } = renderHook(() => useVoiceInput({
+      onTranscript: text => transcripts.push(text),
+      inputRef: { current: { value: '' } },
+    }))
+    result.current.startVoice()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(result.current.listeningRef.current, false)
+    assert.match(transcripts.at(-1), /^\[Dictation stopped/)
+  } finally {
+    delete globalThis.window
+  }
+})
