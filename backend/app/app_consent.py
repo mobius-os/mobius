@@ -34,8 +34,9 @@ BASELINE = (
 # cannot mark itself harmless because it never supplies this.
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
-  "connect_manage", "identity_manage", "railway_manage", "agent_start",
-  "project_builders", "workspace.screen-control",
+  "connect_manage", "identity_manage", "credits_manage", "railway_manage",
+  "spend_credits",
+  "agent_start", "project_builders", "workspace.screen-control",
 })
 
 _CHAT_TEXT = {
@@ -78,6 +79,10 @@ _FLAGS = (
    "Can pair, unpair and manage computers that run work for you."),
   ("identity_manage", "identity_manage", "Manage your sign-in identity",
    "Can manage the mobius.you sign-in link and identity."),
+  ("credits_manage", "credits_manage", "Manage your credits and earnings",
+   "Can see your credits balance, earnings and history, connect this Möbius "
+   "to a credits service, buy credits, spend them on hosted models, set the "
+   "prices of your apps, and keep or withdraw your earnings."),
   ("railway_manage", "railway_manage", "Manage Railway deployments",
    "Can manage deployments on your Railway account."),
   ("location_history_read", "location_history_read", "See your location history",
@@ -92,8 +97,8 @@ _FLAGS = (
 # named here. A test fails when a new permission is added without one, so a
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
-  {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps"}
-  | {key for key, *_ in _FLAGS}
+  {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
+   "spend_credits"} | {key for key, *_ in _FLAGS}
 )
 
 
@@ -149,6 +154,14 @@ def rows_from_contract(
   for key, row_id, title, text in _FLAGS:
     if data.get(key):
       rows.append(_row(row_id, title, text))
+  targets = data.get("spend_credits")
+  if isinstance(targets, list) and targets:
+    rows.append(_row(
+      "spend_credits", "Spend your credits on paid features",
+      "Its service can pay for priced calls from your Möbius credits, at the "
+      "price each creator sets, to: " + ", ".join(targets) + ".",
+      scope=[str(target) for target in targets],
+    ))
   background = contract.get("background")
   if isinstance(background, dict):
     scheduled = background.get("mode") == "scheduled"

@@ -40,7 +40,7 @@ from app.deps import (
   Principal,
   get_principal,
   reject_cross_site,
-  require_nondelegated_owner_or_app_control,
+  require_account_owner_control,
 )
 from app.github_contribution_git import (
   _assert_clean_worktree,
@@ -1631,7 +1631,7 @@ async def _adopt_legacy_control_attempt_if_needed(
   "/{app_id}/{record_id}/submit",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("5/minute")
@@ -2365,7 +2365,7 @@ async def relay_contribution_status(
   "/{app_id}/{record_id}/withdraw",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("5/minute")

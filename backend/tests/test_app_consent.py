@@ -178,8 +178,9 @@ def test_every_contract_permission_has_a_row():
       "cross_app_access": "write", "share_with_apps": "write",
       "shared_memory": "write", "manage_apps": True, "manage_skills": True,
       "github_access": True, "github_connect": True, "connections_manage": True,
-      "connect_manage": True, "identity_manage": True, "railway_manage": True,
-      "location_history_read": True,
+      "connect_manage": True, "identity_manage": True, "credits_manage": True,
+      "railway_manage": True, "location_history_read": True,
+      "spend_credits": ["ana/prompts"],
     },
   }
   contract = contract_from_manifest(manifest)
@@ -189,7 +190,8 @@ def test_every_contract_permission_has_a_row():
   assert {"chat_log_access", "shared_memory", "cross_app_access", "share_with_apps",
           "filesystem_access", "manage_apps", "manage_skills", "github_access",
           "github_connect", "connections_manage", "connect_manage",
-          "identity_manage", "railway_manage", "location_history_read"} <= ids
+          "identity_manage", "credits_manage", "railway_manage",
+          "location_history_read", "spend_credits"} <= ids
 
 
 def test_helper_activity_read_has_a_non_critical_row():
@@ -198,6 +200,14 @@ def test_helper_activity_read_has_a_non_critical_row():
     ("helper_activity_read", "Read helper activity", False),
   ]
   assert "helper_activity_read" in app_consent.HANDLED_DATA_KEYS
+
+
+def test_spending_credits_is_a_critical_row_naming_who_it_pays():
+  rows = app_consent.rows_from_contract(_contract(spend_credits=["ana/prompts"]))
+  assert [(r["id"], r["title"], r["critical"], r["scope"]) for r in rows] == [
+    ("spend_credits", "Spend your credits on paid features", True, ["ana/prompts"]),
+  ]
+  assert "ana/prompts" in rows[0]["text"]
 
 
 def test_acceptance_stores_rows_and_survives_a_rewording(db, monkeypatch):
@@ -266,6 +276,39 @@ def _accepted(db, slug, contract):
   app = _app(db, slug, contract=contract)
   assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
   return app
+
+
+def test_paying_a_new_seller_asks_again(db):
+  app = _accepted(db, "payer", _contract(spend_credits=["ana/prompts"]))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(spend_credits=["ana/prompts", "bob/notes"])
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["spend_credits"]
+
+
+def test_managing_credits_is_its_own_critical_row():
+  rows = app_consent.rows_from_contract(_contract(credits_manage=True))
+  assert [(r["id"], r["title"], r["critical"]) for r in rows] == [
+    ("credits_manage", "Manage your credits and earnings", True),
+  ]
+  # The sign-in identity row says nothing about money.
+  identity = app_consent.rows_from_contract(_contract(identity_manage=True))
+  assert [r["id"] for r in identity] == ["identity_manage"]
+
+
+def test_an_identity_manager_asks_again_before_managing_credits(db):
+  """Consent to the sign-in link never covers the owner's money."""
+  app = _accepted(db, "you", _contract(identity_manage=True))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(identity_manage=True, credits_manage=True)
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["credits_manage"]
+
+
+def test_changed_payees_change_the_digest_so_a_stale_accept_fails(db):
+  app = _app(db, "stale", contract=_contract(spend_credits=["ana/prompts"]))
+  shown = app_consent.request_digest(app_consent.current_rows(app))
+  app.capability_contract = _contract(spend_credits=["bob/notes"])
+  assert not app_consent.accept(app, shown)
+  assert app.accepted_consent is None
 
 
 def test_background_work_is_a_row_with_timing_and_authority():

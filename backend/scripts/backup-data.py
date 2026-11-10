@@ -43,8 +43,8 @@ default). Routed into two archives:
                   (apps/, chats/, compiled/, shared/, .git, ...). shared/
                   + .git are git-tracked but the git repo dies WITH the
                   volume, so a true DR artifact carries them too.
-  secrets.tar.*   cli-auth/, app-secrets/, push/, .vault/, service-token.txt,
-                  .secret-key.
+  secrets.tar.*   cli-auth/, app-secrets/, credits-client/, push/, .vault/,
+                  service-token.txt, .secret-key.
 
 Retired embedded-recovery credentials/sentinels are never captured. Older
 volumes may still contain `.recovery-secret`, `.recovery-owner.json`, or
@@ -145,7 +145,7 @@ EXCLUDE_STARTSWITH = (
 # Top-level entries routed into the ENCRYPTED secrets archive. Everything
 # else non-excluded goes into data.tar.gz.
 SECRET_NAMES = {
-  "cli-auth", "app-secrets", "push", ".vault",
+  "cli-auth", "app-secrets", "credits-client", "push", ".vault",
   "service-token.txt", ".secret-key", "setup-code",
 }
 

@@ -226,6 +226,7 @@ def test_required_owner_cards_keep_terminal_and_decline_claim_boundaries():
   assert "`request_approval` for permission" in core
   assert "`request_restart` for a platform restart" in core
   assert "Each is the **last action of the turn**" in core
+  assert "put your closing message in the card's `message`" in core
   assert "**Not now** choice that resumes the chat, not `on_answer: \"close\"`" in core
   assert "release the approval's work claim with `finish_agent_work(..., release=true)`" in core
 
@@ -313,6 +314,7 @@ def test_core_question_fallback_shows_the_minimal_valid_shape():
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
 
   assert "call request_question --args-json" in core
+  assert """'{"message":"...","questions":""" in core
   assert '[{"question":"...","options":[' in core
   assert "<question array>" not in core
 
@@ -788,6 +790,7 @@ def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
     "**Your reply text is the conversation.**",
     "Thinking is folded away and is not a reply",
     "**End every turn with a closing message:**",
+    "put the closing message in the card's `message`, which is shown above the card",
     "A denied tool call means the partner or a Möbius guard declined it",
     "System reminders and hook output come from Möbius",
     "**Report outcomes faithfully.**",

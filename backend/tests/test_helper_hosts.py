@@ -6,6 +6,7 @@ import stat
 
 import pytest
 
+from app.chat_writer import create_chat
 
 from app import claude_helper_host as claude_host
 from app import helper_hosts
@@ -604,6 +605,218 @@ def test_a_usage_limit_inside_a_host_parks_like_the_private_runner(
   ) is ProviderErrorKind.USAGE_LIMIT
 
 
+def _call(input_tokens, output_tokens, cache_read=0):
+  return {
+    "input_tokens": input_tokens, "output_tokens": output_tokens,
+    "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": 0,
+  }
+
+
+class _Sink:
+  def __init__(self):
+    self.events = []
+
+  def publish(self, event):
+    self.events.append(event)
+
+
+def _read_stream(tmp_path, messages):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  turn.sink = _Sink()
+  host._turn_by_tool_use["toolu_spawn"] = turn
+
+  class _Stream:
+    async def receive_messages(self):
+      for message in messages:
+        yield message
+
+  host._client = _Stream()
+  asyncio.run(host._read())
+  return turn
+
+
+def test_a_helper_turn_counts_each_of_its_own_model_calls_once(tmp_path):
+  """Claude's task notification total is only the last model call, so the
+  turn sums its own calls. Claude repeats one call's message per content
+  block; each call counts once, with its latest usage. The dispatcher's calls
+  and anything after the turn settled are not the helper's."""
+  from claude_agent_sdk import types as sdk
+
+  def child(message_id, usage, text="x"):
+    return sdk.AssistantMessage(
+      content=[sdk.TextBlock(text=text)], model="claude",
+      parent_tool_use_id="toolu_spawn", usage=usage, message_id=message_id,
+    )
+
+  turn = _read_stream(tmp_path, [
+    sdk.TaskStartedMessage(
+      subtype="task_started", data={}, task_id="agent-1", description="d1",
+      uuid="u", session_id="s", tool_use_id="toolu_spawn", task_type="local_agent",
+    ),
+    child("msg_1", _call(10, 1, cache_read=1_000)),
+    child("msg_1", _call(10, 40, cache_read=1_000)),
+    child("msg_2", _call(20, 30, cache_read=1_100)),
+    sdk.AssistantMessage(
+      content=[sdk.TextBlock(text="dispatcher")], model="claude",
+      usage=_call(9_999, 9_999), message_id="msg_root",
+    ),
+    sdk.ResultMessage(
+      subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+      num_turns=1, session_id="host", usage=_call(8_888, 8_888),
+    ),
+    sdk.TaskNotificationMessage(
+      subtype="task_notification", data={}, task_id="agent-1", status="completed",
+      output_file="", summary="done", uuid="u", session_id="s",
+      usage={"total_tokens": 1_150, "tool_uses": 0, "duration_ms": 50},
+    ),
+    child("msg_3", _call(7_777, 7_777)),
+  ])
+
+  assert turn.status == "completed"
+  assert turn.call_usage == {
+    "msg_1": _call(10, 40, cache_read=1_000),
+    "msg_2": _call(20, 30, cache_read=1_100),
+  }
+
+
+def _settle_with(calls):
+  def settle(turn, verb):
+    for message_id, usage in calls(verb):
+      turn.call_usage[message_id] = usage
+    settle.host._on_task_end(turn.agent_id, "completed", None, None)
+  return settle
+
+
+def test_hosted_helper_turns_report_the_sum_of_their_own_calls(
+  tmp_path, monkeypatch,
+):
+  """Spawned and follow-up turns alike report only their own calls, with
+  Claude's input/cache/output split, as a labelled lower bound."""
+  from app.usage_metrics import run_usage_quality
+
+  settle = _settle_with(lambda verb: (
+    [("a", _call(10, 5, cache_read=100)), ("b", _call(20, 5, cache_read=150))]
+    if verb == "SPAWN" else [("c", _call(30, 7, cache_read=200))]
+  ))
+  turn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+
+  spawned = turn("task")
+  assert spawned["error"] is None
+  usage = spawned["usage_metrics"]
+  assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (
+    280, 10, 290,
+  )
+  assert usage["cache_read_input_tokens"] == 250
+  assert run_usage_quality(usage, "completed") == "partial"
+
+  resumed = turn("more", spawned["session_id"])["usage_metrics"]
+  assert (resumed["input_tokens"], resumed["total_tokens"]) == (230, 237)
+
+
+def test_a_helper_with_no_model_calls_reports_no_usage(tmp_path, monkeypatch):
+  settle = _settle_with(lambda _verb: [])
+  turn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+  assert "usage_metrics" not in turn("task")
+
+
+def _owner_stops_mid_task(tmp_path, monkeypatch, *, force, claude_reports_stop):
+  """Run a real hosted turn whose helper made a model call, then end it with
+  the owner's Stop (or force-stop) through the registered runner handle, and
+  attach the turn's result metrics to its durable run like chat.py does."""
+  from app import chat as chat_mod
+  from app import models
+  from app.database import SessionLocal
+  from app.runner_registry import RunnerKind, registry
+  from app.usage_metrics import run_usage_quality, summarize_chat_run_tokens
+  from tests.goal_fixtures import goal_run
+
+  db = SessionLocal()
+  try:
+    db.add(create_chat(id="child", title="t", messages=[], pending_messages=[],
+                       provider="claude"))
+    db.add(goal_run(db, id="rt-stop", chat_id="child", status="running",
+                    provider="claude"))
+    db.commit()
+  finally:
+    db.close()
+
+  progressed = asyncio.Event()
+
+  def settle(turn, _verb):
+    turn.call_usage["msg_1"] = _call(70, 5)
+    progressed.set()
+
+  _turn_fn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  host = client.host
+  stopped_agents: list[str] = []
+
+  async def stop_task(agent_id):
+    stopped_agents.append(agent_id)
+    if claude_reports_stop:
+      # Claude acknowledges a stopped task with a terminal end, no counters.
+      host._on_task_end(agent_id, "stopped", None, None)
+
+  client.stop_task = stop_task
+
+  async def scenario():
+    running = asyncio.create_task(claude_host.run_claude_host_turn(
+      user_message="task", session_id=None,
+      base_env={"CHAT_ID": "child", "TMPDIR": str(tmp_path)},
+      chat_id="child", skill_text="helper", bc=None, agent_settings=None,
+      skills_enabled=False, run_policy=None, connector_plan=None,
+      helper_host_key=_key(), data_dir=str(tmp_path),
+    ))
+    await asyncio.wait_for(progressed.wait(), 10)
+    handle = registry.get_handle("child", RunnerKind.CLAUDE_SDK)
+    assert isinstance(handle, claude_host.ActiveClaudeHelperTurn)
+    stopped = await (handle.force_stop(timeout=1) if force else handle.stop(timeout=1))
+    result = await asyncio.wait_for(running, 10)
+    await chat_mod._record_run_metrics(
+      chat_id="child", run_token="rt-stop",
+      provider_session_id=result["session_id"], cost_usd=result["cost_usd"],
+      usage=result.get("usage_metrics"),
+    )
+    return stopped, result
+
+  stopped, result = asyncio.run(scenario())
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == "rt-stop").one()
+    stored = (run.total_tokens, run.input_tokens, run_usage_quality(run.usage_json, "stopped"))
+    summary = summarize_chat_run_tokens([run])
+  finally:
+    db.close()
+  assert registry.get_handle("child", RunnerKind.CLAUDE_SDK) is None
+  return stopped, stopped_agents, result, stored, summary
+
+
+@pytest.mark.parametrize("force,claude_reports_stop", [
+  (False, True),   # owner Stop: Claude reports the stopped task
+  (True, False),   # force-stop: Claude never answers stop_task
+])
+def test_an_owner_stop_keeps_the_helpers_calls_as_partial_usage(
+  tmp_path, monkeypatch, force, claude_reports_stop,
+):
+  """An owner's Stop is not a provider failure, yet the work done so far is
+  real: its calls reach the durable run as a partial lower bound, never as a
+  final or zero total, and the turn settles without waiting for a
+  notification Claude may never send."""
+  stopped, stopped_agents, result, stored, summary = _owner_stops_mid_task(
+    tmp_path, monkeypatch, force=force, claude_reports_stop=claude_reports_stop,
+  )
+  assert stopped is True
+  assert stopped_agents == ["agent-1"]
+  assert result["error"] is None
+  usage = result["usage_metrics"]
+  assert (usage["total_tokens"], usage["calculation"]) == (75, "helper_call_sum")
+  assert stored == (75, 70, "partial")
+  assert summary["totals"]["total_tokens"] == 75
+  assert summary["coverage"]["runs_by_quality"]["final"] == 0
+
+
 def test_a_refusal_inside_a_host_reaches_the_result_as_a_refusal(
   tmp_path, monkeypatch,
 ):
@@ -669,10 +882,12 @@ def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   assert turn.dispatch_error == "not_called"
   assert "529 Overloaded" in caplog.text and "completed without its tool call" in caplog.text
 
+  from app import chat_logging
+  chat_logging.install_platform_warning_log()
   startup._route_diagnostics_to_chat_log(None)
-  from app.chat_logging import get_chat_log_handler
+  assert chat_logging.get_chat_log_handler() in logging.getLogger("app").handlers
   for name in ("app.helper_hosts", "app.claude_helper_host"):
-    assert get_chat_log_handler() in logging.getLogger(name).handlers
+    assert logging.getLogger(name).isEnabledFor(logging.INFO)
 
 
 def test_host_helper_sessions_round_trip():
@@ -799,6 +1014,36 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
     for agent in options.agents.values():
       assert agent.prompt.startswith("CONSTITUTION")
       assert "# Interruptions in Möbius" in agent.prompt
+
+
+def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tmp_path):
+  """A raising or invalid identity/env hook must block, not run unscoped."""
+  from contextlib import ExitStack
+  from types import SimpleNamespace
+
+  factory = claude_host._host_options(
+    key=SimpleNamespace(cwd=str(tmp_path)), host_env={},
+    skill_text="C", connector_plan=None, skills_enabled=False,
+    model=None, supports_effort=True,
+  )
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None,
+                         pre_compact=None, subagent_stop=None)
+  with ExitStack() as stack:
+    options = factory(host, None, stack)
+  assert [m.on_failure for m in options.hooks["PreToolUse"]] == ["block"]
+  for event in ("PostToolUse", "PostToolUseFailure", "PreCompact", "SubagentStop"):
+    assert all(m.on_failure is None for m in options.hooks[event]), event
+
+
+@pytest.mark.asyncio
+async def test_helper_pre_tool_use_denies_once_identity_is_closed(tmp_path):
+  """Under on_failure="block" a None return blocks; a closed host must say deny."""
+  host = _claude_host(tmp_path)
+  host._cancel_pending_identity()
+  result = await host.pre_tool_use(
+    {"tool_name": "Read", "tool_input": {}, "agent_id": "unknown-agent"}, "t1", {},
+  )
+  assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio

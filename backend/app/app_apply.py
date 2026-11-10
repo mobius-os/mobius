@@ -771,9 +771,10 @@ async def _apply_source_revision(
         provider = manifest.get("model_provider")
         if (not store_managed and isinstance(provider, dict)
             and provider.get("transport") == "identity_broker"):
-          # The broker signs with the owner's Möbius account, so only the
-          # reviewed Möbius · You package may route turns through it. Local
-          # apps declare their own HTTPS endpoint and vault key.
+          # The broker signs with the owner's Möbius account. The platform
+          # owns that provider and ignores this declaration, but only the
+          # reviewed Möbius · You package may still carry it. Local apps
+          # declare their own HTTPS endpoint and vault key.
           raise AppApplyError(
             "local_model_broker",
             "Local apps may declare an HTTPS model provider with their own "

@@ -70,6 +70,53 @@ the server attests the app from its own token and the key vault adds the key
 `permissions.job_secret_read` is refused with a pointer to that route. No grant
 implies permission to activate bots, send messages or make paid calls.
 
+### Paying for priced calls with credits
+
+The owner, or an installed Store app with accepted `credits_manage` consent
+(including frames), pairs this Möbius with a credits service using
+`POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
+control is planned. Shared-browser guests and delegated helpers cannot pair.
+The paired service keeps the owner's credits, never this Möbius's database.
+For now, app credits permissions work only for installed Store apps with
+accepted owner consent. Owner-built local apps cannot use
+`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
+their account, price and charge requests receive 403.
+
+A creator publishes the price of one action of their app
+under their handle at that service; another owner's copy of the app pays for a call with
+`POST /api/identity/credits/charges`
+`{seller, app, action, idempotency_key, max_price_micro}`. Only the app's own
+service may call it, with the reviewed `permissions.spend_credits` grant (a
+critical consent row listing each `"<seller>/<app>"` it may pay; an update that
+adds one asks again): never the browser frame, a public invocation, or a
+service a shared-browser guest or delegated helper invoked, and never a seller the grant does not
+list (`seller_not_allowed`). Each charge names the paying app (its package id,
+or its slug when no package id is recorded) as `buyer_app`. The service reads the
+published price; the app cannot choose it, only refuse to pay more than `max_price_micro`, the
+price it showed the owner. Retrying the same idempotency key charges once;
+the key is scoped to the paying app before it reaches the service, so two apps
+that pick the same key never replay each other's charge. An upstream 5xx,
+transport failure or unreadable receipt on `/charges` answers 503
+`charge_outcome_unknown`: the charge may have been made. Retry with the same
+idempotency key, never a new one. The client never retries automatically.
+Other refusals keep the service's `detail.code` and fields (`not_paired`,
+`insufficient_credits`, `price_changed` with the current `price_micro`,
+`key_spend_cap`). `not_paired` means the owner has not connected credits yet.
+A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
+and an address that is not a credits service answers 502 `not_found`, so
+neither reads as the caller's own sign-in failing.
+Balance, history and purchase reads refuse a shared-browser guest.
+
+Everything else under `/api/identity/credits` is the owner's own money: the
+balance, earnings and history, pairing, buying, model funding, publishing
+prices, and keeping or withdrawing earnings. Besides the owner, only an app
+with `permissions.credits_manage: true` reaches it, a separate critical
+consent row. `identity_manage` covers the sign-in link only and never includes
+it. Reading a seller's published prices also admits a `spend_credits` app.
+The summary and purchase terms carry a `pairing` id that changes when the
+service or its key does; a top-up that names an earlier `pairing` is refused
+with 409 `pairing_changed`, so nothing is bought on another service's terms.
+
 ## Manifest contract
 
 Runtime capabilities live in the root `capabilities` object:
@@ -839,6 +886,29 @@ reaches the server again. An admitted module that does not export
 `appBlockSessions = true` is never mounted as its ordinary view on this path;
 the block falls back to an explicit, visible open. That verdict belongs to one
 applied revision; after an update the block negotiates again.
+
+`chat.blocks.ask` v1 extends an admitted passive session with one more
+host-drawn control. The app reports only references (`{id, code, rev}`, 1 to
+12, strict ASCII patterns; `rev` is a lower-case hex token naming the reported
+state) to things the chat's agent should fix. The host draws its own **Fix in
+chat** button, and when the owner presses it, the host sends an owner message
+written entirely by the host: a fixed sentence naming the app, then one
+`<app slug> · <id> · <code>` line per reference. The app supplies no words,
+receives no event, and the press causes no app effect. The host draws an ask
+only on the newest block of its app and intent in the chat the transcript
+attests, never while an action is confirming or busy or during recovery. The
+message's client id is a hash of the chat, the block's saved content and the
+sorted references with their revisions, with no clock in it, so the server's
+existing duplicate-message check posts the same ref set about the same state
+once across retries (including after a lost acknowledgement), reloads, devices
+and concurrent taps; a new `rev` makes a new ask possible. The block identity
+is its saved content, not its occurrence: identical blocks in one chat share
+one ask. It is a deduplication key and grants nothing. The host does not attest
+that a reference exists or that its code is accurate; it is the app's report.
+Admission mirrors passive execution: `AppOut.passive_block_ask` is true only
+when the owner's live grant exists, the immutable applied manifest declares it
+and passive execution itself is admitted. Only then does the session list
+`ask-v1` in its features. Declaring it is a reviewable widening.
 
 Each frame document has a host-assigned generation, echoed by the frame in
 `frame-mounted` and every `app-block-state`. Negotiation, reported state

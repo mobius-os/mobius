@@ -40,7 +40,8 @@ from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
-  get_owner_or_delegated_owner_for_app_token, reject_cross_site,
+  acts_for_guest, get_owner_or_delegated_owner_for_app_token, reject_cross_site,
+  require_account_owner_control,
   require_chat_embed_operation,
   require_installation_owner_control,
 )
@@ -567,11 +568,10 @@ def create_app_token_endpoint(
       "message": "This app requires your approval before it opens.",
     })
   owner = principal.owner
-  # Preserve the delegation lineage on the down-scoped token. create_agent_token
-  # keeps agent_chat == delegation_chat, so principal.chat_id is the child chat
-  # a delegated bearer must carry; a plain owner has neither claim.
+  # Restrictive lineage is separate from chat/run execution identity. Preserve
+  # the signed provenance, never reconstruct it from the current caller chat.
   delegation_id = principal.delegation_id
-  delegation_chat = principal.chat_id if delegation_id is not None else None
+  delegation_chat = principal.delegation_chat
   token = auth.create_app_token(
     body.app_id,
     owner.username,
@@ -637,18 +637,23 @@ class ModelConnectionPatch(BaseModel):
   enabled: bool
 
 
-def _app_model_connection(provider_id: str, principal: Principal):
-  """The reviewed app connection this caller may switch, never a CLI provider."""
+def _app_model_connection(provider_id: str, principal: Principal, db: Session):
+  """The switchable model connection this caller may use, never a CLI provider.
+
+  The Möbius subscription is platform-owned: the owner switches it in
+  Settings, and an app with the reviewed identity-management grant (installed
+  Möbius · You copies) may too. An app connection belongs to its declaring app.
+  """
+  from app.deps import get_owner_or_app_with_identity_manage
   from app.providers import AppModelProvider, MobiusProvider, PROVIDERS, sync_app_model_providers
   sync_app_model_providers(get_settings().data_dir)
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    app_id = provider.app_id
-  elif isinstance(provider, AppModelProvider):
-    app_id = provider.app_id
-  else:
+  if isinstance(provider, MobiusProvider):
+    get_owner_or_app_with_identity_manage(principal, db)
+    return provider
+  if not isinstance(provider, AppModelProvider):
     raise HTTPException(404, "This app model connection is not installed.")
-  if principal.app_id is not None and principal.app_id != app_id:
+  if principal.app_id is not None and principal.app_id != provider.app_id:
     raise HTTPException(403, "Only the declaring app can change this model connection.")
   return provider
 
@@ -657,9 +662,10 @@ def _app_model_connection(provider_id: str, principal: Principal):
 def model_connection_enabled(
   provider_id: str,
   principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   from app.providers import provider_enabled
-  _app_model_connection(provider_id, principal)
+  _app_model_connection(provider_id, principal, db)
   return {"enabled": provider_enabled(get_settings().data_dir, provider_id)}
 
 
@@ -668,10 +674,11 @@ def set_model_connection_enabled(
   provider_id: str,
   body: ModelConnectionPatch,
   principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   from app.providers import update_agent_settings
   require_installation_owner_control(principal)
-  _app_model_connection(provider_id, principal)
+  _app_model_connection(provider_id, principal, db)
   data_dir = get_settings().data_dir
   if not update_agent_settings(data_dir, lambda current: {
     **current,
@@ -747,30 +754,12 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _write_credentials(token_data: dict) -> None:
-  """Transforms the token endpoint response into CLI credential format."""
-  for field in ("access_token", "refresh_token", "expires_in"):
-    if field not in token_data:
-      raise ValueError(f"Token response missing '{field}'")
+  """Stores a new Claude sign-in from the token endpoint response
+  (providers.write_claude_sign_in), creating the CLI home if needed."""
+  from app.providers import write_claude_sign_in
 
   _, cli_home = _cli_env()
-
-  # Extract email from the account object if present.
-  account = token_data.get("account") or {}
-  email = account.get("email_address", "")
-
-  creds = {
-    "claudeAiOauth": {
-      "accessToken": token_data["access_token"],
-      "refreshToken": token_data["refresh_token"],
-      "expiresAt": int(time.time() * 1000) + token_data["expires_in"] * 1000,
-      "scopes": token_data.get("scope", "").split(),
-      "email": email,
-    }
-  }
-  path = os.path.join(cli_home, ".credentials.json")
-  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(fd, "w") as f:
-    json.dump(creds, f)
+  email = write_claude_sign_in(Path(cli_home) / ".credentials.json", token_data)
   log.info("Credentials written for %s", email or "(unknown)")
 
 
@@ -897,12 +886,19 @@ async def providers_status(
   model pickers can disable disconnected providers instead of guessing.
 
   Availability is safe to share across the app/embed boundary; the owner's
-  Möbius trial balance is not. `trial` is therefore attached only for a true
-  owner caller, so an app or chat-embed principal sees the same availability
-  fields without the owner's credit units and grant expiries.
+  Möbius trial balance and Claude sign-in expiry are not. `trial` (mobius)
+  and `login_expires_at` (claude: ISO 8601 UTC, or null when unknown or the
+  read failed) are therefore attached only for a true owner caller, so an app,
+  chat-embed principal, or shared-browser guest (or work it started) sees the
+  same availability fields without them.
+  `login_expires_at` is an upper bound: the CLI treats the stored end as a
+  window, so the sign-in can end up to three days before it.
   """
   require_chat_embed_operation(principal, "models:read")
-  is_owner_caller = principal.app_id is None and principal.scope == "owner"
+  is_owner_caller = (
+    principal.app_id is None and principal.scope == "owner"
+    and not acts_for_guest(principal)
+  )
   from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir
   from app.providers import refresh_app_model_providers
@@ -926,6 +922,11 @@ async def providers_status(
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
       except Exception:
         out[pid]["trial"] = None
+    if pid == "claude" and error is None and is_owner_caller:
+      from app.providers import claude_login_expires_at
+      out[pid]["login_expires_at"] = await run_in_threadpool(
+        claude_login_expires_at, data_dir,
+      )
   return out
 
 
@@ -1078,7 +1079,10 @@ async def _consume_mobius_pending(state: str) -> dict:
 
 
 @router.post(
-  "/provider/mobius/login", dependencies=[Depends(reject_cross_site)],
+  "/provider/mobius/login",
+  # Linking the owner's Möbius account is theirs alone, whatever workspace
+  # access a guest holds.
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 @_limiter.limit("3/minute")
 async def mobius_login_start(

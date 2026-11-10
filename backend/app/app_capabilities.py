@@ -311,6 +311,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "default_limits": {},
     "hard_limits": {},
   },
+  # Lets a passive chat block offer a host-drawn "Fix in chat" button that
+  # sends a host-written request naming what the app flagged into that chat
+  # as the owner's own message. Only for an app also admitted to
+  # chat.blocks.passive.
+  "chat.blocks.ask": {
+    "version": 1,
+    "kind": "session",
+    "title": "Ask this chat's agent from its chat blocks",
+    "description": (
+      "Show a Fix in chat button on this app's chat blocks. When you press "
+      "it, Möbius sends your message to that chat asking its agent to fix "
+      "the items the block names. The app cannot choose the wording, and you "
+      "see the exact message in the chat."
+    ),
+    "risk": "messages",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "device.storage": {
     "version": 1,
     "kind": "invoke",
@@ -597,6 +616,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connections_manage": bool(perms.get("connections_manage", False)),
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
+      "credits_manage": bool(perms.get("credits_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
       "helper_activity_read": bool(perms.get("helper_activity_read", False)),
       "location_history_read": bool(perms.get("location_history_read", False)),
@@ -618,6 +638,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
+  if perms.get("spend_credits"):
+    contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -746,6 +768,7 @@ def contract_from_app_state(
       # unrelated row projection (no mapping, e.g. a PATCH of pinned or
       # chat_log_access) retains every contract-only grant the owner accepted.
       "identity_manage": bool(contract_grants.get("identity_manage", False)),
+      "credits_manage": bool(contract_grants.get("credits_manage", False)),
       "railway_manage": bool(contract_grants.get("railway_manage", False)),
       "helper_activity_read": bool(
         contract_grants.get("helper_activity_read", False)
@@ -753,6 +776,7 @@ def contract_from_app_state(
       "location_history_read": bool(
         contract_grants.get("location_history_read", False)
       ),
+      "spend_credits": contract_grants.get("spend_credits", []),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
@@ -983,12 +1007,12 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "data.helper_activity_read",
+  "data.credits_manage", "data.railway_manage", "data.helper_activity_read",
   "data.location_history_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools",
+  "agent.skills", "agent.tools", "data.spend_credits",
   "public.network",
 }
 
@@ -1116,6 +1140,7 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
 
 
 PASSIVE_BLOCK_CAPABILITY = "chat.blocks.passive"
+PASSIVE_ASK_CAPABILITY = "chat.blocks.ask"
 
 
 class _RuntimeManifestUnavailable(Exception):
@@ -1123,8 +1148,11 @@ class _RuntimeManifestUnavailable(Exception):
 
 
 @lru_cache(maxsize=512)
-def _applied_passive_digest(app_id: int, runtime_revision: str, compiled_path: str) -> str | None:
-  """Digest of one immutable (runtime revision, compiled bundle) pair.
+def _applied_passive_admission(
+  app_id: int, runtime_revision: str, compiled_path: str,
+) -> tuple[str | None, bool]:
+  """Digest of one immutable (runtime revision, compiled bundle) pair, and
+  whether that revision also declares chat.blocks.ask.
 
   Both inputs are content addressed, so the answer can never change for this
   key: a new Apply produces a new revision and bundle name. The editable source
@@ -1136,24 +1164,49 @@ def _applied_passive_digest(app_id: int, runtime_revision: str, compiled_path: s
 
   digest = app_bundle_digest(app_id, compiled_path)
   if digest is None:
-    return None
+    return None, False
   try:
     root = runtime_parent(app_id) / runtime_revision
     if not root.is_dir():
       raise _RuntimeManifestUnavailable
     manifest_path = root / "mobius.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
-      return None
+      return None, False
     with manifest_path.open("rb") as handle:
       raw = handle.read(MANIFEST_MAX_BYTES + 1)
     if len(raw) > MANIFEST_MAX_BYTES:
-      return None
-    declaration = normalize_runtime_capabilities(json.loads(raw)).get(PASSIVE_BLOCK_CAPABILITY)
+      return None, False
+    declared = normalize_runtime_capabilities(json.loads(raw))
   except (AppliedRuntimeUnavailable, OSError) as exc:
     raise _RuntimeManifestUnavailable from exc
   except (ValueError, TypeError, AttributeError):
-    return None
-  return digest if declaration and declaration["version"] == 1 else None
+    return None, False
+  passive = declared.get(PASSIVE_BLOCK_CAPABILITY)
+  if not passive or passive["version"] != 1:
+    return None, False
+  ask = declared.get(PASSIVE_ASK_CAPABILITY)
+  return digest, bool(ask and ask["version"] == 1)
+
+
+def _granted(app: Any, capability: str) -> bool:
+  contract = getattr(app, "capability_contract", None)
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(capability) if isinstance(runtime, dict) else None
+  return isinstance(grant, dict) and type(grant.get("version")) is int and grant["version"] == 1
+
+
+def _passive_admission(app: Any) -> tuple[str | None, bool]:
+  if not _granted(app, PASSIVE_BLOCK_CAPABILITY):
+    return None, False
+  revision = getattr(app, "runtime_revision", None)
+  compiled = getattr(app, "compiled_path", None)
+  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
+      or not isinstance(compiled, str) or not compiled:
+    return None, False
+  try:
+    return _applied_passive_admission(int(app.id), revision, compiled)
+  except _RuntimeManifestUnavailable:
+    return None, False
 
 
 def passive_block_module_digest(app: Any) -> str | None:
@@ -1165,17 +1218,14 @@ def passive_block_module_digest(app: Any) -> str | None:
   immediate) and the immutable applied declaration, and return the compiled
   content address the frame verifies before evaluating module bytes.
   """
-  contract = getattr(app, "capability_contract", None)
-  runtime = contract.get("runtime") if isinstance(contract, dict) else None
-  grant = runtime.get(PASSIVE_BLOCK_CAPABILITY) if isinstance(runtime, dict) else None
-  if not isinstance(grant, dict) or type(grant.get("version")) is not int or grant["version"] != 1:
-    return None
-  revision = getattr(app, "runtime_revision", None)
-  compiled = getattr(app, "compiled_path", None)
-  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
-      or not isinstance(compiled, str) or not compiled:
-    return None
-  try:
-    return _applied_passive_digest(int(app.id), revision, compiled)
-  except _RuntimeManifestUnavailable:
-    return None
+  return _passive_admission(app)[0]
+
+
+def passive_block_ask(app: Any) -> bool:
+  """Admit host-drawn asks on this app's passive blocks.
+
+  Exactly as for passive execution: the owner's live chat.blocks.ask grant,
+  the applied revision's own declaration, and passive admission itself.
+  """
+  digest, declared = _passive_admission(app)
+  return bool(digest) and declared and _granted(app, PASSIVE_ASK_CAPABILITY)

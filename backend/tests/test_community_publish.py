@@ -519,14 +519,72 @@ def test_snapshot_publishes_file_names_install_accepts(tmp_path):
 
 
 @pytest.mark.parametrize("folder", ["secrets", "credentials"])
-def test_snapshot_refuses_private_directory_names_without_known_secret_content(tmp_path, folder):
+def test_snapshot_publishes_private_sounding_folders_without_secret_content(tmp_path, folder):
   repo, app, _ = _app_repo(tmp_path)
   path = f"{folder}/ordinary.txt"
-  _commit_files(repo, app, {path: b"unrecognized private material"})
+  _commit_files(repo, app, {path: b"ordinary source"})
+
+  _, files = build_public_snapshot(app)
+
+  assert path in {item["path"] for item in files}
+
+
+# What a private folder typically holds is refused by its own name, whatever
+# folder it sits in: the folder name is not what makes it private.
+@pytest.mark.parametrize("folder", ["", "src/", "secrets/", "credentials/", "config/"])
+@pytest.mark.parametrize("name", [
+  ".env", ".env.production", "prod.env", ".netrc", ".npmrc", "id_ed25519",
+  "credentials", "secrets", ".git-credentials", ".aws/credentials",
+  "credentials.json", "secrets.json", "service-account.json", ".secret-key",
+  "service-token.txt", "tls.key", "release.jks",
+  "debug.keystore", "trust.bks", "keys.jceks", "client.p12", "client.pfx",
+  "deploy.ppk", "vault.kdbx",
+])
+def test_snapshot_refuses_credential_files_by_name_in_any_folder(tmp_path, folder, name):
+  repo, app, _ = _app_repo(tmp_path)
+  path = f"{folder}{name}"
+  _commit_files(repo, app, {path: b"\x30\x82 opaque"})
+
   with pytest.raises(CommunityPublicationError) as raised:
     build_public_snapshot(app)
+
   assert raised.value.code == "sensitive_path"
   assert path in raised.value.detail
+
+
+@pytest.mark.parametrize("name, content", [
+  ("server_private", b"-----BEGIN PRIVATE KEY-----\nMIIE"),
+  ("tls_private", b"-----BEGIN EC PRIVATE KEY-----\nMHcC"),
+  ("deploy_key", b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl"),
+  ("signing.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n"),
+  ("token.json", b'{"token": "ya29.' + b"a0Af" * 10 + b'"}'),
+  ("client_secret.json", b'{"installed": {"client_secret": "GOCSPX-' + b"A" * 28 + b'"}}'),
+])
+def test_snapshot_refuses_recognizable_credentials_in_private_folders(tmp_path, name, content):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {f"secrets/{name}": content})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
+
+
+def test_content_scan_reads_tokens_inside_a_binary_database(tmp_path):
+  import sqlite3
+
+  database = tmp_path / "vault.db"
+  with sqlite3.connect(database) as connection:
+    connection.execute("create table keys (value text)")
+    connection.execute("insert into keys values (?)", ("ghp_" + "A" * 36,))
+  connection.close()
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"secrets/vault.db": database.read_bytes()})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
 
 
 def test_snapshot_names_the_path_it_refuses_and_why(tmp_path):
@@ -639,6 +697,27 @@ def test_snapshot_allows_slack_placeholder(tmp_path):
   assert "README.md" in {item["path"] for item in files}
 
 
+def test_snapshot_publishes_a_secrets_manager_ui_and_credential_setup_docs(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  sources = {
+    "secrets/SecretsPanel.jsx": (
+      b"export function SecretsPanel() {\n"
+      b"  return <input type='password' placeholder='sk_test_...' />;\n}\n"
+    ),
+    "secrets/vault.js": b"export const fields = ['api_key', 'password'];",
+    "credentials/README.md": (
+      b"Paste a webhook such as https://hooks.slack.com/services/"
+      b"T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX and a bot token "
+      b"like 123456789:YOUR_BOT_TOKEN.\n"
+    ),
+  }
+  _commit_files(repo, app, sources)
+
+  _, files = build_public_snapshot(app)
+
+  assert set(sources) <= {item["path"] for item in files}
+
+
 def test_snapshot_applies_the_same_icon_rule_as_apply(tmp_path):
   repo, app, _ = _app_repo(tmp_path)
   manifest = json.loads((repo / "mobius.json").read_text())
@@ -664,13 +743,20 @@ def test_snapshot_applies_the_same_icon_rule_as_apply(tmp_path):
   "sk-proj-" + "A" * 20,
   "rk_live_" + "A" * 20,
   "sk_live_" + "A" * 20,
+  "sk_test_" + "A" * 20,
+  "rk_test_" + "A" * 20,
+  "sk-" + "A" * 20 + "T3BlbkFJ" + "A" * 20,
+  "sk-svcacct-" + "A" * 40 + "T3BlbkFJ" + "A" * 40,
   "xoxb-1234567890-1234567890-" + "A" * 24,
+  "https://hooks.slack.com/services/T0123ABCD/B0123ABCD/" + "a1B2" * 6,
+  "123456789:AA" + "a1B2_-c" * 4 + "a1B2_",
 ])
+@pytest.mark.parametrize("folder", ["", "src/", "secrets/"])
 def test_snapshot_refuses_additional_recognizable_credential_patterns(
-  tmp_path, credential,
+  tmp_path, credential, folder,
 ):
   repo, app, _ = _app_repo(tmp_path)
-  _commit_files(repo, app, {"config.js": f"const key = '{credential}';".encode()})
+  _commit_files(repo, app, {f"{folder}config.js": f"const key = '{credential}';".encode()})
 
   with pytest.raises(CommunityPublicationError) as raised:
     build_public_snapshot(app)
@@ -690,3 +776,27 @@ def test_snapshot_refuses_declared_icon_missing_from_snapshot(tmp_path):
 
   assert raised.value.code == "invalid_icon"
   assert "missing.png" in raised.value.detail
+
+
+def test_public_certificates_publish_and_private_keys_in_pem_are_refused(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"certs/cacert.pem": b"-----BEGIN CERTIFICATE-----\nMIIB\n"})
+  _, files = build_public_snapshot(app)
+  assert any(entry["path"] == "certs/cacert.pem" for entry in files)
+
+  (tmp_path / "second").mkdir()
+  repo, app, _ = _app_repo(tmp_path / "second")
+  _commit_files(repo, app, {"certs/server.pem": b"-----BEGIN PRIVATE KEY-----\nMIIE"})
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+  assert raised.value.code == "secret_detected"
+
+
+def test_openai_marker_scan_stays_linear_on_long_runs(tmp_path):
+  import time
+  from app import community_publish
+  text = "sk-" * 200_000
+  started = time.monotonic()
+  assert not any(pattern.search(text) for pattern in community_publish._SECRET_PATTERNS)
+  # The unbounded prefix took about a minute here; the bounded one is instant.
+  assert time.monotonic() - started < 5

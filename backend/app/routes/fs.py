@@ -80,8 +80,9 @@ _DU_ENTRY_CAP = 200_000
 _GIT_TIMEOUT = 30
 _GIT_LIST_CAP = 200  # per-category status list cap; counts stay exact
 
-# Paths relative to the FS root that the viewer never reads/writes/git's
-# (403) and omits from listings (reported in `redacted`). Mostly secrets;
+# Paths relative to the data dir (also denied relative to the FS view root)
+# that the viewer never reads/writes/git's (403) and omits from listings
+# (reported in `redacted`). Mostly secrets;
 # `.storage-meta` is the one non-secret entry — it's the storage layer's
 # internal MIME-sidecar tree (routes/storage.py), kept out of the owner's
 # File Explorer so it can't be mistaken for app data or hand-edited (the card
@@ -102,12 +103,14 @@ _DENY_RELPATHS = (
   ".storage-meta",
   ".contribution-runtime",
   # Credential stores: the Web Push signing key, the key vault and the
-  # retired app-secret store, the identity broker, the agent's signed-in
-  # browser sessions, and Connect runner tokens / pairing codes.
+  # retired app-secret store, the identity broker, the paired credits
+  # service's key (credits_client.py), the agent's signed-in browser
+  # sessions, and Connect runner tokens / pairing codes.
   "push/private_key.pem",
   ".vault",
   "app-secrets",
   "identity-broker",
+  "credits-client",
   "agent-browser-profiles",
   "shared/connect",
 )
@@ -146,26 +149,30 @@ def _rel_to_root(resolved: Path, root: Path) -> str:
     return ""
 
 
-def _contribution_runtime_roots() -> tuple[Path, ...]:
-  """Literal and canonical private-runtime roots, without creating either.
+def _private_roots():
+  """Literal and canonical data-dir secret paths, without creating them.
 
-  The literal path keeps root listings redacted. The canonical path also
-  catches a request made through an in-root symlink alias, and keeps the deny
-  boundary correct if ``fs_view_root`` is ever widened above ``data_dir``.
+  Literal paths redact listings; canonical paths also cover in-root symlink
+  aliases. Neither boundary depends on how far ``fs_view_root`` is widened.
   """
   data_root = Path(get_settings().data_dir).resolve()
-  literal = data_root / ".contribution-runtime"
-  try:
-    canonical = literal.resolve()
-  except (OSError, RuntimeError):
-    canonical = literal
-  return (literal,) if canonical == literal else (literal, canonical)
+  for rel in _DENY_RELPATHS:
+    literal = data_root / rel
+    yield literal
+    try:
+      canonical = literal.resolve()
+    except (OSError, RuntimeError):
+      continue
+    if canonical != literal:
+      yield canonical
 
 
-def _is_denied(resolved: Path, root: Path) -> bool:
+def _is_denied(resolved: Path, root: Path, private_roots=None) -> bool:
   """True when the resolved path is a secret we never expose."""
-  for private_root in _contribution_runtime_roots():
-    if resolved == private_root or private_root in resolved.parents:
+  path = str(resolved)
+  for private_root in _private_roots() if private_roots is None else private_roots:
+    private = str(private_root)
+    if path == private or path.startswith(private + "/") or path.startswith(private + "-"):
       return True
   rel = _rel_to_root(resolved, root)
   if rel == "":
@@ -291,7 +298,9 @@ def fs_du(
   summed."""
   root = _fs_root()
   resolved = _resolve(path, root)
-  if _is_denied(resolved, root):
+  # Resolve private boundaries once per scan, not once per entry.
+  private_roots = tuple(_private_roots())
+  if _is_denied(resolved, root, private_roots):
     raise HTTPException(status_code=403, detail="Path not viewable.")
   rel = _rel_to_root(resolved, root)
   if not resolved.is_dir():
@@ -322,7 +331,7 @@ def fs_du(
       # flips `truncated`.
       if child.is_symlink():
         continue
-      if _is_denied(child, root):
+      if _is_denied(child, root, private_roots):
         truncated = True
         continue
       kept.append(name)
@@ -350,7 +359,7 @@ def fs_du(
         continue
       if stat.S_ISLNK(st.st_mode):
         continue
-      if _is_denied(f, root):
+      if _is_denied(f, root, private_roots):
         truncated = True
         continue
       total_bytes += st.st_size
@@ -388,7 +397,9 @@ def fs_tree(
   per-subdir scan runs."""
   root = _fs_root()
   resolved = _resolve(path, root)
-  if _is_denied(resolved, root):
+  # Resolve private boundaries once per scan, not once per entry.
+  private_roots = tuple(_private_roots())
+  if _is_denied(resolved, root, private_roots):
     raise HTTPException(status_code=403, detail="Path not viewable.")
   rel_prefix = _rel_to_root(resolved, root)
   if not resolved.is_dir():
@@ -415,7 +426,7 @@ def fs_tree(
     children = []
   for de in children:
     child = resolved / de.name
-    if _is_denied(child, root):
+    if _is_denied(child, root, private_roots):
       redacted.append(de.name)
       continue
     e = _entry(child, rel_prefix)

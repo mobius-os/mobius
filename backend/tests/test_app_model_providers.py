@@ -55,8 +55,48 @@ def test_broker_transport_requires_the_identity_app_grant():
     validate_manifest_contract(manifest)
 
 
+def _catalogue_ids():
+  return [model["id"] for model in providers.PROVIDERS["mobius"].declaration["models"]]
+
+
 @pytest.mark.asyncio
-async def test_identity_app_declaration_owns_native_models_and_background_choice(db, tmp_path):
+async def test_mobius_models_need_no_installed_app(db):
+  """The platform owns the Möbius catalogue; uninstalling an app cannot drop it."""
+  data_dir = get_settings().data_dir
+  assert db.query(models.App).filter(models.App.deleted_at.is_(None)).count() == 0
+  try:
+    providers.sync_app_model_providers(data_dir, force=True)
+    default = providers.PROVIDERS["mobius"].declaration["default_model"]
+    assert providers.DEFAULT_MODELS["mobius"] == default
+    assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == default
+    assert providers.provider_of_model(default) == "mobius"
+    assert providers.provider_selectable(data_dir, "mobius")
+    listed = await providers.list_models(data_dir)
+    assert [row["id"] for row in listed["mobius"]] == _catalogue_ids()
+    assert any(row["provider"] == "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+
+    assert providers.update_agent_settings(data_dir, lambda current: {
+      **current, "model_providers_enabled": {"mobius": False},
+    })
+    assert not providers.provider_selectable(data_dir, "mobius")
+    assert "mobius" not in await providers.list_models(data_dir)
+    assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+    assert providers.update_agent_settings(data_dir, lambda current: {
+      **current, "model_providers_enabled": {"mobius": True},
+      "provider": "mobius", "model": default,
+    })
+    assert providers.owner_default_provider(data_dir, "mobius") == "mobius"
+  finally:
+    providers.update_agent_settings(data_dir, lambda current: {
+      key: value for key, value in current.items()
+      if key not in {"model_providers_enabled", "provider", "model"}
+    })
+    providers.invalidate_model_cache()
+
+
+@pytest.mark.asyncio
+async def test_installed_identity_broker_declaration_is_inert(db, tmp_path):
+  """Installed Möbius · You copies still declare the broker; it adds nothing."""
   manifest = _manifest()
   manifest["id"] = "identity"
   manifest["permissions"] = {"identity_manage": True}
@@ -71,38 +111,21 @@ async def test_identity_app_declaration_owns_native_models_and_background_choice
   db.add(app)
   db.commit()
   data_dir = get_settings().data_dir
+  catalogue = providers.PROVIDERS["mobius"].declaration
   try:
     providers.sync_app_model_providers(data_dir, force=True)
-    assert providers.PROVIDERS["mobius"].app_id == app.id
-    assert providers.DEFAULT_MODELS["mobius"] == "deepseek-flash"
-    assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == "deepseek-flash"
-    assert providers.provider_of_model("deepseek-flash") == "mobius"
+    assert f"app-{app.id}" not in providers.PROVIDERS
+    assert providers.PROVIDERS["mobius"].declaration is catalogue
+    assert providers.provider_of_model("deepseek-flash") is None
     listed = await providers.list_models(data_dir)
-    assert [row["id"] for row in listed["mobius"]] == ["deepseek-flash", "deepseek-v4-pro"]
-    assert any(row["provider"] == "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
-
-    assert providers.update_agent_settings(data_dir, lambda current: {
-      **current, "model_providers_enabled": {"mobius": False},
-    })
-    assert "mobius" not in await providers.list_models(data_dir)
-    assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
-    assert providers.update_agent_settings(data_dir, lambda current: {
-      **current, "model_providers_enabled": {"mobius": True},
-      "provider": "mobius", "model": "deepseek-flash",
-    })
-    assert providers.owner_default_provider(data_dir, "mobius") == "mobius"
+    assert [row["id"] for row in listed["mobius"]] == _catalogue_ids()
 
     app.deleted_at = datetime.now(UTC)
     db.commit()
     providers.sync_app_model_providers(data_dir, force=True)
-    assert providers.PROVIDERS["mobius"].declaration is None
-    assert "mobius" not in providers.DEFAULT_MODELS
-    assert "mobius" not in providers.DEFAULT_BACKGROUND_MODELS
-    assert providers.provider_of_model("deepseek-flash") is None
-    assert providers.owner_default_provider(data_dir, "mobius") != "mobius"
-    assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+    assert providers.PROVIDERS["mobius"].declaration is catalogue
+    assert providers.provider_selectable(data_dir, "mobius")
   finally:
-    providers.PROVIDERS["mobius"].set_declaration(None, None)
     providers.invalidate_model_cache()
 
 

@@ -614,6 +614,10 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.ChatAppArtifact).filter(
     models.ChatAppArtifact.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  # A reused app id must not inherit the old app's spent or cancelled scopes.
+  db.query(models.AppChatScopeStart).filter(
+    models.AppChatScopeStart.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   # Native Projects snapshot their provider metadata and own a separate root;
   # uninstalling the provider must not delete or invalidate those projects.
   db.query(models.Project).filter(

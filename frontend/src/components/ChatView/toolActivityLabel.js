@@ -2,6 +2,7 @@ import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { appActivityLabel } from './appActivityCard.js'
 import { runningBackgroundTask } from './toolTasks.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -202,6 +203,7 @@ const CONTROL_TOOLS = new Map([
   ['finish_agent_work', 'WorkClaim'],
   ['list_agent_peers', 'PeerControl'],
   ['send_agent_message', 'PeerControl'],
+  ['read_agent_message', 'PeerControl'],
   ['notify_owner', 'NotifyControl'],
   ['open_item', 'OpenControl'],
   ['request_secret', 'AskControl'],
@@ -249,6 +251,7 @@ const CONTROL_CALLS = new Map([
   ['finish_agent_work', ['Settling a claim:', 'Settled a claim:', 'outcome']],
   ['send_agent_message', ['Messaging another chat:', 'Messaged another chat:', 'body']],
   ['list_agent_peers', ['Checking other chats', 'Checked other chats']],
+  ['read_agent_message', ['Reading a peer note in full', 'Read a peer note in full']],
   ['checkpoint_chat', ['Saving chat notes', 'Saved chat notes']],
   ['notify_owner', ['Notifying you:', 'Notified you:', 'title']],
   ['open_item', ['Opening it for you', 'Opened it for you']],
@@ -561,5 +564,18 @@ export function memoryRecallLabel(tool) {
   return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`
 }
 export function isDistinctiveActivityTool(item) {
-  return item?.type === 'tool' && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+  return item?.type === 'tool' && !isRoutineTool(item)
+    && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+}
+
+// A tool's owner declares routine bookkeeping (the platform for its controls,
+// an app with `tools[].routine` in its manifest); the backend stamps `routine`
+// on each call. Such a call never stands as its own beat or names an activity
+// line beside other work. A failed, warned or receipt-less call reads like any
+// other tool.
+export function isRoutineTool(item) {
+  if (item?.type !== 'tool' || item.routine !== true || item.status === 'failed') return false
+  const activity = item.app_activity
+  return !toolBlockFailed(item) && activity?.status !== 'failed'
+    && !activity?.warning && !activity?.receipt_missing
 }

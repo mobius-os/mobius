@@ -221,6 +221,10 @@ command_scratch="$(mktemp -d /tmp/mobius-wt-npm.XXXXXX)" || {
 # the caller's own TMPDIR while bulky scratch goes to the deleted directory.
 export MOBIUS_TEST_LOG_DIR="${MOBIUS_TEST_LOG_DIR:-${TMPDIR:-/tmp}/mobius-test-logs}"
 export TMPDIR="$command_scratch" NODE_COMPILE_CACHE="$command_scratch/node-compile-cache"
+# Vite otherwise caches under node_modules/.vite. A borrowed tree belongs to
+# another checkout or to the read-only image, so this command's cache stays in
+# its own scratch (frontend/vite.config.js reads this variable).
+export MOBIUS_VITE_CACHE="$command_scratch/vite-cache"
 
 cd "$FRONTEND" || exit 1
 # Descendants must not inherit the lock. A package script may intentionally

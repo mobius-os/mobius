@@ -512,12 +512,15 @@ def validate_repair(gh, cwd: Path, row, target: dict, checkout: dict,
   else:
     historical_paths.update(paths)
   _assert_path_scope(historical_paths, allowed, target_repo=target["repo"])
+  # Shown to the owner beside the proposed push, e.g. "2 files changed, 9 insertions(+)".
+  stat = _git(path, "diff", "--shortstat", "--no-renames", f"{initial}..{head}", check=False)
   return {"checkout": str(path), "initial_head_sha": initial,
           "head_sha": head, "head_repo": slug, "head_repo_id": repo_id,
           "head_ref": branch, "files": sorted(historical_paths if merges else paths),
           "allowed_files": sorted(allowed),
           **({"merged_base_sha": base} if merges else {}),
-          "diff_sha256": hashlib.sha256(diff).hexdigest()}
+          "diff_sha256": hashlib.sha256(diff).hexdigest(),
+          "diff_stat": stat.stdout.strip() if stat.returncode == 0 else ""}
 
 
 def _present_commit(path: Path, sha: str) -> str | None:

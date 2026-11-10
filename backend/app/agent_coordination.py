@@ -11,12 +11,13 @@ import time
 from typing import Any
 import uuid
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import String, and_, cast, func, literal, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
+from app.context_budget import PEER_NOTE_CHARS, excerpt
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -33,9 +34,10 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-# Notes are delivered whole: the send cap (4000 characters) already bounds
-# each one, and a clipped note forces the recipient to dig the rest out of the
-# activity log. The message count bounds the delivery.
+# A turn's coordination block carries at most this many notes, each whole up
+# to context_budget.PEER_NOTE_CHARS (the send cap, so every note sent today
+# arrives whole). A longer stored note arrives as a marked excerpt naming
+# read_agent_message, so the block stays bounded and its cursor still advances.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -691,6 +693,30 @@ def model_message(message: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def context_message(message: dict[str, Any]) -> dict[str, Any]:
+  """The model note shape for repeated context, its body within one budget."""
+  result = model_message(message)
+  body = result.get("body")
+  if isinstance(body, str) and len(body) > PEER_NOTE_CHARS:
+    result["body"] = excerpt(
+      body, PEER_NOTE_CHARS,
+      f"read_agent_message(message_id={result['id']}) pages the full note",
+    )
+  return result
+
+
+def peer_message_for_agent(
+  db: Session, chat_id: str, message_id: str,
+) -> dict[str, Any] | None:
+  """One whole note this chat may read, by the chat's history visibility."""
+  row = chat_message_history_query(db, chat_id).filter(
+    models.AgentCoordinationMessage.id == message_id,
+  ).first()
+  if row is None:
+    return None
+  return model_message(serialize_messages(db, [row])[0])
+
+
 def visible_peer_messages(
   db: Session,
   scope: CoordinationScope,
@@ -980,7 +1006,7 @@ def agent_context_snapshot(
     oldest_first=True,
   )
   delivered_rows = message_window[:MAX_CONTEXT_MESSAGES]
-  messages = [model_message(message) for message in delivered_rows]
+  messages = [context_message(message) for message in delivered_rows]
   snapshot = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -1282,33 +1308,46 @@ def _matching_retry(
   return rows
 
 
+def _delete_beyond(db: Session, query, keep: int) -> None:
+  """Delete the rows of ``query`` older than its newest ``keep``, by id.
+
+  Retention counts notes; it never loads or measures their bodies.
+  """
+  message = models.AgentCoordinationMessage
+  stale = [row.id for row in query.with_entities(message.id).order_by(
+    message.created_at.desc(), message.id.desc(),
+  ).offset(keep).all()]
+  if not stale:
+    return
+  db.query(models.ChatActivityPosition).filter(
+    models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
+  ).delete(synchronize_session=False)
+  db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
+
+
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
-  stale = _channel_query(db, scope).order_by(
-    models.AgentCoordinationMessage.created_at.desc(),
-    models.AgentCoordinationMessage.id.desc(),
-  ).offset(MAX_SCOPE_MESSAGES).all()
-  for row in stale:
-    db.query(models.ChatActivityPosition).filter(
-      models.ChatActivityPosition.event_id == f"peer:{row.id}",
-    ).delete(synchronize_session=False)
-    db.delete(row)
+  _delete_beyond(db, _channel_query(db, scope), MAX_SCOPE_MESSAGES)
 
 
 def _prune_direct_inboxes(
   db: Session, network: CoordinationScope, recipients: list[str],
 ) -> None:
+  # Protect pending obligations from ordinary inbox retention. Once closed,
+  # the peer note follows normal retention; its outbox history is kept.
+  revocation = db.query(models.AgentWorkClaimRevocation).filter(
+    models.AgentWorkClaimRevocation.outcome.is_(None),
+    models.AgentCoordinationMessage.from_run_id == (
+      literal("work-claim:") + models.AgentWorkClaimRevocation.claim_id
+    ),
+    models.AgentCoordinationMessage.send_id == (
+      literal("revision:") + cast(models.AgentWorkClaimRevocation.revision, String)
+    ),
+  ).exists()
   for recipient in recipients:
-    stale = _channel_query(db, network).filter(
+    _delete_beyond(db, _channel_query(db, network).filter(
       models.AgentCoordinationMessage.to_chat_id == recipient,
-    ).order_by(
-      models.AgentCoordinationMessage.created_at.desc(),
-      models.AgentCoordinationMessage.id.desc(),
-    ).offset(MAX_DIRECT_MESSAGES_PER_RECIPIENT).all()
-    for row in stale:
-      db.query(models.ChatActivityPosition).filter(
-        models.ChatActivityPosition.event_id == f"peer:{row.id}",
-      ).delete(synchronize_session=False)
-      db.delete(row)
+      ~revocation,
+    ), MAX_DIRECT_MESSAGES_PER_RECIPIENT)
 
 
 def _publish_message_hint(
@@ -1619,6 +1658,62 @@ def send_work_claim_transfer_notice(
   )
 
 
+async def deliver_work_claim_revocation(
+  db: Session, notice: models.AgentWorkClaimRevocation,
+) -> PeerDeliveryResult:
+  """Retry from the immutable transfer snapshot, including after settlement."""
+  from app.agent_work_claims import (
+    acknowledge_transfer_notice, stage_retire_obsolete_transfer_notices,
+  )
+
+  stage_retire_obsolete_transfer_notices(db, claim_id=notice.claim_id)
+  db.commit()
+  db.refresh(notice)
+  if notice.outcome is not None:
+    return PeerDeliveryResult(steered=[], woken=[], queued=[])
+  recipient = notice.recipient_chat_id
+  if recipient not in _agent_chat_ids(db, {recipient}):
+    # A live chat without an addressable run still owes its notice.
+    return PeerDeliveryResult(steered=[], woken=[], queued=[],
+                             unreachable=[recipient])
+  send_work_claim_transfer_notice(
+    db, owner_id=notice.owner_id, claim_id=notice.claim_id,
+    revision=notice.revision, sender_chat_id=notice.sender_chat_id,
+    recipients=[recipient], body=notice.body,
+  )
+  delivered = await deliver_peer_recipients(
+    recipients=[recipient], delivery=DELIVERY_INTERRUPT, kind="handoff",
+    sender_chat_id=notice.sender_chat_id,
+  )
+  if recipient in delivered.steered + delivered.woken + delivered.queued:
+    acknowledge_transfer_notice(db, claim_id=notice.claim_id,
+                                revision=notice.revision)
+  return delivered
+
+
+async def recover_work_claim_revocations() -> None:
+  """The existing runtime sweep repairs crashes before peer persistence/delivery."""
+  from app.agent_work_claims import (
+    pending_transfer_notices, stage_retire_obsolete_transfer_notices,
+  )
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    stage_retire_obsolete_transfer_notices(db)
+    db.commit()
+    identities = [(row.claim_id, row.revision)
+                  for row in pending_transfer_notices(db).all()]
+  for identity in identities:
+    try:
+      with SessionLocal() as db:
+        notice = db.get(models.AgentWorkClaimRevocation, identity)
+        if notice is not None and notice.outcome is None:
+          await deliver_work_claim_revocation(db, notice)
+    except Exception:
+      log.warning("claim revocation delivery failed claim=%s revision=%s",
+                  *identity, exc_info=True)
+
+
 def _wake_notice(kind: str, sender_name: str) -> str:
   return (
     f"A peer ({sender_name}) sent an interrupting {kind} while this chat was "
@@ -1695,7 +1790,7 @@ def _interrupt_peer_carrier(
   messages = message_window[-MAX_CONTEXT_MESSAGES:]
   if not messages:
     return None
-  model_messages = [model_message(message) for message in messages]
+  model_messages = [context_message(message) for message in messages]
   payload: dict[str, Any] = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -1782,9 +1877,10 @@ async def _steer_running_recipient(chat_id: str) -> str:
       provider = chat.provider or "claude"
       if not has_live_steerable_turn(chat_id, provider):
         return "queued"
-      pending = list(chat.pending_messages or [])
       # Peer data must never jump ahead of owner-authored work, a Wait result,
-      # or any other product continuation already in the chat queue.
+      # or any other product continuation already in the chat queue. Rows a
+      # Stop held wait for the owner, not for this turn.
+      pending = [row for row in chat.pending_messages or [] if not row.get("held")]
       if pending and len(_carrier_rows(pending)) != len(pending):
         return "queued"
       run = db.query(models.ChatRun).filter(

@@ -1883,8 +1883,41 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0096_app_accepted_consent",
     "0097_core_contribution_review_runs",
     "0098_run_end_reason",
+    "0099_app_chat_scope_starts",
+    "0100_chat_branch_origin",
+    "0101_claim_revocation_outbox",
+    "0102_work_claim_text",
   ]
   assert second == first
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_app_chat_scope_starts_exist_after_fresh_and_frozen_upgrade(tmp_path, start):
+  db_path = tmp_path / "scope-starts-boot.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_app_chat_scope_starts(eng)  # Idempotent on a crash retry.
+
+  assert "0099_app_chat_scope_starts" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  # Every binding names a chat or a cancellation; admission excludes the latter.
+  for columns, values in (
+    ("app_id, scope, created_at", "1, 'neither', '2026-10-01 12:00:00'"),
+    ("app_id, scope, chat_id, cancelled_at, admitted_at, created_at",
+     "1, 'both', 'c', '2026-10-01', '2026-10-01', '2026-10-01'"),
+  ):
+    with pytest.raises(IntegrityError):
+      with eng.begin() as conn:
+        conn.execute(text(
+          f"INSERT INTO app_chat_scope_starts ({columns}) VALUES ({values})"
+        ))
+  eng.dispose()
 
 
 def test_notification_seen_migration_preserves_current_unread_history(tmp_path):
@@ -4795,3 +4828,36 @@ def test_retired_write_journal_tables_are_dropped_idempotently(tmp_path):
   tables = set(inspect(eng).get_table_names())
   assert not {"agent_write_streams", "agent_write_intents"} & tables
   assert {"chats", "chat_runs"} <= tables
+
+
+def test_work_claim_text_widens_postgres_columns_and_skips_sqlite(monkeypatch):
+  import sqlalchemy
+
+  statements = []
+
+  class RecordingEngine:
+    dialect = SimpleNamespace(name="postgresql")
+
+    def begin(self):
+      return self
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def execute(self, statement):
+      statements.append(str(statement))
+
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda _eng: SimpleNamespace(
+    get_table_names=lambda: ["agent_work_claims"]))
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == [
+    f"ALTER TABLE agent_work_claims ALTER COLUMN {column} TYPE TEXT"
+    for column in ("summary", "takeover_reason", "outcome")
+  ]
+  statements.clear()
+  RecordingEngine.dialect = SimpleNamespace(name="sqlite")
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == []

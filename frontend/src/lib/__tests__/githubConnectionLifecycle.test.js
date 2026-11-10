@@ -1,10 +1,13 @@
-/* Resuming sign-in is an activation action, not a side effect of ending a wait. */
+/* Resuming sign-in is an activation action, not a side effect of ending a wait; the settled account lives in the shared query cache. */
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { beforeEach, test } from 'node:test'
 import { setTimeout as tick } from 'node:timers/promises'
+import { QueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import GithubConnection from '../../components/SettingsView/GithubConnection.jsx'
+import { githubStatus } from '../githubConnection.js'
 import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { setShimQueryClient } from './react-query-shim.mjs'
 
 const json = body => new Response(JSON.stringify(body), { status: 200 })
 const attempt = { attempt_id: 'a1', user_code: 'TEST-CODE', verification_uri: 'https://github.com/login/device' }
@@ -27,6 +30,44 @@ const renderConnection = () => renderHook(() => GithubConnection({
   onExpand: noop,
 }))
 
+let queryClient
+beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  setShimQueryClient(queryClient)
+})
+
+test('reopening Settings paints the cached account before the fresh read lands', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let answer
+  api.github = { status: () => new Promise(resolve => { answer = resolve }) }
+  queryClient.setQueryData(githubStatus.key, { state: 'connected', login: 'octo-test', scopes: ['public_repo', 'workflow'], signInAvailable: true })
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  assert.match(JSON.stringify(view.result.current), /"children":"octo-test"/)
+  assert.doesNotMatch(JSON.stringify(view.result.current), /Checking…/)
+  answer(json({ connected: false, device_flow_available: true }))
+  await tick(20)
+  view.rerender()
+  assert.match(JSON.stringify(view.result.current), /Not connected/)
+})
+
+test('a sign-in waiting on GitHub resumes but is never kept in the cache', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  api.github = {
+    status: async () => json({ connected: false, device_flow_available: true, active_attempt: attempt }),
+    connectPoll: async () => json({ status: 'pending', retry_after: 100 }),
+  }
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  await tick(20)
+  assert.equal(findSignIn(view.result.current).props.attempt.userCode, 'TEST-CODE')
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), {
+    state: 'disconnected', login: '', scopes: [], signInAvailable: true,
+  })
+})
+
 test('closing and reopening GitHub discards disconnect confirmation', async t => {
   const original = api.github
   t.after(() => { api.github = original })
@@ -42,7 +83,7 @@ test('closing and reopening GitHub discards disconnect confirmation', async t =>
   await tick(20)
   findButton(view.result.current, 'Disconnect…').props.onClick()
   assert.ok(findButton(view.result.current, 'Disconnect'))
-  findNode(view.result.current, node => node.props?.className === 'settings__account-link').props.onClick()
+  findNode(view.result.current, node => node.props?.className === 'settings-item').props.onClick()
   view.rerender(props)
   assert.ok(findButton(view.result.current, 'Disconnect…'))
   assert.ok(!findButton(view.result.current, 'Disconnect'))
@@ -89,7 +130,7 @@ test('private-access removal guides GitHub revocation and reconnects with public
   assert.match(JSON.stringify(view.result.current), /github.com\/settings\/applications/)
   await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
   assert.equal(requestedPrivate, false)
-  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Off"/)
   assert.ok(!findButton(view.result.current, 'Remove private access…'))
 })
 
@@ -107,7 +148,7 @@ test('private-access removal does not claim success if GitHub grants private sco
   findButton(view.result.current, 'Remove private access…').props.onClick()
   await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
   assert.match(JSON.stringify(view.result.current), /GitHub still granted private-repository access/)
-  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Active"/)
 })
 
 test('public-only connection can request private access and shows the granted result', async t => {
@@ -123,10 +164,10 @@ test('public-only connection can request private access and shows the granted re
   const view = renderConnection()
   t.after(() => view.unmount())
   await tick(20)
-  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Off"/)
   await findButton(view.result.current, 'Enable private repositories').props.onClick()
   assert.equal(requestedPrivate, true)
-  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+  assert.match(JSON.stringify(view.result.current), /"Private repositories"[^\]]{0,240}"children":"Active"/)
 })
 
 for (const connected of [false, true]) {
@@ -252,4 +293,133 @@ test('unmount during cancellation owns reconciliation and cannot resume a hidden
   await tick(20)
   assert.equal(cancelSignal?.aborted, true)
   assert.equal(polls, 1, 'only the original visible poll may run')
+})
+
+// Status reads answered by hand, in any order.
+function controlledStatus() {
+  const reads = []
+  return {
+    reads,
+    status: () => new Promise(resolve => { reads.push(resolve) }),
+  }
+}
+const connectedBody = login => ({ connected: true, login, scopes: ['public_repo', 'workflow'], device_flow_available: true })
+const disconnectedBody = { connected: false, device_flow_available: true }
+
+for (const [older, newer] of [['disconnected', 'connected'], ['connected', 'disconnected']]) {
+  test(`a read left over from before a provider page opened cannot replace the newer ${newer} status`, async t => {
+    const original = api.github
+    t.after(() => { api.github = original })
+    const { reads, status } = controlledStatus()
+    api.github = { status }
+    const body = state => json(state === 'connected' ? connectedBody('octo-test') : disconnectedBody)
+    // Settings starts a read, then a provider page unmounts it mid-read.
+    const first = renderConnection()
+    first.unmount()
+    // Back on the overview a newer read starts and answers first.
+    const second = renderConnection()
+    t.after(() => second.unmount())
+    assert.equal(reads.length, 2)
+    reads[1](body(newer))
+    await tick(20)
+    reads[0](body(older))
+    await tick(20)
+    second.rerender()
+    assert.equal(queryClient.getQueryData(githubStatus.key).state, newer)
+    if (newer === 'connected') {
+      assert.match(JSON.stringify(second.result.current), /"children":"octo-test"/)
+    } else {
+      assert.match(JSON.stringify(second.result.current), /Not connected/)
+      assert.ok(!findButton(second.result.current, 'Disconnect…'))
+    }
+  })
+}
+
+test('a read started before a disconnect never publishes over it, before or after its own status read', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  const { reads, status } = controlledStatus()
+  let finishDisconnect
+  api.github = {
+    status,
+    disconnect: () => new Promise(resolve => { finishDisconnect = () => resolve(json({})) }),
+  }
+  queryClient.setQueryData(githubStatus.key, { state: 'connected', login: 'octo-test', scopes: ['public_repo', 'workflow'], signInAvailable: true })
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  assert.equal(reads.length, 1, 'opening Settings reads the status')
+  findButton(view.result.current, 'Disconnect…').props.onClick()
+  const disconnecting = findButton(view.result.current, 'Disconnect').props.onClick()
+  // The opening read answers while the disconnect is under way.
+  reads[0](json(connectedBody('stale-login')))
+  await tick(20)
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo-test')
+  finishDisconnect()
+  await tick(20)
+  assert.equal(reads.length, 2, 'the disconnect reads the status it left')
+  reads[1](json(disconnectedBody))
+  await disconnecting
+  view.rerender()
+  assert.equal(queryClient.getQueryData(githubStatus.key).state, 'disconnected')
+  assert.match(JSON.stringify(view.result.current), /Not connected/)
+})
+
+test('a superseded read that fails reports nothing, and the newer answer stands', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let calls = 0
+  let failOld
+  api.github = {
+    status: () => {
+      calls += 1
+      return calls === 1
+        ? new Promise((_resolve, reject) => { failOld = () => reject(new Error('offline')) })
+        : Promise.resolve(json(connectedBody('octo-test')))
+    },
+  }
+  const first = renderConnection()
+  first.unmount()
+  const second = renderConnection()
+  t.after(() => second.unmount())
+  await tick(20)
+  failOld()
+  await tick(20)
+  second.rerender()
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo-test')
+  assert.doesNotMatch(JSON.stringify(second.result.current), /offline/)
+})
+
+test('a failed cancellation still shows the waiting sign-in when reopening Settings reads the status first', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  const { reads, status } = controlledStatus()
+  let polls = 0
+  api.github = {
+    status,
+    connectPoll: async () => { polls++; return json({ status: 'pending', retry_after: 100 }) },
+    connectCancel: async () => { throw new Error('Cancellation service unavailable') },
+  }
+  const props = { active: true, expanded: true, onExpand: noop, onToggle: noop }
+  const view = renderHook(next => GithubConnection(next), props)
+  t.after(() => view.unmount())
+  const waiting = () => json({ connected: false, device_flow_available: true, active_attempt: attempt })
+  reads[0](waiting())
+  await tick(20)
+  assert.equal(findSignIn(view.result.current).props.attempt.attemptId, 'a1')
+  const cancelling = findSignIn(view.result.current).props.onCancel()
+  await tick(20)
+  assert.equal(reads.length, 2, 'the failed cancellation reads the status it left')
+  // Settings is hidden and shown again while that read is under way, and the
+  // read the reopening starts answers first.
+  view.rerender({ ...props, active: false })
+  view.rerender(props)
+  assert.equal(reads.length, 3)
+  reads[2](waiting())
+  await tick(20)
+  reads[1](waiting())
+  await cancelling
+  await tick(20)
+  view.rerender(props)
+  assert.equal(findSignIn(view.result.current)?.props.attempt.attemptId, 'a1', 'the sign-in still waiting on GitHub stays visible')
+  assert.equal(polls, 2, 'and its wait resumes')
 })

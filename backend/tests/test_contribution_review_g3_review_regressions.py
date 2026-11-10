@@ -23,7 +23,7 @@ from app.runtime_supervisors import RuntimeSupervisors
 from app.database import SessionLocal
 from tests.test_contribution_review_runs import setup, ITEM
 from tests.test_contribution_review_workflows import (BASE, NEW, SHA, checkout_body,
-  configure_repair, publish_body, takeover)
+  configure_repair, propose_and_push, publish_body, takeover)
 
 
 @pytest.mark.parametrize("result_state,expected_release", [("not_dispatched", True), ("unknown", False)])
@@ -31,7 +31,7 @@ def test_push_result_releases_only_definite_non_effect(setup, monkeypatch, resul
   db, row, principal = configure_repair(setup, monkeypatch)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw:
     DispatchResult(result_state, reason="Exact refusal or uncertainty"))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   claim = db.query(models.AgentWorkClaim).one()
   assert (claim.released_at is not None) is expected_release
   attempt = row.outcomes_json[domain.key(ITEM)].get("repair_attempts", [])
@@ -70,11 +70,11 @@ def test_remote_rejection_keeps_audit_but_allows_fresh_proved_repair(setup, monk
         reason="GitHub rejected the exact repair ref; no branch update was applied.")
     return DispatchResult.confirmed({"head_sha": NEW})
   monkeypatch.setattr(repairs, "push_repair", push)
-  first = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+  first = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
   assert first["repair_attempts"][-1]["state"] == "rejected"
   assert first["repair_attempts"][-1]["head_sha"] == NEW
   assert db.query(models.AgentWorkClaim).one().released_at is not None
-  second = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
+  second = propose_and_push(db, row, principal, publish_body())["run"]["items"][0]
   assert calls == [1, 1]
   assert [a["state"] for a in second["repair_attempts"]] == ["rejected", "pushed"]
   assert second["successor"]["head_sha"] == NEW
@@ -92,7 +92,7 @@ def test_confirmed_publish_discards_checkout_after_durable_fact(setup, monkeypat
     discarded.append(path)
   monkeypatch.setattr(repairs, "discard_checkout", discard)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: DispatchResult.confirmed({"head_sha": NEW}))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   assert discarded == ["/fake/server-repair"]
 
 
@@ -378,11 +378,16 @@ def test_checkout_gc_failure_is_logged_but_does_not_block_preparation(setup, mon
 
 
 def test_stop_admission_lock_blocks_repair_arm(setup, monkeypatch):
+  """The owner's push races Stop for the admission lock: Stop wins and the proposal is never armed."""
   db, row, principal = configure_repair(setup, monkeypatch)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("push after Stop"))
+  proposal = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["proposed"]
+  decision = routes.RepairDecision(repo=ITEM["repo"], number=ITEM["number"], head_sha=ITEM["head_sha"],
+                                   attempt_id=proposal["id"], decision="push")
+  owner = Principal(owner=principal.owner, app_id=None)
   async def race():
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      pending = asyncio.create_task(routes.publish_repair(1, row.id, publish_body(), db, principal))
+      pending = asyncio.create_task(routes.decide_repair(1, row.id, decision, db, owner))
       await asyncio.sleep(0.05)
       assert not pending.done()
       domain.save_outcome(db, row, routes.REVIEW_STOP_KEY, {"state": "requested", "actor": "owner"})
@@ -393,14 +398,14 @@ def test_stop_admission_lock_blocks_repair_arm(setup, monkeypatch):
     else:
       pytest.fail("repair admitted after Stop")
   asyncio.run(race())
-  assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
+  assert [a["state"] for a in row.outcomes_json[domain.key(ITEM)]["repair_attempts"]] == ["proposed"]
 
 
 def test_successor_invariant_refusal_never_dispatches_and_releases(setup, monkeypatch):
   db, row, principal = configure_repair(setup, monkeypatch)
   monkeypatch.setattr(domain, "confirmed_successor", lambda *a: (_ for _ in ()).throw(HTTPException(409, "bad history")))
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("public push"))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   assert db.query(models.AgentWorkClaim).one().released_at is not None
 
 

@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ChevronRight, Key, Plus, X } from '@openai/apps-sdk-ui/components/Icon'
+import { Key, Plus, X } from '@openai/apps-sdk-ui/components/Icon'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
@@ -105,16 +105,16 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
 
   return (
     <section
-      className={`settings__section settings-keys${attention ? ' settings-setup-target' : ''}`}
+      className={`settings-group settings-keys${attention ? ' settings-setup-target' : ''}`}
       aria-labelledby="settings-keys-title"
       id="settings-keys"
       ref={focusRef}
       tabIndex={-1}
     >
-      <div className="settings-keys__head">
-        <div>
-          <h2 className="settings__section-title settings-keys__title" id="settings-keys-title">Keys</h2>
-          <p className="settings__subtext settings__subtext--tight">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-keys-title">Keys</h2>
+          <p className="settings-group__desc">
             Apps borrow a key without ever seeing it. You and your agents can read them.
           </p>
         </div>
@@ -142,20 +142,20 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
       ))}
 
       {data?.available && (
-        <div className="settings-keys__list">
+        <div className="settings-list">
           {keys.length === 0 && <p className="settings-keys__empty">No keys yet.</p>}
           {keys.map(key => (
-            <button key={key.name} type="button" className="settings-keys__row" onClick={() => onOpenKey(key.name)}>
-              <span className="settings__account-icon settings-keys__icon" aria-hidden="true"><Key width={17} height={17} /></span>
-              <span className="settings-keys__row-copy">
-                <strong>{key.name}</strong>
-                <small>
+            // Opens its own page, so no arrow: arrows in Settings mean "expands here".
+            <button key={key.name} type="button" className="settings-item" onClick={() => onOpenKey(key.name)}>
+              <span className="settings-item__icon" aria-hidden="true"><Key width={18} height={18} /></span>
+              <span className="settings-item__body">
+                <span className="settings-item__title">{key.name}</span>
+                <span className="settings-item__sub settings-item__sub--wrap">
                   {savedByApp(key, names) ? `Saved by ${savedByApp(key, names)} · ` : ''}
                   {usersLine(key, names)}
                   {key.last_used ? ` · used ${relativeTime(key.last_used)}` : ''}
-                </small>
+                </span>
               </span>
-              <ChevronRight className="settings-keys__chevron" width={18} height={18} aria-hidden="true" />
             </button>
           ))}
           {denied.map(request => (
@@ -342,12 +342,12 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
     <div className="settings-keys-page">
       {error && <Alert color="danger" variant="soft" description={error} />}
 
-      <section className="settings__section settings-keys-card" aria-label="Value">
+      <section className="settings-list settings-keys-card" aria-label="Value">
         <ValueRow keyRecord={key} names={names} save={save} busy={busy} />
       </section>
 
-      <h2 className="settings__section-title settings-keys-page__heading">Who can use it</h2>
-      <section className="settings__section settings-keys-card">
+      <h2 className="settings-group__title settings-keys-page__heading">Who can use it</h2>
+      <section className="settings-list settings-keys-card">
         <div className="settings-keys-card__row">
           <span className="settings-keys-card__copy">
             <strong>Agents</strong>
@@ -395,8 +395,8 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
         )}
       </section>
 
-      <h2 className="settings__section-title settings-keys-page__heading">Sites</h2>
-      <section className="settings__section settings-keys-card">
+      <h2 className="settings-group__title settings-keys-page__heading">Sites</h2>
+      <section className="settings-list settings-keys-card">
         <SitesRows keyRecord={key} setGrants={setGrants} busy={busy} />
       </section>
       <p className="settings-keys__muted settings-keys-page__note">
@@ -405,8 +405,8 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
 
       <SentAs keyRecord={key} save={save} busy={busy} />
 
-      <h2 className="settings__section-title settings-keys-page__heading">Recent use</h2>
-      <section className="settings__section settings-keys-card">
+      <h2 className="settings-group__title settings-keys-page__heading">Recent use</h2>
+      <section className="settings-list settings-keys-card">
         <KeyUsage name={key.name} names={names} />
       </section>
 
@@ -697,7 +697,7 @@ function NewKey({ onCreated }) {
 
   return (
     <form className="settings-keys-page" onSubmit={create} autoComplete="off">
-      <section className="settings__section settings-keys-card">
+      <section className="settings-list settings-keys-card">
         <label className="settings-keys-card__field">
           <span>Name</span>
           <input className="settings-keys__input" value={name} onChange={e => setName(e.target.value)} placeholder="openweather" aria-invalid={name !== '' && !nameValid} required autoFocus />

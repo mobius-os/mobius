@@ -21,15 +21,17 @@ from app.agent_coordination import (
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
+  peer_message_for_agent,
   send_agent_message,
-  send_work_claim_transfer_notice,
+  deliver_work_claim_revocation,
   visible_peer_messages,
 )
 from app.agent_work_claims import (
-  acknowledge_transfer_notice,
+  pending_transfer_notices,
   claim_work,
   finish_work,
 )
+from app.context_budget import PEER_NOTE_CHARS
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -114,36 +116,22 @@ async def claim_current_work(
     )
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc
-  previous = result.get("previous_owner_chat_id")
-  if previous and result.get("notification_pending"):
-    send_work_claim_transfer_notice(
-      db,
-      owner_id=principal.owner.id,
-      claim_id=result["id"],
-      revision=result["transfer_notice_revision"],
-      sender_chat_id=principal.chat_id,
-      recipients=[previous],
-      body=(
-        f"Work claim {result['work_key']} transferred to {principal.chat_id}: "
-        f"{result.get('takeover_reason') or 'ownership changed'}"
-      ),
-    )
-    delivery = await deliver_peer_recipients(
-      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
-      sender_chat_id=principal.chat_id,
-    )
-    # Persist the retry latch only after the durable notice has also reached
-    # its requested live/wake/queue delivery path. A crash or delivery error
-    # before this point leaves notification_pending true, so the exact same
-    # transfer request retries idempotently instead of losing the wake.
-    acknowledge_transfer_notice(
-      db, claim_id=result["id"], revision=result["transfer_notice_revision"],
-    )
-    result["notification_pending"] = False
-    result["steered"] = delivery.steered
-    result["woken"] = delivery.woken
-    result["queued"] = delivery.queued
-    result["unreachable"] = delivery.unreachable
+  # Older obligations belong to the sweep, not a refresh/observer's request.
+  revision = result.pop("_created_transfer_notice_revision", None)
+  if revision is not None:
+    try:
+      notice = db.get(models.AgentWorkClaimRevocation, (result["id"], revision))
+      delivery = await deliver_work_claim_revocation(db, notice)
+      result["notification_pending"] = (
+        pending_transfer_notices(db, claim_id=result["id"]).first() is not None
+      )
+      for state in ("steered", "woken", "queued", "unreachable"):
+        result[state] = getattr(delivery, state)
+    except Exception:
+      # Ownership and its obligation already committed. Delivery failure must
+      # not turn that accepted transfer into a false failure or lose recovery.
+      db.rollback()
+      logging.getLogger(__name__).exception("Committed claim revocation awaits recovery")
   return result
 
 
@@ -242,9 +230,17 @@ async def send_current_message(
   )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated up to 24 times.
+  # owner-visible activity card needs, not the body repeated per recipient.
+  # A stored note longer than the send cap comes back as a head the card
+  # labels as truncated.
+  receipt = [model_message(row) for row in rows[:1]]
+  for row in receipt:
+    body = row.get("body") or ""
+    if len(body) > PEER_NOTE_CHARS:
+      row.update(body=body[:PEER_NOTE_CHARS], body_truncated=True,
+                 body_chars=len(body))
   result = {
-    "messages": [model_message(row) for row in rows[:1]],
+    "messages": receipt,
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
@@ -267,6 +263,22 @@ async def send_current_message(
       "recipient or tell the owner."
     )
   return result
+
+
+@router.get("/messages/{message_id}")
+def read_current_message(
+  message_id: str,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """One whole note this agent's chat sent, received or can see broadcast."""
+  if principal.chat_id is None or principal.run_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  get_active_chat_for_principal(db, principal.chat_id, principal)
+  message = peer_message_for_agent(db, principal.chat_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this agent.")
+  return message
 
 
 @router.get("/chats/{chat_id}")
