@@ -135,8 +135,15 @@
   color: var(--danger);
 }
 
+/* The drawn bar below replaces the native one here even when a theme opts
+   back into shell scrollbars (index.css), so a table never shows two. */
 .md-table-wrap {
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.md-table-wrap::-webkit-scrollbar {
+  display: none;
 }
 
 /* The drawn bar under a table that cannot fit (see useTableScrollbar). The
@@ -165,6 +172,12 @@
   border: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
+}
+
+/* Prose wraps, but ids, versions and commands in code spans stay whole; a
+   column of them widens the table and the drawn bar takes over. */
+.md-table .md-inline-code {
+  white-space: nowrap;
 }
 
 .md-table th {

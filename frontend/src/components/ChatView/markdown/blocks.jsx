@@ -8,6 +8,11 @@ import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 import AppBlock from './AppBlock.jsx'
 import { appBlockFromToken } from './appBlock.js'
+import {
+  tableScrollbarThumb,
+  tableScrollForTrackDistance,
+  tableScrollLeftForTrackTap,
+} from './tableScrollbar.js'
 
 /**
  * Block-level markdown components.
@@ -110,15 +115,16 @@ export function CodeBlock({ token }) {
 function useTableScrollbar() {
   const scrollRef = useRef(null)
   const thumbRef = useRef(null)
+  const dragRef = useRef(null)
   const [overflowing, setOverflowing] = useState(false)
 
   const sync = () => {
     const scroller = scrollRef.current
     const thumb = thumbRef.current
     if (!scroller || !thumb) return
-    const { clientWidth, scrollWidth, scrollLeft } = scroller
-    thumb.style.width = `${(clientWidth / scrollWidth) * 100}%`
-    thumb.style.transform = `translateX(${(scrollLeft / clientWidth) * 100}%)`
+    const { widthPercent, offsetPercent } = tableScrollbarThumb(scroller)
+    thumb.style.width = `${widthPercent}%`
+    thumb.style.transform = `translateX(${offsetPercent}%)`
   }
 
   useEffect(() => {
@@ -136,28 +142,37 @@ function useTableScrollbar() {
   }, [])
 
   useEffect(sync, [overflowing])
+  useEffect(() => () => dragRef.current?.abort(), [])
 
-  // Dragging the bar moves the table by the same proportion as the thumb.
+  // A tap on the track outside the thumb jumps there; from then on the table
+  // follows the pointer by the same proportion as the thumb.
   const onPointerDown = (event) => {
     const scroller = scrollRef.current
-    if (!scroller) return
+    const thumb = thumbRef.current
+    if (!scroller || !thumb || event.button !== 0) return
     event.preventDefault()
     const track = event.currentTarget
+    const geometry = {
+      clientWidth: scroller.clientWidth,
+      scrollWidth: scroller.scrollWidth,
+      trackWidth: track.clientWidth,
+    }
+    const thumbBox = thumb.getBoundingClientRect()
+    if (event.clientX < thumbBox.left || event.clientX > thumbBox.right) {
+      const offsetX = event.clientX - track.getBoundingClientRect().left
+      scroller.scrollLeft = tableScrollLeftForTrackTap(offsetX, geometry)
+    }
+    dragRef.current?.abort()
+    const drag = new AbortController()
+    dragRef.current = drag
     track.setPointerCapture(event.pointerId)
-    const ratio = scroller.scrollWidth / track.clientWidth
     let lastX = event.clientX
-    const onMove = (move) => {
-      scroller.scrollLeft += (move.clientX - lastX) * ratio
+    track.addEventListener('pointermove', (move) => {
+      scroller.scrollLeft += tableScrollForTrackDistance(move.clientX - lastX, geometry)
       lastX = move.clientX
-    }
-    const onUp = () => {
-      track.removeEventListener('pointermove', onMove)
-      track.removeEventListener('pointerup', onUp)
-      track.removeEventListener('pointercancel', onUp)
-    }
-    track.addEventListener('pointermove', onMove)
-    track.addEventListener('pointerup', onUp)
-    track.addEventListener('pointercancel', onUp)
+    }, { signal: drag.signal })
+    // Capture ends on pointerup and pointercancel alike.
+    track.addEventListener('lostpointercapture', () => drag.abort(), { signal: drag.signal })
   }
 
   return { scrollRef, thumbRef, overflowing, sync, onPointerDown }
