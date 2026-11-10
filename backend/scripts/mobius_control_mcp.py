@@ -2212,7 +2212,9 @@ def _paged_read(name: str, handler, arguments: dict[str, Any]):
       len(text.encode("utf-8", "surrogatepass")) <= _CONTEXT_BUDGET.READ_PAGE_BYTES):
     return value
   def footer(start: int, end: int, next_offset: int | None) -> str:
-    call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)),
+    # An omitted argument stays omitted: an explicit null is not repeated.
+    call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)
+                        if arguments[key] is not None),
                       f"offset={next_offset}", f"version={current}"])
     more = f"next page: {name}({call})" if next_offset is not None else "end of result"
     return (f"\n[Result characters {start}-{end} of {len(text)}, "

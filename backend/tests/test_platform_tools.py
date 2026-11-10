@@ -1587,6 +1587,10 @@ def test_read_goal_pages_a_long_task_view_and_a_long_field(monkeypatch):
 
   joined = "".join(_read_all_pages(control, "read_goal", {"task": "parent"}))
   assert json.loads(joined) == view
+  # An explicit null is not repeated into the next-page call.
+  first = control._call_tool({"name": "read_goal", "arguments": {"task": "parent", "field": None}})
+  footer = first["content"][0]["text"].rsplit("\n", 1)[1]
+  assert "None" not in footer and "task=parent" in footer
   assert "".join(_read_all_pages(control, "read_goal", {"task": "parent", "field": "note"})) == note
 
 
