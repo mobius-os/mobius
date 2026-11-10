@@ -35,9 +35,9 @@ MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
 # A turn's coordination block carries at most this many notes, each whole up
-# to context_budget.PEER_NOTE_CHARS (the send cap, so every note sent today
-# arrives whole). A longer stored note arrives as a marked excerpt naming
-# read_agent_message, so the block stays bounded and its cursor still advances.
+# to context_budget.PEER_NOTE_CHARS. A longer note arrives as a marked excerpt
+# naming read_agent_message, so the block stays bounded and its cursor still
+# advances.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -100,9 +100,22 @@ class CoordinationContextDelivery:
   delivered_through: PeerMessageCursor | None
 
 
+# A send has no recipient count limit, so queries over a recipient list run
+# in batches well below SQLite's bound-parameter limit.
+_ID_BATCH = 500
+
+
+def _batches(values) -> list[list[str]]:
+  ordered = list(dict.fromkeys(values))
+  return [ordered[start:start + _ID_BATCH] for start in range(0, len(ordered), _ID_BATCH)]
+
+
 def _latest_runs(
   db: Session, chat_ids: list[str] | set[str],
 ) -> dict[str, Any]:
+  if len(chat_ids) > _ID_BATCH:
+    return {key: row for batch in _batches(chat_ids)
+            for key, row in _latest_runs(db, batch).items()}
   if not chat_ids:
     return {}
   latest_started = db.query(
@@ -410,6 +423,8 @@ def _agent_chat_ids(
   db: Session, candidate_ids: list[str] | set[str],
 ) -> set[str]:
   """Return non-deleted chats with a run or durable Delegation identity."""
+  if len(candidate_ids) > _ID_BATCH:
+    return set().union(*(_agent_chat_ids(db, batch) for batch in _batches(candidate_ids)))
   if not candidate_ids:
     return set()
   live_chat_ids = {
@@ -638,8 +653,13 @@ def _message_names(
     for value in (row.from_chat_id, row.to_chat_id)
     if value
   }
-  if not chat_ids:
-    return {}
+  names: dict[str, str] = {}
+  for batch in _batches(chat_ids):
+    names.update(_names_for(db, batch))
+  return names
+
+
+def _names_for(db: Session, chat_ids: list[str]) -> dict[str, str]:
   names = {
     str(row.child_chat_id): str(row.task_key)
     for row in db.query(
@@ -1245,8 +1265,6 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
-  if len(clean_body) > 4000:
-    raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
 
 
@@ -1317,12 +1335,11 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
   stale = [row.id for row in query.with_entities(message.id).order_by(
     message.created_at.desc(), message.id.desc(),
   ).offset(keep).all()]
-  if not stale:
-    return
-  db.query(models.ChatActivityPosition).filter(
-    models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
-  ).delete(synchronize_session=False)
-  db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
+  for batch in _batches(stale):
+    db.query(models.ChatActivityPosition).filter(
+      models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in batch]),
+    ).delete(synchronize_session=False)
+    db.query(message).filter(message.id.in_(batch)).delete(synchronize_session=False)
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
@@ -1988,6 +2005,9 @@ def unreachable_reasons(
   physical run that failed, or one stopped before its provider turn began. A
   running, parked, resuming, or idle chat is queued for its next turn.
   """
+  if len(chat_ids) > _ID_BATCH:
+    return {key: reason for batch in _batches(chat_ids)
+            for key, reason in unreachable_reasons(db, batch).items()}
   if not chat_ids:
     return {}
   ids = list(dict.fromkeys(chat_ids))

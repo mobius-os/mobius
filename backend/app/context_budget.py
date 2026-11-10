@@ -18,11 +18,13 @@ NEXT_ACTION_CHARS = 2_000
 LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
 
-# Peer notes and work claims, shown where Möbius repeats them: a note in a
-# turn's coordination block, a send receipt, a claim tool result, a transfer
-# notice and a dependency notice. Each equals the input cap that text has, so
-# anything accepted today is shown exactly as before; a longer stored text
-# becomes a marked excerpt and stays whole in storage.
+# Peer notes and work claims are not capped where they are written. These
+# limits apply where Möbius repeats them: a note in a turn's coordination
+# block and its send receipt (and the transcript card), a claim tool result, a
+# transfer notice and a dependency notice. Each equals the input cap that text
+# once had, so anything that fit then is shown exactly as before; a longer text
+# becomes a marked excerpt naming its paged full read (read_agent_message or
+# read_work_claim) and stays whole in storage.
 PEER_NOTE_CHARS = 4_000
 CLAIM_SUMMARY_CHARS = 500
 CLAIM_TEXT_CHARS = 1_000  # a takeover reason or an outcome

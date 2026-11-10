@@ -1802,7 +1802,8 @@ def test_claim_texts_stored_beyond_the_input_caps_read_as_bounded_excerpts(db):
   )
   assert held["state"] == "held_by_peer"
   assert len(held["summary"]) <= CLAIM_SUMMARY_CHARS
-  assert held["summary"].endswith("of 20000 characters; the work claim keeps the full text]")
+  assert held["summary"].endswith(
+    f"of 20000 characters; read_work_claim(work_key={key}, field=summary) pages the full text]")
   assert len(held["takeover_reason"]) <= CLAIM_TEXT_CHARS
 
   db.query(models.AgentWorkClaim).update({models.AgentWorkClaim.outcome: None})
@@ -1857,31 +1858,77 @@ def test_claim_texts_within_the_input_caps_are_repeated_exactly(db):
   assert "excerpt" not in notice
 
 
-def test_transfer_notice_repeats_a_capped_reason_and_would_excerpt_a_longer_one(db):
-  from app import agent_work_claims
-  from app.context_budget import CLAIM_TEXT_CHARS
+def test_long_claim_texts_are_accepted_and_read_whole_where_excerpted(db):
+  from app.agent_work_claims import read_claim_text
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_dependencies import dependency_notice
 
   owner, first, second = _fixture(db)
   key = "github:mobius-os/mobius:pr:2002:transfer"
-  claim_work(
+  summary = "Merge" + " the reviewed change" * 400
+  claimed = claim_work(
     db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
-    work_key=key, summary="Merge the reviewed PR",
+    work_key=key, summary=summary,
   )
-  reason = "Because " + "the broader change supersedes it " * 600
-  # The input cap still refuses this reason; a later release lifts it.
-  with pytest.raises(ValueError, match="10-1000"):
+  assert len(claimed["summary"]) <= CLAIM_SUMMARY_CHARS
+  assert read_claim_text(db, owner_id=owner.id, work_key=key, field="summary") == summary
+  # A takeover must still explain itself.
+  with pytest.raises(ValueError, match="at least 10 characters"):
     claim_work(
       db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
-      work_key=key, summary="Broader work", takeover_reason=reason,
+      work_key=key, summary="Broader work", takeover_reason="too short",
       expected_owner_chat_id=first.id,
     )
-  short = "Because the broader change supersedes it."
-  claim_work(
+  reason = "Because" + " the broader change supersedes it" * 600
+  moved = claim_work(
     db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
-    work_key=key, summary="Broader work", takeover_reason=short,
+    work_key=key, summary="Broader work", takeover_reason=reason,
     expected_owner_chat_id=first.id,
   )
+  assert len(moved["takeover_reason"]) <= CLAIM_TEXT_CHARS
   notice = db.query(models.AgentWorkClaimRevocation).one()
-  assert f"transferred to {second.id}: {short} (acquisition" in notice.body
-  excerpted = agent_work_claims.claim_text(reason)
-  assert len(excerpted) <= CLAIM_TEXT_CHARS and "work claim keeps the full text" in excerpted
+  assert reason not in notice.body
+  assert f"read_work_claim(work_key={key}, field=takeover_reason) pages the full text" in notice.body
+  assert read_claim_text(db, owner_id=owner.id, work_key=key, field="takeover_reason") == reason
+
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Same work",
+  )
+  outcome = "Merged:" + " every check passed" * 500
+  finished = finish_work(
+    db, owner_id=owner.id, chat_id=second.id, work_key=key,
+    outcome=outcome, release=False,
+  )
+  assert len(finished["outcome"]) <= CLAIM_TEXT_CHARS
+  assert read_claim_text(db, owner_id=owner.id, work_key=key, field="outcome") == outcome
+  dependency = db.query(models.GoalDependency).filter(
+    models.GoalDependency.waiting_chat_id == first.id,
+  ).one()
+  assert dependency.outcome_json["outcome"] == outcome
+  text = dependency_notice(dependency)
+  assert outcome not in text
+  assert f"read_work_claim(work_key={key}, field=outcome) pages the full text" in text
+  with pytest.raises(ValueError, match="field must be one of"):
+    read_claim_text(db, owner_id=owner.id, work_key=key, field="owner_chat_id")
+  with pytest.raises(LookupError):
+    read_claim_text(db, owner_id=owner.id, work_key="github:none:missing", field="outcome")
+
+
+def test_goal_settlement_keeps_a_long_goal_result_whole_on_the_claim(db):
+  from app.agent_work_claims import stage_settle_goal_claims
+
+  owner, first, _ = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2003:goal"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Ship it",
+  )
+  result = "Shipped " + "with notes " * 500
+  stage_settle_goal_claims(
+    db, chat_id=first.id, goal_id="claim-goal-first", status="completed",
+    result=result, finished_keys=[key],
+  )
+  db.commit()
+  stored = db.query(models.AgentWorkClaim).one().outcome
+  assert stored == "Owning Goal completed: " + " ".join(result.split())

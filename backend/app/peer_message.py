@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.context_budget import PEER_NOTE_CHARS
 from app.agent_coordination import (
   MESSAGE_DELIVERIES as _DELIVERIES,
   MESSAGE_KINDS as _KINDS,
@@ -25,10 +26,10 @@ MAX_PEER_NOTES = 8
 MAX_RESULT_MESSAGES = 200  # bounds both current receipts and historic markers
 MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
-# The card preserves the FULL note up to the send cap (4,000 chars). A longer
-# stored note arrives as a head marked body_truncated (by the send receipt or
-# here), which the card labels, so an owner never mistakes it for the whole.
-MAX_BODY_CHARS = 4000
+# The card shows a note whole within the display limit notes share with turn
+# context; a longer note's receipt already carries the marked excerpt, which
+# fits. body_truncated only trips on a defensive over-limit row.
+MAX_BODY_CHARS = PEER_NOTE_CHARS
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.
 MAX_COMPACTION_BODY_CHARS = 400
@@ -205,11 +206,8 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
     # expandable card from a malformed empty row.
     if not body:
       continue
-    # The card shows the full note up to MAX_BODY_CHARS; a receipt already
-    # marks a longer note's head, and a longer body is cut and marked here.
     rows.append({
-      **message, "body": body,
-      "body_truncated": bool(message.get("body_truncated")) or len(stripped) > MAX_BODY_CHARS,
+      **message, "body": body, "body_truncated": len(stripped) > MAX_BODY_CHARS,
     })
   return rows
 

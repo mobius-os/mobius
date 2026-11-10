@@ -45,13 +45,32 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
-# A claim's texts are repeated into tool results and notices within the input
-# caps they have; a longer stored text is excerpted there and kept whole.
-_CLAIM_TEXT_KEPT = "the work claim keeps the full text"
+# A claim's texts are stored whole. Where Möbius repeats them (claim tool
+# results, transfer and dependency notices) a longer text is a marked excerpt
+# naming read_work_claim, which pages the claim's current text.
+CLAIM_TEXT_FIELDS = ("summary", "takeover_reason", "outcome")
 
 
-def claim_text(value: str | None, limit: int = CLAIM_TEXT_CHARS) -> str | None:
-  return excerpt(value, limit, _CLAIM_TEXT_KEPT) if isinstance(value, str) else value
+def claim_text(value: str | None, work_key: str | None, field: str) -> str | None:
+  if not isinstance(value, str):
+    return value
+  limit = CLAIM_SUMMARY_CHARS if field == "summary" else CLAIM_TEXT_CHARS
+  read_full = (f"read_work_claim(work_key={work_key}, field={field}) pages the full text"
+               if work_key else "the work claim keeps the full text")
+  return excerpt(value, limit, read_full)
+
+
+def read_claim_text(db: Session, *, owner_id: int, work_key: str, field: str) -> str:
+  """One claim text whole, by the same owner-wide key the claim tools use."""
+  if field not in CLAIM_TEXT_FIELDS:
+    raise ValueError(f"field must be one of: {', '.join(CLAIM_TEXT_FIELDS)}")
+  row = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_id == owner_id,
+    models.AgentWorkClaim.work_key == clean_work_key(work_key),
+  ).first()
+  if row is None:
+    raise LookupError("No work claim exists for this key.")
+  return getattr(row, field) or ""
 
 
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
@@ -61,7 +80,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": claim_text(row.summary, CLAIM_SUMMARY_CHARS),
+    "summary": claim_text(row.summary, row.work_key, "summary"),
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
@@ -70,9 +89,9 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "acquisition_id": row.acquisition_id,
     "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
-    "takeover_reason": claim_text(row.takeover_reason),
+    "takeover_reason": claim_text(row.takeover_reason, row.work_key, "takeover_reason"),
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-    "outcome": claim_text(row.outcome),
+    "outcome": claim_text(row.outcome, row.work_key, "outcome"),
   }
   if state == "held_by_peer":
     result["next_action"] = (
@@ -182,11 +201,12 @@ def claim_work(
   """Acquire first claim, observe its owner, or deliberately transfer it."""
   key = clean_work_key(work_key)
   clean_summary = summary.strip()
-  if not clean_summary or len(clean_summary) > 500:
-    raise ValueError("summary must be 1-500 characters")
+  if not clean_summary:
+    raise ValueError("summary must not be blank")
   reason = takeover_reason.strip() if takeover_reason else None
-  if reason is not None and not 10 <= len(reason) <= 1000:
-    raise ValueError("takeover_reason must be 10-1000 characters")
+  # A takeover must explain itself; ten characters rules out "x" or "ok".
+  if reason is not None and len(reason) < 10:
+    raise ValueError("takeover_reason must be at least 10 characters")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
@@ -364,7 +384,7 @@ def claim_work(
     claim_id=row.id, revision=previous_revision + 1,
     acquisition_id=row.acquisition_id, owner_id=owner_id,
     sender_chat_id=chat_id, recipient_chat_id=previous,
-    body=(f"Work claim {key} transferred to {chat_id}: {claim_text(reason)} "
+    body=(f"Work claim {key} transferred to {chat_id}: {claim_text(reason, key, 'takeover_reason')} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its
@@ -421,7 +441,7 @@ def _stage_settle(
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).update({
-    models.AgentWorkClaim.outcome: outcome[:1000],
+    models.AgentWorkClaim.outcome: outcome,
     models.AgentWorkClaim.updated_at: now,
     models.AgentWorkClaim.revision: previous_revision + 1,
     (
@@ -434,7 +454,7 @@ def _stage_settle(
   stage_stamp_claim_outcome(
     db, row, ("completed" if complete else
               "owner_deleted" if outcome == _DELETED_OWNER_OUTCOME else "released"),
-    outcome[:1000],
+    outcome,
   )
   db.expire(row)
   return ReleasedClaim(
@@ -442,7 +462,7 @@ def _stage_settle(
     work_key=work_key,
     revision=previous_revision + 1,
     state="completed" if complete else "released",
-    outcome=outcome[:1000],
+    outcome=outcome,
   )
 
 
@@ -639,8 +659,8 @@ def finish_work(
 ) -> dict:
   key = clean_work_key(work_key)
   clean_outcome = outcome.strip()
-  if not clean_outcome or len(clean_outcome) > 1000:
-    raise ValueError("outcome must be 1-1000 characters")
+  if not clean_outcome:
+    raise ValueError("outcome must not be blank")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,

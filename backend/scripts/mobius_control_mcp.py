@@ -71,6 +71,7 @@ SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 READ_AGENT_MESSAGE_TOOL = "read_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
 FINISH_AGENT_WORK_TOOL = "finish_agent_work"
+READ_WORK_CLAIM_TOOL = "read_work_claim"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 NOTIFY_OWNER_TOOL = "notify_owner"
 OPEN_ITEM_TOOL = "open_item"
@@ -799,11 +800,10 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   recipients = arguments.get("recipients", [])
   if (
     not isinstance(recipients, list)
-    or len(recipients) > 24
     or any(not isinstance(value, str) or not value for value in recipients)
   ):
     raise ValueError(
-      "recipients must be a list of at most 24 agent/chat ids from "
+      "recipients must be a list of agent/chat ids from "
       "list_agent_peers; for a finished helper use message_agent(helper, message)"
     )
   broadcast = arguments.get("broadcast", False)
@@ -825,8 +825,6 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   body = arguments.get("body")
   if not isinstance(body, str) or not body.strip():
     raise ValueError("body must be a non-empty string")
-  if len(body.strip()) > 4000:
-    raise ValueError("body must be 4000 characters or fewer")
   send_id = arguments.get("send_id")
   if send_id is not None and (
     not isinstance(send_id, str)
@@ -874,6 +872,15 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
   if not {"work_key", "outcome"}.issubset(arguments) or not set(arguments).issubset(allowed):
     raise ValueError("finish_agent_work needs work_key and outcome")
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
+
+
+def _call_read_work_claim(arguments: dict[str, Any]) -> str:
+  if set(arguments) != {"work_key", "field"}:
+    raise ValueError("read_work_claim needs work_key and field")
+  payload = _agent_api_call("GET", "/api/agent-coordination/work-claims/text?" + urlencode(
+    {"work_key": arguments["work_key"], "field": arguments["field"]}))
+  # The text alone, plain, so its pages read as the text itself.
+  return payload.get("text") or ""
 
 
 def _parse_env_file(path: str) -> dict[str, str]:
@@ -2042,7 +2049,6 @@ _TOOL_DEFINITIONS = {
         "recipients": {
           "type": "array",
           "items": {"type": "string"},
-          "maxItems": 24,
           "description": "Agent/chat ids from list_agent_peers for a direct note, including a live helper's peer chat id; not spawn_agent helper names or delegation ids.",
         },
         "broadcast": {
@@ -2065,7 +2071,6 @@ _TOOL_DEFINITIONS = {
         },
         "body": {
           "type": "string",
-          "maxLength": 4000,
           "description": (
             "One concise note. Cite files by path; never paste their contents."
           ),
@@ -2119,8 +2124,8 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "summary"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
-        "takeover_reason": {"type": "string", "minLength": 10, "maxLength": 1000},
+        "summary": {"type": "string", "minLength": 1},
+        "takeover_reason": {"type": "string", "minLength": 10},
         "expected_owner_chat_id": {"type": "string", "minLength": 1, "maxLength": 64},
       },
     },
@@ -2141,8 +2146,28 @@ _TOOL_DEFINITIONS = {
       "required": ["work_key", "outcome"],
       "properties": {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
-        "outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "outcome": {"type": "string", "minLength": 1},
         "release": {"type": "boolean"},
+      },
+    },
+  },
+  READ_WORK_CLAIM_TOOL: {
+    "name": READ_WORK_CLAIM_TOOL,
+    "description": (
+      "Read one work claim's summary, takeover_reason or outcome whole when a "
+      "claim result or notice showed only its excerpt. A long text comes in "
+      "pages; its last line names the next page."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "required": ["work_key", "field"],
+      "properties": {
+        "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
+        "field": {"type": "string", "enum": ["summary", "takeover_reason", "outcome"]},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Page of a long text, as its last line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the version its last line names."},
       },
     },
   },
@@ -2169,6 +2194,7 @@ _TOOL_HANDLERS = {
   READ_AGENT_MESSAGE_TOOL: _call_read_agent_message,
   CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
   FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
+  READ_WORK_CLAIM_TOOL: _call_read_work_claim,
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
   NOTIFY_OWNER_TOOL: _call_notify_owner,
   OPEN_ITEM_TOOL: _call_open_item,
@@ -2219,7 +2245,9 @@ def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]
 # MCP at about 25k tokens; Codex truncates). One pager serves them all: a
 # result that fits one page is returned unchanged; a longer one comes as one
 # character page ending in a line that names the call for the next page.
-_PAGED_READ_TOOLS = frozenset({READ_GOAL_TOOL, UPDATE_GOAL_TOOL, READ_AGENT_MESSAGE_TOOL})
+_PAGED_READ_TOOLS = frozenset({
+  READ_GOAL_TOOL, UPDATE_GOAL_TOOL, READ_AGENT_MESSAGE_TOOL, READ_WORK_CLAIM_TOOL,
+})
 
 
 def _paged_read(name: str, handler, arguments: dict[str, Any]):
