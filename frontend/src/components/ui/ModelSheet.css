@@ -176,7 +176,7 @@
   min-height: 44px;
   background: none;
   border: none;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-size: 14px;
   font-weight: 500;

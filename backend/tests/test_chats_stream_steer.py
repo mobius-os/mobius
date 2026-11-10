@@ -1926,7 +1926,7 @@ def test_codex_never_acknowledged_steer_does_not_lock_send_or_stop():
         return True
 
       handle.stop = _bounded_stop
-      stopped, _cleared = await asyncio.wait_for(
+      stopped, _ = await asyncio.wait_for(
         chat_mod.stop_chat_for(chat_id), timeout=1,
       )
       assert stopped is True

@@ -346,9 +346,9 @@ class FakeAnthropic:
 ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "TERM", "TZ")
 
 
-@pytest.fixture
-def scrubbed_env(monkeypatch, tmp_path, fake_api):
-  """Rebuild os.environ from an allowlist; the SDK passes os.environ through."""
+def scrub_env(monkeypatch, tmp_path, api_url: str) -> Path:
+  """Rebuild os.environ from an allowlist, pointed at the fake API at
+  `api_url`; the SDK passes os.environ through. Returns the working dir."""
   for key in list(os.environ):
     if key not in ENV_ALLOW:
       monkeypatch.delenv(key, raising=False)
@@ -359,7 +359,7 @@ def scrubbed_env(monkeypatch, tmp_path, fake_api):
   values = {
     "HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude"),
     "TMPDIR": str(tmp_path), "ANTHROPIC_API_KEY": "sk-ant-fake-probe",
-    "ANTHROPIC_BASE_URL": fake_api.url,
+    "ANTHROPIC_BASE_URL": api_url,
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
     "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1",
     "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
@@ -368,6 +368,11 @@ def scrubbed_env(monkeypatch, tmp_path, fake_api):
   for key, value in values.items():
     monkeypatch.setenv(key, value)
   return work
+
+
+@pytest.fixture
+def scrubbed_env(monkeypatch, tmp_path, fake_api):
+  return scrub_env(monkeypatch, tmp_path, fake_api.url)
 
 
 @pytest.fixture

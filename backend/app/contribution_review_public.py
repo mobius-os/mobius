@@ -1,7 +1,9 @@
-"""Explicit COMMENT reviews: immutable private evidence, bounded public copy.
+"""Explicit public reviews: immutable private evidence, bounded public copy.
 
-This module never approves a PR. Only the route's frozen opt-in and persisted
-attempt receipt authorize dispatch; an uncertain effect is never retried.
+A COMMENT needs the route's frozen opt-in and persisted attempt receipt. A
+formal APPROVE or REQUEST_CHANGES additionally needs the owner's own submit of
+one exact saved proposal (see contribution_review_verdicts). An uncertain
+effect is never retried.
 """
 import json
 import subprocess
@@ -18,11 +20,12 @@ def evidence(outcome):
 
 
 def require_same_evidence(previous, proposed):
-  """Posting freezes judgment, not merely the at-most-once network receipt."""
+  """Posting or proposing freezes judgment, not merely the network receipt."""
   receipt = previous.get("public_review") or {}
-  if receipt.get("state") not in {"posting", "posted", "unknown"}:
+  if receipt.get("state") not in {"posting", "posted", "unknown"} and not previous.get("verdict_proposal"):
     return False
-  frozen = evidence(previous)
+  # Later merge gates may rewrite state/summary; the published judgment stays.
+  frozen = previous.get("frozen_evidence") or evidence(previous)
   if frozen != evidence(proposed):
     raise HTTPException(409, "This public review already froze different evidence. Its verdict cannot be changed.")
   return True
@@ -51,14 +54,17 @@ def _clip_evidence(text: str, limit: int) -> str:
   return text[:keep].rstrip() + marker(len(text) - keep)
 
 
-def review_comment_body(outcome: dict, *, marker: str = "") -> str:
+VERDICT_HEADERS = {"COMMENT": None, "APPROVE": "Approved", "REQUEST_CHANGES": "Changes requested"}
+
+
+def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMENT") -> str:
   """The public text of an owner-requested review: verdict, findings, checks.
 
   Stored evidence is never cut. Only the posted copy is bounded to GitHub's
   limit, and any omission is stated in the body, never silent. The verdict
   header, the checks and the reviewed-head footer always survive.
   """
-  verdict = "All clear" if outcome.get("state") == "all_clear" else "Changes suggested"
+  verdict = VERDICT_HEADERS[event] or ("All clear" if outcome.get("state") == "all_clear" else "Changes suggested")
   header = f"**Möbius review: {verdict}**"
   summary = (outcome.get("summary") or "").strip()
   tests = (outcome.get("tests") or "").strip()
@@ -81,14 +87,16 @@ def review_comment_body(outcome: dict, *, marker: str = "") -> str:
   return render(_clip_evidence(summary, available - tests_room), _clip_evidence(tests, tests_room))
 
 
-def post_review(gh, cwd, target, body):
+def post_review(gh, cwd, target, body, event="COMMENT"):
   """The first transport call is the dispatch boundary; failures after it fence replay."""
+  if event not in VERDICT_HEADERS:
+    return DispatchResult.not_dispatched("Unknown review event.")
   if _body_units(body) > GITHUB_REVIEW_BODY_MAX:
     return DispatchResult.not_dispatched("The public review exceeds GitHub's body limit.")
   try:
     response = gh(cwd, "api", "--method", "POST",
       f"repos/{target['repo']}/pulls/{target['number']}/reviews", "--input", "-",
-      input_text=json.dumps({"commit_id": target["head_sha"], "event": "COMMENT", "body": body})).stdout
+      input_text=json.dumps({"commit_id": target["head_sha"], "event": event, "body": body})).stdout
     result = json.loads(response)
     if (not isinstance(result, dict) or not isinstance(result.get("id"), int)
         or isinstance(result["id"], bool) or result["id"] <= 0):
@@ -99,7 +107,10 @@ def post_review(gh, cwd, target, body):
     return classify_dispatch_error(exc)
 
 
-def reconcile_review(gh, cwd, target, receipt, actor_id):
+REVIEW_STATES = {"COMMENT": "COMMENTED", "APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}
+
+
+def reconcile_review(gh, cwd, target, receipt, actor_id, event="COMMENT"):
   """Find only this armed attempt, without ever treating absence as permission to retry.
 
   A bounded scan may miss a very old review; that leaves uncertainty intact.
@@ -118,7 +129,7 @@ def reconcile_review(gh, cwd, target, receipt, actor_id):
         if (isinstance(review, dict) and isinstance(review.get("user"), dict)
             and str(review["user"].get("id")) == str(actor_id)
             and review.get("commit_id") == target["head_sha"]
-            and review.get("state") == "COMMENTED"
+            and review.get("state") == REVIEW_STATES[event]
             and isinstance(review.get("body"), str) and marker in review["body"]
             and isinstance(review.get("id"), int) and not isinstance(review["id"], bool)):
           return {**receipt, "state": "posted", "id": review["id"], "url": review.get("html_url"),

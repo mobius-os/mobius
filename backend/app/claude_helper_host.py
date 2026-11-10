@@ -31,6 +31,7 @@ import dataclasses
 import json
 import logging
 import shlex
+import tempfile
 import time
 import uuid
 from contextlib import ExitStack
@@ -40,6 +41,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
 
@@ -261,7 +263,8 @@ class HelperTurn:
   summary: str | None = None
   # Provider report, distinct from task lifecycle summaries and closing text.
   report: HelperReport = dataclasses.field(default_factory=HelperReport)
-  usage: dict | None = None
+  # Per-call usage of this turn's own model calls, by Claude message id.
+  call_usage: dict = dataclasses.field(default_factory=dict)
   dispatch_error: str | None = None
   dispatch_tool_error: bool = False
   dispatch_consumed: bool = False
@@ -279,10 +282,10 @@ class HelperTurn:
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
 
-  def finish(self, status: str, summary: str | None = None, usage=None) -> None:
+  def finish(self, status: str, summary: str | None = None) -> None:
     if self.done.is_set():
       return
-    self.status, self.summary, self.usage = status, summary, usage
+    self.status, self.summary = status, summary
     self.started.set()
     self.done.set()
 
@@ -557,6 +560,9 @@ class ClaudeHelperHost(Host):
       turn.dispatch_tool_error = True
       if not turn.done.is_set() and turn.dispatch_id in self._turn_by_dispatch:
         self._specs[turn.dispatch_id] = turn.spec
+        # Nothing was consumed, so a Stop during the re-ask must not stop the
+        # (resumable) agent this turn addresses.
+        turn.dispatch_consumed = False
       log.warning("helper dispatch tool error kind=%s id=%s", turn.kind, turn.dispatch_id)
 
   async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
@@ -650,6 +656,10 @@ class ClaudeHelperHost(Host):
         if turn is None or turn.done.is_set():
           continue
         if isinstance(message, AssistantMessage):
+          # Claude repeats one model call's message per content block; the
+          # latest copy carries that call's most complete usage.
+          if message.message_id and isinstance(message.usage, dict):
+            turn.call_usage[message.message_id] = message.usage
           turn.refused = message.stop_reason == "refusal"
           if error:
             turn.api_error = (str(error), _message_text(message))
@@ -735,7 +745,9 @@ class ClaudeHelperHost(Host):
     if identity is not None and not identity.done():
       identity.set_result(turn)
 
-  def _on_task_end(self, task_id, status, summary, usage) -> None:
+  def _on_task_end(self, task_id, status, summary, _task_usage=None) -> None:
+    # Claude's task counters are not this turn's usage: a task notification's
+    # total is its last model call only. The turn sums its own calls instead.
     turn = self._turn_by_agent.get(task_id)
     # A follow-up turn is mapped to its agent before the agent resumes, and
     # each run reports its end more than once; a late report of the previous
@@ -746,7 +758,7 @@ class ClaudeHelperHost(Host):
     report = turn.report.final()
     if report is not None:
       turn.sink.publish({"type": "assistant_result", "content": report})
-    turn.finish(normalized, summary, dict(usage) if usage else None)
+    turn.finish(normalized, summary)
 
   # ------------------------------------------------------------------ work
 
@@ -1026,7 +1038,9 @@ def _host_options(
     _system_prompt_with_register,
   )
   from app.connectors import claude_mcp_config_handle
-  from app.platform_tools import claude_control_servers
+  from app.platform_tools import CONTROL_SERVER_NAME, claude_control_servers
+  from app import app_tools
+  from app.database import SessionLocal
 
   blocked = [
     # Supported AgentDefinition restriction: reports belong to Möbius, not
@@ -1088,7 +1102,15 @@ def _host_options(
       cli_path=_claude_cli_path(),
       stderr=capture_stderr,
       hooks={
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
+        # PreToolUse owns dispatch identity, built-in-tool denial and each
+        # helper's env file, so a hook that raises or returns no valid
+        # decision must block the call, not run it unscoped (a timeout already
+        # blocks). Every no-opinion path returns {}, since None now blocks.
+        # The post-tool and lifecycle hooks below stay permissive on purpose:
+        # failing them closed would misreport a tool that already ran.
+        "PreToolUse": [HookMatcher(
+          matcher=None, hooks=[host.pre_tool_use], on_failure="block",
+        )],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
@@ -1102,9 +1124,22 @@ def _host_options(
     )
     if skills_enabled:
       options["skills"] = "all"
+    # tools/list precedes any child call, so it cannot use a child's bearer.
+    # Share reviewed metadata only, for this host's lifetime. Execution still
+    # fetches the live catalogue with the hook-stamped exact child identity.
+    catalogue_dir = stack.enter_context(tempfile.TemporaryDirectory(
+      prefix="mobius-helper-tools-",
+    ))
+    catalogue_file = Path(catalogue_dir) / "catalogue.json"
+    with SessionLocal() as db:
+      catalogue = {"tools": [tool.listing() for tool in app_tools.live_app_tools(db)]}
+    catalogue_file.write_text(json.dumps(catalogue), encoding="utf-8")
+    servers = claude_control_servers(enabled=True)
+    servers[CONTROL_SERVER_NAME]["env"] = {
+      "MOBIUS_APP_TOOL_CATALOGUE_FILE": str(catalogue_file),
+    }
     handle = stack.enter_context(claude_mcp_config_handle(
-      connector_plan,
-      extra_servers=claude_control_servers(enabled=True),
+      connector_plan, extra_servers=servers,
     ))
     if handle:
       options["mcp_servers"] = handle.path
@@ -1251,12 +1286,12 @@ async def run_claude_host_turn(
           result["api_error_status"] = 429
         if turn.refused:
           result["provider_refusal"] = True
-      if turn.usage:
-        result["usage_metrics"] = {
-          "total_tokens": turn.usage.get("total_tokens"),
-          "duration_ms": turn.usage.get("duration_ms")
-          or int((time.monotonic() - started_at) * 1000),
-        }
+      usage = normalize_claude_helper_usage(
+        list(turn.call_usage.values()),
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+      )
+      if usage is not None:
+        result["usage_metrics"] = usage
       return result
   finally:
     if handle is not None:

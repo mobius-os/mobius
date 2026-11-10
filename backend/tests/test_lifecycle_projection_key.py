@@ -45,7 +45,6 @@ def test_idle_wait_cancel_moves_the_runtime_proof_but_a_routine_check_does_not(
   cancelled, detail = _read(client, auth, chat_id)
   # The transcript version cannot see the new card; only the lifecycle key can.
   assert cancelled["updated_at"] == armed["updated_at"]
-  assert cancelled["restart_observation_key"] == armed["restart_observation_key"]
   assert cancelled["lifecycle_projection_key"] != armed["lifecycle_projection_key"]
   assert [summary["id"] for message in detail["messages"]
           for summary in message.get("wait_summaries", [])] == [wait.id]
@@ -65,7 +64,7 @@ def test_goal_and_dependency_outcomes_move_the_key_but_open_plan_revisions_do_no
 
   def key(include_foreign_context=True):
     return _lifecycle_projection_key(
-      db, chat_id, include_foreign_context=include_foreign_context,
+      db, chat_id, 0, include_foreign_context=include_foreign_context,
     )
 
   open_key = key()

@@ -285,17 +285,19 @@ def _control_module():
   return module
 
 
-def test_promote_goal_tool_returns_verified_platform_identity(monkeypatch):
+@pytest.mark.parametrize("state", ["promoted", "active"])
+def test_promote_goal_tool_returns_goal_identity_not_execution_root(monkeypatch, state):
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
-    "state": "promoted",
+    "state": state,
     "objective": objective,
-    "root_run_id": "goal-1",
+    "goal_id": "goal-1",
+    "root_run_id": "root-1",
     "run_id": "run-1",
   })
 
-  assert control._promote_goal("Ship and verify") == {
-    "state": "promoted",
+  assert control._call_promote_goal({"objective": "Ship and verify"}) == {
+    "state": state,
     "objective": "Ship and verify",
     "goal_id": "goal-1",
     "run_id": "run-1",
@@ -308,15 +310,15 @@ def test_promote_goal_result_names_the_real_plan_tool():
   control = _control_module()
   next_action = control._GOALS.PLAN_NEXT_ACTION
   assert "update_goal" in next_action
-  assert control.UPDATE_GOAL_TOOL in control.OWNER_TOOLS
-  assert control.UPDATE_GOAL_TOOL not in control.DELEGATED_TOOLS
+  assert control.UPDATE_GOAL_TOOL in platform_tools.OWNER_CONTROL_TOOL_NAMES
+  assert control.UPDATE_GOAL_TOOL not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_promote_goal_with_tasks_publishes_the_plan_in_the_same_call(monkeypatch):
   control = _control_module()
   monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
     "state": "promoted", "objective": objective,
-    "root_run_id": "goal-1", "run_id": "run-1",
+    "goal_id": "goal-1", "root_run_id": "root-1", "run_id": "run-1",
   })
   sent = []
   monkeypatch.setenv("CHAT_ID", "chat-1")
@@ -362,22 +364,43 @@ def test_update_goal_reports_compactly_and_rejects_unknown_arguments(monkeypatch
 def test_goal_report_supplies_completion_keys_without_bloating_progress_updates():
   control = _control_module()
   payload = {
-    "goal": {"status": "open", "revision": 1, "held_work_keys": ["test:verified"]},
+    "goal": {
+      "status": "open", "revision": 1,
+      "held_work_keys": ["test:verified"],
+      "completable_work_keys": ["test:before-goal", "test:verified"],
+    },
     "plan": {"tasks": [], "summary": {"can_complete": False, "completion_blockers": ["verify"]}},
   }
   compact = control._goal_report(payload, full=False)
   assert "test:verified" not in compact
+  assert "test:before-goal" not in compact
   full = control._goal_report(payload, full=True)
   assert "Completion blocked by: verify" in full
   assert "test:verified" in full
+  assert "test:before-goal" in full
+  assert "Eligible work_keys for finished_claims (name only work performed):" in full
+  assert "Held work_keys" not in full
   payload["plan"]["summary"]["can_complete"] = True
   ready = control._goal_report(payload, full=False)
   assert "Ready to complete after verification" in ready
   assert "test:verified" in ready
+  assert "test:before-goal" in ready
   payload["goal"]["status"] = "completed"
   settled = control._goal_report(payload, full=True)
   assert "Ready to complete" not in settled
   assert "test:verified" not in settled
+  assert "test:before-goal" not in settled
+
+
+def test_goal_report_lists_goal_less_completion_keys_without_goal_owned_claims():
+  control = _control_module()
+  text = control._goal_report({
+    "goal": {"status": "open", "revision": 1, "held_work_keys": [],
+             "completable_work_keys": ["test:before-goal"]},
+    "plan": {"summary": {"can_complete": True}},
+  }, full=False)
+  assert "Eligible work_keys for finished_claims" in text
+  assert "test:before-goal" in text
 
 
 def test_a_compile_refusal_carries_its_diagnostic_not_just_that_it_failed():
@@ -416,7 +439,8 @@ def test_a_long_compile_refusal_survives_the_http_error_body_read(monkeypatch):
   text = str(caught.value)
   assert text.startswith("Refused (422): Compilation failed.\n[UNRESOLVED_IMPORT] missing-0")
   assert not text.lstrip("Refused (422): ").startswith("{")
-  assert len(text) < 5200
+  # The server caps the diagnostic; the client shows what it read whole.
+  assert text.endswith(stderr)
 
 
 def test_only_a_compile_refusal_appends_stderr():
@@ -484,6 +508,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   monkeypatch.delenv("MOBIUS_COORDINATION_ENABLED", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   initialized = control._dispatch_message({
     "jsonrpc": "2.0",
@@ -513,7 +539,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   ]
   restart = tools[platform_tools.RESTART_TOOL_NAME]
   assert restart["inputSchema"] == {
-    "type": "object", "properties": {}, "additionalProperties": False,
+    "type": "object", "properties": {"message": control.CARD_MESSAGE_PROPERTY},
+    "additionalProperties": False,
   }
   assert "platform derives" in restart["description"]
   assert "without waking an agent" in restart["description"]
@@ -617,7 +644,7 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
-    control.LIST_AGENT_PEERS_TOOL, *control.HELPER_TOOLS,
+    control.LIST_AGENT_PEERS_TOOL, *platform_tools.HELPER_TOOL_NAMES,
   ):
     assert len(tools[name]["description"]) <= 1000, name
 
@@ -654,6 +681,8 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
+  # This platform-only contract assumes a successfully empty app catalogue.
+  monkeypatch.setattr(control, "_app_tool_listings", lambda: [])
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 1, "method": "tools/list",
@@ -691,7 +720,7 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert "unavailable" in denied_cancel["content"][0]["text"]
 
 
-def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
+def test_request_restart_takes_only_a_closing_message(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   receipt = {
@@ -703,7 +732,7 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   monkeypatch.setattr(
     control._APPROVALS,
     "request_restart",
-    lambda: calls.append("request_restart") or receipt,
+    lambda **arguments: calls.append(arguments) or receipt,
   )
 
   response = control._call_tool({
@@ -712,14 +741,19 @@ def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
   })
   assert response["isError"] is False
   assert json.loads(response["content"][0]["text"]) == receipt
-  assert calls == ["request_restart"]
+  with_message = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {"message": "The fix is committed."},
+  })
+  assert with_message["isError"] is False
+  assert calls == [{}, {"message": "The fix is committed."}]
 
   invalid = control._call_tool({
     "name": platform_tools.RESTART_TOOL_NAME,
     "arguments": {"command": "restart"},
   })
   assert invalid["isError"] is True
-  assert "takes no arguments" in invalid["content"][0]["text"]
+  assert "takes only message" in invalid["content"][0]["text"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -962,6 +996,22 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
   assert "live helper" in followup["description"]
 
 
+def test_agent_prose_fields_carry_no_guessed_length_budgets():
+  control = _control_module()
+  spawn = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]["properties"]
+  update = control._TOOL_DEFINITIONS["update_goal"]["inputSchema"]["properties"]
+  task = update["tasks"]["items"]["properties"]
+  assert "maxLength" not in spawn["task"]
+  assert "maxItems" not in update["tasks"]
+  assert "maxItems" not in update["finished_claims"]
+  for name in ("next_action", "cancel", "defer"):
+    assert "maxLength" not in update[name]
+  for name in ("reason", "efforts", "unmet_outcome"):
+    assert "maxLength" not in update["cannot_complete"]["properties"][name]
+  for name in ("title", "completion_condition", "note", "result"):
+    assert "maxLength" not in task[name]
+
+
 def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
   control = _control_module()
   body = "x" * 4000
@@ -1058,20 +1108,31 @@ def test_question_tool_requires_only_owner_facing_meaning():
 
 
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """Every exposed saved-card tool carries the same complete instruction."""
+  """Every exposed saved-card tool carries the same complete instruction, and
+  the closing message travels in the card call itself where the card has one."""
   control = _control_module()
   instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
   for name in (
     control.REQUEST_APPROVAL_TOOL,
     control.REQUEST_QUESTION_TOOL,
     control.REQUEST_RESTART_TOOL,
-    control.REQUEST_SECRET_TOOL,
   ):
-    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    definition = control._TOOL_DEFINITIONS[name]
+    description = definition["description"].lower()
     assert description.count(instruction) == 1
     assert "closeout before this call" not in description
-  assert "before this call, write your closing message" in instruction
+    message = definition["inputSchema"]["properties"]["message"]
+    assert message is control.CARD_MESSAGE_PROPERTY
+    assert "message" not in definition["inputSchema"].get("required", [])
+  assert "put your closing message in `message`" in instruction
   assert "where things stand" in instruction
+  assert "at most a one-sentence lead-in" in control.CARD_MESSAGE_PROPERTY["description"]
+  # The sealed card has no message field, so its closing message stays prose.
+  secret = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]
+  secret_instruction = control.SECRET_CARD_TERMINAL_INSTRUCTION.lower()
+  assert secret["description"].lower().count(secret_instruction) == 1
+  assert "message" not in secret["inputSchema"]["properties"]
+  assert "before this call, write your closing message" in secret_instruction
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
@@ -1344,12 +1405,13 @@ def test_apply_app_publishes_the_directory_and_returns_where_to_open_it(
 
 def test_helpers_may_build_apps_but_not_reach_the_owner(monkeypatch):
   control = _control_module()
-  for name in control.APP_TOOLS:
-    assert name in control.DELEGATED_TOOLS
+  for name in platform_tools.APP_BUILD_TOOL_NAMES:
+    assert name in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   for name in (
     control.NOTIFY_OWNER_TOOL, control.OPEN_ITEM_TOOL, control.REQUEST_SECRET_TOOL,
   ):
-    assert name in control.OWNER_TOOLS and name not in control.DELEGATED_TOOLS
+    assert name in platform_tools.OWNER_CONTROL_TOOL_NAMES
+    assert name not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
 
 
 def test_screenshot_returns_the_image_and_the_owner_embed_line(monkeypatch, tmp_path):
@@ -1405,8 +1467,8 @@ def test_screenshot_in_a_read_only_sandbox_says_why_it_cannot_capture(monkeypatc
 
 
 @pytest.mark.parametrize(("body", "reason"), [
-  ('{"detail":{"code":"invalid_plan","message":"note for a must be at most 1000 characters","task_id":"a"}}',
-   "note for a must be at most 1000 characters"),
+  ('{"detail":{"code":"invalid_plan","message":"depends_on for a must be a list of ids","task_id":"a"}}',
+   "depends_on for a must be a list of ids"),
   ('{"detail":"A recipient is not an addressable Möbius peer."}',
    "A recipient is not an addressable Möbius peer."),
   ('{"detail":[{"loc":["body","tasks",0,"id"],"msg":"Field required"}]}',
@@ -1417,6 +1479,184 @@ def test_refusals_read_as_their_reason_not_the_wire_envelope(body, reason):
   control = _control_module()
   assert control._refusal_message(body) == reason
   assert "{" not in control._refusal_message(body) or body.startswith("<")
+
+
+def test_a_non_json_error_page_is_shown_as_a_marked_head():
+  control = _control_module()
+  page = "<html>" + "gateway " * 5000 + "</html>"
+  rendered = control._refusal_message(page)
+  assert rendered.startswith("<html>gateway")
+  assert rendered.endswith(f"[excerpt of a {len(page)}-character non-JSON error body]")
+  assert len(rendered) < 2100
+
+
+def test_a_refusal_cut_at_the_transport_read_is_labelled_truncated(monkeypatch):
+  import io
+  import urllib.error
+
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://backend.test")
+  monkeypatch.setenv("AGENT_TOKEN", "t")
+  body = json.dumps({"detail": "R" * 200_000}).encode()
+
+  def refuse(request, timeout=None):
+    raise urllib.error.HTTPError(request.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
+
+  monkeypatch.setattr(control, "urlopen", refuse)
+  with pytest.raises(RuntimeError) as caught:
+    control._agent_api_json("POST", "/api/x")
+  assert "truncated at the 65536-byte read" in str(caught.value)
+  assert "non-JSON" not in str(caught.value)
+
+
+def _next_page(footer):
+  tail = footer.rsplit("offset=", 1)[1].rstrip(")]")
+  offset, version = tail.split(", version=")
+  return {"offset": int(offset), "version": version}
+
+
+def _read_all_pages(control, name, arguments):
+  pieces, more = [], {}
+  while True:
+    text = control._call_tool({"name": name, "arguments": {**arguments, **more}})["content"][0]["text"]
+    # The whole result, footer included, fits the smallest provider's limit.
+    assert len(text.encode("utf-8", "surrogatepass")) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
+    if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
+      return pieces + [text]
+    text, footer = text.rsplit("\n", 1)
+    pieces.append(text)
+    if "end of result" in footer:
+      return pieces
+    more = _next_page(footer)
+
+
+def test_pages_of_a_plan_that_changed_in_between_are_refused(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": "x" * 200} for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: payload)
+  first = control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"]
+  page = _next_page(first.rsplit("\n", 1)[1])
+  payload["goal"]["revision"] = 4
+  tasks[0]["title"] = "changed"
+  refused = control._call_tool({"name": "update_goal", "arguments": page})
+  assert refused["isError"]
+  assert "start again from offset 0" in refused["content"][0]["text"]
+
+
+def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": f"Task {index} " + "x" * 200}
+           for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or payload)
+  full = control._goal_report(payload, full=True)
+  assert len(full) > 2 * control._CONTEXT_BUDGET.READ_PAGE_BYTES
+
+  assert "".join(_read_all_pages(control, "update_goal", {})) == full
+  # Every page is the plain read: no change is ever sent or re-run for a page.
+  assert all(body == {} for body in sent)
+  refused = control._call_tool({"name": "update_goal",
+                                "arguments": {"offset": 5, "next_action": "x"}})
+  assert refused["isError"] and "pass it alone" in refused["content"][0]["text"]
+
+  small = {"goal": {"status": "open", "revision": 1, "objective": "Ship"},
+           "plan": {"tasks": tasks[:3], "summary": {"total": 3}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: small)
+  assert control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"] == (
+    control._goal_report(small, full=True))
+
+
+def test_read_goal_pages_a_long_task_view_and_a_long_field(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  view = {"role": "coordinator", "helpers": [], "goal": {
+    "focus": "parent", "children": [{"id": f"c{index}", "title": "T" * 300} for index in range(400)]}}
+  note = "".join(f"{index:07d}" for index in range(30_000))
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "parent", "text": note} if "field=" in path else view))
+
+  joined = "".join(_read_all_pages(control, "read_goal", {"task": "parent"}))
+  assert json.loads(joined) == view
+  # An explicit null is not repeated into the next-page call.
+  first = control._call_tool({"name": "read_goal", "arguments": {"task": "parent", "field": None}})
+  footer = first["content"][0]["text"].rsplit("\n", 1)[1]
+  assert "None" not in footer and "task=parent" in footer
+  assert "".join(_read_all_pages(control, "read_goal", {"task": "parent", "field": "note"})) == note
+
+
+def test_a_change_reply_bounds_what_it_echoes():
+  control = _control_module()
+  running = [f"t{index:04d}" for index in range(3000)]
+  payload = {"goal": {"status": "cannot_complete", "revision": 9, "result": "R" * 100_000},
+             "plan": {"tasks": [], "summary": {"total": 3000, "running": running}}}
+  reply = control._goal_report(payload, full=False)
+  assert len(reply.encode()) < control._CONTEXT_BUDGET.READ_PAGE_BYTES
+  assert "update_goal with no arguments shows it whole" in reply
+  payload["goal"]["status"] = "open"
+  reply = control._goal_report(payload, full=False)
+  assert "and 2950 more (update_goal with no arguments lists them all)" in reply
+  # The paged full report still lists everything.
+  assert all(task in control._goal_report(payload, full=True) for task in running[-3:])
+
+
+def test_read_pages_are_sized_in_bytes_so_cjk_text_fits_one_result(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  note = "目標達成のための詳細な記録。" * 6_000  # 3 bytes per character
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note}))
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note
+  assert len(pages) > 1
+  assert all(len(page.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES for page in pages)
+
+
+def test_the_pager_carries_a_lone_surrogate_through(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  # Pages are sized and fingerprinted as surrogate-passing UTF-8, like the brief.
+  note = "half \ud800 pair"
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note * 20_000} if "field=" in path
+    else {"role": "coordinator", "helpers": [], "goal": {"focus": "a", "note": note}}))
+  view = control._call_tool({"name": "read_goal", "arguments": {"task": "a"}})
+  assert not view.get("isError"), view
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note * 20_000
+
+
+def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "objective", "task": None, "text": "Ship it"} if "field=" in path
+    else {"role": "coordinator", "goal": None, "helpers": []}))
+  assert control._call_read_goal({"field": "objective"}) == "Ship it"
+  # field=null is the whole view, never a missing-text failure.
+  assert control._call_read_goal({"task": "a", "field": None})["goal"] == "This chat has no Goal."
+  assert control._call_read_goal({"task": "a"})["goal"] == "This chat has no Goal."
+
+
+def test_a_refusal_reason_is_shown_whole():
+  control = _control_module()
+  reason = "R" * 5000
+  assert control._refusal_message(json.dumps({"detail": reason})) == reason
+  issues = [{"loc": ["body", f"field{index}"], "msg": "Field required"} for index in range(8)]
+  rendered = control._refusal_message(json.dumps({"detail": issues}))
+  assert rendered.count("Field required") == 8
+  assert "field7: Field required" in rendered
 
 
 def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):

@@ -272,6 +272,9 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # Rows marked `held` (a Stop kept them) wait for the owner's next send and
+  # are not runnable: test `continuations.has_runnable_pending` when the
+  # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -286,6 +289,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Set once on a branch (app.chat_branches): {"chat_id", "title",
+  # "through_count", "fork"}. The shell draws "Branched from" after the first
+  # `through_count` rows; `fork` names the source provider session and the
+  # point in it the branch's first turn copies (None when it cannot).
+  branch_origin = Column(JSON, nullable=True, default=None)
   # Content-addressed system-prompt snapshot selected when this chat starts
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
@@ -950,6 +958,7 @@ RUN_END_REASONS = frozenset((
   "superseded",           # a new turn started while this row was still open
   "provider_switch",      # a provider handoff retired the run
   "dependency_withdrawn", # its Goal dependency result was withdrawn
+  "wait_withdrawn",       # its never-admitted Wait follow-up was withdrawn
   "chat_deleted",         # the chat was deleted mid-turn
   "recovered",            # the turn wedged and was closed by recovery
 ))
@@ -1661,6 +1670,8 @@ class AgentWorkClaim(Base):
   )
   owner_run_id = Column(String(64), nullable=False)
   owner_goal_id = Column(String(64), nullable=True, index=True)
+  # Last-transfer projection, never the recovery source for revocations.
+  # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
   takeover_reason = Column(String(1000), nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
@@ -1673,6 +1684,34 @@ class AgentWorkClaim(Base):
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
   outcome = Column(String(1000), nullable=True)
+
+
+class AgentWorkClaimRevocation(Base):
+  """One immutable former-executor notice, committed with its transfer.
+
+  Delivery acknowledgement records a peer delivery path, not that execution
+  stopped. Keep the snapshot even if the claim finishes, is reacquired, or a
+  recipient becomes unreachable; chat identities deliberately have no FK.
+  """
+
+  __tablename__ = "agent_work_claim_revocations"
+
+  claim_id = Column(
+    String(64), ForeignKey("agent_work_claims.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  revision = Column(Integer, primary_key=True)
+  acquisition_id = Column(String(64), nullable=True)
+  owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
+                    nullable=False)
+  sender_chat_id = Column(String(64), nullable=False)
+  recipient_chat_id = Column(String(64), nullable=False)
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  # Outcome is the state; the timestamp records when that outcome was stored.
+  # NULL is owed; closure need not mean a notice was delivered.
+  outcome = Column(String(32), nullable=True, index=True)
+  closed_at = Column(DateTime, nullable=True)
 
 
 class AgentWorkInterest(Base):
@@ -1898,6 +1937,46 @@ class ChatAppArtifact(Base):
   )
   touched_at = Column(DateTime, nullable=False, default=now_naive_utc)
   seen_at = Column(DateTime, nullable=True, default=None)
+
+
+class AppChatScopeStart(Base):
+  """The one first turn an app's scoped handoff may admit for a scope.
+
+  ``POST /api/app-chats/start`` treats (app, scope) as an idempotency identity:
+  a lost response, a retry, a second pane, or a replay after the app cancelled
+  the job never admits a second agent turn. The owner deleting the bound chat
+  releases the scope, so the next start creates a fresh chat. The identity
+  lives outside ``chats`` on purpose: ``chat_id`` has no foreign key, so a
+  cancellation can fence a scope before any chat exists. Rows also leave with
+  their app, because ``apps`` ids can be reused.
+
+  Admission is recorded here too, not inferred from the chat alone: an owner
+  Stop or queued-message removal can leave an admitted chat with no messages,
+  queue, or run, and a replay must still find it started.
+  """
+
+  __tablename__ = "app_chat_scope_starts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  scope = Column(String(160), primary_key=True)
+  # The chat this scope admitted; NULL only when cancelled before admission.
+  chat_id = Column(String(64), nullable=True)
+  # Set once by the app's cancellation; a cancelled scope never admits a turn.
+  cancelled_at = Column(DateTime, nullable=True)
+  # Set once, in the chat writer commit that accepted the chat's first turn
+  # (see app_chat_scopes); never cleared.
+  admitted_at = Column(DateTime, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (
+    CheckConstraint(
+      "chat_id IS NOT NULL OR cancelled_at IS NOT NULL",
+      name="ck_app_chat_scope_starts_outcome",
+    ),
+    CheckConstraint(
+      "admitted_at IS NULL OR (chat_id IS NOT NULL AND cancelled_at IS NULL)",
+      name="ck_app_chat_scope_starts_admitted",
+    ),
+  )
 
 
 class PushSubscription(Base):

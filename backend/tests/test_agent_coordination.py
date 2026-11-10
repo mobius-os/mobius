@@ -879,6 +879,52 @@ def test_unknown_deleted_and_never_started_recipients_fail_atomically(
   assert db.query(models.AgentCoordinationMessage).count() == 0
 
 
+def test_transfer_after_crash_recovers_every_former_owner_notice(
+  client, auth, db, monkeypatch,
+):
+  """Ownership can move again before the first route ever persisted its note."""
+  from app.agent_work_claims import claim_work
+
+  chats, _ = _network_fixture(db)
+  owner = db.query(models.Owner).one()
+  key = "platform:test:crashed-transfer-chain"
+  claim_work(db, owner_id=owner.id, chat_id=chats["root"].id,
+             run_id="root-run", work_key=key, summary="Do the shared action")
+  # The ownership transaction committed; the process died before route delivery.
+  claim_work(db, owner_id=owner.id, chat_id=chats["outsider"].id,
+             run_id="outside-run", work_key=key, summary="Continue the action",
+             takeover_reason="The original executor handed over the action.",
+             expected_owner_chat_id=chats["root"].id)
+  assert db.query(models.AgentCoordinationMessage).count() == 0
+
+  async def delivered(**kwargs):
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  monkeypatch.setattr("app.routes.agent_coordination.deliver_peer_recipients", delivered)
+  moved = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
+    json={"work_key": key, "summary": "Finish the action",
+          "takeover_reason": "The second executor handed over the action.",
+          "expected_owner_chat_id": chats["outsider"].id},
+  )
+  assert moved.status_code == 200, moved.text
+  assert moved.json()["steered"] == [chats["outsider"].id]
+  assert {row.to_chat_id for row in db.query(models.AgentCoordinationMessage).all()} == {
+    chats["outsider"].id,
+  }
+  # Restart recovery, not a later caller's response, owns older obligations.
+  asyncio.run(agent_coordination.recover_work_claim_revocations())
+  notices = db.query(models.AgentCoordinationMessage).all()
+  assert {row.to_chat_id for row in notices} == {
+    chats["root"].id, chats["outsider"].id,
+  }
+  first = next(row for row in notices if row.to_chat_id == chats["root"].id)
+  assert first.from_chat_id == chats["outsider"].id
+  assert "original executor" in first.body
+
+
 def test_work_claim_transfer_acknowledges_only_after_delivery(
   client, auth, db, monkeypatch,
 ):
@@ -906,7 +952,7 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
     raise RuntimeError("delivery interrupted before acknowledgement")
 
   monkeypatch.setattr(
-    "app.routes.agent_coordination.deliver_peer_recipients", fail_delivery,
+    "app.agent_coordination.deliver_peer_recipients", fail_delivery,
   )
   transfer_body = {
     "work_key": work_key,
@@ -914,12 +960,15 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
     "takeover_reason": "The original owner explicitly handed it over.",
     "expected_owner_chat_id": chats["root"].id,
   }
-  with pytest.raises(RuntimeError, match="before acknowledgement"):
-    client.post(
-      "/api/agent-coordination/work-claims",
-      headers=outside_auth,
-      json=transfer_body,
-    )
+  transferred = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=outside_auth,
+    json=transfer_body,
+  )
+  assert transferred.status_code == 200, transferred.text
+  assert transferred.json()["state"] == "transferred"
+  assert transferred.json()["notification_pending"] is True
+  assert "steered" not in transferred.json()
 
   db.expire_all()
   claim = db.query(models.AgentWorkClaim).filter(
@@ -937,7 +986,7 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
     )
 
   monkeypatch.setattr(
-    "app.routes.agent_coordination.deliver_peer_recipients", deliver_on_retry,
+    "app.agent_coordination.deliver_peer_recipients", deliver_on_retry,
   )
   retried = client.post(
     "/api/agent-coordination/work-claims",
@@ -946,8 +995,9 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
   )
   assert retried.status_code == 200, retried.text
   assert retried.json()["state"] == "transferred"
-  assert retried.json()["notification_pending"] is False
-  assert retried.json()["steered"] == [chats["root"].id]
+  assert retried.json()["notification_pending"] is True
+  assert "steered" not in retried.json()
+  asyncio.run(agent_coordination.recover_work_claim_revocations())
   db.expire_all()
   assert db.get(models.AgentWorkClaim, claim.id).notification_revision == (
     claim.revision
@@ -1880,3 +1930,73 @@ def test_goal_parent_and_its_helper_share_one_coordination_scope(db):
     recipients=[helper.id], broadcast=False, kind="note", body="Check the logs first.",
   )
   assert [row["recipient_chat_id"] for row in sent] == [helper.id]
+
+
+def test_reacquisition_does_not_deliver_the_new_owners_old_revocation(
+  client, auth, db, monkeypatch,
+):
+  from app.agent_work_claims import claim_work, finish_work
+
+  chats, _ = _network_fixture(db)
+  owner = db.query(models.Owner).one()
+  key = "platform:test:reacquired-action"
+  initial = claim_work(db, owner_id=owner.id, chat_id=chats["root"].id,
+                       run_id="root-run", work_key=key, summary="Act once")
+  claim_work(db, owner_id=owner.id, chat_id=chats["outsider"].id,
+             run_id="outside-run", work_key=key, summary="Continue",
+             takeover_reason="The first owner handed this action over.",
+             expected_owner_chat_id=chats["root"].id)
+  finish_work(db, owner_id=owner.id, chat_id=chats["outsider"].id,
+              work_key=key, outcome="Release to a new acquisition", release=True)
+  deliveries = []
+
+  async def delivered(**kwargs):
+    deliveries.extend(kwargs["recipients"])
+    return PeerDeliveryResult(steered=kwargs["recipients"], woken=[], queued=[])
+
+  monkeypatch.setattr("app.agent_coordination.deliver_peer_recipients", delivered)
+  response = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=_top_level_auth(db, chats["root"].id, "root-run"),
+    json={"work_key": key, "summary": "Own the new acquisition"},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["state"] == "claimed"
+  assert deliveries == []
+  assert response.json()["notification_pending"] is False
+  notice = db.get(models.AgentWorkClaimRevocation, (initial["id"], 2))
+  db.refresh(notice)
+  assert notice.outcome == "superseded"
+  assert notice.closed_at is not None
+
+
+@pytest.mark.parametrize("requester", ["current_owner", "observer"])
+def test_claim_reads_do_not_dispatch_or_expose_an_older_revocation(
+  client, auth, db, monkeypatch, requester,
+):
+  from app.agent_work_claims import claim_work
+
+  chats, _ = _network_fixture(db)
+  owner = db.query(models.Owner).one()
+  key = "platform:test:claim-read-is-not-delivery"
+  claim_work(db, owner_id=owner.id, chat_id=chats["root"].id,
+             run_id="root-run", work_key=key, summary="Act once")
+  claim_work(db, owner_id=owner.id, chat_id=chats["outsider"].id,
+             run_id="outside-run", work_key=key, summary="Continue",
+             takeover_reason="The first owner handed this action over.",
+             expected_owner_chat_id=chats["root"].id)
+
+  def broken_old_notice(*_args, **_kwargs):
+    raise RuntimeError("unrelated older delivery failed")
+
+  monkeypatch.setattr("app.agent_coordination.send_work_claim_transfer_notice", broken_old_notice)
+  chat, run = ((chats["outsider"], "outside-run") if requester == "current_owner"
+               else (chats["root"], "root-run"))
+  response = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=_top_level_auth(db, chat.id, run),
+    json={"work_key": key, "summary": "Inspect this action"},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["notification_pending"] is True
+  assert all(state not in response.json() for state in ("steered", "woken", "queued", "unreachable"))

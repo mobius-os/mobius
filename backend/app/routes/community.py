@@ -45,7 +45,7 @@ from app.deps import (
   Principal, get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_manage_apps,
-  reject_cross_site, require_nondelegated_owner_control,
+  reject_cross_site, require_account_owner, require_account_owner_control,
 )
 
 
@@ -81,8 +81,9 @@ def _store_github_owner_control(
   owner: models.Owner = Depends(_store_github_owner),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Require explicit owner confirmation without dropping Store app grants."""
-  require_nondelegated_owner_control(principal)
+  """Publish under the owner's GitHub and Möbius identity: the owner (or a
+  Store app acting for them) confirms it, never a helper or a guest."""
+  require_account_owner_control(principal)
   return owner
 
 
@@ -90,8 +91,9 @@ def _store_owner_control(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Protect public expression while preserving the Store app capability."""
-  require_nondelegated_owner_control(principal)
+  """Protect public expression under the owner's identity (reviews,
+  withdrawals, install receipts) while preserving the Store app capability."""
+  require_account_owner_control(principal)
   return owner
 
 
@@ -452,14 +454,14 @@ async def _github_json(
   return payload, response.status_code
 
 
-@router.get("/identity")
+@router.get("/identity", dependencies=[Depends(require_account_owner)])
 async def community_identity(
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ) -> JSONResponse:
   return await _request("GET", "/identity")
 
 
-@router.get("/github-status")
+@router.get("/github-status", dependencies=[Depends(require_account_owner)])
 async def community_github_status(
   _: models.Owner = Depends(_store_github_owner),
 ) -> dict[str, str | bool]:
@@ -467,7 +469,8 @@ async def community_github_status(
 
   Connection setup and credential details remain owned by Contribute. The
   Store inherits the already-reviewed local authority without receiving the
-  token, OAuth controls, scopes, or resumable device-flow state.
+  token, OAuth controls, scopes, or resumable device-flow state. It is the
+  owner's account, so never a guest's.
   """
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
@@ -506,7 +509,7 @@ async def list_community_apps(
   )
 
 
-@router.get("/publications")
+@router.get("/publications", dependencies=[Depends(require_account_owner)])
 async def list_community_publications(
   limit: int = Query(default=100, ge=1, le=100),
   offset: int = Query(default=0, ge=0, le=10_000),
@@ -903,7 +906,9 @@ async def _publish_local_source(
     return repository, source_commit_sha
 
 
-@router.get("/publications/github/preview")
+@router.get(
+  "/publications/github/preview", dependencies=[Depends(require_account_owner)],
+)
 async def preview_local_app_publication(
   app_id: int = Query(gt=0),
   db: Session = Depends(get_db),

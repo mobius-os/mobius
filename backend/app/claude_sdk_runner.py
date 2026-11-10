@@ -61,6 +61,7 @@ from collections import deque
 from collections.abc import Awaitable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
@@ -479,12 +480,39 @@ def _resumable(
   """
   if not session_id:
     return False
+  path = claude_session_path(config_dir, cwd, session_id)
+  return path is not None and path.is_file()
+
+
+def claude_session_path(config_dir: str | os.PathLike | None, cwd: str, session_id: str) -> Path | None:
+  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``.
+
+  ``config_dir`` is the turn's ``CLAUDE_CONFIG_DIR`` (``ClaudeProvider.build_env``);
+  without one the CLI uses this process's own. None when neither is set.
+  """
   base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
   if not base:
-    return False
+    return None
   proj = "-" + cwd.strip("/").replace("/", "-")
-  return os.path.isfile(
-    os.path.join(base, "projects", proj, f"{session_id}.jsonl")
+  return Path(base) / "projects" / proj / f"{session_id}.jsonl"
+
+
+# The CLI's refusals of a resume target. It prints them and exits before any
+# session starts, so no session id has been reported (see fork_rejected).
+_RESUME_TARGET_REFUSALS = ("No message found with message.uuid", "No conversation found")
+
+
+def fork_rejected(result: RunnerResult) -> bool:
+  """Whether a turn started with ``fork_from`` failed because the fork was refused.
+
+  Only a refused resume target ends a turn before Claude reports its new
+  session id. Usage limits, auth and provider errors come from the API after
+  the session started, so they keep the fork for the next attempt.
+  """
+  error = result.get("error")
+  return (
+    bool(error) and not result.get("session_id")
+    and any(refusal in str(error) for refusal in _RESUME_TARGET_REFUSALS)
   )
 
 
@@ -1128,12 +1156,16 @@ async def run_claude_sdk_turn(
   connector_plan=None,
   coordination_enabled: bool = True,
   goal_brief_refresh=None,
+  fork_from: dict | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
   Args:
     user_message: Fully prepared user prompt for this turn.
     session_id: Existing Claude session to resume, or None on first turn.
+    fork_from: On a branch's first turn (no ``session_id``), the source
+      ``{"session_id", "at"}``: the turn starts in a new session forked from
+      that one at entry ``at`` (chat_branches.claude_fork_point).
     base_env: Environment passed through to the Claude subprocess.
     cwd: Working directory for the SDK run.
     chat_id: Möbius chat identifier used for registries.
@@ -1553,7 +1585,15 @@ async def run_claude_sdk_turn(
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
-        "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        # The queued-prompt gate keeps Stop and a saved owner card final, so a
+        # hook that raises or returns no valid decision refuses the prompt
+        # rather than letting it start new work.
+        # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
+        # one closed would turn a completed tool (even the saved card itself)
+        # into an error result, inviting a duplicate.
+        "UserPromptSubmit": [HookMatcher(
+          matcher=None, hooks=[queued_prompt_hook], on_failure="block",
+        )],
         "PreToolUse": [
           HookMatcher(
             matcher=_ANSWER_CHECK_CARD_MATCHER,
@@ -1591,6 +1631,10 @@ async def run_claude_sdk_turn(
       options_kwargs["thinking"] = thinking_config
     if _effort:
       options_kwargs["effort"] = _effort
+    if session_id is None and fork_from is not None:
+      options_kwargs["resume"] = fork_from["session_id"]
+      options_kwargs["fork_session"] = True
+      options_kwargs["resume_session_at"] = fork_from["at"]
     # Arm ultracode via its documented `ultracode` settings flag; on every other
     # turn set the documented `disableWorkflows` flag so a stray "ultracode" token
     # in injected memory/context can't arm the Workflow fleet on a turn the owner
