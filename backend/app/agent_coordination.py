@@ -1291,9 +1291,9 @@ def _clean_delivery(delivery: str, *, broadcast: bool) -> str:
 # A send's rows, as plain values. Every recipient row of one send carries the
 # same body, so a send returns them sharing the one body string the caller
 # already holds rather than loading and copying it once per recipient.
-_SEND_COLUMNS = (
-  "id", "send_id", "room_kind", "room_id", "from_chat_id", "from_run_id",
-  "to_chat_id", "delivery", "kind", "created_at",
+_SEND_COLUMNS = tuple(
+  column.key for column in models.AgentCoordinationMessage.__table__.columns
+  if column.key != "body"
 )
 
 

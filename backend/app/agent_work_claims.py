@@ -96,10 +96,11 @@ def read_claim_text(
     return current
   if current and claim_text_digest(current) == digest:
     return current
-  if field != "takeover_reason":
+  if field != "takeover_reason" and row is not None:
     for (outcome,) in db.query(models.GoalDependency.outcome_json).filter(
       models.GoalDependency.waiting_chat_id == chat_id,
       models.GoalDependency.target_kind == "claim_acquisition",
+      models.GoalDependency.target_claim_id == row.id,
     ).all():
       text = outcome.get(field) if isinstance(outcome, dict) else None
       if (isinstance(text, str) and outcome.get("work_key") == key

@@ -121,8 +121,7 @@ helper tools are switched off; do not substitute a provider CLI. To discover or
 message agents in other Möbius chats—including
 top-level chat agents—use the `mobius_control` peer network
 (`list_agent_peers`, then `send_agent_message`; `read_agent_message` reads a
-note whole when context carried only its excerpt, and `read_work_claim` does
-the same for a work claim's summary, takeover reason or outcome). These are offered only while
+note whole when context carried only its excerpt). These are offered only while
 another agent is live, or inside a Project or delegation; when they are absent,
 no peer is reachable, so record any hand-off in this chat's note. Do not fall back to the
 ordinary chat-message API for agent-to-agent coordination: that creates an
@@ -252,7 +251,8 @@ its turn, and must not duplicate its approval, mutation, or monitor. Claims sett
 (`update_goal(complete: true, finished_claims: ["WORK_KEY"])`) and releases the
 rest; Stop, dismissal, or chat deletion releases them. Call `finish_agent_work` only to settle earlier or for a
 claim taken outside a Goal; transfer only for a concrete reason, naming the
-observed owner. Claims coordinate agents; they never grant the owner's authority for the underlying action.
+observed owner. When a claim result or notice shows only an excerpt of a claim's text, `read_work_claim` with the
+digest it names reads that text whole. Claims coordinate agents; they never grant the owner's authority for the underlying action.
 
 ---
 
