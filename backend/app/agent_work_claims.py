@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS, excerpt
 from app.decision_cards import fence_owner
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
@@ -44,6 +45,15 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
+# A claim's texts are repeated into tool results and notices within the input
+# caps they have; a longer stored text is excerpted there and kept whole.
+_CLAIM_TEXT_KEPT = "the work claim keeps the full text"
+
+
+def claim_text(value: str | None, limit: int = CLAIM_TEXT_CHARS) -> str | None:
+  return excerpt(value, limit, _CLAIM_TEXT_KEPT) if isinstance(value, str) else value
+
+
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   title = db.query(models.Chat.title).filter(
     models.Chat.id == row.owner_chat_id,
@@ -51,7 +61,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": row.summary,
+    "summary": claim_text(row.summary, CLAIM_SUMMARY_CHARS),
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
@@ -60,9 +70,9 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "acquisition_id": row.acquisition_id,
     "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
-    "takeover_reason": row.takeover_reason,
+    "takeover_reason": claim_text(row.takeover_reason),
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-    "outcome": row.outcome,
+    "outcome": claim_text(row.outcome),
   }
   if state == "held_by_peer":
     result["next_action"] = (
@@ -354,7 +364,7 @@ def claim_work(
     claim_id=row.id, revision=previous_revision + 1,
     acquisition_id=row.acquisition_id, owner_id=owner_id,
     sender_chat_id=chat_id, recipient_chat_id=previous,
-    body=(f"Work claim {key} transferred to {chat_id}: {reason} "
+    body=(f"Work claim {key} transferred to {chat_id}: {claim_text(reason)} "
           f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
   ))
   # No peer-message helper may commit here. The ownership change and its

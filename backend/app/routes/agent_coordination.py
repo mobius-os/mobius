@@ -21,6 +21,7 @@ from app.agent_coordination import (
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
+  peer_message_for_agent,
   send_agent_message,
   deliver_work_claim_revocation,
   visible_peer_messages,
@@ -30,6 +31,7 @@ from app.agent_work_claims import (
   claim_work,
   finish_work,
 )
+from app.context_budget import PEER_NOTE_CHARS
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -228,9 +230,17 @@ async def send_current_message(
   )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated up to 24 times.
+  # owner-visible activity card needs, not the body repeated per recipient.
+  # A stored note longer than the send cap comes back as a head the card
+  # labels as truncated.
+  receipt = [model_message(row) for row in rows[:1]]
+  for row in receipt:
+    body = row.get("body") or ""
+    if len(body) > PEER_NOTE_CHARS:
+      row.update(body=body[:PEER_NOTE_CHARS], body_truncated=True,
+                 body_chars=len(body))
   result = {
-    "messages": [model_message(row) for row in rows[:1]],
+    "messages": receipt,
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
@@ -253,6 +263,22 @@ async def send_current_message(
       "recipient or tell the owner."
     )
   return result
+
+
+@router.get("/messages/{message_id}")
+def read_current_message(
+  message_id: str,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """One whole note this agent's chat sent, received or can see broadcast."""
+  if principal.chat_id is None or principal.run_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  get_active_chat_for_principal(db, principal.chat_id, principal)
+  message = peer_message_for_agent(db, principal.chat_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this agent.")
+  return message
 
 
 @router.get("/chats/{chat_id}")

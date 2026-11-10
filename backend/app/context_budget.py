@@ -1,4 +1,4 @@
-"""Display limits and read pages for agent-written Goal text.
+"""Display limits and read pages for agent-written Goal and peer text.
 
 Agent input to a Goal plan is not capped where it is written: the store keeps
 it whole and the paged reads return it whole. The per-turn Goal brief shows
@@ -17,6 +17,15 @@ NEXT_ACTION_CHARS = 2_000
 # Entries all brief lists share, and dependency ids per task, as a plan held them.
 LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
+
+# Peer notes and work claims, shown where Möbius repeats them: a note in a
+# turn's coordination block, a send receipt, a claim tool result, a transfer
+# notice and a dependency notice. Each equals the input cap that text has, so
+# anything accepted today is shown exactly as before; a longer stored text
+# becomes a marked excerpt and stays whole in storage.
+PEER_NOTE_CHARS = 4_000
+CLAIM_SUMMARY_CHARS = 500
+CLAIM_TEXT_CHARS = 1_000  # a takeover reason or an outcome
 
 
 # A change's reply echoes at most this much of one text and this many ids;
