@@ -1338,7 +1338,8 @@ def test_next_turn_context_delivers_a_note_at_the_send_cap_whole(db):
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=previous_started + timedelta(seconds=100),
   )
-  body = ("Reply on the review: " + "detail " * 700)[:4000].rstrip() + " END"
+  body = ("Reply on the review: " + "detail " * 700)[:3996] + " END"
+  assert len(body) == 4000
   db.add_all([current, models.AgentCoordinationMessage(
     id="long-note", room_kind="workspace", room_id="1",
     from_chat_id=chats["outsider"].id, from_run_id="outside-run",
@@ -2000,3 +2001,189 @@ def test_claim_reads_do_not_dispatch_or_expose_an_older_revocation(
   assert response.status_code == 200, response.text
   assert response.json()["notification_pending"] is True
   assert all(state not in response.json() for state in ("steered", "woken", "queued", "unreachable"))
+
+
+def _stored_note(chats, index, body, created_at, *, to="scout"):
+  return models.AgentCoordinationMessage(
+    id=f"stored-{index}", room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id=f"stored-send-{index}", send_target_key=chats[to].id,
+    to_chat_id=chats[to].id, kind="finding", body=body, created_at=created_at,
+  )
+
+
+def test_notes_stored_beyond_the_send_cap_arrive_bounded_and_read_whole(
+  client, auth, db,
+):
+  """A note written by a release without the cap never floods a turn."""
+  from app.context_budget import PEER_NOTE_CHARS
+
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  current = make_goal_run(db,
+    id="scout-huge-run", root_run_id="scout-huge-run",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=previous_started + timedelta(seconds=100),
+  )
+  huge = "Long finding " + "detail " * 30_000 + "END"
+  db.add_all([current, *[
+    _stored_note(chats, index, huge if index < 3 else "Short note",
+                 previous_started + timedelta(seconds=index + 1))
+    for index in range(4)
+  ]])
+  db.commit()
+
+  snapshot = agent_context_snapshot(db, chats["scout"].id, current.id)
+  bodies = [message["body"] for message in snapshot["messages"]]
+  assert bodies[3] == "Short note"
+  for index, body in enumerate(bodies[:3]):
+    assert len(body) <= PEER_NOTE_CHARS
+    assert body.endswith(
+      f"of {len(huge)} characters; read_agent_message(message_id=stored-{index}) "
+      "pages the full note]"
+    )
+  # The cursor still reaches the last note, so the next turn moves on.
+  assert snapshot["_peer_message_through"]["id"] == "stored-3"
+  context = build_coordination_context(db, chats["scout"].id, current.id)
+  assert len(context) < 4 * PEER_NOTE_CHARS + 4_000
+
+  scout = _delegated_auth(db, chats["scout"].id, "scout-run")
+  read = client.get("/api/agent-coordination/messages/stored-0", headers=scout)
+  assert read.status_code == 200, read.text
+  assert read.json()["body"] == huge
+  assert read.json()["sender_chat_id"] == chats["outsider"].id
+  # Only a chat that may see the note can read it.
+  builder = _delegated_auth(db, chats["builder"].id, "builder-run")
+  assert client.get(
+    "/api/agent-coordination/messages/stored-0", headers=builder,
+  ).status_code == 404
+
+
+def test_interrupt_carrier_excerpts_a_note_stored_beyond_the_send_cap(
+  client, auth, db, monkeypatch,
+):
+  from app.chat_event_sink import commit_steer_cut
+  from app.context_budget import PEER_NOTE_CHARS
+  from app.timeutil import now_naive_utc
+
+  chats, _ = _network_fixture(db)
+  builder = chats["builder"]
+  db.get(models.ChatRun, "builder-run").provider_execution_admitted = True
+  huge = "Stored before rollback " + "x" * 50_000
+  db.add(_stored_note(chats, 0, huge, now_naive_utc(), to="builder"))
+  db.commit()
+  monkeypatch.setattr(
+    "app.chat_steering.has_live_steerable_turn", lambda *_args: True,
+  )
+  carriers = []
+
+  async def fake_steer(_provider, chat_id, content, user_msgs, cids):
+    carriers.extend(user_msgs)
+    await commit_steer_cut(chat_id, user_msgs, cids)
+    return True
+
+  monkeypatch.setattr("app.chat_steering.steer_into_active_turn", fake_steer)
+  urgent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [builder.id], "delivery": "interrupt", "body": "act-now"},
+  )
+  assert urgent.status_code == 200, urgent.text
+  content = carriers[0]["content"]
+  assert "act-now" in content
+  assert "read_agent_message(message_id=stored-0) pages the full note" in content
+  assert "x" * PEER_NOTE_CHARS not in content
+  assert len(content) < 2 * PEER_NOTE_CHARS + 2_000
+
+
+def test_retention_prunes_notes_stored_beyond_the_send_cap_by_count(
+  client, auth, db, monkeypatch,
+):
+  from app.activity_position import record_activity_position
+  from app.timeutil import now_naive_utc
+
+  chats, _ = _network_fixture(db)
+  monkeypatch.setattr(
+    "app.agent_coordination.MAX_DIRECT_MESSAGES_PER_RECIPIENT", 2,
+  )
+  start = now_naive_utc() - timedelta(minutes=5)
+  db.add_all([
+    _stored_note(chats, index, f"{index} " + "y" * 100_000,
+                 start + timedelta(seconds=index), to="builder")
+    for index in range(2)
+  ])
+  db.flush()
+  for index in range(2):
+    record_activity_position(db, chats["builder"].id, f"peer:stored-{index}")
+  db.commit()
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": "Newest"},
+  )
+  assert sent.status_code == 200, sent.text
+  db.expire_all()
+  kept = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.to_chat_id == chats["builder"].id,
+  ).order_by(models.AgentCoordinationMessage.created_at.asc()).all()
+  assert [row.id for row in kept][0] == "stored-1"
+  assert [row.body for row in kept][1] == "Newest"
+  assert db.query(models.ChatActivityPosition).filter(
+    models.ChatActivityPosition.event_id == "peer:stored-0",
+  ).count() == 0
+  assert db.query(models.ChatActivityPosition).filter(
+    models.ChatActivityPosition.event_id == "peer:stored-1",
+  ).count() == 1
+
+
+def test_send_receipt_and_card_mark_a_note_longer_than_the_send_cap(
+  client, auth, db, monkeypatch,
+):
+  from app import peer_message
+  from app.context_budget import PEER_NOTE_CHARS
+
+  chats, _ = _network_fixture(db)
+  huge = "z" * (PEER_NOTE_CHARS * 3)
+  monkeypatch.setattr(
+    "app.routes.agent_coordination.send_agent_message",
+    lambda **_kwargs: [{
+      "id": "receipt-note", "kind": "note", "sender_chat_id": chats["scout"].id,
+      "recipient_chat_id": chats["builder"].id, "recipient_name": "Builder",
+      "broadcast": False, "delivery": "next_turn", "body": huge,
+    }],
+  )
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": "short input"},
+  )
+  assert sent.status_code == 200, sent.text
+  receipt = sent.json()["messages"][0]
+  assert receipt["body"] == huge[:PEER_NOTE_CHARS]
+  assert (receipt["body_truncated"], receipt["body_chars"]) == (True, len(huge))
+  card = peer_message.settle_peer_message(
+    {"direction": "send", "status": "sending"}, json.dumps(sent.json()),
+  )
+  assert card["body"] == huge[:PEER_NOTE_CHARS]
+  assert card["body_truncated"] is True
+
+
+def test_send_receipt_at_the_send_cap_is_unchanged(client, auth, db):
+  chats, _ = _network_fixture(db)
+  body = "w" * 4000
+  sent = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": body},
+  )
+  assert sent.status_code == 200, sent.text
+  receipt = sent.json()["messages"][0]
+  assert receipt["body"] == body
+  assert "body_truncated" not in receipt and "body_chars" not in receipt
+  # The input cap itself is unchanged in this release.
+  assert client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": body + "w"},
+  ).status_code == 422

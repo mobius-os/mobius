@@ -120,7 +120,8 @@ and effort unless explicit helper settings override them. Providers' built-in
 helper tools are switched off; do not substitute a provider CLI. To discover or
 message agents in other Möbius chats—including
 top-level chat agents—use the `mobius_control` peer network
-(`list_agent_peers`, then `send_agent_message`). These are offered only while
+(`list_agent_peers`, then `send_agent_message`; `read_agent_message` reads a
+note whole when context carried only its excerpt). These are offered only while
 another agent is live, or inside a Project or delegation; when they are absent,
 no peer is reachable, so record any hand-off in this chat's note. Do not fall back to the
 ordinary chat-message API for agent-to-agent coordination: that creates an

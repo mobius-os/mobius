@@ -1803,3 +1803,26 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
 
+
+
+def test_read_agent_message_returns_a_note_plain_and_pages_a_long_one(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  note = "".join(f"{index:07d}\n" for index in range(20_000))
+  paths = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    paths.append((method, path)) or {"id": "note/1", "kind": "finding", "body": note}))
+
+  assert "".join(_read_all_pages(control, "read_agent_message", {"message_id": "note/1"})) == note
+  assert set(paths) == {("GET", "/api/agent-coordination/messages/note%2F1")}
+  first = control._call_tool({"name": "read_agent_message", "arguments": {"message_id": "note/1"}})
+  assert "next page: read_agent_message(message_id=note/1, offset=" in (
+    first["content"][0]["text"].rsplit("\n", 1)[1])
+
+  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {"id": "n", "body": "Short"})
+  assert control._call_tool({"name": "read_agent_message",
+                             "arguments": {"message_id": "n"}})["content"][0]["text"] == "Short"
+  refused = control._call_tool({"name": "read_agent_message", "arguments": {"id": "n"}})
+  assert refused["isError"] and "needs message_id" in refused["content"][0]["text"]
+  assert platform_tools.READ_MESSAGE_TOOL_NAME in platform_tools.PEER_TOOL_NAMES
