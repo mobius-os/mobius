@@ -1023,6 +1023,9 @@ umask 022
 mkdir -p /data/identity-broker
 chown root:root /data/identity-broker
 chmod 700 /data/identity-broker
+# /run survives an in-place restart, and a stopped broker leaves its socket
+# behind. Clear it so the readiness check below only sees this boot's broker.
+rm -f /run/mobius-identity-broker.sock
 if [ "$_use_platform" -eq 1 ]; then
   DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
     python3 -P /app/runtime/served_runtime_launcher.py identity_broker &

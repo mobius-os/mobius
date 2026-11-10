@@ -110,6 +110,25 @@ def test_planned_restart_clears_what_the_old_boot_left_running(tmp_path):
     _stop(proc)
 
 
+def test_consecutive_planned_restarts_each_rerun_the_boot(tmp_path):
+  proc, log = _start(tmp_path, FAKE_BOOT)
+  try:
+    for boots in (2, 3):
+      _wait_for(lambda: len(_log_lines(log, "service")) == boots - 1)
+      proc.send_signal(signal.SIGUSR1)
+      _wait_for(lambda: len(_log_lines(log, "service")) == boots)
+      assert proc.poll() is None
+    services = [int(line[0]) for line in _log_lines(log, "service")]
+    assert [_alive(pid) for pid in services] == [False, False, True]
+
+    # A host stop after in-place restarts still ends the container cleanly.
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=15) == 143
+  finally:
+    _stop(proc)
+  assert len(_log_lines(log, "boot")) == 3
+
+
 def test_each_boot_learns_which_process_to_ask_for_a_restart(tmp_path):
   proc, log = _start(tmp_path, FAKE_BOOT)
   try:
@@ -122,12 +141,16 @@ def test_each_boot_learns_which_process_to_ask_for_a_restart(tmp_path):
 def test_boot_starts_with_default_signal_handling_like_under_tini(tmp_path):
   # Python ignores SIGPIPE; a boot inheriting that would change how every
   # shell pipeline and the server react to a closed pipe.
+  # The supervisor also blocks its handled signals while it starts a boot; the
+  # boot must not inherit that mask either.
   proc, log = _start(
     tmp_path,
-    'echo "ignored $(awk \'/^SigIgn:/ {print $2}\' /proc/$$/status)" >> "$BOOT_LOG"; exit 0',
+    'echo "ignored $(awk \'/^SigIgn:/ {print $2}\' /proc/$$/status)" >> "$BOOT_LOG"; '
+    'echo "blocked $(awk \'/^SigBlk:/ {print $2}\' /proc/$$/status)" >> "$BOOT_LOG"; exit 0',
   )
   assert proc.wait(timeout=15) == 0
   assert int(_log_lines(log, "ignored")[0][0], 16) == 0
+  assert int(_log_lines(log, "blocked")[0][0], 16) == 0
 
 
 def test_host_stop_is_forwarded_and_reported_as_the_boot_ended(tmp_path):
@@ -190,3 +213,71 @@ def test_entrypoint_restart_poller_restarts_through_the_supervisor(tmp_path):
     assert proc.poll() is None
   finally:
     _stop(proc)
+
+
+# A stand-in identity broker: it binds its socket after a short start-up and,
+# like the real broker, has no SIGTERM handler, so a stopped broker leaves its
+# socket file behind. A boot that finds the BROKEN marker gets a broker that
+# fails to start.
+STAND_IN_BROKER = r"""
+import socket, sys, time
+time.sleep(0.3)
+server = socket.socket(socket.AF_UNIX)
+server.bind(sys.argv[1])
+server.listen()
+time.sleep(1000)
+"""
+
+
+def _entrypoint_broker_start() -> tuple[str, str]:
+  """The entrypoint's real socket clearing and broker readiness check."""
+  source = ENTRYPOINT.read_text()
+  clear = re.search(r"^rm -f /run/mobius-identity-broker\.sock\n", source, re.M)
+  launch = source.find("python3 -P /app/runtime/identity_broker.py &")
+  wait = re.search(r"^_identity_broker_ready=0\n.*?^fi\n", source, re.M | re.S)
+  assert clear and wait and launch != -1, "entrypoint.sh broker start not found"
+  # The socket must be cleared before the broker starts and is waited for.
+  assert clear.start() < launch < wait.start()
+  return clear.group(0), wait.group(0)
+
+
+def test_rerun_boot_waits_for_its_own_identity_broker(tmp_path):
+  # /run outlives an in-place restart. If the old broker's socket survived
+  # into the rerun, the readiness check would pass before the new broker
+  # bound it, and a broker that fails to start would go unnoticed.
+  sock = tmp_path / "broker.sock"
+  clear, wait = _entrypoint_broker_start()
+  clear = clear.replace("/run/mobius-identity-broker.sock", '"$BROKER_SOCK"')
+  wait = wait.replace("/run/mobius-identity-broker.sock", '"$BROKER_SOCK"')
+  script = (
+    'echo "boot $$" >> "$BOOT_LOG"\n'
+    + clear +
+    'if [ -e "$BROKEN" ]; then "$PY" -c "raise SystemExit(1)" &\n'
+    'else "$PY" -c "$BROKER" "$BROKER_SOCK" &\n'
+    'fi\n'
+    '_identity_broker_pid=$!\n'
+    + wait +
+    'echo "ready $$" >> "$BOOT_LOG"\n'
+    ': > "$BROKEN"\n'
+    "trap 'trap - TERM; kill -TERM $$' TERM\n"
+    'while :; do sleep 0.05; done\n'
+  )
+  log = tmp_path / "boots.log"
+  proc = subprocess.Popen(
+    [sys.executable, "-I", str(SUPERVISOR), "sh", "-c", script],
+    env={
+      "PATH": os.environ["PATH"], "BOOT_LOG": str(log), "PY": sys.executable,
+      "BROKER": STAND_IN_BROKER, "BROKER_SOCK": str(sock),
+      "BROKEN": str(tmp_path / "broken"),
+    },
+  )
+  try:
+    _wait_for(lambda: len(_log_lines(log, "ready")) == 1)
+    assert sock.is_socket()
+    proc.send_signal(signal.SIGUSR1)
+    # The rerun's broker fails, so its boot must fail rather than reach ready.
+    assert proc.wait(timeout=20) == 1
+  finally:
+    _stop(proc)
+  assert len(_log_lines(log, "boot")) == 2
+  assert len(_log_lines(log, "ready")) == 1

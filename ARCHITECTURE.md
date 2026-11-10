@@ -243,7 +243,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `pending_questions.py` | Shared `PendingQuestion` dataclass for AskUserQuestion interception (split out to break the `questions`↔runner import cycle; the registry itself lives in `questions.py`) |
 | `tool_summaries.py` | Tool-input summary strings (shared by SDK + subprocess paths) |
 | `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into bounded `{title, url, snippet}` metadata stored on WebSearch blocks and rendered once in the message-level Sources row; an iterative count/depth budget and HTTP(S)-only URL gate keep provider payload cost fixed before SSE or persistence |
-| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, then SIGTERMs its own pid; shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
+| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, drains, then publishes the restart request the root-owned poller accepts (an unpublishable request ends the boot with SIGKILL instead); shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
 
 ### Mini-apps, storage, files
 
@@ -1179,8 +1179,12 @@ recovery. The platform process then publishes an intent and restart request; it
 does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
-records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
-pid 1. At the very start of the next entrypoint invocation, the ledger binds
+records its one-shot nonce in `/data/.restart-ledger`, and only then asks the
+image's container supervisor (`backend/runtime/container_supervisor.py`) to end
+the boot and rerun the entrypoint inside the same container. If the worker
+cannot publish its request at all, it ends its boot as a failure (SIGKILL, exit
+137), so the host's restart policy replaces the container. At the very start of the
+next entrypoint invocation, the ledger binds
 that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
 latest exact DB run and the restart policy is on. At startup, the same

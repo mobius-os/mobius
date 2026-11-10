@@ -14,7 +14,9 @@ This frozen, root-owned process sits between ``tini`` and ``entrypoint.sh``:
   process; the entrypoint's restart poller sends it after the restart ledger
   has accepted the exact authenticated request. The supervisor stops the
   current boot, clears every process that boot left behind, and runs the same
-  command again, which begins a fresh boot exactly as a new container would.
+  command again, which begins a fresh boot (new boot id, ledger and source
+  selection). The container's filesystem persists, including ``/tmp`` and
+  ``/run``, so per-boot files there must be cleared by the boot that owns them.
 * Stop signals (``SIGTERM``, ``SIGINT``, ``SIGHUP``, ``SIGQUIT``) belong to the
   host. They are forwarded, and the supervisor then exits with the boot's own
   status, so ``tini -e 143`` still reports a host stop as a clean exit.
@@ -40,6 +42,7 @@ from pathlib import Path
 
 PLANNED_RESTART_SIGNAL = signal.SIGUSR1
 HOST_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+_HANDLED_SIGNALS = (PLANNED_RESTART_SIGNAL, *HOST_STOP_SIGNALS)
 # The entrypoint's restart poller reads this to find the process it signals.
 SUPERVISOR_PID_ENV = "MOBIUS_SUPERVISOR_PID"
 # Leftovers get a polite SIGTERM, then SIGKILL. Uvicorn's own graceful window
@@ -160,15 +163,31 @@ class Supervisor:
     except ProcessLookupError:
       pass
 
-  def _start_boot(self) -> None:
+  def _start_boot(self) -> bool:
+    """Start a fresh boot, unless a host stop has already arrived.
+
+    The handled signals stay blocked from the stop check until ``self.child``
+    is set, so a stop or restart signal is either seen by that check or
+    forwarded to the new boot, never lost in between. A restart request can
+    only belong to the boot that is running when it arrives.
+    """
     env = dict(os.environ)
     env[SUPERVISOR_PID_ENV] = str(os.getpid())
-    # Python ignores SIGPIPE and SIGXFSZ at startup; the boot must start with
-    # the same default signal handling it had directly under tini.
-    self.child = os.posix_spawnp(
-      self.command[0], self.command, env,
-      setsigdef=_PYTHON_IGNORED_SIGNALS, setsigmask=(),
-    )
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, _HANDLED_SIGNALS)
+    try:
+      if self.stop_signal is not None:
+        return False
+      self.restart_requested = False
+      # Python ignores SIGPIPE and SIGXFSZ at startup; the boot must start
+      # with the same default signal handling (and an empty signal mask) it
+      # had directly under tini.
+      self.child = os.posix_spawnp(
+        self.command[0], self.command, env,
+        setsigdef=_PYTHON_IGNORED_SIGNALS, setsigmask=(),
+      )
+      return True
+    finally:
+      signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
   def _wait_for_boot(self) -> int:
     # As a subreaper this process also inherits the boot's orphans; reap them
@@ -185,10 +204,8 @@ class Supervisor:
     for signum in HOST_STOP_SIGNALS:
       signal.signal(signum, self._on_host_stop)
     while True:
-      self.restart_requested = False
-      if self.stop_signal is not None:
+      if not self._start_boot():
         return 128 + self.stop_signal
-      self._start_boot()
       status = self._wait_for_boot()
       if not self.restart_requested or self.stop_signal is not None:
         return exit_status(status)
@@ -198,8 +215,6 @@ class Supervisor:
         # services; end the container and let the host replace it instead.
         _log(f"{len(survivors)} process(es) survived cleanup; stopping the container.")
         return 1
-      if self.stop_signal is not None:
-        return 128 + self.stop_signal
       _log("planned restart: starting a fresh boot in this container.")
 
 
