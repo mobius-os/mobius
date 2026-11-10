@@ -252,7 +252,7 @@ def test_unfiled_helper_cannot_file_a_child_under_another_branch(
   assert unfiled.status_code == 201, unfiled.text
 
 
-def test_helper_edits_its_branch_of_a_saved_plan_beyond_the_caps(client, db, branch):
+def test_helper_edits_its_branch_of_a_large_plan_with_long_text(client, db, branch):
   goal = db.get(models.ChatGoal, "release-goal")
   tasks = [dict(task) for task in goal.plan_json["tasks"]]
   backend = next(task for task in tasks if task["id"] == "backend")
@@ -263,9 +263,10 @@ def test_helper_edits_its_branch_of_a_saved_plan_beyond_the_caps(client, db, bra
   db.commit()
   response = patch(client, branch, [{"id": "backend-api", "note": "Progressing"}])
   assert response.status_code == 200, response.text
-  view = _brief(client, db, branch[1], "builder-run")["goal"]
-  assert view["task"]["note"] == "N" * 2000
-  refused = patch(client, branch, [
-    {"id": "backend-new", "title": "New", "parent_id": "backend"},
+  added = patch(client, branch, [
+    {"id": "backend-new", "title": "New", "parent_id": "backend", "note": "M" * 2000},
   ])
-  assert refused.status_code == 422 and "at most 64 tasks" in refused.text
+  assert added.status_code == 200, added.text
+  db.expire_all()
+  saved = {task["id"]: task for task in db.get(models.ChatGoal, "release-goal").plan_json["tasks"]}
+  assert saved["backend"]["note"] == "N" * 2000 and saved["backend-new"]["note"] == "M" * 2000

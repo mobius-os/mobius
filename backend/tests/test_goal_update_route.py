@@ -129,6 +129,25 @@ def test_cannot_complete_settles_reasoned_unmet_tasks_without_shrinking_objectiv
   assert "Unmet outcome:" in saved.result
 
 
+def test_cannot_complete_keeps_long_explanations_whole(client, owner_token, db):
+  _, chat_id = _active_goal(client, owner_token, db)
+  _seed_plan(client, db, chat_id)
+  outcome = {
+    "reason": "R" * 6000, "efforts": "E" * 6000, "unmet_outcome": "U" * 6000,
+  }
+  response = _update(client, db, chat_id, {
+    "tasks": [
+      {"id": "inspect", "status": "failed", "note": "Unavailable"},
+      {"id": "build", "status": "blocked", "note": "Needs inspect"},
+    ],
+    "cannot_complete": outcome,
+  })
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  saved = db.get(models.ChatGoal, "goal-1").result
+  assert all(value in saved for value in outcome.values())
+
+
 def test_cannot_complete_refuses_unexplained_or_pending_tasks_atomically(
   client, owner_token, db,
 ):
@@ -324,7 +343,7 @@ def test_the_final_task_edit_and_completion_can_share_one_call(
   assert completed.json()["plan"]["tasks"][0]["result"] == "Shipped"
 
 
-@pytest.mark.parametrize("value", [False, 0, 1, "", " ", [], {}, "x" * 4001])
+@pytest.mark.parametrize("value", [False, 0, 1, "", " ", [], {}])
 def test_completion_flag_rejects_accidental_coercion(client, owner_token, db, value):
   _, chat_id = _active_goal(client, owner_token, db)
   response = _update(client, db, chat_id, {"complete": value})
@@ -466,83 +485,30 @@ def test_a_chat_without_a_goal_is_told_to_promote_first(client, owner_token, db)
   assert "Promote one first" in written.json()["detail"]["message"]
 
 
-def test_a_task_note_may_run_to_a_thousand_characters(client, owner_token, db):
+def test_long_task_notes_and_next_action_are_kept_whole(client, owner_token, db):
   _, chat_id = _active_goal(client, owner_token, db)
   _seed_plan(client, db, chat_id)
 
-  kept = _update(client, db, chat_id, {"tasks": [{"id": "inspect", "note": "n" * 1000}]})
-  extended = _update(client, db, chat_id, {"tasks": [{"id": "inspect", "note": "n" * 1001}]})
-
-  assert kept.status_code == 200, kept.text
-  assert extended.status_code == 422, extended.text
-  assert "at most 1000 characters" in extended.json()["detail"]["message"]
-
-
-def _save_plan_beyond_the_caps(db):
-  """Store a plan as a release with wider input limits could have written it."""
-  goal = db.get(models.ChatGoal, "goal-1")
-  tasks = [{"id": f"t{i}", "title": f"Task {i}", "status": "pending", "depends_on": []}
-           for i in range(70)]
-  tasks[0].update(title="T" * 2000, note="N" * 2000, result="R" * 2000,
-                  completion_condition="C" * 2000)
-  goal.plan_json = {"version": 1, "tasks": tasks}
-  goal.revision = 5
-  db.commit()
-  return tasks
-
-
-def test_saved_plan_beyond_the_caps_is_readable_and_editable_without_new_room(
-  client, owner_token, db,
-):
-  auth, chat_id = _active_goal(client, owner_token, db)
-  _save_plan_beyond_the_caps(db)
-
-  read = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()
-  assert read["plan_unreadable"] is False
-  assert len(read["plan"]["tasks"]) == 70
-  assert read["plan"]["tasks"][0]["note"] == "N" * 2000
-
-  progressed = _update(client, db, chat_id, {"tasks": [
-    {"id": "t0", "status": "running"},
-    {"id": "t1", "note": "Short new note", "progress": {"current": 1, "total": 3}},
-  ]})
-  assert progressed.status_code == 200, progressed.text
-  by_id = {task["id"]: task for task in progressed.json()["plan"]["tasks"]}
-  assert by_id["t0"]["status"] == "running" and by_id["t0"]["title"] == "T" * 2000
-  assert by_id["t1"]["progress"] == {"current": 1, "total": 3}
-
-  # The limits still bound what a write adds or changes.
-  for edit, refusal in (
-    ({"id": "t70", "title": "One task too many"}, "at most 64 tasks"),
-    ({"id": "t1", "note": "M" * 1001}, "at most 1000 characters"),
-    ({"id": "t0", "note": "M" * 2000}, "at most 1000 characters"),
-  ):
-    refused = _update(client, db, chat_id, {"tasks": [edit]})
-    assert refused.status_code == 422 and refusal in refused.text, refused.text
-  db.expire_all()
-  assert len(db.get(models.ChatGoal, "goal-1").plan_json["tasks"]) == 70
-
-
-@pytest.mark.parametrize("outcome", [
-  {"complete": True},
-  {"cannot_complete": {"reason": "No access", "efforts": "Tried",
-                       "unmet_outcome": "Not shipped"}},
-  {"cancel": "Owner called off this goal"},
-])
-def test_saved_plan_beyond_the_caps_can_settle_the_goal(
-  client, owner_token, db, outcome,
-):
-  _, chat_id = _active_goal(client, owner_token, db)
-  tasks = _save_plan_beyond_the_caps(db)
-  status = "completed" if "complete" in outcome else "cancelled"
-  response = _update(client, db, chat_id, {
-    "tasks": [{"id": task["id"], "status": status, "note": "Settled"}
-              for task in tasks[1:]] + [{"id": "t0", "status": status}],
-    **outcome,
+  note, next_action = "n" * 20_000, "a" * 10_000
+  extended = _update(client, db, chat_id, {
+    "tasks": [{"id": "inspect", "note": note}], "next_action": next_action,
   })
-  assert response.status_code == 200, response.text
+
+  assert extended.status_code == 200, extended.text
+  task = next(t for t in extended.json()["plan"]["tasks"] if t["id"] == "inspect")
+  assert task["note"] == note
   db.expire_all()
-  goal = db.get(models.ChatGoal, "goal-1")
-  assert goal.status == {"complete": "completed", "cannot_complete": "cannot_complete",
-                         "cancel": "cancelled"}[next(iter(outcome))]
-  assert goal.plan_json["tasks"][0]["note"] == "N" * 2000
+  assert db.get(models.ChatGoal, "goal-1").next_action == next_action
+
+
+def test_goal_prose_and_claim_lists_have_no_guessed_budgets():
+  from app.routes.goal_plans import GoalPromotionRequest, GoalUpdateRequest
+
+  objective = "Deliver the outcome " * 500
+  assert GoalPromotionRequest(objective=objective).objective == objective.strip()
+  keys = [f"test:work-{index}" for index in range(80)]
+  assert GoalUpdateRequest(
+    complete="done " * 2000, finished_claims=keys,
+  ).finished_claims == keys
+  assert GoalUpdateRequest(cancel="c" * 9000).cancel == "c" * 9000
+  assert GoalUpdateRequest(defer="d" * 9000).defer == "d" * 9000
