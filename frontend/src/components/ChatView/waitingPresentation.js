@@ -31,7 +31,31 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage', 'processes'])
+// The one owner-facing label table for platform-resource waits. A kind listed
+// here is an automatic resource wait on every surface: the live Waiting card,
+// the settled pause record and the continuation marker that resumed it.
+export const RESOURCE_PAUSE_LABELS = {
+  memory: {
+    summary: 'Waiting for memory to settle',
+    pressure: 'Memory reached its measured critical boundary',
+    paused: 'Paused while memory was low',
+    resumed: 'Memory freed up — continuing automatically',
+  },
+  storage: {
+    summary: 'Waiting for storage headroom',
+    pressure: 'Storage reached its measured critical boundary',
+    paused: 'Paused while storage was low',
+    resumed: 'Storage freed up — continuing automatically',
+  },
+  processes: {
+    summary: 'Waiting for process headroom',
+    pressure: 'Running processes and threads reached their measured critical boundary',
+    paused: 'Paused while processes and threads were near the limit',
+    resumed: 'Processes and threads freed up — continuing automatically',
+  },
+}
+
+export const RESOURCE_PAUSE_KINDS = new Set(Object.keys(RESOURCE_PAUSE_LABELS))
 
 export function isResourcePause(block) {
   return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
@@ -39,15 +63,10 @@ export function isResourcePause(block) {
 
 export function resourcePausePresentation(block, handoff = null) {
   const kind = block?.pause?.kind
+  const resource = RESOURCE_PAUSE_KINDS.has(kind) ? RESOURCE_PAUSE_LABELS[kind] : null
   // A platform-resource park keeps its one saved card while the server keeps
   // moving the next check later, so the time saved on the card goes stale.
-  const next = RESOURCE_PAUSE_KINDS.has(kind)
-    ? null
-    : clockLabel(pauseTiming(block?.pause).checkAt)
-  const storage = kind === 'storage'
-  const memory = kind === 'memory'
-  const processes = kind === 'processes'
-  const resource = RESOURCE_PAUSE_KINDS.has(kind)
+  const next = resource ? null : clockLabel(pauseTiming(block?.pause).checkAt)
   const limit = ['rate_limit', 'usage_limit', 'limit'].includes(kind)
   const automatic = handoff?.kind === 'automatic' && handoff.reason === kind
   const restoring = handoff?.kind === 'automatic' && handoff.reason === 'restoring_edits'
@@ -56,20 +75,16 @@ export function resourcePausePresentation(block, handoff = null) {
   const manual = !restoring && (!!blocked || ((kind === 'model_capacity' || limit) && !automatic))
   return {
     manual,
-    summary: storage ? 'Waiting for storage headroom'
-      : memory ? 'Waiting for memory to settle'
-        : processes ? 'Waiting for process headroom'
-          : limit ? 'Provider usage limit' : 'Model capacity',
+    summary: resource ? resource.summary
+      : limit ? 'Provider usage limit' : 'Model capacity',
     next: restoring ? 'restoring local work'
       : restart ? 'server restart needed'
       : handoff?.kind === 'owner_input' ? 'answer needed'
       : manual
       ? 'manual recovery' : next ? `checks again ${next}` : 'checks again automatically',
     owner: resource ? 'Möbius resource monitor' : 'Provider availability',
-    pressure: storage ? 'Storage reached its measured critical boundary'
-      : memory ? 'Memory reached its measured critical boundary'
-        : processes ? 'Running processes and threads reached their measured critical boundary'
-          : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
+    pressure: resource ? resource.pressure
+      : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
     wakeUp: restoring ? 'Möbius is restoring local work; this chat continues after that work is restored and loaded'
       : restart ? 'Waiting for a server restart to load restored work; use the saved Restart card'
       : blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'

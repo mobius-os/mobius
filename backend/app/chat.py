@@ -4937,9 +4937,10 @@ async def run_chat(
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
   setup_failure_settled = False
+  start_hold = None
   try:
     try:
-      await require_agent_turn_admission(get_settings().data_dir)
+      start_hold = await require_agent_turn_admission(get_settings().data_dir)
     except AgentTurnDeferred as deferred:
       # Only a storage wait consults the committed Continue anyway control,
       # which belongs to this physical run alone, never its later retries,
@@ -4949,7 +4950,7 @@ async def run_chat(
         and await asyncio.to_thread(_run_allows_low_storage, chat_id, run_token)
       ):
         raise
-      await require_agent_turn_admission(
+      start_hold = await require_agent_turn_admission(
         get_settings().data_dir, allow_low_storage=True,
       )
       # Only a turn the override actually admitted is told storage is low.
@@ -5086,6 +5087,8 @@ async def run_chat(
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
   finally:
+    if start_hold is not None:
+      start_hold.release()
     browser_cancelled = None
     sink = get_active_sink(chat_id) if chat_id else None
     if run_token and sink is not None and getattr(sink, "run_token", None) == run_token:

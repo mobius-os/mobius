@@ -2801,7 +2801,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
     chat_mod.discard_starting(cid)
 
 
-@pytest.mark.parametrize("park_reason", ["storage", "memory"])
+@pytest.mark.parametrize("park_reason", ["storage", "memory", "processes"])
 def test_app_resource_spawn_failure_reattaches_with_original_attribution(
   owner_token, monkeypatch, park_reason,
 ):
@@ -3779,7 +3779,7 @@ async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
   assert error["resumable"] is True
 
 
-@pytest.mark.parametrize("park_reason", ["storage", "memory"])
+@pytest.mark.parametrize("park_reason", ["storage", "memory", "processes"])
 def test_still_short_resource_park_waits_without_a_new_turn_or_card(
   owner_token, monkeypatch, park_reason,
 ):

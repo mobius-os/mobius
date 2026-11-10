@@ -1264,8 +1264,9 @@ def ready_agent(response: Response):
 
   Basic `/api/ready` remains the container healthcheck so history can keep
   serving when agent work is resource-degraded. This public facet adds the
-  agent runtime's storage and memory prerequisites while returning stable codes
-  only; account state, exact capacity, paths, and writer details stay private.
+  agent runtime's storage, memory and process prerequisites while returning
+  stable codes only; account state, exact capacity, paths, and writer details
+  stay private.
   """
   response.headers["Cache-Control"] = "no-store"
   from app.agent_readiness import agent_readiness

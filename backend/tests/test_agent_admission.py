@@ -1,8 +1,24 @@
 """Provider turns pause only for measured critical resource pressure."""
 
+import asyncio
+
 import pytest
 
-from app.agent_admission import AgentTurnDeferred, require_agent_turn_admission
+from app import agent_admission
+from app.agent_admission import (
+  START_HOLD_SECONDS,
+  AgentTurnDeferred,
+  TurnStartHolds,
+  agent_turn_deferral,
+  require_agent_turn_admission,
+)
+from app.resource_pressure import assess_resource_pressure
+
+
+@pytest.fixture(autouse=True)
+def _isolated_start_holds(monkeypatch):
+  """Admitted turns here never end, so keep their holds out of other tests."""
+  monkeypatch.setattr(agent_admission, "START_HOLDS", TurnStartHolds())
 
 
 def _status(state: str, free: int = 512 * 1024 * 1024) -> dict:
@@ -274,4 +290,101 @@ async def test_critical_process_headroom_defers_new_turns_before_the_task_cap():
   status["pressure"]["processes"]["state"] = "constrained"
   await require_agent_turn_admission(
     "/data", status_reader=lambda _path: status, scratch_sweeper=sweep,
+  )
+
+
+def _tasks_status(current: int, limit: int = 1000) -> dict:
+  facts = {
+    "disk": {"free_bytes": 8 * 1024 * 1024 * 1024},
+    "processes": {"available": True, "current_tasks": current, "limit_tasks": limit},
+  }
+  return {"facts": facts, "pressure": assess_resource_pressure(facts)}
+
+
+async def _sweep_frees_no_threads():
+  raise AssertionError("scratch cleanup frees no threads")
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_burst_cannot_all_pass_one_pre_burst_task_count():
+  """Every turn in a burst reads the same count, taken before any CLI starts.
+
+  Each admitted turn holds a per-turn task budget, so the burst stops short of
+  the cap instead of every member seeing 700 of 1000 and starting.
+  """
+  holds = TurnStartHolds()
+  status = _tasks_status(700)
+  assert status["pressure"]["processes"]["state"] == "constrained"
+
+  async def admit():
+    try:
+      return await require_agent_turn_admission(
+        "/data", status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+        holds=holds,
+      )
+    except AgentTurnDeferred as deferred:
+      return deferred
+
+  outcomes = await asyncio.gather(*(admit() for _ in range(10)))
+  deferred = [o for o in outcomes if isinstance(o, AgentTurnDeferred)]
+  admitted = len(outcomes) - len(deferred)
+  # 700 + 4 * 40 = 860 crosses the 85% critical ratio.
+  assert admitted == 4
+  assert {d.resource for d in deferred} == {"processes"}
+  assert "700 of its 1000 processes and threads in use and 4 more agent turns still starting" in str(deferred[0])
+  assert holds.starting_turns() == 4
+
+
+@pytest.mark.asyncio
+async def test_start_hold_ends_when_its_turn_ends_or_has_had_time_to_start():
+  now = [0.0]
+  holds = TurnStartHolds(clock=lambda: now[0])
+  status = _tasks_status(820)
+
+  async def admit():
+    return await require_agent_turn_admission(
+      "/data", status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+      holds=holds,
+    )
+
+  first = await admit()
+  with pytest.raises(AgentTurnDeferred, match="1 more agent turn still starting"):
+    await admit()
+  first.release()
+  first.release()
+  assert holds.starting_turns() == 0
+
+  await admit()
+  now[0] = START_HOLD_SECONDS
+  # By now the measured count includes the started turn; its hold lapses.
+  assert holds.starting_turns() == 0
+  await admit()
+
+
+@pytest.mark.asyncio
+async def test_resume_check_counts_starting_turns_without_taking_a_hold():
+  """The continuation sweep asks before resuming; asking must not reserve."""
+  holds = TurnStartHolds()
+  status = _tasks_status(820)
+
+  def reader(_path):
+    return status
+
+  assert await agent_turn_deferral("/data", status_reader=reader, holds=holds) is None
+  assert holds.starting_turns() == 0
+  holds.hold()
+  waiting = await agent_turn_deferral("/data", status_reader=reader, holds=holds)
+  assert waiting is not None and waiting.resource == "processes"
+
+
+@pytest.mark.asyncio
+async def test_unknown_task_cap_never_holds_turns_for_starting_ones():
+  """Uncapped hosts fail open even while many turns are starting."""
+  holds = TurnStartHolds()
+  for _ in range(50):
+    holds.hold()
+  status = _tasks_status(700, limit=None)
+  await require_agent_turn_admission(
+    "/data", status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+    holds=holds,
   )
