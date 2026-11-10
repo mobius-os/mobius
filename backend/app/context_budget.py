@@ -14,7 +14,7 @@ TITLE_CHARS = 160
 TEXT_CHARS = 1_000
 # A Goal's next action and a deferral (hold) reason.
 NEXT_ACTION_CHARS = 2_000
-# Entries per brief list and dependency ids per task, as a plan held them.
+# Entries all brief lists share, and dependency ids per task, as a plan held them.
 LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
 

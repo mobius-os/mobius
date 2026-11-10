@@ -1816,3 +1816,37 @@ def test_a_refusal_names_a_few_unsettled_dependencies_and_counts_the_rest():
   message = str(refused.value)
   assert "d0000, " in message and "d0009 and 1190 more (1200 in all)" in message
   assert "d0010" not in message
+
+
+def test_helper_edits_and_task_choice_stay_linear_on_deep_plans(monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  depth = 3000
+  tasks = [{"id": f"t{i}", "title": "Task", "status": "running",
+            **({"parent_id": f"t{i - 1}"} if i else {})} for i in range(depth)]
+  goal = SimpleNamespace(status="open", plan_json={"tasks": tasks})
+  assignment = SimpleNamespace(goal=goal, plan_task="t10", plan_task_missing=False)
+  calls = []
+  real = goal_plans._branch_members
+  monkeypatch.setattr(goal_plans, "_branch_members",
+                      lambda *args: calls.append(1) or real(*args))
+  document = goal_plans.stage_helper_task_edits(
+    assignment, [{"id": f"t{depth - 1}", "note": "deep edit"}])
+  assert document["tasks"][-1]["note"] == "deep edit"
+  # One branch walk per side, not one per task.
+  assert len(calls) == 2
+  with pytest.raises(goal_plans.GoalPlanError, match="Helpers may edit only"):
+    goal_plans.stage_helper_task_edits(assignment, [{"id": "t5", "note": "outside"}])
+
+
+def test_a_missing_plan_task_names_a_few_tasks_and_counts_the_rest(db, monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  tasks = [{"id": f"t{i:04d}", "title": "Task"} for i in range(500)]
+  goal = SimpleNamespace(plan_json={"tasks": tasks})
+  monkeypatch.setattr(goal_plans, "active_goal_rows", lambda db, chat_id: (None, goal))
+  with pytest.raises(goal_plans.GoalPlanError) as refused:
+    goal_plans.helper_plan_task(db, "chat", "missing")
+  assert "t0009 and 490 more (500 in all)" in str(refused.value)

@@ -33,7 +33,9 @@ router = APIRouter(prefix="/api/chats", tags=["goal-plans"])
 class GoalPromotionRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  objective: str = Field(min_length=1)
+  # An agent-promoted objective repeats whole in every brief, so it keeps its
+  # cap. An owner's /goal objective is not capped and is shown whole.
+  objective: str = Field(min_length=1, max_length=1000)
 
   @field_validator("objective")
   @classmethod

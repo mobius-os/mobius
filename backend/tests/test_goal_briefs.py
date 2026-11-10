@@ -967,8 +967,34 @@ def test_longer_texts_and_lists_show_within_the_old_caps_with_a_pointer():
   assert "read_goal(task=focus, field=note) reads it whole" in brief["task"]["note"]
   assert len(brief["task"]["depends_on"]) == 16
   assert brief["task"]["depends_on_omitted"] == "14 more; read_goal(task=focus) lists them all"
-  assert len(brief["children"]) == 64
-  assert brief["children_omitted"] == "36 more; read_goal(task=focus) lists them all"
+  # The lists share 64 entries, prerequisites before children.
+  assert len(brief["dependencies"]) == 30
+  assert len(brief["children"]) == 34
+  assert brief["children_omitted"] == "66 more; read_goal(task=focus) lists them all"
   assert all(len(dep["result"]) <= 1_000 for dep in brief["dependencies"])
   # The saved plan and the full read stay whole.
   assert project_goal(goal, "focus")["task"]["note"] == long
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_large_plan_brief_never_lists_more_than_an_old_cap_plan_could(role):
+  long = "L" * 20_000
+  tasks = [_task(f"a{i}", f"a{i - 1}" if i else None, "running", note=long,
+                 completion_condition=long) for i in range(40)]
+  tasks += [_task(f"d{i:03d}", status="completed", result=long) for i in range(80)]
+  tasks.append(_task("focus", "a39", "running", note=long,
+                     depends_on=[f"d{i:03d}" for i in range(80)]))
+  tasks += [_task(f"c{i:03d}", "focus", note=long, depends_on=["d000"]) for i in range(100)]
+  tasks += [_task(f"s{i:03d}", "a39", note=long) for i in range(60)]
+  tasks += [_task(f"b{i:03d}", status="blocked", note=long) for i in range(56)]
+  goal = _goal(normalize_tasks(tasks), next_action=long)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  lists = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
+  assert sum(len(brief.get(key) or []) for key in lists) <= 64
+  # The nearest ancestors come first and constrain the focus.
+  assert brief["ancestors"][-1]["id"] == "a39"
+  for key in lists:
+    for entry in brief.get(key) or []:
+      assert all(len(entry.get(field) or "") <= 1_000
+                 for field in ("note", "result", "completion_condition"))
+      assert len(entry.get("depends_on") or []) <= 16

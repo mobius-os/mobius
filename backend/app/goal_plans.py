@@ -340,12 +340,10 @@ def helper_plan_task(
     if assignment is not None and assignment.plan_task is not None:
       # A branch helper splits only its own branch, as its brief is scoped.
       parent_of = {str(task.get("id")): task.get("parent_id") for task in tasks}
-      ids = [
-        task_id for task_id in ids
-        if _within_branch(task_id, assignment.plan_task, parent_of)
-      ]
+      branch = _branch_members(assignment.plan_task, parent_of)
+      ids = [task_id for task_id in ids if task_id in branch]
     if requested not in ids:
-      known = ", ".join(ids) if ids else "none (no active Goal plan)"
+      known = _named(ids) if ids else "none (no active Goal plan)"
       raise GoalPlanError(
         f"plan_task {requested!r} is not a task of this chat's Goal plan; "
         f"plan tasks: {known}"
@@ -361,17 +359,20 @@ def helper_plan_task(
   return leaves[0] if len(leaves) == 1 else None
 
 
-def _within_branch(task_id: str, branch: str, parent_of: dict) -> bool:
-  """Whether ``task_id`` is ``branch`` or nested beneath it."""
-  seen: set[str] = set()
-  current: str | None = task_id
-  while current is not None and current not in seen:
-    if current == branch:
-      return True
-    seen.add(current)
-    parent = parent_of.get(current)
-    current = str(parent) if parent is not None else None
-  return False
+def _branch_members(branch: str, parent_of: dict) -> set[str]:
+  """``branch`` and every task nested beneath it, in one pass over the plan."""
+  children: dict[str, list[str]] = {}
+  for task_id, parent in parent_of.items():
+    if parent is not None:
+      children.setdefault(str(parent), []).append(str(task_id))
+  members: set[str] = set()
+  pending = [branch] if branch in parent_of else []
+  while pending:
+    current = pending.pop()
+    if current not in members:
+      members.add(current)
+      pending.extend(children.get(current, []))
+  return members
 
 
 @dataclass(frozen=True)
@@ -1198,7 +1199,7 @@ def staged_task_edits(root: models.ChatGoal, edits: list[dict[str, Any]]) -> dic
       raise GoalPlanError(f"task edit {position + 1} needs a string id")
     unknown = set(edit) - TASK_EDIT_FIELDS - {"id"}
     if unknown:
-      raise GoalPlanError(f"unknown fields for {edit['id']}: {', '.join(sorted(unknown))}")
+      raise GoalPlanError(f"unknown fields for {edit['id']}: {_named(sorted(unknown))}")
     target = by_id.get(edit["id"])
     if target is None:
       target = {"id": edit["id"]}
@@ -1233,12 +1234,13 @@ def stage_helper_task_edits(assignment: GoalAssignment, edits: list[dict[str, An
     current = parents[current]
   document = staged_task_edits(goal, edits)
   after = {task["id"]: task for task in document["tasks"]}
-  after_parents = {key: task.get("parent_id") for key, task in after.items()}
+  before_branch = _branch_members(branch, parents)
+  after_branch = _branch_members(branch, {key: task.get("parent_id") for key, task in after.items()})
   for key, task in after.items():
     old = before.get(key)
     if old == task:
       continue
-    if (old is not None and not _within_branch(key, branch, parents)) or not _within_branch(key, branch, after_parents):
+    if (old is not None and key not in before_branch) or key not in after_branch:
       raise GoalPlanError("Helpers may edit only their assigned checklist branch")
     if key == branch:
       contract = ("title", "parent_id", "depends_on", "completion_condition")

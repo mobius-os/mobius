@@ -169,7 +169,10 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 # A task text and its display limit in the brief.
 _TASK_TEXT_LIMITS = (("completion_condition", TEXT_CHARS), ("note", TEXT_CHARS),
                      ("result", TEXT_CHARS))
-_BRIEF_LISTS = ("ancestors", "children", "siblings", "dependencies", "open_blockers")
+# Lists that share LIST_ITEMS entries, in priority order: what constrains the
+# focus, what feeds it, what it contains, what surrounds it. A plan of at most
+# LIST_ITEMS tasks never fills them past that, so this is base's worst case.
+_BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
 # A shortened title ends in this alone; the brief says once how to read it.
 _TITLE_MARKER = "…"
 
@@ -179,7 +182,7 @@ def fit_brief(payload, task_id, *, role="coordinator"):
 
   Each task text and the next action over its limit becomes a marked excerpt
   naming the paged read that returns it whole (a title ends in a bare "…",
-  explained once); lists show at most LIST_ITEMS entries and each task at most
+  explained once); the lists share at most LIST_ITEMS entries and each task at most
   DEPENDENCY_IDS dependency ids. The objective and other open Goals were never
   capped and stay whole. A plan valid under the old caps is shown exactly as
   before. The saved Goal and plan are untouched.
@@ -212,13 +215,15 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     clip(payload["hold"], "reason", NEXT_ACTION_CHARS, f"{goal_read} shows it whole")
   if "task" in payload:
     clip_task(payload["task"])
+  room = LIST_ITEMS
   for key in _BRIEF_LISTS:
     entries = payload.get(key)
     if not entries:
       continue
     # The nearest ancestors constrain the focus most.
     kept = [dict(entry) for entry in (
-      entries[-LIST_ITEMS:] if key == "ancestors" else entries[:LIST_ITEMS])]
+      entries[len(entries) - room:] if key == "ancestors" and room else entries[:room])]
+    room -= len(kept)
     for entry in kept:
       clip_task(entry)
     payload[key] = kept
