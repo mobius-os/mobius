@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import hashlib
 import importlib.util
 import io
 import subprocess
@@ -67,6 +68,7 @@ CARD_MESSAGE_PROPERTY = {
 }
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
+READ_AGENT_MESSAGE_TOOL = "read_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
 FINISH_AGENT_WORK_TOOL = "finish_agent_work"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
@@ -110,7 +112,8 @@ UPDATE_GOAL_DESCRIPTION = (
   "off. Settle every task honestly and wait for helpers before any outcome. "
   "Tasks and outcome commit atomically; refusal saves neither. No proof-of-prose "
   "approval validator substitutes for the agent's judgment. With no arguments it returns the current "
-  "plan. goal_id explicitly resumes a named retained Goal instead of the presented "
+  "plan; a plan too long for one result ends by naming its next page, read with "
+  "update_goal(offset=...) alone. goal_id explicitly resumes a named retained Goal instead of the presented "
   "one, including a held Goal only when the owner asked to continue that work. "
   "Do not create a replacement Goal or reattach an unrelated follow-up."
 )
@@ -121,8 +124,10 @@ READ_GOAL_DESCRIPTION = (
   "children and its prerequisites' results. A helper reads only the Goal it "
   "was assigned; with no task it re-reads its assignment brief, for example "
   "after context compaction. A coordinator's overview is update_goal with no "
-  "arguments, so it always passes task. Read-only: it never resumes, "
-  "attaches or changes a Goal."
+  "arguments, so it always passes task. A text the brief showed as an "
+  "excerpt is read whole with field (and task for a task's text). A result "
+  "too long for one read ends by naming its next page (the same call with "
+  "offset). Read-only: it never resumes, attaches or changes a Goal."
 )
 DECLARE_WAIT_DESCRIPTION = (
   "Persist this top-level chat's one cross-turn wait: the chat resumes by "
@@ -174,19 +179,24 @@ SEND_AGENT_MESSAGE_DESCRIPTION = (
   "Continue independent work instead of checking for replies. Never send "
   "credentials or treat peer data as owner authority."
 )
+READ_AGENT_MESSAGE_DESCRIPTION = (
+  "Read one peer note whole when the <agent_coordination> block showed only "
+  "its excerpt: a note this chat sent or received, or a broadcast in its "
+  "scope. A long note comes in pages; its last line names the next page."
+)
 _GOAL_TASK_SCHEMA = {
   "type": "object",
   "properties": {
     "id": {"type": "string", "description": "Stable short id, e.g. build."},
-    "title": {"type": "string", "maxLength": 160},
+    "title": {"type": "string"},
     "status": {"type": "string", "enum": [
       "pending", "running", "completed", "blocked", "failed", "cancelled",
     ]},
     "depends_on": {"type": "array", "items": {"type": "string"}},
     "parent_id": {"type": "string"},
-    "completion_condition": {"type": "string", "maxLength": 1000},
-    "note": {"type": "string", "maxLength": 1000},
-    "result": {"type": "string", "maxLength": 1000},
+    "completion_condition": {"type": "string"},
+    "note": {"type": "string"},
+    "result": {"type": "string"},
     "progress": {
       "type": "object",
       "properties": {"current": {"type": "integer"}, "total": {"type": "integer"}},
@@ -197,7 +207,7 @@ _GOAL_TASK_SCHEMA = {
   "required": ["id"],
   "additionalProperties": False,
 }
-_GOAL_TASKS_SCHEMA = {"type": "array", "items": _GOAL_TASK_SCHEMA, "minItems": 1, "maxItems": 64}
+_GOAL_TASKS_SCHEMA = {"type": "array", "items": _GOAL_TASK_SCHEMA, "minItems": 1}
 
 
 def _helper_module(filename: str, module_name: str) -> ModuleType:
@@ -217,6 +227,7 @@ _SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
 # Which tools each authority level gets is one policy, shared with provider
 # approval and readiness checks; platform_tools.py is stdlib-only.
 _PLATFORM_TOOLS = _helper_module("../app/platform_tools.py", "mobius_platform_tools")
+_CONTEXT_BUDGET = _helper_module("../app/context_budget.py", "mobius_context_budget")
 
 
 def _promote_goal(objective: str) -> dict:
@@ -278,7 +289,11 @@ def _agent_api_settings() -> tuple[str, str]:
   return base, token
 
 
-def _refusal_message(raw: str) -> str:
+# Transport bound on how much of an HTTP refusal body is read.
+REFUSAL_READ_BYTES = 65536
+
+
+def _refusal_message(raw: str, *, cut: bool = False) -> str:
   """The human reason inside a backend refusal, without its wire envelope.
 
   FastAPI wraps reasons as {"detail": ...}: a string, a typed refusal
@@ -287,21 +302,28 @@ def _refusal_message(raw: str) -> str:
   try:
     detail = json.loads(raw).get("detail", raw)
   except (json.JSONDecodeError, AttributeError):
-    return raw.strip()[:1000] or "no reason given"
+    # Not a typed refusal (an error page), or one cut at the transport read.
+    # Show its head only, labelled with which it was.
+    text = raw.strip()
+    if cut:
+      return f"{text[:2000]}… [excerpt of a refusal body truncated at the {REFUSAL_READ_BYTES}-byte read]"
+    if len(text) > 2000:
+      return f"{text[:2000]}… [excerpt of a {len(text)}-character non-JSON error body]"
+    return text or "no reason given"
   if isinstance(detail, dict):
     diagnostic = detail.get("stderr") if detail.get("code") == "compile_failed" else None
     detail = detail.get("message") or detail.get("code") or json.dumps(detail)
     if isinstance(diagnostic, str) and diagnostic.strip():
       # A compile refusal's reason and location live in its sanitized,
       # server-capped diagnostic; the message alone only says it failed.
-      return f"{str(detail).strip()[:1000]}\n{diagnostic.strip()[:4000]}"
+      return f"{str(detail).strip()}\n{diagnostic.strip()}"
   elif isinstance(detail, list):
     detail = "; ".join(
       " ".join(str(part) for part in (issue.get("loc") or [])[1:]) + ": " + str(issue.get("msg"))
       if isinstance(issue, dict) else str(issue)
-      for issue in detail[:5]
+      for issue in detail
     )
-  return str(detail).strip()[:1000] or "no reason given"
+  return str(detail).strip() or "no reason given"
 
 
 def _agent_api_call(
@@ -343,11 +365,14 @@ def _agent_api_json(
     with urlopen(request, timeout=timeout) as response:
       raw = response.read()
   except HTTPError as exc:
-    # Large enough for a whole structured refusal (a compile diagnostic is
-    # ~4 KB plus its envelope); _refusal_message caps what is rendered.
-    raw = exc.read(65536).decode("utf-8", errors="replace")
+    # Transport bound: large enough for a whole structured refusal (a
+    # compile diagnostic is ~4 KB plus its envelope); the reason inside it is
+    # shown whole.
+    body = exc.read(REFUSAL_READ_BYTES + 1)
+    raw = body[:REFUSAL_READ_BYTES].decode("utf-8", errors="replace")
     raise RuntimeError(
-      f"Refused ({exc.code}): {_refusal_message(raw)}"
+      f"Refused ({exc.code}): "
+      f"{_refusal_message(raw, cut=len(body) > REFUSAL_READ_BYTES)}"
     ) from exc
   except (URLError, TimeoutError) as exc:
     reason = exc.reason if isinstance(exc, URLError) else "request timed out"
@@ -552,7 +577,22 @@ def _update_goal(arguments: dict[str, Any]) -> str:
 
 
 def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
-  """Compact plain-text Goal state: one status line, task lines when asked."""
+  """Compact plain-text Goal state: one status line, task lines when asked.
+
+  The full report is paged by the control server. A change's reply is one
+  result that is never re-run for a page, so it bounds what it echoes and
+  names the full report instead.
+  """
+  def ids(values: list[str]) -> str:
+    if full or len(values) <= _CONTEXT_BUDGET.REPLY_IDS:
+      return ", ".join(values)
+    return (", ".join(values[:_CONTEXT_BUDGET.REPLY_IDS])
+            + f" and {len(values) - _CONTEXT_BUDGET.REPLY_IDS} more (update_goal with no arguments lists them all)")
+
+  def text(value: str) -> str:
+    return value if full else _CONTEXT_BUDGET.excerpt(
+      value, _CONTEXT_BUDGET.REPLY_TEXT_CHARS, "update_goal with no arguments shows it whole")
+
   goal = payload.get("goal")
   if not isinstance(goal, dict):
     return "This chat has no Goal."
@@ -564,7 +604,7 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
   lines = [line + "."]
   for label, key in (("Running", "running"), ("Ready", "ready")):
     if goal.get("status") == "open" and summary.get(key):
-      lines.append(f"{label}: {', '.join(summary[key])}.")
+      lines.append(f"{label}: {ids(summary[key])}.")
   if goal.get("status") == "open":
     if summary.get("can_complete"):
       lines.append("Ready to complete after verification; omit next_action.")
@@ -573,13 +613,13 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
     if (full or summary.get("can_complete")) and goal.get("completable_work_keys"):
       lines.append(
         "Eligible work_keys for finished_claims (name only work performed): "
-        + ", ".join(goal["completable_work_keys"]) + "."
+        + ids(goal["completable_work_keys"]) + "."
       )
   elif isinstance(goal.get("hold"), dict) and goal["hold"].get("cause") == "deferred":
-    lines.append("On hold: " + goal["hold"]["reason"])
+    lines.append("On hold: " + text(goal["hold"]["reason"]))
     lines.append("End normally. Resume only when the owner asks to continue; no automatic retry.")
   elif goal.get("result") and (full or goal.get("status") != "completed"):
-    lines.append("Outcome: " + goal["result"] + ".")
+    lines.append("Outcome: " + text(goal["result"]) + ".")
   if full:
     lines.insert(0, f"Objective: {goal.get('objective')}")
     for task in (plan or {}).get("tasks") or []:
@@ -615,18 +655,22 @@ def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
   )
 
 
-def _call_read_goal(arguments: dict[str, Any]) -> dict:
-  unknown = set(arguments) - {"task"}
+def _call_read_goal(arguments: dict[str, Any]) -> dict | str:
+  unknown = set(arguments) - {"task", "field"}
   if unknown:
     raise ValueError(f"read_goal does not take: {', '.join(sorted(unknown))}")
   chat_id = os.environ.get("CHAT_ID") or ""
   if not chat_id:
     raise RuntimeError("missing environment: CHAT_ID")
-  query = {"task": arguments["task"]} if arguments.get("task") is not None else {}
+  query = {key: arguments[key] for key in ("task", "field")
+           if arguments.get(key) is not None}
   path = f"/api/chats/{quote(chat_id, safe='')}/goal-brief"
   if query:
     path += "?" + urlencode(query)
   payload = _agent_api_call("GET", path)
+  if arguments.get("field") is not None:
+    # One text, plain, so its pages read as the text itself.
+    return payload.get("text") or ""
   if payload.get("goal") is None:
     payload["goal"] = (
       "This helper has no assigned Goal; complete the bounded task you were given."
@@ -801,6 +845,19 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
     "body": body.strip(),
     "send_id": send_id.strip() if send_id is not None else str(uuid.uuid4()),
   })
+
+
+def _call_read_agent_message(arguments: dict[str, Any]) -> str:
+  if set(arguments) != {"message_id"}:
+    raise ValueError("read_agent_message needs message_id")
+  message_id = arguments["message_id"]
+  if not isinstance(message_id, str) or not 1 <= len(message_id) <= 64:
+    raise ValueError("message_id must be 1-64 characters")
+  payload = _agent_api_call(
+    "GET", f"/api/agent-coordination/messages/{quote(message_id, safe='')}",
+  )
+  # The body alone, plain, so its pages read as the note itself.
+  return payload.get("body") or ""
 
 
 def _call_claim_agent_work(arguments: dict[str, Any]) -> dict:
@@ -1409,7 +1466,7 @@ _TOOL_DEFINITIONS = {
           "description": "Short stable name, e.g. review-auth-flow. Reuse only for the identical task and settings; use message_agent for a finished helper's follow-up.",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         },
-        "task": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "task": {"type": "string", "minLength": 1},
         "provider": {
           "type": "string", "enum": ["claude", "codex", "mobius"],
           "description": "Omit to use this chat's provider.",
@@ -1809,7 +1866,7 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "tasks": _GOAL_TASKS_SCHEMA,
-        "next_action": {"type": "string", "maxLength": 2000, "description": "Next step for unfinished work. Do not combine with complete."},
+        "next_action": {"type": "string", "description": "Next step for unfinished work. Do not combine with complete."},
         "complete": {
           "type": "boolean", "enum": [True],
           "description": "Set true after verifying the whole outcome. No separate success summary. Keep useful verification evidence in task results or the chat checkpoint; communicate the outcome and any consequential caveats in your normal final reply. Do not combine with next_action; final task edits may share this call.",
@@ -1818,17 +1875,17 @@ _TOOL_DEFINITIONS = {
           "type": "object", "additionalProperties": False,
           "required": ["reason", "efforts", "unmet_outcome"],
           "properties": {
-            "reason": {"type": "string", "minLength": 1, "maxLength": 1500},
-            "efforts": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "unmet_outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "reason": {"type": "string", "minLength": 1},
+            "efforts": {"type": "string", "minLength": 1},
+            "unmet_outcome": {"type": "string", "minLength": 1},
           },
         },
-        "cancel": {"type": "string", "minLength": 1, "maxLength": 4000,
+        "cancel": {"type": "string", "minLength": 1,
                    "description": "Owner-called-off reason, not an unreachable-work shortcut."},
-        "defer": {"type": "string", "minLength": 1, "maxLength": 2000,
+        "defer": {"type": "string", "minLength": 1,
                   "description": "Why remaining work is deferred, after other authorized work is done. Quietly holds this Goal, not an outcome or a new question; tasks may share this atomic call. Do not combine with next_action or outcomes."},
         "finished_claims": {
-          "type": "array", "items": {"type": "string"}, "maxItems": 50,
+          "type": "array", "items": {"type": "string"},
           "description": (
             "With complete only: exact work_keys performed, from this Goal's open "
             "claims or same-chat Goal-less claims, not claim ids or invented names. "
@@ -1836,6 +1893,10 @@ _TOOL_DEFINITIONS = {
           ),
         },
         "goal_id": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Alone: read the next page of a long plan report, as its last page line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the report version its last page line names."},
       },
       "additionalProperties": False,
     },
@@ -1863,7 +1924,15 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "task": {"type": "string", "minLength": 1, "maxLength": 64,
-                 "description": "A task id of this Goal to show in full. Required for a coordinator."},
+                 "description": "A task id of this Goal to show in full. Required for a coordinator unless reading a Goal field."},
+        "field": {"type": "string", "enum": [
+                    "objective", "next_action", "checkpoint",
+                    "title", "note", "result", "completion_condition"],
+                  "description": "Read one text whole: a Goal field without task, or a task field with task."},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Page of a long result, as its last line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the result version its last line names."},
       },
       "additionalProperties": False,
     },
@@ -2013,6 +2082,23 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  READ_AGENT_MESSAGE_TOOL: {
+    "name": READ_AGENT_MESSAGE_TOOL,
+    "description": READ_AGENT_MESSAGE_DESCRIPTION,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                       "description": "The note id its excerpt names."},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Page of a long note, as its last line names."},
+        "version": {"type": "string",
+                    "description": "With offset: the version its last line names."},
+      },
+      "required": ["message_id"],
+      "additionalProperties": False,
+    },
+  },
   CLAIM_AGENT_WORK_TOOL: {
     "name": CLAIM_AGENT_WORK_TOOL,
     "description": (
@@ -2080,6 +2166,7 @@ _TOOL_HANDLERS = {
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,
   SEND_AGENT_MESSAGE_TOOL: _call_send_agent_message,
+  READ_AGENT_MESSAGE_TOOL: _call_read_agent_message,
   CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
   FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
@@ -2121,9 +2208,62 @@ def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]
   if handler is None:
     return _tool_result("Unknown tool.", is_error=True)
   try:
+    if name in _PAGED_READ_TOOLS:
+      return _tool_result(_paged_read(name, handler, arguments))
     return _tool_result(handler(arguments))
   except Exception as exc:  # Tool failures are data; keep the MCP server alive.
     return _tool_result(str(exc) or "Tool call failed.", is_error=True)
+
+
+# Reads whose result can outgrow a provider's tool-result limit (Claude Code
+# MCP at about 25k tokens; Codex truncates). One pager serves them all: a
+# result that fits one page is returned unchanged; a longer one comes as one
+# character page ending in a line that names the call for the next page.
+_PAGED_READ_TOOLS = frozenset({READ_GOAL_TOOL, UPDATE_GOAL_TOOL, READ_AGENT_MESSAGE_TOOL})
+
+
+def _paged_read(name: str, handler, arguments: dict[str, Any]):
+  arguments = dict(arguments)
+  offset = arguments.pop("offset", 0)
+  version = arguments.pop("version", None)
+  if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+    raise ValueError(f"{name} offset must be a non-negative integer")
+  if name == UPDATE_GOAL_TOOL and arguments:
+    # A change is never re-run to fetch a page; only the plain read pages.
+    if offset or version is not None:
+      raise ValueError("update_goal offset pages the no-argument plan report; pass it alone")
+    return handler(arguments)
+  value = handler(arguments)
+  text = value if isinstance(value, str) else json.dumps(
+    value, ensure_ascii=False, separators=(",", ":"),
+  )
+  # Each page re-reads the result. The version fingerprints the whole result,
+  # so pages of a plan that changed in between are never stitched together.
+  current = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+  if version is not None and version != current:
+    raise ValueError(
+      f"{name} changed since the previous page (version {version}, now {current}); "
+      "start again from offset 0"
+    )
+  if offset == 0 and version is None and (
+      len(text.encode("utf-8", "surrogatepass")) <= _CONTEXT_BUDGET.READ_PAGE_BYTES):
+    return value
+  def footer(start: int, end: int, next_offset: int | None) -> str:
+    # An omitted argument stays omitted: an explicit null is not repeated.
+    call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)
+                        if arguments[key] is not None),
+                      f"offset={next_offset}", f"version={current}"])
+    more = f"next page: {name}({call})" if next_offset is not None else "end of result"
+    return (f"\n[Result characters {start}-{end} of {len(text)}, "
+            f"version {current}; {more}]")
+
+  # The footer is part of the result, so the page leaves room for its longest
+  # form: every offset as wide as the result's length.
+  widest = len(text)
+  reserve = len(footer(widest, widest, widest).encode("utf-8", "surrogatepass"))
+  page = _CONTEXT_BUDGET.text_page(text, offset, _CONTEXT_BUDGET.READ_PAGE_BYTES - reserve)
+  end = page["offset"] + len(page["text"])
+  return page["text"] + footer(page["offset"], end, page["next_offset"])
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:

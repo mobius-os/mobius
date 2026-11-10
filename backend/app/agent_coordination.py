@@ -11,12 +11,13 @@ import time
 from typing import Any
 import uuid
 
-from sqlalchemy import String, and_, cast, func, literal, or_
+from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models
+from app.context_budget import PEER_NOTE_CHARS, excerpt
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.delegations import delegation_source_work_filter, delegation_source_work_id
 from app.goal_plans import paused_goal_run
@@ -33,9 +34,10 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
-# Notes are delivered whole: the send cap (4000 characters) already bounds
-# each one, and a clipped note forces the recipient to dig the rest out of the
-# activity log. The message count bounds the delivery.
+# A turn's coordination block carries at most this many notes, each whole up
+# to context_budget.PEER_NOTE_CHARS (the send cap, so every note sent today
+# arrives whole). A longer stored note arrives as a marked excerpt naming
+# read_agent_message, so the block stays bounded and its cursor still advances.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -584,11 +586,71 @@ def _channel_query(db: Session, scope: CoordinationScope):
   )
 
 
+# SQLite's text functions stop at an embedded U+0000, which notes stored
+# before such bodies were refused may contain. Its byte functions do not: the
+# head is read as bytes, enough for PEER_NOTE_CHARS of any UTF-8 text.
+_HEAD_BYTES = 4 * PEER_NOTE_CHARS
+
+
+def with_note_heads(query):
+  """Select each note's head and length instead of its whole body.
+
+  Lists and snapshots show at most PEER_NOTE_CHARS of a note, so they never
+  load a longer body. PostgreSQL text cannot hold U+0000.
+  """
+  message = models.AgentCoordinationMessage
+  if query.session.get_bind().dialect.name == "sqlite":
+    blob = cast(message.body, LargeBinary)
+    head = [
+      func.substr(blob, 1, _HEAD_BYTES).label("body"),
+      func.length(blob).label("body_bytes"),
+    ]
+  else:
+    head = [func.substr(message.body, 1, PEER_NOTE_CHARS).label("body")]
+  return query.with_entities(
+    *(column for column in message.__table__.columns if column.key != "body"),
+    *head,
+    func.length(message.body).label("body_chars"),
+  )
+
+
+def _note_head(row) -> tuple[str, int]:
+  """A head row's text and its whole note's length in characters."""
+  head, chars = row.body, row.body_chars
+  if isinstance(head, bytes):
+    whole = row.body_bytes <= len(head)
+    # A cut through one character drops only that character.
+    head = head.decode("utf-8", "ignore")
+    if whole:
+      # The whole body was read, so count it, past any U+0000 too.
+      chars = len(head)
+    else:
+      # More than four bytes per displayed character is always longer.
+      chars = max(chars, PEER_NOTE_CHARS + 1)
+  return head, chars
+
+
 def serialize_message(
   row: models.AgentCoordinationMessage,
   names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+  """One note for an owner, embed or agent view.
+
+  A row selected through with_note_heads carries only its head: a note longer
+  than PEER_NOTE_CHARS is returned as that head with truncated=true and its
+  full length. A whole row (a full read) is returned whole.
+  """
   names = names or {}
+  result = _serialized(row, names)
+  if getattr(row, "body_chars", None) is not None:
+    head, chars = _note_head(row)
+    result["body"] = head[:PEER_NOTE_CHARS]
+    if chars > PEER_NOTE_CHARS:
+      result.update(truncated=True, body_chars=chars)
+  return result
+
+
+def _serialized(row, names: dict[str, str]) -> dict[str, Any]:
   return {
     "id": row.id,
     "send_id": row.send_id,
@@ -607,21 +669,17 @@ def serialize_message(
   }
 
 
-def _recent_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _recent_message_rows(query, *, limit: int) -> list[Any]:
   """Return one bounded chronological window for context or owner history."""
-  return list(reversed(query.order_by(
+  return list(reversed(with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.desc(),
     models.AgentCoordinationMessage.id.desc(),
   ).limit(max(1, min(int(limit), 100))).all()))
 
 
-def _oldest_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _oldest_message_rows(query, *, limit: int) -> list[Any]:
   """Return the next bounded chronological page without skipping backlog."""
-  return query.order_by(
+  return with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.asc(),
     models.AgentCoordinationMessage.id.asc(),
   ).limit(max(1, min(int(limit), 100))).all()
@@ -689,6 +747,38 @@ def model_message(message: dict[str, Any]) -> dict[str, Any]:
     for key in _MODEL_MESSAGE_KEYS
     if message.get(key) is not None
   }
+
+
+def context_message(message: dict[str, Any]) -> dict[str, Any]:
+  """The model note shape for repeated context, its body within one budget."""
+  result = model_message(message)
+  body = result.get("body")
+  if isinstance(body, str):
+    result["body"] = excerpt(
+      body, PEER_NOTE_CHARS,
+      f"read_agent_message(message_id={result['id']}) pages the full note",
+      total=message.get("body_chars") or len(body),
+    )
+  return result
+
+
+def peer_message_for_chat(
+  db: Session, chat_id: str, message_id: str,
+) -> dict[str, Any] | None:
+  """One whole note this chat may read, by the chat's history visibility."""
+  row = chat_message_history_query(db, chat_id).filter(
+    models.AgentCoordinationMessage.id == message_id,
+  ).first()
+  if row is None:
+    return None
+  return serialize_messages(db, [row])[0]
+
+
+def peer_message_for_agent(
+  db: Session, chat_id: str, message_id: str,
+) -> dict[str, Any] | None:
+  message = peer_message_for_chat(db, chat_id, message_id)
+  return model_message(message) if message is not None else None
 
 
 def visible_peer_messages(
@@ -980,7 +1070,7 @@ def agent_context_snapshot(
     oldest_first=True,
   )
   delivered_rows = message_window[:MAX_CONTEXT_MESSAGES]
-  messages = [model_message(message) for message in delivered_rows]
+  messages = [context_message(message) for message in delivered_rows]
   snapshot = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -1092,7 +1182,9 @@ def chat_message_history(
   sent = query.filter(message.from_chat_id == chat_id).count()
   broadcasts = query.filter(message.to_chat_id.is_(None)).count()
   if before:
-    cursor = query.filter(message.id == before).first()
+    cursor = query.with_entities(message.created_at, message.id).filter(
+      message.id == before,
+    ).first()
     if cursor is None:
       raise ValueError("Message cursor is invalid, invisible, or expired.")
     query = query.filter(or_(
@@ -1100,7 +1192,9 @@ def chat_message_history(
       and_(message.created_at == cursor.created_at, message.id < cursor.id),
     ))
   limit = max(1, min(int(limit), 100))
-  rows = query.order_by(message.created_at.desc(), message.id.desc()).limit(limit + 1).all()
+  rows = with_note_heads(query).order_by(
+    message.created_at.desc(), message.id.desc(),
+  ).limit(limit + 1).all()
   messages = serialize_messages(db, rows[:limit])
   from app.activity_position import attach_activity_positions
   projected = [{"id": f"peer:{item['id']}"} for item in messages]
@@ -1219,6 +1313,9 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
+  if "\x00" in clean_body:
+    # PostgreSQL text cannot store it and SQLite's text functions stop at it.
+    raise ValueError("Message body must not contain U+0000.")
   if len(clean_body) > 4000:
     raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
@@ -1282,16 +1379,25 @@ def _matching_retry(
   return rows
 
 
+def _delete_beyond(db: Session, query, keep: int) -> None:
+  """Delete the rows of ``query`` older than its newest ``keep``, by id.
+
+  Retention counts notes; it never loads or measures their bodies.
+  """
+  message = models.AgentCoordinationMessage
+  stale = [row.id for row in query.with_entities(message.id).order_by(
+    message.created_at.desc(), message.id.desc(),
+  ).offset(keep).all()]
+  if not stale:
+    return
+  db.query(models.ChatActivityPosition).filter(
+    models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
+  ).delete(synchronize_session=False)
+  db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
+
+
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
-  stale = _channel_query(db, scope).order_by(
-    models.AgentCoordinationMessage.created_at.desc(),
-    models.AgentCoordinationMessage.id.desc(),
-  ).offset(MAX_SCOPE_MESSAGES).all()
-  for row in stale:
-    db.query(models.ChatActivityPosition).filter(
-      models.ChatActivityPosition.event_id == f"peer:{row.id}",
-    ).delete(synchronize_session=False)
-    db.delete(row)
+  _delete_beyond(db, _channel_query(db, scope), MAX_SCOPE_MESSAGES)
 
 
 def _prune_direct_inboxes(
@@ -1309,18 +1415,10 @@ def _prune_direct_inboxes(
     ),
   ).exists()
   for recipient in recipients:
-    stale = _channel_query(db, network).filter(
+    _delete_beyond(db, _channel_query(db, network).filter(
       models.AgentCoordinationMessage.to_chat_id == recipient,
       ~revocation,
-    ).order_by(
-      models.AgentCoordinationMessage.created_at.desc(),
-      models.AgentCoordinationMessage.id.desc(),
-    ).offset(MAX_DIRECT_MESSAGES_PER_RECIPIENT).all()
-    for row in stale:
-      db.query(models.ChatActivityPosition).filter(
-        models.ChatActivityPosition.event_id == f"peer:{row.id}",
-      ).delete(synchronize_session=False)
-      db.delete(row)
+    ), MAX_DIRECT_MESSAGES_PER_RECIPIENT)
 
 
 def _publish_message_hint(
@@ -1626,7 +1724,8 @@ def send_work_claim_transfer_notice(
     broadcast=False,
     kind="handoff",
     delivery=DELIVERY_INTERRUPT,
-    body=body,
+    # A claim's reason was never refused for U+0000; a note cannot carry it.
+    body=body.replace("\x00", "\ufffd"),
     send_id=f"revision:{revision}",
   )
 
@@ -1763,7 +1862,7 @@ def _interrupt_peer_carrier(
   messages = message_window[-MAX_CONTEXT_MESSAGES:]
   if not messages:
     return None
-  model_messages = [model_message(message) for message in messages]
+  model_messages = [context_message(message) for message in messages]
   payload: dict[str, Any] = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,

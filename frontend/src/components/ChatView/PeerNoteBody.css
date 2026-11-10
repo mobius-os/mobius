@@ -1,0 +1,38 @@
+/* The "Show full note" action reads as a quiet text link in every note view. */
+.peer-note-more {
+  appearance: none;
+  display: inline-block;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.peer-note-more:hover { color: var(--text); }
+.peer-note-more:disabled { cursor: default; opacity: 0.6; }
+.peer-note-more:focus-visible {
+  outline: 2px solid var(--accent, var(--text));
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* A note shown only in part, with no way to read the rest from this view. */
+.peer-note-excerpt {
+  display: inline-block;
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted);
+}
+
+/* A full note beyond the display limit is plain text, never markdown. */
+.peer-note-full {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

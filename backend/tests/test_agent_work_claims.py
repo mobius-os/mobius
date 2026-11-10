@@ -1778,3 +1778,110 @@ def test_failed_handback_preserves_the_prior_notice_and_owner(db):
   assert [row.revision for row in pending_transfer_notices(db).all()] == [2]
   assert db.get(models.AgentWorkClaimRevocation, (initial["id"], 3)) is None
   assert db.query(models.GoalDependency).one().target_chat_id == second.id
+
+
+def test_claim_texts_stored_beyond_the_input_caps_read_as_bounded_excerpts(db):
+  """A claim written by a release without the caps stays readable and bounded."""
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_dependencies import dependency_notice
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2000:uncapped"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Short summary",
+  )
+  row = db.query(models.AgentWorkClaim).one()
+  row.summary = "S" * 20_000
+  row.takeover_reason = "R" * 20_000
+  db.commit()
+
+  held = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Same work",
+  )
+  assert held["state"] == "held_by_peer"
+  assert len(held["summary"]) <= CLAIM_SUMMARY_CHARS
+  assert held["summary"].endswith("of 20000 characters; the work claim keeps the full text]")
+  assert len(held["takeover_reason"]) <= CLAIM_TEXT_CHARS
+
+  db.query(models.AgentWorkClaim).update({models.AgentWorkClaim.outcome: None})
+  db.commit()
+  finished = finish_work(
+    db, owner_id=owner.id, chat_id=first.id, work_key=key,
+    outcome="Merged", release=False,
+  )
+  assert finished["state"] == "completed"
+  row = db.query(models.AgentWorkClaim).one()
+  row.outcome = "O" * 20_000
+  db.commit()
+  assert len(claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Same work",
+  )["outcome"]) <= CLAIM_TEXT_CHARS
+  assert db.get(models.AgentWorkClaim, row.id).outcome == "O" * 20_000
+
+  dependency = db.query(models.GoalDependency).one()
+  dependency.outcome_json = {**dependency.outcome_json,
+                             "summary": "S" * 20_000, "outcome": "O" * 20_000}
+  db.commit()
+  notice = dependency_notice(dependency)
+  assert notice == dependency_notice(dependency)  # deterministic for orphan checks
+  assert len(notice) < CLAIM_SUMMARY_CHARS + CLAIM_TEXT_CHARS + 1_000
+  assert "S" * 20_000 not in notice and "O" * 20_000 not in notice
+
+
+def test_claim_texts_within_the_input_caps_are_repeated_exactly(db):
+  from app.goal_dependencies import dependency_notice
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2001:capped"
+  summary, outcome = "s" * 500, "o" * 1000
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary=summary,
+  )
+  claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Same work",
+  )
+  finished = finish_work(
+    db, owner_id=owner.id, chat_id=first.id, work_key=key,
+    outcome=outcome, release=False,
+  )
+  assert (finished["summary"], finished["outcome"]) == (summary, outcome)
+  dependency = db.query(models.GoalDependency).one()
+  assert dependency.outcome_json["summary"] == summary
+  notice = dependency_notice(dependency)
+  assert f'"summary": "{summary}"' in notice and f'"outcome": "{outcome}"' in notice
+  assert "excerpt" not in notice
+
+
+def test_transfer_notice_repeats_a_capped_reason_and_would_excerpt_a_longer_one(db):
+  from app import agent_work_claims
+  from app.context_budget import CLAIM_TEXT_CHARS
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2002:transfer"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Merge the reviewed PR",
+  )
+  reason = "Because " + "the broader change supersedes it " * 600
+  # The input cap still refuses this reason; a later release lifts it.
+  with pytest.raises(ValueError, match="10-1000"):
+    claim_work(
+      db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+      work_key=key, summary="Broader work", takeover_reason=reason,
+      expected_owner_chat_id=first.id,
+    )
+  short = "Because the broader change supersedes it."
+  claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Broader work", takeover_reason=short,
+    expected_owner_chat_id=first.id,
+  )
+  notice = db.query(models.AgentWorkClaimRevocation).one()
+  assert f"transferred to {second.id}: {short} (acquisition" in notice.body
+  excerpted = agent_work_claims.claim_text(reason)
+  assert len(excerpted) <= CLAIM_TEXT_CHARS and "work claim keeps the full text" in excerpted

@@ -1299,8 +1299,11 @@ def question_view(question: models.DelegationQuestion) -> dict:
   }
 
 
+# Automatic notices repeat in the parent's provider context, so they carry a
+# bounded preview; the saved question and choices stay whole for explicit reads.
 _AUTOMATIC_QUESTION_MAX = 1000
 _AUTOMATIC_OPTION_MAX = 120
+_AUTOMATIC_OPTIONS_SHOWN = 16
 
 
 def _automatic_question_preview(view: dict, delegation_id: str) -> dict:
@@ -1308,14 +1311,22 @@ def _automatic_question_preview(view: dict, delegation_id: str) -> dict:
   question = view["question"]
   options = view["options"]
   clipped = question[:_AUTOMATIC_QUESTION_MAX]
-  clipped_options = [option[:_AUTOMATIC_OPTION_MAX] for option in options]
+  clipped_options = [
+    option[:_AUTOMATIC_OPTION_MAX] for option in options[:_AUTOMATIC_OPTIONS_SHOWN]
+  ]
   if clipped == question and clipped_options == options:
     return view
-  return {
+  preview = {
     **view, "question": clipped, "options": clipped_options,
     "preview_truncated": True,
     "full_question_url": f"/api/delegations/{delegation_id}",
   }
+  if len(options) > len(clipped_options):
+    preview["options_omitted"] = (
+      f"{len(options) - len(clipped_options)} more choices; "
+      "full_question_url has the whole question and every choice"
+    )
+  return preview
 
 
 def helper_answer_content(question: models.DelegationQuestion, answer: str) -> str:

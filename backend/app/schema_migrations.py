@@ -7068,6 +7068,24 @@ def _add_claim_revocation_outbox(eng) -> None:
     ))
 
 
+def _widen_work_claim_text(eng) -> None:
+  """Let work-claim summaries, takeover reasons and outcomes hold any length.
+
+  SQLite does not enforce VARCHAR lengths, so only PostgreSQL changes. TEXT
+  still reads and writes as before for a rolled-back release.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  if eng.dialect.name != "postgresql":
+    return
+  if "agent_work_claims" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    for column in ("summary", "takeover_reason", "outcome"):
+      conn.execute(text(
+        f"ALTER TABLE agent_work_claims ALTER COLUMN {column} TYPE TEXT"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7191,6 +7209,7 @@ _SCHEMA_MIGRATIONS = (
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
   ("0100_chat_branch_origin", _add_chat_branch_origin),
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
+  ("0102_work_claim_text", _widen_work_claim_text),
 )
 
 

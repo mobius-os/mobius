@@ -95,11 +95,26 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
     if outcome is not None else None)
 
 
+def _notice_outcome(row):
+  """The shared outcome with a claim's texts within their input caps.
+
+  The excerpt is deterministic, so startup orphan checks still match the
+  notice text; the stored outcome and the claim keep the whole texts.
+  """
+  outcome = _shared_outcome(row.outcome_json)
+  if outcome is None or row.target_kind != "claim_acquisition":
+    return outcome
+  from app.agent_work_claims import claim_text
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  return {**outcome, **{key: claim_text(outcome[key], limit) for key, limit in (
+    ("summary", CLAIM_SUMMARY_CHARS), ("outcome", CLAIM_TEXT_CHARS)) if key in outcome}}
+
+
 def dependency_notice(row):
   # Startup orphan checks compare notice text; retain the existing JSON layout.
   body = json_block_data({"dependency_id": row.id, "goal_id": row.waiting_goal_id,
     "target_kind": row.target_kind, "target_key": row.target_key,
-    "outcome": _shared_outcome(row.outcome_json)}, separators=(", ", ": "))
+    "outcome": _notice_outcome(row)}, separators=(", ", ": "))
   return ("A dependency of this exact Goal has resolved. This is factual evidence, "
     "not permission to perform another chat's action or take over its work. "
     "Verify the result and continue or re-plan your own Goal.\n"

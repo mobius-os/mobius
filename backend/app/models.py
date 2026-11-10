@@ -1663,7 +1663,7 @@ class AgentWorkClaim(Base):
   owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
                     nullable=False, index=True)
   work_key = Column(String(256), nullable=False)
-  summary = Column(String(500), nullable=False)
+  summary = Column(Text, nullable=False)
   owner_chat_id = Column(
     String(64), ForeignKey("chats.id", ondelete="SET NULL"),
     nullable=True, index=True,
@@ -1673,7 +1673,7 @@ class AgentWorkClaim(Base):
   # Last-transfer projection, never the recovery source for revocations.
   # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
-  takeover_reason = Column(String(1000), nullable=True)
+  takeover_reason = Column(Text, nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
   notification_revision = Column(
     Integer, nullable=False, default=1, server_default="1"
@@ -1683,7 +1683,7 @@ class AgentWorkClaim(Base):
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
-  outcome = Column(String(1000), nullable=True)
+  outcome = Column(Text, nullable=True)
 
 
 class AgentWorkClaimRevocation(Base):
@@ -2372,6 +2372,25 @@ class ContributionReviewRun(Base):
       postgresql_where=text("app_id IS NULL"),
     ),
   )
+
+
+class DirectMergeAttempt(Base):
+  """The owner's one-tap merge of one exact PR head, saved before its write is sent.
+
+  The unique owner/work key is the fence: the same key a review run's merge
+  uses, so one tap and one review grant can never both send a write for the
+  same version. A row stays ``attempting`` or ``unknown`` until GitHub's answer
+  is known; only a read-only look, or the one-hour dispatch window, frees it.
+
+  This new table is created by normal startup metadata.create_all.
+  """
+  __tablename__ = "contribution_direct_merge_attempts"
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  work_key = Column(String(256), nullable=False)
+  state = Column(String(16), nullable=False)  # attempting, unknown, merged or queued
+  armed_at = Column(String(32), nullable=False)  # UTC ISO, the dispatch window's start
+  __table_args__ = (UniqueConstraint("owner_id", "work_key", name="uq_direct_merge_attempt_key"),)
 
 
 class ProjectSourceCopy(Base):
