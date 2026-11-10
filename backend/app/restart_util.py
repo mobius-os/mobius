@@ -37,7 +37,8 @@ log = logging.getLogger("mobius.restart")
 # Grace after SIGTERM before the hard kill — the crash floor. uvicorn's graceful
 # shutdown blocks on the never-closing chat SSE stream, so without a hard-kill
 # fallback a plain SIGTERM hangs the worker in shutdown limbo: it stops serving
-# but never exits, so tini (PID 1) never exits and the container never restarts.
+# but never exits, so the boot never ends and no restart (in place or by the
+# host) can follow.
 _FORCE_KILL_AFTER_SECONDS = 5.0
 _CUTOVER_FAILSAFE_SECONDS = 90.0
 _RESTART_ADMISSION_LOCK = threading.Lock()

@@ -1183,9 +1183,12 @@ records its one-shot nonce in `/data/.restart-ledger`, and only then asks the
 image's container supervisor (`backend/runtime/container_supervisor.py`) to end
 the boot and rerun the entrypoint inside the same container. If the worker
 cannot publish its request at all, it ends its boot as a failure (SIGKILL, exit
-137), so the host's restart policy replaces the container. At the very start of the
-next entrypoint invocation, the ledger binds
-that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
+137), so the host's restart policy replaces the container. Because an in-app
+Restart keeps the container, root-made changes outside `/data` (for example
+under `/etc`, `/usr` or `/app`) survive it on every host, as they already did
+under Docker's own restart; only a container replacement (a redeploy or image
+update) resets them. At the very start of the next entrypoint invocation, the
+ledger binds that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
 latest exact DB run and the restart policy is on. At startup, the same
 authorization converts matching stranded `running` rows into due restart parks

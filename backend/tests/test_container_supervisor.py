@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -63,79 +65,89 @@ def _alive(pid: int) -> bool:
   return state[state.rfind(")") + 2:].split()[0] != "Z"
 
 
-def _start(tmp_path: Path, script: str) -> tuple[subprocess.Popen, Path]:
-  log = tmp_path / "boots.log"
-  proc = subprocess.Popen(
-    [sys.executable, "-I", str(SUPERVISOR), "sh", "-c", script],
-    env={"PATH": os.environ["PATH"], "BOOT_LOG": str(log)},
-  )
-  return proc, log
+_launched: list[subprocess.Popen] = []
 
 
 def _stop(proc: subprocess.Popen) -> None:
-  if proc.poll() is None:
-    proc.kill()
-    proc.wait(timeout=10)
+  """Kill the supervisor's whole process group, including what it orphaned."""
+  try:
+    os.killpg(proc.pid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+  proc.wait(timeout=10)
+
+
+@pytest.fixture(autouse=True)
+def _tear_down_launched_supervisors():
+  # Killing only the supervisor would orphan its fake boot, the boot's
+  # background services and the restart poller, which would then outlive the
+  # test. Each supervisor leads its own process group, so stop the group.
+  yield
+  while _launched:
+    _stop(_launched.pop())
+
+
+def _launch(script: str, **env: str) -> subprocess.Popen:
+  proc = subprocess.Popen(
+    [sys.executable, "-I", str(SUPERVISOR), "sh", "-c", script],
+    env={"PATH": os.environ["PATH"], **env},
+    start_new_session=True,
+  )
+  _launched.append(proc)
+  return proc
+
+
+def _start(tmp_path: Path, script: str) -> tuple[subprocess.Popen, Path]:
+  log = tmp_path / "boots.log"
+  return _launch(script, BOOT_LOG=str(log)), log
 
 
 def test_planned_restart_reruns_the_boot_without_ending_the_container(tmp_path):
   proc, log = _start(tmp_path, FAKE_BOOT)
-  try:
-    _wait_for(lambda: len(_log_lines(log, "service")) == 1)
-    first_service = int(_log_lines(log, "service")[0][0])
+  _wait_for(lambda: len(_log_lines(log, "service")) == 1)
+  first_service = int(_log_lines(log, "service")[0][0])
 
-    proc.send_signal(signal.SIGUSR1)
+  proc.send_signal(signal.SIGUSR1)
 
-    _wait_for(lambda: len(_log_lines(log, "service")) == 2)
-    assert proc.poll() is None, "the container's supervisor must keep running"
-    boots = _log_lines(log, "boot")
-    assert len(boots) == 2 and boots[0][0] != boots[1][0]
-  finally:
-    _stop(proc)
+  _wait_for(lambda: len(_log_lines(log, "service")) == 2)
+  assert proc.poll() is None, "the container's supervisor must keep running"
+  boots = _log_lines(log, "boot")
+  assert len(boots) == 2 and boots[0][0] != boots[1][0]
   assert not _alive(first_service)
 
 
 def test_planned_restart_clears_what_the_old_boot_left_running(tmp_path):
   proc, log = _start(tmp_path, FAKE_BOOT)
-  try:
-    _wait_for(lambda: len(_log_lines(log, "service")) == 1)
-    first_service = int(_log_lines(log, "service")[0][0])
-    proc.send_signal(signal.SIGUSR1)
-    _wait_for(lambda: len(_log_lines(log, "service")) == 2)
-    # The old boot's background service must be gone before the new boot
-    # starts its own, so services never run twice side by side.
-    assert not _alive(first_service)
-    assert _alive(int(_log_lines(log, "service")[1][0]))
-  finally:
-    _stop(proc)
+  _wait_for(lambda: len(_log_lines(log, "service")) == 1)
+  first_service = int(_log_lines(log, "service")[0][0])
+  proc.send_signal(signal.SIGUSR1)
+  _wait_for(lambda: len(_log_lines(log, "service")) == 2)
+  # The old boot's background service must be gone before the new boot
+  # starts its own, so services never run twice side by side.
+  assert not _alive(first_service)
+  assert _alive(int(_log_lines(log, "service")[1][0]))
 
 
 def test_consecutive_planned_restarts_each_rerun_the_boot(tmp_path):
   proc, log = _start(tmp_path, FAKE_BOOT)
-  try:
-    for boots in (2, 3):
-      _wait_for(lambda: len(_log_lines(log, "service")) == boots - 1)
-      proc.send_signal(signal.SIGUSR1)
-      _wait_for(lambda: len(_log_lines(log, "service")) == boots)
-      assert proc.poll() is None
-    services = [int(line[0]) for line in _log_lines(log, "service")]
-    assert [_alive(pid) for pid in services] == [False, False, True]
+  for boots in (2, 3):
+    _wait_for(lambda: len(_log_lines(log, "service")) == boots - 1)
+    proc.send_signal(signal.SIGUSR1)
+    _wait_for(lambda: len(_log_lines(log, "service")) == boots)
+    assert proc.poll() is None
+  services = [int(line[0]) for line in _log_lines(log, "service")]
+  assert [_alive(pid) for pid in services] == [False, False, True]
 
-    # A host stop after in-place restarts still ends the container cleanly.
-    proc.send_signal(signal.SIGTERM)
-    assert proc.wait(timeout=15) == 143
-  finally:
-    _stop(proc)
+  # A host stop after in-place restarts still ends the container cleanly.
+  proc.send_signal(signal.SIGTERM)
+  assert proc.wait(timeout=15) == 143
   assert len(_log_lines(log, "boot")) == 3
 
 
 def test_each_boot_learns_which_process_to_ask_for_a_restart(tmp_path):
   proc, log = _start(tmp_path, FAKE_BOOT)
-  try:
-    _wait_for(lambda: len(_log_lines(log, "boot")) == 1)
-    assert _log_lines(log, "boot")[0][1] == str(proc.pid)
-  finally:
-    _stop(proc)
+  _wait_for(lambda: len(_log_lines(log, "boot")) == 1)
+  assert _log_lines(log, "boot")[0][1] == str(proc.pid)
 
 
 def test_boot_starts_with_default_signal_handling_like_under_tini(tmp_path):
@@ -204,15 +216,9 @@ def test_entrypoint_restart_poller_restarts_through_the_supervisor(tmp_path):
     'while :; do sleep 0.05; done\n'
   )
   log = tmp_path / "boots.log"
-  proc = subprocess.Popen(
-    [sys.executable, "-I", str(SUPERVISOR), "sh", "-c", script],
-    env={"PATH": os.environ["PATH"], "BOOT_LOG": str(log), "DATA": str(data)},
-  )
-  try:
-    _wait_for(lambda: len(_log_lines(log, "boot")) == 2)
-    assert proc.poll() is None
-  finally:
-    _stop(proc)
+  proc = _launch(script, BOOT_LOG=str(log), DATA=str(data))
+  _wait_for(lambda: len(_log_lines(log, "boot")) == 2)
+  assert proc.poll() is None
 
 
 # A stand-in identity broker: it binds its socket after a short start-up and,
@@ -241,11 +247,20 @@ def _entrypoint_broker_start() -> tuple[str, str]:
   return clear.group(0), wait.group(0)
 
 
-def test_rerun_boot_waits_for_its_own_identity_broker(tmp_path):
+@pytest.fixture
+def short_dir():
+  # AF_UNIX socket paths are limited to about 108 bytes, which a long pytest
+  # temp directory can exceed.
+  path = Path(tempfile.mkdtemp(prefix="sv-", dir="/tmp"))
+  yield path
+  shutil.rmtree(path, ignore_errors=True)
+
+
+def test_rerun_boot_waits_for_its_own_identity_broker(tmp_path, short_dir):
   # /run outlives an in-place restart. If the old broker's socket survived
   # into the rerun, the readiness check would pass before the new broker
   # bound it, and a broker that fails to start would go unnoticed.
-  sock = tmp_path / "broker.sock"
+  sock = short_dir / "broker.sock"
   clear, wait = _entrypoint_broker_start()
   clear = clear.replace("/run/mobius-identity-broker.sock", '"$BROKER_SOCK"')
   wait = wait.replace("/run/mobius-identity-broker.sock", '"$BROKER_SOCK"')
@@ -263,21 +278,14 @@ def test_rerun_boot_waits_for_its_own_identity_broker(tmp_path):
     'while :; do sleep 0.05; done\n'
   )
   log = tmp_path / "boots.log"
-  proc = subprocess.Popen(
-    [sys.executable, "-I", str(SUPERVISOR), "sh", "-c", script],
-    env={
-      "PATH": os.environ["PATH"], "BOOT_LOG": str(log), "PY": sys.executable,
-      "BROKER": STAND_IN_BROKER, "BROKER_SOCK": str(sock),
-      "BROKEN": str(tmp_path / "broken"),
-    },
+  proc = _launch(
+    script, BOOT_LOG=str(log), PY=sys.executable, BROKER=STAND_IN_BROKER,
+    BROKER_SOCK=str(sock), BROKEN=str(tmp_path / "broken"),
   )
-  try:
-    _wait_for(lambda: len(_log_lines(log, "ready")) == 1)
-    assert sock.is_socket()
-    proc.send_signal(signal.SIGUSR1)
-    # The rerun's broker fails, so its boot must fail rather than reach ready.
-    assert proc.wait(timeout=20) == 1
-  finally:
-    _stop(proc)
+  _wait_for(lambda: len(_log_lines(log, "ready")) == 1)
+  assert sock.is_socket()
+  proc.send_signal(signal.SIGUSR1)
+  # The rerun's broker fails, so its boot must fail rather than reach ready.
+  assert proc.wait(timeout=20) == 1
   assert len(_log_lines(log, "boot")) == 2
   assert len(_log_lines(log, "ready")) == 1

@@ -192,7 +192,9 @@ _start_platform_restart_poller() {
         # The image's container supervisor reruns the boot inside this
         # container, so a planned restart never depends on the host's restart
         # policy (Railway's default ON_FAILURE never revives a clean stop).
-        # Only a boot started without it falls back to stopping the container.
+        # Only a boot started without it (an overridden image entrypoint) falls
+        # back to stopping the container. That stop still exits cleanly through
+        # tini -e 143, so it relies on the host's ALWAYS/unless-stopped policy.
         if [ -n "$_supervisor_pid" ] && kill -USR1 "$_supervisor_pid" 2>/dev/null; then
           echo "O1: platform-restart sentinel seen — restarting inside this container." >&2
         else
@@ -1111,11 +1113,11 @@ fi
 
 # --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
 # uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat
-# SSE stream never closes on its own — so an in-app restart (the Settings
-# Restart button SIGTERMs this worker) hangs the process in shutdown limbo: it
-# stops serving but never exits, tini never exits, and the container never
-# restarts ("pressed Restart, server never came back"). Bounding the drain makes
-# every SIGTERM-based restart reliably cycle the container.
+# SSE stream never closes on its own — so a restart (the container supervisor
+# SIGTERMs this boot for an in-app Restart; the host does for a stop) hangs the
+# process in shutdown limbo: it stops serving but never exits, so the boot never
+# ends ("pressed Restart, server never came back"). Bounding the drain makes
+# every SIGTERM-based restart reliably end the boot.
 _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
 # `$_env_scrub` is applied to the uvicorn exec so the served process runs with
 # the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
