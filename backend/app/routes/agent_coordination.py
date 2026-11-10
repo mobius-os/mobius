@@ -22,6 +22,7 @@ from app.agent_coordination import (
   owner_chat_snapshot,
   owner_project_snapshot,
   peer_message_for_agent,
+  peer_message_for_chat,
   send_agent_message,
   deliver_work_claim_revocation,
   visible_peer_messages,
@@ -255,12 +256,14 @@ async def send_current_message(
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row, its body under the same excerpt rule as turn
   # context, plus the exact recipient count and names the owner-visible
-  # activity card needs, not the body repeated per recipient. body_truncated
-  # lets the owner's card label an excerpt in its own words.
+  # activity card needs, not the body repeated per recipient. An excerpted
+  # body is marked as the owner views mark it (truncated, body_chars), and
+  # send_id lets the owner's timeline join the card to the stored rows.
   receipt = [context_message(row) for row in rows[:1]]
   for shown, stored in zip(receipt, rows):
+    shown["send_id"] = stored["send_id"]
     if shown.get("body") != stored.get("body"):
-      shown["body_truncated"] = True
+      shown.update(truncated=True, body_chars=len(stored["body"]))
   result = {
     "messages": receipt,
     "recipient_count": len(rows),
@@ -360,6 +363,25 @@ def inspect_project_room(
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/chats/{chat_id}/messages/{message_id}")
+def inspect_chat_message(
+  chat_id: str,
+  message_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """One whole note, for a view that showed its head marked truncated.
+
+  The same exact-chat visibility as this chat's history.
+  """
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  message = peer_message_for_chat(db, chat_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this chat.")
+  return message
 
 
 @router.get("/chats/{chat_id}/history")

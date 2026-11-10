@@ -5,7 +5,7 @@
 // app/peer_message.py), repeated here only as a defensive bound: the server
 // already sends a longer note as a marked excerpt that fits, so the card shows
 // whatever it receives whole and never shows a silent excerpt.
-const MAX_BODY_CHARS = 4000
+export const PEER_NOTE_CHARS = 4000
 const MAX_NAME_CHARS = 120
 const MAX_NOTES = 8
 const MAX_RESULT_MESSAGES = 200 // the read tool's max page; count can't exceed it
@@ -24,7 +24,7 @@ function cleanLabelText(value, limit) {
 
 function cleanBody(value) {
   if (typeof value !== 'string') return ''
-  return value.trim().slice(0, MAX_BODY_CHARS)
+  return value.trim().slice(0, PEER_NOTE_CHARS)
 }
 
 function cleanKind(value) {
@@ -113,7 +113,7 @@ export function peerMessageCardModel(pm) {
   }
 
   if (pm.status === 'failed') {
-    const reason = cleanLabelText(pm.reason, MAX_BODY_CHARS)
+    const reason = cleanLabelText(pm.reason, PEER_NOTE_CHARS)
     return { status: 'failed', direction, reason, hasDetail: Boolean(reason) }
   }
   return { status: pm.status, direction, hasDetail: false }

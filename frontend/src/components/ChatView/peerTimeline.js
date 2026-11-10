@@ -66,10 +66,13 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
     for (const block of msg.blocks || []) {
       const pm = block.peer_message
       if (pm?.status !== 'sent' || !block.tool_use_id || tools.has(block.tool_use_id)) continue
+      // A receipt names its send; every stored row of that send joins the
+      // card. Older markers without it match one exact body in this segment.
       const matches = ordered.filter(note => !represented.has(note.id)
-        && note.sender_chat_id === chatId && note.body === pm.body
-        && (pm.broadcast ? note.broadcast : !note.broadcast && (!pm.peers?.length || pm.peers.includes(note.recipient_name)))
-        && peerTime(note.created_at) >= msg.ts && peerTime(note.created_at) <= next).slice(0, pm.count || 1)
+        && note.sender_chat_id === chatId
+        && (pm.send_id ? note.send_id === pm.send_id : note.body === pm.body
+          && (pm.broadcast ? note.broadcast : !note.broadcast && (!pm.peers?.length || pm.peers.includes(note.recipient_name)))
+          && peerTime(note.created_at) >= msg.ts && peerTime(note.created_at) <= next)).slice(0, pm.count || 1)
       if (!matches.length) continue
       tools.set(block.tool_use_id, matches)
       matches.forEach(note => represented.add(note.id))
@@ -99,6 +102,11 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
     slots.set(index, rows)
   }
   return { slots, tools, positions }
+}
+
+/** The mailbox id of a timeline note: activity events carry it as message_id. */
+export function peerNoteMessageId(note) {
+  return note?.message_id ?? note?.id
 }
 
 export function peerRecordTool(note, chatId) {

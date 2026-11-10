@@ -49,6 +49,14 @@ test('active tool receipts also deduplicate before the durable mirror catches up
   assert.equal(result.tools.get('live')[0].id, 'sent')
   assert.equal(result.slots.size, 0)
 })
+test('a receipt joins every stored row of its send by send id, whatever the bodies', () => {
+  const rows = ['a', 'b', 'c'].map(id => note(id, 1500, { send_id: 'send-1', sender_chat_id: 'chat', recipient_chat_id: id, recipient_name: `Agent ${id}`, body: 'Head of a long note   ' }))
+  const other = note('other', 1500, { send_id: 'send-2', sender_chat_id: 'chat', body: 'Head of a long note…' })
+  const tool = { tool_use_id: 'tool', peer_message: { status: 'sent', body: 'Head of a long note…', count: 3, peers: ['Agent a'], send_id: 'send-1' } }
+  const result = projectPeerTimeline([{ ts: 1000, blocks: [tool] }, { ts: 3000 }], [...rows, other], 'chat')
+  assert.deepEqual(result.tools.get('tool').map(row => row.id), ['a', 'b', 'c'])
+  assert.equal(result.slots.get(1)[0].id, 'other')
+})
 test('same body to another recipient or in another turn is not swallowed', () => {
   const sent = note('sent', 1500, { sender_chat_id: 'chat', recipient_name: 'Different agent' })
   const tool = { tool_use_id: 'tool', peer_message: { status: 'sent', body: sent.body, peers: ['Other agent'] } }

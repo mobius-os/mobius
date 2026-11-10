@@ -70,16 +70,18 @@ def text_page(text: str, offset: int = 0, budget: int = READ_PAGE_BYTES) -> dict
   }
 
 
-def excerpt(text: str, limit: int, read_full: str) -> str:
+def excerpt(text: str, limit: int, read_full: str, *, total: int | None = None) -> str:
   """``text`` whole if it fits ``limit`` characters, else a marked excerpt.
 
   The excerpt is its head plus a marker naming ``read_full``, together within
-  ``limit`` whenever the marker alone fits.
+  ``limit`` whenever the marker alone fits. ``total`` is the whole text's
+  length when ``text`` is already only its head.
   """
-  if len(text) <= limit:
+  total = len(text) if total is None else total
+  if total <= limit:
     return text
   # A shorter head never needs more digits than ``limit``, so reserving the
   # marker as it reads for a ``limit``-long head is enough.
-  room = limit - len(f"… [excerpt: {limit} of {len(text)} characters; {read_full}]")
+  room = limit - len(f"… [excerpt: {limit} of {total} characters; {read_full}]")
   head = text[:max(room, 0)].rstrip()
-  return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
+  return f"{head}… [excerpt: {len(head)} of {total} characters; {read_full}]"

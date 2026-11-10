@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 import uuid
 
-from sqlalchemy import String, and_, cast, func, literal, or_
+from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -602,11 +602,71 @@ def _channel_query(db: Session, scope: CoordinationScope):
   )
 
 
+# SQLite's text functions stop at an embedded U+0000, which notes stored
+# before such bodies were refused may contain. Its byte functions do not: the
+# head is read as bytes, enough for PEER_NOTE_CHARS of any UTF-8 text.
+_HEAD_BYTES = 4 * PEER_NOTE_CHARS
+
+
+def with_note_heads(query):
+  """Select each note's head and length instead of its whole body.
+
+  Lists and snapshots show at most PEER_NOTE_CHARS of a note, so they never
+  load a longer body. PostgreSQL text cannot hold U+0000.
+  """
+  message = models.AgentCoordinationMessage
+  if query.session.get_bind().dialect.name == "sqlite":
+    blob = cast(message.body, LargeBinary)
+    head = [
+      func.substr(blob, 1, _HEAD_BYTES).label("body"),
+      func.length(blob).label("body_bytes"),
+    ]
+  else:
+    head = [func.substr(message.body, 1, PEER_NOTE_CHARS).label("body")]
+  return query.with_entities(
+    *(column for column in message.__table__.columns if column.key != "body"),
+    *head,
+    func.length(message.body).label("body_chars"),
+  )
+
+
+def _note_head(row) -> tuple[str, int]:
+  """A head row's text and its whole note's length in characters."""
+  head, chars = row.body, row.body_chars
+  if isinstance(head, bytes):
+    whole = row.body_bytes <= len(head)
+    # A cut through one character drops only that character.
+    head = head.decode("utf-8", "ignore")
+    if whole:
+      # The whole body was read, so count it, past any U+0000 too.
+      chars = len(head)
+    else:
+      # More than four bytes per displayed character is always longer.
+      chars = max(chars, PEER_NOTE_CHARS + 1)
+  return head, chars
+
+
 def serialize_message(
   row: models.AgentCoordinationMessage,
   names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+  """One note for an owner, embed or agent view.
+
+  A row selected through with_note_heads carries only its head: a note longer
+  than PEER_NOTE_CHARS is returned as that head with truncated=true and its
+  full length. A whole row (a full read) is returned whole.
+  """
   names = names or {}
+  result = _serialized(row, names)
+  if getattr(row, "body_chars", None) is not None:
+    head, chars = _note_head(row)
+    result["body"] = head[:PEER_NOTE_CHARS]
+    if chars > PEER_NOTE_CHARS:
+      result.update(truncated=True, body_chars=chars)
+  return result
+
+
+def _serialized(row, names: dict[str, str]) -> dict[str, Any]:
   return {
     "id": row.id,
     "send_id": row.send_id,
@@ -625,21 +685,17 @@ def serialize_message(
   }
 
 
-def _recent_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _recent_message_rows(query, *, limit: int) -> list[Any]:
   """Return one bounded chronological window for context or owner history."""
-  return list(reversed(query.order_by(
+  return list(reversed(with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.desc(),
     models.AgentCoordinationMessage.id.desc(),
   ).limit(max(1, min(int(limit), 100))).all()))
 
 
-def _oldest_message_rows(
-  query, *, limit: int,
-) -> list[models.AgentCoordinationMessage]:
+def _oldest_message_rows(query, *, limit: int) -> list[Any]:
   """Return the next bounded chronological page without skipping backlog."""
-  return query.order_by(
+  return with_note_heads(query).order_by(
     models.AgentCoordinationMessage.created_at.asc(),
     models.AgentCoordinationMessage.id.asc(),
   ).limit(max(1, min(int(limit), 100))).all()
@@ -718,15 +774,16 @@ def context_message(message: dict[str, Any]) -> dict[str, Any]:
   """The model note shape for repeated context, its body within one budget."""
   result = model_message(message)
   body = result.get("body")
-  if isinstance(body, str) and len(body) > PEER_NOTE_CHARS:
+  if isinstance(body, str):
     result["body"] = excerpt(
       body, PEER_NOTE_CHARS,
       f"read_agent_message(message_id={result['id']}) pages the full note",
+      total=message.get("body_chars") or len(body),
     )
   return result
 
 
-def peer_message_for_agent(
+def peer_message_for_chat(
   db: Session, chat_id: str, message_id: str,
 ) -> dict[str, Any] | None:
   """One whole note this chat may read, by the chat's history visibility."""
@@ -735,7 +792,14 @@ def peer_message_for_agent(
   ).first()
   if row is None:
     return None
-  return model_message(serialize_messages(db, [row])[0])
+  return serialize_messages(db, [row])[0]
+
+
+def peer_message_for_agent(
+  db: Session, chat_id: str, message_id: str,
+) -> dict[str, Any] | None:
+  message = peer_message_for_chat(db, chat_id, message_id)
+  return model_message(message) if message is not None else None
 
 
 def visible_peer_messages(
@@ -1139,7 +1203,9 @@ def chat_message_history(
   sent = query.filter(message.from_chat_id == chat_id).count()
   broadcasts = query.filter(message.to_chat_id.is_(None)).count()
   if before:
-    cursor = query.filter(message.id == before).first()
+    cursor = query.with_entities(message.created_at, message.id).filter(
+      message.id == before,
+    ).first()
     if cursor is None:
       raise ValueError("Message cursor is invalid, invisible, or expired.")
     query = query.filter(or_(
@@ -1147,7 +1213,9 @@ def chat_message_history(
       and_(message.created_at == cursor.created_at, message.id < cursor.id),
     ))
   limit = max(1, min(int(limit), 100))
-  rows = query.order_by(message.created_at.desc(), message.id.desc()).limit(limit + 1).all()
+  rows = with_note_heads(query).order_by(
+    message.created_at.desc(), message.id.desc(),
+  ).limit(limit + 1).all()
   messages = serialize_messages(db, rows[:limit])
   from app.activity_position import attach_activity_positions
   projected = [{"id": f"peer:{item['id']}"} for item in messages]
@@ -1266,6 +1334,9 @@ def _clean_message(kind: str, body: str) -> str:
   clean_body = body.strip()
   if not clean_body:
     raise ValueError("Message body must not be blank.")
+  if "\x00" in clean_body:
+    # PostgreSQL text cannot store it and SQLite's text functions stop at it.
+    raise ValueError("Message body must not contain U+0000.")
   return clean_body
 
 
@@ -1692,7 +1763,8 @@ def send_work_claim_transfer_notice(
     broadcast=False,
     kind="handoff",
     delivery=DELIVERY_INTERRUPT,
-    body=body,
+    # A claim's reason was never refused for U+0000; a note cannot carry it.
+    body=body.replace("\x00", "\ufffd"),
     send_id=f"revision:{revision}",
   )
 

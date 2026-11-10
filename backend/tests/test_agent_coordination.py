@@ -2205,7 +2205,7 @@ def test_send_receipt_within_the_display_limit_is_unchanged(client, auth, db):
   assert sent.status_code == 200, sent.text
   receipt = sent.json()["messages"][0]
   assert receipt["body"] == body
-  assert "body_truncated" not in receipt and "body_chars" not in receipt
+  assert "truncated" not in receipt and "body_chars" not in receipt
   longer = client.post(
     "/api/agent-coordination/messages",
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
@@ -2248,12 +2248,18 @@ def test_owner_card_labels_a_long_note_without_the_agent_marker(client, auth, db
     json={"recipients": [chats["builder"].id], "body": huge},
   )
   receipt = sent.json()["messages"][0]
-  assert receipt["body_truncated"] is True
+  # The receipt marks its excerpt as owner views do and names its send.
+  assert (receipt["truncated"], receipt["body_chars"]) == (True, len(huge.strip()))
   assert "read_agent_message(" in receipt["body"]  # the sender's own excerpt
+  stored = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.id == receipt["id"],
+  ).one()
+  assert receipt["send_id"] == stored.send_id
   card = peer_message.settle_peer_message(
     {"direction": "send", "status": "sending"}, json.dumps(sent.json()),
   )
-  assert card["body_truncated"] is True
+  assert card["body_truncated"] is True and card["send_id"] == stored.send_id
+  assert peer_message.bounded_peer_message(card)["send_id"] == stored.send_id
   assert "read_agent_message" not in card["body"] and card["body"].endswith("…")
   assert huge.startswith(card["body"][:-1]) and len(card["body"]) <= PEER_NOTE_CHARS
 
@@ -2279,3 +2285,42 @@ def test_a_send_to_many_recipients_reloads_no_stored_row(client, auth, db, monke
   changed = client.post("/api/agent-coordination/messages", headers=headers,
                         json={**body, "body": "y" * 10_000})
   assert changed.status_code == 422
+
+
+def test_owner_and_embed_snapshots_carry_only_long_note_heads(client, auth, db):
+  from app.context_budget import PEER_NOTE_CHARS
+  from app.timeutil import now_naive_utc
+
+  chats, _ = _network_fixture(db)
+  huge = "Snapshot " + "z" * 200_000
+  db.add_all([_stored_note(chats, index, huge, now_naive_utc(), to="root") for index in range(3)])
+  db.commit()
+  snapshot = client.get(f"/api/agent-coordination/chats/{chats['root'].id}", headers=auth)
+  assert snapshot.status_code == 200, snapshot.text
+  notes = [row for row in snapshot.json()["messages"] if row["id"].startswith("stored-")]
+  assert len(notes) == 3
+  assert all(row["body"] == huge[:PEER_NOTE_CHARS] and row["truncated"] is True
+             and row["body_chars"] == len(huge) for row in notes)
+  assert len(snapshot.content) < 3 * PEER_NOTE_CHARS + 20_000
+  # Turn delivery excerpts from the head with the note's true length.
+  db.get(models.ChatRun, "root-run").provider_execution_admitted = True
+  db.commit()
+  context = _next_turn_context(db, chats["root"], "root-after-huge")
+  assert context.count(f"of {len(huge)} characters; read_agent_message(") == 3
+  assert len(context) < 3 * PEER_NOTE_CHARS + 10_000
+
+
+def test_turn_delivery_and_send_handle_u0000(client, auth, db):
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  db.add(_stored_note(chats, 0, "stored before refusal\x00 tail", previous_started + timedelta(seconds=1)))
+  db.commit()
+  context = _next_turn_context(db, chats["scout"], "scout-after-nul")
+  assert "stored before refusal\\u0000 tail" in context
+  refused = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [chats["builder"].id], "body": "one\u0000two"},
+  )
+  assert refused.status_code == 422
