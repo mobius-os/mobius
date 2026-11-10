@@ -139,6 +139,20 @@
   overflow-x: auto;
 }
 
+/* The drawn bar under a table that cannot fit (see useTableScrollbar). The
+   padded track is the touch target; the thumb is the visible part. */
+.md-table-scrollbar {
+  padding: 6px 0 4px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.md-table-scrollbar__thumb {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
 .md-table {
   border-collapse: collapse;
   font-size: 13px;
@@ -150,7 +164,7 @@
   padding: 6px 12px;
   border: 1px solid var(--border);
   text-align: left;
-  white-space: nowrap;
+  vertical-align: top;
 }
 
 .md-table th {

@@ -104,39 +104,106 @@ export function CodeBlock({ token }) {
   )
 }
 
+/** A table that cannot fit even with wrapped cells scrolls sideways behind a
+ * drawn bar. Native scrollbars cannot carry it: the shell hides them, and
+ * iOS WebKit never paints styled ones in a page (WebKit bug 198858). */
+function useTableScrollbar() {
+  const scrollRef = useRef(null)
+  const thumbRef = useRef(null)
+  const [overflowing, setOverflowing] = useState(false)
+
+  const sync = () => {
+    const scroller = scrollRef.current
+    const thumb = thumbRef.current
+    if (!scroller || !thumb) return
+    const { clientWidth, scrollWidth, scrollLeft } = scroller
+    thumb.style.width = `${(clientWidth / scrollWidth) * 100}%`
+    thumb.style.transform = `translateX(${(scrollLeft / clientWidth) * 100}%)`
+  }
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || typeof ResizeObserver === 'undefined') return undefined
+    const measure = () => {
+      setOverflowing(scroller.scrollWidth > scroller.clientWidth + 1)
+      sync()
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(scroller)
+    if (scroller.firstElementChild) observer.observe(scroller.firstElementChild)
+    measure()
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(sync, [overflowing])
+
+  // Dragging the bar moves the table by the same proportion as the thumb.
+  const onPointerDown = (event) => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    event.preventDefault()
+    const track = event.currentTarget
+    track.setPointerCapture(event.pointerId)
+    const ratio = scroller.scrollWidth / track.clientWidth
+    let lastX = event.clientX
+    const onMove = (move) => {
+      scroller.scrollLeft += (move.clientX - lastX) * ratio
+      lastX = move.clientX
+    }
+    const onUp = () => {
+      track.removeEventListener('pointermove', onMove)
+      track.removeEventListener('pointerup', onUp)
+      track.removeEventListener('pointercancel', onUp)
+    }
+    track.addEventListener('pointermove', onMove)
+    track.addEventListener('pointerup', onUp)
+    track.addEventListener('pointercancel', onUp)
+  }
+
+  return { scrollRef, thumbRef, overflowing, sync, onPointerDown }
+}
+
 export function Table({ token, onInternalNav, mediaDimensions }) {
+  const bar = useTableScrollbar()
   return (
-    <div className="md-table-wrap">
-      <table className="md-table">
-        <thead>
-          <tr>
-            {token.header.map((cell, i) => (
-              <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
-                <InlineContent
-                  tokens={cell.tokens}
-                  onInternalNav={onInternalNav}
-                  mediaDimensions={mediaDimensions}
-                />
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {token.rows.map((row, i) => (
-            <tr key={i}>
-              {row.map((cell, j) => (
-                <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
+    <div className="md-table-frame">
+      <div className="md-table-wrap" ref={bar.scrollRef} onScroll={bar.sync}>
+        <table className="md-table">
+          <thead>
+            <tr>
+              {token.header.map((cell, i) => (
+                <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
                   <InlineContent
                     tokens={cell.tokens}
                     onInternalNav={onInternalNav}
                     mediaDimensions={mediaDimensions}
                   />
-                </td>
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {token.rows.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => (
+                  <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
+                    <InlineContent
+                      tokens={cell.tokens}
+                      onInternalNav={onInternalNav}
+                      mediaDimensions={mediaDimensions}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {bar.overflowing && (
+        <div className="md-table-scrollbar" aria-hidden="true" onPointerDown={bar.onPointerDown}>
+          <div className="md-table-scrollbar__thumb" ref={bar.thumbRef} />
+        </div>
+      )}
     </div>
   )
 }
