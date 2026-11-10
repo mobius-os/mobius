@@ -422,7 +422,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
-    GoalPlanConflict, GoalPlanError, normalize_tasks, staged_task_edits,
+    GoalPlanConflict, GoalPlanError, normalize_saved_tasks, staged_task_edits,
   )
   # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (
@@ -463,7 +463,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     # a matching result cannot disguise a new mutation of a closed Goal.
     if tasks is not None:
       document = staged_task_edits(goal, tasks)
-      saved = normalize_tasks(goal.plan_json["tasks"]) if goal.plan_json else []
+      saved = normalize_saved_tasks(goal.plan_json["tasks"]) if goal.plan_json else []
       if document["tasks"] != saved:
         raise GoalPlanConflict("A settled Goal checklist cannot change")
     if finished_claims:
@@ -484,7 +484,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     document = staged_task_edits(goal, tasks)
     if status is None and defer is None and next_action is None and checkpoint is None:
       try:
-        saved = normalize_tasks(goal.plan_json["tasks"])
+        saved = normalize_saved_tasks(goal.plan_json["tasks"])
       except (GoalPlanError, KeyError, TypeError):
         saved = None
       if saved == document["tasks"]:
@@ -522,7 +522,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         "Goal plan is unreadable; replace it with a validated plan before settlement"
       )
     try:
-      plan_tasks = normalize_tasks(document["tasks"]) if document is not None else []
+      plan_tasks = normalize_saved_tasks(document["tasks"]) if document is not None else []
     except (GoalPlanError, KeyError, TypeError) as exc:
       raise GoalPlanError("Goal plan is unreadable; replace it with a validated plan before settlement") from exc
     allowed = {"completed", "cancelled"} if status == "completed" else {

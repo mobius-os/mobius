@@ -1707,6 +1707,44 @@ def test_plan_preserves_bounded_input_contract():
     normalize_tasks(tasks)
 
 
+def test_saved_content_beyond_the_caps_is_kept_but_new_content_is_bounded(
+  client, owner_token, db,
+):
+  from app.goal_plans import GoalPlanError, normalize_tasks, replace_plan
+  saved = [{"id": f"t{i}", "title": "Task", "status": "pending", "depends_on": []}
+           for i in range(70)]
+  saved[0].update(title="T" * 2000, note="N" * 2000,
+                  depends_on=[f"t{i}" for i in range(1, 20)])
+  assert normalize_tasks(saved, saved=saved) == saved
+  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
+    normalize_tasks(saved)
+  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
+    normalize_tasks(saved + [{"id": "new", "title": "New"}], saved=saved)
+  with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
+    normalize_tasks([{**saved[0], "depends_on": saved[0]["depends_on"] + ["t20"]}]
+                    + saved[1:], saved=saved)
+  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
+    normalize_tasks([{**saved[0], "note": "M" * 2000}] + saved[1:], saved=saved)
+  # Dropping a task the long list names shortens that list, which is allowed.
+  shorter = normalize_tasks(
+    [{**saved[0], "depends_on": saved[0]["depends_on"][1:]}] + saved[2:], saved=saved)
+  assert shorter[0]["depends_on"] == [f"t{i}" for i in range(2, 20)]
+  # A malformed saved list exempts nothing and stays a plan error.
+  for corrupt in (7, [{"id": "t1"}]):
+    with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
+      normalize_tasks(saved, saved=[{**saved[0], "depends_on": corrupt}] + saved[1:])
+
+  _, _chat_id = _active_goal(client, owner_token, db)
+  run = db.get(models.ChatRun, "goal-root")
+  goal = db.get(models.ChatGoal, "goal-1")
+  goal.plan_json = {"version": 1, "tasks": saved}
+  db.commit()
+  # A replacement may keep saved content and drop tasks, but not add them.
+  kept = replace_plan(db, physical=run, root=goal, expected_revision=goal.revision,
+                      tasks=saved[:-1])
+  assert len(kept["tasks"]) == 69 and kept["tasks"][0]["note"] == "N" * 2000
+
+
 def test_maximum_bounded_dependency_chain_is_valid():
   from app.goal_plans import normalize_tasks
   tasks = [{"id": f"t{i}", "title": "Task", "status": "pending",
@@ -1750,3 +1788,24 @@ def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
   emitted.clear()
   publish_plan_for_delegation(db, direct)
   assert [event["chatId"] for event in emitted] == [owner]
+
+
+def test_over_limit_plan_with_a_non_string_id_is_a_plan_error():
+  from app.goal_plans import GoalPlanError, normalize_tasks
+  saved = [{"id": f"t{i}", "title": "x"} for i in range(70)]
+  raw = [*saved, {"id": ["not", "a", "string"], "title": "x"}]
+  with pytest.raises(GoalPlanError):
+    normalize_tasks(raw, saved=saved)
+
+
+def test_large_saved_plan_validates_in_linear_time():
+  import time
+  from app.goal_plans import normalize_saved_tasks
+  saved = [{"id": "root", "title": "root"}] + [
+    {"id": f"c{i}", "title": "child", "parent_id": "root", "status": "completed"}
+    for i in range(5000)
+  ]
+  started = time.monotonic()
+  normalize_saved_tasks(saved)
+  # The per-task child scan made this about two seconds; linear is far below.
+  assert time.monotonic() - started < 1

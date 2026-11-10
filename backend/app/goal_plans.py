@@ -54,7 +54,9 @@ class GoalPlanConflict(RuntimeError):
   """Another writer advanced the plan revision first."""
 
 
-def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
+def _clean_text(
+  value: Any, *, field: str, maximum: int, required: bool, saved: Any = None,
+) -> str:
   if value is None and not required:
     return ""
   if not isinstance(value, str):
@@ -62,12 +64,14 @@ def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
   cleaned = " ".join(value.split())
   if required and not cleaned:
     raise GoalPlanError(f"{field} must not be empty")
-  if len(cleaned) > maximum:
+  if len(cleaned) > maximum and not (
+    isinstance(saved, str) and cleaned == " ".join(saved.split())
+  ):
     raise GoalPlanError(f"{field} must be at most {maximum} characters")
   return cleaned
 
 
-def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
+def normalize_tasks(raw_tasks: Any, *, saved: Any = None) -> list[dict[str, Any]]:
   """Validate and normalize one complete plan snapshot.
 
   Explicit dependencies and implicit child-before-parent completion edges form
@@ -75,10 +79,22 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   and repeated progress cannot claim completion before its total has
   been reached. Those are orchestration invariants, not UI hints, so every
   write path shares this function.
+
+  ``saved`` is the plan's stored task list. Size limits bound what a write
+  adds or changes; they never reject saved content kept unchanged, which a
+  release with other limits may have written.
   """
+  saved_by_id = {
+    task["id"]: task for task in saved
+    if isinstance(task, dict) and isinstance(task.get("id"), str)
+  } if isinstance(saved, list) else {}
   if not isinstance(raw_tasks, list) or not raw_tasks:
     raise GoalPlanError("a goal plan needs at least one task")
-  if len(raw_tasks) > MAX_TASKS:
+  if len(raw_tasks) > MAX_TASKS and any(
+    not isinstance(raw, dict) or not isinstance(raw.get("id"), str)
+    or raw["id"] not in saved_by_id
+    for raw in raw_tasks
+  ):
     raise GoalPlanError(f"a goal plan supports at most {MAX_TASKS} tasks")
 
   tasks: list[dict[str, Any]] = []
@@ -95,6 +111,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     if task_id in ids:
       raise GoalPlanError(f"duplicate task id: {task_id}")
     ids.add(task_id)
+    before = saved_by_id.get(task_id, {})
     status = raw.get("status", "pending")
     if not isinstance(status, str) or status not in TASK_STATUSES:
       raise GoalPlanError(f"invalid status for {task_id}: {status}")
@@ -104,7 +121,12 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     ):
       raise GoalPlanError(f"depends_on for {task_id} must be a list of ids")
     depends_on = list(dict.fromkeys(depends_on))
-    if len(depends_on) > MAX_DEPENDENCIES:
+    # Keeping or shortening a saved list never grows it; only additions count.
+    saved_dependencies = before.get("depends_on")
+    if len(depends_on) > MAX_DEPENDENCIES and not (
+      isinstance(saved_dependencies, list)
+      and set(depends_on) <= {d for d in saved_dependencies if isinstance(d, str)}
+    ):
       raise GoalPlanError(
         f"{task_id} supports at most {MAX_DEPENDENCIES} dependencies"
       )
@@ -128,7 +150,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       "id": task_id,
       "title": _clean_text(
         raw.get("title"), field=f"title for {task_id}",
-        maximum=MAX_TITLE, required=True,
+        maximum=MAX_TITLE, required=True, saved=before.get("title"),
       ),
       "status": status,
       "depends_on": depends_on,
@@ -141,19 +163,19 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     completion_condition = _clean_text(
       raw.get("completion_condition"),
       field=f"completion_condition for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      maximum=MAX_NOTE, required=False, saved=before.get("completion_condition"),
     )
     if completion_condition:
       task["completion_condition"] = completion_condition
     note = _clean_text(
       raw.get("note"), field=f"note for {task_id}",
-      maximum=MAX_NOTE, required=False,
+      maximum=MAX_NOTE, required=False, saved=before.get("note"),
     )
     if note:
       task["note"] = note
     result = _clean_text(
       raw.get("result"), field=f"result for {task_id}",
-      maximum=MAX_RESULT, required=False,
+      maximum=MAX_RESULT, required=False, saved=before.get("result"),
     )
     if result:
       task["result"] = result
@@ -221,19 +243,21 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     return list(dict.fromkeys(dependencies))
 
   for task in tasks:
-    incomplete = [
-      dependency for dependency in effective_dependencies(task["id"])
-      if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] in {"running", "completed"} and incomplete:
-      raise GoalPlanError(
-        f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {', '.join(incomplete)}"
-      )
+    # Only running and completed tasks need settled dependencies, so the
+    # parent-chain walk is skipped for the rest of a large saved plan.
+    if task["status"] in {"running", "completed"}:
+      incomplete = [
+        dependency for dependency in effective_dependencies(task["id"])
+        if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
+      ]
+      if incomplete:
+        raise GoalPlanError(
+          f"{task['id']} cannot be {task['status']} until these dependencies "
+          f"complete: {', '.join(incomplete)}"
+        )
     unfinished_children = [
-      child["id"] for child in tasks
-      if child.get("parent_id") == task["id"]
-      and child["status"] not in SETTLED_TASK_STATUSES
+      child_id for child_id in children_by_parent.get(task["id"], [])
+      if by_id[child_id]["status"] not in SETTLED_TASK_STATUSES
     ]
     if task["status"] == "completed" and unfinished_children:
       raise GoalPlanError(
@@ -252,6 +276,11 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
         current=progress["current"], total=progress["total"],
       )
   return tasks
+
+
+def normalize_saved_tasks(saved: Any) -> list[dict[str, Any]]:
+  """Validate a stored plan without re-applying size limits to it."""
+  return normalize_tasks(saved, saved=saved)
 
 
 def _goal_rows_for_physical(
@@ -684,7 +713,7 @@ def serialize_plan(
   if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
     return None
   try:
-    tasks = normalize_tasks(deepcopy(raw["tasks"]))
+    tasks = normalize_saved_tasks(deepcopy(raw["tasks"]))
   except GoalPlanError:
     return None
   by_id = {task["id"]: task for task in tasks}
@@ -1112,15 +1141,15 @@ def replace_plan(
   expected_revision: int,
   tasks: Any,
 ) -> dict[str, Any]:
-  normalized = normalize_tasks(tasks)
   current_tasks = (
     root.plan_json.get("tasks")
     if isinstance(root.plan_json, dict)
     and isinstance(root.plan_json.get("tasks"), list)
     else None
   )
+  normalized = normalize_tasks(tasks, saved=current_tasks)
   try:
-    current_normalized = normalize_tasks(current_tasks)
+    current_normalized = normalize_saved_tasks(current_tasks)
   except GoalPlanError:
     # An invalid saved plan cannot be an identical no-op, but a fully
     # validated replacement must still be able to repair it.
@@ -1196,7 +1225,7 @@ def staged_task_edits(root: models.ChatGoal, edits: list[dict[str, Any]]) -> dic
       tasks.append(target)
       by_id[edit["id"]] = target
     target.update({key: value for key, value in edit.items() if key != "id"})
-  normalized = normalize_tasks(tasks)
+  normalized = normalize_tasks(tasks, saved=saved)
   return {"version": 1, "updated_at": datetime.now(UTC).isoformat(), "tasks": normalized}
 
 
@@ -1215,7 +1244,7 @@ def stage_helper_task_edits(assignment: GoalAssignment, edits: list[dict[str, An
   goal, branch = assignment.goal, assignment.plan_task
   if goal.status != "open" or branch is None or assignment.plan_task_missing:
     raise GoalPlanError("An open Goal and an assigned checklist task are required")
-  before = {task["id"]: task for task in normalize_tasks(goal.plan_json["tasks"])}
+  before = {task["id"]: task for task in normalize_saved_tasks(goal.plan_json["tasks"])}
   parents = {key: task.get("parent_id") for key, task in before.items()}
   current = branch
   while current is not None:
