@@ -1719,6 +1719,7 @@
     "finish_it",
     "back_to_draft",
     "ask_rereview",
+    "ask_approval",
     "close"
    ]
   },
@@ -1790,12 +1791,13 @@
     "readComplete": true,
     "role": "author"
    },
-   "state": "author.waiting_review",
-   "next": "",
+   "state": "author.commented",
+   "next": "ask_approval",
    "enabled": [
     "check_my_pr",
     "finish_it",
     "back_to_draft",
+    "ask_approval",
     "close"
    ]
   },
@@ -1926,6 +1928,208 @@
    "state": "closed",
    "next": "",
    "enabled": []
+  },
+  {
+   "name": "Someone commented on this version, and nothing else stands, with an answer owed (the comment is feedback)",
+   "rule": "comment feedback",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 1,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.feedback",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone commented on this version, and another person approved it",
+   "rule": "comment without approval",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     },
+     {
+      "by": "kim",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved",
+   "next": "merge",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone commented on this version and their approval is of an older one",
+   "rule": "comment without approval",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": false
+     },
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.commented",
+   "next": "ask_approval",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone commented on this version, and checks fail",
+   "rule": "comment without approval",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "fail",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.blocked",
+   "next": "respond",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "close"
+   ]
+  },
+  {
+   "name": "Someone commented on this version, and a bot commented too",
+   "rule": "comment without approval",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": false
+     },
+     {
+      "by": "qa-bot",
+      "state": "COMMENTED",
+      "commit": "h2",
+      "bot": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.commented",
+   "next": "ask_approval",
+   "enabled": [
+    "check_my_pr",
+    "finish_it",
+    "back_to_draft",
+    "ask_approval",
+    "close"
+   ]
   }
  ]
 }

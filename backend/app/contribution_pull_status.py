@@ -135,11 +135,11 @@ def _rereview_only(facts: dict, pull: dict, body) -> None:
 
 
 def _approval_note_check(facts: dict, pull: dict, body) -> None:
-  looked_again = machine.decide(facts)["looked_again"]
-  allowed = {login.lower() for login in looked_again}
+  approval_from = machine.decide(facts)["approval_from"]
+  allowed = {login.lower() for login in approval_from}
   if any(login.lower() not in allowed for login in body.people):
-    raise HTTPException(409, "Ask only people who looked again without approving: "
-                             f"{', '.join(looked_again) or 'nobody'}.")
+    raise HTTPException(409, "Ask only people who commented without approving: "
+                             f"{', '.join(approval_from) or 'nobody'}.")
   asked = {login.lower() for login in body.people}
   if any(mention.lower() not in asked for mention in MENTION.findall(body.note)):
     raise HTTPException(409, "The note may only name the people asked.")

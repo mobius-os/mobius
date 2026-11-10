@@ -42,15 +42,35 @@ def test_asking_someone_to_look_again_is_for_people_who_have_not_looked_past_the
   assert action(looked, "ask_rereview")["reason"] == "They already looked at this version. Ask them to approve."
   not_yet = machine.decide(facts([CHANGES]))
   assert not_yet["rereview_from"] == ["sam"]
-  assert action(not_yet, "ask_approval")["reason"] == "Nobody has looked again without approving."
+  assert action(not_yet, "ask_approval")["reason"] == "Nobody has commented without approving."
   assert action(not_yet, "ask_approval")["title"] == "Ask for approval"
   mixed = machine.decide(facts([CHANGES, comment("h2"), {**approval(), "by": "kim", "sameWork": False}]))
   assert (mixed["looked_again"], mixed["rereview_from"]) == (["sam"], ["kim"])
 
 
+def test_anyone_who_only_commented_on_this_version_can_be_asked_to_approve_whether_or_not_they_hold_a_request():
+  commented = machine.decide(facts([comment("h2")]))
+  assert commented["state"] == "author.commented"
+  assert (commented["looked_again"], commented["approval_from"]) == ([], ["sam"])
+  assert commented["headline"] == "Your PR · sam left a comment but hasn’t approved. Ask for their approval"
+  assert action(commented, "ask_approval")["title"] == "Ask sam to approve"
+  assert next(item["id"] for item in commented["actions"] if item["highlighted"]) == "ask_approval"
+  holding = machine.decide(facts([CHANGES, comment("h2"), comment("h2", by="kim")]))
+  assert (holding["state"], holding["looked_again"], holding["approval_from"]) == (
+    "author.looked_again", ["sam"], ["sam", "kim"])
+  older = machine.decide(facts([approval(sameWork=False), comment("h2")]))
+  assert (older["state"], older["rereview_from"]) == ("author.commented", [])
+  other_approved = machine.decide(facts([comment("h2"), {**approval(commit="h2"), "by": "kim"}]))
+  assert other_approved["state"] == "author.approved"
+  owed = machine.decide(facts([comment("h2")], openThreads=1))
+  assert owed["state"] == "author.feedback"
+  assert action(owed, "ask_approval")["enabled"] is True
+  assert machine.decide(facts([comment("h2", bot=True)]))["state"] == "author.waiting_review"
+
+
 def test_a_comment_never_approves_and_one_from_a_bot_or_from_nobody_holding_a_request_changes_nothing():
   assert action(machine.decide(facts([comment("h2")])), "merge")["enabled"] is False
-  assert machine.decide(facts([comment("h2")]))["state"] == "author.waiting_review"
+  assert machine.decide(facts([comment("h2")]))["state"] == "author.commented"
   assert machine.decide(facts([CHANGES, comment("h2", by="kim")]))["state"] == "author.waiting_rereview"
   assert machine.decide(facts([CHANGES, comment("h2", bot=True)]))["state"] == "author.waiting_rereview"
   assert machine.decide(facts([CHANGES, comment("h1")]))["state"] == "author.waiting_rereview"
