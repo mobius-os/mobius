@@ -33,6 +33,7 @@ The rules, in plain words:
     confirmed. An action tied to a thing waits for that thing (a draft to send, a
     person to ask, a result to set aside). Asking works for anyone who reviewed or commented
     and has not approved this version; the sheet ticks the people each ask is meant for.
+    Request review is the one ask that waits for nobody: it names anyone, reviewed or not.
     Taking over someone else's PR stays for maintainers: it is Contribute's own rule,
     GitHub would let any writer push.
   - Only new commits bring their PR back for re-review; replies never do. A
@@ -393,6 +394,11 @@ def _ask_stops(facts: dict, d: dict) -> str:
   return _first_reason(_readable(facts), _still_open(facts), "" if d["askable"] else nobody)
 
 
+def _request_stops(facts: dict, d: dict) -> str:
+  """Request review asks anyone to review, so unlike the Ask actions it never waits for someone to have reviewed first."""
+  return _first_reason(_readable(facts), _still_open(facts))
+
+
 def _ask_approval_title(d: dict) -> str:
   return f"Ask {', '.join(d['approval_from'])} to approve" if d["approval_from"] else "Ask for approval"
 
@@ -429,6 +435,8 @@ ACTIONS = (
   Action("set_aside", "you", BOTH, "Set aside…", _set_aside_guard),
   Action("open_for_review", "you", ("author",), "Open for review", _status_stops),
   Action("back_to_draft", "you", ("author",), "Back to draft", _status_stops),
+  Action("request_review", "you", ("author",), "Request review", _request_stops,
+         "Asks the people you pick to review it on GitHub."),
   Action("ask_rereview", "you", ("author",), "Ask for re-review", _ask_stops),
   Action("ask_approval", "you", ("author",), _ask_approval_title, _ask_stops,
          "Posts one short note on the PR."),

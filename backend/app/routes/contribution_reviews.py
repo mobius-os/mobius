@@ -49,7 +49,8 @@ REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True}
+                       "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
+                       "pr_machine": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -1282,6 +1283,14 @@ async def close_pull_now(app_id: int, body: PullStatusChange, db: Session = Depe
                          principal: Principal = Depends(get_principal)):
   """The owner's own Close, unmerged (close): their own PR, or one they can write to."""
   return await _owner_status_change(app_id, "close", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/request-review",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def request_review_now(app_id: int, body: ReviewerRequest, db: Session = Depends(get_db),
+                             principal: Principal = Depends(get_principal)):
+  """The owner's own Request review (request_review): GitHub's review request to people they pick, who need not have reviewed."""
+  return await _owner_status_change(app_id, "request-review", body, db, principal)
 
 
 @router.post(APP_PREFIX + "/{app_id}/pulls/request-reviewers",

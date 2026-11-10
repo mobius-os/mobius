@@ -1,4 +1,4 @@
-"""The owner's own Open for review, Back to draft, Close, Ask for re-review and Ask for approval:
+"""The owner's own Open for review, Back to draft, Close, Request review, Ask for re-review and Ask for approval:
 owner-only, asked of the PR machine on GitHub's live answer, and never repeated when unconfirmed."""
 import asyncio
 import json
@@ -164,6 +164,33 @@ def test_ask_for_rereview_is_for_anyone_who_reviewed_and_has_not_approved_this_v
   assert refused(current, "request-reviewers", asking(["sam"])) == (409, "Everyone who reviewed it has already approved this version.")
 
 
+def test_request_review_asks_anyone_even_a_person_who_never_reviewed():
+  github = StatusGitHub()
+  github.reviews = []  # nobody has reviewed this pull request yet: Ask for re-review would have no one to name
+  assert change(github, "request-review", asking(["Sam", "bob"]))["state"] == "requested"
+  assert github.writes_seen == [("reviewers", ["Sam", "bob"])]
+  draft = StatusGitHub(draft=True)
+  draft.reviews = []
+  assert change(draft, "request-review", asking(["sam"]))["state"] == "requested", "a draft can ask early"
+
+
+def test_request_review_refuses_the_author_and_whoever_already_approved_this_version():
+  github = StatusGitHub()
+  assert github.reviews == [APPROVAL], "sam approved this version"
+  assert refused(github, "request-review", asking(["Alex"])) == (409, "The author of a pull request cannot be asked to review it.")
+  assert refused(github, "request-review", asking(["bob", "sam"])) == (
+    409, "Someone who already approved this version cannot be asked again.")
+  assert change(github, "request-review", asking(["bob"]))["state"] == "requested", "the others can still be asked"
+  assert github.writes_seen == [("reviewers", ["bob"])]
+
+
+def test_request_review_is_refused_on_a_pull_request_that_is_no_longer_open():
+  github = StatusGitHub()
+  github.pull = {**github.pull, "state": "closed"}
+  status, reason = refused(github, "request-review", asking(["sam"]))
+  assert status == 409 and reason == "This PR is no longer open." and github.writes_seen == []
+
+
 def test_ask_for_approval_posts_one_note_to_people_who_looked_again_without_approving():
   github = looked_again()
   note = "@Sam thank you for coming back. Could you approve this now?"
@@ -300,12 +327,13 @@ def test_an_unreadable_review_list_refuses_a_status_change_in_the_machines_words
   ("draft", "convertPullRequestToDraft", "draft_unconfirmed"),
   ("close", "close", "close_unconfirmed"),
   ("request-reviewers", "reviewers", "reviewers_unconfirmed"),
+  ("request-review", "reviewers", "reviewers_unconfirmed"),
 ])
 def test_an_unconfirmed_write_is_a_502_with_its_code_and_is_never_retried(name, write, code):
   github = StatusGitHub(draft=name == "ready")
   github.reviews = [{**APPROVAL, "commit": {"oid": OLDER}}]
   github.answers[write] = "not json"
-  request = asking(["sam"]) if name == "request-reviewers" else None
+  request = asking(["sam"]) if name.startswith("request-review") else None
   status, detail = refused(github, name, request)
   assert status == 502 and detail["code"] == code and "Check the pull request" in detail["message"]
   assert len(github.writes_seen) == 1
@@ -328,7 +356,8 @@ def test_status_routes_are_not_taken_by_a_contribution_record_named_pulls():
   from starlette.routing import Match
   from app.main import app
   endpoints = {"ready": routes.mark_pull_ready_now, "draft": routes.back_to_draft_now,
-               "close": routes.close_pull_now, "request-reviewers": routes.request_rereview_now,
+               "close": routes.close_pull_now, "request-review": routes.request_review_now,
+               "request-reviewers": routes.request_rereview_now,
                "ask-approval": routes.ask_approval_now}
   for name, endpoint in endpoints.items():
     scope = {"type": "http", "method": "POST", "path": f"/api/github/contributions/1/pulls/{name}", "root_path": ""}

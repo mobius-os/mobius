@@ -1,7 +1,7 @@
 """The owner's own status changes on one pull request, at the version they saw.
 
-Open for review, back to draft, close, ask for re-review, and ask for approval:
-each is a tap in Contribute behind its confirm sheet. As with Merge now
+Open for review, back to draft, close, request review, ask for re-review, and ask
+for approval: each is a tap in Contribute behind its confirm sheet. As with Merge now
 (contribution_direct_merge) there is no run, agent or stored consent: the
 owner's tap is the authority. GitHub is read again right before the one
 write, and the PR machine is asked on those facts, so the refusal is the
@@ -138,6 +138,19 @@ def _rereview_only(facts: dict, pull: dict, body) -> None:
   _ask_only_askable(body.reviewers, facts)
 
 
+def _request_check(facts: dict, pull: dict, body) -> None:
+  """Anyone may be asked to review, except the author and anyone who already approved this version.
+
+  Whether a login is a person who can review is GitHub's to answer: it refuses a bot or a non-collaborator with a 422.
+  """
+  author = str(facts.get("author") or "").lower()
+  approved = {name.lower() for name in machine.decide(facts)["approved_by"]}
+  if any(login.lower() == author for login in body.reviewers):
+    raise HTTPException(409, "The author of a pull request cannot be asked to review it.")
+  if any(login.lower() in approved for login in body.reviewers):
+    raise HTTPException(409, "Someone who already approved this version cannot be asked again.")
+
+
 def _approval_note_check(facts: dict, pull: dict, body) -> None:
   _ask_only_askable(body.people, facts)
   asked = {login.lower() for login in body.people}
@@ -188,6 +201,8 @@ CHANGES = {
   "draft": StatusChange("back_to_draft", "draft", convert_to_draft,
                         _unconfirmed("draft_unconfirmed", "turned it back into a draft"), already=_is_draft),
   "close": StatusChange("close", "closed", close_pull, _unconfirmed("close_unconfirmed", "closed it")),
+  "request-review": StatusChange("request_review", "requested", request_reviewers,
+                                 _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _request_check),
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
   "ask-approval": StatusChange("ask_approval", "asked", post_note,
@@ -262,7 +277,7 @@ async def change_pull_status(gh, cwd, name: str, body, authorize, job: dict | No
   """Apply one owner status change (a key of CHANGES) to the exact pull request named, once.
 
   `body` carries repo, number and head_sha (and reviewers for
-  request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
+  request-review and request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
   authority no longer stands; it runs before any GitHub call and again right
   before the write. `job` is the agent job a review run holds on this PR.
   Raises HTTPException: 404 when GitHub cannot be read, 409 for a refusal
