@@ -57,6 +57,15 @@ test('a receipt joins every stored row of its send by send id, whatever the bodi
   assert.deepEqual(result.tools.get('tool').map(row => row.id), ['a', 'b', 'c'])
   assert.equal(result.slots.get(1)[0].id, 'other')
 })
+test('the same agent-chosen send id in two runs joins each card to its own rows', () => {
+  const sent = (id, ts, body) => note(id, ts, { send_id: 'status', sender_chat_id: 'chat', recipient_chat_id: 'peer', recipient_name: 'Other agent', body })
+  const first = { tool_use_id: 'first', peer_message: { status: 'sent', body: 'Run one', count: 1, peers: ['Other agent'], send_id: 'status' } }
+  const second = { tool_use_id: 'second', peer_message: { status: 'sent', body: 'Run two', count: 1, peers: ['Other agent'], send_id: 'status' } }
+  const messages = [{ ts: 1000, blocks: [first] }, { ts: 3000, blocks: [second] }, { ts: 5000 }]
+  const result = projectPeerTimeline(messages, [sent('one', 1500, 'Run one'), sent('two', 3500, 'Run two')], 'chat')
+  assert.deepEqual(result.tools.get('first').map(row => row.id), ['one'])
+  assert.deepEqual(result.tools.get('second').map(row => row.id), ['two'])
+})
 test('same body to another recipient or in another turn is not swallowed', () => {
   const sent = note('sent', 1500, { sender_chat_id: 'chat', recipient_name: 'Different agent' })
   const tool = { tool_use_id: 'tool', peer_message: { status: 'sent', body: sent.body, peers: ['Other agent'] } }

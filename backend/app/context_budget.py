@@ -9,6 +9,8 @@ naming the paged read. The Goal objective was never capped (an owner's /goal
 is not) and is shown whole, as before.
 """
 
+import re
+
 TITLE_CHARS = 160
 # A task's note, result and completion condition.
 TEXT_CHARS = 1_000
@@ -68,6 +70,14 @@ def text_page(text: str, offset: int = 0, budget: int = READ_PAGE_BYTES) -> dict
     "text": text[offset:end], "offset": offset, "total_chars": len(text),
     "next_offset": end if end < len(text) else None,
   }
+
+
+_EXCERPT_MARKER = re.compile(r"… \[excerpt: \d+ of \d+ characters; [^\]]*\]$")
+
+
+def without_excerpt_marker(text: str) -> str:
+  """An excerpt's head ending in "…", for a reader its marker's read is not for."""
+  return _EXCERPT_MARKER.sub("…", text)
 
 
 def excerpt(text: str, limit: int, read_full: str, *, total: int | None = None) -> str:

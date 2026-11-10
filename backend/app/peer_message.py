@@ -10,10 +10,9 @@ but next-turn context is now the only inbound delivery path.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-from app.context_budget import PEER_NOTE_CHARS
+from app.context_budget import PEER_NOTE_CHARS, without_excerpt_marker
 from app.agent_coordination import (
   MESSAGE_DELIVERIES as _DELIVERIES,
   MESSAGE_KINDS as _KINDS,
@@ -31,7 +30,6 @@ MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
 # share with turn context. A longer note's receipt carries the agents' marked
 # excerpt and truncated=true; the card drops the agent-facing marker and
 # labels the excerpt for the owner (its marker's body_truncated) instead.
-_AGENT_EXCERPT_MARKER = re.compile(r"… \[excerpt: \d+ of \d+ characters; [^\]]*\]$")
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.
 MAX_COMPACTION_BODY_CHARS = 400
@@ -211,7 +209,7 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
       continue
     truncated = bool(message.get("truncated"))
     if truncated:
-      body = _AGENT_EXCERPT_MARKER.sub("…", body)
+      body = without_excerpt_marker(body)
     rows.append({
       **message, "body": body,
       "body_truncated": truncated or len(stripped) > PEER_NOTE_CHARS,
