@@ -1707,6 +1707,36 @@ def test_plan_preserves_bounded_input_contract():
     normalize_tasks(tasks)
 
 
+def test_saved_content_beyond_the_caps_is_kept_but_new_content_is_bounded(
+  client, owner_token, db,
+):
+  from app.goal_plans import GoalPlanError, normalize_tasks, replace_plan
+  saved = [{"id": f"t{i}", "title": "Task", "status": "pending", "depends_on": []}
+           for i in range(70)]
+  saved[0].update(title="T" * 2000, note="N" * 2000,
+                  depends_on=[f"t{i}" for i in range(1, 20)])
+  assert normalize_tasks(saved, saved=saved) == saved
+  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
+    normalize_tasks(saved)
+  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
+    normalize_tasks(saved + [{"id": "new", "title": "New"}], saved=saved)
+  with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
+    normalize_tasks([{**saved[0], "depends_on": saved[0]["depends_on"] + ["t20"]}]
+                    + saved[1:], saved=saved)
+  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
+    normalize_tasks([{**saved[0], "note": "M" * 2000}] + saved[1:], saved=saved)
+
+  _, _chat_id = _active_goal(client, owner_token, db)
+  run = db.get(models.ChatRun, "goal-root")
+  goal = db.get(models.ChatGoal, "goal-1")
+  goal.plan_json = {"version": 1, "tasks": saved}
+  db.commit()
+  # A replacement may keep saved content and drop tasks, but not add them.
+  kept = replace_plan(db, physical=run, root=goal, expected_revision=goal.revision,
+                      tasks=saved[:-1])
+  assert len(kept["tasks"]) == 69 and kept["tasks"][0]["note"] == "N" * 2000
+
+
 def test_maximum_bounded_dependency_chain_is_valid():
   from app.goal_plans import normalize_tasks
   tasks = [{"id": f"t{i}", "title": "Task", "status": "pending",
