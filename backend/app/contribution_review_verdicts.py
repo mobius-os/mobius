@@ -39,9 +39,13 @@ def _sha256(text: str) -> str:
 def propose(outcome, target) -> dict:
   """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
   event = EVENTS[outcome["state"]]
-  body = public.review_comment_body(outcome, event=event)
-  comment_body = public.review_comment_body(outcome, event="COMMENT")
-  return {"id": uuid.uuid4().hex, "state": "proposed", "event": event, "body": body,
+  proposal_id = uuid.uuid4().hex
+  # The marker is part of the frozen wording: GitHub's body limit is applied to
+  # exactly what will be posted, so submitting can never overflow it.
+  marker = f"<!-- mobius-review:{proposal_id} -->"
+  body = public.review_comment_body(outcome, marker=marker, event=event)
+  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT")
+  return {"id": proposal_id, "state": "proposed", "event": event, "marker": marker, "body": body,
           "body_sha256": _sha256(body), "comment_body": comment_body, "comment_body_sha256": _sha256(comment_body),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
           "proposed_at": reviews.utc_now_iso()}
@@ -66,7 +70,7 @@ def _settle(db, row, item_key, proposal_id, fields):
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
-def _arm(db, row, item_key, proposal_id, marker, authorize, event=None):
+def _arm(db, row, item_key, proposal_id, authorize, event=None):
   """Reserve the one dispatch for this proposal, fenced across grants."""
   fence_owner(db, row.owner_id)
   try:
@@ -94,7 +98,7 @@ def _arm(db, row, item_key, proposal_id, marker, authorize, event=None):
     db.rollback()
     raise
   current = row.outcomes_json[item_key]
-  armed = {**current, "verdict_proposal": {**saved, **sent_as, "state": "posting", "marker": marker,
+  armed = {**current, "verdict_proposal": {**saved, **sent_as, "state": "posting",
                                            "submitted_at": reviews.utc_now_iso()}}
   if not reviews._cas_outcome(db, row, item_key, armed):
     raise HTTPException(409, "This review changed. Refresh before submitting.")
@@ -112,27 +116,16 @@ def _preflight(gh, cwd, row, target):
     raise HTTPException(409, "GitHub does not allow a verdict on your own pull request. Nothing was posted.")
 
 
-async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
-  """Post the submitted proposal once, as proposed or (event COMMENT) as its plain comment.
+async def _prove_target(gh, cwd, row, target):
+  """Read-only proof of actor, open PR, exact head and authorship; a failed read proves non-dispatch."""
+  try:
+    await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
+  except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
+    raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
 
-  Returns its settled receipt; its ``event`` is what was actually sent.
-  """
-  async with _github_connection_transaction():
-    try:
-      await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
-    except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
-      raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
-    marker = f"<!-- mobius-review:{uuid.uuid4().hex} -->"
-    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      armed = _arm(db, row, item_key, proposal_id, marker, authorize, event)
-    try:
-      authorize()
-    except HTTPException as exc:
-      _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
-      raise
-    wording = armed["comment_body"] if armed["event"] == "COMMENT" else armed["body"]
-    body = f"{wording}\n\n{marker}"
-    result = await settled.run_settled(public.post_review, gh, cwd, target, body, armed["event"])
+
+def _persist_result(db, row, item_key, proposal_id, result):
+  """Record what the dispatch returned: the proposal leaves `posting` only here."""
   fields = {"state": {"confirmed": "posted", "unknown": "unknown", "not_dispatched": "not_dispatched"}[result.state]}
   receipt = result.receipt or {}
   # The proposal id is its identity; GitHub's review id is a separate fact.
@@ -140,6 +133,39 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, 
   if result.reason:
     fields["summary"] = result.reason
   _settle(db, row, item_key, proposal_id, fields)
+
+
+async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
+  """Post the owner-submitted proposal once, as proposed or (event COMMENT) as its plain comment.
+
+  Returns its settled receipt; its ``event`` is what was actually sent.
+  """
+  async with _github_connection_transaction():
+    await _prove_target(gh, cwd, row, target)
+    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+      armed = _arm(db, row, item_key, proposal_id, authorize, event)
+      # Admission and the reservation's database fence can both wait, so the
+      # proof above may be stale. Repeat it now that the dispatch is reserved;
+      # anything that ends before the post is a definite non-dispatch.
+      try:
+        await _prove_target(gh, cwd, row, target)
+      except BaseException as exc:
+        summary = str(exc.detail) if isinstance(exc, HTTPException) else "The request ended before anything was posted."
+        _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": summary})
+        raise
+    try:
+      authorize()
+    except HTTPException as exc:
+      _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
+      raise
+    # Both wordings carry the proposal's marker, frozen when it was proposed.
+    wording = armed["comment_body"] if armed["event"] == "COMMENT" else armed["body"]
+    # A caller cancelled during the post still records what GitHub answered.
+    result = await settled.settle(
+      asyncio.to_thread(public.post_review, gh, cwd, target, wording, armed["event"]),
+      what="Verdict dispatch",
+      abandoned=lambda task: _persist_result(db, row, item_key, proposal_id, task.result()))
+  _persist_result(db, row, item_key, proposal_id, result)
   db.refresh(row)
   return row.outcomes_json[item_key]["verdict_proposal"]
 
