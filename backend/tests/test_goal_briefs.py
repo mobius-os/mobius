@@ -950,6 +950,22 @@ def test_a_plan_valid_under_the_old_caps_shows_exactly_as_before(role):
   assert json_block_data(brief) == before
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_step_after_step_chain_at_the_old_task_cap_shows_whole(role, nested):
+  # Each step depends on the one before, so its children are also prerequisites
+  # of their siblings: one task listed twice costs one entry of the budget.
+  parent = "group" if nested else None
+  tasks = [_task("group", status="running")] if nested else []
+  tasks += [_task(f"s{i:02d}", parent, depends_on=[f"s{i - 1:02d}"] if i else [])
+            for i in range(64 - len(tasks))]
+  goal = _goal(normalize_tasks(tasks))
+  focus = "group" if nested else None
+  projection = project_goal(goal, focus, role=role)
+  assert len(projection["children"]) + len(projection.get("dependencies", [])) > 64
+  assert fit_brief(project_goal(goal, focus, role=role), focus, role=role) == projection
+
+
 def test_longer_texts_and_lists_show_within_the_old_caps_with_a_pointer():
   long = "L" * 50_000
   tasks = [_task(f"d{i:02d}", status="completed", result=long) for i in range(30)]

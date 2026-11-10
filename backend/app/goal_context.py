@@ -215,15 +215,25 @@ def fit_brief(payload, task_id, *, role="coordinator"):
     clip(payload["hold"], "reason", NEXT_ACTION_CHARS, f"{goal_read} shows it whole")
   if "task" in payload:
     clip_task(payload["task"])
+  # The budget counts distinct tasks: one listed both as a child and as a
+  # prerequisite (any step-after-step chain) costs one entry, not two.
   room = LIST_ITEMS
+  counted = set()
   for key in _BRIEF_LISTS:
     entries = payload.get(key)
     if not entries:
       continue
-    # The nearest ancestors constrain the focus most.
-    kept = [dict(entry) for entry in (
-      entries[len(entries) - room:] if key == "ancestors" and room else entries[:room])]
-    room -= len(kept)
+    # The nearest ancestors constrain the focus most, so they are kept first.
+    kept = []
+    for entry in (reversed(entries) if key == "ancestors" else entries):
+      if entry["id"] not in counted:
+        if not room:
+          continue
+        counted.add(entry["id"])
+        room -= 1
+      kept.append(dict(entry))
+    if key == "ancestors":
+      kept.reverse()
     for entry in kept:
       clip_task(entry)
     payload[key] = kept
