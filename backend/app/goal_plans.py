@@ -91,7 +91,8 @@ def normalize_tasks(raw_tasks: Any, *, saved: Any = None) -> list[dict[str, Any]
   if not isinstance(raw_tasks, list) or not raw_tasks:
     raise GoalPlanError("a goal plan needs at least one task")
   if len(raw_tasks) > MAX_TASKS and any(
-    not isinstance(raw, dict) or raw.get("id") not in saved_by_id
+    not isinstance(raw, dict) or not isinstance(raw.get("id"), str)
+    or raw["id"] not in saved_by_id
     for raw in raw_tasks
   ):
     raise GoalPlanError(f"a goal plan supports at most {MAX_TASKS} tasks")
@@ -237,19 +238,21 @@ def normalize_tasks(raw_tasks: Any, *, saved: Any = None) -> list[dict[str, Any]
     return list(dict.fromkeys(dependencies))
 
   for task in tasks:
-    incomplete = [
-      dependency for dependency in effective_dependencies(task["id"])
-      if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
-    ]
-    if task["status"] in {"running", "completed"} and incomplete:
-      raise GoalPlanError(
-        f"{task['id']} cannot be {task['status']} until these dependencies "
-        f"complete: {', '.join(incomplete)}"
-      )
+    # Only running and completed tasks need settled dependencies, so the
+    # parent-chain walk is skipped for the rest of a large saved plan.
+    if task["status"] in {"running", "completed"}:
+      incomplete = [
+        dependency for dependency in effective_dependencies(task["id"])
+        if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
+      ]
+      if incomplete:
+        raise GoalPlanError(
+          f"{task['id']} cannot be {task['status']} until these dependencies "
+          f"complete: {', '.join(incomplete)}"
+        )
     unfinished_children = [
-      child["id"] for child in tasks
-      if child.get("parent_id") == task["id"]
-      and child["status"] not in SETTLED_TASK_STATUSES
+      child_id for child_id in children_by_parent.get(task["id"], [])
+      if by_id[child_id]["status"] not in SETTLED_TASK_STATUSES
     ]
     if task["status"] == "completed" and unfinished_children:
       raise GoalPlanError(

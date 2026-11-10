@@ -1780,3 +1780,24 @@ def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
   emitted.clear()
   publish_plan_for_delegation(db, direct)
   assert [event["chatId"] for event in emitted] == [owner]
+
+
+def test_over_limit_plan_with_a_non_string_id_is_a_plan_error():
+  from app.goal_plans import GoalPlanError, normalize_tasks
+  saved = [{"id": f"t{i}", "title": "x"} for i in range(70)]
+  raw = [*saved, {"id": ["not", "a", "string"], "title": "x"}]
+  with pytest.raises(GoalPlanError):
+    normalize_tasks(raw, saved=saved)
+
+
+def test_large_saved_plan_validates_in_linear_time():
+  import time
+  from app.goal_plans import normalize_saved_tasks
+  saved = [{"id": "root", "title": "root"}] + [
+    {"id": f"c{i}", "title": "child", "parent_id": "root", "status": "completed"}
+    for i in range(5000)
+  ]
+  started = time.monotonic()
+  normalize_saved_tasks(saved)
+  # The per-task child scan made this about two seconds; linear is far below.
+  assert time.monotonic() - started < 1
