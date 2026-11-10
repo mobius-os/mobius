@@ -222,9 +222,6 @@ _SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
 # approval and readiness checks; platform_tools.py is stdlib-only.
 _PLATFORM_TOOLS = _helper_module("../app/platform_tools.py", "mobius_platform_tools")
 _CONTEXT_BUDGET = _helper_module("../app/context_budget.py", "mobius_context_budget")
-# A change's reply echoes at most this much of one text and this many ids.
-_REPLY_TEXT_CHARS = 4_000
-_REPLY_IDS = 50
 
 
 def _promote_goal(objective: str) -> dict:
@@ -581,14 +578,14 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
   names the full report instead.
   """
   def ids(values: list[str]) -> str:
-    if full or len(values) <= _REPLY_IDS:
+    if full or len(values) <= _CONTEXT_BUDGET.REPLY_IDS:
       return ", ".join(values)
-    return (", ".join(values[:_REPLY_IDS])
-            + f" and {len(values) - _REPLY_IDS} more (update_goal with no arguments lists them all)")
+    return (", ".join(values[:_CONTEXT_BUDGET.REPLY_IDS])
+            + f" and {len(values) - _CONTEXT_BUDGET.REPLY_IDS} more (update_goal with no arguments lists them all)")
 
   def text(value: str) -> str:
     return value if full else _CONTEXT_BUDGET.excerpt(
-      value, _REPLY_TEXT_CHARS, "update_goal with no arguments shows it whole")
+      value, _CONTEXT_BUDGET.REPLY_TEXT_CHARS, "update_goal with no arguments shows it whole")
 
   goal = payload.get("goal")
   if not isinstance(goal, dict):
@@ -2214,14 +2211,20 @@ def _paged_read(name: str, handler, arguments: dict[str, Any]):
   if offset == 0 and version is None and (
       len(text.encode("utf-8", "surrogatepass")) <= _CONTEXT_BUDGET.READ_PAGE_BYTES):
     return value
-  page = _CONTEXT_BUDGET.text_page(text, offset)
+  def footer(start: int, end: int, next_offset: int | None) -> str:
+    call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)),
+                      f"offset={next_offset}", f"version={current}"])
+    more = f"next page: {name}({call})" if next_offset is not None else "end of result"
+    return (f"\n[Result characters {start}-{end} of {len(text)}, "
+            f"version {current}; {more}]")
+
+  # The footer is part of the result, so the page leaves room for its longest
+  # form: every offset as wide as the result's length.
+  widest = len(text)
+  reserve = len(footer(widest, widest, widest).encode("utf-8", "surrogatepass"))
+  page = _CONTEXT_BUDGET.text_page(text, offset, _CONTEXT_BUDGET.READ_PAGE_BYTES - reserve)
   end = page["offset"] + len(page["text"])
-  call = ", ".join([*(f"{key}={arguments[key]}" for key in sorted(arguments)),
-                    f"offset={page['next_offset']}", f"version={current}"])
-  footer = (f"next page: {name}({call})" if page["next_offset"] is not None
-            else "end of result")
-  return (f"{page['text']}\n[Result characters {page['offset']}-{end} of "
-          f"{page['total_chars']}, version {current}; {footer}]")
+  return page["text"] + footer(page["offset"], end, page["next_offset"])
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:

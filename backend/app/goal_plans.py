@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from app import models
 from app.chat_message_identity import assistant_message_run_id
+from app.context_budget import REFUSAL_IDS
 
 
 _LOG = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ def unsettled_chain(by_id: dict, key: str, inherited: list[str] | None) -> list[
   return list(dict.fromkeys(own + inherited)) if own else inherited
 
 
-def named_ids(ids: list[str], shown: int = 10) -> str:
+def named_ids(ids: list[str], shown: int = REFUSAL_IDS) -> str:
   """Name a refusal's first few ids and count the rest, however many there are."""
   if len(ids) <= shown:
     return ", ".join(ids)

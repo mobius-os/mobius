@@ -19,14 +19,23 @@ LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
 
 
-# One page of a long control-tool result, in UTF-8 bytes. Providers cap a
-# tool result (Claude Code MCP at about 25k tokens; Codex truncates). Bytes,
+# A change's reply echoes at most this much of one text and this many ids;
+# a refusal names this many ids and counts the rest.
+REPLY_TEXT_CHARS = 4_000
+REPLY_IDS = 50
+REFUSAL_IDS = 10
+
+
+# The whole of one control-tool result, page and footer together, in UTF-8
+# bytes. Codex keeps 10,000 tokens of a tool result, counted as 4 bytes each
+# (40,000 bytes) including the short wall-time header it adds, and cuts the
+# middle out of anything longer; Claude Code keeps about 25k tokens. Bytes,
 # not characters, so CJK and other multi-byte text stays within it too.
-READ_PAGE_BYTES = 40_000
+READ_PAGE_BYTES = 39_000
 
 
-def text_page(text: str, offset: int = 0) -> dict:
-  """One page of ``text`` from character ``offset``, within READ_PAGE_BYTES.
+def text_page(text: str, offset: int = 0, budget: int = READ_PAGE_BYTES) -> dict:
+  """One page of ``text`` from character ``offset``, within ``budget`` bytes.
 
   Pages end on character boundaries; offsets count characters.
   """
@@ -36,10 +45,10 @@ def text_page(text: str, offset: int = 0) -> dict:
       f"offset {offset} is past the end of this {len(text)}-character result; "
       "start again from offset 0"
     )
-  low, high = 0, min(len(text) - offset, READ_PAGE_BYTES)
+  low, high = 0, min(len(text) - offset, budget)
   while low < high:  # the most characters whose UTF-8 form fits one page
     middle = (low + high + 1) // 2
-    if len(text[offset:offset + middle].encode("utf-8", "surrogatepass")) <= READ_PAGE_BYTES:
+    if len(text[offset:offset + middle].encode("utf-8", "surrogatepass")) <= budget:
       low = middle
     else:
       high = middle - 1

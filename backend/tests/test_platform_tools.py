@@ -1519,10 +1519,11 @@ def _read_all_pages(control, name, arguments):
   pieces, more = [], {}
   while True:
     text = control._call_tool({"name": name, "arguments": {**arguments, **more}})["content"][0]["text"]
+    # The whole result, footer included, fits the smallest provider's limit.
+    assert len(text.encode("utf-8", "surrogatepass")) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
     if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
       return pieces + [text]
     text, footer = text.rsplit("\n", 1)
-    assert len(text.encode("utf-8", "surrogatepass")) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
     pieces.append(text)
     if "end of result" in footer:
       return pieces
@@ -1617,11 +1618,11 @@ def test_read_pages_are_sized_in_bytes_so_cjk_text_fits_one_result(monkeypatch):
   assert all(len(page.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES for page in pages)
 
 
-def test_a_saved_lone_surrogate_does_not_break_goal_reads(monkeypatch):
+def test_the_pager_carries_a_lone_surrogate_through(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
-  # Request validation accepts a lone surrogate, so a saved text may hold one.
+  # Pages are sized and fingerprinted as surrogate-passing UTF-8, like the brief.
   note = "half \ud800 pair"
   monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
     {"field": "note", "task": "a", "text": note * 20_000} if "field=" in path
