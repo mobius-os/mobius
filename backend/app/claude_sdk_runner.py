@@ -1410,6 +1410,7 @@ async def run_claude_sdk_turn(
 
   def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
+    message_card: bool = False,
   ) -> str | None:
     nonlocal answer_check_reminders, answer_check_reviewed
     if (
@@ -1430,6 +1431,7 @@ async def run_claude_sdk_turn(
       reminded=answer_check_reminders > 0,
       seen_at_reminder=seen_at_reminder,
       last_assistant_message=last_assistant_message,
+      message_card=message_card,
     )
     if reason is None:
       return None
@@ -1469,7 +1471,15 @@ async def run_claude_sdk_turn(
     # goes to its parent agent, not the owner.
     if hook_input.get("agent_id"):
       return {"continue_": True}
-    reason = _answer_check_since_last_reminder(before_card=True)
+    # A successful save publishes this closing message with its card. Count
+    # it as pending visible text, without publishing it before the save.
+    # Secret cards have no closing-message field and keep their existing check.
+    message_card = hook_input.get("tool_name") != f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}"
+    tool_input = hook_input.get("tool_input")
+    message = tool_input.get("message") if message_card and isinstance(tool_input, dict) else None
+    reason = _answer_check_since_last_reminder(
+      before_card=True, last_assistant_message=message, message_card=message_card,
+    )
     if reason is None:
       return {"continue_": True}
     return {"continue_": True, "hookSpecificOutput": {

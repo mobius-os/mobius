@@ -59,9 +59,11 @@ from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 from tests.test_answer_check import (
   _ANSWER_ONLY_IN_THINKING,
+  _CHECKOUT,
   _DRAFT,
   _answer_as_second_thinking_part,
   _closing_draft_before_card,
+  _link_only_in_tool_output,
   _reasoning_after_a_reminder,
   _viewed_before_after,
 )
@@ -3954,6 +3956,141 @@ async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monke
   await _run_turn("answer-check-card-ok-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card_tool", ["request_question", "request_approval", "request_restart"])
+@pytest.mark.parametrize("blocks,message", [
+  (_closing_draft_before_card(), _DRAFT),
+  (_ANSWER_ONLY_IN_THINKING, "The deploy failed because the build ran out of memory. " * 10),
+], ids=["closing-draft", "long-reasoning"])
+async def test_answer_check_counts_the_pending_card_message(monkeypatch, card_tool, blocks, message):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = list(blocks)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(
+        self.options, tool_name=f"mcp__mobius_control__{card_tool}",
+        tool_input={"message": message},
+      ))
+      # Merely considering a card must not publish its text or alter the stream.
+      assert bus.assistant_blocks == blocks
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-card-message-chat", bc=bus)
+  assert decisions == [{"continue_": True}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", [None, "", "   ", 5, {"text": _DRAFT}])
+async def test_answer_check_does_not_treat_an_empty_or_invalid_card_message_as_an_answer(monkeypatch, message):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": message}))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-empty-card-message-chat", bc=bus)
+  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_answer_check_counts_a_card_message_added_after_a_refusal(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options))
+      bus.assistant_blocks.extend(_reasoning_after_a_reminder())
+      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": _DRAFT}))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-retried-card-message-chat", bc=bus)
+  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
+  assert decisions[1] == {"continue_": True}
+
+
+@pytest.mark.asyncio
+async def test_an_unsaved_card_message_does_not_count_as_a_delivered_reply(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": _DRAFT}))
+      # The card could fail its own validation. Its proposed text must not
+      # suppress the end-of-turn check if it was never actually published.
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-unsaved-card-message-chat", bc=bus)
+  assert decisions[0] == {"continue_": True}
+  assert decisions[1]["decision"] == "block"
+
+
+@pytest.mark.asyncio
+async def test_secret_cards_keep_their_check_and_reply_text_guidance(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(
+        self.options, tool_name="mcp__mobius_control__request_secret",
+        tool_input={"message": _DRAFT},
+      ))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-secret-card-chat", bc=bus)
+  output = decisions[0]["hookSpecificOutput"]
+  assert output["permissionDecision"] == "deny"
+  assert "card's message" not in output["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["image", "link"])
+@pytest.mark.parametrize("included", [False, True])
+async def test_card_message_participates_in_image_and_link_checks(monkeypatch, missing, included):
+  chat_id = "answer-check-card-media-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  if missing == "image":
+    bus.assistant_blocks = _viewed_before_after(chat_id)
+    reference = f"![Before and after](/api/chats/{chat_id}/media/before-after.png)"
+  else:
+    bus.assistant_blocks = _link_only_in_tool_output("Here is the link below:")
+    reference = f"[Open checkout]({_CHECKOUT})"
+  message = "Here is the result." + ("\n" + reference if included else "")
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": message}))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  if included:
+    assert decisions == [{"continue_": True}]
+  else:
+    output = decisions[0]["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert ("before-after.png" if missing == "image" else "link but shows none") in output["permissionDecisionReason"]
+    assert "card's message" in output["permissionDecisionReason"]
+    assert "decision arguments unchanged" in output["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio

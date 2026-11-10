@@ -95,7 +95,7 @@ _STILL_UNWRITTEN = (
   "reasoning, and reasoning is never shown. {seen} If you believe you already "
   "wrote more than that, it went into your reasoning, not your reply. If the "
   "owner's latest message still needs an answer or a result, write it now as "
-  "ordinary reply text. If the quoted reply already answers it, leave it."
+  "part of your reply. If the quoted reply already answers it, leave it."
 )
 # New reasoning, with no new reply text, that still counts as the answer going
 # unwritten. A retry after a one-line "the reply already answers" thought stays
@@ -127,6 +127,11 @@ _BEFORE_CARD_NEXT = (
   "Do not mention this check. Then call the same card tool again with the "
   "same arguments; this check speaks again only about something new."
 )
+_BEFORE_MESSAGE_CARD_NEXT = (
+  "Do not mention this check. Put any needed explanation, image or link in "
+  "the card's message and call the same card tool again, keeping its decision "
+  "arguments unchanged; this check speaks again only about something new."
+)
 # Attached to a work step's result (never blocking it), so a note the model
 # wrote as thinking mid-reply is caught without costing an extra model step.
 _AFTER_STEP = (
@@ -148,13 +153,15 @@ def reason(
   reminded: bool = False,
   seen_at_reminder: str | None = None,
   last_assistant_message: object = None,
+  message_card: bool = False,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
-  ``last_assistant_message`` is the CLI's own final text, which the Stop hook
-  can see before the stream reader has dispatched it. Before a card, the card
-  itself carries the content, so a short lead-in after long reasoning is
-  normal; only a closing draft counts there. Once a reminder has spoken this
+  ``last_assistant_message`` is pending visible text: the CLI's final text at
+  Stop, or a card's closing message before its save. ``message_card`` directs
+  repairs into that message; secret cards keep ordinary reply-text guidance.
+  Before a card, a short lead-in after long reasoning is normal because the
+  card carries the content; only a closing draft counts there. Once a reminder has spoken this
   turn (``reminded``), the length rule stays quiet: it has no new evidence, and
   a reply that ends with more reasoning and nothing more to say, as the
   reminder allows, must not be returned again for it.
@@ -202,7 +209,8 @@ def reason(
   if not parts:
     return None
   if before_card:
-    return " ".join([_BEFORE_CARD, *parts, _BEFORE_CARD_NEXT])
+    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_card else _BEFORE_CARD_NEXT
+    return " ".join([_BEFORE_CARD, *parts, next_step])
   return " ".join([_END_OF_TURN, *parts, _END_OF_TURN_NEXT])
 
 
