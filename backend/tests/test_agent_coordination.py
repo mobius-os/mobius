@@ -2187,3 +2187,26 @@ def test_send_receipt_at_the_send_cap_is_unchanged(client, auth, db):
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
     json={"recipients": [chats["builder"].id], "body": body + "w"},
   ).status_code == 422
+
+
+def test_owner_and_embed_snapshots_carry_only_long_note_heads(client, auth, db):
+  from app.context_budget import PEER_NOTE_CHARS
+  from app.timeutil import now_naive_utc
+
+  chats, _ = _network_fixture(db)
+  huge = "Snapshot " + "z" * 200_000
+  db.add_all([_stored_note(chats, index, huge, now_naive_utc(), to="root") for index in range(3)])
+  db.commit()
+  snapshot = client.get(f"/api/agent-coordination/chats/{chats['root'].id}", headers=auth)
+  assert snapshot.status_code == 200, snapshot.text
+  notes = [row for row in snapshot.json()["messages"] if row["id"].startswith("stored-")]
+  assert len(notes) == 3
+  assert all(row["body"] == huge[:PEER_NOTE_CHARS] and row["truncated"] is True
+             and row["body_chars"] == len(huge) for row in notes)
+  assert len(snapshot.content) < 3 * PEER_NOTE_CHARS + 20_000
+  # Turn delivery excerpts from the head with the note's true length.
+  db.get(models.ChatRun, "root-run").provider_execution_admitted = True
+  db.commit()
+  context = _next_turn_context(db, chats["root"], "root-after-huge")
+  assert context.count(f"of {len(huge)} characters; read_agent_message(") == 3
+  assert len(context) < 3 * PEER_NOTE_CHARS + 10_000

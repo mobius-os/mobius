@@ -1,6 +1,7 @@
 import MessagesSquare from 'lucide-react/dist/esm/icons/messages-square.mjs'
 import { formatTime } from '../../lib/dateTimeFormat.js'
 import './AgentCoordinationFeed.css'
+import PeerNoteBody from '../ChatView/PeerNoteBody.jsx'
 import {
   groupPeerMessages,
   peerNetworkStatus,
@@ -57,7 +58,10 @@ export default function AgentCoordinationFeed({
                 <span>{targetLabel(message, broadcastScope)}</span>
                 {message.created_at && <time dateTime={message.created_at}>{clockLabel(message.created_at)}</time>}
               </div>
-              <p>{message.body}</p>
+              {/* The sender's chat can always see the note it sent. */}
+              <PeerNoteBody chatId={message.sender_chat_id} messageId={message.id}
+                body={message.body} truncated={Boolean(message.truncated)}
+                className="agent-relay__more" render={text => <p>{text}</p>} />
             </li>
           ))}
         </ol>

@@ -82,6 +82,12 @@ test('network messages expose routing, broadcast audience and full safe text', a
  assert.match(html, /&lt;script&gt;/)
  const sent = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'self', recipient_name: 'Builder', body: 'Ready', kind: 'handoff' } }))
  assert.match(sent, /Sent to /); assert.match(sent, /Builder/); assert.doesNotMatch(sent, /This chat|<dl/)
+ assert.doesNotMatch(sent, /Show full note/)
+ const long = render(h(NetworkMessage, { chatId: 'self', message: { id: 'n1', sender_chat_id: 'peer', body: 'Head of a long note', truncated: true, kind: 'note' } }))
+ assert.match(long, /Head of a long note/)
+ assert.match(long, /<button[^>]*>Show full note<\/button>/)
+ const unreadable = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'peer', body: 'Head', truncated: true, kind: 'note' } }))
+ assert.match(unreadable, /Excerpt — full note not shown/)
 })
 
 test('expanded Goal tasks have no dependency on the agent network query', async () => {

@@ -11,6 +11,7 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import { openInternalLink } from './internalLink.js'
+import PeerNoteBody from './PeerNoteBody.jsx'
 
 const KIND_LABEL = {
   note: 'Note',
@@ -152,10 +153,9 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                     <KindBadge kind={model.kind} />
                     <DeliveryBadge delivery={model.delivery} record={record} />
                   </span>
-                  {model.body && <div className="chat__peer-body"><StandardMarkdown text={model.body} onInternalNav={onInternalNav} /></div>}
-                  {model.bodyTruncated && (
-                    <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
-                  )}
+                  <PeerNoteBody chatId={chatId} messageId={record?.message_id ?? record?.id}
+                    body={model.body} truncated={model.bodyTruncated}
+                    render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                 </div>
               </div>
             )}
@@ -177,10 +177,9 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                           </span>
                         )}
                       </span>
-                      {note.body && <div className="chat__peer-body"><StandardMarkdown text={note.body} onInternalNav={onInternalNav} /></div>}
-                      {note.bodyTruncated && (
-                        <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
-                      )}
+                      <PeerNoteBody chatId={chatId} messageId={records[index]?.message_id ?? records[index]?.id}
+                        body={note.body} truncated={note.bodyTruncated}
+                        render={text => <div className="chat__peer-body"><StandardMarkdown text={text} onInternalNav={onInternalNav} /></div>} />
                     </li>
                   ))}
                 </ul>

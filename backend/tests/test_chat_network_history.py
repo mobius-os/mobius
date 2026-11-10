@@ -54,3 +54,79 @@ def test_history_route_requires_authorized_chat_and_rejects_bad_cursor(client, a
   assert client.get(path + '?before=unrelated', headers=auth).status_code == 422
   assert client.get(path + '?limit=101', headers=auth).status_code == 422
   assert client.get('/api/agent-coordination/chats/missing/history', headers=auth).status_code == 404
+
+
+def _long_notes_fixture(db):
+  db.add_all([create_chat(id=name, title=name, messages=[]) for name in ['long-self', 'long-peer', 'long-other']])
+  db.flush()
+  huge = 'Long finding ' + 'evidence ' * 50_000 + 'END'
+  at_cap = 'c' * 4000
+  rows = [
+    models.AgentCoordinationMessage(id=f'huge-{index}', from_chat_id='long-peer', to_chat_id='long-self',
+      room_kind='workspace', room_id='owner', body=huge, kind='finding',
+      created_at=datetime(2026, 1, 1, 0, 0, index))
+    for index in range(3)
+  ] + [models.AgentCoordinationMessage(id='at-cap', from_chat_id='long-self', to_chat_id='long-peer',
+      room_kind='workspace', room_id='owner', body=at_cap, kind='note',
+      created_at=datetime(2026, 1, 1, 0, 1)),
+    models.AgentCoordinationMessage(id='elsewhere', from_chat_id='long-peer', to_chat_id='long-other',
+      room_kind='workspace', room_id='owner', body=huge, kind='note',
+      created_at=datetime(2026, 1, 1, 0, 2))]
+  db.add_all(rows)
+  db.commit()
+  return huge, at_cap
+
+
+def test_owner_views_carry_only_a_long_notes_head_and_read_it_whole(client, auth, db):
+  from app.context_budget import PEER_NOTE_CHARS
+
+  huge, at_cap = _long_notes_fixture(db)
+  history = client.get('/api/agent-coordination/chats/long-self/history', headers=auth)
+  assert history.status_code == 200
+  by_id = {row['id']: row for row in history.json()['messages']}
+  assert len(history.content) < 4 * PEER_NOTE_CHARS + 10_000
+  for index in range(3):
+    row = by_id[f'huge-{index}']
+    assert row['body'] == huge[:PEER_NOTE_CHARS]
+    assert (row['truncated'], row['body_chars']) == (True, len(huge))
+  # A note within the display limit is exactly as before.
+  assert by_id['at-cap']['body'] == at_cap
+  assert 'truncated' not in by_id['at-cap'] and 'body_chars' not in by_id['at-cap']
+
+  activity = client.get('/api/chats/long-self/activity', headers=auth)
+  assert activity.status_code == 200
+  peers = {event['message_id']: event for event in activity.json()['events'] if event['type'] == 'peer_message'}
+  assert peers['huge-0']['truncated'] is True and len(peers['huge-0']['body']) == PEER_NOTE_CHARS
+  assert peers['at-cap']['body'] == at_cap and 'truncated' not in peers['at-cap']
+
+  full = client.get('/api/agent-coordination/chats/long-self/messages/huge-0', headers=auth)
+  assert full.status_code == 200
+  assert full.json()['body'] == huge and 'truncated' not in full.json()
+  # The read follows the chat's history visibility.
+  assert client.get('/api/agent-coordination/chats/long-self/messages/elsewhere',
+                    headers=auth).status_code == 404
+  assert client.get('/api/agent-coordination/chats/long-other/messages/elsewhere',
+                    headers=auth).json()['body'] == huge
+  assert client.get('/api/agent-coordination/chats/long-self/messages/huge-0').status_code == 401
+
+
+def test_history_never_loads_a_whole_body(db, monkeypatch):
+  """Lists select the head in SQL; the ORM never materializes a long body."""
+  from sqlalchemy import event
+
+  huge, _ = _long_notes_fixture(db)
+  seen = []
+  engine = db.get_bind()
+
+  def capture(_conn, _cursor, statement, parameters, _context, _many):
+    seen.append(statement)
+
+  event.listen(engine, 'before_cursor_execute', capture)
+  try:
+    page = chat_message_history(db, 'long-self')
+  finally:
+    event.remove(engine, 'before_cursor_execute', capture)
+  assert all(len(row['body']) <= 4000 for row in page['messages'])
+  selects = [statement for statement in seen
+             if 'agent_coordination_messages.body' in statement and 'count(' not in statement]
+  assert selects and all('substr(agent_coordination_messages.body' in statement for statement in selects)
