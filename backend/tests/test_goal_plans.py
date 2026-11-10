@@ -1725,6 +1725,10 @@ def test_saved_content_beyond_the_caps_is_kept_but_new_content_is_bounded(
                     + saved[1:], saved=saved)
   with pytest.raises(GoalPlanError, match="at most 1000 characters"):
     normalize_tasks([{**saved[0], "note": "M" * 2000}] + saved[1:], saved=saved)
+  # Dropping a task the long list names shortens that list, which is allowed.
+  shorter = normalize_tasks(
+    [{**saved[0], "depends_on": saved[0]["depends_on"][1:]}] + saved[2:], saved=saved)
+  assert shorter[0]["depends_on"] == [f"t{i}" for i in range(2, 20)]
 
   _, _chat_id = _active_goal(client, owner_token, db)
   run = db.get(models.ChatRun, "goal-root")
