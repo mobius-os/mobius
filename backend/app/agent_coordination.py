@@ -11,7 +11,7 @@ import time
 from typing import Any
 import uuid
 
-from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_
+from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -592,26 +592,55 @@ def _channel_query(db: Session, scope: CoordinationScope):
 _HEAD_BYTES = 4 * PEER_NOTE_CHARS
 
 
+def note_text():
+  """A message's text: its shared body when it references one, else its own."""
+  message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
+  return func.coalesce(
+    select(shared.body).where(shared.id == message.body_id).scalar_subquery(),
+    message.body,
+  )
+
+
+def _message_columns():
+  message = models.AgentCoordinationMessage
+  return [column for column in message.__table__.columns if column.key != "body"]
+
+
+def with_note_text(query):
+  """Select whole messages with each one's text as ``body``."""
+  return query.with_entities(*_message_columns(), note_text().label("body"))
+
+
 def with_note_heads(query):
-  """Select each note's head and length instead of its whole body.
+  """Select each note's head and length instead of its whole text.
 
   Lists and snapshots show at most PEER_NOTE_CHARS of a note, so they never
-  load a longer body. PostgreSQL text cannot hold U+0000.
+  load a longer text. PostgreSQL text cannot hold U+0000.
   """
-  message = models.AgentCoordinationMessage
+  text = note_text()
   if query.session.get_bind().dialect.name == "sqlite":
-    blob = cast(message.body, LargeBinary)
+    blob = cast(text, LargeBinary)
     head = [
       func.substr(blob, 1, _HEAD_BYTES).label("body"),
       func.length(blob).label("body_bytes"),
     ]
   else:
-    head = [func.substr(message.body, 1, PEER_NOTE_CHARS).label("body")]
+    head = [func.substr(text, 1, PEER_NOTE_CHARS).label("body")]
   return query.with_entities(
-    *(column for column in message.__table__.columns if column.key != "body"),
-    *head,
-    func.length(message.body).label("body_chars"),
+    *_message_columns(), *head, func.length(text).label("body_chars"),
   )
+
+
+def delete_unreferenced_bodies(db: Session, body_ids) -> None:
+  """Delete these shared bodies once no message references them, by id."""
+  message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
+  ids = sorted({value for value in body_ids if value})
+  for start in range(0, len(ids), 500):  # below SQLite's bound-parameter limit
+    batch = ids[start:start + 500]
+    db.query(shared).filter(
+      shared.id.in_(batch),
+      ~select(message.id).where(message.body_id == shared.id).exists(),
+    ).delete(synchronize_session=False)
 
 
 def _note_head(row) -> tuple[str, int]:
@@ -766,9 +795,9 @@ def peer_message_for_chat(
   db: Session, chat_id: str, message_id: str,
 ) -> dict[str, Any] | None:
   """One whole note this chat may read, by the chat's history visibility."""
-  row = chat_message_history_query(db, chat_id).filter(
+  row = with_note_text(chat_message_history_query(db, chat_id).filter(
     models.AgentCoordinationMessage.id == message_id,
-  ).first()
+  )).first()
   if row is None:
     return None
   return serialize_messages(db, [row])[0]
@@ -1354,10 +1383,10 @@ def _matching_retry(
 ) -> list[models.AgentCoordinationMessage] | None:
   if sender_run_id is None or send_id is None:
     return None
-  rows = db.query(models.AgentCoordinationMessage).filter(
+  rows = with_note_text(db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.from_run_id == sender_run_id,
     models.AgentCoordinationMessage.send_id == send_id,
-  ).order_by(models.AgentCoordinationMessage.id.asc()).all()
+  )).order_by(models.AgentCoordinationMessage.id.asc()).all()
   if not rows:
     return None
   expected_targets = {None} if broadcast else set(recipients)
@@ -1385,15 +1414,17 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
   Retention counts notes; it never loads or measures their bodies.
   """
   message = models.AgentCoordinationMessage
-  stale = [row.id for row in query.with_entities(message.id).order_by(
+  rows = query.with_entities(message.id, message.body_id).order_by(
     message.created_at.desc(), message.id.desc(),
-  ).offset(keep).all()]
-  if not stale:
+  ).offset(keep).all()
+  if not rows:
     return
+  stale = [row.id for row in rows]
   db.query(models.ChatActivityPosition).filter(
     models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
   ).delete(synchronize_session=False)
   db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
+  delete_unreferenced_bodies(db, [row.body_id for row in rows])
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:

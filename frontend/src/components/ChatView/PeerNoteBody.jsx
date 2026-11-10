@@ -24,7 +24,8 @@ export function FullNoteText({ text }) {
   </>
 }
 
-export default function PeerNoteBody({ chatId, messageId, body, truncated, render, read = readNote }) {
+// `noun` names what is read ("note", or "text" for a Goal's claim texts).
+export default function PeerNoteBody({ chatId, messageId, body, truncated, render, read = readNote, noun = 'note' }) {
   const note = useFullPeerNote(chatId, messageId, read)
   if (note.full != null) {
     return note.full.length > HEAD_CHARS ? <FullNoteText text={note.full} /> : (note.full && render(note.full))
@@ -32,8 +33,8 @@ export default function PeerNoteBody({ chatId, messageId, body, truncated, rende
   return <>
     {body && render(body)}
     {truncated && note.readable && <button type="button" className="peer-note-more" disabled={note.state === 'loading'} onClick={note.load}>
-      {note.state === 'loading' ? 'Loading full note…' : note.state === 'error' ? 'Could not load the full note. Retry' : 'Show full note'}
+      {note.state === 'loading' ? `Loading full ${noun}…` : note.state === 'error' ? `Could not load the full ${noun}. Retry` : `Show full ${noun}`}
     </button>}
-    {truncated && !note.readable && <span className="peer-note-excerpt">Excerpt — full note not shown</span>}
+    {truncated && !note.readable && <span className="peer-note-excerpt">{`Excerpt — full ${noun} not shown`}</span>}
   </>
 }

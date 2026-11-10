@@ -2,6 +2,8 @@
 import DependencyBacklinks from './DependencyBacklinks.jsx'
 import DependencyLink from './DependencyLink.jsx'
 import StopFollowingAction from './StopFollowingAction.jsx'
+import PeerNoteBody from './PeerNoteBody.jsx'
+import { api, jsonOrThrow } from '../../api/client.js'
 
 import { Check, Clock } from '@openai/apps-sdk-ui/components/Icon'
 import { goalTaskDisplayStatus, goalDependencyOutcomeLabel } from './goalProgress'
@@ -92,6 +94,12 @@ function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
   )
 }
 
+// A claim's summary and outcome appear in part here; this reads them whole.
+async function readDependencyText(_chatId, dependencyId) {
+  const texts = await jsonOrThrow(await api.agentCoordination.dependencyText(dependencyId), 'Shared work failed:')
+  return { body: [texts.condition, texts.outcome].filter(Boolean).join('\n\n') }
+}
+
 export default function GoalPlanDetails({ plan, holdReason = null, dependencies = [], dependencyHistory = [], neededBy = [], onInternalNav, onStopFollowing }) {
   const reason = typeof holdReason === 'string' ? holdReason.trim() : ''
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
@@ -149,6 +157,8 @@ export default function GoalPlanDetails({ plan, holdReason = null, dependencies 
                 : SOURCE_RECOVERY_BLOCKERS.has(dependency.resume_blocker)
                   ? `This work needs recovery in ${dependency.source_chat_title || 'the other chat'}`
                   : dependency.automatic ? 'Continues automatically' : 'Saved until you continue this Goal'}</span>
+              {dependency.truncated && <PeerNoteBody chatId="dependency" messageId={dependency.id} truncated noun="text"
+                read={readDependencyText} render={text => <span className="peer-note-full">{text}</span>} />}
             </span>
           </div>
         })}

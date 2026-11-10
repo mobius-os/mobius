@@ -1279,6 +1279,11 @@ export const api = {
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
       options,
     ),
+    // The whole claim texts a Goal view showed in part.
+    dependencyText: (dependencyId, options = {}) => apiFetch(
+      `/chat-waits/dependencies/${encodeURIComponent(dependencyId)}/text`,
+      options,
+    ),
     message: (chatId, messageId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
       options,

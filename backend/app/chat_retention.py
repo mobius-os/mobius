@@ -155,10 +155,16 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   # Peer notes are explicitly outside chat transcripts, so reclaim both sides
   # before the chat rows they reference. Keep the legacy recovery mailbox on
   # the same lifecycle even though new source no longer writes it.
-  db.query(models.AgentCoordinationMessage).filter(
+  purged = db.query(models.AgentCoordinationMessage).filter(
     (models.AgentCoordinationMessage.from_chat_id.in_(chat_ids))
     | (models.AgentCoordinationMessage.to_chat_id.in_(chat_ids))
-  ).delete(synchronize_session=False)
+  )
+  shared_body_ids = [row.body_id for row in purged.with_entities(
+    models.AgentCoordinationMessage.body_id,
+  ).filter(models.AgentCoordinationMessage.body_id.is_not(None)).distinct().all()]
+  purged.delete(synchronize_session=False)
+  from app.agent_coordination import delete_unreferenced_bodies
+  delete_unreferenced_bodies(db, shared_body_ids)
   db.query(models.ProjectAgentMessage).filter(
     (models.ProjectAgentMessage.from_chat_id.in_(chat_ids))
     | (models.ProjectAgentMessage.to_chat_id.in_(chat_ids))

@@ -52,6 +52,14 @@ class GoalDependencyHandoff:
   outcome: dict | None
   source_question_id: str | None = None
   source_deleted: bool = False
+  # A claim text shown in part; the owner reads it whole on request.
+  truncated: bool = False
+
+  def view(self) -> dict:
+    """The presented shape: ``truncated`` appears only when it is true."""
+    from dataclasses import asdict
+    return {key: value for key, value in asdict(self).items()
+            if key != "truncated" or value}
 
 
 @dataclass(frozen=True)

@@ -1527,6 +1527,23 @@ class AgentCoordinationMessage(Base):
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
   body = Column(Text, nullable=False)
+  # The shared body of a send stored once (AgentCoordinationNoteBody). When
+  # set, it is the note's text and ``body`` is empty; rows written before
+  # shared bodies keep their text in ``body``.
+  body_id = Column(String(64), nullable=True, index=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationNoteBody(Base):
+  """One peer-note body shared by every recipient row of one send.
+
+  Retention deletes a body once no message references it.
+  """
+
+  __tablename__ = "agent_coordination_note_bodies"
+
+  id = Column(String(64), primary_key=True)
+  body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 

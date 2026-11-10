@@ -175,3 +175,13 @@ test('a resume marker shows when the work continued', () => {
  assert.match(older, /3rd Jan 2026, 14:30<\/time>/, 'an earlier day keeps its date')
  assert.doesNotMatch(render(h(Resume, { msg: { continuation_reason: 'restart' } })), /<time/)
 })
+
+test('a Goal dependency whose claim text was shown in part offers its full text', async () => {
+ const GoalPlanDetails = await load('GoalPlanDetails')
+ const dependency = { id: 'dep-1', target_kind: 'claim_acquisition', condition: 'Ship the change', automatic: true, outcome: null }
+ const html = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [{ ...dependency, truncated: true }] }))
+ assert.match(html, /Ship the change/)
+ assert.match(html, /<button[^>]*>Show full text<\/button>/)
+ const whole = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [dependency] }))
+ assert.doesNotMatch(whole, /Show full text/)
+})
