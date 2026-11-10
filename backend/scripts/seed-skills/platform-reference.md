@@ -57,8 +57,9 @@ and the running server re-creates it once space is comfortable again:
 rm -f /data/run/recovery-reserve
 ```
 
-Then start Möbius and free space from a chat; while storage is critical,
-Möbius lets one chat the owner starts run for exactly that.
+Then start Möbius and free space. While storage is critical, Möbius defers
+every new turn; use **Continue anyway** on a chat paused for storage to let
+its agent run and free the space.
 
 ## Host-owned container replacement
 

@@ -200,15 +200,53 @@ _clear_after_terminal_status: dict[str, str] = {}
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
 # turns, and the finished-run marker sweep stands down so it cannot race the
-# drain's own interrupt. `_park_handoff_chats` records the chats whose live
+# drain's own interrupt. `_park_handoffs` records, per chat, the exact live
 # turn an interrupter (the restart drain, or the storage guard pausing turns
-# that are filling the disk) took over, so each turn's terminal transition
+# that are filling the disk) took over, so that turn's terminal transition
 # (run_chat's finally) leaves its exact run intact long enough for that
 # interrupter to move it to the durable continuation state. If that transaction
 # fails, the still-set generic marker is left for manual recovery: boot
 # reconcile after a restart, the wedged-run sweep otherwise.
 draining = False
-_park_handoff_chats: set[str] = set()
+
+
+@dataclass(frozen=True)
+class _ParkHandoff:
+  """One live turn an interrupter took over (_interrupt_and_park_live_turns).
+
+  It names that exact turn, not just its chat: a handoff the turn never
+  consumed (it ended before the interrupter marked it, or never stopped) must
+  not reach a later turn of the same chat, whose own Stop, provider-limit
+  park and storage pause behave as if no interrupter existed. The finally
+  matches by generation; the sink-side checks, which hold only the sink,
+  match by run token. One entry per chat at most; the next handoff replaces
+  it.
+  """
+
+  generation: int
+  run_token: str | None
+
+
+_park_handoffs: dict[str, _ParkHandoff] = {}
+
+
+def _handoff_owns_run(chat_id: str | None, run_token: str | None) -> bool:
+  """Whether an interrupter took over the turn running as ``run_token``."""
+  handoff = _park_handoffs.get(chat_id or "")
+  return handoff is not None and handoff.run_token == run_token
+
+
+def _take_park_handoff(chat_id: str, run_gen: int) -> bool:
+  """Consume the handoff for the turn of generation ``run_gen``, if any.
+
+  Called once by that turn's own terminal transition; a handoff for another
+  generation is left untouched.
+  """
+  handoff = _park_handoffs.get(chat_id)
+  if handoff is None or handoff.generation != run_gen:
+    return False
+  del _park_handoffs[chat_id]
+  return True
 
 # Budget for the drain to interrupt live turns + flush their notes. The restart
 # utility arms its SIGKILL backstop at DRAIN_TIMEOUT + grace; the existing short
@@ -1657,9 +1695,9 @@ async def _interrupt_and_park_live_turns(
   """Interrupt each chat's live turn and move its exact run to a durable park.
 
   The shared core of every interrupter-owned pause: publish ``note`` through
-  the turn's sink, hand the turn to this caller (the chat joins
-  ``_park_handoff_chats`` before its generation bumps, so the dying turn's
-  finally leaves the exact run and the pending queue intact), stop every
+  the turn's sink, hand the turn to this caller (it joins ``_park_handoffs``
+  before its generation bumps, so the dying turn's finally leaves the exact
+  run and the pending queue intact), stop every
   handle concurrently, then finalize the transcript and ``ParkRun`` with
   ``park_reason``. ``parked_until=None`` means due now. A restart parks only a
   nonce-bound run: without that binding authenticated boot recovery owns it.
@@ -1681,7 +1719,9 @@ async def _interrupt_and_park_live_turns(
       continue
     # Mark BEFORE bumping so the turn's finally (which may run the instant the
     # interrupt lands) observes the drain and leaves the marker set.
-    _park_handoff_chats.add(chat_id)
+    _park_handoffs[chat_id] = _ParkHandoff(
+      generation=stopped_gen, run_token=getattr(sink, "run_token", None),
+    )
     bump_run_generation(chat_id)
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "interrupted"
@@ -1813,14 +1853,19 @@ async def pause_live_turns_for_storage(spare_chat_ids: frozenset[str]) -> int:
   gets the same storage card admission uses and parks with
   ``park_reason='storage'``, so the continuation sweep resumes it once
   admission would succeed again. A restart drain owns every turn while it
-  runs, and a chat another interrupter already took over is left to it.
+  runs, and a turn another interrupter already took over is left to it.
   Returns how many turns reached the durable park.
   """
   if draining:
     return 0
+
+  def handed_off(chat_id: str) -> bool:
+    sink = get_active_sink(chat_id)
+    return sink is not None and _handoff_owns_run(chat_id, sink.run_token)
+
   chat_ids = [
     chat_id for chat_id in sorted(registry.all_alive_chat_ids())
-    if chat_id not in spare_chat_ids and chat_id not in _park_handoff_chats
+    if chat_id not in spare_chat_ids and not handed_off(chat_id)
   ]
   if not chat_ids:
     return 0
@@ -1868,7 +1913,7 @@ async def drain_all_for_restart(
       note that is equally resumable);
     - mirrors explicit Stop's clean-interrupt handoff — bump the generation so
       the turn-end drain sees a stale generation and does NOT
-      promote the queue — BUT records the chat in `_park_handoff_chats` so
+      promote the queue — BUT records the turn in `_park_handoffs` so
       the turn's finally does not clear the exact run before this drain can
       transition it. After every handle stops, the same writer transaction used
       by provider-limit recovery moves that exact run to ``parked`` with
@@ -4307,13 +4352,15 @@ def _park_exit(
 
   A planned restart is already the authoritative terminal outcome by the time
   the provider exits: ``drain_all_for_restart`` publishes the resumable pause
-  before interrupting the handle and records the chat in
-  ``_park_handoff_chats``. Provider teardown errors after that point
+  before interrupting the handle and records the turn in
+  ``_park_handoffs``. Provider teardown errors after that point
   describe HOW the requested interrupt completed, not a second user-visible
   outcome, so they must not replace the pause card. Returns the
   `_complete_turn` kwargs for the limit disposition.
   """
-  if getattr(sink, "chat_id", None) in _park_handoff_chats:
+  if _handoff_owns_run(
+    getattr(sink, "chat_id", None), getattr(sink, "run_token", None),
+  ):
     return {"parked": False}
   # Claude reports 413 and 429 as `api_error_status`, and the Codex runner
   # turns a reached rate-limit window into 429. Results without a status, and
@@ -5225,16 +5272,15 @@ async def run_chat(
     # claim leaves it alive, and then we leave the marker for that new owner
     # (STALE_NO_ACTION-equivalent — no clear).
     if chat_id and clear_stopped_run and run_gen is not None:
-      if chat_id in _park_handoff_chats:
+      if _take_park_handoff(chat_id, run_gen):
         # Drain-for-restart handoff: this turn was interrupted for a graceful
         # restart. Leave the exact running row and pending queue intact so
         # drain_all_for_restart can move that row to the durable due-restart
         # state after every handle reports stopped. The deliberate difference
         # from Stop is that the else-branch below clears the exact row instead.
         # `_complete_turn` already finalized the partials + paused note; the
-        # bumped generation prevented queue promotion. Discard the in-memory
-        # handoff flag once this dying wrapper has observed it.
-        _park_handoff_chats.discard(chat_id)
+        # bumped generation prevented queue promotion. Taking the handoff
+        # discards it now that this dying wrapper has observed it.
         disposition = chat_queue.TerminalDisposition.DRAINED_FOR_RESTART
       else:
         try:

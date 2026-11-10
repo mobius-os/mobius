@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import time
+from typing import NamedTuple
 
 BACKGROUND_PROCESS_NICE = 5
 # Kernel oom_score_adj (max 1000). The container's own value is inherited by
@@ -213,15 +214,23 @@ def run_owned_processes(marker: str) -> list[tuple[int, int]]:
   return owned
 
 
-def _marked_processes() -> dict[int, tuple[str, int, int, str]]:
-  """Every readable process carrying any run marker.
+class _MarkedProcess(NamedTuple):
+  marker: str
+  parent: int
+  session: int
+  start_ticks: int
+  name: str
 
-  Maps pid to ``(marker, parent_pid, start_ticks, argv0 basename)``. Same
-  readability rules as :func:`run_owned_processes`.
+
+def _marked_processes() -> dict[int, _MarkedProcess]:
+  """Every readable process carrying any run marker, by pid.
+
+  ``name`` is the argv0 basename. Same readability rules as
+  :func:`run_owned_processes`.
   """
   prefix = f"{RUN_MARKER_ENV}=".encode()
   own = os.getpid()
-  marked: dict[int, tuple[str, int, int, str]] = {}
+  marked: dict[int, _MarkedProcess] = {}
   try:
     entries = os.listdir("/proc")
   except OSError:
@@ -248,16 +257,33 @@ def _marked_processes() -> dict[int, tuple[str, int, int, str]]:
         continue
       with open(f"/proc/{pid}/cmdline", "rb") as handle:
         argv0 = handle.read().split(b"\0", 1)[0].decode("utf-8", "replace")
-      marked[pid] = (marker, int(fields[1]), int(fields[19]), os.path.basename(argv0))
+      marked[pid] = _MarkedProcess(
+        marker=marker,
+        parent=int(fields[1]),
+        session=int(fields[3]),
+        start_ticks=int(fields[19]),
+        name=os.path.basename(argv0),
+      )
     except (OSError, ValueError, IndexError):
       continue
   return marked
 
 
-# Agent runtimes Möbius launches. Their own processes carry the run marker
-# too, but they must keep running so an interrupted turn can still be parked
-# cleanly and resumed.
-AGENT_RUNTIMES = frozenset({"claude", "codex"})
+def _agent_runtime_processes(marked: dict[int, _MarkedProcess]) -> set[int]:
+  """The marked processes that are an agent runtime's own machinery.
+
+  A runtime root is a process this server launched itself (the Claude CLI,
+  the Codex app-server wrapper, whatever its executable is called). Each is
+  launched as the leader of a private session, and everything that stays in
+  that session belongs to the runtime: the native Codex binary behind its
+  ``node`` wrapper and the stdio MCP servers the runtime started. Providers
+  start every tool command in a session of its own (see RUN_MARKER_ENV), so a
+  command and all its descendants fall outside it, and an orphaned command
+  re-parented away from its runtime can never pass for one.
+  """
+  server = os.getpid()
+  roots = {pid for pid, proc in marked.items() if proc.parent == server}
+  return roots | {pid for pid, proc in marked.items() if proc.session in roots}
 
 
 def stop_agent_commands(*, spare_markers: frozenset[str] = frozenset()) -> int:
@@ -265,22 +291,25 @@ def stop_agent_commands(*, spare_markers: frozenset[str] = frozenset()) -> int:
 
   For a volume about to fill: the writer is almost always a command an agent
   started (an install, a download, a build) or a scheduled app job, and
-  waiting for an agent's turn to be
-  interrupted gives it seconds more to write. Every process carrying a run
-  marker is stopped at once (SIGSTOP), then killed (SIGKILL also ends a
-  stopped process, so nothing is ever left frozen), except the agent runtimes
-  themselves and browsers, which keep their graceful owners, and runs whose
-  marker is in ``spare_markers``. Identity is by executable name, as for
-  browsers, because a shared Codex app-server parents commands from several
-  chats and a reparented orphan has no telling parent at all. Returns how many
-  processes were killed.
+  waiting for an agent's turn to be interrupted gives it seconds more to
+  write. Every process carrying a run marker is stopped at once (SIGSTOP),
+  then killed (SIGKILL also ends a stopped process, so nothing is ever left
+  frozen), except runs whose marker is in ``spare_markers``, the agent
+  runtimes themselves with their MCP servers (identified by process position,
+  :func:`_agent_runtime_processes`, so the turn can still be paused cleanly
+  and keep its tools), and browsers, which keep their graceful owners.
+  Returns how many processes were killed.
   """
   from app.browser_processes import BROWSERS, DAEMONS
-  spared_names = BROWSERS | DAEMONS | AGENT_RUNTIMES
+  spared_names = BROWSERS | DAEMONS
+  marked = _marked_processes()
+  runtime = _agent_runtime_processes(marked)
   victims = [
-    (pid, ticks)
-    for pid, (marker, _parent, ticks, name) in _marked_processes().items()
-    if marker not in spare_markers and name not in spared_names
+    (pid, proc.start_ticks)
+    for pid, proc in marked.items()
+    if proc.marker not in spare_markers
+    and pid not in runtime
+    and proc.name not in spared_names
   ]
   for pid, ticks in victims:
     _signal_same_process(pid, ticks, signal.SIGSTOP)

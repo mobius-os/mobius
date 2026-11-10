@@ -92,7 +92,8 @@ def held_bytes(data_dir: str | Path) -> int:
   return _allocated_bytes(reserve_path(data_dir))
 
 
-def _holds(allocated: int, target_bytes: int) -> bool:
+def holds(allocated: int, target_bytes: int) -> bool:
+  """Whether ``allocated`` bytes count as a reserve of ``target_bytes``."""
   return allocated >= int(target_bytes * _ALLOCATION_TOLERANCE)
 
 
@@ -158,7 +159,7 @@ def arm(
   path = reserve_path(data_dir)
   partial = path.with_name(path.name + _PARTIAL_SUFFIX)
   current = _allocated_bytes(path)
-  if _holds(current, target_bytes) and current <= target_bytes * 2:
+  if holds(current, target_bytes) and current <= target_bytes * 2:
     return ArmOutcome("already_armed", current)
   path.parent.mkdir(parents=True, exist_ok=True)
   _unlink_quietly(partial)
@@ -183,13 +184,13 @@ def arm(
         raise OSError(result, os.strerror(result))
       if result == 0:
         os.fsync(fd)
-      if result or not _holds(_allocated_bytes(partial), target_bytes):
+      if result or not holds(_allocated_bytes(partial), target_bytes):
         # Unsupported, or allocated space the filesystem compressed away.
         _fill_incompressible(fd, target_bytes)
     finally:
       os.close(fd)
     allocated = _allocated_bytes(partial)
-    if not _holds(allocated, target_bytes):
+    if not holds(allocated, target_bytes):
       _unlink_quietly(partial)
       return ArmOutcome(
         "unsupported", 0,

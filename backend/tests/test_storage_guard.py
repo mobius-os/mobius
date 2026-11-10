@@ -178,7 +178,7 @@ async def test_critical_volume_spares_a_turn_the_owner_continued_anyway(
   from app.process_groups import run_marker
 
   monkeypatch.setattr(storage_guard, "_continued", {})
-  monkeypatch.setattr(storage_guard, "_alive", lambda chat_id: True)
+  monkeypatch.setattr(storage_guard, "_is_live_run", lambda chat_id, run_token: True)
   storage_guard.spare_continued_turn("continued-chat", "continued-run")
   volume = Volume(CRITICAL)
   recorder = Recorder(volume)
@@ -196,7 +196,7 @@ async def test_exhausted_volume_stops_continued_commands_then_releases_the_reser
   tmp_path, monkeypatch,
 ):
   monkeypatch.setattr(storage_guard, "_continued", {})
-  monkeypatch.setattr(storage_guard, "_alive", lambda chat_id: True)
+  monkeypatch.setattr(storage_guard, "_is_live_run", lambda chat_id, run_token: True)
   storage_guard.spare_continued_turn("continued-chat", "continued-run")
   volume = Volume(EXHAUSTED)
   recorder = Recorder(volume)
@@ -280,14 +280,17 @@ def _status_for(free):
 
 def test_container_start_releases_the_reserve_before_any_boot_write():
   """On a full volume the image's boot transaction cannot commit and the
-  container refuses to start; the entrypoint frees the reserve first."""
+  container refuses to start; the entrypoint frees the reserve first, using
+  the server's own critical check so a healthy volume keeps it."""
   from pathlib import Path
 
   entrypoint = (
     Path(__file__).resolve().parents[1] / "scripts" / "entrypoint.sh"
   ).read_text()
-  relative = disk_reserve.reserve_path("/data")
-  release = entrypoint.index(f"rm -f {relative} ")
+  release = entrypoint.index("release_reserve_at_boot(")
+  # When the check itself cannot run, the reserve is released anyway.
+  fallback = entrypoint.index(f"rm -f {disk_reserve.reserve_path('/data')}\n")
+  assert release < fallback < entrypoint.index("begin-boot")
   assert release < entrypoint.index("managed-cutover-ready")
   assert release < entrypoint.index("_platform_serve_checkout() {")
   assert release < entrypoint.index("_platform_boot activate")
@@ -314,8 +317,27 @@ async def test_jumping_straight_to_full_sends_one_notice_not_two(tmp_path, no_co
 def test_continued_turns_forget_chats_that_went_idle(monkeypatch):
   alive = {"chat-a"}
   monkeypatch.setattr(storage_guard, "_continued", {})
-  monkeypatch.setattr(storage_guard, "_alive", lambda chat_id: chat_id in alive)
+  monkeypatch.setattr(
+    storage_guard, "_is_live_run", lambda chat_id, run_token: chat_id in alive,
+  )
   storage_guard.spare_continued_turn("chat-a", "run-a")
   storage_guard.spare_continued_turn("chat-b", "run-b")
 
   assert storage_guard.continued_turns() == {"chat-a": "run-a"}
+
+
+def test_continue_anyway_covers_only_the_run_it_admitted(monkeypatch):
+  """A later, ordinary turn in the same live chat is paused like any other."""
+  from app import chat as chat_mod
+
+  live_sink = SimpleNamespace(run_token="run-a")
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  monkeypatch.setattr(chat_mod.registry, "is_alive", lambda chat_id: True)
+  monkeypatch.setattr(chat_mod, "get_active_sink", lambda chat_id: live_sink)
+  storage_guard.spare_continued_turn("chat-a", "run-a")
+
+  assert storage_guard.continued_turns() == {"chat-a": "run-a"}
+
+  live_sink.run_token = "run-b"
+
+  assert storage_guard.continued_turns() == {}

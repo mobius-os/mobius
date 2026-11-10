@@ -72,14 +72,17 @@ def test_restart_drain_owns_every_turn_while_it_runs(monkeypatch):
   registry.unregister("storage-during-restart", handle.kind)
 
 
-def test_a_chat_already_handed_to_another_interrupter_is_left_to_it():
-  _, _, handle = _live_turn("storage-already-handed")
-  chat_mod._park_handoff_chats.add("storage-already-handed")
+def test_a_turn_already_handed_to_another_interrupter_is_left_to_it():
+  cid = "storage-already-handed"
+  _, sink, handle = _live_turn(cid)
+  chat_mod._park_handoffs[cid] = chat_mod._ParkHandoff(
+    generation=chat_mod.current_run_generation(cid), run_token=sink.run_token,
+  )
 
   assert _pause() == 0
   assert handle.stop_calls == 0
-  chat_mod._park_handoff_chats.discard("storage-already-handed")
-  registry.unregister("storage-already-handed", handle.kind)
+  chat_mod._park_handoffs.pop(cid, None)
+  registry.unregister(cid, handle.kind)
 
 
 def test_unstoppable_turn_is_left_for_the_wedged_run_sweep():
@@ -91,3 +94,61 @@ def test_unstoppable_turn_is_left_for_the_wedged_run_sweep():
   assert _pause() == 0
   assert _run("storage-stuck")["status"] == "running"
   registry.unregister("storage-stuck", stuck.kind)
+
+
+def _stale_handoff(chat_id: str) -> None:
+  """A handoff its turn never consumed: that turn ended before the mark."""
+  chat_mod._park_handoffs[chat_id] = chat_mod._ParkHandoff(
+    generation=chat_mod.current_run_generation(chat_id) - 1,
+    run_token=f"ended-{chat_id}",
+  )
+
+
+def test_a_stale_handoff_does_not_shield_a_later_turn_from_the_storage_pause():
+  cid = "storage-stale-handoff"
+  _, _, handle = _live_turn(cid)
+  _stale_handoff(cid)
+
+  assert _pause() == 1
+  _drain_writer()
+
+  assert handle.stop_calls == 1
+  assert _run(cid)["park_reason"] == "storage"
+
+
+def test_a_stale_handoff_does_not_suppress_a_later_turns_limit_park():
+  cid = "storage-stale-limit"
+  _, sink, handle = _live_turn(cid)
+  _stale_handoff(cid)
+
+  kwargs = chat_mod._park_exit(sink, {"api_error_status": 429}, None)
+
+  assert kwargs["parked"] is True
+  registry.unregister(cid, handle.kind)
+
+
+def test_a_stale_handoff_is_never_taken_by_a_later_turns_terminal():
+  """A later Stop still clears its own run instead of draining for restart."""
+  cid = "storage-stale-stop"
+  _stale_handoff(cid)
+  later_turn = chat_mod.current_run_generation(cid)
+
+  assert chat_mod._take_park_handoff(cid, later_turn) is False
+  assert chat_mod._take_park_handoff(cid, later_turn - 1) is True
+  assert cid not in chat_mod._park_handoffs
+
+
+def test_a_turn_that_never_stops_is_interrupted_once_and_kept_as_one_entry():
+  """The guard ticks every second; an unstoppable turn's handoff stays one."""
+  cid = "storage-stuck-repeat"
+  _, _, _ = _live_turn(cid)
+  registry.unregister(cid, _Handle(cid).kind)
+  stuck = _Handle(cid, stops=False)
+  registry.register(stuck)
+
+  for _ in range(5):
+    assert _pause() == 0
+
+  assert stuck.stop_calls == 1
+  assert list(chat_mod._park_handoffs) == [cid]
+  registry.unregister(cid, stuck.kind)

@@ -65,14 +65,23 @@ def disk_level(disk: dict[str, Any], free_bytes: int) -> str:
 # A turn the owner continued with "Continue anyway" from its storage wait
 # (allow_low_storage, admitted in chat.run_chat) is the owner's explicit
 # choice to let an agent free space. The guard keeps it running and spares its
-# commands until the volume is exhausted.
+# commands until the volume is exhausted. The choice covers that one run:
+# a later turn in the same chat is paused like any other.
 
 _continued: dict[str, str] = {}
 
 
-def _alive(chat_id: str) -> bool:
-  from app.chat import registry
-  return registry.is_alive(chat_id)
+def _is_live_run(chat_id: str, run_token: str) -> bool:
+  """Whether ``run_token`` is still the chat's live turn.
+
+  A turn that has not registered its event sink yet still counts, so a
+  continued turn is spared from its first tick.
+  """
+  from app.chat import get_active_sink, registry
+  if not registry.is_alive(chat_id):
+    return False
+  sink = get_active_sink(chat_id)
+  return sink is None or getattr(sink, "run_token", None) == run_token
 
 
 def spare_continued_turn(chat_id: str, run_token: str) -> None:
@@ -82,8 +91,9 @@ def spare_continued_turn(chat_id: str, run_token: str) -> None:
 
 def continued_turns() -> dict[str, str]:
   """``chat_id -> run_token`` of continued turns that are still live."""
-  for chat_id in [c for c in _continued if not _alive(c)]:
-    _continued.pop(chat_id, None)
+  for chat_id, run_token in list(_continued.items()):
+    if not _is_live_run(chat_id, run_token):
+      _continued.pop(chat_id, None)
   return dict(_continued)
 
 
@@ -295,7 +305,7 @@ class StorageGuard:
       return
     target = disk_reserve.reserve_target_bytes(total)
     held = disk_reserve.held_bytes(self.data_dir)
-    if held >= target * 0.98:
+    if disk_reserve.holds(held, target):
       self.reserve_state = "armed"
       outcome.reserve = "armed"
       return
