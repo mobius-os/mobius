@@ -1,7 +1,7 @@
 """The owner's own status changes on one pull request, at the version they saw.
 
-Open for review, back to draft, close, and ask for re-review: each is a tap
-in Contribute behind its confirm sheet. As with Merge now
+Open for review, back to draft, close, ask for re-review, and ask for approval:
+each is a tap in Contribute behind its confirm sheet. As with Merge now
 (contribution_direct_merge) there is no run, agent or stored consent: the
 owner's tap is the authority. GitHub is read again right before the one
 write, and the PR machine is asked on those facts, so the refusal is the
@@ -13,17 +13,27 @@ outcome cannot be read is reported as unconfirmed and is never repeated.
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from fastapi import HTTPException
 
 from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine, settled
+from app import contribution_review_public as public, contribution_review_runs as reviews
 from app.contribution_direct_merge import CHANGED, UNREADABLE, _READ_FAILURES, _read_object, _refusal_summary
-from app.contribution_review_effects import DispatchResult, classify_dispatch_error, graphql_mutation_result
+from app.contribution_review_effects import (DispatchResult, NotDispatched, _gh_http_status,
+                                             classify_dispatch_error, graphql_mutation_result)
 from app.github_connection import _github_connection_transaction
 
 _log = logging.getLogger(__name__)
+
+# What GitHub reads as a mention in a comment; the ask-approval note may name only the people asked.
+MENTION = re.compile(r"@([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))")
+# The note carries the head and names the person, so the same words on the PR are the same ask.
+NOTE_ALREADY_THERE = "This exact note is already on the pull request. Wait for their reply."
+REPEAT_WINDOW = timedelta(days=7)
 
 # Opening a draft can satisfy the last condition of an armed auto-merge: that would be a merge.
 AUTO_MERGE_ON = ("Auto-merge is switched on for this pull request, so opening it for review could merge it "
@@ -53,25 +63,66 @@ def convert_to_draft(gh, cwd, target, _body) -> str | None:
   return _status_mutation(gh, cwd, _DRAFT, "convertPullRequestToDraft", target["pr_id"], draft=True)
 
 
-def _pull_answer(stdout: str) -> dict:
-  pull = json.loads(stdout)
-  return pull if isinstance(pull, dict) else {}
+def _answer_object(stdout: str) -> dict:
+  answer = json.loads(stdout)
+  return answer if isinstance(answer, dict) else {}
 
 
 def close_pull(gh, cwd, target, _body) -> str | None:
-  pull = _pull_answer(gh(cwd, "api", "--method", "PATCH", f"repos/{target['repo']}/pulls/{target['number']}",
-                         "-f", "state=closed").stdout)
+  pull = _answer_object(gh(cwd, "api", "--method", "PATCH", f"repos/{target['repo']}/pulls/{target['number']}",
+                           "-f", "state=closed").stdout)
   return (pull.get("head") or {}).get("sha") if pull.get("state") == "closed" else None
 
 
 def request_reviewers(gh, cwd, target, body) -> str | None:
-  pull = _pull_answer(gh(cwd, "api", "--method", "POST",
-                         f"repos/{target['repo']}/pulls/{target['number']}/requested_reviewers", "--input", "-",
-                         input_text=json.dumps({"reviewers": body.reviewers})).stdout)
+  pull = _answer_object(gh(cwd, "api", "--method", "POST",
+                           f"repos/{target['repo']}/pulls/{target['number']}/requested_reviewers", "--input", "-",
+                           input_text=json.dumps({"reviewers": body.reviewers})).stdout)
   requested = {str(user.get("login") or "").lower() for user in pull.get("requested_reviewers") or []
                if isinstance(user, dict)}
   confirmed = {login.lower() for login in body.reviewers} <= requested
   return (pull.get("head") or {}).get("sha") if confirmed else None
+
+
+def _head_after_posting(gh, cwd, target) -> str | None:
+  """The head GitHub reports once the note is posted; None when it cannot be read.
+
+  The note is already on the PR, so this read failing must never read as "refused,
+  nothing happened": every failure here is an unconfirmed write, which is never repeated.
+  """
+  try:
+    pull = _answer_object(gh(cwd, "api", f"repos/{target['repo']}/pulls/{target['number']}").stdout)
+  except _READ_FAILURES:
+    return None
+  sha = (pull.get("head") or {}).get("sha")
+  return sha if isinstance(sha, str) else None
+
+
+def _refuse_a_repeated_note(gh, cwd, target, body) -> None:
+  """Raise NotDispatched when this exact note is already among the PR's recent comments.
+
+  A read, so it runs before the settled write (see StatusChange.prepare), never inside it.
+  Best effort: a comment read that fails never blocks the post, except GitHub
+  saying the pull request itself is not there, which nothing could post to.
+  """
+  since = (datetime.now(timezone.utc) - REPEAT_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+  try:
+    found = reviews.read(gh, cwd,
+                         f"repos/{target['repo']}/issues/{target['number']}/comments?per_page=100&since={since}")
+  except _READ_FAILURES as exc:
+    if _gh_http_status(str(exc)) == 404:
+      raise NotDispatched(UNREADABLE) from exc
+    return
+  if isinstance(found, list) and any(isinstance(item, dict) and item.get("body") == body.note for item in found):
+    raise NotDispatched(NOTE_ALREADY_THERE)
+
+
+def post_note(gh, cwd, target, body) -> str | None:
+  """Post the owner's note as a comment on the PR, once; the head GitHub reports once it confirms the comment."""
+  posted = public.post_issue_comment(gh, cwd, target, body.note)
+  if posted.state == "not_dispatched":
+    raise NotDispatched(posted.reason)
+  return _head_after_posting(gh, cwd, target) if posted.state == "confirmed" else None
 
 
 def _rereview_only(facts: dict, pull: dict, body) -> None:
@@ -81,6 +132,17 @@ def _rereview_only(facts: dict, pull: dict, body) -> None:
   if others:
     raise HTTPException(409, "Ask only people whose review is of an older version: "
                              f"{', '.join(allowed) or 'nobody'}.")
+
+
+def _approval_note_check(facts: dict, pull: dict, body) -> None:
+  looked_again = machine.decide(facts)["looked_again"]
+  allowed = {login.lower() for login in looked_again}
+  if any(login.lower() not in allowed for login in body.people):
+    raise HTTPException(409, "Ask only people who looked again without approving: "
+                             f"{', '.join(looked_again) or 'nobody'}.")
+  asked = {login.lower() for login in body.people}
+  if any(mention.lower() not in asked for mention in MENTION.findall(body.note)):
+    raise HTTPException(409, "The note may only name the people asked.")
 
 
 def _no_auto_merge(facts: dict, pull: dict, body) -> None:
@@ -94,6 +156,10 @@ def _nothing_more(facts: dict, pull: dict, body) -> None:
   return None
 
 
+def _nothing_to_read(gh, cwd, target, body) -> None:
+  return None
+
+
 @dataclass(frozen=True)
 class StatusChange:
   machine_action: str  # the PR machine action this tap is
@@ -101,6 +167,10 @@ class StatusChange:
   write: Callable  # (gh, cwd, target, body) -> the head GitHub reports, or None when unconfirmed
   unconfirmed: dict  # the 502 detail when the write's outcome cannot be read
   check: Callable = _nothing_more  # a rule beyond the machine, on the facts and the pull just read
+  # A GitHub read the write needs first, as (gh, cwd, target, body); raises NotDispatched to refuse. It runs
+  # unsettled, before the authority check that precedes the write, so a cancellation or a revoked permission
+  # during the read still stops the write.
+  prepare: Callable = _nothing_to_read
 
 
 def _unconfirmed(code: str, maybe: str) -> dict:
@@ -115,6 +185,9 @@ CHANGES = {
   "close": StatusChange("close", "closed", close_pull, _unconfirmed("close_unconfirmed", "closed it")),
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
+  "ask-approval": StatusChange("ask_approval", "asked", post_note,
+                               _unconfirmed("approval_unconfirmed", "posted the note"), _approval_note_check,
+                               _refuse_a_repeated_note),
 }
 
 
@@ -139,6 +212,14 @@ def _read_pull_facts(gh, cwd, body) -> tuple[dict, dict, dict]:
   facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=actor["id"],
                               actor_login=str(actor.get("login") or ""), job=None)
   return target, pull, facts
+
+
+async def _prepare(change: StatusChange, gh, cwd, target, body) -> None:
+  """The write's own GitHub read, cancellable and unsettled: a refusal here changed nothing."""
+  try:
+    await asyncio.to_thread(change.prepare, gh, cwd, target, body)
+  except NotDispatched as exc:
+    raise HTTPException(409, str(exc)) from exc
 
 
 async def _dispatch(change: StatusChange, gh, cwd, target, body, authorize) -> DispatchResult:
@@ -170,6 +251,8 @@ async def _change(gh, cwd, change: StatusChange, body, authorize, pr_job) -> dic
   authorize()
   async with _github_connection_transaction():
     target, pull, facts = await asyncio.to_thread(_read_pull_facts, gh, cwd, body)  # unsettled: read-only (GitHub account, pull request, reviews and checks)
+    # The write's own GitHub read waits too, so it comes before the job is asked for.
+    await _prepare(change, gh, cwd, target, body)
     # The agent job is local, so GitHub's reads cannot show it change: ask for it now, after every wait,
     # and keep review admission out until the write is sent.
     async with pr_job() as job_now:
@@ -187,7 +270,7 @@ async def change_pull_status(gh, cwd, name: str, body, authorize, pr_job) -> dic
   """Apply one owner status change (a key of CHANGES) to the exact pull request named, once.
 
   `body` carries repo, number and head_sha (and reviewers for
-  request-reviewers). `authorize` raises an HTTPException once the caller's
+  request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
   authority no longer stands; it runs before any GitHub call and again right
   before the write. `pr_job` opens the PR's agent job as it is at the final
   check (a review run's or a Respond chat's), holding review admission until

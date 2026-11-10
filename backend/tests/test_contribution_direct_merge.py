@@ -50,10 +50,13 @@ class FakeGitHub:
     self.pull = {**PULL}
     self.checks = {key: value for key, value in CHECKS.items() if key != "latestOpinionatedReviews"}
     self.reviews = [APPROVAL]  # the writers' standing opinions the check read carries
+    self.comments = []  # the writers' newest reviews that were plain comments (latestReviews)
     self.base_tips = [BASE]  # each base-branch read takes the next; the last repeats
     self.merge_answer = {"merged": True, "sha": MERGED_SHA, "message": RESPONSE_BODY}
     self.enqueue_answer = {"data": {"enqueuePullRequest": {"mergeQueueEntry": QUEUE_ENTRY}}}
     self.unreadable = set()  # any of "repo", "pull", "base", "checks", "reviews"
+    self.compares = {}  # commit -> GitHub's comparison of it with the base tip; a commit not listed is unreadable
+    self.compare_reads = []
     self.on_base_read = lambda count: None
     self.base_reads = 0
     self.calls, self.merges, self.enqueues = [], [], []
@@ -71,6 +74,8 @@ class FakeGitHub:
     return self._read(args[1])
 
   def _read(self, endpoint):
+    if endpoint.startswith(f"repos/{NAME}/compare/"):
+      return self._compare(endpoint)
     reads = {f"repos/{NAME}": ("repo", self.repo), f"repos/{NAME}/pulls/{NUMBER}": ("pull", self.pull),
              f"repos/{NAME}/git/ref/heads/main": ("base", None)}
     if endpoint not in reads:
@@ -83,6 +88,13 @@ class FakeGitHub:
       payload = {"object": {"sha": self.base_tips[min(self.base_reads, len(self.base_tips)) - 1]}}
     return self._answer(payload)
 
+  def _compare(self, endpoint):
+    """A comparison for the same-work proof of an approval of an older commit."""
+    self.compare_reads.append(endpoint)
+    base, commit = endpoint.removeprefix(f"repos/{NAME}/compare/").split("...")
+    assert base == self.base_tips[-1], "compared against something other than the base tip"
+    return self._answer(self.compares.get(commit, ContributionSubmitError("gh: Not Found (HTTP 404)")))
+
   def _graphql(self, flags):
     if flags["id"] != TARGET["pr_id"]:
       pytest.fail(f"unexpected pull request: {flags['id']}")
@@ -90,7 +102,8 @@ class FakeGitHub:
       self.enqueues.append({"id": flags["id"], "head": flags["head"]})
       return self._answer(self.enqueue_answer)
     self._must_be_readable("checks")
-    reviews = {} if "reviews" in self.unreadable else {"latestOpinionatedReviews": {"nodes": self.reviews}}
+    reviews = {} if "reviews" in self.unreadable else {"latestOpinionatedReviews": {"nodes": self.reviews},
+                                                       "latestReviews": {"nodes": self.comments}}
     return self._answer({"data": {"node": {**self.checks, **reviews}}})
 
   def _merge(self, flags):
@@ -152,6 +165,37 @@ def test_the_exact_head_is_merged_once_with_the_repositorys_preferred_method():
                            "repo": NAME, "number": NUMBER, "head_sha": SHA}
   assert github.merges == [{"sha": SHA, "merge_method": "squash"}]
   assert github.enqueues == []
+
+
+SAME_LINE = {"filename": "a.js", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1 @@\n+x"}
+
+
+def test_an_approval_of_an_older_commit_still_merges_when_the_prs_own_change_is_the_same():
+  github = FakeGitHub()
+  github.reviews = [{**APPROVAL, "commit": {"oid": MOVED}}]
+  github.compares = {SHA: {"files": [SAME_LINE]}, MOVED: {"files": [{**SAME_LINE, "patch": "@@ -9 +9 @@\n+x"}]}}
+  assert press(github)["state"] == "merged"
+  assert github.compare_reads == [f"repos/{NAME}/compare/{BASE}...{commit}" for commit in (SHA, MOVED)]
+
+
+@pytest.mark.parametrize("compares", [
+  {SHA: {"files": [SAME_LINE]}, MOVED: {"files": [{**SAME_LINE, "patch": "@@ -1 +1 @@\n+y"}]}},
+  {SHA: {"files": [SAME_LINE]}},
+  {},
+], ids=["the work changed", "the approved version cannot be read", "neither can be read"])
+def test_an_approval_of_an_older_commit_does_not_merge_unless_the_work_is_proved_the_same(compares):
+  github = FakeGitHub()
+  github.reviews = [{**APPROVAL, "commit": {"oid": MOVED}}]
+  github.compares = compares
+  refusal = refused(github)
+  assert (refusal.status_code, refusal.detail) == (409, "The approval is for an older version.")
+  assert github.writes == 0
+
+
+def test_an_approval_of_this_head_costs_no_comparison():
+  github = FakeGitHub()
+  assert press(github)["state"] == "merged"
+  assert github.compare_reads == []
 
 
 @pytest.mark.parametrize("allowed, preferred", [

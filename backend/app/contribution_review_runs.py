@@ -309,6 +309,7 @@ def pull_checks(gh, cwd, target):
   query = ('query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision '
            'isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} '
            'latestOpinionatedReviews(first:100, writersOnly:true){nodes{state author{login __typename} commit{oid}}} '
+           'latestReviews(first:100){nodes{state author{login __typename} commit{oid}}} '
            'viewerLatestReview{state commit{oid}} }}}')
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
                          "-f", f"id={target['pr_id']}").stdout)
