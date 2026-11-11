@@ -35,6 +35,10 @@ class StatusGitHub(FakeGitHub):
     self.recent_comments = []  # what GitHub answers to the read of the PR's recent comments, or an exception
     self.comment_reads = []
     self.during_comment_read = lambda: None  # runs while GitHub has not yet answered the comments read
+    self.also_reviewed = []  # newest reviews of people without write access, which the writers-only opinions never carry
+    self.review_pages = None  # None: one page of every newest review; else pages of nodes, each carrying the next cursor
+    self.approver_reads = []  # the `after` cursor of each read of everyone's newest reviews
+    self.approvers_answer = None  # what GitHub answers to that read instead of a page, or an exception
 
   def __call__(self, cwd, *args, check=True, input_text=None, **_ignored):
     self.calls.append(args)
@@ -50,6 +54,8 @@ class StatusGitHub(FakeGitHub):
     if args[:3] == ("api", "--method", "POST") and args[3] == COMMENTS_ENDPOINT:
       note = json.loads(input_text)["body"]
       return self._write("comment", {"id": 1001, "body": note}, note)
+    if args[:2] == ("api", "graphql") and "pageInfo" in _flags(args[2:])["query"]:
+      return self._newest_reviews(_flags(args[2:]).get("after"))
     if args[:2] == ("api", "graphql") and "mutation" in _flags(args[2:])["query"]:
       field = "convertPullRequestToDraft" if "convertPullRequestToDraft" in _flags(args[2:])["query"] else "markPullRequestReadyForReview"
       node = {"id": PULL["node_id"], "isDraft": field == "convertPullRequestToDraft", "headRefOid": SHA}
@@ -57,6 +63,17 @@ class StatusGitHub(FakeGitHub):
     if args[1] == "user":
       return self._answer(ME)
     return super().__call__(cwd, *args, check=check)
+
+  def _newest_reviews(self, after):
+    """Everyone’s newest review, a hundred to a page, as `latestReviews` answers it (the writers’ opinions are among them)."""
+    self.approver_reads.append(after)
+    if self.approvers_answer is not None:
+      return self._answer(self.approvers_answer)
+    pages = self.review_pages or [[*self.reviews, *self.comments, *self.also_reviewed]]
+    index = 0 if after is None else int(after.removeprefix("cursor-"))
+    more = index + 1 < len(pages)
+    return self._answer({"data": {"node": {"latestReviews": {
+      "pageInfo": {"hasNextPage": more, "endCursor": f"cursor-{index + 1}" if more else None}, "nodes": pages[index]}}}})
 
   def _write(self, name, confirmed, sent):
     self.writes_seen.append((name, sent))
@@ -188,10 +205,59 @@ def test_request_review_refuses_the_author_and_whoever_already_approved_this_ver
   assert github.writes_seen == [("reviewers", ["bob"])]
 
 
+def approval(login, commit=SHA):
+  return {"state": "APPROVED", "author": {"login": login, "__typename": "User"}, "commit": {"oid": commit}}
+
+
+def test_request_review_does_not_ask_a_collaborator_without_write_access_who_approved_this_version():
+  github = StatusGitHub()
+  github.also_reviewed = [approval("Carol")]  # not a writer: the writers-only opinions never carry her approval
+  assert "carol" not in {item["author"]["login"].lower() for item in github.reviews}
+  assert refused(github, "request-review", asking(["carol"])) == (409, "Someone who already approved this version cannot be asked again.")
+  assert refused(github, "request-review", asking(["bob", "CAROL"]))[0] == 409
+  assert github.writes_seen == [], "nobody was asked"
+  assert change(github, "request-review", asking(["bob"]))["state"] == "requested"
+
+
+def test_request_review_asks_someone_whose_approval_was_of_an_older_version():
+  github = StatusGitHub()
+  github.also_reviewed = [approval("carol", OLDER)]
+  assert change(github, "request-review", asking(["carol"]))["state"] == "requested"
+
+
+def test_request_review_finds_an_approver_past_the_first_hundred_reviews():
+  github = StatusGitHub()
+  others = [{"state": "COMMENTED", "author": {"login": f"person{index}", "__typename": "User"}, "commit": {"oid": SHA}} for index in range(100)]
+  github.review_pages = [others, [approval("carol")]]
+  assert refused(github, "request-review", asking(["carol"])) == (409, "Someone who already approved this version cannot be asked again.")
+  assert github.approver_reads == [None, "cursor-1"], "the second page is read with the cursor the first one gave"
+  assert github.writes_seen == []
+
+
+def test_request_review_asks_nobody_when_who_approved_cannot_be_read_in_full():
+  unreadable = "GitHub could not show who approved this pull request."
+  for broken, reason in ((ContributionSubmitError("gh: Bad gateway (HTTP 502)"), subject.UNREADABLE), ({"errors": [{"message": "boom"}]}, unreadable),
+                         ({"data": {"node": None}}, unreadable), (["not", "an", "object"], unreadable)):
+    github = StatusGitHub()
+    github.approvers_answer = broken
+    assert refused(github, "request-review", asking(["bob"])) == (409, reason), broken
+    assert github.writes_seen == [], f"asked anyway after {broken!r}"
+  github = StatusGitHub()
+  github.review_pages = [[approval("someone")] for _ in range(subject.pr_facts.APPROVER_PAGES + 1)]
+  assert refused(github, "request-review", asking(["bob"])) == (409, "GitHub showed too many reviews to tell who approved this pull request.")
+  assert len(github.approver_reads) == subject.pr_facts.APPROVER_PAGES and github.writes_seen == []
+
+
+def test_only_request_review_reads_everyone_who_approved():
+  github = looked_again()
+  assert change(github, "request-reviewers", asking(["sam"]))["state"] == "requested"
+  assert github.approver_reads == [], "Ask for re-review keeps the machine's own rule"
+
+
 def test_request_review_is_refused_on_a_pull_request_that_is_no_longer_open():
   github = StatusGitHub()
   github.pull = {**github.pull, "state": "closed"}
-  status, reason = refused(github, "request-review", asking(["sam"]))
+  status, reason = refused(github, "request-review", asking(["bob"]))
   assert status == 409 and reason == "This PR is no longer open." and github.writes_seen == []
 
 
@@ -384,6 +450,20 @@ def test_an_unconfirmed_write_is_a_502_with_its_code_and_is_never_retried(name, 
   status, detail = refused(github, name, request)
   assert status == 502 and detail["code"] == code and "Check the pull request" in detail["message"]
   assert len(github.writes_seen) == 1
+
+
+@pytest.mark.parametrize("name, person", [("request-review", "bob"), ("request-reviewers", "sam")])
+def test_githubs_own_reason_for_a_422_reaches_the_owner_and_nothing_is_repeated(name, person):
+  reason = "Reviews may only be requested from collaborators. One or more of the users you specified is not a collaborator of the repository."
+  start = looked_again if name == "request-reviewers" else StatusGitHub
+  github = start()
+  github.answers["reviewers"] = ContributionSubmitError(f"gh: {reason} (HTTP 422)")
+  assert refused(github, name, asking([person])) == (409, f"GitHub refused: {reason}")
+  assert len(github.writes_seen) == 1, "one attempt, never repeated"
+  # GitHub saying only "Validation Failed" has no reason to pass on: the generic words stay.
+  vague = start()
+  vague.answers["reviewers"] = ContributionSubmitError("gh: Validation Failed (HTTP 422)")
+  assert refused(vague, name, asking([person])) == (409, "GitHub refused the request (HTTP 422); no effect was applied.")
 
 
 def test_a_refusal_github_proves_is_a_409_that_changed_nothing():
