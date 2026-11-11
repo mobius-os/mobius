@@ -9,10 +9,12 @@ import pytest
 from app import answer_check
 
 
-def _reason(blocks, *, before_card, chat_id="c", media_dir="/m", last=None):
+def _reason(
+  blocks, *, before_card, chat_id="c", media_dir="/m", last=None, message_card=False,
+):
   return answer_check.reason(
     blocks, chat_id=chat_id, media_dir=media_dir, before_card=before_card,
-    last_assistant_message=last,
+    last_assistant_message=last, message_card=message_card,
   )
 
 
@@ -50,7 +52,7 @@ def test_answer_check_length_rule_speaks_only_before_any_reminder():
     reminded=True,
   ) is None
   assert _asks_for_the_answer(answer_check.reason(
-    _closing_draft_before_card(), chat_id="c", media_dir="/m", before_card=False,
+    _closing_draft_in_thinking(), chat_id="c", media_dir="/m", before_card=False,
     reminded=True,
   ))
 
@@ -64,6 +66,25 @@ def test_answer_check_lets_a_short_lead_in_to_a_card_through():
   ]
   assert _reason(lead_in, before_card=True) is None
   assert _reason(_ANSWER_ONLY_IN_THINKING, before_card=True) is None
+
+
+def test_answer_check_before_a_card_asks_for_its_message_instead_of_reading_thinking():
+  # A question, approval or restart card carries the turn's closing message,
+  # so whether one is there decides; closing reasoning is not read at all.
+  closing = _closing_draft_in_thinking()
+  assert _reason(closing, before_card=True, message_card=True, last="Two options below.") is None
+  for blank in (None, "", "   ", 5):
+    reason = _reason(
+      [{"type": "text", "content": "Two options, pick one below."}],
+      before_card=True, message_card=True, last=blank,
+    )
+    assert reason is not None
+    assert reason.startswith("Möbius check before your card is saved.")
+    assert "This card has no message" in reason
+    assert "card's message" in reason
+    assert "brief explanation of the conclusion" not in reason
+  # A secret card has no message field; its closing reasoning is not read either.
+  assert _reason(closing, before_card=True) is None
 
 
 def test_answer_check_quotes_what_the_owner_actually_sees():
@@ -101,8 +122,8 @@ _DRAFT = ("The preview build still fails: increase the memory limit in the "
           "build settings, then retry the deploy.")
 
 
-def _closing_draft_before_card() -> list[dict]:
-  """A reply that drafted its closing words in thinking, then saved a card.
+def _closing_draft_in_thinking() -> list[dict]:
+  """A reply that drafted its closing words in thinking, then handed back.
 
   Summarized thinking keeps such a draft as its own paragraph after blank
   lines; the visible reply is long enough that length alone looks fine.
@@ -116,18 +137,13 @@ def _closing_draft_before_card() -> list[dict]:
   ]
 
 
-@pytest.mark.parametrize(("blocks", "before_card"), [
-  (_closing_draft_before_card(), True),
-  (_closing_draft_before_card(), False),
-  (_ANSWER_ONLY_IN_THINKING, False),
-])
-def test_answer_check_requests_a_summary_without_reproducing_thinking(blocks, before_card):
+@pytest.mark.parametrize("blocks", [_closing_draft_in_thinking(), _ANSWER_ONLY_IN_THINKING])
+def test_answer_check_requests_a_summary_without_reproducing_thinking(blocks):
   # Both detection paths must still prompt for a missing answer, but must not
   # send thinking excerpts back as instructions to reproduce them visibly.
-  reason = _reason(blocks, before_card=before_card)
+  reason = _reason(blocks, before_card=False)
   assert reason is not None
-  prefix = "Möbius check before your card is saved." if before_card else "Möbius end-of-turn check."
-  assert reason.startswith(prefix)
+  assert reason.startswith("Möbius end-of-turn check.")
   assert "brief explanation of the conclusion or a summary of actions taken" in reason
   assert "verified task evidence" in reason
   assert _DRAFT not in reason
@@ -137,12 +153,12 @@ def test_answer_check_requests_a_summary_without_reproducing_thinking(blocks, be
 
 
 def test_answer_check_leaves_said_and_superseded_drafts_alone():
-  blocks = _closing_draft_before_card()
-  assert _asks_for_the_answer(_reason(blocks, before_card=True))
+  blocks = _closing_draft_in_thinking()
+  assert _asks_for_the_answer(_reason(blocks, before_card=False))
   # Said in the visible reply, even re-wrapped across lines.
   said = [*blocks[:2], {"type": "text", "content": _DRAFT.replace(" in the ", "\nin the ")},
           blocks[2]]
-  assert _reason(said, before_card=True) is None
+  assert _reason(said, before_card=False) is None
   # Followed by visible text, which supersedes it.
   later = [*blocks, {"type": "text", "content": "Increase the memory limit, then retry the deploy."}]
   assert _reason(later, before_card=False) is None
@@ -157,26 +173,26 @@ def test_answer_check_leaves_said_and_superseded_drafts_alone():
   for content in ("Same failure, so the memory limit is still too low.",
                   "Same failure.\n\n\n\nOk, asking."):
     assert _reason(
-      [*blocks[:2], {"type": "thinking", "content": content}], before_card=True,
+      [*blocks[:2], {"type": "thinking", "content": content}], before_card=False,
     ) is None
 
 
 def test_answer_check_reads_only_the_reasoning_nearest_the_hand_back():
   # Mid-turn reasoning with a closing paragraph, followed by the steps it
   # planned and newer reasoning, was working toward those steps.
-  first, step, planning = _closing_draft_before_card()
+  first, step, planning = _closing_draft_in_thinking()
   later = {"type": "thinking", "content": "The retry shows the same failure."}
   blocks = [first, step, planning, {"type": "tool", "tool": "Bash", "status": "done"}, later]
-  assert _reason(blocks, before_card=True) is None
+  assert _reason(blocks, before_card=False) is None
   # A draft followed only by a progress note still closes the reply.
   note = {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"}
-  assert _asks_for_the_answer(_reason([first, step, planning, note], before_card=True))
+  assert _asks_for_the_answer(_reason([first, step, planning, note], before_card=False))
 
 
 def test_answer_check_bounds_visible_quotes_without_exposing_closing_drafts():
-  blocks = _closing_draft_before_card()
+  blocks = _closing_draft_in_thinking()
   blocks[0] = {"type": "text", "content": "Earlier progress. " * 1000 + "Latest progress."}
-  reason = _reason(blocks, before_card=True)
+  reason = _reason(blocks, before_card=False)
 
   assert reason is not None
   assert "The end of the owner's visible reply, verbatim:" in reason
@@ -356,16 +372,16 @@ def _answer_as_second_thinking_part(answer: str = _DRAFT) -> dict:
 
 
 def test_answer_check_flags_an_answer_written_as_a_second_thinking_part():
-  earlier = _closing_draft_before_card()[:2]
+  earlier = _closing_draft_in_thinking()[:2]
   assert _asks_for_the_answer(
-    _reason([*earlier, _answer_as_second_thinking_part()], before_card=True),
+    _reason([*earlier, _answer_as_second_thinking_part()], before_card=False),
   )
   # Said in the visible reply after all, or a lone thinking part: ordinary.
   said = [{"type": "text", "content": _DRAFT}, earlier[1], _answer_as_second_thinking_part()]
-  assert _reason(said, before_card=True) is None
+  assert _reason(said, before_card=False) is None
   lone = {"type": "thinking", "content": _DRAFT, "_thinking_segments": [["m1:0", _DRAFT]]}
-  assert _reason([*earlier, lone], before_card=True) is None
-  assert _reason([*earlier, _answer_as_second_thinking_part("Ok.")], before_card=True) is None
+  assert _reason([*earlier, lone], before_card=False) is None
+  assert _reason([*earlier, _answer_as_second_thinking_part("Ok.")], before_card=False) is None
 
 
 def test_unreviewed_answer_evidence_keeps_all_visible_text_but_only_new_work():
@@ -379,59 +395,10 @@ def test_unreviewed_answer_evidence_keeps_all_visible_text_but_only_new_work():
   assert answer_check.unreviewed_evidence(blocks, 0) is blocks
   assert answer_check.unreviewed_evidence(blocks, 3) == [blocks[0], blocks[3], blocks[4]]
   assert answer_check.unreviewed_evidence(None, 3) is None
-
-
-def _reasoning_after_a_reminder() -> list[dict]:
-  """What an agent did after its card was declined: it reasoned about the
-  check, saved a progress note, and wrote its answer as one plain thought,
-  with no reply text. Neither closing-draft shape matches it."""
-  return [
-    {"type": "tool", "tool": "mcp__mobius_control__request_question", "status": "done"},
-    {"type": "thinking", "content": "Wondering whether text written after the "
-     "first tool call is being ignored; the last time a card went through I had "
-     "made another call first, so saving a progress note before the card again.\n\n"},
-    {"type": "tool", "tool": "mcp__mobius_control__checkpoint_chat", "status": "done"},
-    {"type": "thinking", "content": "The memory limit is still too low, so the "
-     "preview build keeps failing. Raising it in the build settings is the only "
-     "change needed before the deploy can be retried.\n\n"},
+  # Thinking an after-step note already spoke about is dropped; tools stay.
+  assert answer_check.unreviewed_evidence(blocks, 0, 3) == [
+    blocks[0], blocks[2], blocks[3], blocks[4],
   ]
-
-
-def test_answer_check_declines_a_card_again_while_the_answer_stays_unwritten():
-  first = _closing_draft_before_card()
-  seen = answer_check.visible_reply(first)
-  blocks = answer_check.unreviewed_evidence(
-    [*first, *_reasoning_after_a_reminder()], len(first),
-  )
-
-  def before_card(blocks, last=None):
-    return answer_check.reason(
-      blocks, chat_id="c", media_dir="/m", before_card=True, reminded=True,
-      seen_at_reminder=seen, last_assistant_message=last,
-    )
-
-  reason = before_card(blocks)
-  assert reason is not None
-  assert reason.startswith("Möbius check before your card is saved.")
-  assert "nothing new has reached the owner" in reason
-  assert "Everything the owner sees from this reply, verbatim:" in reason
-  # Reasoning is never quoted back or described as living in thinking.
-  for words in ("memory limit is still", "Wondering whether", "only in your thinking"):
-    assert words not in reason
-  # New reply text, dispatched or not, is the agent answering: its judgment
-  # decides from there.
-  answered = "The preview build needs a higher memory limit."
-  assert before_card([*blocks, {"type": "text", "content": answered}]) is None
-  assert before_card(blocks, last=answered) is None
-  # A retry after a brief thought is the agent judging its reply complete.
-  assert before_card([
-    *first[:2], {"type": "thinking", "content": "The reply covers it."},
-  ]) is None
-  # At the end of a turn, more reasoning after a reminder may end the turn.
-  assert answer_check.reason(
-    blocks, chat_id="c", media_dir="/m", before_card=False, reminded=True,
-    seen_at_reminder=seen,
-  ) is None
 
 
 def test_answer_check_after_a_step_flags_only_words_written_as_extra_thinking():

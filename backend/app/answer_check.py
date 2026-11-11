@@ -6,23 +6,25 @@ folded away. Three shapes leave the owner without what the turn was for:
 - an answer drafted in thinking: the reasoning that closes the reply (its
   last thinking, after its last visible text) ends with words written for the
   owner, set apart by blank lines (summarized reasoning keeps such a draft as
-  its own closing paragraph), and the agent then saves a card or ends as if it
-  had said them; or, at the end of a turn with no such paragraph, a short
-  visible reply after long reasoning, such as "Nothing has been changed.";
+  its own closing paragraph), and the agent then ends as if it had said them;
+  or, with no such paragraph, a short visible reply after long reasoning, such
+  as "Nothing has been changed.";
 - an image the agent saved to this chat's media and viewed (a screenshot or a
   Read), then never embedded: viewing is private, so a reply that says "here's
   the before and after" shows nothing;
 - a link the agent fetched into tool output and then pointed to ("pay on the
   page linked above") without ever writing it in visible text.
 
-`reason` checks these where a turn hands control back: when the agent ends its
-turn, and just before it saves an owner card (a saved card ends the turn, so a
-later check could never reopen it). `after_step_reason` is the narrower check
-run after each work step, for words written as an extra thinking part. Both
-return text for the agent, or None. They never quote thinking back: asking the
-model to reproduce even summarized thinking can trigger a reasoning-extraction
-refusal, so the reminders quote only the visible reply and ask for a
-task-grounded summary.
+`reason` checks these where a turn hands control back. When the agent ends its
+turn, all three count. Just before it saves an owner card (a saved card ends
+the turn, so a later check could never reopen it), only images and links do:
+a question, approval or restart card carries the turn's closing message in its
+`message`, so one without it is declined outright, with no reading of
+thinking. `after_step_reason` is the narrower check run after each work step,
+for words written as an extra thinking part. Both return text for the agent,
+or None. They never quote thinking back: asking the model to reproduce even
+summarized thinking can trigger a reasoning-extraction refusal, so the
+reminders quote only the visible reply and ask for a task-grounded summary.
 
 ``blocks`` is the chat sink's current assistant segment (dicts with ``type``
 ``text`` / ``thinking`` / ``tool``); anything malformed reads as no evidence.
@@ -85,26 +87,15 @@ _MISSING_ANSWER = (
   "conclusion or a summary of actions taken. If it already answers the "
   "owner, leave it."
 )
-# Before a card after a reminder, the agent often believes it already wrote the
-# answer as reply text while the words went into its reasoning; from the inside
-# the two can look alike, so it may blame the check and retry. Saying plainly
-# that nothing new reached the owner answers that misreading without quoting
-# any reasoning.
-_STILL_UNWRITTEN = (
-  "Since the last check, nothing new has reached the owner: you went on "
-  "reasoning, and reasoning is never shown. {seen} If you believe you already "
-  "wrote more than that, it went into your reasoning, not your reply. If the "
-  "owner's latest message still needs an answer or a result, write it now as "
-  "part of your reply. If the quoted reply already answers it, leave it."
-)
-# New reasoning, with no new reply text, that still counts as the answer going
-# unwritten. A retry after a one-line "the reply already answers" thought stays
-# the agent's judgment; the answers swallowed again after a reminder were
-# several sentences each.
-_RETRY_REASONING_MIN_CHARS = 200
 _SEEN = "Everything the owner sees from this reply, verbatim: «{visible}»."
 _SEEN_EXCERPT = "The end of the owner's visible reply, verbatim: «…{visible}»."
 _SEEN_NOTHING = "The owner sees no text at all from this reply."
+_NO_CARD_MESSAGE = (
+  "This card has no message, and it is saved only with one. Saving it ends "
+  "your turn, so its `message` carries your closing message, shown to the "
+  "owner above the card: what you did, where things stand, and what the card "
+  "decides."
+)
 _IMAGES = (
   "You viewed {images} this turn, but your visible reply never shows {them}. "
   "If the owner should see {them} (you described {them}, promised to show "
@@ -151,47 +142,38 @@ def reason(
   media_dir: str,
   before_card: bool,
   reminded: bool = False,
-  seen_at_reminder: str | None = None,
   last_assistant_message: object = None,
   message_card: bool = False,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
   ``last_assistant_message`` is pending visible text: the CLI's final text at
-  Stop, or a card's closing message before its save. ``message_card`` directs
-  repairs into that message; secret cards keep ordinary reply-text guidance.
-  Before a card, a short lead-in after long reasoning is normal because the
-  card carries the content; only a closing draft counts there. Once a reminder has spoken this
-  turn (``reminded``), the length rule stays quiet: it has no new evidence, and
-  a reply that ends with more reasoning and nothing more to say, as the
-  reminder allows, must not be returned again for it.
-
-  A card is different: saving it ends the turn, so the owner gets a question
-  with no answer. ``seen_at_reminder`` is ``visible_reply`` when the last
-  reminder spoke, with ``blocks`` narrowed to what arrived since; if the agent
-  then reasoned at length but added no reply text, its card is declined again.
+  Stop, or a card's closing message before its save. ``message_card`` marks a
+  card that carries that message (all but secret cards): one without it is
+  declined, and repairs are directed into it. Before a card, thinking is not
+  read at all; the message rule covers a closing message left out. Once a
+  reminder has spoken this turn (``reminded``), the length rule stays quiet:
+  it has no new evidence, and a reply that ends with more reasoning and
+  nothing more to say, as the reminder allows, must not be returned again for
+  it.
   """
   if not isinstance(blocks, list):
     return None
   dispatched = _dispatched_text(blocks)
   visible = _with_undispatched_tail(dispatched, last_assistant_message)
   parts: list[str] = []
-  # Final text the stream reader has not dispatched yet comes after every
-  # thinking block here, so nothing in thinking closes the reply.
-  undispatched = visible != dispatched
-  if (
-    before_card and seen_at_reminder is not None
-    and _reasoned_without_replying(blocks, visible, seen_at_reminder)
-  ):
-    parts.append(_STILL_UNWRITTEN.format(seen=_seen(visible)))
+  if before_card:
+    if message_card and not (
+      isinstance(last_assistant_message, str) and last_assistant_message.strip()
+    ):
+      parts.append(_NO_CARD_MESSAGE)
   elif (
-    (not undispatched and _has_unsaid_draft(
+    # Final text the stream reader has not dispatched yet comes after every
+    # thinking block here, so nothing in thinking closes the reply.
+    (visible == dispatched and _has_unsaid_draft(
       _closing_thinking(blocks), visible, _closing_draft_candidates,
     ))
-    or (
-      not before_card and not reminded
-      and _answer_may_be_only_in_thinking(blocks, visible)
-    )
+    or (not reminded and _answer_may_be_only_in_thinking(blocks, visible))
   ):
     parts.append(_MISSING_ANSWER.format(seen=_seen(visible)))
   images = _unshown_viewed_images(blocks, media_dir, visible)
@@ -219,7 +201,7 @@ def after_step_reason(blocks: object) -> str | None:
 
   Mid-reply only the narrow two-thinking-parts signal counts: long reasoning,
   unshown images, and unmentioned links are normal before a reply is done.
-  ``blocks`` should already be narrowed to this step's new evidence.
+  ``blocks`` should already be narrowed to thinking no check has spoken about.
   """
   if not isinstance(blocks, list):
     return None
@@ -229,41 +211,26 @@ def after_step_reason(blocks: object) -> str | None:
   return _AFTER_STEP.format(seen=_seen(visible))
 
 
-def unreviewed_evidence(blocks: object, reviewed_through: int) -> object:
-  """This segment as a check after an earlier reminder should see it.
+def unreviewed_evidence(
+  blocks: object, reviewed_through: int, thinking_reviewed_through: int = 0,
+) -> object:
+  """This segment as a check after an earlier one spoke should see it.
 
-  Every text block stays, because all of it is on the owner's screen; thinking
-  and tool blocks before ``reviewed_through`` were already covered by that
-  reminder and are dropped, so the check speaks again only about something new.
+  Every text block stays, because all of it is on the owner's screen. Blocks
+  before ``reviewed_through`` were covered by a reminder, and thinking before
+  ``thinking_reviewed_through`` by any check that spoke (a reminder or an
+  after-step note); both are dropped, so a check speaks again only about
+  something new and one swallowed draft is pointed out once.
   """
-  if not isinstance(blocks, list) or reviewed_through <= 0:
+  if not isinstance(blocks, list) or max(reviewed_through, thinking_reviewed_through) <= 0:
     return blocks
   return [
     block for index, block in enumerate(blocks)
-    if index >= reviewed_through or _is_text(block)
+    if _is_text(block) or (
+      index >= reviewed_through
+      and not (index < thinking_reviewed_through and _is_thinking(block))
+    )
   ]
-
-
-def visible_reply(blocks: object, last_assistant_message: object = None) -> str:
-  """The owner's visible reply, whitespace-normalized for comparison."""
-  if not isinstance(blocks, list):
-    return ""
-  return " ".join(
-    _with_undispatched_tail(_dispatched_text(blocks), last_assistant_message).split()
-  )
-
-
-def _reasoned_without_replying(blocks: list, visible: str, seen_at_reminder: str) -> bool:
-  """Whether the agent reasoned at length since a reminder but wrote no reply text.
-
-  ``blocks`` holds only thinking that arrived since that reminder.
-  """
-  if " ".join(visible.split()) != seen_at_reminder:
-    return False
-  new_reasoning = sum(
-    len(block["content"].strip()) for block in blocks if _is_thinking(block)
-  )
-  return new_reasoning >= _RETRY_REASONING_MIN_CHARS
 
 
 def _is_text(block: object) -> bool:

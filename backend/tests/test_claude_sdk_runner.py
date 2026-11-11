@@ -62,9 +62,8 @@ from tests.test_answer_check import (
   _CHECKOUT,
   _DRAFT,
   _answer_as_second_thinking_part,
-  _closing_draft_before_card,
+  _closing_draft_in_thinking,
   _link_only_in_tool_output,
-  _reasoning_after_a_reminder,
   _viewed_before_after,
 )
 
@@ -3875,7 +3874,10 @@ async def _fire_pre_card_hook(options, **overrides) -> dict:
   hook_input = {
     "hook_event_name": "PreToolUse",
     "tool_name": "mcp__mobius_control__request_question",
-    "tool_input": {"questions": [{"question": "How does it look?"}]},
+    "tool_input": {
+      "questions": [{"question": "How does it look?"}],
+      "message": "The new layout is in place; pick a direction below.",
+    },
     "tool_use_id": "toolu_q",
   }
   hook_input.update(overrides)
@@ -3883,21 +3885,26 @@ async def _fire_pre_card_hook(options, **overrides) -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["image", "answer"])
+@pytest.mark.parametrize("missing", ["image", "message"])
 async def test_answer_check_declines_one_card_save_when_something_is_unshown(monkeypatch, missing):
   chat_id = "answer-check-before-card-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = (
-    _viewed_before_after(chat_id) if missing == "image" else _closing_draft_before_card()
-  )
+  bus.assistant_blocks = _viewed_before_after(chat_id)
+  if missing == "message":
+    bus.assistant_blocks.append({
+      "type": "text",
+      "content": f"![Before and after](/api/chats/{chat_id}/media/before-after.png)",
+    })
+  card = {"tool_input": {"questions": [{"question": "How does it look?"}]}} if missing == "message" else {}
 
   class _Client(_FakeClient):
     async def receive_response(self):
       # A delegated child's card passes untouched.
-      decisions.append(await _fire_pre_card_hook(self.options, agent_id="child-1"))
-      decisions.append(await _fire_pre_card_hook(self.options))
-      # The agent's retried card, and the turn's end, are not stopped again.
+      decisions.append(await _fire_pre_card_hook(self.options, agent_id="child-1", **card))
+      decisions.append(await _fire_pre_card_hook(self.options, **card))
+      # The agent's repaired card (an unchanged one when it judges the image
+      # was only its own check), and the turn's end, are not stopped again.
       decisions.append(await _fire_pre_card_hook(self.options))
       decisions.append(await _fire_stop_hook(self.options))
       yield _success_result()
@@ -3913,9 +3920,10 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
   reason = denied["permissionDecisionReason"]
   if missing == "image":
     assert "before-after.png" in reason
+    assert "This card has no message" not in reason
   else:
-    assert "brief explanation of the conclusion" in reason
-    assert _DRAFT not in reason
+    assert "This card has no message" in reason
+    assert "before-after.png" not in reason
   assert decisions[2:] == [{"continue_": True}, {"continue_": True}]
 
 
@@ -3961,10 +3969,10 @@ async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monke
 @pytest.mark.asyncio
 @pytest.mark.parametrize("card_tool", ["request_question", "request_approval", "request_restart"])
 @pytest.mark.parametrize("blocks,message", [
-  (_closing_draft_before_card(), _DRAFT),
+  (_closing_draft_in_thinking(), _DRAFT),
   (_ANSWER_ONLY_IN_THINKING, "The deploy failed because the build ran out of memory. " * 10),
 ], ids=["closing-draft", "long-reasoning"])
-async def test_answer_check_counts_the_pending_card_message(monkeypatch, card_tool, blocks, message):
+async def test_a_card_with_its_closing_message_passes_whatever_the_reasoning(monkeypatch, card_tool, blocks, message):
   decisions: list[dict] = []
   bus = _ChatBus()
   bus.assistant_blocks = list(blocks)
@@ -3985,38 +3993,38 @@ async def test_answer_check_counts_the_pending_card_message(monkeypatch, card_to
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("card_tool", ["request_question", "request_approval", "request_restart"])
 @pytest.mark.parametrize("message", [None, "", "   ", 5, {"text": _DRAFT}])
-async def test_answer_check_does_not_treat_an_empty_or_invalid_card_message_as_an_answer(monkeypatch, message):
+async def test_answer_check_declines_a_card_without_a_closing_message(monkeypatch, card_tool, message):
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
+  # Nothing else is missing: a short lead-in after brief reasoning.
+  bus.assistant_blocks = [
+    {"type": "thinking", "content": "Two options to offer."},
+    {"type": "text", "content": "Two ways to go."},
+  ]
 
   class _Client(_FakeClient):
     async def receive_response(self):
-      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": message}))
+      card = f"mcp__mobius_control__{card_tool}"
+      decisions.append(await _fire_pre_card_hook(
+        self.options, tool_name=card, tool_input={"message": message},
+      ))
+      # After long reasoning about it, the agent adds the closing message.
+      bus.assistant_blocks.append(
+        {"type": "thinking", "content": "The card needs its closing message. " * 10},
+      )
+      decisions.append(await _fire_pre_card_hook(
+        self.options, tool_name=card, tool_input={"message": _DRAFT},
+      ))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
   await _run_turn("answer-check-empty-card-message-chat", bc=bus)
-  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-@pytest.mark.asyncio
-async def test_answer_check_counts_a_card_message_added_after_a_refusal(monkeypatch):
-  decisions: list[dict] = []
-  bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
-
-  class _Client(_FakeClient):
-    async def receive_response(self):
-      decisions.append(await _fire_pre_card_hook(self.options))
-      bus.assistant_blocks.extend(_reasoning_after_a_reminder())
-      decisions.append(await _fire_pre_card_hook(self.options, tool_input={"message": _DRAFT}))
-      yield _success_result()
-
-  _install_fake_client(monkeypatch, _Client)
-  await _run_turn("answer-check-retried-card-message-chat", bc=bus)
-  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
+  denied = decisions[0]["hookSpecificOutput"]
+  assert denied["permissionDecision"] == "deny"
+  assert "This card has no message" in denied["permissionDecisionReason"]
+  assert "card's message" in denied["permissionDecisionReason"]
   assert decisions[1] == {"continue_": True}
 
 
@@ -4024,7 +4032,7 @@ async def test_answer_check_counts_a_card_message_added_after_a_refusal(monkeypa
 async def test_an_unsaved_card_message_does_not_count_as_a_delivered_reply(monkeypatch):
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
+  bus.assistant_blocks = _closing_draft_in_thinking()
 
   class _Client(_FakeClient):
     async def receive_response(self):
@@ -4041,24 +4049,28 @@ async def test_an_unsaved_card_message_does_not_count_as_a_delivered_reply(monke
 
 
 @pytest.mark.asyncio
-async def test_secret_cards_keep_their_check_and_reply_text_guidance(monkeypatch):
+async def test_secret_cards_need_no_message_and_keep_reply_text_guidance(monkeypatch):
+  chat_id = "answer-check-secret-card-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
+  bus.assistant_blocks = _closing_draft_in_thinking()
 
   class _Client(_FakeClient):
     async def receive_response(self):
-      decisions.append(await _fire_pre_card_hook(
-        self.options, tool_name="mcp__mobius_control__request_secret",
-        tool_input={"message": _DRAFT},
-      ))
+      secret = {"tool_name": "mcp__mobius_control__request_secret", "tool_input": {}}
+      decisions.append(await _fire_pre_card_hook(self.options, **secret))
+      bus.assistant_blocks = _viewed_before_after(chat_id)
+      decisions.append(await _fire_pre_card_hook(self.options, **secret))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
-  await _run_turn("answer-check-secret-card-chat", bc=bus)
-  output = decisions[0]["hookSpecificOutput"]
+  await _run_turn(chat_id, bc=bus)
+  assert decisions[0] == {"continue_": True}
+  output = decisions[1]["hookSpecificOutput"]
   assert output["permissionDecision"] == "deny"
+  assert "before-after.png" in output["permissionDecisionReason"]
   assert "card's message" not in output["permissionDecisionReason"]
+  assert "This card has no message" not in output["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -4094,21 +4106,19 @@ async def test_card_message_participates_in_image_and_link_checks(monkeypatch, m
 
 
 @pytest.mark.asyncio
-async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder(monkeypatch):
+async def test_answer_check_catches_a_new_unshown_image_after_its_reminder(monkeypatch):
   from app.answer_check import MAX_REMINDERS
 
+  chat_id = "answer-check-rearm-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
+  bus.assistant_blocks = _viewed_before_after(chat_id)
 
-  def swallow_again() -> None:
-    bus.assistant_blocks.append(
-      {"type": "tool", "tool": "mcp__mobius_control__request_question", "status": "done"},
-    )
-    bus.assistant_blocks.append(_answer_as_second_thinking_part(
-      f"Reminder {len(bus.assistant_blocks)}: the preview build memory limit is still "
-      "too low, so the deploy cannot be retried yet.",
-    ))
+  def view_another() -> None:
+    bus.assistant_blocks.append({
+      "type": "tool", "tool": "mcp__mobius_control__screenshot", "status": "done",
+      "saved_image": f"shot-{len(bus.assistant_blocks)}.png",
+    })
 
   class _Client(_FakeClient):
     async def receive_response(self):
@@ -4116,71 +4126,76 @@ async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder
       # An unchanged retry is the agent judging its reply complete: it passes.
       decisions.append(await _fire_pre_card_hook(self.options))
       for _ in range(MAX_REMINDERS):
-        swallow_again()
+        view_another()
         decisions.append(await _fire_pre_card_hook(self.options))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
-  result = await _run_turn("answer-check-rearm-chat", bc=bus)
+  result = await _run_turn(chat_id, bc=bus)
 
   assert result["error"] is None
   denied = ["hookSpecificOutput" in d for d in decisions]
-  # First miss caught, unchanged retry passes, each later swallow caught until
-  # the per-turn cap, after which the card goes through.
+  # First miss caught, unchanged retry passes, each later new image caught
+  # until the per-turn cap, after which the card goes through.
   assert denied == [
     True, False, *[True] * (MAX_REMINDERS - 1), False,
   ]
-  for decision in decisions:
-    output = decision.get("hookSpecificOutput")
-    if output:
-      assert output["permissionDecision"] == "deny"
-      assert "preview build memory limit" not in output["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
-async def test_answer_check_keeps_declining_a_card_while_the_answer_stays_unwritten(monkeypatch):
+async def test_answer_check_accepts_an_unchanged_card_after_a_long_thought(monkeypatch):
+  # The image reminder allows "leave it out": a verification screenshot, the
+  # card declined for it, the agent reasons at length that the picture was
+  # only its own check and retries the same call. That retry is its decision.
+  chat_id = "answer-check-leave-it-out-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_before_card()
+  bus.assistant_blocks = [
+    {"type": "text", "content": "Checking the layout once more."},
+    {"type": "tool", "tool": "mcp__mobius_control__screenshot",
+     "status": "done", "saved_image": "check-1.png"},
+  ]
 
   class _Client(_FakeClient):
     async def receive_response(self):
       decisions.append(await _fire_pre_card_hook(self.options))
-      bus.assistant_blocks.extend(_reasoning_after_a_reminder())
-      decisions.append(await _fire_pre_card_hook(self.options))
-      # The agent finally writes the answer as reply text: the card goes through.
-      bus.assistant_blocks.append(
-        {"type": "text", "content": "The preview build needs a higher memory limit."},
-      )
+      bus.assistant_blocks.append({
+        "type": "thinking",
+        "content": "The screenshot was only my own verification that the layout "
+        "renders; the owner does not need it, and the card's message already "
+        "says what changed and what they decide. " * 2,
+      })
       decisions.append(await _fire_pre_card_hook(self.options))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
-  result = await _run_turn("answer-check-unwritten-chat", bc=bus)
+  await _run_turn(chat_id, bc=bus)
+  assert "check-1.png" in decisions[0]["hookSpecificOutput"]["permissionDecisionReason"]
+  assert decisions[1] == {"continue_": True}
 
-  assert result["error"] is None
-  assert ["hookSpecificOutput" in d for d in decisions] == [True, True, False]
-  reason = decisions[1]["hookSpecificOutput"]["permissionDecisionReason"]
-  assert "nothing new has reached the owner" in reason
-  assert "memory limit is still" not in reason
+
+async def _fire_after_step_hook(options, **overrides) -> dict:
+  hook_input = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {}, "tool_response": "ok", "tool_use_id": "toolu_b"}
+  hook_input.update(overrides)
+  hook = _post_tool_use_hook(options, "visible_answer_after_step_hook")
+  return await hook(hook_input, "toolu_b", {})
+
+
+def _second_thinking_part_before_a_step() -> list[dict]:
+  return [
+    {"type": "text", "content": "Checking the preview build."},
+    _answer_as_second_thinking_part(),
+    {"type": "tool", "tool": "Bash", "status": "done"},
+  ]
 
 
 @pytest.mark.asyncio
 async def test_answer_check_after_a_step_notes_once_without_blocking_the_step(monkeypatch):
   decisions: list[dict] = []
   bus = _ChatBus()
-  bus.assistant_blocks = [
-    {"type": "text", "content": "Checking the preview build."},
-    _answer_as_second_thinking_part(),
-    {"type": "tool", "tool": "Bash", "status": "done"},
-  ]
-
-  async def after_step(options, **overrides):
-    hook_input = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
-                  "tool_input": {}, "tool_response": "ok", "tool_use_id": "toolu_b"}
-    hook_input.update(overrides)
-    hook = _post_tool_use_hook(options, "visible_answer_after_step_hook")
-    return await hook(hook_input, "toolu_b", {})
+  bus.assistant_blocks = _second_thinking_part_before_a_step()
+  after_step = _fire_after_step_hook
 
   class _Client(_FakeClient):
     async def receive_response(self):
@@ -4205,3 +4220,32 @@ async def test_answer_check_after_a_step_notes_once_without_blocking_the_step(mo
   assert noted["hookSpecificOutput"]["additionalContext"].startswith("Möbius check after this step.")
   assert "permissionDecision" not in noted["hookSpecificOutput"]
   assert decisions[3] == {"continue_": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["after_step", "end_of_turn"])
+async def test_answer_check_points_out_one_swallowed_draft_once(monkeypatch, first):
+  # The after-step note and the end-of-turn check share what they already
+  # spoke about, so a draft the agent chose to leave unsaid is not raised twice.
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _second_thinking_part_before_a_step()
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      if first == "after_step":
+        decisions.append(await _fire_after_step_hook(self.options))
+        decisions.append(await _fire_stop_hook(self.options))
+      else:
+        decisions.append(await _fire_stop_hook(self.options))
+        bus.assistant_blocks.append({"type": "tool", "tool": "Bash", "status": "done"})
+        decisions.append(await _fire_after_step_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-one-draft-once-chat", bc=bus)
+
+  assert result["error"] is None
+  spoke = decisions[0].get("decision") == "block" or "hookSpecificOutput" in decisions[0]
+  assert spoke
+  assert decisions[1] == {"continue_": True}

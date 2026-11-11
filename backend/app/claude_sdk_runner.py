@@ -1391,56 +1391,63 @@ async def run_claude_sdk_turn(
   # The visible-answer check (see `answer_check.reason`) runs at each
   # hand-back: just before the root agent saves an owner card, and when it
   # ends its turn. Before a card it declines that one tool call, so the agent
-  # can write what is missing and call the card again; at the end it returns
+  # can add what is missing and call the card again; at the end it returns
   # the turn. After it speaks, it considers only blocks that arrived since (plus
   # all visible text), so an unchanged retry or continuation passes and a
-  # second swallowed answer is caught, before a card or at the end, up to
+  # second miss is caught, before a card or at the end, up to
   # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
-  # `stop_hook_active`, bounds how often a Stop is returned. Before a card,
-  # long new reasoning with no new reply text since the reminder also counts
-  # as still unanswered. A steer starts a fresh block list, which the identity
-  # check below treats as new. A Stop or a saved owner card owns the turn's
-  # end, so neither is reopened.
+  # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
+  # fresh block list, which the identity check below treats as new. A Stop or
+  # a saved owner card owns the turn's end, so neither is reopened.
   answer_check_reminders = 0
-  # (block list, blocks reviewed, visible reply) as of the last reminder.
-  answer_check_reviewed: tuple[object, int, str | None] = (None, 0, None)
+  # (block list, blocks covered by the last reminder, thinking covered by any
+  # check that spoke). The after-step note shares the thinking pointer, so one
+  # swallowed draft is pointed out once, after a step or at the end.
+  answer_check_reviewed: tuple[object, int, int] = (None, 0, 0)
   answer_check_media_dir = os.path.normpath(
     str(chat_media_dir(get_settings().data_dir, chat_id))
   )
+
+  def _answer_check_pointers(blocks: object) -> tuple[int, int]:
+    reviewed_list, reviewed_through, thinking_through = answer_check_reviewed
+    return (reviewed_through, thinking_through) if blocks is reviewed_list else (0, 0)
+
+  def _answer_check_evidence() -> object:
+    """This segment's blocks as a check should see them after earlier ones spoke."""
+    blocks = getattr(bc, "assistant_blocks", None)
+    return answer_check.unreviewed_evidence(blocks, *_answer_check_pointers(blocks))
+
+  def _answer_check_spoke(*, reminder: bool) -> None:
+    nonlocal answer_check_reviewed
+    blocks = getattr(bc, "assistant_blocks", None)
+    end = len(blocks) if isinstance(blocks, list) else 0
+    reviewed_through = end if reminder else _answer_check_pointers(blocks)[0]
+    answer_check_reviewed = (blocks, reviewed_through, end)
 
   def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
     message_card: bool = False,
   ) -> str | None:
-    nonlocal answer_check_reminders, answer_check_reviewed
+    nonlocal answer_check_reminders
     if (
       answer_check_reminders >= answer_check.MAX_REMINDERS
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
       return None
-    blocks = getattr(bc, "assistant_blocks", None)
-    reviewed_list, reviewed_through, seen_at_reminder = answer_check_reviewed
-    if blocks is not reviewed_list:
-      reviewed_through, seen_at_reminder = 0, None
     reason = answer_check.reason(
-      answer_check.unreviewed_evidence(blocks, reviewed_through),
+      _answer_check_evidence(),
       chat_id=chat_id,
       media_dir=answer_check_media_dir,
       before_card=before_card,
       reminded=answer_check_reminders > 0,
-      seen_at_reminder=seen_at_reminder,
       last_assistant_message=last_assistant_message,
       message_card=message_card,
     )
     if reason is None:
       return None
     answer_check_reminders += 1
-    answer_check_reviewed = (
-      blocks,
-      len(blocks) if isinstance(blocks, list) else 0,
-      answer_check.visible_reply(blocks, last_assistant_message),
-    )
+    _answer_check_spoke(reminder=True)
     log.info(
       "Claude visible-answer check spoke chat_id=%s before_card=%s reminder=%d",
       chat_id, before_card, answer_check_reminders,
@@ -1473,7 +1480,7 @@ async def run_claude_sdk_turn(
       return {"continue_": True}
     # A successful save publishes this closing message with its card. Count
     # it as pending visible text, without publishing it before the save.
-    # Secret cards have no closing-message field and keep their existing check.
+    # Secret cards have no closing-message field.
     message_card = hook_input.get("tool_name") != f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}"
     tool_input = hook_input.get("tool_input")
     message = tool_input.get("message") if message_card and isinstance(tool_input, dict) else None
@@ -1488,16 +1495,13 @@ async def run_claude_sdk_turn(
       "permissionDecisionReason": reason,
     }}
 
-  # Each work step is checked once, for words the model wrote as thinking just
-  # before it; the note rides on the step's result instead of blocking it.
-  answer_check_stepped: tuple[object, int] = (None, 0)
-
+  # After each work step, words the model wrote as thinking just before it
+  # get a note that rides on the step's result instead of blocking it.
   async def visible_answer_after_step_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    nonlocal answer_check_stepped
     del tool_use_id, context
     if (
       hook_input.get("agent_id")
@@ -1506,14 +1510,10 @@ async def run_claude_sdk_turn(
       or not active_client.accepts_native_prompt
     ):
       return {"continue_": True}
-    blocks = getattr(bc, "assistant_blocks", None)
-    stepped_list, stepped_through = answer_check_stepped
-    answer_check_stepped = (blocks, len(blocks) if isinstance(blocks, list) else 0)
-    note = answer_check.after_step_reason(answer_check.unreviewed_evidence(
-      blocks, stepped_through if blocks is stepped_list else 0,
-    ))
+    note = answer_check.after_step_reason(_answer_check_evidence())
     if note is None:
       return {"continue_": True}
+    _answer_check_spoke(reminder=False)
     log.info("Claude visible-answer check spoke after a step chat_id=%s", chat_id)
     return {"continue_": True, "hookSpecificOutput": {
       "hookEventName": "PostToolUse", "additionalContext": note,
