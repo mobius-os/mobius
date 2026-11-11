@@ -125,8 +125,12 @@ export function deriveModeSnapshotPlan({ workspace, projection, contentRect }) {
 
 // Whether side-by-side panes are sharing the screen right now: the tiled
 // builder world with two or more visible panes. A maximized pane or single view
-// has the screen to itself. A stacked phone split does not count: there every
-// pane already spans the width, so taking the screen changes only height.
+// has the screen to itself. A phone split is deliberately exempt, and not for a
+// geometric reason: a vertically stacked split in wide or compact mode also
+// spans the width and still counts. The exemption keeps phone behaviour as it
+// was before this check, where a game still goes full screen from a split. Do
+// not "fix" the asymmetry by holding phone requests too without deciding that
+// phone games should stop going full screen.
 export function panesShareScreen({ viewMode, projection, layoutMode }) {
   return viewMode !== 'single'
     && projection.visibleLeaves.length >= 2

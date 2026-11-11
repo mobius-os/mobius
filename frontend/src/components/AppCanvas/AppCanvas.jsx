@@ -9,6 +9,7 @@ import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import useImmersiveStateEcho from '../../hooks/useImmersiveStateEcho.js'
 import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
@@ -676,7 +677,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   const frameImmersiveRef = useRef(new Map())
   // The runtime's immersive.set() is optimistic, so every request needs an
   // answer even when the verdict does not change (a held request while panes
-  // share the screen). Counting requests re-runs the state echo below.
+  // share the screen). Counting requests re-runs the state echo
+  // (useImmersiveStateEcho below).
   const [immersiveRequestCount, setImmersiveRequestCount] = useState(0)
   // Decides which recorded requests reach Shell live or on a lifecycle
   // transition; see createImmersiveLifecycle for the one-visit rules.
@@ -1759,12 +1761,13 @@ const AppCanvas = forwardRef(function AppCanvas({
   // Keep the app's window.mobius.immersive helper in sync with the shell's
   // applied verdict (see sendImmersiveState): on every flip, promotion, and
   // request, so an optimistic request the shell holds is corrected too.
-  useEffect(() => {
+  useImmersiveStateEcho({
+    immersiveMode, liveVersion: swap.liveVersion, requestCount: immersiveRequestCount,
+  }, () => {
     for (const v of framesRef.current.keys()) {
       if (loadedDocsRef.current.has(v)) sendImmersiveState(v)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersiveMode, swap.liveVersion, immersiveRequestCount])
+  })
 
   // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
   // device or a window resize moves the notch/home-indicator (landscape puts
