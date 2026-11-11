@@ -433,6 +433,7 @@ def test_the_storage_guard_reads_no_cgroup_facts(tmp_path, monkeypatch):
     raise AssertionError("the storage guard read a cgroup fact")
 
   monkeypatch.setattr(resource_pressure, "cgroup_memory_snapshot", unexpected)
+  monkeypatch.setattr(resource_pressure, "cgroup_tasks_snapshot", unexpected)
   monkeypatch.setattr(resource_pressure, "resource_facts", unexpected)
 
   assert storage_guard.StorageGuard(

@@ -153,9 +153,10 @@ def terminate_process_group(
 RUN_TOKEN_ENV = "MOBIUS_RUN_TOKEN"
 # The non-secret twin every agent run carries, delegated helpers included (they
 # never receive the run token). Scheduled app jobs carry one of their own too,
-# so the storage guard can stop a job that is filling the volume. A shared helper host names each helper turn's
-# commands with it, and a provider may persist it in session history, so it
-# must reveal nothing: it is a one-way digest of the run token.
+# so the storage guard can stop a job that is filling the volume. A shared
+# helper host names each helper turn's commands with it, and a provider may
+# persist it in session history, so it must reveal nothing: it is a one-way
+# digest of the run token.
 RUN_MARKER_ENV = "MOBIUS_RUN_MARKER"
 
 
