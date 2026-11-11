@@ -1015,32 +1015,6 @@ def test_active_codex_turn_interrupt_logs_and_still_waits(caplog):
   assert "codex interrupt() raised: interrupt failed" in caplog.text
 
 
-def test_active_codex_turn_interrupt_times_out_if_runner_never_finishes(
-  caplog, monkeypatch,
-):
-  monkeypatch.setattr(codex_sdk_runner, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.05)
-  turn = _FakeTurnHandle()
-
-  async def _scenario() -> float:
-    active_turn = codex_sdk_runner.ActiveCodexTurn(
-      object(), turn, chat_id="chat-1"
-    )
-    start = asyncio.get_running_loop().time()
-    with pytest.raises(asyncio.TimeoutError):
-      await asyncio.wait_for(active_turn.interrupt(), timeout=1.0)
-    return asyncio.get_running_loop().time() - start
-
-  with caplog.at_level("WARNING", logger="moebius.chat"):
-    elapsed = asyncio.run(_scenario())
-
-  assert 0.04 <= elapsed < 1.0
-  assert turn.interrupt_calls == 1
-  assert (
-    "codex active_turn._finished never resolved within 0.05s; runner is wedged"
-    in caplog.text
-  )
-
-
 def test_active_codex_stop_timeout_preserves_runner_completion_future():
   async def _scenario() -> None:
     active = codex_sdk_runner.ActiveCodexTurn(
@@ -5963,14 +5937,12 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
     )} == {'source_tool_use_id': 'image-call', 'width': 1, 'height': 1}
 
 
-def test_wedged_codex_turn_is_not_reported_stopped_to_a_long_stop_budget(monkeypatch):
-  """The restart drain allows 10s; a wedged turn must not be parked as stopped."""
-  monkeypatch.setattr(codex_sdk_runner, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.05)
-
+def test_wedged_codex_turn_is_reported_not_stopped():
+  """stop(timeout) is the only drain budget; a wedged turn reports False."""
   async def _scenario() -> bool:
     active = codex_sdk_runner.ActiveCodexTurn(
-      object(), _FakeTurnHandle(), chat_id="wedged-long-budget",
+      object(), _FakeTurnHandle(), chat_id="wedged-turn",
     )
-    return await active.stop(timeout=10.0)
+    return await active.stop(timeout=0.2)
 
   assert asyncio.run(_scenario()) is False

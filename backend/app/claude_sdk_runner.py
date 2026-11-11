@@ -112,9 +112,6 @@ from app.runtime_types import RunnerResult
 log = logging.getLogger(__name__)
 
 _CONTROL_MCP_READY_TIMEOUT_SECONDS = 10.0
-# How long Stop's interrupt waits for the runner to drain before reporting
-# the turn as wedged (not stopped).
-_INTERRUPT_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 async def _await_control_mcp_ready(
@@ -795,13 +792,11 @@ class ActiveClaudeClient:
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
-    Bounds the `_finished` wait at `_INTERRUPT_DRAIN_TIMEOUT_SECONDS` as a
-    defense-in-depth so a wedged runner (one that never reaches its `finally`
-    block) can't hang Stop indefinitely, and raises ``asyncio.TimeoutError``
-    then so ``stop`` reports the turn as not stopped. Ordinary Stop gives
-    ``stop`` its own 2s bound in `chat.py:_stop_handle_with_escalation`; this
-    inner timeout protects any other caller, such as the restart drain's
-    longer budget.
+    Waits on `_finished` without a bound of its own: ``stop(timeout)`` is
+    the only budget, so its caller decides how long a drain may take (2s for
+    ordinary Stop, longer for the restart drain). A wedged runner (one that
+    never reaches its `finally` block) makes ``stop`` time out and report the
+    turn as not stopped.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
@@ -810,17 +805,7 @@ class ActiveClaudeClient:
     self.close_admission()
     if not await self.cancel_native_queue():
       await self._client.interrupt()
-    try:
-      await asyncio.wait_for(
-        asyncio.shield(self._finished), timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS,
-      )
-    except asyncio.TimeoutError:
-      import logging
-      logging.getLogger("moebius.chat").warning(
-        "ActiveClaudeClient._finished never resolved within %gs; "
-        "runner is wedged", _INTERRUPT_DRAIN_TIMEOUT_SECONDS,
-      )
-      raise
+    await asyncio.shield(self._finished)
 
   @property
   def interrupt_requested(self) -> bool:

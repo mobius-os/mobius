@@ -125,9 +125,6 @@ log = logging.getLogger("moebius.chat")
 _CODEX_CALL_EXECUTOR_WORKERS = 3
 _PROCESS_GROUP_CAPTURE_SPIN_SECONDS = 0.1
 _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
-# How long Stop and Goal dismissal wait for the runner to drain after an
-# interrupt before reporting the turn as wedged (not stopped).
-_INTERRUPT_DRAIN_TIMEOUT_SECONDS = 5.0
 # How often a running Codex helper row re-reads its child rollout for the
 # owner-facing "currently doing" line. The read is a small tail of one file.
 HELPER_PROGRESS_INTERVAL_S = 3.0
@@ -953,10 +950,9 @@ class ActiveCodexTurn:
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain.
 
-    Raises ``asyncio.TimeoutError`` when the runner has not drained within
-    `_INTERRUPT_DRAIN_TIMEOUT_SECONDS`, so ``stop`` reports a wedged turn as
-    not stopped; a caller with a longer budget (the restart drain) must not
-    park a chat that is still running.
+    The `_finished` wait has no bound of its own: ``stop(timeout)`` is the
+    only budget, so a wedged runner makes ``stop`` time out and report the
+    turn as not stopped.
     """
     self._interrupt_requested = True
     self._reject_pending_steer()
@@ -964,25 +960,14 @@ class ActiveCodexTurn:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
-    try:
-      await asyncio.wait_for(
-        asyncio.shield(self._finished), timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS,
-      )
-    except asyncio.TimeoutError:
-      log.warning(
-        "codex active_turn._finished never resolved within %gs; runner is wedged",
-        _INTERRUPT_DRAIN_TIMEOUT_SECONDS,
-      )
-      raise
+    await asyncio.shield(self._finished)
 
   async def clear_goal(self) -> None:
     """Stop this attempt; the platform writer owns Goal dismissal."""
     self._interrupt_requested = True
     self._reject_pending_steer()
     await self.turn.interrupt()
-    await asyncio.wait_for(
-      asyncio.shield(self._finished), timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS,
-    )
+    await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
 
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the active turn and waits up to `timeout` seconds."""

@@ -3866,8 +3866,7 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_wedged_claude_turn_is_not_reported_stopped_to_a_long_stop_budget(monkeypatch):
-  """The restart drain allows 10s; a wedged turn must not be parked as stopped."""
-  monkeypatch.setattr(claude_sdk_runner, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.05)
-  handle = claude_sdk_runner.ActiveClaudeClient(_FakeClient(None), chat_id="wedged-long-budget")
-  assert await handle.stop(timeout=10.0) is False
+async def test_wedged_claude_turn_is_reported_not_stopped():
+  """stop(timeout) is the only drain budget; a wedged turn reports False."""
+  handle = claude_sdk_runner.ActiveClaudeClient(_FakeClient(None), chat_id="wedged-turn")
+  assert await handle.stop(timeout=0.2) is False
