@@ -52,22 +52,37 @@ function loadedImage(naturalWidth, naturalHeight) {
   return { naturalWidth, naturalHeight, dataset: {} }
 }
 
-test('extreme-aspect attachment thumbnails fit whole instead of a blank centre crop', () => {
+test('a wide strip fits whole instead of a blank centre crop', () => {
   // A wide header strip's centre is often empty background; fit it whole.
   assert.equal(attachmentThumbFit(1080, 298), 'contain')
-  assert.equal(attachmentThumbFit(298, 1080), 'contain')
   assert.equal(attachmentThumbFit(251, 100), 'contain')
-  // Photos and ordinary phone screenshots keep the uniform square crop.
+})
+
+test('a very tall capture crops from its top instead of fitting to a sliver', () => {
+  // Fitted whole, a full-page capture would be ~14px wide in the square; its
+  // header is what identifies it.
+  assert.equal(attachmentThumbFit(1170, 8000), 'top')
+  assert.equal(attachmentThumbFit(298, 1080), 'top')
+  assert.equal(attachmentThumbFit(100, 251), 'top')
+})
+
+test('photos and ordinary phone screenshots keep the centre crop', () => {
   assert.equal(attachmentThumbFit(250, 100), 'cover')
+  assert.equal(attachmentThumbFit(100, 250), 'cover')
   assert.equal(attachmentThumbFit(1080, 1080), 'cover')
   assert.equal(attachmentThumbFit(4032, 3024), 'cover')
   assert.equal(attachmentThumbFit(1080, 2340), 'cover')
+  assert.equal(attachmentThumbFit(1080, 2700), 'cover')
 })
 
 test('a thumbnail load records the measured fit for the stylesheet to read', () => {
   const banner = loadedImage(1080, 298)
   markAttachmentThumbFit({ currentTarget: banner })
   assert.equal(banner.dataset.fit, 'contain')
+
+  const page = loadedImage(1170, 8000)
+  markAttachmentThumbFit({ currentTarget: page })
+  assert.equal(page.dataset.fit, 'top')
 
   const photo = loadedImage(4032, 3024)
   markAttachmentThumbFit({ currentTarget: photo })
@@ -96,6 +111,10 @@ test('a thumbnail that loads a different source re-measures instead of keeping t
 
   img.naturalHeight = 4000
   markAttachmentThumbFit({ currentTarget: img })
+  assert.equal(img.dataset.fit, 'top')
+
+  img.naturalHeight = 298
+  markAttachmentThumbFit({ currentTarget: img })
   assert.equal(img.dataset.fit, 'contain')
 })
 
@@ -117,7 +136,7 @@ test('a pending composer image fits a wide banner whole once it loads', () => {
   } finally { chips.unmount() }
 })
 
-test('a sent image fits a wide banner whole once it loads', async () => {
+test('a sent full-page capture crops from its top once it loads', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async url => {
     assert.match(String(url), /\/chats\/thumb-chat\/media-token$/)
@@ -125,14 +144,14 @@ test('a sent image fits a wide banner whole once it loads', async () => {
   }
   let previewProps
   const message = renderHook(Attachments, {
-    attachments: [{ name: 'banner.png', mime_type: 'image/png' }],
+    attachments: [{ name: 'page.png', mime_type: 'image/png' }],
     chatId: 'thumb-chat',
   })
   try {
     await tick()
     const tile = find(
       message.result.current,
-      node => typeof node.type === 'function' && node.props?.alt === 'banner.png',
+      node => typeof node.type === 'function' && node.props?.alt === 'page.png',
       'sent image tile',
     )
     // The tile is a plain frame around the shared preview button.
@@ -154,8 +173,8 @@ test('a sent image fits a wide banner whole once it loads', async () => {
       node => node.type === 'img' && node.props.className === 'chat__attach-thumb',
       'sent thumbnail',
     )
-    const img = loadedImage(298, 1080)
+    const img = loadedImage(1170, 8000)
     thumb.props.onLoad({ currentTarget: img })
-    assert.equal(img.dataset.fit, 'contain')
+    assert.equal(img.dataset.fit, 'top')
   } finally { button.unmount() }
 })

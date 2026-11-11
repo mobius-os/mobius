@@ -3470,11 +3470,17 @@
   display: block;
 }
 
-/* An extreme-aspect image (see attachmentThumbFit.js) shows whole: its
-   centre crop can be blank. Applies to pending and sent squares alike. */
+/* Extreme-aspect images (see attachmentThumbFit.js), pending and sent alike:
+   a wide strip shows whole because its centre crop can be blank, and a very
+   tall capture crops from its top so its header shows. */
 .chat__attach-card-thumb[data-fit="contain"],
 .chat__attach-thumb[data-fit="contain"] {
   object-fit: contain;
+}
+
+.chat__attach-card-thumb[data-fit="top"],
+.chat__attach-thumb[data-fit="top"] {
+  object-position: top;
 }
 
 .chat__attach-card-icon {
@@ -3637,8 +3643,8 @@
 .chat__attach-thumb {
   /* Match the composer's attachment card after send — same `--attach-card`
      token, so the two can't drift. The thumbnail is a square centre crop,
-     except that an extreme-aspect image is fitted whole (the `data-fit`
-     rule above); tapping it still opens the full source image. */
+     except for extreme-aspect images (the `data-fit` rules above); tapping
+     it still opens the full source image. */
   width: 100%;
   height: 100%;
   object-fit: cover;
