@@ -7,6 +7,10 @@ grant is bound to the app, the action and the exact request, and is never
 given to an app: the app repeats its normal request and the route spends the
 matching grant through ``consume_owner_grant``.
 
+Enforcement is opt-in per app: an app token needs a grant at a guarded route
+only when the app's installed manifest declares ``"owner_confirm": true``
+(``declares_owner_confirm``). Every other app keeps working as before.
+
 Whatever did not match (no grant, another target, expired, already spent, an
 app that was reinstalled, a sign-out everywhere) is refused with the same
 words, so a refusal never says which part was wrong.
@@ -25,7 +29,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import activity, models
-from app.deps import Principal, is_owner_input_principal
+from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
+from app.deps import Principal, acts_for_guest, is_owner_input_principal
 from app.timeutil import now_naive_utc
 
 ROUTE_TTL = timedelta(seconds=120)
@@ -84,9 +89,33 @@ def _live(db: Session, now, owner_epoch: int, app_id: int, app_nonce: str, actio
     models.OwnerGrant.expires_at > now)
 
 
-def _owner_session(principal: Principal) -> bool:
-  """The owner's own browser session. A chat embed counts as owner input elsewhere, but its token sits in an app's frame."""
-  return principal.scope == "owner" and is_owner_input_principal(principal)
+def is_owner_hands(principal: Principal) -> bool:
+  """The installation owner's own browser session: the one caller that may mint a grant and the one that needs none.
+
+  Owner scope and owner input, so never an app, an agent or a helper, and not a
+  shared-browser guest. A chat embed has owner input elsewhere, but its token
+  sits in an app's frame, so it is not owner hands.
+  """
+  return principal.scope == "owner" and is_owner_input_principal(principal) and not acts_for_guest(principal)
+
+
+def declares_owner_confirm(db: Session, app_id: int) -> bool:
+  """Whether the app's installed manifest declares ``"owner_confirm": true``.
+
+  Read from the accepted manifest in the app's frozen runtime tree, never from
+  its editable source or anything the app sends, so only installing or
+  updating the app changes it. It is not part of the capability contract, so
+  declaring it adds no consent row and cannot make an installed app dormant.
+  An app whose accepted manifest cannot be read has declared nothing.
+  """
+  app = db.get(models.App, app_id)
+  if app is None:
+    return False
+  try:
+    manifest = json.loads((runtime_root(app) / "mobius.json").read_bytes())
+  except (AppliedRuntimeUnavailable, OSError, ValueError):
+    return False
+  return isinstance(manifest, dict) and manifest.get("owner_confirm") is True
 
 
 def _spender(principal: Principal, app_id: int, action: str) -> str | None:
@@ -99,17 +128,31 @@ def _spender(principal: Principal, app_id: int, action: str) -> str | None:
   return f"app:{app_id}" if principal.app_id == app_id and principal.scope == "app" and not lineage else None
 
 
-def consume_owner_grant(db: Session, principal: Principal, app_id: int, action: str,
+def _needs_no_grant(db: Session, principal: Principal) -> bool:
+  """The owner's own session, and an app token of an app that has not declared ``owner_confirm``."""
+  if is_owner_hands(principal):
+    return True
+  return principal.scope == "app" and principal.app_id is not None and not declares_owner_confirm(db, principal.app_id)
+
+
+def consume_owner_grant(db: Session, principal: Principal, app_id: int | None, action: str,
                         body: BaseModel, **scope: str) -> None:
   """Spend the owner's grant for exactly this request, or raise 403 owner_grant_required.
 
-  Call it after the route's own validation and before its first effect, with
-  the route's path parameters as ``scope`` and its parsed request model as
-  ``body``. The owner's own session needs no grant for a route action: it is
-  the session that mints them. An agent spends only the actions in
+  A guarded route calls it at the top, right after ``_require_owner_hands`` and
+  before any GitHub validation, with the route's path parameters as ``scope``
+  and its parsed request model as ``body``. The grant is bound to that exact
+  body, so spending first is safe, and it means a request the route then
+  refuses (the head moved, a stop, the PR machine's no) has burned the grant:
+  the owner confirms again.
+
+  The owner's own session needs no grant for a route action: it is the session
+  that mints them. An app token needs one only when its app declares
+  ``owner_confirm``; any other app token is left to the route's own guards, as
+  before. Every other caller is refused. An agent spends only the actions in
   AGENT_SPENDS, and only for its own chat, which ``body`` names.
   """
-  if action not in AGENT_SPENDS and _owner_session(principal):
+  if action not in AGENT_SPENDS and _needs_no_grant(db, principal):
     return
   spender = _spender(principal, app_id, action)
   spent = spender is not None and _spend(

@@ -1,11 +1,7 @@
 """The owner grant: the owner's confirmation, minted only by the owner's own session and spent once."""
-import pytest
-from fastapi import HTTPException
+import json
 
-from app import auth as auth_mod, models, owner_grants
-from app.deps import Principal
-from app.routes import contribution_reviews as routes
-from app.timeutil import now_naive_utc
+from app import applied_app_runtime, auth as auth_mod, models, owner_grants
 from tests.test_contribution_direct_merge import MOVED, NAME, NUMBER, SHA, desk  # noqa: F401  (fixture and constants)
 
 MERGE = {"repo": NAME, "number": NUMBER, "head_sha": SHA}
@@ -43,28 +39,41 @@ def test_an_app_an_agent_and_a_helper_can_neither_preview_nor_mint(desk, db):
   agent = auth_mod.create_agent_token("desk-chat", owner.username, owner.token_epoch, run_id="desk-run")
   helper = auth_mod.create_agent_token("desk-chat", owner.username, owner.token_epoch,
                                        delegation_id="child", delegation_chat="desk-chat")
+  # An agent can mint an app token for Contribute, but not a clean one: it carries the agent's chat.
+  minted = desk.client.post("/api/auth/app-token", json={"app_id": desk.app_id},
+                            headers={"Authorization": f"Bearer {agent}"}).json()["token"]
   ask = {"app_id": desk.app_id, "action": "merge", "scope": {}, "body": MERGE}
-  for token in [*app_tokens, agent, helper]:
+  for token in [*app_tokens, agent, helper, minted]:
     headers = {"Authorization": f"Bearer {token}"}
     assert desk.client.post("/api/owner-grants/preview", json=ask, headers=headers).status_code == 403
     assert desk.client.post("/api/owner-grants", json={**ask, "digest": "0" * 64}, headers=headers).status_code == 403
   assert db.query(models.OwnerGrant).count() == 0
+  laundered = {"Authorization": f"Bearer {minted}"}
+  merge = desk.client.post(f"/api/github/contributions/{desk.app_id}/pulls/merge", json=MERGE, headers=laundered)
+  assert merge.status_code == 403  # the owner-tap route refuses it ...
+  assert desk.client.get(f"/api/github/contributions/{desk.app_id}/review-presets",
+                         headers=laundered).status_code == 200  # ... and only that route
+  assert desk.github.calls == []
 
 
-def test_a_grant_covers_only_the_request_confirmed_and_only_until_it_expires(desk, db):
-  owner = db.query(models.Owner).first()
-  assert confirm(desk, "merge", MERGE).status_code == 200
-  app = Principal(owner=owner, app_id=desk.app_id, scope="app")
-  spend = lambda head: owner_grants.consume_owner_grant(
-    db, app, desk.app_id, "merge", routes.DirectMerge(**{**MERGE, "head_sha": head}))
-  with pytest.raises(HTTPException) as other_head:
-    spend(MOVED)
-  db.query(models.OwnerGrant).update({"expires_at": now_naive_utc().replace(year=2000)})
+def declare_owner_confirm(db, slug):
+  """What installing an app whose mobius.json says owner_confirm leaves behind: its accepted manifest."""
+  app = db.query(models.App).filter_by(slug=slug).one()
+  app.runtime_revision = "a" * 40
+  accepted = applied_app_runtime.runtime_parent(app.id) / app.runtime_revision
+  accepted.mkdir(parents=True)
+  (accepted / "mobius.json").write_text(json.dumps({"id": slug, "owner_confirm": True}))
   db.commit()
-  with pytest.raises(HTTPException) as expired:
-    spend(SHA)
-  assert other_head.value.status_code == expired.value.status_code == 403
-  assert other_head.value.detail == expired.value.detail == owner_grants.OWNER_GRANT_REQUIRED  # no oracle
-  # The owner's own session needs no grant for a route action: it is the session that mints them.
-  owner_grants.consume_owner_grant(db, Principal(owner=owner, app_id=None), desk.app_id, "merge",
-                                   routes.DirectMerge(**MERGE))
+
+
+def test_an_app_that_declares_owner_confirm_merges_only_with_a_grant_for_that_exact_request(desk, db):
+  assert desk.post("contribute").status_code == 200  # no declaration: the app merges as it always did
+  desk.github.pull.update(merged=False, state="open")
+  declare_owner_confirm(db, "contribute")
+  refused = desk.post("contribute")
+  assert refused.status_code == 403 and refused.json()["detail"] == owner_grants.OWNER_GRANT_REQUIRED
+  assert confirm(desk, "merge", MERGE).status_code == 200
+  assert desk.post("contribute", {**MERGE, "head_sha": MOVED}).status_code == 403  # another head is not covered
+  assert desk.post("contribute").status_code == 200  # the grant for the head the owner saw is still live
+  assert desk.post("contribute").status_code == 403  # and one request spends it
+  assert [merge["sha"] for merge in desk.github.merges] == [SHA, SHA]
