@@ -61,7 +61,8 @@ def ready_to_merge(facts):
 # Take over is left out of OFFERED: it stays for maintainers.
 CHANGES_THE_PR = ("merge", "close", "open_for_review", "back_to_draft", "check_my_pr", "respond", "finish_it",
                   "review", "take_over")
-OFFERED = {"author": ("check_my_pr", "respond", "finish_it", "open_for_review", "back_to_draft", "merge", "close"),
+OFFERED = {"author": ("check_my_pr", "respond", "finish_it", "open_for_review", "back_to_draft", "request_review",
+                      "merge", "close"),
            "reviewer": ("review", "merge", "close")}
 
 
@@ -125,6 +126,9 @@ INVARIANTS = {
     facts["role"] != "author" or not decision["askable"] or facts.get("readComplete") is False
     or facts["lifecycle"] not in ("open", "draft")
     or all((action(decision, action_id) or {}).get("enabled") for action_id in ("ask_rereview", "ask_approval"))),
+  "request review is the author's whenever the PR can be read and is open, even before anyone has reviewed": lambda decision, facts: (
+    (action(decision, "request_review") or {}).get("enabled", False) == (
+      facts["role"] == "author" and facts["lifecycle"] in ("open", "draft") and facts.get("readComplete") is not False)),
   "nobody who approved this version can be asked": lambda decision, facts: all(
     not any(name.lower() == person["by"].lower() for name in decision["approved_by"]) for person in decision["askable"]),
   "a PR that cannot be read is never acted on": a_pr_that_cannot_be_read_is_never_acted_on,

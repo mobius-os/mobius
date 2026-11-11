@@ -183,6 +183,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -216,6 +217,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -254,6 +256,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -294,6 +297,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -369,6 +373,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -415,6 +420,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -448,6 +454,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -486,6 +493,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -524,6 +532,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -562,6 +571,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -600,6 +610,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -638,6 +649,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -669,6 +681,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -704,6 +717,7 @@
     "set_aside",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -738,6 +752,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -773,6 +788,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -807,6 +823,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1073,6 +1090,7 @@
     "check_github",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "close"
    ]
   },
@@ -1103,6 +1121,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1188,6 +1207,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close",
     "rerun_job"
@@ -1336,6 +1356,7 @@
     "check_github",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "close"
    ]
   },
@@ -1401,6 +1422,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1440,6 +1462,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1481,6 +1504,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1528,6 +1552,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1569,6 +1594,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1608,6 +1634,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1690,6 +1717,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1774,6 +1802,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1820,6 +1849,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1866,6 +1896,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1906,6 +1937,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -1959,6 +1991,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2005,6 +2038,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2081,6 +2115,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2127,6 +2162,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2174,6 +2210,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2214,6 +2251,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",
@@ -2260,6 +2298,7 @@
     "finish_it",
     "open_for_review",
     "back_to_draft",
+    "request_review",
     "ask_rereview",
     "ask_approval",
     "merge",

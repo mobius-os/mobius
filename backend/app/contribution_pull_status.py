@@ -1,7 +1,7 @@
 """The owner's own status changes on one pull request, at the version they saw.
 
-Open for review, back to draft, close, ask for re-review, and ask for approval:
-each is a tap in Contribute behind its confirm sheet. As with Merge now
+Open for review, back to draft, close, request review, ask for re-review, and ask
+for approval: each is a tap in Contribute behind its confirm sheet. As with Merge now
 (contribution_direct_merge) there is no run, agent or stored consent: the
 owner's tap is the authority. GitHub is read again right before the one
 write, and the PR machine is asked on those facts, so the refusal is the
@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from app import contribution_pr_facts as pr_facts, contribution_pr_machine as machine, settled
 from app import contribution_review_public as public, contribution_review_runs as reviews
 from app.contribution_direct_merge import CHANGED, UNREADABLE, _READ_FAILURES, _read_object, _refusal_summary
+from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import (DispatchResult, NotDispatched, _gh_http_status,
                                              classify_dispatch_error, graphql_mutation_result)
 from app.github_connection import _github_connection_transaction
@@ -74,10 +75,29 @@ def close_pull(gh, cwd, target, _body) -> str | None:
   return (pull.get("head") or {}).get("sha") if pull.get("state") == "closed" else None
 
 
+# gh prints GitHub's own sentence, then the status: "gh: Reviews may only be requested from collaborators. (HTTP 422)".
+_GITHUB_422 = re.compile(r"(?im)^gh:\s*(.+?)\s*\(HTTP\s+422\)\s*$")
+
+
+def _github_422_reason(exc: ContributionSubmitError) -> str | None:
+  """GitHub's own sentence for a 422 (a bot, or someone who is not a collaborator), unless it said only "Validation Failed"."""
+  match = _GITHUB_422.search(str(exc))
+  reason = match.group(1).strip() if match else ""
+  return f"GitHub refused: {reason}" if reason and reason.lower() != "validation failed" else None
+
+
 def request_reviewers(gh, cwd, target, body) -> str | None:
-  pull = _answer_object(gh(cwd, "api", "--method", "POST",
-                           f"repos/{target['repo']}/pulls/{target['number']}/requested_reviewers", "--input", "-",
-                           input_text=json.dumps({"reviewers": body.reviewers})).stdout)
+  try:
+    response = gh(cwd, "api", "--method", "POST",
+                  f"repos/{target['repo']}/pulls/{target['number']}/requested_reviewers", "--input", "-",
+                  input_text=json.dumps({"reviewers": body.reviewers}))
+  except ContributionSubmitError as exc:
+    # A 422 is proof that nothing was asked, and GitHub's sentence says why: say it instead of the bare status.
+    reason = _github_422_reason(exc)
+    if reason:
+      raise NotDispatched(reason) from exc
+    raise
+  pull = _answer_object(response.stdout)
   requested = {str(user.get("login") or "").lower() for user in pull.get("requested_reviewers") or []
                if isinstance(user, dict)}
   confirmed = {login.lower() for login in body.reviewers} <= requested
@@ -138,6 +158,38 @@ def _rereview_only(facts: dict, pull: dict, body) -> None:
   _ask_only_askable(body.reviewers, facts)
 
 
+APPROVED_ALREADY = "Someone who already approved this version cannot be asked again."
+
+
+def _refuse_current_approvers(gh, cwd, target, body) -> None:
+  """Request review's own read: nobody who approved this exact version is asked again, whatever their access.
+
+  The machine's approvals are the writers' (the merge rule), so a collaborator with read access who approved
+  is missing from them. A read that cannot answer in full refuses, because an approver would be asked a second time.
+  """
+  try:
+    approved = pr_facts.approvers_at(gh, cwd, target)
+  except pr_facts.READ_FAILURES as exc:
+    raise NotDispatched(str(exc.detail) if isinstance(exc, HTTPException) else UNREADABLE) from exc
+  if any(login.lower() in approved for login in body.reviewers):
+    raise NotDispatched(APPROVED_ALREADY)
+
+
+def _request_check(facts: dict, pull: dict, body) -> None:
+  """Anyone may be asked to review, except the author and anyone who already approved this version.
+
+  Who approved is read twice: here from the machine, which also knows approvals carried over from an older commit,
+  and in _refuse_current_approvers, which sees every approver of this commit. Whether a login is a person who can
+  review is GitHub's to answer: it refuses a bot or a non-collaborator with a 422, in its own words.
+  """
+  author = str(facts.get("author") or "").lower()
+  approved = {name.lower() for name in machine.decide(facts)["approved_by"]}
+  if any(login.lower() == author for login in body.reviewers):
+    raise HTTPException(409, "The author of a pull request cannot be asked to review it.")
+  if any(login.lower() in approved for login in body.reviewers):
+    raise HTTPException(409, APPROVED_ALREADY)
+
+
 def _approval_note_check(facts: dict, pull: dict, body) -> None:
   _ask_only_askable(body.people, facts)
   asked = {login.lower() for login in body.people}
@@ -196,6 +248,9 @@ CHANGES = {
   "draft": StatusChange("back_to_draft", "draft", convert_to_draft,
                         _unconfirmed("draft_unconfirmed", "turned it back into a draft"), already=_is_draft),
   "close": StatusChange("close", "closed", close_pull, _unconfirmed("close_unconfirmed", "closed it")),
+  "request-review": StatusChange("request_review", "requested", request_reviewers,
+                                 _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _request_check,
+                                 _refuse_current_approvers),
   "request-reviewers": StatusChange("ask_rereview", "requested", request_reviewers,
                                     _unconfirmed("reviewers_unconfirmed", "asked for the reviews"), _rereview_only),
   "ask-approval": StatusChange("ask_approval", "asked", post_note,
@@ -287,7 +342,7 @@ async def change_pull_status(gh, cwd, name: str, body, authorize, pr_job) -> dic
   """Apply one owner status change (a key of CHANGES) to the exact pull request named, once.
 
   `body` carries repo, number and head_sha (and reviewers for
-  request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
+  request-review and request-reviewers, people and note for ask-approval). `authorize` raises an HTTPException once the caller's
   authority no longer stands; it runs before any GitHub call and again right
   before the write. `pr_job` opens the PR's agent job as it is at the final
   check (a review run's or a Respond chat's), holding review admission until

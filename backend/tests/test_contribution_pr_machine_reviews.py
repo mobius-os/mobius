@@ -50,6 +50,16 @@ def test_asking_someone_to_look_again_is_for_people_who_have_not_looked_past_the
   assert (mixed["looked_again"], mixed["rereview_from"]) == (["sam"], ["kim"])
 
 
+def test_request_review_needs_no_earlier_review_where_the_ask_actions_need_one():
+  unreviewed = machine.decide(facts([]))
+  assert action(unreviewed, "request_review")["enabled"] is True and action(unreviewed, "request_review")["title"] == "Request review"
+  assert action(unreviewed, "ask_rereview")["reason"] == "Nobody has reviewed this PR yet."
+  closed = machine.decide({**facts([]), "lifecycle": "closed"})
+  assert action(closed, "request_review")["reason"] == "This PR is no longer open."
+  theirs = machine.decide({**facts([], author="sam"), "role": "reviewer"})
+  assert "request_review" not in [item["id"] for item in theirs["actions"]], "only the author asks"
+
+
 def test_anyone_who_only_commented_on_this_version_can_be_asked_to_approve_whether_or_not_they_hold_a_request():
   commented = machine.decide(facts([comment("h2")]))
   assert commented["state"] == "author.commented"

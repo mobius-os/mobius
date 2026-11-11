@@ -203,6 +203,8 @@ function canvasHarness(queryClient, appId) {
     capabilityHostRef: { current: { handle: () => false } },
     serveAppFileExportRequest: () => false, visibleRef: { current: true },
     pendingFileExportRef: { current: null }, setPendingFileExport() {},
+    serveAppOwnerGrantRequest: () => false,
+    pendingOwnerGrantRef: { current: null }, setPendingOwnerGrant() {},
   })
   assert.equal(typeof listener, 'function')
   return { source, message(data, overrides = {}) {
