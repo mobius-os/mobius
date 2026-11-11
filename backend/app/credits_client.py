@@ -71,6 +71,39 @@ def as_http(error: CreditsUnavailable) -> HTTPException:
     error.status, {**error.extra, "code": error.code, "message": error.message})
 
 
+# A server/transport failure or unreadable receipt on ``charges`` may follow a
+# committed charge, so its retry must replay the same payment rather than ask
+# again (see ``_charge_outcome_unknown``). Every other charge refusal is
+# definite: nothing was charged.
+CHARGE_OUTCOME_UNKNOWN = "charge_outcome_unknown"
+
+# A charge answer from the service carries the owner's running balance
+# (``balance``/``balance_micro``), and a refusal can carry the owner's own
+# figures too (``available_micro`` on ``insufficient_credits``, a key's spend
+# cap and what it has spent on ``key_spend_cap``). A paying app learns only
+# about its own charge, never the owner's figures, unless it also holds
+# ``credits_manage``. Both views are allowlists, so a field the service adds
+# later stays hidden until it is known to be safe.
+_PAYER_CHARGE_FIELDS = ("charge_id", "amount_micro", "amount", "replayed")
+# What a refused payer may act on: what its call would cost and what it agreed
+# to pay (``price_changed``, ``insufficient_credits``).
+_PAYER_REFUSAL_FIELDS = ("required_micro", "price_micro", "max_price_micro")
+
+
+def payer_charge_view(answer: dict) -> dict:
+  """A charge answer with only the fields its paying app needs to act on it:
+  the charge's id, what it paid, and whether the service replayed an earlier
+  identical charge."""
+  return {name: answer[name] for name in _PAYER_CHARGE_FIELDS if name in answer}
+
+
+def payer_refusal_view(error: CreditsUnavailable) -> CreditsUnavailable:
+  """The same refusal keeping only the fields about the app's own call, so no
+  figure of the owner's (balance, spend cap, amount spent) reaches it."""
+  extra = {name: error.extra[name] for name in _PAYER_REFUSAL_FIELDS if name in error.extra}
+  return CreditsUnavailable(error.message, status=error.status, code=error.code, extra=extra)
+
+
 # --- The stored key ----------------------------------------------------------
 
 
@@ -181,7 +214,7 @@ def _charge_outcome_unknown() -> CreditsUnavailable:
   # charge. Never present it as a refusal or retry it with a different key.
   return CreditsUnavailable(
     "The charge outcome is unknown. Retry with the same idempotency key.",
-    status=503, code="charge_outcome_unknown")
+    status=503, code=CHARGE_OUTCOME_UNKNOWN)
 
 
 def _call(method: str, path: str, credentials: dict, payload: dict | None = None) -> dict:

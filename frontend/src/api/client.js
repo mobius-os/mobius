@@ -1227,6 +1227,11 @@ export const api = {
     acceptConsent: (appId, digest) => apiFetch(`/apps/${appId}/consent`, {
       method: 'POST', body: JSON.stringify({ digest }),
     }),
+    // Every credits charge waits for the owner's Pay or Cancel.
+    waitingPayments: (appId) => apiFetch(`/apps/${appId}/credits-charges`),
+    answerPayment: (appId, paymentId, pay) => apiFetch(`/apps/${appId}/credits-charges/${encodeURIComponent(paymentId)}`, {
+      method: 'POST', body: JSON.stringify({ pay }),
+    }),
     markActivitySeen: (appId, activityVersion, appCreatedAt) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion, app_created_at: appCreatedAt }),

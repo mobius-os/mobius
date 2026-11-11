@@ -1141,12 +1141,13 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent, except checking a charge (below). Owner-built local
-apps cannot use `credits_manage` or `spend_credits`, even if their
-`mobius.json` declares them: account, price and charge requests receive 403.
-A delegated helper cannot spend credits, including through an otherwise
-approved app service.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. An owner-built local app never gets it, even if its `mobius.json`
+declares it: its account requests receive 403. A local app may still pay with
+`spend_credits` (below): it needs no standing grant, because every charge
+waits for the owner's Pay. It may also check a charge (below). A delegated
+helper cannot spend credits, including through an otherwise approved app
+service.
 
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
@@ -1174,10 +1175,28 @@ the service may still have charged. Retry with the same key, never a new one;
 the client never retries automatically. Do the paid work only after a 200,
 and explain each refusal by its `detail.code`: `not_paired`
 (the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
-`price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
+`price_not_found`, `price_unreadable` (the creator's price could not be read;
+nothing was asked or charged), `key_spend_cap`, or `key_refused` / `invalid_api_key`
 (the credits service refused the key; the owner needs to pair again).
 The key is scoped to your app, so another app's identical key never replays
 your charge.
+
+Every charge waits for the owner. The first request answers 409
+`confirmation_required` while Möbius shows the owner who is paid, for what and
+the price; retry the same charge with the same key every few seconds. It
+answers 200 once they press Pay, or 403 `payment_declined` if they cancel.
+A cancel holds: every retry with that key keeps answering `payment_declined`,
+so stop retrying it; a new purchase in your app takes a new key. Payments come
+from credits only; a `method` other than `"credits"` answers 422
+`payment_method_unsupported`. At most five of your app's payments wait at
+once; another answers 429 `too_many_payments_waiting`. The `*` in a
+`"*/<app>"` grant means any creator of that app; it is never itself a seller.
+
+A 200 answer tells your app only about its own charge — the
+`charge_id`, the amount charged, and `replayed` when the service replayed an
+earlier identical call — never the owner's balance. A refusal keeps only its
+`code`, `message` and the figures about your call (`required_micro`,
+`price_micro`, `max_price_micro`), never the owner's balance or spend cap.
 
 A marketplace that unlocks an item for a buyer on another Möbius checks the
 charge id that buyer's Möbius reports before unlocking:
@@ -1197,7 +1216,8 @@ again on every visit.
 
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
-`identity_manage` does not include it.
+`identity_manage` does not include it, and only a Store app can hold it. An
+app with it keeps seeing the balance in a charge answer.
 
 ## Managed-app update events
 

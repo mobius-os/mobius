@@ -166,7 +166,7 @@ def rows_from_contract(
     rows.append(_row(
       "spend_credits", "Spend your credits on paid features",
       "Its service can pay for priced calls from your Möbius credits, at the "
-      "price each creator sets, to: " + ", ".join(targets) + ".",
+      "price each creator sets, to: " + ", ".join(_payee(t) for t in targets) + ".",
       scope=[str(target) for target in targets],
     ))
   checked_apps = data.get("check_credits_charges")
@@ -356,6 +356,12 @@ def rows_for_manifest(manifest: dict[str, Any], contract: dict[str, Any]) -> lis
   return rows_from_contract(
     contract, project_builders=bool(manifest.get("project_templates")),
   )
+
+
+def _payee(target: str) -> str:
+  """How the panel names one ``spend_credits`` entry."""
+  seller, _, priced_app = target.partition("/")
+  return f"any creator's {priced_app}" if seller == "*" else target
 
 
 def gated(app: models.App) -> bool:

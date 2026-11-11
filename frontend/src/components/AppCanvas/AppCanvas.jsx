@@ -30,6 +30,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import AppConsentPanel from './AppConsentPanel.jsx'
+import { AppCreditsPaymentDialog } from './AppCreditsDialogs.jsx'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   accountLinkCompletion,
@@ -58,6 +59,7 @@ import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
+import { answerRefusalSheet, paysWithCredits } from '../../lib/creditsPayment.js'
 import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import { closeAppOwnerGrant } from '../../lib/appOwnerGrant.js'
 import OwnerConfirmSheet from './OwnerConfirmSheet.jsx'
@@ -471,6 +473,45 @@ const AppCanvas = forwardRef(function AppCanvas({
   const pendingFileExportRef = useRef(null)
   const [pendingOwnerGrant, setPendingOwnerGrant] = useState(null)
   const pendingOwnerGrantRef = useRef(null)
+  // A charge waiting for the owner's Pay (see AppCreditsPaymentDialog). Only
+  // an app whose contract may spend credits can raise one, so no other app's
+  // opening reads the waiting payments.
+  const paymentsQuery = appQueries.creditsPayments.useQuery(appId, {
+    enabled: paysWithCredits(capabilityContract),
+    visible,
+  })
+  const waitingPayment = paymentsQuery.data?.payments?.[0] || null
+  const [paymentBusy, setPaymentBusy] = useState(false)
+  const [paymentError, setPaymentError] = useState('')
+  // A payment that is no longer waiting when the owner answers (it lapsed, or
+  // another device answered it) leaves the waiting list at once, so the reason
+  // is kept here until the owner closes it.
+  const [paymentRefusal, setPaymentRefusal] = useState(null)
+  const shownPayment = paymentRefusal?.payment || waitingPayment
+  async function answerPayment(pay) {
+    const payment = waitingPayment
+    if (!payment) return
+    setPaymentBusy(true)
+    setPaymentError('')
+    try {
+      const res = await api.apps.answerPayment(appId, payment.id, pay)
+      if (res.ok) {
+        // Answered: its sheet leaves now, before Pay re-arms for a second press.
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+      } else if (res.status === 409) {
+        const body = await res.json().catch(() => ({}))
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+        setPaymentRefusal({ payment, ...answerRefusalSheet(body) })
+      } else {
+        setPaymentError('That could not be saved. Try again.')
+      }
+    } catch {
+      setPaymentError('That could not be saved. Try again.')
+    } finally {
+      setPaymentBusy(false)
+      void appQueries.creditsPayments.invalidate(queryClient, appId)
+    }
+  }
   const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
@@ -2089,6 +2130,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       {pendingOwnerGrant && visible && (
         <OwnerConfirmSheet appName={appName} themeColor={themeColor} request={pendingOwnerGrant}
           onCancel={cancelOwnerGrant} onConfirm={confirmOwnerGrant} />
+      )}
+      {shownPayment && visible && !pendingFileExport && !pendingOwnerGrant && (
+        <AppCreditsPaymentDialog key={`${shownPayment.id}:${paymentRefusal ? 'refused' : 'waiting'}`}
+          appId={appId} appName={appName} payment={shownPayment}
+          busy={paymentBusy} error={paymentError} refusal={paymentRefusal}
+          onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
+          onClose={() => setPaymentRefusal(null)} />
       )}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it

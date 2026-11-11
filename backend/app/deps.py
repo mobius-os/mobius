@@ -841,11 +841,23 @@ def acts_for_guest(principal: Principal) -> bool:
   return principal.browser is not None
 
 
+def is_installation_owner_control(principal: Principal) -> bool:
+  """Whether this bearer may use installation-owner controls: the owner or the
+  owner's own top-level agent, never a delegated helper or a shared-browser
+  guest (or work one started). The non-raising form of
+  ``require_installation_owner_control``, for reads that stay private by
+  returning nothing rather than refusing."""
+  return principal.delegation_id is None and not acts_for_guest(principal)
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
+  if is_installation_owner_control(principal):
+    return
+  # A delegated helper and a shared-browser guest are refused separately so each
+  # learns which boundary it hit.
   require_nondelegated_owner_control(principal)
-  if acts_for_guest(principal):
-    raise HTTPException(403, "Only the installation owner can manage this access.")
+  raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
 def get_owner_or_delegated_owner_for_app_token(
@@ -1492,12 +1504,22 @@ def _contract_data(app: models.App) -> dict:
   return data if isinstance(data, dict) else {}
 
 
+def app_manages_credits(app: models.App) -> bool:
+  """Whether the app holds an accepted ``credits_manage`` grant, so a charge
+  answer may still reveal the owner's balance to it. Only a Store app's
+  accepted first-open consent grants it; a local app that merely declares it
+  is a spend-only payer."""
+  return (_contract_data(app).get("credits_manage") is True
+          and app_consent.gated(app) and app_consent.status(app) == "accepted")
+
+
 def _require_credits_app_consent(app: models.App) -> None:
   """Local manifests never self-grant access to the owner's credits.
 
   Use the same Store/consent boundary as first-open approval, not package
   identity: local apply can copy these permissions into a contract without
-  ever showing the owner a consent card.
+  ever showing the owner a consent card. So ``credits_manage`` is Store-only:
+  a local app never gets it, whatever its manifest declares.
   """
   if not app_consent.gated(app) or app_consent.status(app) != "accepted":
     raise HTTPException(
@@ -1512,6 +1534,19 @@ def spend_credits_targets(app: models.App) -> list[str]:
   return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
 
 
+def spend_credits_allows(app: models.App, seller: str, priced_app: str) -> bool:
+  """Whether the owner allowed this app to pay ``seller``'s ``priced_app``.
+
+  ``"*/<app>"`` allows every creator of that app name, as a marketplace needs.
+  ``*`` is that wildcard only in the grant: no creator is literally named
+  ``*``, so a charge naming that seller is never allowed.
+  """
+  if seller == "*":
+    return False
+  targets = spend_credits_targets(app)
+  return f"{seller}/{priced_app}" in targets or f"*/{priced_app}" in targets
+
+
 def get_credits_spender(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
@@ -1523,8 +1558,8 @@ def get_credits_spender(
   and never a public invocation (``get_principal`` refuses that scope), whose
   caller is a visitor. A service a shared-browser guest or delegated helper
   invoked is refused too: neither may spend the installation owner's credits.
-  Only consent-gated Store apps qualify. The route then refuses a seller the
-  accepted grant does not name.
+  The route then refuses a seller the grant does not name, and holds every
+  charge for the owner's Pay.
   """
   require_nondelegated_owner_control(principal)
   if principal.app_id is None or not principal.app_is_service:
@@ -1540,7 +1575,11 @@ def get_credits_spender(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  _require_credits_app_consent(app)
+  # A Store app's first-open consent covers its spending. A local app needs
+  # no standing grant just to spend: every charge waits for the owner's Pay
+  # (credits_confirmations). It never manages credits, even if it asks to.
+  if app_consent.gated(app):
+    _require_credits_app_consent(app)
   if not spend_credits_targets(app):
     raise HTTPException(
       status_code=403,
@@ -1605,7 +1644,8 @@ def get_credits_price_reader(
 
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
-  spending or account authority and needs no credits-management grant.
+  spending or account authority and needs no credits-management grant. A
+  local app therefore reads them unasked; each charge waits for the owner's Pay.
   """
   owner = principal.owner
   if principal.app_id is None:
@@ -1613,8 +1653,9 @@ def get_credits_price_reader(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  _require_credits_app_consent(app)
-  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
+  if app_consent.gated(app):
+    _require_credits_app_consent(app)
+  if app_manages_credits(app) or spend_credits_targets(app):
     return owner
   raise HTTPException(
     status_code=403,

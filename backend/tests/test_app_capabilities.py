@@ -877,6 +877,20 @@ def test_spend_credits_must_name_each_seller_it_pays(targets):
     validate_manifest_contract(_manifest(permissions={'spend_credits': targets}))
 
 
+@pytest.mark.parametrize('targets', [['*'], ['*/'], ['**/prompts'], ['*ana/prompts'],
+                                    ['*/../x'], ['*/prompts', '*/prompts']])
+def test_any_creator_names_exactly_one_app(targets):
+  with pytest.raises(ManifestContractError, match='spend_credits'):
+    validate_manifest_contract(_manifest(permissions={'spend_credits': targets}))
+
+
+def test_a_marketplace_may_pay_any_creator_of_its_app():
+  contract = _contract(permissions={'spend_credits': ['*/prompts']})
+  assert contract['data']['spend_credits'] == ['*/prompts']
+  named = _contract(permissions={'spend_credits': ['ana/prompts']})
+  assert diff_contracts(named, contract)['widens'] is True
+
+
 def test_paying_one_more_seller_widens_and_paying_fewer_does_not():
   one = _contract(permissions={'spend_credits': ['ana/prompts']})
   two = _contract(permissions={'spend_credits': ['ana/prompts', 'bob/notes']})
