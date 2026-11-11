@@ -19,6 +19,7 @@ from sqlalchemy import JSON, Text, case, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
 from app import chat_writer, transcript_rows
 from app.app_chat_scopes import SCOPE_MAX, ScopedStartRefused, chat_scope
 from app.chat_handoffs import project_handoff
@@ -159,6 +160,15 @@ def _latest_run_snapshot(
   return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
+# The version key detects change in a dependency's outcome without reading
+# it whole: its first _KEY_TEXT_CHARS characters plus its total length. An
+# outcome is written whole once, when the dependency resolves (or its source
+# is retained), so a later write changes its length or its head. The head
+# is sized to hold what a Goal card shows of a claim (its summary and outcome
+# at their display limits) with room for the outcome's other fields.
+_KEY_TEXT_CHARS = 2 * (CLAIM_SUMMARY_CHARS + CLAIM_TEXT_CHARS)
+
+
 def _lifecycle_projection_key(
   db: Session, chat_id: str, runtime_revision: int, *, include_foreign_context: bool,
 ) -> str:
@@ -186,10 +196,17 @@ def _lifecycle_projection_key(
   goals = db.query(goal.id, goal.status, goal.revision, goal.completed_at).filter(
     goal.chat_id == chat_id, goal.status.in_(("completed", "cannot_complete", "cancelled")),
   ).order_by(goal.id).all()
+  # A dependency's outcome and a claim's summary can be long: the key reads
+  # what the cards show of them (a bounded head) and their length, never the
+  # whole text. An outcome is written whole when it resolves.
+  outcome_text = cast(dependency.outcome_json, Text)
   dependencies = db.query(
     dependency.id, dependency.resolved_at, dependency.result_disposition,
     dependency.result_disposed_at, dependency.received_run_id, dependency.withdrawn_at,
-    dependency.outcome_json, dependency.target_chat_id, dependency.target_claim_id,
+    func.substr(outcome_text, 1, _KEY_TEXT_CHARS).label("outcome_head"),
+    func.length(outcome_text).label("outcome_chars"),
+    dependency.outcome_json["source_chat_id"].as_string().label("outcome_source"),
+    dependency.target_chat_id, dependency.target_claim_id,
   ).filter(dependency.waiting_chat_id == chat_id).order_by(dependency.id).all()
   # Goal cards also carry their helper tree, whose statuses follow child runs.
   helpers = db.query(
@@ -215,13 +232,14 @@ def _lifecycle_projection_key(
     claim_ids = {row.target_claim_id for row in dependencies if row.target_claim_id}
     claims = db.query(
       models.AgentWorkClaim.id, models.AgentWorkClaim.acquisition_id,
-      models.AgentWorkClaim.owner_chat_id, models.AgentWorkClaim.summary,
+      models.AgentWorkClaim.owner_chat_id,
+      func.substr(models.AgentWorkClaim.summary, 1, _KEY_TEXT_CHARS),
+      func.length(models.AgentWorkClaim.summary),
     ).filter(
       models.AgentWorkClaim.id.in_(claim_ids),
     ).order_by(models.AgentWorkClaim.id).all() if claim_ids else []
     source_ids = {row.target_chat_id for row in dependencies} | {
-      row.outcome_json.get("source_chat_id") for row in dependencies
-      if isinstance(row.outcome_json, dict)
+      row.outcome_source for row in dependencies
     } | {row.owner_chat_id for row in claims}
     source_ids.discard(None)
     sources = db.query(models.Chat.id, models.Chat.title, models.Chat.deleted_at).filter(

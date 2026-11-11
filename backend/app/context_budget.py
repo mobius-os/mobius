@@ -1,4 +1,4 @@
-"""Display limits and read pages for agent-written Goal text.
+"""Display limits and read pages for agent-written Goal and peer text.
 
 Agent input to a Goal plan is not capped where it is written: the store keeps
 it whole and the paged reads return it whole. The per-turn Goal brief shows
@@ -9,6 +9,8 @@ naming the paged read. The Goal objective was never capped (an owner's /goal
 is not) and is shown whole, as before.
 """
 
+import re
+
 TITLE_CHARS = 160
 # A task's note, result and completion condition.
 TEXT_CHARS = 1_000
@@ -17,6 +19,17 @@ NEXT_ACTION_CHARS = 2_000
 # Entries all brief lists share, and dependency ids per task, as a plan held them.
 LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
+
+# Peer notes and work claims are not capped where they are written. These
+# limits apply where Möbius repeats them: a note in a turn's coordination
+# block and its send receipt (and the transcript card), a claim tool result, a
+# transfer notice and a dependency notice. Each equals the input cap that text
+# once had, so anything that fit then is shown exactly as before; a longer text
+# becomes a marked excerpt naming its paged full read (read_agent_message or
+# read_work_claim) and stays whole in storage.
+PEER_NOTE_CHARS = 4_000
+CLAIM_SUMMARY_CHARS = 500
+CLAIM_TEXT_CHARS = 1_000  # a takeover reason or an outcome
 
 
 # A change's reply echoes at most this much of one text and this many ids;
@@ -59,16 +72,26 @@ def text_page(text: str, offset: int = 0, budget: int = READ_PAGE_BYTES) -> dict
   }
 
 
-def excerpt(text: str, limit: int, read_full: str) -> str:
+_EXCERPT_MARKER = re.compile(r"… \[excerpt: \d+ of \d+ characters; [^\]]*\]$")
+
+
+def without_excerpt_marker(text: str) -> str:
+  """An excerpt's head ending in "…", for a reader its marker's read is not for."""
+  return _EXCERPT_MARKER.sub("…", text)
+
+
+def excerpt(text: str, limit: int, read_full: str, *, total: int | None = None) -> str:
   """``text`` whole if it fits ``limit`` characters, else a marked excerpt.
 
   The excerpt is its head plus a marker naming ``read_full``, together within
-  ``limit`` whenever the marker alone fits.
+  ``limit`` whenever the marker alone fits. ``total`` is the whole text's
+  length when ``text`` is already only its head.
   """
-  if len(text) <= limit:
+  total = len(text) if total is None else total
+  if total <= limit:
     return text
   # A shorter head never needs more digits than ``limit``, so reserving the
   # marker as it reads for a ``limit``-long head is enough.
-  room = limit - len(f"… [excerpt: {limit} of {len(text)} characters; {read_full}]")
+  room = limit - len(f"… [excerpt: {limit} of {total} characters; {read_full}]")
   head = text[:max(room, 0)].rstrip()
-  return f"{head}… [excerpt: {len(head)} of {len(text)} characters; {read_full}]"
+  return f"{head}… [excerpt: {len(head)} of {total} characters; {read_full}]"

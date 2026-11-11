@@ -1,11 +1,15 @@
-"""Formal review verdicts: the agent proposes, only the owner submits.
+"""Formal review verdicts: the agent proposes, the owner submits.
 
 A run with the frozen ``propose_verdict`` opt-in never posts APPROVE or
 REQUEST_CHANGES by itself. Its ``publish:true`` outcome saves one immutable
-proposal (event, exact wording, pinned head and base). The owner's own submit
-of that exact proposal is the only authority to post it, once, at the pinned
-head; an uncertain dispatch is never retried. A proposal is not consent to
-merge: a merge grant still needs the posted APPROVE and its usual gates.
+proposal (event, exact wording, pinned head and base), plus the same findings
+worded as a plain COMMENT. The owner's own submit of that exact proposal, as
+proposed or downgraded to the COMMENT, is the authority to post it, once, at
+the pinned head; an uncertain dispatch is never retried. The one exception is
+the owner's own choice when starting the review (``agent_submits_verdict``):
+the run then submits its proposal under that frozen grant. A proposal is not
+consent to merge: a merge grant still needs the posted APPROVE and its gates;
+a COMMENT is never an approval.
 """
 import asyncio
 import hashlib
@@ -15,7 +19,7 @@ import uuid
 from fastapi import HTTPException
 
 from app import chat_queue, models, settled, contribution_review_runs as reviews
-from app import contribution_review_public as public
+from app import contribution_pr_facts as pr_facts, contribution_review_public as public
 from app.contribution_errors import ContributionSubmitError
 from app.decision_cards import fence_owner
 from app.github_connection import _github_connection_transaction
@@ -25,20 +29,35 @@ EVENTS = {"all_clear": "APPROVE", "needs_you": "REQUEST_CHANGES"}
 
 def own_pull(row, pull) -> bool:
   """GitHub refuses approve and request-changes from the PR's own author."""
-  return str((pull.get("user") or {}).get("id") or "") == str(row.github_actor_id)
+  return pr_facts.authored_by(pull, row.github_actor_id)
+
+
+def _sha256(text: str) -> str:
+  return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def propose(outcome, target) -> dict:
+  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
   event = EVENTS[outcome["state"]]
   proposal_id = uuid.uuid4().hex
   # The marker is part of the frozen wording: GitHub's body limit is applied to
   # exactly what will be posted, so submitting can never overflow it.
   marker = f"<!-- mobius-review:{proposal_id} -->"
   body = public.review_comment_body(outcome, marker=marker, event=event)
+  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT")
   return {"id": proposal_id, "state": "proposed", "event": event, "marker": marker, "body": body,
-          "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+          "body_sha256": _sha256(body), "comment_body": comment_body, "comment_body_sha256": _sha256(comment_body),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
           "proposed_at": reviews.utc_now_iso()}
+
+
+def _sent_as(saved: dict, event: str | None) -> dict:
+  """The fields that change when the owner sends the proposal as a plain comment instead."""
+  if event is None or event == saved.get("event"):
+    return {}
+  if event != "COMMENT" or not saved.get("comment_body"):
+    raise HTTPException(409, "This verdict can only be sent as proposed. Nothing was posted.")
+  return {"event": "COMMENT", "proposed_event": saved["event"]}
 
 
 def _settle(db, row, item_key, proposal_id, fields):
@@ -51,7 +70,7 @@ def _settle(db, row, item_key, proposal_id, fields):
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
-def _arm(db, row, item_key, proposal_id, authorize):
+def _arm(db, row, item_key, proposal_id, authorize, event=None):
   """Reserve the one dispatch for this proposal, fenced across grants."""
   fence_owner(db, row.owner_id)
   try:
@@ -73,8 +92,13 @@ def _arm(db, row, item_key, proposal_id, authorize):
   if holder:
     db.rollback()
     raise HTTPException(409, f"Another review run ({holder.id}) already submitted a verdict for this exact version.")
+  try:
+    sent_as = _sent_as(saved, event)
+  except HTTPException:
+    db.rollback()
+    raise
   current = row.outcomes_json[item_key]
-  armed = {**current, "verdict_proposal": {**saved, "state": "posting",
+  armed = {**current, "verdict_proposal": {**saved, **sent_as, "state": "posting",
                                            "submitted_at": reviews.utc_now_iso()}}
   if not reviews._cas_outcome(db, row, item_key, armed):
     raise HTTPException(409, "This review changed. Refresh before submitting.")
@@ -111,12 +135,15 @@ def _persist_result(db, row, item_key, proposal_id, result):
   _settle(db, row, item_key, proposal_id, fields)
 
 
-async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
-  """Post the owner-submitted proposal once; return its settled receipt."""
+async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
+  """Post the owner-submitted proposal once, as proposed or (event COMMENT) as its plain comment.
+
+  Returns its settled receipt; its ``event`` is what was actually sent.
+  """
   async with _github_connection_transaction():
     await _prove_target(gh, cwd, row, target)
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
-      armed = _arm(db, row, item_key, proposal_id, authorize)
+      armed = _arm(db, row, item_key, proposal_id, authorize, event)
       # Admission and the reservation's database fence can both wait, so the
       # proof above may be stale. Repeat it now that the dispatch is reserved;
       # anything that ends before the post is a definite non-dispatch.
@@ -131,14 +158,65 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize):
     except HTTPException as exc:
       _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": str(exc.detail)})
       raise
+    # Both wordings carry the proposal's marker, frozen when it was proposed.
+    wording = armed["comment_body"] if armed["event"] == "COMMENT" else armed["body"]
     # A caller cancelled during the post still records what GitHub answered.
     result = await settled.settle(
-      asyncio.to_thread(public.post_review, gh, cwd, target, armed["body"], armed["event"]),
+      asyncio.to_thread(public.post_review, gh, cwd, target, wording, armed["event"]),
       what="Verdict dispatch",
       abandoned=lambda task: _persist_result(db, row, item_key, proposal_id, task.result()))
   _persist_result(db, row, item_key, proposal_id, result)
   db.refresh(row)
   return row.outcomes_json[item_key]["verdict_proposal"]
+
+
+NEVER_SENT = "This verdict was never sent to GitHub, so nothing is waiting on you."
+DISMISSED = "You dismissed this verdict. GitHub never confirmed it and nothing more will be sent."
+
+
+def _settle_unconfirmed(db, row, item_key, proposal_id, fields):
+  """Move one unconfirmed attempt to a final state on the refreshed item."""
+  def apply(current):
+    saved = current.get("verdict_proposal") or {}
+    if saved.get("id") != proposal_id or saved.get("state") not in {"posting", "unknown"}:
+      return None
+    return {**current, "verdict_proposal": {**saved, **fields}}
+  reviews.save_effect_outcome(db, row, item_key, apply)
+
+
+def settle_observed(db, row, item_key, proposal, review, *, complete_scan, read_at):
+  """Settle an unconfirmed verdict from one read-only look at GitHub's reviews.
+
+  ``review`` is the exact review carrying this attempt's marker, if GitHub shows
+  it: the verdict is then posted. With no such review the verdict is released as
+  never sent only once the read covered GitHub's whole list and began after the
+  one-hour dispatch window that bounds how long a request can still land. Both
+  settle this one record; nothing here ever submits again.
+  """
+  if review is not None:
+    fields = {"state": "posted", "review_id": review["id"], "url": review.get("html_url"),
+              "summary": "The exact public review was confirmed by a read-only observation."}
+    if review.get("state") == public.DISMISSED_STATE:
+      # It was sent, so it is not "never sent"; but it is no longer a live verdict.
+      fields.update(dismissed_on_github=True, summary="The review was sent, then dismissed on GitHub.")
+  elif complete_scan and reviews.dispatch_window_closed(proposal.get("submitted_at"), read_at):
+    fields = {"state": "not_dispatched", "summary": NEVER_SENT}
+  else:
+    return
+  _settle_unconfirmed(db, row, item_key, proposal["id"], fields)
+
+
+def dismiss(db, row, item_key, proposal_id):
+  """The owner's word that an unconfirmed verdict is not worth waiting on.
+
+  Only a settled uncertainty qualifies: a verdict still posting has a live
+  request whose own result must land. This records the decision and sends nothing.
+  """
+  saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
+  if saved.get("id") != proposal_id or saved.get("state") != "unknown":
+    raise HTTPException(409, "Only a verdict GitHub never confirmed can be dismissed. Refresh to see its result.")
+  _settle_unconfirmed(db, row, item_key, proposal_id,
+                      {"state": "not_dispatched", "summary": DISMISSED, "dismissed_at": reviews.utc_now_iso()})
 
 
 def discard(db, row, item_key, proposal_id):
