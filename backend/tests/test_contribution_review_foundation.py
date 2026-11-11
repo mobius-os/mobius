@@ -21,7 +21,7 @@ CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict
                 "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                 "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
                 "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
-                "pr_machine": True}
+                "pr_machine": True, "owner_confirm": True}
 
 def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
