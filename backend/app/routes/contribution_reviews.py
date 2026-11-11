@@ -46,11 +46,14 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
+# owner_confirm: the shell can confirm an action for an app (window.mobius.ownerGrant). The older owner_grant
+# key is deliberately never advertised: released Contribute reads it as proof of the owner's tap and turns Post on.
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True}
+                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
+                       "owner_confirm": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
