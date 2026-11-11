@@ -23,7 +23,8 @@ test('owner grant request takes its app id from the shell and never occupies the
   assert.equal(request.appId, 12) // the forged appId in the payload is ignored
   assert.deepEqual([request.action, request.scope, request.body],
     ['merge', message.scope, message.body])
-  assert.equal(replies.length, 0) // an accepted request only opens the sheet
+  // An accepted request only opens the sheet and is acked, so the frame stops its short wait.
+  assert.deepEqual(replies.splice(0).map(reply => [reply.type, reply.requestId]), [['moebius:owner-grant-ack', 'g1']])
 
   assert.equal(begin(live, false), null) // hidden
   assert.equal(begin(buffered, true), null) // buffered successor, not the live frame

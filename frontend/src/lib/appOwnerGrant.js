@@ -47,11 +47,15 @@ export function parseAppOwnerGrant(message) {
   return scope && body ? { requestId, action, scope, body } : null
 }
 
-function replyOwnerGrant(source, requestId, result) {
+function answerFrame(source, type, requestId, fields = {}) {
   if (typeof requestId !== 'string' || requestId.length > 160) return
   try {
-    source.postMessage({ type: 'moebius:owner-grant-result', requestId, ...result }, '*')
+    source.postMessage({ type, requestId, ...fields }, '*')
   } catch { /* the frame may have been retired */ }
+}
+
+function replyOwnerGrant(source, requestId, result) {
+  answerFrame(source, 'moebius:owner-grant-result', requestId, result)
 }
 
 // The prompt gate, the same as the file export's: a buffered or hidden frame
@@ -72,6 +76,9 @@ export function beginAppOwnerGrant({ message, source, sourceVersion, liveVersion
     replyOwnerGrant(source, parsed.requestId, { error: 'Finish the current confirmation first.' })
     return null
   }
+  // The ack tells the frame its request was accepted, so it stops waiting for
+  // a shell that never answers; the owner may then take as long as they like.
+  answerFrame(source, 'moebius:owner-grant-ack', parsed.requestId)
   return {
     ...parsed, source, appId, frameVersion: sourceVersion,
     phase: 'checking', controller: new AbortController(),
