@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  WAITING_PAYMENTS_POLL_MS, answerRefusal, paymentAmount, paysWithCredits, pressCounts,
-  waitingPaymentNotice, waitingPaymentsRefresh,
+  WAITING_PAYMENTS_POLL_MS, answerRefusal, answerRefusalSheet, paymentAmount, paysWithCredits,
+  pressCounts, waitingPaymentNotice, waitingPaymentsRefresh, withoutPayment,
 } from '../creditsPayment.js'
 
 test('Pay ignores a press while the sheet is still arming', () => {
@@ -50,6 +50,40 @@ test('a refused payment tells the owner the server reason', () => {
   assert.equal(answerRefusal({ detail: 'Not allowed.' }), 'Not allowed.')
   assert.equal(answerRefusal({}), 'That could not be saved. Try again.')
   assert.equal(answerRefusal(null), 'That could not be saved. Try again.')
+})
+
+test('a payment answered already says so, never that it failed', () => {
+  // A double tap, or a second device: the payment is still charged, so the
+  // sheet must not send the owner to buy it again.
+  const paid = answerRefusalSheet({ detail: {
+    code: 'payment_already_answered', state: 'confirmed', message: 'You already paid for this.',
+  } })
+  assert.deepEqual(paid, { title: 'Already paid', message: 'You already paid for this.', failed: false })
+  const cancelled = answerRefusalSheet({ detail: {
+    code: 'payment_already_answered', state: 'declined', message: 'You already cancelled this payment.',
+  } })
+  assert.equal(cancelled.title, 'Already cancelled')
+  assert.equal(cancelled.failed, false)
+})
+
+test('a lapsed or unknown payment did not go through', () => {
+  const gone = answerRefusalSheet({ detail: {
+    code: 'payment_gone', message: 'That payment is no longer waiting. Try it again in the app.',
+  } })
+  assert.deepEqual(gone, {
+    title: 'This payment didn’t go through',
+    message: 'That payment is no longer waiting. Try it again in the app.',
+    failed: true,
+  })
+  assert.equal(answerRefusalSheet(null).failed, true)
+})
+
+test('an answered payment leaves the waiting list at once', () => {
+  const data = { payments: [{ id: 'a1' }, { id: 'b2' }] }
+  assert.deepEqual(withoutPayment(data, 'a1'), { payments: [{ id: 'b2' }] })
+  assert.equal(withoutPayment(data, 'zz'), data)
+  assert.equal(withoutPayment(undefined, 'a1'), undefined)
+  assert.deepEqual(withoutPayment({ payments: [{ id: 'a1' }] }, 'a1'), { payments: [] })
 })
 
 test('only an app whose contract may spend credits reads its waiting payments', () => {

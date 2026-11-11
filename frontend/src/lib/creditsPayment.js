@@ -51,6 +51,33 @@ export function answerRefusal(body) {
 }
 
 /**
+ * What the sheet says when an answer is refused (`body`, the 409). A payment
+ * answered already (a second press, or another device) is not a failure: a
+ * paid one is still charged, so the sheet must never send the owner to buy it
+ * again. Only a payment that lapsed or is unknown "didn't go through".
+ */
+export function answerRefusalSheet(body) {
+  const detail = body?.detail
+  const message = answerRefusal(body)
+  if (detail?.code === 'payment_already_answered') {
+    const paid = detail.state === 'confirmed'
+    return { title: paid ? 'Already paid' : 'Already cancelled', message, failed: false }
+  }
+  return { title: 'This payment didn’t go through', message, failed: true }
+}
+
+/**
+ * The waiting payments (`data`, as the server lists them) without the one the
+ * owner just answered, so its sheet leaves at once rather than staying armed
+ * for a second press until the list is read again.
+ */
+export function withoutPayment(data, paymentId) {
+  if (!Array.isArray(data?.payments)) return data
+  const payments = data.payments.filter(payment => String(payment?.id) !== String(paymentId))
+  return payments.length === data.payments.length ? data : { ...data, payments }
+}
+
+/**
  * Whether an app's contract may spend the owner's credits. Only such an app
  * can have a payment waiting, so the shell reads waiting payments for no
  * other app.

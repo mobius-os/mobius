@@ -1309,6 +1309,53 @@ def test_a_payment_unanswered_past_its_window_cannot_be_paid(
   assert _charges_upstream(paired) == []
 
 
+@pytest.mark.parametrize("first, state, said", [
+  (True, "confirmed", "already paid"), (False, "declined", "already cancelled"),
+], ids=["paid", "cancelled"])
+def test_a_second_answer_is_told_the_first_rather_than_that_it_failed(
+  client, auth, db, paired, real_payments, first, state, said,
+):
+  """A double tap, or a second device, answering a payment already answered
+  hears how it was answered: a paid payment is never reported as failed, which
+  would send the owner to buy it again under a new key and pay twice."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40"})
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(path, headers=auth).json()["payments"][0]["id"]
+  assert client.post(f"{path}/{pid}", json={"pay": first}, headers=auth).status_code == 200
+  for again in (True, False):
+    late = client.post(f"{path}/{pid}", json={"pay": again}, headers=auth)
+    assert late.status_code == 409
+    detail = late.json()["detail"]
+    assert (detail["code"], detail["state"]) == ("payment_already_answered", state)
+    assert said in detail["message"]
+  # The first answer stands: a later Cancel never undoes a Pay, nor Pay a Cancel.
+  replay = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert replay.status_code == (200 if first else 403)
+  assert len(_charges_upstream(paired)) == (1 if first else 0)
+
+
+def test_an_answered_payment_is_gone_once_its_answer_lapses(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(path, headers=auth).json()["payments"][0]["id"]
+  assert client.post(f"{path}/{pid}", json={"pay": True}, headers=auth).status_code == 200
+  clock[0] += credits_confirmations.CONFIRM_SECONDS - 1
+  held = client.post(f"{path}/{pid}", json={"pay": True}, headers=auth)
+  assert held.json()["detail"]["code"] == "payment_already_answered"
+  clock[0] += 2
+  gone = client.post(f"{path}/{pid}", json={"pay": True}, headers=auth)
+  assert gone.status_code == 409 and gone.json()["detail"]["code"] == "payment_gone"
+
+
 def test_a_card_payment_is_refused_rather_than_charged_from_credits(
   client, auth, db, paired, real_payments,
 ):

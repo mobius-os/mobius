@@ -59,7 +59,7 @@ import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { answerRefusal, paysWithCredits } from '../../lib/creditsPayment.js'
+import { answerRefusalSheet, paysWithCredits } from '../../lib/creditsPayment.js'
 import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import { closeAppOwnerGrant } from '../../lib/appOwnerGrant.js'
 import OwnerConfirmSheet from './OwnerConfirmSheet.jsx'
@@ -495,10 +495,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     setPaymentError('')
     try {
       const res = await api.apps.answerPayment(appId, payment.id, pay)
-      if (res.status === 409) {
+      if (res.ok) {
+        // Answered: its sheet leaves now, before Pay re-arms for a second press.
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+      } else if (res.status === 409) {
         const body = await res.json().catch(() => ({}))
-        setPaymentRefusal({ payment, message: answerRefusal(body) })
-      } else if (!res.ok) {
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+        setPaymentRefusal({ payment, ...answerRefusalSheet(body) })
+      } else {
         setPaymentError('That could not be saved. Try again.')
       }
     } catch {
@@ -2130,7 +2134,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       {shownPayment && visible && !pendingFileExport && !pendingOwnerGrant && (
         <AppCreditsPaymentDialog key={`${shownPayment.id}:${paymentRefusal ? 'refused' : 'waiting'}`}
           appId={appId} appName={appName} payment={shownPayment}
-          busy={paymentBusy} error={paymentError} refusal={paymentRefusal?.message || ''}
+          busy={paymentBusy} error={paymentError} refusal={paymentRefusal}
           onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
           onClose={() => setPaymentRefusal(null)} />
       )}

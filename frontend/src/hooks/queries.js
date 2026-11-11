@@ -3,7 +3,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
-import { waitingPaymentsRefresh } from '../lib/creditsPayment.js'
+import { waitingPaymentsRefresh, withoutPayment } from '../lib/creditsPayment.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -680,6 +680,10 @@ export const appQueries = {
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({
       predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
     }),
+    // An answered payment leaves the list before it is read again.
+    remove: (queryClient, appId, paymentId) => queryClient.setQueriesData({
+      predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
+    }, data => withoutPayment(data, paymentId)),
   },
   uninstalled: {
     key: uninstalledAppsKey,

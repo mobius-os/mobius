@@ -3359,8 +3359,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // An app asked to charge the owner's credits, or a device answered it.
       if (ev.appId) void appQueries.creditsPayments.invalidate(queryClient, ev.appId)
       // The Pay sheet shows over the paying app only: tell the owner about a
-      // payment from an app they are not looking at.
-      const notice = ev.type === 'credits_charge_requested' && waitingPaymentNotice({
+      // payment from an app they are not looking at. A shared-browser guest
+      // can never answer one, so it is not told.
+      const notice = ev.type === 'credits_charge_requested' && !isSharedBrowserAccess && waitingPaymentNotice({
         appId: ev.appId, visibleAppIds: visibleAppIdsRef.current, apps: appsRef.current,
       })
       if (notice) notifyShell(notice.message, { noticeKey: notice.noticeKey })
@@ -3593,7 +3594,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [
     applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
-    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
+    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered, isSharedBrowserAccess,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
     markStreamingAcknowledged, markStreamingEnd, notifyShell, observeManagedAppEvent,

@@ -157,7 +157,18 @@ def answer_payment(
   """Pay or Cancel one waiting charge. Only a human owner can answer."""
   require_installation_owner_control(principal)
   app = _live_app(db, app_id)
-  if not credits_confirmations.answer(app.id, payment_id, body.pay):
+  outcome = credits_confirmations.answer(app.id, payment_id, body.pay)
+  if outcome in (credits_confirmations.CONFIRMED, credits_confirmations.DECLINED):
+    # Answered already (a second press, or another device): that answer stands,
+    # so a paid payment is never reported as failed and bought again.
+    paid = outcome == credits_confirmations.CONFIRMED
+    raise HTTPException(status_code=409, detail={
+      "code": "payment_already_answered",
+      "state": outcome,
+      "message": ("You already paid for this. There is nothing more to do."
+                  if paid else "You already cancelled this payment."),
+    })
+  if outcome != credits_confirmations.ANSWERED:
     raise HTTPException(status_code=409, detail={
       "code": "payment_gone",
       "message": "That payment is no longer waiting. Try it again in the app.",

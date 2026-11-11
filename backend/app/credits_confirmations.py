@@ -163,14 +163,27 @@ def waiting(app_id: int) -> list[dict]:
     return [p.view() for p in found]
 
 
-def answer(app_id: int, payment_id: str, pay: bool) -> bool:
-  """Record the owner's Pay or Cancel. False if there is no such question,
-  including one left unanswered past its window."""
+# What ``answer`` found: the owner's answer is recorded now, or the payment
+# is unknown here (never asked, another app's, or lapsed unanswered). A payment
+# already answered returns that earlier answer, ``CONFIRMED`` or ``DECLINED``.
+ANSWERED, GONE = "answered", "gone"
+
+
+def answer(app_id: int, payment_id: str, pay: bool) -> str:
+  """Record the owner's Pay or Cancel, returning ``ANSWERED``.
+
+  A payment answered before (a second press, or another device) keeps that
+  answer and returns it, ``CONFIRMED`` or ``DECLINED``, for as long as the
+  answer holds, so the owner is told it was already paid rather than that it
+  failed. ``GONE`` if there is no such question, including one left
+  unanswered past its window."""
   with _lock:
     _expire()
     payment = _payments.get(payment_id)
-    if payment is None or payment.app_id != app_id or payment.state != WAITING:
-      return False
+    if payment is None or payment.app_id != app_id:
+      return GONE
+    if payment.state != WAITING:
+      return payment.state
     payment.state = CONFIRMED if pay else DECLINED
     # An answer lives ``CONFIRM_SECONDS`` from now, not from the first charge:
     # replaying the charge reads the live answer but never pushes the expiry
@@ -179,7 +192,7 @@ def answer(app_id: int, payment_id: str, pay: bool) -> bool:
     payment.at = time.monotonic()
   from app.broadcast import get_system_broadcast
   get_system_broadcast().publish({"type": "credits_charge_answered", "appId": str(app_id)})
-  return True
+  return ANSWERED
 
 
 def clear() -> None:

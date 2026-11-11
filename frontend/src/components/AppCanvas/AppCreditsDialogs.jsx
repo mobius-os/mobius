@@ -56,10 +56,11 @@ function CreditsSheetHead({ appId, name, eyebrow, titleId, title }) {
 
 // Every credits charge an app makes waits here for the owner's Pay: nothing
 // leaves their credits until they have seen who is paid, for what, and how much.
-// With `refusal`, the payment did not go through and the sheet says why; it is
-// no longer waiting, so there is nothing left to pay.
+// With `refusal` ({ title, message, failed }, see answerRefusalSheet), the
+// payment is no longer waiting and the sheet says why: it lapsed (`failed`),
+// or was answered already, so there is nothing left to pay.
 export function AppCreditsPaymentDialog({
-  appId, appName, payment, busy, error, refusal = '', onCancel, onPay, onClose,
+  appId, appName, payment, busy, error, refusal = null, onCancel, onPay, onClose,
 }) {
   const dialogRef = useRef(null)
   const cancelRef = useRef(null)
@@ -76,7 +77,7 @@ export function AppCreditsPaymentDialog({
       <section className="app-consent canvas-credits__sheet">
         <CreditsSheetHead appId={appId} name={name} titleId={titleId}
           eyebrow="Credits payment"
-          title={refusal ? 'This payment didn’t go through' : 'Confirm your purchase'} />
+          title={refusal ? refusal.title : 'Confirm your purchase'} />
         <div className="canvas-credits__amount">
           <span className="canvas-credits__figure">{figure}</span>
           <span className="canvas-credits__unit">credits</span>
@@ -97,7 +98,8 @@ export function AppCreditsPaymentDialog({
         </ul>
         {refusal ? (
           <>
-            <p className="app-consent__error" role="alert">{refusal}</p>
+            <p className={refusal.failed ? 'app-consent__error' : 'app-consent__meta'}
+              role="alert">{refusal.message}</p>
             <div className="app-consent__actions">
               <button type="button" className="app-consent__btn" ref={cancelRef} onClick={onClose}>Close</button>
             </div>

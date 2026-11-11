@@ -48,7 +48,10 @@ test('Pay is off when the payment sheet first appears', () => {
 test('a payment no longer waiting keeps its sheet with the reason and only a Close', () => {
   const html = render(createElement(AppCreditsPaymentDialog, {
     appId: 1, appName: 'Market', payment: PAYMENT,
-    busy: false, error: '', refusal: 'That payment is no longer waiting. Try it again in the app.',
+    busy: false, error: '', refusal: {
+      title: 'This payment didn’t go through', failed: true,
+      message: 'That payment is no longer waiting. Try it again in the app.',
+    },
     onCancel: noop, onPay: noop, onClose: noop,
   }))
   assert.match(html, /role="alert">That payment is no longer waiting. Try it again in the app.</)
@@ -56,4 +59,17 @@ test('a payment no longer waiting keeps its sheet with the reason and only a Clo
   button(html, 'Close')
   assert.doesNotMatch(html, />Pay /)
   assert.match(html, /0.40/)
+})
+
+test('a payment answered already says so, and never that it failed', () => {
+  const html = render(createElement(AppCreditsPaymentDialog, {
+    appId: 1, appName: 'Market', payment: PAYMENT, busy: false, error: '',
+    refusal: { title: 'Already paid', message: 'You already paid for this.', failed: false },
+    onCancel: noop, onPay: noop, onClose: noop,
+  }))
+  assert.match(html, />Already paid</)
+  assert.match(html, /role="alert">You already paid for this.</)
+  assert.doesNotMatch(html, /didn’t go through|Try it again/)
+  button(html, 'Close')
+  assert.doesNotMatch(html, />Pay /)
 })
