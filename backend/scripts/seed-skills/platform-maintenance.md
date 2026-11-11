@@ -23,8 +23,9 @@ sudo -n true
 Use `sudo` deliberately when the task needs it. If that check fails, stop: the
 operator disabled root with `MOBIUS_AGENT_SUDO=0`, and bypassing that choice is
 not part of the agent's authority. Package changes made only in a running
-container are lost when the container is replaced; see the dependency steps
-below for making them durable.
+container survive an in-app Restart, which reruns the boot in the same
+container, but are lost when the container is replaced; see the dependency
+steps below for making them durable.
 
 ---
 
