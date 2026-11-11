@@ -10,7 +10,7 @@ adding to `Chat.agent_settings_json` (a JSON column intentionally
 included as the no-migration escape hatch). For non-secret app-scoped data
 you'd otherwise add a column for, use per-app storage at
 `/data/apps/<app_id>/...` via the storage API. Credentials belong in the
-separate encrypted app-secrets API.
+key vault (app/key_vault.py), which apps use without reading.
 """
 
 import logging

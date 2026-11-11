@@ -638,8 +638,6 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
-  if perms.get("job_secret_read"):
-    contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
   if perms.get("spend_credits"):
     contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
   service = manifest.get("service")
@@ -731,9 +729,9 @@ def contract_from_app_state(
   Store installs derive their complete contract from the reviewed manifest.
   Local apps are created and edited directly by their owner, so their durable
   database state is authoritative for server permissions while ``mobius.json``
-  is authoritative for host-mediated runtime capabilities — including an
-  app-secret model provider, which reaches no turn until the owner saves its
-  key in the app.
+  is authoritative for host-mediated runtime capabilities — including a
+  vault-key model provider, which reaches no turn until the owner approves its
+  key request in Settings › Keys.
   """
   if capabilities is None:
     capabilities = runtime_declaration_from_contract(
@@ -769,7 +767,6 @@ def contract_from_app_state(
       # Manifest apply passes an explicit mapping: omission revokes. An
       # unrelated row projection (no mapping, e.g. a PATCH of pinned or
       # chat_log_access) retains every contract-only grant the owner accepted.
-      "job_secret_read": contract_grants.get("job_secret_read", []),
       "identity_manage": bool(contract_grants.get("identity_manage", False)),
       "credits_manage": bool(contract_grants.get("credits_manage", False)),
       "railway_manage": bool(contract_grants.get("railway_manage", False)),
@@ -1015,7 +1012,7 @@ _BOOLEAN_GRANTS = {
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools", "data.job_secret_read", "data.spend_credits",
+  "agent.skills", "agent.tools", "data.spend_credits",
   "public.network",
 }
 

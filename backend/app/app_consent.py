@@ -17,6 +17,7 @@ import json
 import secrets
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -97,7 +98,7 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read", "spend_credits"} | {key for key, *_ in _FLAGS}
+   "spend_credits"} | {key for key, *_ in _FLAGS}
 )
 
 
@@ -107,11 +108,11 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
   """One thing an app asks for.
 
   ``rank`` orders levels of the same permission (read < write). ``scope`` names
-  the specific things a row covers (secret names, an install-time run): an
-  accepted answer covers a request only when it includes every name, so
-  adding or swapping one asks again. ``limits`` are a runtime capability's
-  upper bounds: an accepted answer covers only values at or below the ones the
-  owner saw, so raising any of them asks again.
+  the specific things a row covers (an install-time run): an accepted answer
+  covers a request only when it includes every name, so adding or swapping one
+  asks again. ``limits`` are a runtime capability's upper bounds: an accepted
+  answer covers only values at or below the ones the owner saw, so raising any
+  of them asks again.
   """
   return {
     "id": row_id, "title": title, "text": text, "level": level,
@@ -153,13 +154,6 @@ def rows_from_contract(
   for key, row_id, title, text in _FLAGS:
     if data.get(key):
       rows.append(_row(row_id, title, text))
-  names = data.get("job_secret_read")
-  if isinstance(names, list) and names:
-    rows.append(_row(
-      "job_secret_read", "Read named secrets in its job",
-      "Its background job can read the secrets it names: " + ", ".join(names) + ".",
-      scope=[str(name) for name in names],
-    ))
   targets = data.get("spend_credits")
   if isinstance(targets, list) and targets:
     rows.append(_row(
@@ -200,10 +194,14 @@ def rows_from_contract(
       "agent_extend", "Add skills and tools to your agents",
       "Installs the skills it ships and lets agents call the tools it declares.",
     ))
-  if contract.get("model_provider"):
+  provider = contract.get("model_provider")
+  if provider:
     rows.append(_row(
       "model_provider", "Add a model provider",
-      "Adds a model provider whose requests use a secret saved in the app.",
+      "Adds a model provider served through your Möbius account."
+      if provider.get("transport") == "identity_broker" else
+      f"Adds a model provider at {urlsplit(provider.get('base_url') or '').hostname}. "
+      "Its requests use a key the app saved, or one you let it use on that site.",
     ))
   service = contract.get("service") or {}
   public = contract.get("public") or {}

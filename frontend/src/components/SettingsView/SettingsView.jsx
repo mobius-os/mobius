@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ArrowLeft, Folder, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, Folder, Key, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
@@ -26,6 +26,7 @@ import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
+import KeysSection, { KeyPage } from './KeysSection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import WalletSection from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
@@ -264,12 +265,14 @@ export default function SettingsView({
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [githubAccountOpen, setGithubAccountOpen] = useState(false)
-  // null shows the overview; a provider id shows that provider's page. A page
-  // is one Back-stack entry, so the phone's back gesture returns to Settings.
+  // null shows the overview; a provider id shows that provider's page, and
+  // `key:<name>` a vault key's page (`key:` alone adds a key). A page is one
+  // Back-stack entry, so the phone's back gesture returns to Settings.
   const [detailPage, setDetailPage] = useState(null)
+  const keyPage = typeof detailPage === 'string' && detailPage.startsWith('key:') ? detailPage.slice(4) : null
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
   const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
-  const selectedProvider = sharedFoldersOpen || mobiusAccountOpen ? null : detailPage
+  const selectedProvider = keyPage !== null || sharedFoldersOpen || mobiusAccountOpen ? null : detailPage
   const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
@@ -939,6 +942,15 @@ export default function SettingsView({
       />
     )
     detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+  } else if (keyPage !== null) {
+    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} onBack={closeDetailPage} />
+    detailBody = (
+      <KeyPage
+        name={keyPage}
+        onOpenKey={(name) => openDetailPage(`key:${name}`)}
+        onClose={closeDetailPage}
+      />
+    )
   } else if (sharedFoldersOpen) {
     subhead = <SettingsSubhead title="Shared folders" mark={<Folder width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = <SharedFoldersPage />
@@ -1084,6 +1096,13 @@ export default function SettingsView({
             />
           </div>
         </section>}
+
+        <KeysSection
+          focusRef={(node) => setSetupFocusRef('keys', node)}
+          attention={attentionSection === 'keys'}
+          onOpenKey={(name) => openDetailPage(`key:${name}`)}
+          onAddKey={() => openDetailPage('key:')}
+        />
 
         <section
           className={`settings-group settings-ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}

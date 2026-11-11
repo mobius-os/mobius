@@ -774,11 +774,11 @@ async def _apply_source_revision(
           # The broker signs with the owner's Möbius account. The platform
           # owns that provider and ignores this declaration, but only the
           # reviewed Möbius · You package may still carry it. Local apps
-          # declare their own HTTPS endpoint and app-secret key.
+          # declare their own HTTPS endpoint and vault key.
           raise AppApplyError(
             "local_model_broker",
             "Local apps may declare an HTTPS model provider with their own "
-            "app secret, not the protected Möbius broker transport.",
+            "vault key, not the protected Möbius broker transport.",
           )
         schedule = manifest.get("schedule")
         job_name = schedule.get("job") if isinstance(schedule, dict) else None

@@ -109,11 +109,13 @@ from app.routes import (
   shared_folders_router,
   public_apps_router,
   public_storage_router,
-  secrets_router, self_reminders_router, settings_router, skills_router,
+  self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, generated_files_router, platform_router,
   published_router,
   connect_router,
+  keys_router,
+  app_secrets_compat_router,
   projects_router,
   project_copies_router,
   shared_apps_router,
@@ -965,8 +967,8 @@ app.add_middleware(
   # All sensitive endpoints are independently protected by JWT.
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
-  # HEAD is the documented app-secret presence check; an Authorization
-  # header makes the opaque frame preflight it like any other method.
+  # Apps borrow keys with any of these methods through /api/keys/use; an
+  # Authorization header makes the opaque frame preflight every one.
   allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   # The app runtime uses X-Mobius-Version to opt into ETag reads, then
   # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
@@ -994,7 +996,9 @@ app.add_middleware(
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
-  expose_headers=["ETag", "X-Recovery-Notification-Id"],
+  # X-Vault-Denied tells an app its key request was refused by the vault
+  # rather than by the site it called (/api/keys/use).
+  expose_headers=["ETag", "X-Recovery-Notification-Id", "X-Vault-Denied"],
 )
 
 
@@ -1099,6 +1103,8 @@ app.include_router(public_apps_router)
 app.include_router(local_services_router)
 app.include_router(location_router)
 app.include_router(connect_router)
+app.include_router(keys_router)
+app.include_router(app_secrets_compat_router)
 app.include_router(browser_access_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
@@ -1109,7 +1115,6 @@ app.include_router(platform_router)
 app.include_router(uploads_router)
 app.include_router(generated_files_router)
 app.include_router(media_router)
-app.include_router(secrets_router)
 # Before github_router: its /contributions/{app_id}/{record_id}/<action> paths would take
 # an owner action at /contributions/{app_id}/pulls/<action> as a record named "pulls".
 app.include_router(contribution_reviews_router)

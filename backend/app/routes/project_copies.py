@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/project-copies", tags=["project-copies"])
 MAX_PACKAGE = 16 * 1024 * 1024
 MAX_SOURCE = 10 * 1024 * 1024
 MAX_FILES = 500
-EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', '.env', 'credentials', 'cli-auth', 'app-secrets'})
+EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', '.env', 'credentials', 'cli-auth', 'app-secrets', '.vault'})
 # Saved app data is private by nature; credential files follow the shared rule.
 DATA_SUFFIXES = ('.sqlite', '.sqlite3', '.db')
 # A copy is an unreviewed snapshot, so it also skips .pem files, which can
