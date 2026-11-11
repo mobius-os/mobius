@@ -849,7 +849,10 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
+    # The choice the editor shows, and what the source declares now, so
+    # the owner can see that a license the Store doesn't offer is there.
     "license": store_licenses.offered_license(manifest),
+    "declared_license": store_licenses.declared_license(manifest),
   }
 
 
@@ -995,6 +998,7 @@ def store_listing_review(
     "checklist": checklist,
     "listing": listing,
     "draft": draft,
+    "license_options": store_licenses.license_options(),
   }
 
 
@@ -1213,7 +1217,8 @@ def read_public_snapshot(
 
   Only source that cannot be read at all raises; the listing preview reports
   everything else as checklist items. Over the package budget, only the
-  manifest and listing artwork are read, which is all the review needs.
+  manifest, listing artwork and root license text are read, which is all
+  the review needs.
 
   Reading a Git tree rather than the editable worktree prevents an unsaved or
   concurrently-changing draft from crossing the public-source consent boundary.
@@ -1246,10 +1251,12 @@ def read_public_snapshot(
         manifest = json.loads(_blob(repo, manifest_entry))
       except ValueError:
         manifest = {}
+    # The root license text too, so the License item stays honest.
     wanted = {"mobius.json"} | _listing_paths(manifest)
     entries = [
       entry for entry in entries
-      if entry.path in wanted and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
+      if (entry.path in wanted or store_licenses.is_license_file(entry.path))
+      and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
     ]
 
   files: list[dict[str, str]] = []

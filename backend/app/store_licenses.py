@@ -3,8 +3,9 @@
 Publishing makes an app's source public, so the Store requires the owner to
 say how others may use it. The choice lives where every app tool already
 looks for it: an SPDX identifier in ``mobius.json``'s ``license`` and the
-full text in a root ``LICENSE`` file. Saving the listing writes both; the
-publish gate refuses a snapshot missing either.
+full text in a root ``LICENSE`` file. Saving the listing writes both, but
+replaces only license text it wrote itself; the publish gate refuses a
+snapshot missing either.
 """
 
 from __future__ import annotations
@@ -59,10 +60,20 @@ OFFERED_LICENSES = (
 OFFERED_SPDX = frozenset(item.spdx for item in OFFERED_LICENSES)
 
 
+def license_options() -> list[dict[str, str]]:
+  """The offered licenses as the Store's picker shows them, recommended first."""
+  return [{"spdx": item.spdx, "name": item.name} for item in OFFERED_LICENSES]
+
+
+def declared_license(manifest: dict) -> str:
+  """The manifest's license as written, offered or not; "" when it has none."""
+  value = manifest.get("license")
+  return value.strip() if isinstance(value, str) else ""
+
+
 def offered_license(manifest: dict) -> str:
   """The manifest's license when it is one the Store offers, else ""."""
-  value = manifest.get("license")
-  value = value.strip() if isinstance(value, str) else ""
+  value = declared_license(manifest)
   return value if value in OFFERED_SPDX else ""
 
 

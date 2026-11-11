@@ -166,6 +166,7 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
     ],
     "listing": listing,
     "draft": {**listing, "hero": ""},
+    "license_options": [{"spdx": "MIT", "name": "MIT License"}],
   }
   monkeypatch.setattr(community, "store_listing_review", lambda value, problems: review)
 
@@ -182,6 +183,7 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
   assert preview["asset_root"] == accepted_base
   assert preview["ready"] is True
   assert preview["listing"] is listing
+  assert preview["license_options"] is review["license_options"]
 
 
 @pytest.mark.asyncio

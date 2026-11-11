@@ -14,6 +14,7 @@ from app.community_publish import (
   build_public_snapshot,
   public_store_listing,
   read_public_store_asset,
+  store_listing_review,
 )
 
 
@@ -496,6 +497,13 @@ def test_a_tree_over_the_file_limit_reads_only_what_the_review_needs(
   repo, app, _ = _app_repo(tmp_path)
   _commit_files(repo, app, {
     f"src/file{index}.js": b"export {}" for index in range(community_publish.MAX_SOURCE_FILES + 50)
+  } | {
+    "mobius.json": json.dumps({
+      "id": "test-app", "name": "Test app", "version": "1.0.0",
+      "entry": "index.jsx", "license": "MIT",
+    }).encode(),
+    "COPYING": b"MIT License",
+    "src/LICENSE": b"vendored",
   })
   reads = []
   real_blob = community_publish._blob
@@ -507,8 +515,14 @@ def test_a_tree_over_the_file_limit_reads_only_what_the_review_needs(
   _, files, problems = community_publish.read_public_snapshot(app)
 
   assert [problem.code for problem in problems] == ["payload_too_large"]
-  assert [item["path"] for item in files] == ["mobius.json"]
-  assert set(reads) == {"mobius.json"} and len(reads) <= 2
+  # The root license text is read too, so the License item stays honest.
+  assert sorted(item["path"] for item in files) == ["COPYING", "mobius.json"]
+  assert set(reads) == {"COPYING", "mobius.json"} and len(reads) <= 3
+  license_item = next(
+    item for item in store_listing_review(files, problems)["checklist"]
+    if item["id"] == "license"
+  )
+  assert license_item["done"] is True, license_item
 
 
 def test_snapshot_publishes_file_names_install_accepts(tmp_path):

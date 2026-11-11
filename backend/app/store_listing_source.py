@@ -222,7 +222,7 @@ def changes_beyond_listing(root: Path, accepted: str, tree: str | None = None) -
     != store_licenses.offered_license(manifests[1] or {})
   )
   if (license_paths or license_choice_changed) and not _saved_license_text_only(
-    root, accepted, changed, read, manifests[1] or {},
+    root, accepted, changed, read, (manifests[0] or {}, manifests[1] or {}),
   ):
     return True
   for path in changed - license_paths:
@@ -250,28 +250,43 @@ def _saved_license_text_only(
   accepted: str,
   changed: set[str],
   read: Callable[[str, int], bytes | None],
-  candidate: dict,
+  manifests: tuple[dict, dict],
 ) -> bool:
-  """Whether the candidate's root license texts are exactly what a save writes.
+  """Whether the candidate's root license text is exactly what a save writes.
 
-  A save writes LICENSE only for a changed license choice, or when no root
-  license text exists, and always writes the generated text for the choice;
-  a changed choice also removes every other root license text. So a
+  A save writes LICENSE, the generated text for the chosen license, only
+  where no root license text existed, or over the text it generated for the
+  previous choice; it never writes or removes any other license text. So a
   touched license file, or a license choice that differs from the accepted
-  one, rides along only beside that exact LICENSE and no other license text.
-  Anything else, such as a manifest naming a new license above the old
-  terms, was never saved and would publish contradictory licenses.
+  one, rides along only as one of those two. Anything else, such as a
+  manifest naming a new license above the old terms, or someone's own
+  license text replaced, was never saved.
   """
+  previous, candidate = manifests
   spdx = store_licenses.offered_license(candidate)
   if not spdx or read(store_licenses.LICENSE_FILE, MANIFEST_MAX_BYTES) != (
     store_licenses.license_text(spdx, candidate)
   ):
     return False
-  others = {
-    path for path in app_git.ref_root_files(root, accepted) | changed
+  if any(
+    read(path, 0) is not None for path in changed
     if store_licenses.is_license_file(path) and path != store_licenses.LICENSE_FILE
+  ):
+    return False
+  texts = {
+    path for path in app_git.ref_root_files(root, accepted)
+    if store_licenses.is_license_file(path)
   }
-  return all(read(path, 0) is None for path in others)
+  if not texts:
+    return True
+  previous_spdx = store_licenses.offered_license(previous)
+  size = app_git.ref_file_size(root, accepted, store_licenses.LICENSE_FILE)
+  return (
+    texts == {store_licenses.LICENSE_FILE} and bool(previous_spdx)
+    and size is not None and size <= MANIFEST_MAX_BYTES
+    and app_git.ref_file(root, accepted, store_licenses.LICENSE_FILE)
+    == store_licenses.license_text(previous_spdx, previous)
+  )
 
 
 # The store fields the editor writes. Any other store key is curated
@@ -706,22 +721,31 @@ def write_listing(root: Path, app: models.App, edit: ListingEdit) -> Callable[[]
         raise ListingEditError(
           "listing_license_invalid", "Choose one of the licenses the Store offers.",
         )
-      license_changed = store_licenses.offered_license(current) != edit.license
+      previous_license = store_licenses.offered_license(current)
       manifest["license"] = edit.license
-      # The text follows the choice. An unchanged choice keeps the author's
-      # own license text (their copyright line), writing one only when none
-      # exists. A changed choice replaces every root license text, so the old
-      # terms (in COPYING, LICENSE.md, ...) never sit beside the new LICENSE.
-      root_files = [entry.name for entry in root.iterdir() if entry.is_file()]
-      if license_changed or not store_licenses.has_license_file(root_files):
+      # The text follows the choice, but only text this editor wrote may be
+      # replaced. Anyone else's (an upstream author's copyright notice, which
+      # a remix must keep) changes only in the source, where it can be kept.
+      texts = sorted(
+        entry.name for entry in root.iterdir()
+        if entry.is_file() and store_licenses.is_license_file(entry.name)
+      )
+      if texts and previous_license != edit.license and not (
+        texts == [store_licenses.LICENSE_FILE] and previous_license
+        and (root / store_licenses.LICENSE_FILE).read_bytes()
+        == store_licenses.license_text(previous_license, current)
+      ):
+        raise ListingEditError(
+          "listing_license_text_exists",
+          f"This app already has license text ({', '.join(texts)}). Change it "
+          "in the source, or ask an agent to, keeping any notices it must carry.",
+          409,
+        )
+      if not texts or previous_license != edit.license:
         changes.write(
           store_licenses.LICENSE_FILE,
           store_licenses.license_text(edit.license, manifest),
         )
-      if license_changed:
-        for name in root_files:
-          if name != store_licenses.LICENSE_FILE and store_licenses.is_license_file(name):
-            changes.delete(name)
     changes.write(
       "mobius.json",
       bom + _spliced_manifest(

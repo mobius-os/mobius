@@ -958,6 +958,7 @@ async def preview_local_app_publication(
     "checklist": review["checklist"],
     "listing": review["listing"],
     "draft": review["draft"],
+    "license_options": review["license_options"],
   }
 
 
