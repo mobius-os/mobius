@@ -84,6 +84,11 @@ def _live(db: Session, now, owner_epoch: int, app_id: int, app_nonce: str, actio
     models.OwnerGrant.expires_at > now)
 
 
+def _owner_session(principal: Principal) -> bool:
+  """The owner's own browser session. A chat embed counts as owner input elsewhere, but its token sits in an app's frame."""
+  return principal.scope == "owner" and is_owner_input_principal(principal)
+
+
 def _spender(principal: Principal, app_id: int, action: str) -> str | None:
   """Who may spend a grant for this action, as the audit names them; None when this caller may not."""
   lineage = principal.chat_id or principal.run_id or principal.delegation_id
@@ -104,7 +109,7 @@ def consume_owner_grant(db: Session, principal: Principal, app_id: int, action: 
   the session that mints them. An agent spends only the actions in
   AGENT_SPENDS, and only for its own chat, which ``body`` names.
   """
-  if action not in AGENT_SPENDS and is_owner_input_principal(principal):
+  if action not in AGENT_SPENDS and _owner_session(principal):
     return
   spender = _spender(principal, app_id, action)
   spent = spender is not None and _spend(
