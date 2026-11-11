@@ -615,6 +615,17 @@ app ids are never identity. Only the visible frame may open sessions. Controls
 from other frames, duplicate request ids, undeclared names, version mismatches,
 and stale results are ignored or rejected without changing another session.
 
+One undeclared request is the documented exception to routing new shell
+operations through this broker: `moebius:owner-grant`, behind
+`window.mobius.ownerGrant.request(action, scope, body)`. It asks the shell to
+confirm a sensitive action with the owner in a sheet the shell draws outside the
+frame; only the owner's tap records a short-lived, single-use grant on the
+server, and the frame never receives it. A confirmation is a restriction, not a
+power, so it must not cost the owner a consent row or make a Store app dormant;
+`fileExport` and `clipboard` are the precedent. It keeps the broker's identity
+rules: the host binds it to the exact visible `contentWindow`, the app id is
+never taken from the payload, and the sheet's words come from the server.
+
 ## Provider contract
 
 The host registry maps a capability id to:

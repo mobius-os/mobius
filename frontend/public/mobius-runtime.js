@@ -4619,6 +4619,52 @@ function makeFileExport() {
 	};
 }
 
+// src/runtime/ownerGrant.js
+function makeOwnerGrant() {
+	const pending = /* @__PURE__ */ new Map();
+	function onMessage(event) {
+		if (event.source !== window.parent || event.origin !== window.location.origin) return;
+		const message = event.data;
+		if (message?.type !== "moebius:owner-grant-result") return;
+		const settle = pending.get(message.requestId);
+		if (!settle) return;
+		pending.delete(message.requestId);
+		if (message.ok) settle.resolve(true);
+		else if (message.cancelled) settle.resolve(false);
+		else settle.reject(Object.assign(new Error(message.error || "Confirmation failed."), message.code ? { code: message.code } : {}));
+	}
+	window.addEventListener("message", onMessage);
+	return {
+		request(action, scope = {}, body = {}) {
+			if (typeof action !== "string" || !action) return Promise.reject(/* @__PURE__ */ new Error("Action is required."));
+			const requestId = globalThis.crypto?.randomUUID?.() || `owner-grant-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			return new Promise((resolve, reject) => {
+				pending.set(requestId, {
+					resolve,
+					reject
+				});
+				try {
+					window.parent.postMessage({
+						type: "moebius:owner-grant",
+						requestId,
+						action,
+						scope,
+						body
+					}, "*");
+				} catch (error) {
+					pending.delete(requestId);
+					reject(error);
+				}
+			});
+		},
+		_destroy() {
+			window.removeEventListener("message", onMessage);
+			for (const settle of pending.values()) settle.resolve(false);
+			pending.clear();
+		}
+	};
+}
+
 // src/runtime/projects.js
 const REQUEST_TIMEOUT_MS = 15e3;
 function cleanText(value, maximum = 256) {
@@ -4789,6 +4835,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		_runtimeContext.projects?._destroy?.();
 		_runtimeContext.chat?._destroy?.();
 		_runtimeContext.fileExport?._destroy?.();
+		_runtimeContext.ownerGrant?._destroy?.();
 	}
 	const tokenRef = { current: getToken };
 	const scopedToken = async (options) => {
@@ -4813,6 +4860,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		storage
 	});
 	const fileExport = makeFileExport();
+	const ownerGrant = makeOwnerGrant();
 	const api = {
 		appId,
 		get online() {
@@ -4850,6 +4898,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		immersive: makeImmersive({ appId }),
 		clipboard: makeClipboard(),
 		fileExport,
+		ownerGrant,
 		projects
 	};
 	window.mobius = api;
@@ -4862,6 +4911,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		projects,
 		chat,
 		fileExport,
+		ownerGrant,
 		api
 	};
 	storage._drain();

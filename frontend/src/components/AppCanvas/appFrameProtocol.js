@@ -4,6 +4,9 @@ import {
   readAppFileExport, saveAppFileExport,
 } from '../../lib/appFileExport.js'
 import {
+  beginAppOwnerGrant, finishAppOwnerGrant, mintAppOwnerGrant, previewAppOwnerGrant,
+} from '../../lib/appOwnerGrant.js'
+import {
   clearAppFrameStorage,
   isSharedVirtualStorageKey,
   removeAppFrameStorage,
@@ -71,6 +74,46 @@ export async function confirmAppFileExport({ pendingRef, setPending, appId,
     pendingRef.current = failed
     setPending(failed)
   }
+}
+
+// The owner-grant request takes the same gate as the file export: attribute the
+// sender, then occupy the one slot only for the live visible frame. The server
+// is asked to describe the action at once; the sheet draws what it answers.
+export function serveAppOwnerGrantRequest({ message, source, frames, liveVersion, visible,
+  pendingRef, setPending, appId }) {
+  if (message?.type !== 'moebius:owner-grant') return false
+  const sourceVersion = attributedFrameVersion(frames, source)
+  if (sourceVersion == null) return true // an unknown/retired frame gets no reply
+  const request = beginAppOwnerGrant({ message, source, sourceVersion,
+    liveVersion, visible, pending: pendingRef.current, appId })
+  if (request) {
+    pendingRef.current = request
+    setPending(request)
+    void previewAppOwnerGrant({ request, pendingRef, setPending })
+  }
+  return true
+}
+
+export function retireStaleAppOwnerGrant({ pendingRef, setPending, appId, visible,
+  liveVersion, frames }) {
+  const request = pendingRef.current
+  if (!request || appFileExportIsCurrent({ request, appId, visible, liveVersion,
+    sourceVersion: attributedFrameVersion(frames, request.source) })) return false
+  return finishAppOwnerGrant({ request, pendingRef, setPending, result: { cancelled: true } })
+}
+
+// Checked at the tap: a request whose frame is no longer the live visible one
+// cannot mint, and is cancelled instead.
+export function confirmAppOwnerGrant({ pendingRef, setPending, appId, visible,
+  liveVersion, frames }) {
+  const request = pendingRef.current
+  if (request?.phase !== 'ready') return undefined
+  if (!appFileExportIsCurrent({ request, appId, visible, liveVersion,
+    sourceVersion: attributedFrameVersion(frames, request.source) })) {
+    finishAppOwnerGrant({ request, pendingRef, setPending, result: { cancelled: true } })
+    return undefined
+  }
+  return mintAppOwnerGrant({ request, pendingRef, setPending })
 }
 
 export function attributedShellShortcutAction(message, advertisedShortcuts) {
