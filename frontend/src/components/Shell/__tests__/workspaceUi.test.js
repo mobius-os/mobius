@@ -268,6 +268,13 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
   assert.match(drawer, /Nothing recent yet/)
 })
 
+test('a pointer press switches drawer lists without leaving a latent keyboard ring', () => {
+  const tab = drawer.match(/<button\s+type="button"\s+role="tab"[\s\S]*?>\n/)?.[0] ?? ''
+  assert.match(tab, /data-list-tab=\{tab\}/)
+  assert.match(tab, /onMouseDown=\{event => event\.preventDefault\(\)\}/)
+  assert.match(tab, /onClick=\{\(\) => selectListTab\(tab\)\}/)
+})
+
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
   // The AppCanvas wrapper is wrapped in its own LazySurface (an inline
   // ErrorBoundary by default) so one canvas throw or failed chunk download

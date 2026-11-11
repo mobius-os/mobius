@@ -1422,6 +1422,10 @@ export default function Drawer({
                         aria-selected={listTab === tab}
                         aria-controls="drawer-list-panel"
                         tabIndex={listTab === tab ? 0 : -1}
+                        // A pointer press switches lists without taking focus:
+                        // a mouse-focused tab would show the keyboard ring after
+                        // any later key press, even Shift or Alt-Tab.
+                        onMouseDown={event => event.preventDefault()}
                         onClick={() => selectListTab(tab)}
                       >
                         {tab === 'recents' ? 'Recents' : 'Archived'}
