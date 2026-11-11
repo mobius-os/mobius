@@ -1170,8 +1170,9 @@ class VerdictDecision(PullIdentity):
 
 
 def _require_owner_hands(principal: Principal, refusal: str) -> None:
-  """A public action only the owner's own tap may take: any agent bearer is refused."""
-  if principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None:
+  """A public action only the owner's own tap may take: an agent bearer, and the app token one minted, are refused."""
+  if (principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None
+      or principal.via_agent_chat is not None):
     raise HTTPException(403, refusal)
 
 
