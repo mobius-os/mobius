@@ -393,12 +393,21 @@
 .chat__msg:focus { outline: none; }
 
 .chat__msg--user { align-items: flex-end; }
-/* A mid-turn message waiting for the agent's next step boundary. */
+/* A mid-turn message waiting for the agent's next step boundary. The caption
+   holds at zero height and opacity briefly: a fast cut replaces this row with
+   an ordinary one, and must neither flash the caption nor grow and shrink the
+   row at the pinned bottom. The global reduced-motion rule shortens the fade
+   but keeps the delay. */
 .chat__steer-pending-note {
-  margin-top: 4px;
+  overflow: hidden;
   font-size: 12px;
   line-height: 16px;
   color: var(--muted);
+  animation: chat-steer-note-in 0.2s ease-out 0.8s both;
+}
+@keyframes chat-steer-note-in {
+  from { max-height: 0; margin-top: 0; opacity: 0; }
+  to { max-height: 32px; margin-top: 4px; opacity: 1; }
 }
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
