@@ -7,6 +7,7 @@ from app.timeutil import now_naive_utc
 
 from app import models
 from app.agent_work_claims import (
+  claim_text_digest,
   claim_work,
   finish_work,
   stage_release_claims_for_chat,
@@ -1633,7 +1634,9 @@ def test_only_pending_revocations_are_protected_from_inbox_pruning(db, monkeypat
     )
   db.expire_all()
   inbox = db.query(models.AgentCoordinationMessage).filter_by(to_chat_id=first.id).all()
-  assert {row.body for row in inbox} == (
+  def text(row):
+    return db.get(models.AgentCoordinationNoteBody, row.body_id).body if row.body_id else row.body
+  assert {text(row) for row in inbox} == (
     {"Ordinary later note 1"} if closed else {notice.body, "Ordinary later note 1"}
   )
   # Mailbox retention never erases the immutable obligation/closure history.
@@ -1802,7 +1805,9 @@ def test_claim_texts_stored_beyond_the_input_caps_read_as_bounded_excerpts(db):
   )
   assert held["state"] == "held_by_peer"
   assert len(held["summary"]) <= CLAIM_SUMMARY_CHARS
-  assert held["summary"].endswith("of 20000 characters; the work claim keeps the full text]")
+  assert held["summary"].endswith(
+    f"of 20000 characters; read_work_claim(work_key={key}, field=summary, "
+    f"digest={claim_text_digest('S' * 20_000)}) pages the full text]")
   assert len(held["takeover_reason"]) <= CLAIM_TEXT_CHARS
 
   db.query(models.AgentWorkClaim).update({models.AgentWorkClaim.outcome: None})
@@ -1857,31 +1862,203 @@ def test_claim_texts_within_the_input_caps_are_repeated_exactly(db):
   assert "excerpt" not in notice
 
 
-def test_transfer_notice_repeats_a_capped_reason_and_would_excerpt_a_longer_one(db):
-  from app import agent_work_claims
-  from app.context_budget import CLAIM_TEXT_CHARS
+def test_long_claim_texts_are_accepted_and_read_whole_where_excerpted(db):
+  from app.agent_work_claims import read_claim_text
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_dependencies import dependency_notice
 
   owner, first, second = _fixture(db)
   key = "github:mobius-os/mobius:pr:2002:transfer"
-  claim_work(
+  summary = "Merge" + " the reviewed change" * 400
+  claimed = claim_work(
     db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
-    work_key=key, summary="Merge the reviewed PR",
+    work_key=key, summary=summary,
   )
-  reason = "Because " + "the broader change supersedes it " * 600
-  # The input cap still refuses this reason; a later release lifts it.
-  with pytest.raises(ValueError, match="10-1000"):
+  assert len(claimed["summary"]) <= CLAIM_SUMMARY_CHARS
+  assert read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key=key, field="summary") == summary
+  # A takeover must still explain itself.
+  with pytest.raises(ValueError, match="at least 10 characters"):
     claim_work(
       db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
-      work_key=key, summary="Broader work", takeover_reason=reason,
+      work_key=key, summary="Broader work", takeover_reason="too short",
       expected_owner_chat_id=first.id,
     )
-  short = "Because the broader change supersedes it."
-  claim_work(
+  reason = "Because" + " the broader change supersedes it" * 600
+  moved = claim_work(
     db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
-    work_key=key, summary="Broader work", takeover_reason=short,
+    work_key=key, summary="Broader work", takeover_reason=reason,
     expected_owner_chat_id=first.id,
   )
+  assert len(moved["takeover_reason"]) <= CLAIM_TEXT_CHARS
   notice = db.query(models.AgentWorkClaimRevocation).one()
-  assert f"transferred to {second.id}: {short} (acquisition" in notice.body
-  excerpted = agent_work_claims.claim_text(reason)
-  assert len(excerpted) <= CLAIM_TEXT_CHARS and "work claim keeps the full text" in excerpted
+  assert reason not in notice.body
+  assert (f"read_work_claim(work_key={key}, field=takeover_reason, "
+          f"digest={claim_text_digest(reason)}) pages the full text") in notice.body
+  assert read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key=key, field="takeover_reason") == reason
+
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Same work",
+  )
+  outcome = "Merged:" + " every check passed" * 500
+  finished = finish_work(
+    db, owner_id=owner.id, chat_id=second.id, work_key=key,
+    outcome=outcome, release=False,
+  )
+  assert len(finished["outcome"]) <= CLAIM_TEXT_CHARS
+  assert read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key=key, field="outcome") == outcome
+  dependency = db.query(models.GoalDependency).filter(
+    models.GoalDependency.waiting_chat_id == first.id,
+  ).one()
+  assert dependency.outcome_json["outcome"] == outcome
+  text = dependency_notice(dependency)
+  assert outcome not in text
+  assert (f"read_work_claim(work_key={key}, field=outcome, "
+          f"digest={claim_text_digest(outcome)}) pages the full text") in text
+  with pytest.raises(ValueError, match="field must be one of"):
+    read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key=key, field="owner_chat_id")
+  with pytest.raises(LookupError):
+    read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key="github:none:missing", field="outcome")
+
+
+def test_goal_settlement_keeps_a_long_goal_result_whole_on_the_claim(db):
+  from app.agent_work_claims import stage_settle_goal_claims
+
+  owner, first, _ = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2003:goal"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Ship it",
+  )
+  result = "Shipped " + "with notes " * 500
+  stage_settle_goal_claims(
+    db, chat_id=first.id, goal_id="claim-goal-first", status="completed",
+    result=result, finished_keys=[key],
+  )
+  db.commit()
+  stored = db.query(models.AgentWorkClaim).one().outcome
+  assert stored == "Owning Goal completed: " + " ".join(result.split())
+
+
+def test_an_old_excerpt_reads_its_own_text_or_refuses_after_the_claim_moves_on(db):
+  """A marker names one exact text; a later holder's text is never substituted."""
+  from app.agent_work_claims import read_claim_text
+  from app.goal_dependencies import dependency_notice
+
+  owner, first, second = _fixture(db)
+  third = create_chat(id="claim-third", title="Later holder", messages=[])
+  db.add(third)
+  db.flush()
+  db.add(models.ChatRun(id="claim-run-third", root_run_id="claim-run-third",
+                        chat_id=third.id, status="running", provider="codex"))
+  db.commit()
+  key = "github:mobius-os/mobius:pr:2005:moves"
+  summary = "First holder" + " plans the work" * 100
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary=summary)
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  outcome = "Released because" + " the plan changed" * 100
+  released = finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+                         outcome=outcome, release=True)
+  outcome_digest = claim_text_digest(outcome)
+  assert f"digest={outcome_digest}" in released["outcome"]
+  dependency = db.query(models.GoalDependency).one()
+  notice = dependency_notice(dependency)
+  assert f"digest={outcome_digest}" in notice
+
+  # Another chat re-acquires the released claim: outcome and summary reset.
+  reacquired = claim_work(db, owner_id=owner.id, chat_id=third.id,
+                          run_id="claim-run-third", work_key=key, summary="Later work")
+  assert reacquired["state"] == "claimed"
+  assert db.query(models.AgentWorkClaim).one().outcome is None
+
+  # The follower reads its notice's outcome and summary from its own dependency.
+  assert read_claim_text(db, owner_id=owner.id, chat_id=second.id, work_key=key,
+                         field="outcome", digest=outcome_digest) == outcome
+  assert read_claim_text(db, owner_id=owner.id, chat_id=second.id, work_key=key,
+                         field="summary", digest=claim_text_digest(summary)) == summary
+  # Anyone else's old marker is refused, never answered with '' or new text.
+  with pytest.raises(LookupError, match="no longer stored"):
+    read_claim_text(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+                    field="outcome", digest=outcome_digest)
+  with pytest.raises(LookupError, match="no longer stored"):
+    read_claim_text(db, owner_id=owner.id, chat_id=third.id, work_key=key,
+                    field="summary", digest=claim_text_digest(summary))
+  with pytest.raises(LookupError, match="has no outcome"):
+    read_claim_text(db, owner_id=owner.id, chat_id=third.id, work_key=key, field="outcome")
+  assert read_claim_text(db, owner_id=owner.id, chat_id=third.id, work_key=key,
+                         field="summary") == "Later work"
+
+
+def test_owner_goal_views_show_long_claim_texts_in_part_and_read_them_whole(client, auth, db):
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_plans import presented_goal
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2007:owner-view"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="Ship it")
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="Done", release=False)
+  # A text stored by a release without the input caps.
+  dependency = db.query(models.GoalDependency).one()
+  summary, outcome = "S" * 9_000, "O" * 20_000
+  dependency.outcome_json = {**dependency.outcome_json, "summary": summary, "outcome": outcome}
+  db.commit()
+
+  goal = presented_goal(db, second.id)
+  shown = (goal.get("dependencies") or goal.get("dependency_history"))[0]
+  assert shown["condition"] == summary[:CLAIM_SUMMARY_CHARS]
+  assert shown["outcome"]["outcome"] == outcome[:CLAIM_TEXT_CHARS]
+  assert shown["truncated"] is True
+  # The stored outcome is untouched, and the owner reads it whole.
+  assert db.get(models.GoalDependency, dependency.id).outcome_json["outcome"] == outcome
+  full = client.get(f"/api/chat-waits/dependencies/{dependency.id}/text", headers=auth)
+  assert full.status_code == 200, full.text
+  assert full.json() == {"id": dependency.id, "condition": summary, "outcome": outcome}
+  assert client.get("/api/chat-waits/dependencies/missing/text", headers=auth).status_code == 404
+
+
+def test_owner_goal_views_keep_claim_texts_within_the_limits_as_before(db):
+  from app.goal_plans import presented_goal
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2008:owner-view"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="s" * 500)
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="o" * 1000, release=False)
+  goal = presented_goal(db, second.id)
+  shown = (goal.get("dependencies") or goal.get("dependency_history"))[0]
+  assert shown["condition"] == "s" * 500 and shown["outcome"]["outcome"] == "o" * 1000
+  assert "truncated" not in shown
+
+
+def test_settled_dependency_history_shows_long_claim_texts_in_part(db):
+  """The transcript receipt and settled history read the same bounded view."""
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  from app.goal_dependencies import goal_dependency_history
+
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:2009:history"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="Ship it")
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="Done", release=False)
+  dependency = db.query(models.GoalDependency).one()
+  dependency.outcome_json = {**dependency.outcome_json, "summary": "S" * 9_000, "outcome": "O" * 20_000}
+  dependency.result_disposition = "delivered"
+  db.commit()
+  goal = db.get(models.ChatGoal, "claim-goal-second")
+  for include_foreign_context in (True, False):
+    [shown] = goal_dependency_history(db, goal, include_foreign_context=include_foreign_context)
+    assert shown["condition"] == "S" * CLAIM_SUMMARY_CHARS
+    assert shown["outcome"]["outcome"] == "O" * CLAIM_TEXT_CHARS
+    assert shown["truncated"] is True

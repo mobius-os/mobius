@@ -4,7 +4,10 @@ Owner-authorized credential minting and provider-link mutations reject delegated
 execution bearers; otherwise a child could exchange inherited tool access for a
 new unrestricted owner or app credential and bypass its delegation boundary. The
 app-frame token is the one exception: it is narrower than the bearer presented
-and carries the same delegation lineage, so it stays a delegated credential.
+and carries the same delegation lineage, so it stays a delegated credential. A
+top-level agent's app token carries the agent's chat (``via_agent_chat``): it still
+works wherever an app token does, but a route that wants the owner's own tap
+refuses it, so an agent cannot turn its bearer into a clean app credential there.
 """
 
 import asyncio
@@ -581,6 +584,7 @@ def create_app_token_endpoint(
     delegation_id=delegation_id,
     delegation_chat=delegation_chat,
     browser=principal.browser,
+    via_agent_chat=principal.chat_id,
   )
   return {"token": token}
 
@@ -589,6 +593,7 @@ def create_app_token_endpoint(
 def create_app_job_token_endpoint(
   body: schemas.AppTokenRequest,
   owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Mint a narrower-lifetime app token for one supervised job run."""
@@ -615,6 +620,7 @@ def create_app_job_token_endpoint(
       app_nonce=app.token_nonce,
       consent=app_consent.session_id(app),
       expires_delta=timedelta(hours=2),
+      via_agent_chat=principal.chat_id,
     )
   }
 

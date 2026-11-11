@@ -108,6 +108,9 @@ class Principal:
   delegation_id: str | None = None
   # Restrictive provenance, not the chat/run identity of an app caller.
   delegation_chat: str | None = None
+  # The chat of the agent bearer that minted this app token (auth.create_app_token).
+  # Kept apart from chat_id, which an app caller never has.
+  via_agent_chat: str | None = None
   app_is_service: bool = False
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
@@ -752,6 +755,7 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     run_id=payload.get("agent_run") if app_id is None else None,
     delegation_id=payload.get("delegation_id"),
     delegation_chat=payload.get("delegation_chat"),
+    via_agent_chat=payload.get("via_agent_chat") if app_id is not None else None,
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
   )

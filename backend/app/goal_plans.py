@@ -528,13 +528,12 @@ def presented_dependency_goals(db: Session, chat_ids) -> dict[str, dict]:
   ).filter(models.ChatGoal.id.in_(owned), models.ChatGoal.status.in_(("open", "stopped"))).with_entities(
     models.ChatRun, models.ChatGoal,
   ).options(defer(models.ChatGoal.plan_json)).all()
-  from dataclasses import asdict
   from app.chat_handoffs import goal_handoffs
   result = {}
   for physical, goal in rows:
     native = goal_handoffs(db, goal)
     result[physical.chat_id] = {"id": goal.id,
-      "dependencies": [asdict(item) for item in native.dependencies],
+      "dependencies": [item.view() for item in native.dependencies],
       "handoff": _goal_handoff(db, physical, goal, native=native)}
   return result
 
@@ -826,9 +825,8 @@ def _goal_presentation(
   from app.chat_handoffs import goal_handoffs
   native = goal_handoffs(db, root, include_foreign_context=include_foreign_context)
   presentation["handoff"] = _goal_handoff(db, physical, root, native=native)
-  from dataclasses import asdict
   if native.dependencies:
-    presentation["dependencies"] = [asdict(item) for item in native.dependencies]
+    presentation["dependencies"] = [item.view() for item in native.dependencies]
   from app.goal_dependencies import goal_dependency_history
   history = goal_dependency_history(db, root, include_foreign_context=include_foreign_context)
   if history:

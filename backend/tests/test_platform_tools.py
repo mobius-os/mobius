@@ -987,7 +987,7 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
 
   with pytest.raises(ValueError) as target:
     control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
-  assert "list of at most 24 agent/chat ids" in str(target.value)
+  assert "list of agent/chat ids" in str(target.value)
   assert "secret-peer" not in str(target.value)
 
   send = control._TOOL_DEFINITIONS["send_agent_message"]
@@ -1806,23 +1806,152 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
 
 
 def test_read_agent_message_returns_a_note_plain_and_pages_a_long_one(monkeypatch):
+  """The backend serves one byte page at a time; the tool names the next one."""
+  import re
+  from urllib.parse import parse_qs, urlparse
+
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
-  note = "".join(f"{index:07d}\n" for index in range(20_000))
+  note = "".join(f"{index:07d}\n" for index in range(5_000))
   paths = []
-  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
-    paths.append((method, path)) or {"id": "note/1", "kind": "finding", "body": note}))
 
-  assert "".join(_read_all_pages(control, "read_agent_message", {"message_id": "note/1"})) == note
-  assert set(paths) == {("GET", "/api/agent-coordination/messages/note%2F1")}
-  first = control._call_tool({"name": "read_agent_message", "arguments": {"message_id": "note/1"}})
-  assert "next page: read_agent_message(message_id=note/1, offset=" in (
-    first["content"][0]["text"].rsplit("\n", 1)[1])
+  def backend(method, path):
+    paths.append((method, path))
+    offset = int(parse_qs(urlparse(path).query).get("offset", ["0"])[0])
+    end = min(offset + 10_000, len(note))
+    return {"id": "note/1", "kind": "finding", "body": note[offset:end], "offset": offset,
+            "total_bytes": len(note), "next_offset": end if end < len(note) else None}
 
-  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {"id": "n", "body": "Short"})
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  pieces, arguments = [], {"message_id": "note/1"}
+  while True:
+    text = control._call_tool({"name": "read_agent_message", "arguments": arguments})["content"][0]["text"]
+    body, footer = text.rsplit("\n", 1)
+    pieces.append(body)
+    found = re.search(r"next page: read_agent_message\(message_id=note/1, offset=(\d+)\)", footer)
+    if not found:
+      assert "end of note" in footer
+      break
+    arguments = {"message_id": "note/1", "offset": int(found.group(1))}
+  assert "".join(pieces) == note
+  assert paths[0] == ("GET", "/api/agent-coordination/messages/note%2F1")
+  assert paths[1] == ("GET", "/api/agent-coordination/messages/note%2F1?offset=10000")
+
+  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {
+    "id": "n", "body": "Short", "offset": 0, "total_bytes": 5, "next_offset": None})
   assert control._call_tool({"name": "read_agent_message",
                              "arguments": {"message_id": "n"}})["content"][0]["text"] == "Short"
   refused = control._call_tool({"name": "read_agent_message", "arguments": {"id": "n"}})
   assert refused["isError"] and "needs message_id" in refused["content"][0]["text"]
   assert platform_tools.READ_MESSAGE_TOOL_NAME in platform_tools.PEER_TOOL_NAMES
+
+
+def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
+  control = _control_module()
+  sent = []
+  recipients = [f"peer-{index:03d}" for index in range(120)]
+
+  def backend(method, path, body=None):
+    sent.append(body)
+    return {"messages": [], "recipient_count": 120, "recipient_names": recipients,
+            "interrupt_requested": recipients[:100], "queued": [], "unreachable": recipients[100:],
+            "unreachable_reasons": {chat_id: "the chat is deleted" for chat_id in recipients[100:]}}
+
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  result = control._call_send_agent_message({"recipients": recipients, "body": "Note"})
+  shown = control._CONTEXT_BUDGET.REPLY_IDS
+  assert result["recipient_names"] == recipients[:shown] and result["recipient_names_more"] == 70
+  assert len(result["interrupt_requested"]) == shown and result["interrupt_requested_more"] == 50
+  assert result["unreachable"] == recipients[100:] and "unreachable_more" not in result
+  assert set(result["unreachable_reasons"]) == set(recipients[100:])
+  assert sent[0]["send_id"]
+
+  def times_out(method, path, body=None):
+    sent.append(body)
+    raise control.TransportFailure("coordination request failed: request timed out")
+
+  monkeypatch.setattr(control, "_agent_api_call", times_out)
+  with pytest.raises(RuntimeError) as timed_out:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  send_id = sent[-1]["send_id"]
+  assert f"send_id={send_id}" in str(timed_out.value)
+  assert "may already be stored" in str(timed_out.value)
+  with pytest.raises(RuntimeError):
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note", "send_id": send_id})
+  assert sent[-1]["send_id"] == send_id
+
+  def resets(method, path, body=None):
+    sent.append(body)
+    raise control.TransportFailure("coordination request failed: Connection reset by peer")
+
+  monkeypatch.setattr(control, "_agent_api_call", resets)
+  with pytest.raises(RuntimeError) as reset:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert f"send_id={sent[-1]['send_id']}" in str(reset.value)
+
+  # A body cut short after the server answered is a transport failure too.
+  import http.client
+
+  class CutShort:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def read(self):
+      raise http.client.IncompleteRead(b"{", 10)
+
+  monkeypatch.setattr(control, "urlopen", lambda *_args, **_kwargs: CutShort())
+  monkeypatch.setenv("API_BASE_URL", "http://backend.invalid")
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  with pytest.raises(control.TransportFailure):
+    control._agent_api_json("POST", "/api/agent-coordination/messages", {})
+
+  def refuses(method, path, body=None):
+    raise RuntimeError("Refused (422): body must not be blank")
+
+  monkeypatch.setattr(control, "_agent_api_call", refuses)
+  with pytest.raises(RuntimeError) as refused:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert "send_id=" not in str(refused.value)
+
+
+def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):
+  control = _control_module()
+  send = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
+  claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
+  finish = control._TOOL_DEFINITIONS["finish_agent_work"]["inputSchema"]["properties"]
+  assert "maxLength" not in send["body"] and "maxItems" not in send["recipients"]
+  assert "maxLength" not in claim["summary"] and "maxLength" not in finish["outcome"]
+  assert claim["takeover_reason"] == {"type": "string", "minLength": 10}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or {"messages": []})
+  recipients = [f"peer-{index}" for index in range(100)]
+  control._call_send_agent_message({"recipients": recipients, "body": "x" * 50_000})
+  assert sent[0]["recipients"] == recipients and len(sent[0]["body"]) == 50_000
+
+
+def test_read_work_claim_pages_one_claim_text(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  outcome = "".join(f"{index:07d}\n" for index in range(20_000))
+  paths = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    paths.append(path) or {"text": outcome}))
+  arguments = {"work_key": "pr:1#merge", "field": "outcome"}
+  assert "".join(_read_all_pages(control, "read_work_claim", arguments)) == outcome
+  assert set(paths) == {"/api/agent-coordination/work-claims/text?work_key=pr%3A1%23merge&field=outcome"}
+  refused = control._call_tool({"name": "read_work_claim", "arguments": {"work_key": "pr:1"}})
+  assert refused["isError"] and "needs work_key and field" in refused["content"][0]["text"]
+  digested = {**arguments, "digest": "abc123def456"}
+  paths.clear()
+  control._call_tool({"name": "read_work_claim", "arguments": digested})
+  assert paths[0].endswith("&field=outcome&digest=abc123def456")
+  for bad in ({**arguments, "field": 3}, {**arguments, "digest": ""}):
+    refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
+    assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
+  assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES
