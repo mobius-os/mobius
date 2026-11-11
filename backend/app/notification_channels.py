@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.cookiejar import CookieJar, DefaultCookiePolicy
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -130,6 +130,16 @@ def _clip(text: str | None, limit: int = _BODY_MAX) -> str:
   return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+# The link back sits inside Slack's <url|text> and Discord's [text](<url>), so
+# characters that close or split that markup must not survive in it. Encoding
+# them keeps the address while a crafted target can't add a mention or link.
+_LINK_SAFE = "/:?#=&%;@+,$!~*'()"
+
+
+def _markup_url(url: str) -> str:
+  return quote(url, safe=_LINK_SAFE)
+
+
 def _slack_escape(text: str) -> str:
   # Slack's only control characters. Escaping them also defuses <!channel>.
   return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -150,14 +160,14 @@ def build_request(kind: str, url: str, message: Message, include_body: bool) -> 
     lines = [f"*{_slack_escape(title)}*"]
     if body:
       lines.append(_slack_escape(body))
-    lines.append(f"<{message.url}|Open in Möbius>")
+    lines.append(f"<{_markup_url(message.url)}|Open in Möbius>")
     return url, {"text": "\n".join(lines), "unfurl_links": False, "unfurl_media": False}
   if kind == "discord":
     lines = [f"**{_discord_escape(title)}**"]
     if body:
       lines.append(_discord_escape(body))
     # Angle brackets keep Discord from unfurling a preview of the shell.
-    lines.append(f"[Open in Möbius](<{message.url}>)")
+    lines.append(f"[Open in Möbius](<{_markup_url(message.url)}>)")
     return url, {
       "content": "\n".join(lines)[:2000],
       "username": "Möbius",
@@ -227,10 +237,12 @@ def deliver(target: Target, message: Message) -> str | None:
     return "Sending failed."
 
 
-def record_outcome(channel_id: str, error: str | None) -> None:
+def record_outcome(target: Target, error: str | None) -> None:
+  """Record how a send went, unless the channel's link was replaced meanwhile."""
   with SessionLocal() as db:
     db.query(models.NotificationChannel).filter(
-      models.NotificationChannel.id == channel_id,
+      models.NotificationChannel.id == target.id,
+      models.NotificationChannel.url_encrypted == target.url_encrypted,
     ).update({
       "last_sent_at": now_naive_utc(),
       "last_error": error,
@@ -238,36 +250,51 @@ def record_outcome(channel_id: str, error: str | None) -> None:
     db.commit()
 
 
-def _deliver_all(targets: tuple[Target, ...], message: Message) -> None:
-  for target in targets:
+def _current_target(channel_id: str, message: Message) -> Target | None:
+  """The channel as it is now, if it still wants this message."""
+  with SessionLocal() as db:
+    row = db.get(models.NotificationChannel, channel_id)
+    if row is None or not _follows(row, message.source_type, message.source_id):
+      return None
+    return Target(
+      id=row.id, kind=row.kind, url_encrypted=row.url_encrypted,
+      include_body=bool(row.include_body),
+    )
+
+
+def _deliver_all(channel_ids: tuple[str, ...], message: Message) -> None:
+  for channel_id in channel_ids:
+    # Sends can wait behind a slow service. Use the channel's settings at send
+    # time, so a removed, replaced, or narrowed channel gets nothing it no
+    # longer wants.
+    target = _current_target(channel_id, message)
+    if target is None:
+      continue
     error = deliver(target, message)
     if error:
       # Channel ids only: links and message text stay out of logs.
       logger.warning("notification channel %s: %s", target.id[:8], error)
     try:
-      record_outcome(target.id, error)
+      record_outcome(target, error)
     except Exception:
       logger.exception("notification channel %s: outcome not recorded", target.id[:8])
 
 
-def send_later(targets: tuple[Target, ...], message: Message) -> None:
+def send_later(channel_ids: tuple[str, ...], message: Message) -> None:
   """Deliver off the caller's thread, like phone push; no retry."""
-  if targets:
-    _SENDS.submit(_deliver_all, targets, message)
+  if channel_ids:
+    _SENDS.submit(_deliver_all, channel_ids, message)
 
 
-def targets_for(db: Session, owner_id: int, source_type: str, source_id: str | None) -> tuple[Target, ...]:
-  """The owner's channels that want a notification from this source."""
+def _follows(row: models.NotificationChannel, source_type: str, source_id: str | None) -> bool:
+  if row.app_ids is None:
+    return True
+  return source_type == "app" and source_id in {str(app_id) for app_id in row.app_ids}
+
+
+def channels_for(db: Session, owner_id: int, source_type: str, source_id: str | None) -> tuple[str, ...]:
+  """Ids of the owner's channels that want a notification from this source."""
   rows = db.query(models.NotificationChannel).filter(
     models.NotificationChannel.owner_id == owner_id,
   ).all()
-  chosen = []
-  for row in rows:
-    if row.app_ids is not None:
-      if source_type != "app" or source_id not in {str(app_id) for app_id in row.app_ids}:
-        continue
-    chosen.append(Target(
-      id=row.id, kind=row.kind, url_encrypted=row.url_encrypted,
-      include_body=bool(row.include_body),
-    ))
-  return tuple(chosen)
+  return tuple(row.id for row in rows if _follows(row, source_type, source_id))

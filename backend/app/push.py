@@ -150,8 +150,8 @@ class _PreparedPush:
   subscriptions: tuple[dict, ...]
   # Native push devices (Möbius mobile app): {"id", "token", "registered_at"}.
   devices: tuple[dict, ...] = ()
-  # Outside channels (Slack, Discord, …) and the message they receive.
-  channels: tuple[notification_channels.Target, ...] = ()
+  # Ids of outside channels (Slack, Discord, …) and the message they receive.
+  channels: tuple[str, ...] = ()
   channel_message: notification_channels.Message | None = None
 
 
@@ -356,7 +356,7 @@ def _prepare_owner_notification(
       .all()
     )
   ]
-  channels = notification_channels.targets_for(db, owner_id, source_type, source_id)
+  channels = notification_channels.channels_for(db, owner_id, source_type, source_id)
   channel_message = notification_channels.Message(
     title=title, body=body, url=tap_url(target), notification_id=notification_id,
     source_type=source_type, source_id=source_id,

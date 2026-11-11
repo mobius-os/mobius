@@ -177,3 +177,84 @@ def test_replacing_a_link_keeps_the_channel_settings(client, auth, db, sent):
   assert refused.status_code == 400
   db.refresh(row)
   assert notification_channels.decrypt_url(row.url_encrypted) == DISCORD
+
+
+def test_a_crafted_link_back_cannot_add_a_mention_or_another_link(client, auth, db, sent):
+  social = _app(db, "channel-social-6")
+  _add(client, auth, url=SLACK)
+  _add(client, auth, url=DISCORD)
+  response = client.post("/api/notifications/send", headers=auth, json={
+    "title": "Hi", "body": None, "source_type": "app", "source_id": str(social.id),
+    "target": f"/shell/?app={social.id}&intent=x> <!channel> <https://example.com|Open in Möbius>)",
+  })
+  assert response.status_code == 200, response.text
+
+  slack, discord = (payload for _, payload in sent)
+  link = slack["text"].splitlines()[-1]
+  assert link.startswith("<") and link.endswith("|Open in Möbius>")
+  assert link.count("<") == 1 and link.count(">") == 1 and link.count("|") == 1
+  assert "<!channel>" not in slack["text"]
+  assert f"/shell/?app={social.id}&intent=x%3E%20%3C!channel%3E" in link
+
+  link = discord["content"].splitlines()[-1]
+  assert link.startswith("[Open in Möbius](<") and link.endswith(">)")
+  assert link.count("<") == 1 and link.count(">") == 1
+
+
+@pytest.fixture
+def queued(monkeypatch, sent):
+  """Hold sends in the queue until the test releases them."""
+  waiting = []
+  monkeypatch.setattr(
+    notification_channels, "send_later", lambda ids, message: waiting.append((ids, message)),
+  )
+
+  def release():
+    sent.clear()
+    for ids, message in waiting:
+      notification_channels._deliver_all(ids, message)
+    return sent
+  return release
+
+
+def test_a_queued_send_follows_the_channels_settings_when_it_goes_out(
+  client, auth, db, queued, sent,
+):
+  social = _app(db, "channel-social-7")
+  removed = _add(client, auth, url=SLACK, include_body=True)
+  narrowed = _add(client, auth, url=DISCORD, include_body=True)
+  quieted = _add(client, auth, url="https://hooks.slack.com/services/T222/B222/quietsecret", include_body=True)
+  _notify(client, auth, social)
+
+  client.delete(f"/api/push/channels/{removed['id']}", headers=auth)
+  client.patch(f"/api/push/channels/{narrowed['id']}", headers=auth, json={"app_ids": []})
+  client.patch(f"/api/push/channels/{quieted['id']}", headers=auth, json={"include_body": False})
+
+  delivered = queued()
+  assert len(delivered) == 1
+  url, payload = delivered[0]
+  assert url.endswith("quietsecret") and "See you" not in payload["text"]
+
+
+def test_a_queued_send_goes_to_the_replacement_link(client, auth, db, queued, sent):
+  social = _app(db, "channel-social-8")
+  channel = _add(client, auth, url=SLACK)
+  _notify(client, auth, social)
+  new_slack = "https://hooks.slack.com/services/T111/B111/newsecret"
+  client.patch(f"/api/push/channels/{channel['id']}", headers=auth, json={"url": new_slack})
+
+  assert [url for url, _ in queued()] == [new_slack]
+
+
+def test_a_send_to_a_replaced_link_does_not_report_on_the_new_one(client, auth, db, sent):
+  channel = _add(client, auth, url=SLACK)
+  row = db.query(models.NotificationChannel).one()
+  old = notification_channels.Target(
+    id=row.id, kind=row.kind, url_encrypted=row.url_encrypted, include_body=False,
+  )
+  client.patch(
+    f"/api/push/channels/{channel['id']}", headers=auth,
+    json={"url": "https://hooks.slack.com/services/T111/B111/newsecret"},
+  )
+  notification_channels.record_outcome(old, "The service answered 404.")
+  assert client.get("/api/push/channels", headers=auth).json()[0]["lastError"] is None

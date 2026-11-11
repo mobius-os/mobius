@@ -388,5 +388,5 @@ def test_channel(
     notification_id=f"test-{uuid.uuid4()}", source_type="system", source_id=None,
   )
   error = notification_channels.deliver(target, message)
-  notification_channels.record_outcome(channel_id, error)
+  notification_channels.record_outcome(target, error)
   return {"ok": error is None, "error": error}
