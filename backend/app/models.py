@@ -1527,6 +1527,23 @@ class AgentCoordinationMessage(Base):
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
   body = Column(Text, nullable=False)
+  # The shared body of a send stored once (AgentCoordinationNoteBody). When
+  # set, it is the note's text and ``body`` is empty; rows written before
+  # shared bodies keep their text in ``body``.
+  body_id = Column(String(64), nullable=True, index=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationNoteBody(Base):
+  """One peer-note body shared by every recipient row of one send.
+
+  Retention deletes a body once no message references it.
+  """
+
+  __tablename__ = "agent_coordination_note_bodies"
+
+  id = Column(String(64), primary_key=True)
+  body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
@@ -1663,7 +1680,7 @@ class AgentWorkClaim(Base):
   owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
                     nullable=False, index=True)
   work_key = Column(String(256), nullable=False)
-  summary = Column(String(500), nullable=False)
+  summary = Column(Text, nullable=False)
   owner_chat_id = Column(
     String(64), ForeignKey("chats.id", ondelete="SET NULL"),
     nullable=True, index=True,
@@ -1673,7 +1690,7 @@ class AgentWorkClaim(Base):
   # Last-transfer projection, never the recovery source for revocations.
   # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
-  takeover_reason = Column(String(1000), nullable=True)
+  takeover_reason = Column(Text, nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
   notification_revision = Column(
     Integer, nullable=False, default=1, server_default="1"
@@ -1683,7 +1700,7 @@ class AgentWorkClaim(Base):
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
-  outcome = Column(String(1000), nullable=True)
+  outcome = Column(Text, nullable=True)
 
 
 class AgentWorkClaimRevocation(Base):
