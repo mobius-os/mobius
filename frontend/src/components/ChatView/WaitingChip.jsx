@@ -10,8 +10,26 @@ import {
 
 export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery }) {
   const presentation = waitPresentation(wait)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState(null)
+  const cancel = async () => {
+    setCancelling(true)
+    setCancelError(null)
+    try {
+      const result = await onCancel(wait.id)
+      if (result.disposition === 'not_withdrawable') setCancelError(result.detail)
+    } catch {
+      setCancelError('Could not stop this follow-up. Try again.')
+    } finally {
+      setCancelling(false)
+    }
+  }
   const needsRecovery = wait.delivery_pending && ['manual_resume', 'resume_failed', 'restart'].includes(wait.resume_blocker)
-  const cancellable = wait.kind !== 'platform_activation' && !wait.delivery_pending
+  const cancellable = wait.kind !== 'platform_activation' && !wait.result_disposition
+    && (wait.delivery_pending || !wait.status || wait.status === 'armed')
+    && (wait.can_withdraw !== false || !!cancelError)
+  const recoveryAction = needsRecovery && onRevealRecovery
+    ? { label: 'View recovery', onClick: onRevealRecovery } : null
   return (
     <WaitingCard
       expanded={expanded}
@@ -21,9 +39,11 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
       text={presentation.condition}
       meta={presentation.summary}
       stateLabel={wait.delivery_pending && ['manual_resume', 'resume_failed', 'owner_input', 'restart'].includes(wait.resume_blocker) ? 'Needs you' : 'Waiting'}
-      action={needsRecovery && onRevealRecovery
-        ? { label: 'View recovery', onClick: onRevealRecovery }
-        : cancellable && onCancel ? { label: 'Stop waiting', onClick: () => onCancel(wait.id) } : null}
+      action={cancellable && onCancel ? {
+        label: cancelling ? 'Stopping…' : wait.delivery_pending ? 'Stop follow-up' : 'Stop waiting',
+        onClick: cancel, disabled: cancelling || wait.can_withdraw === false, error: cancelError,
+      } : recoveryAction}
+      secondaryAction={cancellable && onCancel ? recoveryAction : null}
       rows={[
         { label: 'Waiting for', value: presentation.condition, primary: true },
         ...(wait.delivery_pending ? [{ label: 'Original condition', value: wait.description, primary: true }] : []),

@@ -496,8 +496,10 @@ chmod 0600 "$ENV_FILE"
 TPROOF=$(mktemp -d /tmp/mobius-transcript-proof.XXXXXX)
 served_backend() {  # <exact CID>: the serving uvicorn process's working directory
   # As the server's own user: the container has no CAP_SYS_PTRACE, so root
-  # cannot read another user's /proc/<pid>/cwd.
-  docker exec -u mobius "$1" sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
+  # cannot read another user's /proc/<pid>/cwd. -o, not -n: the server is the
+  # oldest match; a child it is starting (say, a build in the frontend folder)
+  # carries the server's command line in its own cwd until it execs.
+  docker exec -u mobius "$1" sh -c 'readlink "/proc/$(pgrep -o -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
 }
 tprobe() {  # <command>: runs in the code the server runs; any error fails at once
   local backend output cid

@@ -67,6 +67,14 @@ def base_head(gh, cwd: Path, repo: str, base_ref: str) -> str:
 
 
 def assert_current_base(gh, cwd: Path, target: dict) -> None:
+  """Refuse unless the PR still targets the branch and head this target names, at the tip seen.
+
+  The merge call follows the PR's own base, so the branch tip alone cannot
+  prove it: a retargeted PR can leave the old branch untouched.
+  """
+  pull = read(gh, cwd, f"repos/{target['repo']}/pulls/{target['number']}")
+  if (pull.get("base") or {}).get("ref") != target["base_ref"] or (pull.get("head") or {}).get("sha") != target["head_sha"]:
+    raise HTTPException(409, "The pull request changed since it was checked. Refresh and check it again.")
   if base_head(gh, cwd, target["repo"], target["base_ref"]) != target["base_sha"]:
     raise HTTPException(409, "The target branch changed. Review the new combined result first.")
 
@@ -148,10 +156,10 @@ def selected_pull(gh, cwd, target):
   return pull
 
 
-# How long after arming a public attempt (arm_merge or arm_ready) a request
-# issued for it might still be evaluated by GitHub. In process, dispatch is a
-# few sequential gh calls (at most six for readiness: the final actor, PR,
-# base and checks reads, then the mutation), each killed at
+# How long after arming a public attempt (arm_merge, or a readiness attempt an
+# older build armed) a request issued for it might still be evaluated by
+# GitHub. In process, dispatch is a few sequential gh calls (at most six for
+# readiness: the final actor, PR, base and checks reads, then the mutation), each killed at
 # SUBMIT_TIMEOUT_SECONDS (90 s); GitHub ends any API request that takes over
 # 10 s to process. A crash can orphan the gh child past that timeout, but its
 # request can reach GitHub only while the kernel still retransmits it, which
@@ -273,6 +281,9 @@ def merge_blocker(target, repo, pull, pr) -> str | None:
   allowed_states = {"CLEAN", "BEHIND"} if pr["isMergeQueueEnabled"] else {"CLEAN"}
   if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") not in allowed_states:
     return "GitHub has not cleared this pull request for a normal merge; check its rules or merge queue."
+  # GitHub's own review gate is a second safety net. It is empty (None) in a repository
+  # that requires no review: the PR machine's merge guard, asked right after this,
+  # closes that hole with an approval of this exact version by someone else.
   if pr.get("reviewDecision") not in (None, "APPROVED"):
     return "GitHub still requires a review or has requested changes."
   return checks_blocker(pr)
@@ -295,7 +306,11 @@ def checks_blocker(pr) -> str | None:
 
 
 def pull_checks(gh, cwd, target):
-  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
+  query = ('query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision '
+           'isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} '
+           'latestOpinionatedReviews(first:100, writersOnly:true){nodes{state author{login __typename} commit{oid}}} '
+           'latestReviews(first:100){nodes{state author{login __typename} commit{oid}}} '
+           'viewerLatestReview{state commit{oid}} }}}')
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
                          "-f", f"id={target['pr_id']}").stdout)
   if result.get("errors") or not (result.get("data") or {}).get("node"):
@@ -407,6 +422,20 @@ def _transition_candidates(db, owner_id, target):
   return query.all()
 
 
+def runs_naming_pull(db, owner_id, repo: str, number: int) -> list:
+  """This owner's review runs whose immutable selection names this pull request.
+
+  The candidates for the PR machine's one-job-per-PR fact; the caller decides
+  which of them still has a live agent on it.
+  """
+  run = models.ContributionReviewRun
+  frozen = func.json_each(run.targets_json).table_valued("value").alias("named_target")
+  names_it = and_(func.lower(func.json_extract(frozen.c.value, "$.repo")) == repo.lower(),
+                  func.json_extract(frozen.c.value, "$.number") == number)
+  return db.query(run).filter(run.owner_id == owner_id,
+    select(1).select_from(frozen).where(names_it).correlate(run).exists()).all()
+
+
 def require_public_transition_clear(db, row, target, *, repair=False):
   """New mutations must not cross an unresolved item or head-branch attempt.
 
@@ -511,6 +540,33 @@ def released_on_refusal(db, row, claim):
     raise
 
 
+def saved_merge_attempt(db, owner_id, target):
+  """``(run id, chat id, item)`` of any review grant that already armed a merge of this exact head, or None."""
+  item = models.ContributionReviewRun.outcomes_json[key(target)]
+  # Filter by PR key and either the current attempt or a historical same-head
+  # attempt. The second clause is a coarse SQL prefilter; Python proves shape.
+  candidates = db.query(models.ContributionReviewRun.id,
+      models.ContributionReviewRun.chat_id, item).filter(
+    models.ContributionReviewRun.owner_id == owner_id,
+    or_(item["head_sha"].as_string() == target["head_sha"],
+      cast(item["merge_attempts"], String).like(f"%{target['head_sha']}%")),
+  ).all()
+  return next(((grant_id, chat_id, saved) for grant_id, chat_id, saved in candidates
+    if isinstance(saved, dict) and any(
+      isinstance(attempt, dict) and attempt.get("head_sha") == target["head_sha"]
+        and merge_attempted(attempt)
+      for attempt in [saved, *(saved.get("merge_attempts") if isinstance(saved.get("merge_attempts"), list) else [])])), None)
+
+
+def unconfirmed_direct_merge(db, owner_id, target):
+  """The owner's one-tap merge of this exact head whose write may still land, or None."""
+  saved = db.query(models.DirectMergeAttempt).filter_by(
+    owner_id=owner_id, work_key=merge_work_key(target)).first()
+  if saved and saved.state in {"attempting", "unknown"} and not dispatch_window_closed(saved.armed_at, time.time()):
+    return saved
+  return None
+
+
 def arm_merge(db, row, target, outcome, principal):
   """Reserve one exact public attempt across grants as well as within a grant.
 
@@ -530,20 +586,13 @@ def arm_merge(db, row, target, outcome, principal):
                         + ("Your Goal follows this claim and will receive its result." if follows else
                            f"No new Goal follow was created ({follow_status}); reconcile the result yourself."))}
   item_key = key(target)
-  item = models.ContributionReviewRun.outcomes_json[item_key]
-  # Filter by PR key and either the current attempt or a historical same-head
-  # attempt. The second clause is a coarse SQL prefilter; Python proves shape.
-  candidates = db.query(models.ContributionReviewRun.id,
-      models.ContributionReviewRun.chat_id, item).filter(
-    models.ContributionReviewRun.owner_id == row.owner_id,
-    or_(item["head_sha"].as_string() == target["head_sha"],
-      cast(item["merge_attempts"], String).like(f"%{target['head_sha']}%")),
-  ).all()
-  previous = next(((grant_id, chat_id, saved) for grant_id, chat_id, saved in candidates
-    if isinstance(saved, dict) and any(
-      isinstance(attempt, dict) and attempt.get("head_sha") == target["head_sha"]
-        and merge_attempted(attempt)
-      for attempt in [saved, *(saved.get("merge_attempts") if isinstance(saved.get("merge_attempts"), list) else [])])), None)
+  previous = saved_merge_attempt(db, row.owner_id, target)
+  direct = unconfirmed_direct_merge(db, row.owner_id, target)
+  if previous is None and direct is not None:
+    db.rollback()
+    release_if_acquired(db, row, claim)
+    return {**outcome, "state": "needs_you",
+            "summary": "Your one-tap Merge of this exact version is not confirmed yet. Check the pull request on GitHub; no request was repeated."}
   if previous is not None:
     # Claim acquisition commits and refreshes ORM state. Recheck this row too:
     # another worker may have armed it while this one awaited GitHub preflight.
@@ -579,21 +628,35 @@ def merge_pending(outcome) -> bool:
   return not merge_settled(outcome) and merge_attempted(outcome)
 
 
+# A repair the agent proposed is not a public receipt yet: only the owner's
+# push or discard of it (the same attempt id) may change it in place.
+REPAIR_PROPOSED = "proposed"
+# Repair attempts that never changed a branch: they are not part of the successor chain.
+REPAIR_NON_EFFECTS = {"rejected", "discarded"}
+
+
+def _history_kept(saved: list, incoming: list) -> bool:
+  if len(incoming) < len(saved):
+    return False
+  return all(new == old or (isinstance(old, dict) and old.get("state") == REPAIR_PROPOSED
+                            and isinstance(new, dict) and new.get("id") == old.get("id"))
+             for old, new in zip(saved, incoming))
+
+
 def keeps_public_receipts(current, outcome) -> bool:
   """Only a remote-effect settlement may change an existing public receipt.
 
-  Admission and private writes may append a repair attempt or arm the first
-  readiness attempt. One built from an older snapshot must not drop a repair
+  Admission and private writes may append a repair attempt, or arm or discard
+  a proposed one. One built from an older snapshot must not drop a repair
   arm, successor, readiness receipt or its audit, or live merge that another
-  writer saved before this row was refreshed. Only ``disarm_ready`` removes
-  an exact unspent readiness receipt. A proven same-head queue removal keeps
-  its receipt but lets the owning grant move on to a repaired successor.
+  writer saved before this row was refreshed. A readiness receipt (armed by
+  an older build) only settles through observation. A proven same-head queue
+  removal keeps its receipt but lets the owning grant move on to a repaired successor.
   """
   for history in ("repair_attempts", "ready_audit", "merge_attempts"):
-    saved = current.get(history) or []
-    if (outcome.get(history) or [])[:len(saved)] != saved:
+    if not _history_kept(current.get(history) or [], outcome.get(history) or []):
       return False
-  for receipt in ("successor", "ready_attempt"):
+  for receipt in ("successor", "ready_attempt", "verdict_proposal"):
     if receipt in current and outcome.get(receipt) != current[receipt]:
       return False
   fields = ("merge_attempted", "queue_entry_id", "queue_enqueued_at", "queue_receipt_unconfirmed",
@@ -637,10 +700,15 @@ def view(row):
       return {**outcome, "state": "ready_unattributable"}
     if attempt.get("state") == "attempting":
       return {**outcome, "state": "marking_ready"}
-    return outcome
+    verdict = verdict_overlay(row, outcome)
+    if verdict and approved_merge_waiting(row, outcome):
+      summary = outcome.get("summary") or ""
+      return {**outcome, "state": verdict, "summary": f"{MERGE_WAITING}\n\n{summary}" if summary else MERGE_WAITING}
+    return {**outcome, "state": verdict} if verdict else outcome
   projected_items = [projected(t) for t in row.targets_json]
   states = [item.get("state", "reviewing") for item in projected_items]
-  state = ("needs_you" if any(s in {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable"} for s in states)
+  state = ("needs_you" if any(s in {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable",
+                                     "verdict_pending", "verdict_posting", "verdict_unknown"} for s in states)
            else "complete" if all(s in {"all_clear", "merged"} for s in states)
            else "queued" if all(s in {"queued", "merged", "all_clear"} for s in states)
            else "marking_ready" if any(s == "marking_ready" for s in states)
@@ -665,6 +733,82 @@ def view(row):
           "created_at": row.created_at.isoformat() + "Z", "items": views}
 
 
+MERGE_WAITING = ("GitHub confirmed your approval, but the merge has not run. "
+                 "Continue the merge here, or press Merge on the pull request.")
+
+
+def approved_merge_waiting(row, outcome) -> bool:
+  """An approval GitHub confirmed whose granted merge was never attempted.
+
+  Neither a lost response that observation later recovered nor an agent that
+  was not resumed arranges the merge by itself: the grant is not complete.
+  """
+  proposal = outcome.get("verdict_proposal") or {}
+  return (row.mode == "review_merge" and outcome.get("state") == "all_clear"
+          and proposal.get("state") == "posted" and proposal.get("event") == "APPROVE"
+          and not proposal.get("dismissed_on_github") and not merge_attempted(outcome))
+
+
+def verdict_overlay(row, outcome):
+  """The item state a verdict proposal adds on top of its private review.
+
+  A pending, uncertain or refused verdict always needs the owner. A discarded
+  one ends a merge grant without merging; a plain review keeps its findings.
+  """
+  proposal = outcome.get("verdict_proposal") or {}
+  state = proposal.get("state")
+  if state == "proposed":
+    return "verdict_pending"
+  if state == "posting":
+    return "verdict_posting"
+  if state == "unknown":
+    return "verdict_unknown"
+  if approved_merge_waiting(row, outcome):
+    return "needs_you"
+  if state == "not_dispatched" or (state == "discarded" and row.mode == "review_merge"
+                                   and not merge_attempted(outcome)):
+    return "needs_you"
+  return None
+
+
+def public_merge_blocker(row, item) -> str | None:
+  """What a merge grant that also publishes still needs before it may merge.
+
+  A requested public action is part of the owner's consent: merging past a
+  missing, uncertain or refused one would silently drop it. A comment, even
+  one the owner sent in place of a proposed approval, is never an approval.
+  """
+  frozen = row.options_json or {}
+  if row.mode != "review_merge" or frozen.get("post_review") is not True:
+    return None
+  if frozen.get("propose_verdict") is True and item.get("verdict_proposal"):
+    proposal = item["verdict_proposal"]
+    if proposal.get("event") == "COMMENT":
+      return "You sent a comment, not an approval, so this PR will not be merged."
+    if proposal.get("event") != "APPROVE":
+      return "The proposed verdict requests changes, so this PR will not be merged."
+    if proposal.get("state") == "proposed":
+      return "Submit or discard the proposed approval in Contribute. Nothing merges before you submit it."
+    if proposal.get("state") == "discarded":
+      return "You discarded the proposed approval, so nothing was posted or merged."
+    if proposal.get("state") != "posted":
+      return "The approval was not confirmed on GitHub, so this PR was not merged. Check GitHub; nothing was repeated."
+    if proposal.get("dismissed_on_github"):
+      return "The approval was dismissed on GitHub, so it no longer counts and this PR was not merged."
+    return None
+  receipt = item.get("public_review") or {}
+  if receipt.get("state") != "posted":
+    return "The review comment was not confirmed on GitHub, so this PR was not merged. Nothing was repeated."
+  return None
+
+
+OWNER_SUBMITS_NOTE = ("Only the owner submits or discards a proposal, in Contribute; tell "
+  "them it is waiting there and end your turn. Do not ask for approval in chat or retry. ")
+AGENT_SUBMITS_NOTE = ("The owner chose, when starting this review, to let its verdict go out without another "
+  "tap: right after you send publish:true the server submits that proposal itself (never on the owner's own PR). "
+  "If it could not be sent, it waits for the owner in Contribute; never retry it. ")
+
+
 def brief(row):
   endpoint = run_endpoint(row) + "/outcomes"
   if row.mode == "review_fix_merge":
@@ -679,14 +823,34 @@ def brief(row):
     "exact-head private review/merge endpoints remain compatible; a fresh "
     "preview/approval is needed for the new programmatic reviewer workflow."
   )
-  public_note = (
+  verdict = frozen.get("propose_verdict") is True
+  # A proposal posts nothing until the owner's own tap, so "report privately" must
+  # not read as "keep a verdict private": a verdict is exactly what to hand them.
+  publish_rule = (
+    "The owner opted into verdict proposals for this run. When your result for a PR is a verdict (all_clear, or "
+    "needs_you with findings), set publish:true in /outcomes: that only saves a proposal for the owner, and nothing "
+    "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
+    "never only a private note. Owner questions and blocked work use publish:false (the default) and stay private. "
+  ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) and stay private. "
+  )
+  public_note = ((
+    publish_rule +
     "Evidence freezes once dispatch is armed; identical retry is read-only. "
     "Keep owner-only questions and private data out of public evidence.\n"
-    if frozen.get("post_review") is True else ""
-  )
+    + ("This grant also merges: an all_clear result must use publish:true. Nothing merges before the owner's "
+       "own approval of it is confirmed on GitHub; only then does the server attempt the guarded merge.\n"
+       if row.mode == "review_merge" else "")
+    + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
+       "REQUEST_CHANGES for needs_you; your summary is its wording). On the owner's own PRs nothing is proposed or "
+       "posted: publish:true keeps your result private and the owner fixes it or sets it aside. "
+       + (AGENT_SUBMITS_NOTE if frozen.get("agent_submits_verdict") is True else OWNER_SUBMITS_NOTE)
+       + ("If the owner submits an APPROVE, this chat is resumed: re-send the identical outcome once to run "
+          "the guarded merge. " if row.mode == "review_merge" else "")
+       + "\n" if verdict else "")
+  ) if frozen.get("post_review") is True else "")
   opener = ("Review this exact selected public PR batch and report privately unless you publish a verdict."
     if frozen.get("post_review") is True else "Review this exact selected public PR batch privately.")
   publish_field = ' "publish": false,\n' if frozen.get("post_review") is True else ""
@@ -763,7 +927,7 @@ def _receipted_target(original, outcome):
   current = original["head_sha"]
   confirmed = None
   for receipt in receipts:
-    if receipt.get("state") == "rejected":
+    if receipt.get("state") in REPAIR_NON_EFFECTS:
       continue  # Audited non-effect, not part of the successor chain.
     if receipt.get("state") != "pushed":
       break
@@ -864,8 +1028,20 @@ def repair_round_limit(row):
 
 def require_repair_round_available(row, attempts):
   limit = repair_round_limit(row)
-  if limit is not None and sum(a.get("state") != "rejected" for a in attempts) >= limit:
+  if limit is not None and sum(a.get("state") not in REPAIR_NON_EFFECTS for a in attempts) >= limit:
     raise HTTPException(409, "The approved repair round limit is exhausted. Ask the owner.")
+
+
+def _takeover_opening(row) -> str:
+  """Whose PR this is, and for a takeover the owner's frozen reason."""
+  if all(target.get("role") == "author" for target in row.targets_json):
+    return ("Finish the owner's own named PRs for them: review privately and, only where "
+            "necessary, repair them under the explicit scoped grant.")
+  reason = (row.options_json or {}).get("takeover_reason")
+  said = ("The owner's reason, which the platform already posted on the PR from the owner's account as "
+          f"\"Taking this PR over: <reason>\" (never post it yourself): {reason}\n" if reason else "")
+  return ("Take over someone else's named PRs for the owner, a maintainer: review privately and, only where "
+          f"necessary, repair them under the explicit scoped grant.\n{said}").rstrip()
 
 
 def takeover_brief(row):
@@ -876,26 +1052,17 @@ def takeover_brief(row):
     "No maximum repair round count is configured for this grant."
     if limit is None else f"At most {limit} repair rounds per PR."
   )
-  readiness_instruction = (
-    f"For a draft, AFTER fresh independent all-clear and passing tests, POST {endpoint}/ready "
-    "with repo, number, exact head_sha, reviewed_base_sha, independent_receipt_id, "
-    "summary, all six scope values, tests and tests_passed:true. The server alone "
-    "checks current actor, rights, exact head/base and GitHub checks, then marks "
-    "ready with one durable attempt receipt. An uncertain result is read-only "
-    "reconciliation, never a repeated mutation. Only after confirmed readiness "
-    "may the parent submit all_clear to /outcomes for merge/queue."
-    if draft_ready_allowed(row) else
-    "This grant does not authorize marking a draft ready for review. A draft blocks merge."
-  )
-  return f"""Privately review and, only where necessary, repair these named PRs under the
-explicit scoped takeover grant. Original selection is immutable:
+  return f"""{_takeover_opening(row)}
+Original selection is immutable:
 {json.dumps(row.targets_json)}
 Frozen prompts and model selection for this run:
 {json.dumps(frozen)}
-Mandatory: never raw push, merge, enqueue, post public comments/reviews or broaden
-scope. A changed repository, actor, branch, external head drift, force-push,
-unrelated edit, unsafe result or unclear public receipt blocks the item. Use a
-saved owner question card in this owning chat to clarify; do not infer consent.
+Mandatory: never raw push, merge, enqueue, mark ready, convert to draft, close,
+request reviewers, post public comments/reviews or broaden scope. Every push, the
+merge and every PR status change is the owner's own tap: you propose, they decide.
+A changed repository, actor, branch, external head drift, force-push, unrelated
+edit, unsafe result or unclear public receipt blocks the item. Use a saved owner
+question card in this owning chat to clarify; do not infer consent.
 For each exact head obtain a fresh read-only durable independent child review of
 the FULL diff, six-scope rubric and tests against the exact current target base.
 Start that reviewer via POST {endpoint}/reviewers with repo, number, head_sha.
@@ -913,12 +1080,15 @@ findings (specific in-scope issues). The response is the ONLY dedicated checkout
 in which to edit. Scope is server-frozen from the selected PR files, not editable
 prompt authority. Make a local fast-forward commit and run focused tests. POST
 {endpoint}/repairs with repo, number, head_sha (the predecessor), summary, tests,
-tests_passed:true. Server derives changed files, SHA and diff, rechecks rights,
-privacy, source invariants and live head, fences one public attempt and publishes
-without force. Never manually push. Ambiguous receipts only reconcile through
-the same endpoint; never repeat the public request. Each confirmed repair yields
-a successor that requires a NEW independent full-diff review and fresh tests
-before merge. {round_instruction}
+tests_passed:true. The server derives changed files, SHA and diff, rechecks rights,
+privacy, source invariants and live head, and saves the repair as a PROPOSAL:
+nothing is pushed. The owner reads it in Contribute and pushes or discards it with
+their own tap. Tell them it is waiting there and end your turn; do not ask for
+approval in chat, edit that checkout or propose it again meanwhile. This chat is
+resumed with their decision. After a confirmed push the successor head needs a NEW
+independent full-diff review and fresh tests. After a discard, do not push it: ask
+the owner what they want instead. An unconfirmed push is reconciled read-only
+through /observe and never repeated. Never manually push. {round_instruction}
 For an old uncertain public attempt, open its named owning chat/run and POST
 that old run's /observe endpoint for read-only reconciliation against GitHub.
 If the exact
@@ -929,16 +1099,17 @@ rather than starting unattended follow-up turns. This never broadens mutation co
 When an exact repair push is confirmed, finish its saved receipt work_key via
 finish_agent_work with release:false and the confirmed head outcome. Never
 finish another chat's claim.
-{readiness_instruction}
 Then parent alone POST {endpoint}/outcomes with repo, number, exact head_sha,
 reviewed_base_sha, independent_receipt_id, state all_clear or needs_you, summary,
-all six scope values, tests and tests_passed. The server alone checks live base,
-checks, permissions and attempts exact normal merge/queue using its durable fence.
+all six scope values, tests and tests_passed. The server checks the live base and
+the independent receipt, then records all_clear as ready for the owner's own Merge.
+It never merges, enqueues or marks a takeover ready for review, and neither may
+you: a draft stays a draft until the owner opens it for review.
 POST {endpoint}/observe is read-only GitHub reconciliation of saved attempts;
 it can run after Stop but never starts agents or repeats a push/merge.
-For pending checks or a queue use this owning chat's EXISTING durable Wait
-capability; these routes create no automatic Wait. Never use a transient poll
-process or second queue. Observation cannot start a stopped run.
+For pending checks use this owning chat's EXISTING durable Wait capability; these
+routes create no automatic Wait. Never use a transient poll process.
+Observation cannot start a stopped run.
 Keep every step in this one owning chat and expose concrete blockers to the owner.
 Review rubric: correctness, maintainability, simplicity, tests, security_privacy,
 technical_debt. Public comments and reviews are NOT authorized by this grant.
@@ -978,8 +1149,15 @@ def arm_repair(db, row, target, previous, receipt, principal):
     require_public_transition_clear(db, row, target, repair=True)
     previous = row.outcomes_json.get(key(target), {})
     save_outcome(db, row, key(target), {**previous, "state": "pushing",
-      "repair_attempts": [*previous.get("repair_attempts", []), {**receipt, "work_key": work_key}]})
+      "repair_attempts": _with_armed(previous.get("repair_attempts", []), {**receipt, "work_key": work_key})})
   return None
+
+
+def _with_armed(attempts: list, armed: dict) -> list:
+  """The owner's push arms its own proposal in place; any other arm is a new attempt."""
+  if any(a.get("id") == armed["id"] and a.get("state") == REPAIR_PROPOSED for a in attempts):
+    return [armed if a.get("id") == armed["id"] else a for a in attempts]
+  return [*attempts, armed]
 
 
 def repair_file_scope(gh, cwd, target):
@@ -1038,14 +1216,19 @@ def confirmed_successor(previous, attempts, receipt):
     "summary": "Repair published; fresh independent full-diff review required."}
 
 
-def merge_method(repo):
-  method = next((method for method, setting in (
+def allowed_merge_methods(repo) -> list[str]:
+  """The methods the repository's own settings allow, in the order Möbius prefers them."""
+  return [method for method, setting in (
     ("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"),
     ("rebase", "allow_rebase_merge"),
-  ) if repo.get(setting) is True), None)
-  if method is None:
+  ) if repo.get(setting) is True]
+
+
+def merge_method(repo):
+  allowed = allowed_merge_methods(repo)
+  if not allowed:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return method
+  return allowed[0]
 
 
 def disarm_merge(db, row, target, reason):
@@ -1103,18 +1286,22 @@ def save_effect_outcome(db, row, item_key, outcome):
     if current.get("state") == "merged" and outcome.get("state") != "merged":
       return
     public_receipt = current.get("public_review") or {}
-    if public_receipt.get("state") == "posted":
+    if public_receipt.get("state") == "posted" and outcome.get("public_review") != public_receipt:
       # A stale read-only observer cannot downgrade a confirmed public fact.
+      # A later effect (the merge after a posted review) carries it unchanged.
       return
     if (public_receipt.get("state") in {"posting", "unknown"}
         and public_receipt.get("marker") != (outcome.get("public_review") or {}).get("marker")):
       # Only the dispatcher/observer of this exact attempt can settle it.
       return
+    outcome = _keep_verdict(current, outcome)
+    if outcome is None:
+      return
     current_ready = current.get("ready_attempt")
     incoming_ready = outcome.get("ready_attempt")
     if current_ready and not incoming_ready:
       # A writer that never saw this receipt cannot remove it; its own fact
-      # still lands. Only disarm_ready removes an exact unspent receipt.
+      # still lands. Nothing removes a readiness receipt any more.
       outcome = {**outcome, "ready_attempt": current_ready}
     elif current_ready and (
         current_ready.get("id") != incoming_ready.get("id")
@@ -1135,6 +1322,32 @@ def save_effect_outcome(db, row, item_key, outcome):
     if _cas_outcome(db, row, item_key, outcome):
       return
   raise HTTPException(409, "The remote result could not be recorded after concurrent changes; observe this run.")
+
+
+VERDICT_SETTLED = {"posted", "unknown", "not_dispatched", "discarded"}
+
+
+def _keep_verdict(current, outcome):
+  """A writer that never saw the verdict proposal cannot drop or rewind it.
+
+  Only that proposal's own settlement may move it forward; a settled fact is
+  never replaced. Returns None when the incoming write must not land.
+  """
+  saved = current.get("verdict_proposal")
+  incoming = outcome.get("verdict_proposal")
+  if not saved:
+    return outcome
+  if not incoming or incoming.get("id") != saved.get("id"):
+    return {**outcome, "verdict_proposal": saved}
+  if saved.get("state") in VERDICT_SETTLED and incoming != saved:
+    # One exception: an unconfirmed attempt settles from a read-only look at
+    # GitHub (contribution_review_verdicts.settle_observed): its exact review
+    # was found, or none exists after the dispatch window.
+    settles = saved.get("state") == "unknown" and (
+      (incoming.get("state") == "posted" and incoming.get("review_id"))
+      or incoming.get("state") == "not_dispatched")
+    return outcome if settles else None
+  return outcome
 
 
 def settle_merge_observation(db, row, item_key, observed, fact):
@@ -1186,66 +1399,14 @@ def ready_pending(item) -> bool:
   return bool(attempt) and attempt.get("state") not in {"ready", "unattributable"}
 
 
-def draft_ready_allowed(row):
-  return (row.mode == "review_fix_merge" and
-    (row.options_json or {}).get("confirmation_scope") == "named_pr_repairs_ready_and_reviewed_successors")
-
-
-def readiness_blocker(target, repo, pull, pr):
-  if not merge_permission(repo):
-    return "Your repository write permission is no longer available."
-  if pull.get("state") != "open" or pull.get("merged") or pull.get("draft") is not True:
-    return "This exact pull request is not an open draft."
-  if pr.get("headRefOid") != target["head_sha"]:
-    return "The pull request changed during the readiness check."
-  return checks_blocker(pr)
-
-
-def mark_ready(gh, cwd, target):
-  # GitHub's mutation has no expected-head parameter: caller must hold the
-  # credential lock and recheck the exact PR immediately before this call.
-  query = """mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft headRefOid}}}"""
-  response = gh(cwd, "api", "graphql", "-f", f"query={query}",
-    "-f", f"id={target['pr_id']}", check=False)
-  result = graphql_mutation_result(response)
-  data = result.get("data")
-  mutation = data.get("markPullRequestReadyForReview") if isinstance(data, dict) else None
-  pull = mutation.get("pullRequest") if isinstance(mutation, dict) else None
-  if (result.get("errors") or not isinstance(pull, dict) or pull.get("id") != target["pr_id"]
-      or pull.get("headRefOid") != target["head_sha"] or pull.get("isDraft") is not False):
-    raise HTTPException(409, "GitHub did not confirm readiness of the exact pull request.")
-  return pull
-
-
-def ready_work_key(target):
-  return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:ready"
-
-
-def arm_ready(db, row, target, receipt, principal):
-  """Fence one readiness mutation per exact PR/head across overlapping grants."""
-  work_key = ready_work_key(target)
-  claim = reserve_public_work(db, row, principal, work_key,
-    f"Mark reviewed draft {key(target)} ready at {target['head_sha'][:12]}.", "Draft readiness")
-  if claim["state"] in {"held_by_peer", "completed"}:
-    raise HTTPException(409, "This draft readiness already has an owning conversation. Follow its saved result.")
-  item_key = key(target)
-  prior = db.query(models.ContributionReviewRun).filter(
-    models.ContributionReviewRun.owner_id == row.owner_id,
-    models.ContributionReviewRun.outcomes_json[item_key]["ready_attempt"]["head_sha"].as_string() == target["head_sha"],
-  ).populate_existing().first()
-  if prior is not None:
-    db.rollback()
-    release_if_acquired(db, row, claim)
-    raise HTTPException(409, "An earlier draft readiness attempt is saved. Reconcile it read-only; do not repeat it.")
-  with released_on_refusal(db, row, claim):
-    require_public_transition_clear(db, row, target)
-    save_ready_attempt(db, row, item_key, receipt)
 
 
 def save_ready_attempt(db, row, item_key, receipt):
-  """Keep the admission and each observed transition as immutable audit entries.
+  """Record one observed transition of a readiness receipt as an immutable audit entry.
 
-  An observed transition is derived from the refreshed item (see
+  Agents no longer mark drafts ready (the owner's own tap does, see
+  contribution_pull_status), but receipts older builds armed still settle
+  here. The transition is derived from the refreshed item (see
   ``save_effect_outcome``), so a delayed observer never writes back an older
   snapshot over newer receipts and evidence.
   """
@@ -1256,36 +1417,7 @@ def save_ready_attempt(db, row, item_key, receipt):
     if not audit or audit[-1] != event:
       audit.append(event)
     return {**current, "ready_attempt": dict(receipt), "ready_audit": audit}
-  if receipt["state"] == "attempting":
-    save_outcome(db, row, item_key, apply((row.outcomes_json or {}).get(item_key, {})))
-  else:
-    save_effect_outcome(db, row, item_key, apply)
-
-
-def disarm_ready(db, row, target, receipt_id):
-  """Release only the exact still-unspent readiness reservation.
-
-  This is the one writer allowed to remove a readiness receipt, matched by
-  its immutable id and head on the refreshed item, never on a snapshot.
-  """
-  db.rollback()
-  item_key = key(target)
-  for _ in range(4):
-    db.refresh(row)
-    previous = (row.outcomes_json or {}).get(item_key, {})
-    attempt = previous.get("ready_attempt") or {}
-    if (attempt.get("state") != "attempting" or attempt.get("id") != receipt_id
-        or attempt.get("head_sha") != target["head_sha"]):
-      raise HTTPException(409, "The readiness reservation changed; it cannot be released.")
-    audit = [*(previous.get("ready_audit") or []),
-      {"id": receipt_id, "state": "not_dispatched", "head_sha": target["head_sha"]}]
-    if _cas_outcome(db, row, item_key, {**{k: v for k, v in previous.items() if k != "ready_attempt"},
-                                        "ready_audit": audit}):
-      break
-  else:
-    raise HTTPException(409, "The readiness reservation changed; observe this run.")
-  agent_work_claims.finish_work(db, owner_id=row.owner_id, chat_id=row.chat_id,
-    work_key=ready_work_key(target), outcome="Draft readiness was not attempted.", release=True)
+  save_effect_outcome(db, row, item_key, apply)
 
 
 def queue_receipt(entry):

@@ -1,6 +1,6 @@
 /* InstallSheet — in-PWA modal to set a mini-app's home-screen name +
    icon before entering the install surface. Overlay/card language
-   mirrors ManageModelsModal / WalkthroughOverlay (hand-rolled fixed
+   mirrors WalkthroughOverlay (hand-rolled fixed
    overlay; the shell has no shared Dialog primitive). */
 
 .is__overlay {

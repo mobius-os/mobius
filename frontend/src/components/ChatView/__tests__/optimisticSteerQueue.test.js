@@ -48,17 +48,14 @@ test('accepted deferred steers leave the queue and appear inline immediately', (
   )
 })
 
-test('Stop serializes behind an in-flight steer; steer bails under a committed Stop', () => {
-  // The Stop×steer race (review 2026-07-17): Stop snapshotting mid-steer
-  // loses the optimistically-hidden rows on a not_steered resolution. The
-  // contract is two-sided — handleStop awaits steerInFlightRef (bounded)
-  // BEFORE its queue snapshot, and steerRows refuses to start once a Stop
-  // owns the teardown.
-  const stopIdx = source.indexOf('async function handleStop()')
-  const awaitIdx = source.indexOf('steerInFlightRef.current', stopIdx)
-  const snapshotIdx = source.indexOf('Snapshot the queue before doing anything destructive', stopIdx)
-  assert.ok(stopIdx >= 0 && awaitIdx > stopIdx && snapshotIdx > awaitIdx,
-    'handleStop must await the in-flight steer before snapshotting the queue')
+test('Stop leaves the queue to the server; steer bails under a committed Stop', () => {
+  // Stop holds the durable queue server-side, so it neither snapshots nor
+  // resends rows and an in-flight steer cannot change what Stop would send.
+  // A steer still refuses to start once a Stop owns the teardown.
+  const stopBody = source.match(/async function handleStop\(\) \{[\s\S]*?\n  \}\n/)?.[0] || ''
+  assert.ok(stopBody, 'handleStop exists')
+  assert.doesNotMatch(stopBody, /pendingMessagesRef|doSend\(/,
+    'Stop must not read the local queue or resend it')
   assert.match(
     source,
     /async function steerRows\(steerRowsList\) \{[\s\S]*?if \(handlingStopRef\.current\) return/,

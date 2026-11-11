@@ -1278,6 +1278,7 @@ export default function useStreamConnection(chatId, {
               if (event.response_mode) incoming.response_mode = event.response_mode
               if (event.secure_input) incoming.secure_input = event.secure_input
               if (event.platform_action) incoming.platform_action = event.platform_action
+              if (event.message) incoming.message = event.message
               if (event.question_id) incoming.question_id = event.question_id
               // Re-arm the replayed event with any answer the user already
               // submitted this turn. After a reconnect wipe upsertQuestionItem
@@ -1676,7 +1677,10 @@ export default function useStreamConnection(chatId, {
     // answered. If the backend reports `started` instead, it recovered a
     // restarted question as a fresh hidden continuation and we reset below.
     const isAnswerSubmission = !!answers
-    const isManualResume = continuation === 'manual'
+    // Resume and an empty Send of the held queue start a turn only if the
+    // server accepts one (it may queue them behind other work instead), so
+    // the stream is reset on acceptance, not before the POST.
+    const startsOnAcceptance = continuation === 'manual' || continuation === 'queue'
     // force_steer and direct_steer inject into the LIVE turn — neither starts
     // a new turn on the expected path.
     // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
@@ -1772,7 +1776,7 @@ export default function useStreamConnection(chatId, {
         }
         throw new Error('Möbius is unavailable and this device could not save the message. Your draft is unchanged.')
       }
-      if (!queueOnly && !isAnswerSubmission && !isManualResume && !forceSteer && !directSteer) {
+      if (!queueOnly && !isAnswerSubmission && !startsOnAcceptance && !forceSteer && !directSteer) {
         wantsReconnectRef.current = true
         clearQuestionResponseTracking()
         justSentAtRef.current = Date.now()
@@ -1938,7 +1942,7 @@ export default function useStreamConnection(chatId, {
       }
       // Resume acknowledges an existing interrupted turn, not a new message.
       // Retain its visible answer until the successor catch-up can replace it.
-      if (isManualResume && data.status === 'started') {
+      if (startsOnAcceptance && data.status === 'started') {
         wantsReconnectRef.current = true
         justSentAtRef.current = Date.now()
         setIsStreaming(true)
@@ -1970,7 +1974,7 @@ export default function useStreamConnection(chatId, {
       if (err?.code === 'OUTBOX_SETTLED') {
         // A concurrent local cancellation or another tab's receipt owns this
         // cid now. Neither absence nor retirement authorizes another POST.
-        if (!queueOnly && !isAnswerSubmission && !isManualResume) {
+        if (!queueOnly && !isAnswerSubmission && !startsOnAcceptance) {
           wantsReconnectRef.current = false
           setIsStreaming(false)
         }
@@ -1995,7 +1999,7 @@ export default function useStreamConnection(chatId, {
       // they target, so their POST failures must not tear down that turn's
       // stream. The caller keeps the queued/direct-steer fallback or retryable
       // question intact while the existing connection remains authoritative.
-      if (ownsPresentation() && !forceSteer && !directSteer && !isAnswerSubmission && !isManualResume) {
+      if (ownsPresentation() && !forceSteer && !directSteer && !isAnswerSubmission && !startsOnAcceptance) {
         wantsReconnectRef.current = false
         setIsStreaming(false)
       }

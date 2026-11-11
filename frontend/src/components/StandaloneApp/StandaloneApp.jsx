@@ -1,4 +1,4 @@
-import { openExistingChat, stageAppChatDraft } from '../../lib/appChatNavigation.js'
+import { openChatWithAppDraft, openExistingChat } from '../../lib/appChatNavigation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -203,19 +203,18 @@ export default function StandaloneApp({ initialApp }) {
           window.location.href = shellUrl({ chat: request.chatId })
         }
         if (request.requireExisting) return openExistingChat(request, open)
-        // A failed send awaiting resolution keeps the composer; drop the draft.
-        await stageAppChatDraft(request.chatId, request.draft).catch(() => {})
-        open()
+        await openChatWithAppDraft(request.chatId, request.draft, { open, openNew: openNewChat })
         return
       }
-      if (request.type === 'moebius:new-chat') {
-        const response = await api.chats.create({})
-        if (!response.ok) throw new Error(`chat create ${response.status}`)
-        const chat = await response.json()
-        stageComposerHandoff(chat.id, request.draft)
-        window.location.href = shellUrl({ chat: chat.id })
-      }
+      if (request.type === 'moebius:new-chat') await openNewChat(request.draft)
       return null
+    }
+    async function openNewChat(draft) {
+      const response = await api.chats.create({})
+      if (!response.ok) throw new Error(`chat create ${response.status}`)
+      const chat = await response.json()
+      stageComposerHandoff(chat.id, draft)
+      window.location.href = shellUrl({ chat: chat.id })
     }
     const outcome = run()
     if (request.requestId) return outcome

@@ -6,7 +6,9 @@ Off unless ``<data_dir>/tracing.json`` enables it::
 
 ``endpoint`` is an OTLP/HTTP collector base URL (Jaeger, an OpenTelemetry
 Collector, Grafana Alloy, ...). The file is read once at startup, so a change
-needs a server restart.
+needs a server restart. The same file's ``"stall_log": true`` turns on the
+local stall log (see ``app.stall_recorder``), which needs neither a collector
+nor OpenTelemetry and is independent of ``enabled``.
 
 When enabled, this records the shape of work, never its content: request
 routes and status codes, SQL statement text (SQLite placeholders, not bound
@@ -57,16 +59,25 @@ except ImportError:  # optional local install
 _tracer = None
 
 
-def _read_config() -> dict | None:
+def _read_payload() -> tuple[Path, dict]:
   path = Path(get_settings().data_dir) / _CONFIG_NAME
   try:
     payload = json.loads(path.read_text(encoding="utf-8"))
   except FileNotFoundError:
-    return None
+    return path, {}
   except (OSError, UnicodeError, json.JSONDecodeError):
-    _log.warning("tracing: %s is unreadable; tracing stays off", path)
-    return None
-  if not isinstance(payload, dict) or payload.get("enabled") is not True:
+    _log.warning("tracing: %s is unreadable; diagnostics stay off", path)
+    return path, {}
+  return path, payload if isinstance(payload, dict) else {}
+
+
+def stall_log_requested() -> bool:
+  return _read_payload()[1].get("stall_log") is True
+
+
+def _read_config() -> dict | None:
+  path, payload = _read_payload()
+  if payload.get("enabled") is not True:
     return None
   endpoint = payload.get("endpoint")
   if not isinstance(endpoint, str) or not endpoint.startswith(("http://", "https://")):

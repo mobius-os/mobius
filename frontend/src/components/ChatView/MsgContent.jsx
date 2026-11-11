@@ -15,7 +15,7 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
-import { foldAppActivityOperations } from './activityGrouping.js'
+import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -27,6 +27,7 @@ import PauseRecordCard from './PauseRecordCard.jsx'
 import { isContinuationMessage, isSideQuestionMessage, PAUSE_RECORD_BLOCK } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
+  cardMessageBlock,
   legacyRestartActivityOwners,
   repairInterleavedQuestionText,
   renderedBlockEntries,
@@ -209,6 +210,7 @@ function generatedFileLayout(files, { chatId, isStreaming, embeddedImageKey }) {
  * can depend on the set's content rather than on a per-render Set. */
 function embeddedImagePathKey(blocks) {
   return (blocks || [])
+    .map(block => cardMessageBlock(block) || block)
     .flatMap(block => block?.type === 'text' ? markdownImagePaths(block) : [])
     .sort()
     .join('\n')
@@ -351,10 +353,13 @@ function MsgContentInner({
       activitySourceBlocks || displayBlocks,
       chatId,
     )
+    const coalescedEntries = coalesceThinkingEntries(
+      mergeAdjacentPeerActivityEntries(positionedEntries),
+    )
+    // A live turn keeps stream order; a settled reply folds its routine saves
+    // into its earlier activity line (joinRoutineToActivity).
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      coalesceThinkingEntries(
-        mergeAdjacentPeerActivityEntries(positionedEntries),
-      ),
+      isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
@@ -463,6 +468,9 @@ function MsgContentInner({
         )
       }
       if (block.type === 'text') {
+        // A card's closing message hides with its card while the live
+        // surface renders both.
+        if (block.ownerCard && suppressedQuestionKeys?.has(questionKey(block.ownerCard))) return null
         const text = msg.role === 'user'
           ? stripAugmentation(block.content) : block.content
         if (!text) return null

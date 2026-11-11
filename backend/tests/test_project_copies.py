@@ -198,6 +198,29 @@ def test_source_copy_rejects_control_characters_and_nested_secrets(path):
   assert not copies.eligible(path)
 
 
+# The names copies always skipped stay skipped, at any depth, now that the
+# credential-file part comes from the rule Store publication shares.
+@pytest.mark.parametrize('path', [
+  '.env', '.env.local', 'tls.key', 'cert.pem', 'client.p12', 'app.sqlite',
+  'app.sqlite3', 'state.db', 'credentials/notes.md', 'credentials.json',
+  'secrets.json', '.npmrc', '.pypirc', 'service-token.txt', 'cli-auth/x',
+  'app-secrets/x', 'node_modules/x.js', 'src/.SSH/id', 'src/Secrets.JSON',
+  # Shared with publication and newly skipped here too.
+  'prod.env', 'release.jks', 'vault.kdbx', 'deploy.ppk', '.netrc', 'id_rsa',
+  'service-account.json',
+  # Env folders, such as a virtualenv named .env, are private as a whole.
+  '.env/production', 'src/.env/dev', '.env.local/x', '.env/lib/python3.12/site-packages/x.py',
+  'credentials', '.credentials.json',
+])
+def test_source_copy_skips_private_data_and_credential_files(path):
+  assert not copies.eligible(path)
+
+
+@pytest.mark.parametrize('path', ['src/App.jsx', 'secrets/Panel.jsx', 'docs/keys.md', 'environment.txt'])
+def test_source_copy_keeps_ordinary_source(path):
+  assert copies.eligible(path)
+
+
 def test_committed_import_survives_response_failure_and_retry_keeps_files(client, db, monkeypatch):
   import asyncio
   package = {'format':'mobius-project-copy-v1', 'name':'Copy', 'project_type':'blank', 'files':[{'path':'x.txt', 'content':'YQ=='}]}
