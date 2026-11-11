@@ -139,6 +139,7 @@ import {
   writeNewChatIntent,
 } from './newChatPolicy.js'
 import { saveDrawerRename } from '../Drawer/drawerRename.js'
+import usePinnedItemMutations from '../Drawer/usePinnedItemMutations.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -821,6 +822,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const notifyShell = useCallback((message, options) => {
     notificationCenterActionsRef.current?.addNotice(message, options)
   }, [])
+  const pins = usePinnedItemMutations({ chats, apps, projects, onNotice: notifyShell })
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -2796,18 +2798,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // The final scoped read settles the row from server truth in every case.
   const setChatArchived = useCallback(async (chatId, archived, { undoable = true } = {}) => {
     const sid = String(chatId)
+    // A chat this list has not read yet (one just created on a project page)
+    // is filed the same way; the scoped read after the write brings its row in.
     const previous = chatsRef.current.find(row => String(row?.id) === sid)
-    if (!previous) return false
+    const intent = {
+      archivedAt: archived ? (previous?.archived_at || new Date().toISOString()) : null,
+      pinnedAt: archived ? null : (previous?.pinned_at ?? null),
+    }
     const token = Symbol(sid)
-    archiveActionsRef.current.set(sid, {
-      token,
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    })
-    projectChatList(rows => withChatArchive(rows, sid, {
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    }))
+    archiveActionsRef.current.set(sid, { token, ...intent })
+    projectChatList(rows => withChatArchive(rows, sid, intent))
     const prior = archiveRequestsRef.current.get(sid) || Promise.resolve()
     const request = prior.catch(() => {}).then(() => (
       archived ? api.chats.archive(sid) : api.chats.unarchive(sid)
@@ -2863,8 +2863,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     chats.filter(row => row?.archived_at).map(row => String(row.id)),
   ), [chats])
   const pinnedChatIds = useMemo(() => new Set(
-    chats.filter(row => row?.pinned_at).map(row => String(row.id)),
-  ), [chats])
+    pins.projectedItems.chats.filter(row => row?.pinned_at).map(row => String(row.id)),
+  ), [pins.projectedItems])
 
   const confirmAppDeleted = useCallback((id) => {
     const sid = String(id)
@@ -4599,27 +4599,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     await refreshChats()
   }
 
-  // The drawer queues its own pin gestures; a pin from another surface is one
-  // intent that the server's pin witness orders against them.
-  async function setChatPinned(chatId, pinned) {
-    const sid = String(chatId)
-    try {
-      const updated = await api.chats.setPinned(sid, pinned)
-      projectChatList(rows => rows.map(row => (
-        String(row?.id) === sid ? { ...row, pinned_at: updated?.pinned_at ?? null } : row
-      )))
-    } catch {
-      notifyShell(`Couldn’t ${pinned ? 'pin' : 'unpin'} that item.`, { variant: 'error' })
-    }
-    refreshChatRows(sid)
-  }
-
   async function renameChat(chatId, title) {
     const saved = await saveDrawerRename(
       () => api.chats.update(chatId, { title }),
       notifyShell,
     )
-    if (saved) refreshChatRows(chatId)
+    if (saved) void chatQueries.list.invalidate(queryClient)
   }
 
   // The sidebar's chat actions, offered on a project page. Each goes through
@@ -4636,15 +4621,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       }
     }
     return {
-      onPin: thenRefreshProjectChats(setChatPinned),
-      onSetArchived: thenRefreshProjectChats(async (chatId, archived) => {
-        // A chat created on this page reaches the drawer list on its next read,
-        // and archiving acts on that list's row.
-        if (!chatsRef.current.some(row => String(row?.id) === String(chatId))) {
-          chatsRef.current = await refreshChats()
-        }
-        return setChatArchived(chatId, archived)
-      }),
+      onPin: thenRefreshProjectChats((chatId, pinned) => pins.pin('chat', chatId, pinned)),
+      onSetArchived: thenRefreshProjectChats(setChatArchived),
       onRename: thenRefreshProjectChats(renameChat),
       onDelete: thenRefreshProjectChats(deleteChat),
     }
@@ -5071,6 +5049,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onSetChatArchived={setChatArchived}
+        onRenameChat={renameChat}
+        pins={pins}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
         onNotice={notifyShell}

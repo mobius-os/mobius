@@ -3,20 +3,23 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 
+// The one rename field shared by drawer rows, launcher cards, and project chat
+// rows. It runs here as a component function so its focus, key, and outside
+// pointer rules are exercised directly.
 const shimPath = fileURLToPath(new URL('../../ChatView/hooks/__tests__/react-hook-shim.mjs', import.meta.url))
 const vite = await createSsrRenderServer({
   plugins: [{
     name: 'rename-test-hooks',
     enforce: 'pre',
     transform(code, id) {
-      if (id.endsWith('/ProjectChatList.jsx')) {
+      if (id.endsWith('/InlineRenameInput.jsx')) {
         return code.replace("from 'react'", `from ${JSON.stringify(shimPath)}`)
       }
     },
   }],
 })
 const { renderHook } = await vite.ssrLoadModule(shimPath)
-const { ProjectChatRename } = await vite.ssrLoadModule('/src/components/Projects/ProjectChatList.jsx')
+const { default: InlineRenameInput } = await vite.ssrLoadModule('/src/components/Drawer/InlineRenameInput.jsx')
 after(() => vite.close())
 
 function editor(t) {
@@ -26,6 +29,10 @@ function editor(t) {
   document.body = {}
   document.documentElement = {}
   document.activeElement = document.body
+  let pointerTarget = 'outside'
+  document.closest = selector => (
+    pointerTarget === 'scrim' && selector === '.drawer-overlay' ? document : null
+  )
   const restoreGlobals = []
   for (const [name, value] of Object.entries({
     document,
@@ -42,8 +49,8 @@ function editor(t) {
   const submitted = []
   let cancelled = 0
   let focusCount = 0
-  const hook = renderHook(() => ProjectChatRename({
-    chat: { title: 'Original' },
+  const hook = renderHook(() => InlineRenameInput({
+    initialValue: 'Original',
     onSubmit: title => submitted.push(title),
     onCancel: () => { cancelled++ },
   }))
@@ -51,12 +58,13 @@ function editor(t) {
     hook.unmount()
     for (const restore of restoreGlobals) restore()
   })
-  const element = hook.result.current.props.children[1]
+  const element = hook.result.current
   const input = {
     value: 'Original',
     isConnected: true,
     focus() { focusCount++; document.activeElement = input },
     select() {},
+    contains: () => pointerTarget === 'inside',
   }
   element.props.ref.current = input
   function flushFrames() {
@@ -65,6 +73,12 @@ function editor(t) {
     for (const callback of pending) callback()
   }
   flushFrames()
+  function dispatch(type, target) {
+    pointerTarget = target
+    const event = new Event(type, { cancelable: true })
+    document.dispatchEvent(event)
+    return event
+  }
   return {
     submitted,
     document,
@@ -79,7 +93,8 @@ function editor(t) {
       element.props.onBlur()
       flushFrames()
     },
-    pointerDown() { document.dispatchEvent(new Event('pointerdown')) },
+    pointerDown(target = 'outside') { return dispatch('pointerdown', target) },
+    click(target = 'outside') { return dispatch('click', target) },
     key(key, nativeEvent = {}) {
       input.value = '  新しい名前  '
       const event = {
@@ -113,34 +128,54 @@ test('ordinary Escape still cancels rename without saving', t => {
   assert.deepEqual(h.submitted, [])
 })
 
-
-test('clicking blank space after editing saves instead of reclaiming focus', t => {
-  const h = editor(t)
-  h.change('Edited title')
-  h.pointerDown()
-  h.blur()
-  assert.deepEqual(h.submitted, ['Edited title'])
-  assert.equal(h.focusCount(), 1)
+test('an unchanged or blank name leaves the item as it was', t => {
+  for (const value of ['  Original ', '   ']) {
+    const h = editor(t)
+    h.change(value)
+    h.blur({})
+    assert.deepEqual(h.submitted, [])
+    assert.equal(h.cancelled(), 1)
+  }
 })
 
-test('menu teardown may recover focus once, but later blank-space clicks save', t => {
+test('a tap outside discards the edit and does not act on what it landed on', t => {
+  const h = editor(t)
+  h.change('Edited title')
+  assert.equal(h.pointerDown().defaultPrevented, true)
+  assert.equal(h.click().defaultPrevented, true)
+  assert.equal(h.cancelled(), 1)
+  h.blur()
+  assert.deepEqual(h.submitted, [])
+  assert.equal(h.click().defaultPrevented, false, 'only the cancelling tap is swallowed')
+})
+
+test('a tap on the drawer scrim discards the edit and still closes the drawer', t => {
+  const h = editor(t)
+  h.change('Edited title')
+  assert.equal(h.pointerDown('scrim').defaultPrevented, false)
+  assert.equal(h.click('scrim').defaultPrevented, false)
+  assert.equal(h.cancelled(), 1)
+  assert.deepEqual(h.submitted, [])
+})
+
+test('menu teardown may recover focus once; a later body blur settles the edit', t => {
   const h = editor(t)
   h.blur()
   assert.equal(h.focusCount(), 2)
   assert.deepEqual(h.submitted, [])
   assert.equal(h.cancelled(), 0)
-  h.change('Edited title')
-  h.pointerDown()
   h.blur(h.document.documentElement)
-  assert.deepEqual(h.submitted, ['Edited title'])
   assert.equal(h.focusCount(), 2)
+  assert.equal(h.cancelled(), 1)
 })
 
-test('the first outside pointer ends focus recovery even without a menu-teardown blur', t => {
+test('a tap inside the field keeps editing and ends the menu focus handoff', t => {
   const h = editor(t)
-  h.pointerDown()
+  h.pointerDown('inside')
+  assert.equal(h.cancelled(), 0)
+  h.change('Edited title')
   h.blur()
-  assert.equal(h.cancelled(), 1)
+  assert.deepEqual(h.submitted, ['Edited title'])
   assert.equal(h.focusCount(), 1)
 })
 
@@ -160,20 +195,11 @@ test('editing without a pointer or key also ends menu focus recovery', t => {
   assert.equal(h.focusCount(), 1)
 })
 
-test('a focusable outside destination settles without stealing its focus', t => {
+test('tabbing to a focusable control saves without stealing its focus', t => {
   const h = editor(t)
   h.change('Edited title')
   const destination = {}
   h.blur(destination)
   assert.deepEqual(h.submitted, ['Edited title'])
   assert.equal(h.document.activeElement, destination)
-})
-
-
-test('focus recovery is consumed by the first menu-teardown blur', t => {
-  const h = editor(t)
-  h.blur()
-  h.blur()
-  assert.equal(h.focusCount(), 2)
-  assert.equal(h.cancelled(), 1)
 })

@@ -32,6 +32,7 @@ const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
+const pinnedItemMutations = readFileSync(new URL('../../Drawer/usePinnedItemMutations.js', import.meta.url), 'utf8')
 const itemMenuGestures = readFileSync(
   new URL('../../Drawer/useItemMenuGestures.js', import.meta.url),
   'utf8',
@@ -982,8 +983,12 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
   assert.match(
+    pinnedItemMutations,
+    /const projectedItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)/,
+  )
+  assert.match(
     drawer,
-    /const projectedDrawerItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
+    /const projectedDrawerItems = pins\.projectedItems[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
   )
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
@@ -1615,6 +1620,19 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('archiving a chat the list has not read yet files it and brings its row in', async () => {
+  const h = harness()
+  h.fullRead({ id: 'other', archived_at: null, pinned_at: null })
+  const pending = h.act('a', true)
+  await tick()
+  assert.deepEqual(h.calls, ['archive'], 'an unseen id still reaches the server')
+  h.requests[0].resolve({ ok: true })
+  assert.equal(await pending, true)
+  assert.deepEqual(h.refreshes, ['a'])
+  assert.equal(h.row.archived_at, 'server-archive')
+  assert.equal(h.notices[0].options.action.label, 'Undo')
 })
 
 test('unreachable archive says so and offers Try again', async () => {

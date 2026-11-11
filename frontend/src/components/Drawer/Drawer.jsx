@@ -46,14 +46,12 @@ import {
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
-import useItemMenuGestures from './useItemMenuGestures.js'
-import { createPinnedMutationQueue } from './pinnedMutationQueue.js'
+import InlineRenameInput from './InlineRenameInput.jsx'
+import useItemMenuGestures, { itemMenuPlacement } from './useItemMenuGestures.js'
 import {
   buildDrawerSections,
   filterInstalledApps,
   findDrawerMenuItem,
-  nextPendingPinnedAt,
-  projectPendingDrawerPins,
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
@@ -145,6 +143,10 @@ export default function Drawer({
   onDeleteChat,
   // Owner filing: (chatId, archived) moves a chat between Recents and Archived.
   onSetChatArchived,
+  // Shell owns chat rename and every pin, so a project page's Chats list acts
+  // through the same paths: (chatId, title), and usePinnedItemMutations().
+  onRenameChat,
+  pins,
   onDeleteApp,
   onDeleteAppData,
   onNotice,
@@ -212,13 +214,6 @@ export default function Drawer({
   )
   const resizeRef = useRef(null)
   const pinnedReorderGenerationRef = useRef(0)
-  const pinMutationGenerationRef = useRef(0)
-  const pinMutationQueueRef = useRef(null)
-  if (pinMutationQueueRef.current === null) {
-    pinMutationQueueRef.current = createPinnedMutationQueue()
-  }
-  const lastPendingPinnedAtRef = useRef(null)
-  const [pendingPins, setPendingPins] = useState(() => new Map())
   const [pinnedOrderHandoff, setPinnedOrderHandoff] = useState(null)
   // Recents and Archived are two lists in one panel, windowed by the same
   // machinery below; each device remembers which one it shows.
@@ -237,12 +232,8 @@ export default function Drawer({
     setListTab(tab)
     writeListTab(tab)
   }, [])
-  const projectedDrawerItems = useMemo(() => projectPendingDrawerPins(
-    chats,
-    apps,
-    projects,
-    pendingPins,
-  ), [chats, apps, projects, pendingPins])
+  // Pins still in flight are already applied; Shell owns pin mutations.
+  const projectedDrawerItems = pins.projectedItems
   const {
     pinned: basePinnedItems,
     recents: allRecents,
@@ -564,7 +555,7 @@ export default function Drawer({
         return
       }
       if (!next || next === previous) return
-      if (kind === 'chat') current.renameChat(id, next)
+      if (kind === 'chat') current.onRenameChat(id, next)
       else if (kind === 'project') current.renameProject(id, next)
       else current.renameApp(id, next)
     },
@@ -578,10 +569,7 @@ export default function Drawer({
       })
     },
     pin(kind, id, next) {
-      const current = rowActionInputsRef.current
-      if (kind === 'chat') current.pinChat(id, next)
-      else if (kind === 'project') current.pinProject(id, next)
-      else current.pinApp(id, next)
+      rowActionInputsRef.current.pins.pin(kind, id, next)
     },
     reorderPinned(orderedKeys) {
       return rowActionInputsRef.current.reorderPinned(orderedKeys)
@@ -677,10 +665,6 @@ export default function Drawer({
     void prefetchChatMessages(queryClient, id)
   }
 
-  async function renameChat(id, title) {
-    if (await saveDrawerRename(() => api.chats.update(id, { title }), onNotice)) refreshChats()
-  }
-
   async function renameApp(id, name) {
     if (await saveDrawerRename(() => api.apps.update(id, { name }), onNotice)) refreshApps()
   }
@@ -722,87 +706,6 @@ export default function Drawer({
     return updated
   }
 
-  function mutatePin(kind, id, pinned, { queryKey, request, recover }) {
-    const generation = ++pinMutationGenerationRef.current
-    const intentWitness = reservePinnedIntent()
-    const itemKey = `${kind}:${id}`
-    const optimisticPinnedAt = pinned
-      ? nextPendingPinnedAt(
-        projectedDrawerItems.chats,
-        projectedDrawerItems.apps,
-        projectedDrawerItems.projects,
-        { previous: lastPendingPinnedAtRef.current },
-      )
-      : null
-    if (optimisticPinnedAt) lastPendingPinnedAtRef.current = optimisticPinnedAt
-    const pending = {
-      generation,
-      pinned,
-      pinnedAt: optimisticPinnedAt,
-    }
-    setPendingPins(current => new Map(current).set(itemKey, pending))
-
-    return pinMutationQueueRef.current.enqueue(async () => {
-      try {
-        const updated = await request(await intentWitness)
-        const persistedPinnedAt = updated?.pinned_at ?? null
-        if (pinned && !persistedPinnedAt) {
-          throw new Error('Pin update returned no canonical rank')
-        }
-
-        // Retire any list request that began before the committed write, then
-        // place the server's exact rank in the canonical cache. The pending
-        // projection keeps the owner's choice visible until this queue item
-        // retires, but never becomes durable ordering truth.
-        try {
-          await queryClient.cancelQueries({ queryKey, exact: true })
-        } catch {}
-        const applyPersistedPin = list => (list || []).map(item => (
-          String(item.id) === String(id)
-            ? { ...item, pinned_at: persistedPinnedAt }
-            : item
-        ))
-        queryClient.setQueryData(queryKey, applyPersistedPin)
-      } catch {
-        onNotice?.(`Couldn’t ${pinned ? 'pin' : 'unpin'} that item.`, { variant: 'error' })
-        // A timeout can race a successful server commit. Recovery is outside
-        // the queue so one unavailable list read cannot block later intent.
-        void Promise.resolve().then(recover).catch(() => {})
-      } finally {
-        setPendingPins(current => {
-          if (current.get(itemKey)?.generation !== generation) return current
-          const next = new Map(current)
-          next.delete(itemKey)
-          return next
-        })
-      }
-    })
-  }
-
-  function pinChat(id, pinned) {
-    return mutatePin('chat', id, pinned, {
-      queryKey: chatQueries.keys.all,
-      request: witness => api.chats.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshChats,
-    })
-  }
-
-  function pinApp(id, pinned) {
-    return mutatePin('app', id, pinned, {
-      queryKey: appQueries.keys.all,
-      request: witness => api.apps.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshApps,
-    })
-  }
-
-  function pinProject(id, pinned) {
-    return mutatePin('project', id, pinned, {
-      queryKey: projectQueries.keys.all,
-      request: witness => api.projects.setPinned(id, pinned, { intentWitness: witness }),
-      recover: () => projectQueries.list.invalidate(queryClient),
-    })
-  }
-
   // Persist a new order for the one combined pinned list (chats, apps, and
   // projects share it). The visible handoff remains authoritative until the
   // ONE atomic server transaction returns exact ranks for all three query
@@ -811,7 +714,7 @@ export default function Drawer({
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
     const generation = ++pinnedReorderGenerationRef.current
     const intentWitness = reservePinnedIntent()
-    return pinMutationQueueRef.current.enqueue(async () => {
+    return pins.enqueue(async () => {
       if (generation !== pinnedReorderGenerationRef.current) return false
       const currentPinned = buildDrawerSections(
         queryClient.getQueryData(chatQueries.keys.all) || chats,
@@ -1207,6 +1110,7 @@ export default function Drawer({
     projects,
     onDeleteChat,
     onSetChatArchived,
+    onRenameChat,
     onDeleteApp,
     onDeleteAppData,
     onNotice,
@@ -1218,12 +1122,9 @@ export default function Drawer({
     resetAppsSurfaceUi,
     setSharingApp,
     overlayCancelRef,
-    renameChat,
     renameApp,
     renameProject,
-    pinChat,
-    pinApp,
-    pinProject,
+    pins,
     reorderPinned,
     prefetchChat,
   }
@@ -1727,7 +1628,6 @@ const DrawerRow = memo(function DrawerRow({
             : 'Manual recovery needed'
   const slug = item.slug
   const wrapRef = useRef(null)
-  const inputRef = useRef(null)
   const itemButtonRef = useRef(null)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
@@ -1740,45 +1640,6 @@ const DrawerRow = memo(function DrawerRow({
     recordItemMenuPointer,
     beginSecondaryMenuPress,
   } = useItemMenuGestures(openItemMenuAt)
-  // Cancel-on-outside-tap during rename. Capture-phase listeners on
-  // pointerdown AND click anywhere outside the rename input normally call
-  // preventDefault + stopPropagation so another row, Settings, or New chat
-  // does NOT fire its own click — the rename just exits. The scrim is the one
-  // exception: it remains a reliable drawer-close surface, so a scrim tap
-  // cancels the rename and continues to Drawer.handleOverlayPointerDown.
-  // Both events are needed: pointerdown prevents focus shift,
-  // click is a separate event that some browsers fire regardless.
-  // `cancelingRef` tells `commitRename` to bail when the impending
-  // blur fires, so the value is discarded rather than committed.
-  // `swallowClickRef` tracks that a cancel just happened so the
-  // click listener knows to swallow the following click event.
-  const cancelingRef = useRef(false)
-  const swallowClickRef = useRef(false)
-  useEffect(() => {
-    if (!renaming) return
-    function onOutsidePointer(e) {
-      const inputEl = inputRef.current
-      if (!inputEl || inputEl.contains(e.target)) return
-      cancelingRef.current = true
-      actions.cancelRename()
-      if (e.target?.closest?.('.drawer-overlay')) return
-      e.preventDefault()
-      e.stopPropagation()
-      swallowClickRef.current = true
-    }
-    function onOutsideClick(e) {
-      if (!swallowClickRef.current) return
-      swallowClickRef.current = false
-      e.preventDefault()
-      e.stopPropagation()
-    }
-    document.addEventListener('pointerdown', onOutsidePointer, true)
-    document.addEventListener('click', onOutsideClick, true)
-    return () => {
-      document.removeEventListener('pointerdown', onOutsidePointer, true)
-      document.removeEventListener('click', onOutsideClick, true)
-    }
-  }, [renaming, actions])
 
   useEffect(() => () => {
     reorderCleanupRef.current?.()
@@ -1800,72 +1661,7 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [drawerRowGesturesRef, id, kind, variant])
 
-  // Autofocus + select-all on rename open so the user can either retype from
-  // scratch or tap into the existing name to edit it. Defer one frame: opening
-  // rename tears down the action menu, and focusing synchronously here races
-  // the browser moving focus off the just-unmounted menu item, which overrides
-  // the editor focus. A frame later the teardown has settled and focus sticks.
-  useEffect(() => {
-    if (!renaming) return undefined
-    const frame = requestAnimationFrame(() => {
-      const input = inputRef.current
-      if (!input) return
-      input.focus()
-      input.select()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [renaming])
-
-  function commitRename() {
-    if (cancelingRef.current) {
-      cancelingRef.current = false
-      return  // outside-tap canceled — discard the value
-    }
-    const value = inputRef.current?.value || ''
-    actions.submitRename(kind, id, label, value.trim())
-  }
-
-  function onRenameBlur() {
-    const input = inputRef.current
-    requestAnimationFrame(() => {
-      const active = document.activeElement
-      if (active === input) return
-      // Closing the action menu calls history.back() to release its Back-stack
-      // entry; that popstate drops focus to <body> a frame later. That is the
-      // app moving focus, not the user leaving the field, so reclaim it instead
-      // of committing — otherwise the just-opened editor blur-commits and
-      // vanishes. A real exit tabs to another control; outside-pointer and
-      // Escape cancel through their own paths (cancelingRef).
-      const focusDropped = !active
-        || active === document.body
-        || active === document.documentElement
-      if (focusDropped && input?.isConnected && !cancelingRef.current) {
-        input.focus()
-        return
-      }
-      commitRename()
-    })
-  }
-
-  function onInputKeyDown(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-    else if (e.key === 'Escape') { e.preventDefault(); actions.cancelRename() }
-  }
-
   // Every app card and drawer row enters the same placed action-menu path.
-  // Pointer gestures use their real release point; keyboard invocations fall
-  // back to the bottom-center of the focused item instead of the event's 0,0.
-  function itemMenuPlacement(point) {
-    const rect = itemButtonRef.current?.getBoundingClientRect()
-    const hasPoint = Number.isFinite(Number(point?.x))
-      && Number.isFinite(Number(point?.y))
-      && (Number(point.x) !== 0 || Number(point.y) !== 0)
-    return {
-      clientX: hasPoint ? Number(point.x) : (rect?.left || 0) + (rect?.width || 0) / 2,
-      clientY: hasPoint ? Number(point.y) : rect?.bottom || 0,
-    }
-  }
-
   function openItemMenuAt(
     point,
     trigger = itemButtonRef.current,
@@ -1875,41 +1671,26 @@ const DrawerRow = memo(function DrawerRow({
       kind,
       id,
       surface,
-      placement: itemMenuPlacement(point),
+      placement: itemMenuPlacement(point, itemButtonRef.current),
       focusFirstAction,
       restoreFocusTarget: trigger,
     })
   }
 
   if (renaming) {
-    if (variant === 'card') {
-      return (
-        <div className="apps-directory__card apps-directory__card--editing">
-          <input
-            ref={inputRef}
-            className="drawer__rename-input"
-            defaultValue={label}
-            maxLength={drawerNameMaxLength(kind)}
-            onKeyDown={onInputKeyDown}
-            onBlur={onRenameBlur}
-            aria-label="Rename app"
-          />
-        </div>
-      )
-    }
-    return (
-      <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>
-        <input
-          ref={inputRef}
-          className="drawer__rename-input"
-          defaultValue={label}
-          maxLength={drawerNameMaxLength(kind)}
-          onKeyDown={onInputKeyDown}
-          onBlur={onRenameBlur}
-          aria-label={`Rename ${kind}`}
-        />
-      </div>
+    const editor = (
+      <InlineRenameInput
+        className="drawer__rename-input"
+        initialValue={label}
+        maxLength={drawerNameMaxLength(kind)}
+        ariaLabel={variant === 'card' ? 'Rename app' : `Rename ${kind}`}
+        onSubmit={next => actions.submitRename(kind, id, label, next)}
+        onCancel={actions.cancelRename}
+      />
     )
+    return variant === 'card'
+      ? <div className="apps-directory__card apps-directory__card--editing">{editor}</div>
+      : <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>{editor}</div>
   }
 
   if (variant === 'card') {

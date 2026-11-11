@@ -11,6 +11,20 @@ function isMenuKey(event) {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')
 }
 
+// Where an item's action menu opens. Pointer gestures use their real release
+// point; keyboard invocations report 0,0 and fall back to the bottom-center of
+// the item they were invoked on.
+export function itemMenuPlacement(point, trigger) {
+  const rect = trigger?.getBoundingClientRect?.()
+  const hasPoint = Number.isFinite(Number(point?.x))
+    && Number.isFinite(Number(point?.y))
+    && (Number(point.x) !== 0 || Number(point.y) !== 0)
+  return {
+    clientX: hasPoint ? Number(point.x) : (rect?.left || 0) + (rect?.width || 0) / 2,
+    clientY: hasPoint ? Number(point.y) : rect?.bottom || 0,
+  }
+}
+
 // `openMenuAt(point, trigger, { focusFirstAction })` places the menu. Pointer
 // gestures pass their real point; keyboard invocations pass the event's 0,0,
 // which the caller replaces with its trigger's position.
