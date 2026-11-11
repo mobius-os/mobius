@@ -49,7 +49,7 @@ KEY_PREFIX = "mbc_"
 # The credits service's account handles, priced-action slugs and UUID ids.
 _HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
-_TOPUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 class CreditsUnavailable(Exception):
@@ -340,7 +340,7 @@ def _path_piece(value: str, pattern: re.Pattern[str]) -> str:
 
 def read_topup(topup_id: str) -> dict:
   """A purchase's state; reading it confirms a paid checkout with Stripe."""
-  return _call("GET", f"topups/{_path_piece(topup_id, _TOPUP_ID)}", _paired())
+  return _call("GET", f"topups/{_path_piece(topup_id, _UUID)}", _paired())
 
 
 def purchase_terms() -> dict:
@@ -388,6 +388,28 @@ def charge(seller: str, app: str, action: str, idempotency_key: str,
     "seller": seller, "app": app, "action": action,
     "idempotency_key": app_scoped_key(payer, idempotency_key),
     "max_price_micro": int(max_price_micro), "buyer_app": buyer_app})
+
+
+def own_sale_receipt(charge_id: str, apps: list[str]) -> dict:
+  """A charge that paid this owner for one of ``apps``: a claimed sale, checked.
+
+  A marketplace app unlocks an item for a buyer on another Möbius only after
+  this confirms the charge id that buyer handed over. The credits service shows
+  any charge to any key holder who has its id, so the scope is applied here: an
+  app sees only payments to this installation's own account for the priced
+  apps it declared, never the owner's own purchases or a sale of another app.
+  The account's handle is read fresh each time, so a renamed account never
+  matches its old name. Reading a receipt moves no money, so its failures keep
+  the service's own refusal.
+  """
+  credentials = _paired()
+  receipt = _call("GET", f"charges/{_path_piece(charge_id, _UUID)}", credentials)
+  seller = receipt.get("seller")
+  if receipt.get("app") in apps and isinstance(seller, str) \
+      and seller == _call("GET", "balance", credentials).get("handle"):
+    return receipt
+  raise CreditsUnavailable(
+    "No charge to you for this app has that id.", status=404, code="charge_not_found")
 
 
 def app_scoped_key(payer: str, idempotency_key: str) -> str:
