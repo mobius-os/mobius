@@ -97,6 +97,11 @@ def test_anyone_who_reviewed_or_commented_can_be_asked_except_who_approved_this_
   assert action(approved, "ask_rereview")["reason"] == "Everyone who reviewed it has already approved this version."
 
 
+def test_a_review_in_a_state_beyond_the_three_is_still_askable_and_names_its_commit():
+  dismissed = {"by": "sam", "state": "DISMISSED", "commit": "h1", "bot": False}
+  assert machine.decide(facts([dismissed]))["askable"] == [{"by": "sam", "reason": "commented_older", "commit": "h1"}]
+
+
 def test_reviewers_without_write_access_can_be_asked_but_never_count_toward_merging():
   def everyone(*items):
     return [{"bot": False, **item} for item in items]

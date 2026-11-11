@@ -30,10 +30,13 @@ The rules, in plain words:
     That words the PR's standing and its highlighted next step (not_ready_to_merge);
     it does not switch your own Merge off: GitHub's merge rules refuse what cannot
     land. The agent's own unattended merge has no tap behind it, so it still asks it.
-  - Only four things stop an action of yours: the PR cannot be read, it is closed or
-    merged, an agent is already working on it, or something sent to GitHub is not
-    confirmed. An action tied to a thing waits for that thing (a draft to send, a
-    person to ask, a result to set aside). Asking works for anyone who reviewed or commented
+  - Only four things stop an action of yours, each where it matters: the PR cannot be
+    read and it is closed or merged (every action); an agent is already working on it
+    (an agent job, Take over, Merge, Open for review, Back to draft, Close); something
+    sent to GitHub is not confirmed (an agent job, Take over, Merge). Ask for re-review,
+    Ask for approval and Request review check only the first, since a note or a review
+    request races nothing. An action tied to a thing waits for that thing (a draft to
+    send, a person to ask, a result to set aside). Asking works for anyone who reviewed or commented
     and has not approved this version; the sheet ticks the people each ask is meant for.
     Request review is the one ask that waits for nobody: it names anyone, reviewed or not.
     Taking over someone else's PR stays for maintainers: it is Contribute's own rule,
@@ -157,7 +160,8 @@ def _askable(people: list[dict], standing: dict, others: list[dict], head) -> li
     if has(standing["approved_at_head"], name):
       continue
     reason, state = next(((why, kind) for why, kind, names in reasons if has(names, name)), ("commented_older", "COMMENTED"))
-    review = next((r for r in people if _same(r.get("by"), name) and r.get("state") == state), None)
+    theirs = [r for r in people if _same(r.get("by"), name)]
+    review = next((r for r in theirs if r.get("state") == state), theirs[0] if theirs else None)  # a state beyond the three (a dismissed one) still names its commit
     askable.append({"by": name, "reason": reason, "commit": (review or {}).get("commit") or ""})
   for review in others:
     if review.get("state") == "APPROVED" and review.get("commit") == head:
