@@ -31,6 +31,11 @@ class RunnerResult(TypedDict):
   provider_refusal: NotRequired[bool]
 
 
+def prompt_not_sent_result(session_id: str | None) -> RunnerResult:
+  """The result of a turn superseded before its provider received the prompt."""
+  return {"session_id": session_id, "cost_usd": None, "error": None, "prompt_sent": False}
+
+
 class ChatEvent(TypedDict):
   """Minimum event shape shared by all chat stream events."""
 

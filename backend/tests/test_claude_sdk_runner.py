@@ -1398,6 +1398,7 @@ async def test_claude_interrupt_marks_owner_request_before_sdk_await():
       observed.append(handle.interrupt_requested)
 
   handle = ActiveClaudeClient(_Client(), chat_id="claude-owned-stop")
+  handle.mark_connected()
   task = asyncio.create_task(handle.interrupt())
   while not observed:
     await asyncio.sleep(0)
@@ -3863,6 +3864,138 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
   await _run_turn("answer-check-card-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_stop_while_claude_turn_prepares_never_sends_the_prompt(monkeypatch):
+  """Stop before registration found no handle; the stale turn must not run unseen."""
+  from app import providers
+
+  gate = asyncio.Event()
+  entered = asyncio.Event()
+
+  async def slow_effort_lookup(_data_dir, _model):
+    entered.set()
+    await gate.wait()
+    return True
+
+  monkeypatch.setattr(providers, "model_supports_effort", slow_effort_lookup)
+  clients = _install_fake_client(monkeypatch)
+  chat_id = "stop-during-claude-startup"
+  run_gen = registry.bump_generation(chat_id)
+  registry.mark_starting(chat_id)
+  try:
+    task = asyncio.create_task(claude_sdk_runner.run_claude_sdk_turn(
+      user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+      chat_id=chat_id, skill_text="system", bc=_ChatBus(),
+      agent_settings={"model": "claude-opus-4-8"}, run_generation=run_gen,
+    ))
+    await entered.wait()
+    # What Stop does to the runner registry while no handle is registered yet:
+    # supersede the run's generation and find nothing to interrupt.
+    assert registry.get_handles(chat_id) == []
+    registry.bump_generation(chat_id)
+    gate.set()
+    result = await task
+
+    assert result["prompt_sent"] is False
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+    assert all(not client.queries for client in clients)
+  finally:
+    registry.discard_starting(chat_id)
+    registry.forget(chat_id)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_claude_connects_ends_the_turn_before_its_prompt(monkeypatch):
+  connecting = asyncio.Event()
+  release = asyncio.Event()
+
+  class _SlowConnect(_FakeClient):
+    async def connect(self):
+      connecting.set()
+      await release.wait()
+
+  clients = _install_fake_client(monkeypatch, _SlowConnect)
+  chat_id = "stop-during-claude-connect"
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    task = asyncio.create_task(claude_sdk_runner.run_claude_sdk_turn(
+      user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+      chat_id=chat_id, skill_text="system", bc=_ChatBus(), run_generation=run_gen,
+    ))
+    await connecting.wait()
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is not None
+    registry.bump_generation(chat_id)
+    release.set()
+    result = await task
+
+    assert result["prompt_sent"] is False
+    assert clients[0].queries == []
+    assert clients[0].disconnected is True
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+  finally:
+    registry.forget(chat_id)
+
+
+@pytest.mark.asyncio
+async def test_stop_that_finds_the_handle_while_connecting_ends_the_turn_cleanly(monkeypatch):
+  """Stop reaching the handle mid-connect must not need the hard-kill path."""
+  connecting = asyncio.Event()
+  release = asyncio.Event()
+
+  class _SdkLikeConnect(_FakeClient):
+    connected = False
+
+    async def connect(self):
+      connecting.set()
+      await release.wait()
+      self.connected = True
+
+    async def interrupt(self):
+      if not self.connected:
+        # What the real SDK raises before connect() returns.
+        raise RuntimeError("Not connected. Call connect() first.")
+      await super().interrupt()
+
+  clients = _install_fake_client(monkeypatch, _SdkLikeConnect)
+  chat_id = "stop-handle-during-claude-connect"
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    task = asyncio.create_task(claude_sdk_runner.run_claude_sdk_turn(
+      user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+      chat_id=chat_id, skill_text="system", bc=_ChatBus(), run_generation=run_gen,
+    ))
+    await connecting.wait()
+    handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
+    registry.bump_generation(chat_id)
+    stop = asyncio.create_task(handle.stop())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await stop is True
+    result = await task
+    assert result["prompt_sent"] is False
+    assert clients[0].queries == []
+    assert clients[0].disconnected is True
+  finally:
+    registry.forget(chat_id)
+
+
+def test_registry_refuses_a_runner_whose_run_was_superseded():
+  class _Handle:
+    chat_id = "superseded-registration"
+    kind = RunnerKind.CLAUDE_SDK
+
+  run_gen = registry.bump_generation(_Handle.chat_id)
+  try:
+    registry.bump_generation(_Handle.chat_id)
+    assert registry.register(_Handle(), run_generation=run_gen) is False
+    assert registry.get_handle(_Handle.chat_id, RunnerKind.CLAUDE_SDK) is None
+    assert registry.register(_Handle(), run_generation=run_gen + 1) is True
+  finally:
+    registry.unregister(_Handle.chat_id, RunnerKind.CLAUDE_SDK)
+    registry.forget(_Handle.chat_id)
 
 
 @pytest.mark.asyncio

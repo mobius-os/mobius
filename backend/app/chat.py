@@ -154,6 +154,7 @@ from app.providers import (
   registered_provider,
 )
 from app.runner_registry import registry
+from app.runtime_types import prompt_not_sent_result
 from app.session_links import resume_retired
 
 
@@ -6764,6 +6765,7 @@ async def _run_chat_impl_with_db(
           helper_host_key=helper_host_key,
           data_dir=settings.data_dir,
           goal_brief_refresh=goal_brief_refresh,
+          run_generation=run_gen,
         )
       else:
         async def claude_turn(*, user_message: str, fork_from: dict | None):
@@ -6782,6 +6784,7 @@ async def _run_chat_impl_with_db(
             coordination_enabled=coordination_tools_enabled,
             goal_brief_refresh=goal_brief_refresh,
             fork_from=fork_from,
+            run_generation=run_gen,
           )
 
         runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)
@@ -6801,7 +6804,7 @@ async def _run_chat_impl_with_db(
           if _run_generation_superseded(chat_id, run_gen):
             # Stopped between the attempts: end as stopped, without a retry.
             _log_superseded_run(chat_id, "claude-branch-fork-retry")
-            runner_result = {"session_id": None, "cost_usd": None, "error": None, "prompt_sent": False}
+            runner_result = prompt_not_sent_result(None)
           else:
             runner_result = await claude_turn(
               user_message=with_resumed_context(user_message, resumed_context_fallback),
