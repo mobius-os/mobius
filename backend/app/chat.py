@@ -663,7 +663,7 @@ async def _record_run_metrics(
   cost_usd: float | None,
   usage: dict | None,
   cost_scope: str = "turn",
-  resumed_session_id: str | None = None,
+  session_start: dict | None = None,
 ) -> dict | None:
   """Best-effort durable accounting for one provider run.
 
@@ -691,7 +691,7 @@ async def _record_run_metrics(
       cost_usd=cost_usd,
       usage=usage,
       cost_scope=cost_scope,
-      resumed_session_id=resumed_session_id,
+      session_start=session_start,
     )))
   except Exception:
     _get_logger().warning(
@@ -6773,7 +6773,7 @@ async def _run_chat_impl_with_db(
         cost_usd=runner_result.get("cost_usd"),
         usage=usage_metrics,
         cost_scope=runner_result.get("cost_scope", "turn"),
-        resumed_session_id=claude_session_id,
+        session_start=runner_result.get("session_start"),
       )
       if runner_result.get("cost_scope") == "session":
         runner_result["cost_usd"] = (recorded_metrics or {}).get("cost_usd")

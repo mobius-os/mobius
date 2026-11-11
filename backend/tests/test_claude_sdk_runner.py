@@ -1972,16 +1972,37 @@ async def test_a_long_system_prompt_reaches_claude_whole_without_a_long_argument
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_id,fork_from,start", [
+  (None, None, {"kind": "fresh"}),
+  ("sess-1", None, {"kind": "resumed", "session_id": "sess-1"}),
+  (None, {"session_id": "source", "at": "turn-7"},
+   {"kind": "forked", "session_id": "source"}),
+])
+async def test_claude_cost_reports_the_session_it_restored(
+  monkeypatch, session_id, fork_from, start,
+):
+  # Claude's cost is a session total that includes whatever a resume or fork
+  # restored; accounting needs to know which session that was.
+  _install_fake_client(monkeypatch)
+
+  result = await _run_turn(
+    "chat-cost-start", bc=_Bus(), session_id=session_id, fork_from=fork_from,
+  )
+
+  assert result["cost_scope"] == "session"
+  assert result["session_start"] == start
+
+
+@pytest.mark.asyncio
 async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   clients = _install_fake_client(monkeypatch)
 
-  result = await _run_turn(
+  await _run_turn(
     "chat-thinking", bc=_Bus(), cwd="/data",
     agent_settings={"model": "claude-opus-4-8", "effort": "high"},
   )
 
   options = clients[0].options
-  assert result["cost_scope"] == "session"
   assert options.model == "claude-opus-4-8"
   assert options.effort == "high"
   # The Claude runner appends its provider-authored concise register on top of

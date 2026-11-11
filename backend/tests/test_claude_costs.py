@@ -51,31 +51,35 @@ def test_snapshot_requires_raw_evidence_and_rejects_crash_regression():
   assert session_cost_snapshot(usage, 0) is None
 
 
-def _record(run_id, total, *, session="session", resumed="session", usage=None):
+def _record(run_id, total, usage=None, *, session="session", start=None, chat="cost-chat"):
   return get_writer().submit(RecordRunMetrics(
-    chat_id="cost-chat", run_token=run_id, provider_session_id=session,
-    cost_usd=total, cost_scope="session", resumed_session_id=resumed, usage=usage,
+    chat_id=chat, run_token=run_id, provider_session_id=session,
+    cost_usd=total, cost_scope="session", usage=usage,
+    session_start=start or {"kind": "resumed", "session_id": session},
   )).result(timeout=5)["cost_usd"]
+
+
+FRESH = {"kind": "fresh"}
 
 
 def test_writer_subtracts_snapshot_once_and_preserves_source():
   _seed_chat("cost-chat")
   _seed_run("cost-1", "cost-chat")
-  assert _record("cost-1", 10, resumed=None, usage=_usage(10, 10, 10)) == 10
+  assert _record("cost-1", 10, _usage(10, 10, 10), start=FRESH) == 10
   _seed_run("cost-2", "cost-chat")
   usage = _usage(13, 18, 8)
-  assert _record("cost-2", 13, usage=usage) == 3
-  assert _record("cost-2", 13, usage=usage) == 3  # Duplicate acknowledgement.
+  assert _record("cost-2", 13, usage) == 3
+  assert _record("cost-2", 13, usage) == 3  # Duplicate acknowledgement.
   assert _record("cost-2", 13) == 3  # Missing usage must not erase earlier tokens.
   _seed_run("cost-3", "cost-chat")
-  assert _record("cost-3", 13, usage=_usage(13, 18, 0)) == 0
+  assert _record("cost-3", 13, _usage(13, 18, 0)) == 0
   _seed_run("cost-4", "cost-chat")
-  assert _record("cost-4", 2, session="new-session") == 2
+  assert _record("cost-4", 2, _usage(2, 2, 2), session="new-session", start=FRESH) == 2
   # Resuming an earlier session must not use the latest *different* session.
   _seed_run("cost-5", "cost-chat")
-  assert _record("cost-5", 14) == 1
+  assert _record("cost-5", 14, _usage(14, 20, 2)) == 1
   # A delayed repeat of an old result must not subtract a successor.
-  assert _record("cost-2", 13, usage=usage) == 3
+  assert _record("cost-2", 13, usage) == 3
   with SessionLocal() as db:
     row = db.get(models.ChatRun, "cost-2")
     assert row.cost_usd == 3
@@ -90,19 +94,28 @@ def test_writer_subtracts_snapshot_once_and_preserves_source():
 def test_writer_unknown_resume_and_failed_gap_do_not_guess():
   _seed_chat("cost-chat")
   _seed_run("unknown-1", "cost-chat")
-  assert _record("unknown-1", 10) is None
+  assert _record("unknown-1", 10, _usage(10, 10, 10)) is None
   # Its raw snapshot is still a valid starting point for the next result.
   _seed_run("known-2", "cost-chat")
-  assert _record("known-2", 13) == 3
+  assert _record("known-2", 13, _usage(13, 18, 8)) == 3
   _seed_run("failed-3", "cost-chat")
   with SessionLocal() as db:
     row = db.get(models.ChatRun, "failed-3")
     row.provider_execution_admitted = True
     db.commit()  # Provider died without a cost result or even a session id.
   _seed_run("unknown-4", "cost-chat")
-  assert _record("unknown-4", 15) is None
+  assert _record("unknown-4", 15, _usage(15, 20, 2)) is None
   _seed_run("known-5", "cost-chat")
-  assert _record("known-5", 16) == 1
+  assert _record("known-5", 16, _usage(16, 21, 1)) == 1
+
+
+def test_writer_unknown_session_start_does_not_guess():
+  _seed_chat("cost-chat")
+  _seed_run("no-start", "cost-chat")
+  assert get_writer().submit(RecordRunMetrics(
+    chat_id="cost-chat", run_token="no-start", provider_session_id="session",
+    cost_usd=10, cost_scope="session", usage=_usage(10, 10, 10),
+  )).result(timeout=5)["cost_usd"] is None
 
 
 def test_writer_can_use_verified_pre_repair_snapshot():
@@ -113,36 +126,94 @@ def test_writer_can_use_verified_pre_repair_snapshot():
     cost_usd=10, usage=_usage(10, 10, 10),
   )).result(timeout=5)
   _seed_run("current-2", "cost-chat")
-  assert _record("current-2", 13) == 3
+  assert _record("current-2", 13, _usage(13, 18, 8)) == 3
 
 
 def test_writer_does_not_use_a_crash_zero_as_a_later_baseline():
   _seed_chat("cost-chat")
   _seed_run("before-crash", "cost-chat")
-  assert _record("before-crash", 10, resumed=None) == 10
+  assert _record("before-crash", 10, _usage(10, 10, 10), start=FRESH) == 10
   _seed_run("crash-zero", "cost-chat")
-  assert _record("crash-zero", 0) is None
+  assert _record("crash-zero", 0, _usage(0, 0, 0)) is None
   _seed_run("after-crash", "cost-chat")
-  assert _record("after-crash", 13) is None
+  assert _record("after-crash", 13, _usage(13, 14, 4)) is None
   _seed_run("measured-again", "cost-chat")
-  assert _record("measured-again", 14) == 1
+  assert _record("measured-again", 14, _usage(14, 16, 2)) == 1
+
+
+def test_writer_leaves_a_restore_older_than_the_last_result_unknown():
+  # The CLI saves session totals only on a normal exit. If it was killed after
+  # reporting 13, the next resume restores 10 and reports 10 + 5 = 15.
+  _seed_chat("cost-chat")
+  _seed_run("saved", "cost-chat")
+  assert _record("saved", 10, _usage(10, 10, 10), start=FRESH) == 10
+  _seed_run("killed", "cost-chat")
+  assert _record("killed", 13, _usage(13, 18, 8)) == 3
+  _seed_run("restored-older", "cost-chat")
+  assert _record("restored-older", 15, _usage(15, 15, 5)) is None  # Not 2.
+  # The reported total is still what a normal exit saves for the next resume.
+  _seed_run("after", "cost-chat")
+  assert _record("after", 16, _usage(16, 17, 2)) == 1
+
+
+def test_writer_accepts_subagent_and_background_spend_beyond_turn_usage():
+  _seed_chat("cost-chat")
+  _seed_run("first", "cost-chat")
+  assert _record("first", 10, _usage(10, 10, 10), start=FRESH) == 10
+  _seed_run("with-task", "cost-chat")
+  usage = _usage(14, 30, 8)  # A subagent's requests are in model_usage only.
+  usage["provider_model_usage"]["haiku"] = _usage(1, 4, 4)["provider_model_usage"]["opus"]
+  usage["provider_model_usage"]["opus"]["costUSD"] = 13
+  assert _record("with-task", 14, usage) == 4
+
+
+def test_branch_first_turn_subtracts_its_source_session_snapshot():
+  # A branch forks the source session, and Claude restores that session's
+  # totals on the branch's first turn, which has no session of its own yet.
+  _seed_chat("cost-chat")
+  _seed_run("parent-1", "cost-chat")
+  assert _record("parent-1", 10, _usage(10, 10, 10), start=FRESH) == 10
+  _seed_run("parent-2", "cost-chat")
+  assert _record("parent-2", 13, _usage(13, 18, 8)) == 3
+  _seed_chat("branch-chat")
+  _seed_run("branch-1", "branch-chat")
+  fork = {"kind": "forked", "session_id": "session"}
+  assert _record(
+    "branch-1", 14, _usage(14, 20, 2), session="branch-session",
+    start=fork, chat="branch-chat",
+  ) == 1
+  _seed_run("branch-2", "branch-chat")
+  assert _record(
+    "branch-2", 16, _usage(16, 23, 3), session="branch-session",
+    chat="branch-chat",
+  ) == 2
+  # A fork whose source has no recorded snapshot stays unknown.
+  _seed_chat("orphan-chat")
+  _seed_run("orphan-1", "orphan-chat")
+  assert _record(
+    "orphan-1", 14, _usage(14, 20, 2), session="orphan-session",
+    start={"kind": "forked", "session_id": "missing"}, chat="orphan-chat",
+  ) is None
 
 
 def test_chat_usage_sums_corrected_turns_not_session_snapshots(client, auth, chat):
-  for run_id, total, resumed in (("usage-1", 10, None), ("usage-2", 13, "session")):
+  for run_id, total, start in (
+    ("usage-1", 10, FRESH),
+    ("usage-2", 13, {"kind": "resumed", "session_id": "session"}),
+  ):
     _seed_run(run_id, chat.id)
     get_writer().submit(RecordRunMetrics(
       chat_id=chat.id, run_token=run_id, provider_session_id="session",
-      cost_usd=total, cost_scope="session", resumed_session_id=resumed,
+      cost_usd=total, cost_scope="session", session_start=start,
     )).result(timeout=5)
   response = client.get(f"/api/chats/{chat.id}/usage", headers=auth)
   assert response.status_code == 200
   payload = response.json()
-  assert payload["totals"]["cost_usd"] == 13
+  assert payload["totals"]["cost_usd"] == 10  # The resume has no counters to verify.
   assert payload["coverage"]["runs_with_usage"] == 0  # Cost metadata isn't token usage.
   assert payload["coverage"]["runs_by_quality"]["missing"] == 2
   assert [run["usage_quality"] for run in payload["runs"]] == ["missing", "missing"]
-  assert [run["cost_usd"] for run in payload["runs"]] == [10, 3]
+  assert [run["cost_usd"] for run in payload["runs"]] == [10, None]
   assert [run["usage"]["provider_cost"]["total_usd"]
           for run in payload["runs"]] == [10, 13]
 
@@ -256,3 +327,36 @@ def test_historical_repair_requires_consistent_other_model_evidence(tmp_path, au
   _repair_claude_session_costs(eng)
   with eng.connect() as conn:
     assert conn.execute(text("SELECT cost_usd, usage_json FROM chat_runs ORDER BY started_at")).all() == rows
+
+
+def _with_haiku(usage, tokens, cost=0):
+  usage["provider_model_usage"]["haiku"] = _usage(cost, tokens, 0)["provider_model_usage"]["opus"]
+  usage["provider_model_usage"]["opus"]["costUSD"] -= cost
+  return usage
+
+
+def test_historical_repair_follows_a_proven_cumulative_session(tmp_path):
+  # Once a row proves the session cumulative, later rows need only consistent
+  # counters: subagent requests add to model_usage beyond the turn's own usage,
+  # and Claude Code's background Haiku calls move another model's counters.
+  records = [
+    ("proven", 10, _with_haiku(_usage(10, 10, 10), 2)),
+    ("proven", 13, _with_haiku(_usage(13, 18, 8), 2)),  # Exact proof.
+    ("proven", 17, _with_haiku(_usage(17, 30, 6), 2)),  # Subagent spend.
+    ("proven", 19, _with_haiku(_usage(19, 34, 4), 5, cost=1)),  # Haiku moved.
+    ("proven", 20, _with_haiku(_usage(20, 34, 9), 5, cost=1)),  # Does not cover.
+    ("proven", 22, _with_haiku(_usage(22, 30, 2), 5, cost=1)),  # Counter regressed.
+    # The same later rows without an earlier proof keep their totals.
+    ("unproven", 10, _with_haiku(_usage(10, 10, 10), 2)),
+    ("unproven", 17, _with_haiku(_usage(17, 30, 6), 2)),
+    ("unproven", 19, _with_haiku(_usage(19, 34, 4), 5, cost=1)),
+  ]
+  eng = _migration_database(tmp_path, records)
+  _repair_claude_session_costs(eng)
+  with eng.connect() as conn:
+    rows = conn.execute(text("SELECT cost_usd FROM chat_runs ORDER BY started_at")).all()
+  assert [row.cost_usd for row in rows] == [10, 3, 4, 2, 20, 22, 10, 17, 19]
+  _repair_claude_session_costs(eng)
+  with eng.connect() as conn:
+    again = conn.execute(text("SELECT cost_usd FROM chat_runs ORDER BY started_at")).all()
+  assert again == rows

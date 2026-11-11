@@ -114,6 +114,6 @@
     "0101_claim_revocation_outbox": "324d6cf035b194205fb5b8ef9cb3d1e66c24a22aa74bd76f4487a9eb59a12324",
     "0102_work_claim_text": "6322e94d3f9970fb6fc6c11966c7182ad3e9794a203f0b0ef7b93532ef5c9ccd",
     "0103_shared_peer_note_bodies": "f713001c5f0a692bb03b4846d3ad2dfae901f2664d28360cef7c8227521f410e",
-    "0104_claude_session_costs": "70fdceb77541dcda0cbee2d450ddc89b8593d5227dffc5096e6400f6bbb6015c"
+    "0104_claude_session_costs": "f53ee15b9dea71ab2f84383e3c21ed04888dadf6d6b270a5cd0bf519f32f5481"
   }
 }

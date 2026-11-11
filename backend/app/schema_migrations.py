@@ -7118,6 +7118,9 @@ def _add_shared_peer_note_bodies(eng) -> None:
 def _repair_claude_session_costs(eng) -> None:
   """Repair only historical costs whose token snapshots prove their scope.
 
+  A row proves it when one model's counters advanced by exactly the turn's
+  usage while the rest stayed put. Later rows of a proven session follow it
+  when every counter and the total are non-decreasing and cover the turn.
   No transcript changes or provider-file reads. Preserve original totals and
   a labelled baseline in usage_json; ambiguous or old per-call data stays as is.
   The marker makes retry after a crash before the ledger insert idempotent.
@@ -7185,6 +7188,42 @@ def _repair_claude_session_costs(eng) -> None:
         return None
     return "zero" if per_call else None
 
+  def count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+  def counters(usage):
+    models = (usage or {}).get("provider_model_usage")
+    if not isinstance(models, dict) or not models:
+      return None
+    result = {}
+    for name, model in models.items():
+      values = tuple(count(model.get(key)) if isinstance(model, dict) else None
+                     for key, _ in fields)
+      if None in values:
+        return None
+      result[name] = values
+    return result
+
+  def covers_turn(usage, previous_usage):
+    # Subagent requests and Claude Code's background calls add to model_usage
+    # but not to the turn's main-loop usage, so cumulative counters only need
+    # to cover it. Same rule as the live writer (app.claude_costs).
+    now, before = counters(usage), counters(previous_usage)
+    turn = usage.get("provider_usage")
+    if now is None or before is None or not isinstance(turn, dict):
+      return False
+    own = tuple(count(turn.get(raw)) for _, raw in fields)
+    if None in own or any(
+      name not in now or any(a < b for a, b in zip(now[name], values))
+      for name, values in before.items()
+    ):
+      return False
+    zero = (0,) * len(fields)
+    return any(
+      all(a - b >= spent for a, b, spent in zip(values, before.get(name, zero), own))
+      for name, values in now.items()
+    )
+
   if "chat_runs" not in sa_inspect(eng).get_table_names():
     return
   columns = {column["name"] for column in sa_inspect(eng).get_columns("chat_runs")}
@@ -7196,6 +7235,9 @@ def _repair_claude_session_costs(eng) -> None:
   previous_key = None
   previous_usage = None
   previous_total = None
+  # The CLI only upgrades forward, so a session proven cumulative never goes
+  # back to per-call totals. Later rows there need only consistent counters.
+  proven_cumulative = False
   with eng.begin() as conn:
     rows = conn.execute(text(
       "SELECT id, chat_id, provider_session_id, cost_usd, usage_json "
@@ -7208,6 +7250,7 @@ def _repair_claude_session_costs(eng) -> None:
       if key != previous_key:
         previous_usage = previous_total = None
         previous_key = key
+        proven_cumulative = False
       try:
         usage = json.loads(row["usage_json"] or "null")
       except (TypeError, ValueError):
@@ -7217,6 +7260,8 @@ def _repair_claude_session_costs(eng) -> None:
         continue
       total = snapshot(usage, row["cost_usd"])
       basis = baseline_basis(usage, previous_usage)
+      if basis is None and proven_cumulative and covers_turn(usage, previous_usage):
+        basis = "previous"
       if total is not None and "provider_cost" not in usage:
         baseline = previous_total if basis == "previous" else 0.0
         cost = (max(0.0, total - baseline) if basis is not None
@@ -7230,6 +7275,7 @@ def _repair_claude_session_costs(eng) -> None:
             "UPDATE chat_runs SET cost_usd = :cost, usage_json = :usage "
             "WHERE id = :id"
           ), {"id": row["id"], "cost": cost, "usage": json.dumps(usage)})
+          proven_cumulative = proven_cumulative or basis == "previous"
       previous_usage, previous_total = usage, total
 
 

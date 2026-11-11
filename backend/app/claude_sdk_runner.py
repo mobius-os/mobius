@@ -1954,7 +1954,14 @@ async def run_claude_sdk_turn(
               teardown.finish()
 
   result = await _run_once()
-  # CLI 2.1.277+ restores the earlier session's cost on resume. The durable
-  # metrics owner has the prior snapshot and derives the additive turn cost.
+  # CLI 2.1.277+ restores the earlier session's cost on resume, and the source
+  # session's on a fork. The durable metrics owner has the prior snapshot and
+  # derives the additive turn cost from how this session started.
   result["cost_scope"] = "session"
+  if session_id is not None:
+    result["session_start"] = {"kind": "resumed", "session_id": session_id}
+  elif fork_from is not None:
+    result["session_start"] = {"kind": "forked", "session_id": fork_from["session_id"]}
+  else:
+    result["session_start"] = {"kind": "fresh"}
   return result
