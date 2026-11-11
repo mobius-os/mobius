@@ -56,7 +56,6 @@ BOOTSTRAP_INTEGRATIONS_MANIFEST_URL = _MANIFEST_URL.format(
 BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = _MANIFEST_URL.format(
   repo="app-connections",
 )
-BOOTSTRAP_IDENTITY_MANIFEST_URL = _MANIFEST_URL.format(repo="app-mobius-you")
 BOOTSTRAP_SOCIAL_MANIFEST_URL = _MANIFEST_URL.format(repo="app-social")
 
 
@@ -95,11 +94,6 @@ _CORE_BOOTSTRAP_APPS = (
     predecessor_manifest_url=(
       BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL
     ),
-  ),
-  # Möbius · You is useful on every new deployment. Managed owners arrive
-  # signed in; local owners see the same app with account linking optional.
-  _BootstrapApp(
-    "identity", "Möbius · You", BOOTSTRAP_IDENTITY_MANIFEST_URL, False,
   ),
   # Social (federated community board + direct messages) ships on every
   # deployment. Installing it does NOT join the public community: browsing is

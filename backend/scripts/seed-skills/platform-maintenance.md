@@ -49,6 +49,22 @@ Review the exact changed paths and use the smallest matching action:
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations do not activate a live install and do not require an immediate rebuild. They survive container replacement only through the release that contains them; see Dependencies below. |
 
+### Verify activation without confusing image and source versions
+
+`mapi /api/platform/status` names the remaining activation in
+`activation.required_actions`, `needs_restart`, and `unfinished_update`.
+Its `current_build_sha` is the immutable image revision, not the source the
+running server imported. `served_sha` identifies that served source; local
+reconciliation normally makes these revisions different. A server restart
+cannot change the image revision, so never request one just to make these
+values match. `image_build_applied` says whether the served source, including
+committed changes that need no restart, contains the image revision (`null`
+for an unstamped image); status and `mapi /api/version` report the same
+answer. `false` with no update offered after a check means the image was built
+outside the official releases; nothing needs doing. `/api/version` also reports
+`serving_source` and frontend freshness. Use those owning facts to verify a
+ready boot.
+
 ### Dependencies — live first, durable second
 
 1. Run `sudo -n true` once. Use `sudo` for apt or other system/global install
@@ -134,6 +150,24 @@ raw stdout is not stored anywhere an agent can read.
 When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and
 stacks. It occupies one worker for the window, and one profile runs at a time.
+
+Slowness is often bursty and gone before a profile starts. For that, turn on
+the stall log: add `"stall_log": true` to `/data/tracing.json` (the opt-in
+tracing file; it needs no collector or extra packages and works without
+`"enabled"`) and restart. It then writes `/data/logs/stalls.jsonl` (one
+rotation to `.jsonl.1`): requests slower to start responding than a long
+database hold (`DB_CHECKOUT_WARN_SECONDS`, 2 s by default, counted from
+arrival so a slow upload counts), event-loop stalls past asyncio's
+slow-callback threshold (0.1 s), and long database holds. Routes that wait on
+purpose (long-polls, waits) also appear as slow requests. An event that caught
+busy threads links by `snapshot` to a line showing what they were doing at
+that moment. `no_busy_threads: true` marks a late request while no thread was
+busy: it was waiting, on an upstream, the client, or a lock, queue or future
+inside the server, not on CPU or a blocked event loop. `false` only means some
+thread was not in a known wait; it is not proof of CPU work. Records name route templates and
+code locations, never concrete paths or query strings; `<unmatched>` means no
+API route matched or routing had not run yet. Read it before reproducing a
+reported slowdown.
 
 Exercising owner-input cards programmatically (for a test, never to answer for
 the owner): while a card is open, posting a chat message returns 409

@@ -108,6 +108,10 @@ IMAGE_PLATFORM_BOOT_MODULES = (
 )
 
 
+# The self-hosted helper's migration marker: a release that raises the protocol
+# it holds needs the host installer run again (see deployment_control).
+HOST_HELPER_REQUIREMENT_PATH = "deployment/self-hosted-helper.required"
+
 # Ordered first-match rules.  Narrow baked/deployment inputs precede the broad
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
@@ -121,7 +125,7 @@ _RULES = (
     "host_helper_migration",
     ActivationLevel.HOST_MAINTENANCE,
     "This release requires a newer self-hosted replacement helper.",
-    exact=("deployment/self-hosted-helper.required",),
+    exact=(HOST_HELPER_REQUIREMENT_PATH,),
     deployment="self_hosted",
   ),
   _Rule(

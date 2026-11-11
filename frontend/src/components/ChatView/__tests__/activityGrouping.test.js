@@ -1,6 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { foldAppActivityOperations, groupActivityRuns } from '../activityGrouping.js'
+import {
+  foldAppActivityOperations,
+  groupActivityRuns,
+  joinRoutineToActivity,
+} from '../activityGrouping.js'
+import { activityCollapsedLabel } from '../groupBlocks.js'
+import { mergeAdjacentCompactActivityEntries } from '../activityPosition.js'
 
 const entry = (type, extra = {}) => ({ item: { type, ...extra } })
 
@@ -100,4 +106,105 @@ test('pages of one app operation render as one row listing every page', () => {
     { single: prose },
     { group: [last] },
   ])
+})
+
+const routineSave = (extra = {}) => entry('tool', {
+  tool: 'mcp__mobius_control__checkpoint_chat', status: 'done', routine: true, ...extra,
+})
+
+test('a settled routine save joins the reply\'s earlier activity line', () => {
+  const command = { ...entry('tool', { tool: 'Bash', status: 'done' }), idx: 0 }
+  const answer = { ...entry('text', { content: 'Done.' }), idx: 1 }
+  const save = { ...routineSave(), idx: 2 }
+  const capture = {
+    ...entry('tool', {
+      tool: 'mcp__mobius_control__notes_remember', status: 'done', routine: true,
+      app_activity: { status: 'succeeded', app_slug: 'notes', label: 'Saved' },
+    }),
+    idx: 3,
+  }
+
+  const nodes = groupActivityRuns(joinRoutineToActivity([command, answer, save, capture]))
+  assert.deepEqual(nodes, [{ group: [command, save, capture] }, { single: answer }])
+  assert.equal(activityCollapsedLabel(nodes[0].group), 'Ran a command')
+})
+
+test('a saved reply\'s compact routine block joins its earlier compact line', () => {
+  const work = entry('activity', { entries: [entry('tool', { tool: 'Bash', status: 'done' })], tool_count: 1 })
+  const answer = entry('text', { content: 'Done.' })
+  const saved = entry('activity', { entries: [routineSave()], tool_count: 1 })
+  const merged = mergeAdjacentCompactActivityEntries(joinRoutineToActivity([work, answer, saved]))
+  assert.equal(merged.length, 2)
+  assert.equal(merged[0].item.type, 'activity')
+  assert.equal(merged[1], answer)
+  // A compact block that counts steps it does not show is not known routine.
+  const partial = entry('activity', { entries: [routineSave()], tool_count: 2 })
+  assert.deepEqual(joinRoutineToActivity([work, answer, partial]), [work, answer, partial])
+  // Nor is one that carries a peer message or helper result: it keeps its place.
+  const carrying = entry('activity', {
+    entries: [routineSave(), routineSave()], tool_count: 2,
+    positioned_entries: [entry('peer_message', { content: 'Done on my side.' })],
+  })
+  assert.deepEqual(joinRoutineToActivity([work, answer, carrying]), [work, answer, carrying])
+})
+
+test('failed or undeclared saves keep their own place and wording', () => {
+  const command = entry('tool', { tool: 'Bash', status: 'done' })
+  const answer = entry('text', { content: 'Done.' })
+  for (const save of [
+    routineSave({ output_exit_code: 1 }),
+    routineSave({ status: 'failed' }),
+    routineSave({ routine: undefined }),
+    routineSave({ app_activity: { status: 'succeeded', warning: 'Saved partially' } }),
+    routineSave({ app_activity: { status: 'failed', label: 'Could not save' } }),
+    routineSave({ app_activity: { status: 'succeeded', receipt_missing: true } }),
+  ]) {
+    assert.deepEqual(joinRoutineToActivity([command, answer, save]), [command, answer, save])
+  }
+  // With no earlier activity the save stays put and still says what it did.
+  const save = routineSave()
+  assert.deepEqual(joinRoutineToActivity([answer, save]), [answer, save])
+  assert.equal(activityCollapsedLabel([save]), 'Saved notes')
+})
+
+test('a routine save never names reasoning or a distinctive line', () => {
+  const thought = entry('thinking', { duration_ms: 3000 })
+  const capture = entry('tool', {
+    tool: 'mcp__mobius_control__notes_remember', status: 'done', routine: true,
+    app_activity: { status: 'succeeded', app_slug: 'notes', label: 'Saved' },
+  })
+  assert.deepEqual(groupActivityRuns([thought, capture]), [{ group: [thought, capture] }])
+  assert.equal(activityCollapsedLabel([thought, capture]), 'Thought for 3 seconds')
+  // A save still running says so on the live line, even after reasoning.
+  const saving = routineSave({ status: 'running' })
+  assert.deepEqual(groupActivityRuns([thought, saving]), [{ group: [thought, saving] }])
+  assert.equal(activityCollapsedLabel([thought, saving], { live: true }), 'Saving notes')
+  assert.equal(activityCollapsedLabel([saving], { live: true }), 'Saving notes')
+})
+
+test('a routine save moves back only across the reply\'s prose', () => {
+  const command = entry('tool', { tool: 'Bash', status: 'done' })
+  const question = entry('question', { id: 'q' })
+  const image = entry('tool', { tool: 'Read', input: '/tmp/preview.png', status: 'done' })
+  const answer = entry('text', { content: 'Done.' })
+  const save = routineSave()
+  // A save made after a card or image never appears before it.
+  assert.deepEqual(
+    joinRoutineToActivity([command, question, image, answer, save]),
+    [command, question, image, answer, save],
+  )
+  assert.deepEqual(
+    joinRoutineToActivity([command, question, answer, save]),
+    [command, question, answer, save],
+  )
+  assert.deepEqual(
+    joinRoutineToActivity([command, image, answer, save]),
+    [command, image, answer, save],
+  )
+  // Across prose alone it still joins the activity line before that prose.
+  const more = entry('text', { content: 'And more.' })
+  assert.deepEqual(
+    joinRoutineToActivity([question, command, answer, more, save]),
+    [question, command, save, answer, more],
+  )
 })

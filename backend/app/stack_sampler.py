@@ -70,6 +70,37 @@ def _is_waiting(frame) -> bool:
   )
 
 
+def thread_snapshot(*, exclude: frozenset[int] = frozenset()) -> dict:
+  """What every other thread is doing right now, for a one-off record.
+
+  Busy threads keep their stacks. Parked threads matter too (a request
+  blocked on a lock or future is slow without being busy), so each one parked
+  inside app code is reduced to its innermost app frame; idle workers with no
+  app frame are omitted.
+  """
+  names = {t.ident: t.name for t in threading.enumerate()}
+  busy: list[dict] = []
+  waiting: list[dict] = []
+  for ident, frame in sys._current_frames().items():
+    if ident in exclude:
+      continue
+    name = names.get(ident, f"thread-{ident}")
+    if _is_waiting(frame):
+      while frame is not None and not frame.f_code.co_filename.startswith(_APP_ROOT):
+        frame = frame.f_back
+      if frame is not None:
+        waiting.append({"thread": name, "at": _frame_label(frame)})
+      continue
+    stack = []
+    while frame is not None and len(stack) < _STACK_DEPTH_LIMIT:
+      stack.append(_frame_label(frame))
+      frame = frame.f_back
+    busy.append({"thread": name, "stack": stack[::-1]})
+  # Frames pin their locals; drop the last reference before returning.
+  frame = None
+  return {"busy": busy, "waiting": waiting}
+
+
 def sample_thread_stacks(seconds: float, *, interval: float = _INTERVAL_SECONDS) -> dict:
   """Sample every other thread for ``seconds`` and rank where they were busy.
 

@@ -10,7 +10,6 @@ import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useImmersiveStateEcho from '../../hooks/useImmersiveStateEcho.js'
-import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -54,10 +53,10 @@ import {
 } from './appFrameProtocol.js'
 import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
 import {
-  blockEventDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
+  blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { finishAppFileExport } from '../../lib/appFileExport.js'
+import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -67,11 +66,6 @@ import './AppCanvas.css'
 function appFrameRequestUrl(appId, version, frameRev) {
   return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
     + (frameRev ? `-${frameRev}` : '')
-}
-
-function fileExportInk(color) {
-  const contrast = contrastingAccentFg(color)
-  return contrast === '#000000' ? '#172008' : contrast || undefined
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {
@@ -247,6 +241,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      the document generation; frame-mounted (`blockGeneration`) and every
 //      app-block-state must name that exact generation, or they are dropped;
 //      each owner event is posted once, to the generation it was dispatched for. It grants no app authority.
+//      moebius:app-block-refresh {sessionId, generation, reason} is a host
+//      hint to re-read (a turn settled in this chat, the tab became visible),
+//      posted once per hint to the generation it was raised for.
 //
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
@@ -450,7 +447,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   navigationTarget = true,
   pendingIntent = null,
   // Optional transcript block session (see 6b above).
-  blockSession = null, blockEvent = null, onBlockState, onBlockCapability,
+  blockSession = null, blockEvent = null, blockRefresh = null, onBlockState, onBlockCapability,
   shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
@@ -602,6 +599,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const blockDocumentsRef = useRef(null)
   blockDocumentsRef.current ??= createBlockDocuments()
   const sentBlockNonceRef = useRef(null)
+  const sentBlockRefreshRef = useRef(null)
   const reportedBlockRef = useRef(null)
   const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
   // Tell the block host about the live document's negotiation once per
@@ -1591,6 +1589,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     sentBlockNonceRef.current = message.nonce
     postToFrame(swap.liveVersion, message)
   }, [swap.liveLoaded, swap.liveVersion, blockSession, blockEvent, blockDocumentRevision])
+  useEffect(() => {
+    if (!swap.liveLoaded) return
+    const message = blockRefreshDelivery({ session: blockSession, refresh: blockRefresh,
+      document: blockDocumentsRef.current.get(swap.liveVersion), sentSeq: sentBlockRefreshRef.current })
+    if (!message) return
+    sentBlockRefreshRef.current = blockRefresh.seq
+    postToFrame(swap.liveVersion, message)
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockRefresh, blockDocumentRevision])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which

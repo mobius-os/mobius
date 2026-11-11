@@ -24,7 +24,8 @@ from app.deps import (
   Principal,
   get_principal,
   reject_cross_site,
-  require_installation_owner_control,
+  require_account_owner,
+  require_account_owner_control,
 )
 from app.github_contribution_git import _gh
 from app.github_contributions import _recheck_submit_app, _validate_submit_app
@@ -62,7 +63,7 @@ def _require_reviewer_owner_action(principal: Principal) -> None:
   intentionally app-writable, so an opaque-frame click alone is not evidence
   of owner confirmation for a GitHub write.
   """
-  require_installation_owner_control(principal)
+  require_account_owner_control(principal)
   if principal.scope != "owner" or principal.app_id is not None:
     raise HTTPException(
       403,
@@ -192,6 +193,7 @@ async def _reviewer_manual_plan(
 
 async def _reviewer_validate_comment(
   db: Session, app_id: int, body: str, head_sha: str,
+  *, principal: Principal,
 ) -> str:
   app = (
     db.query(models.App)
@@ -201,12 +203,14 @@ async def _reviewer_validate_comment(
   owner = db.query(models.Owner).first()
   if app is None or owner is None:
     raise HTTPException(404, "Reviewer app not found.")
+  actor = app_services.request_actor(db, principal, app if principal.app_id is not None else None)
   db.expunge(app)
   db.expunge(owner)
   db.close()
   result = await app_services.invoke_policy(
     app, owner, "reviewer/validate-comment",
     {"body": body, "head_sha": head_sha},
+    actor=actor,
   )
   return _owner_bound_comment(body, head_sha, result)
 
@@ -340,7 +344,7 @@ async def reviewer_grant_toggle(
 
 @router.post(
   "/reviewer/{app_id}/comment",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner)],
 )
 @_limiter.limit("20/minute")
 async def reviewer_comment(
@@ -358,7 +362,9 @@ async def reviewer_comment(
   head_sha = body.head_sha.lower()
   base_sha = body.base_sha.lower()
   guide_hash = body.guide_hash.lower()
-  comment = await _reviewer_validate_comment(db, app_id, body.body, head_sha)
+  comment = await _reviewer_validate_comment(
+    db, app_id, body.body, head_sha, principal=principal,
+  )
   _reviewer_assert_live_revision(
     repository, body.pr_number, head_sha, base_sha,
   )

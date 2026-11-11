@@ -72,13 +72,16 @@ async function sessionFrame(page) {
   return found
 }
 
-/** A scroll command can be reversed before the host observes the list end.
- * Keep it intersecting through a render opportunity before returning to Confirm. */
-async function seeConfirmationEnd(block) {
-  const end = block.locator('.md-app-block__list-end')
-  await end.scrollIntoViewIfNeeded()
-  await expect(end).toBeInViewport()
-  await end.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+/** A scroll command can be reversed before the host observes a list edge.
+ * Keep each end of the app's rows intersecting through a render opportunity
+ * before returning to Confirm. */
+async function seeConfirmationEnds(block) {
+  for (const edge of ['is-start', 'is-end']) {
+    const node = block.locator(`.md-app-block__list-edge.${edge}`)
+    await node.scrollIntoViewIfNeeded()
+    await expect(node).toBeInViewport()
+    await node.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  }
 }
 
 /** Include container reflow in failures of the action's same-slot contract. */
@@ -152,13 +155,16 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   expect(Math.round(confirmBox.height)).toBe(Math.round(box.height))
   expect(Math.abs(confirmBox.x + confirmBox.width - (box.x + box.width)),
     `Action slot layout: ${JSON.stringify({ before, beforeClick, after })}`).toBeLessThan(2)
-  await expect(block.locator('.md-app-block__confirmation')).toContainText('fixture/repo: Change one')
-  await expect(block.locator('.md-app-block__confirmation')).toContainText('The list below comes from Block Session')
+  // The app's list is the block's rows, with no explanation added around it.
+  await expect(block.locator('.md-app-block__items > li')).toHaveCount(12)
+  await expect(block.locator('.md-app-block__items > li').first()).toContainText('fixture/repo: Change one')
+  await expect(block).not.toContainText('comes from')
+  await expect(block).not.toContainText('From this conversation')
   await expect(block.locator('.md-app-block__badge')).toHaveCount(0)
 
-  // The twelve-item list may extend below the viewport even on desktop.
-  // Check the in-place geometry above before scrolling through that list.
-  await seeConfirmationEnd(block)
+  // The twelve rows may extend past the viewport even on desktop.
+  // Check the in-place geometry above before scrolling through them.
+  await seeConfirmationEnds(block)
   await confirm.scrollIntoViewIfNeeded()
   await expect(confirm).toBeEnabled()
 
@@ -176,7 +182,9 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   await confirm.evaluate(button => { button.click(); button.click() })
   await expect(block.locator('.md-app-block__summary')).toHaveText('Sent 1')
   await expect(block.locator('footer .md-app-block__action')).toHaveText('Send all')
-  await expect(block.locator('footer .md-app-block__status')).toHaveText('Sent')
+  await expect(block.locator('footer .md-app-block__pill')).toHaveText('Sent')
+  // The app's live title replaces the saved one once it reports.
+  await expect(block.locator('header strong')).toHaveText('1 sent')
   const lines = (await log.textContent()).split('\n')
   expect(lines.filter(line => line.endsWith(' confirm'))).toHaveLength(1)
   expect(lines.some(line => line.includes('foreign'))).toBe(false)
@@ -186,7 +194,7 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   expect(page.url()).not.toContain('fixture-hidden-navigation')
 })
 
-test('with the action at the bottom edge, Confirm arms only after the list end has been on screen', async ({ page, request }) => {
+test('with the action at the bottom edge, Confirm arms only after the first row above it has been on screen', async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 700 })
   await installFixtures(page, request)
   const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:batch',
@@ -198,20 +206,23 @@ test('with the action at the bottom edge, Confirm arms only after the list end h
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
   await expect(confirm).toHaveText('Confirm')
-  const listEnd = block.locator('.md-app-block__list-end')
-  expect(await listEnd.evaluate(node => node.getBoundingClientRect().top > window.innerHeight)).toBe(true)
-  // Long past the delay, the unseen list keeps Confirm disabled.
+  // The rows are drawn above the footer: the last one sits beside Confirm,
+  // the first is above the viewport.
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(block.locator('.md-app-block__list-edge.is-end')).toBeInViewport()
+  await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
+  // Long past the delay, the unseen start keeps Confirm disabled.
   await page.waitForTimeout(1200)
   await expect(confirm).toBeDisabled()
-  // Scroll through the list to its end, then back up to Confirm.
-  await seeConfirmationEnd(block)
+  // Scroll up through the rows to the first, then back down to Confirm.
+  await seeConfirmationEnds(block)
   await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
   await expect(confirm).toBeEnabled()
   await confirm.click()
   await expect(block.locator('.md-app-block__summary')).toHaveText('Sent 1')
 })
 
-test('a list replaced after Confirm armed must have its own end seen (no borrowed intersection)', async ({ page, request }) => {
+test('a list replaced after Confirm armed must have its own ends seen (no borrowed intersection)', async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 700 })
   await installFixtures(page, request)
   const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:swap',
@@ -221,22 +232,43 @@ test('a list replaced after Confirm armed must have its own end seen (no borrowe
   await expect(action).toHaveText('Send all')
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
-  // One target: its end is on screen, so Confirm arms.
+  // One target: both its ends are on screen, so Confirm arms.
   await expect(confirm).toHaveText('Confirm')
   await expect(confirm).toBeEnabled()
-  // The app replaces it with 256 targets while the old end was visible.
-  await expect(block.locator('.md-app-block__confirmation li')).toHaveCount(256)
-  expect(await block.locator('.md-app-block__list-end').evaluate(node => node.getBoundingClientRect().top > window.innerHeight)).toBe(true)
+  // The app replaces it with 256 targets while the old row was visible.
+  await expect(block.locator('.md-app-block__items > li')).toHaveCount(256)
+  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
   await page.waitForTimeout(900)
   await expect(confirm).toBeDisabled()
   const frame = await sessionFrame(page)
   await confirm.evaluate(button => button.click())
   await page.waitForTimeout(200)
   expect((await frame.locator('#block-log').textContent()).split('\n').filter(line => line.endsWith(' confirm'))).toHaveLength(0)
-  // Scrolling to the new end and back arms it.
-  await seeConfirmationEnd(block)
+  // Scrolling to the new ends and back arms it.
+  await seeConfirmationEnds(block)
   await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
   await expect(confirm).toBeEnabled()
+})
+
+test('at 390 px, a 512-character confirmation label and value wrap inside the block', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:long',
+    title: 'Long fact', interaction: 'inline', action: { label: 'Send', intent: 'long:one' } }) })
+  const block = chat.locator('.md-app-block')
+  await block.locator('footer .md-app-block__action').click()
+  await expect(block.locator('footer .md-app-block__action')).toHaveText('Confirm')
+  const fact = block.locator('.md-app-block__items .md-app-block__facts > div').first()
+  const boxes = await fact.evaluate(div => {
+    const box = node => node.getBoundingClientRect().toJSON()
+    return { block: box(div.closest('.md-app-block')), label: box(div.querySelector('dt')), value: box(div.querySelector('dd')) }
+  })
+  for (const cell of ['label', 'value']) {
+    expect(boxes[cell].left, JSON.stringify(boxes)).toBeGreaterThanOrEqual(boxes.block.left)
+    expect(boxes[cell].right, JSON.stringify(boxes)).toBeLessThanOrEqual(boxes.block.right)
+  }
+  await expect(fact.locator('dd')).toContainText('ACTUAL TARGET')
 })
 
 test('a document reload discards idle controls until the new document reports', async ({ page, request }) => {
@@ -272,3 +304,85 @@ test('an admitted module without session support falls back to a fresh visible v
   const view = page.frameLocator('.md-app-block__view iframe.canvas--live')
   await expect(view.locator('#fixture-intent')).toHaveText('review:plain')
 })
+
+test('rows and result links are 44px targets, and row fact labels stay visible by default', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:rows', title: 'Two rows',
+    interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Row one', intent: 'open:r1', facts: [{ label: 'From account', value: 'Alice' }] },
+      { title: 'Row two', intent: 'open:r2', facts: [{ label: 'To account', value: 'Bob' }] },
+      // A title-only row is still a full target.
+      { title: 'Row three', intent: 'open:r3' }] }) })
+  const block = chat.locator('.md-app-block')
+  const action = block.locator('footer .md-app-block__action')
+  await expect(action).toHaveText('Send all')
+  const height = locator => locator.evaluate(node => node.getBoundingClientRect().height)
+  // The whole row opens its entry: at least 44px tall, and its padding hits the row's title link.
+  const rows = block.locator('.md-app-block__items > li')
+  await expect(rows).toHaveCount(3)
+  for (const row of await rows.all()) {
+    expect(await height(row)).toBeGreaterThanOrEqual(44)
+    expect(await row.evaluate(node => {
+      const box = node.getBoundingClientRect()
+      return document.elementFromPoint(box.right - 4, box.bottom - 3)?.closest('a')?.textContent
+    })).toBe(await row.locator('.md-app-block__item-title').textContent())
+  }
+  // Without the value-only opt-in, a sighted reader sees each label.
+  const label = block.locator('.md-app-block__facts dt').first()
+  await expect(label).toHaveText('From account')
+  expect(await label.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(20)
+  await action.click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  const links = block.locator('.md-app-block__item-state .md-app-block__link')
+  await expect(links).toHaveCount(3)
+  for (const link of await links.all()) {
+    expect(await height(link)).toBeGreaterThanOrEqual(44)
+    // The link's own target, top to bottom, is the link, not the row's title link.
+    expect(await link.evaluate(node => {
+      const box = node.getBoundingClientRect()
+      return [box.top + 1, box.bottom - 1].every(y => document.elementFromPoint(box.left + box.width / 2, y)?.closest('a') === node)
+    })).toBe(true)
+  }
+})
+
+test('two result links that wrap in one row keep separate 44px targets, clear of the row title', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:links', title: 'Links',
+    interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Two links', intent: 'open:two-links' }, { title: 'One link', intent: 'open:one-link' }] }) })
+  const block = chat.locator('.md-app-block')
+  await block.locator('footer .md-app-block__action').click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  await expect(block.locator('.md-app-block__item-state .md-app-block__link')).toHaveCount(3)
+  const geometry = await block.evaluate(node => [...node.querySelectorAll('.md-app-block__items > li')].map(row => {
+    const title = row.querySelector('.md-app-block__item-title').getBoundingClientRect()
+    return [...row.querySelectorAll('.md-app-block__item-state .md-app-block__link')].map(link => {
+      const box = link.getBoundingClientRect()
+      const x = box.left + Math.min(box.width / 2, 20)
+      const hits = [box.top + 1, box.bottom - 1].map(y => document.elementFromPoint(x, y)?.closest('a')?.href)
+      return { href: link.href, top: box.top, bottom: box.bottom, height: box.height, hits, clearOfTitle: box.top >= title.bottom - 0.5 }
+    })
+  }))
+  const [two, one] = geometry
+  expect(two).toHaveLength(2)
+  expect(two[1].top, 'the long labels wrap onto separate lines').toBeGreaterThan(two[0].top)
+  expect(two[1].top, 'their targets do not overlap').toBeGreaterThanOrEqual(two[0].bottom - 0.5)
+  for (const link of [...two, ...one]) {
+    expect(link.height).toBeGreaterThanOrEqual(44)
+    expect(link.hits).toEqual([link.href, link.href])
+    expect(link.clearOfTitle).toBe(true)
+  }
+})
+

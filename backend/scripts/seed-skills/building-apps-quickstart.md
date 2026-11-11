@@ -103,10 +103,22 @@ const CSS = `
 ```
 
 Use Möbius theme variables (`--bg`, `--surface`, `--surface-2`, `--text`,
-`--muted`, `--border`, `--accent`, `--font`). Add a short app-specific prefix
-to classes. Prefer CSS classes over inline style objects except for truly
-computed values. Use generic interface icons from the OpenAI Apps SDK UI rather
-than Lucide, hand-drawn SVG, emoji, or text characters:
+`--muted`, `--border`, `--accent`, `--font`). Colour roles keep text and
+labels readable in both modes:
+
+- Coloured text (links, status labels, small accents) uses `--accent-text`,
+  `--danger-text`, `--green-text` or `--warning-text`; each reads on `--bg`,
+  `--surface` and `--surface-2`.
+- A filled button or badge uses `--accent-fill` (hover/pressed
+  `--accent-fill-hover`), `--danger-fill` or `--green-fill`, labelled with
+  `--accent-fg`.
+- `--accent`, `--danger`, `--green` and `--warning` stay for dots, borders,
+  focus rings and `color-mix()` washes, not small text or labelled fills.
+
+Add a short app-specific prefix to classes. Prefer CSS classes over inline
+style objects except for truly computed values. Use generic interface icons
+from the OpenAI Apps SDK UI rather than Lucide, hand-drawn SVG, emoji, or text
+characters:
 
 ```jsx
 import { Plus, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'

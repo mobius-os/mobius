@@ -482,6 +482,11 @@ async function ownerSessionConfirmedInvalid(ownerToken) {
   }
 }
 
+// A FormData body must let the browser write its own multipart boundary.
+function jsonContentType(body) {
+  return body instanceof FormData ? {} : { 'Content-Type': 'application/json' }
+}
+
 export async function apiFetch(path, options = {}) {
   if (sharedBrowserEnabled) {
     // An API operation belongs to the authority that initiated it, even if
@@ -507,7 +512,7 @@ export async function apiFetch(path, options = {}) {
       assertAuthority()
       return fetch(`${BASE}/api${guestPath}`, {
         ...options, credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
+        headers: { ...jsonContentType(options.body), ...getAuthHeaders(options.headers), 'X-Mobius-Shared-Browser': '1' },
       })
     }
     const tokenAtSend = sharedBrowserToken
@@ -526,7 +531,7 @@ export async function apiFetch(path, options = {}) {
     return response
   }
   const headers = {
-    'Content-Type': 'application/json',
+    ...jsonContentType(options.body),
     ...getAuthHeaders(options.headers),
   }
   const sentCredential = Object.entries(headers).some(
@@ -987,6 +992,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    // A new chat continuing this one through the reply stored as
+    // `throughId`; answers the same shape as `create`.
+    branch: (chatId, throughId) => listAffectingMutation(
+      'chats', `/chats/${encodeURIComponent(chatId)}/branch`, {
+        method: 'POST',
+        body: JSON.stringify({ through_id: throughId }),
+      },
+    ),
     send: (chatId, payload, options = {}) => apiFetch(`/chats/${encodeURIComponent(chatId)}/messages`, {
       ...options,
       method: 'POST',
@@ -1258,12 +1271,23 @@ export const api = {
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
+  chatWaits: {
+    // The whole claim texts a Goal or wait view showed in part.
+    dependencyText: (dependencyId, options = {}) => apiFetch(
+      `/chat-waits/dependencies/${encodeURIComponent(dependencyId)}/text`,
+      options,
+    ),
+  },
   agentCoordination: {
     history: (chatId, { before, limit = 50 } = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
     ),
     chat: (chatId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    message: (chatId, messageId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
       options,
     ),
     project: (projectId, options = {}) => apiFetch(
@@ -1598,19 +1622,19 @@ export const api = {
     }),
   },
   models: {
-    // Pass refresh=true to bypass the 5-minute server cache. The
-    // manage-models modal's refresh button uses this; everything
-    // else rides the cache.
-    list: ({ refresh = false } = {}) => apiFetch(
-      `/models${refresh ? '?refresh=true' : ''}`,
-    ),
+    list: () => apiFetch('/models'),
   },
   owner: {
     modelPrefs: {
       get: () => apiFetch('/owner/model-prefs'),
-      save: (hiddenIds) => apiFetch('/owner/model-prefs', {
+      // `hidden` maps only the changed model ids to true (hide) or false
+      // (show); the server applies them to the owner's list and answers with
+      // the whole list. Callers save through modelQueries.prefs.saveChanges,
+      // which orders saves and owns the cache.
+      update: (hidden, { timeoutMs } = {}) => apiFetch('/owner/model-prefs', {
         method: 'PATCH',
-        body: JSON.stringify({ hidden_ids: hiddenIds }),
+        body: JSON.stringify({ hidden }),
+        timeoutMs,
       }),
     },
     walkthrough: {
@@ -1635,19 +1659,16 @@ export const api = {
     // as theme.css.reset-bak-<unix-ts> for rollback. Used by the
     // `?reset-theme=1` URL-parameter recovery flow in useTheme.
     reset: () => apiFetch('/theme/reset', { method: 'POST' }),
+    // The light/dark switch: the server rewrites theme.css for `mode` and
+    // returns the theme it now serves, shaped like `get`.
+    setMode: (mode) => apiFetch('/theme/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
   },
   storage: {
     shared: {
-      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
-      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
       getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
-      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
-        method: 'PUT',
-        body: JSON.stringify({ content: JSON.stringify(mode) }),
-      }),
     },
   },
   notify: {

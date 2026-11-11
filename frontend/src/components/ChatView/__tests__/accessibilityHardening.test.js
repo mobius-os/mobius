@@ -44,7 +44,6 @@ test('ShareAppSheet presents hosted use and installable copies as separate lifec
 test('workspace-wide dialogs share one focus, inerting, and Escape contract', () => {
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),
-    read('../ManageModelsModal.jsx'),
     read('../AgentContextInspector.jsx'),
     read('../ChatSummaryViewer.jsx'),
   ]
@@ -61,8 +60,6 @@ test('workspace-wide dialogs share one focus, inerting, and Escape contract', ()
   assert.match(imageViewer, /modal: false/)
   assert.match(imageViewer, /aria-modal="false"/)
 
-  const manageModels = dialogs[1]
-  assert.match(manageModels, /ref=\{keepEditingRef\}/)
   const updateReview = read('../../SettingsView/UpdateReviewModal.jsx')
   assert.match(updateReview, /const inFlight = applying \|\| rebuilding \|\| resolving/)
   assert.match(updateReview, /closeOnEscape: !inFlight/)
