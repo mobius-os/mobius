@@ -491,7 +491,7 @@
 }
 
 .drawer__item--active {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: var(--accent-dim);
 }
 
@@ -552,7 +552,7 @@
   min-width: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #fff);
   font-size: 11px;
   font-weight: 700;
@@ -606,7 +606,7 @@
 }
 
 .drawer__row--project-owned.drawer__row--active {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: var(--accent-dim);
 }
 
@@ -749,7 +749,7 @@
 }
 
 .drawer__item-action-item--danger {
-  color: var(--danger);
+  color: var(--danger-text, var(--danger));
 }
 
 .drawer__item-action-item:focus-visible {

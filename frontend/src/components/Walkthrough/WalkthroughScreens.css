@@ -28,7 +28,6 @@
 .wt-btn:active:not(:disabled) { transform: scale(.97); }
 .wt-btn:disabled { opacity: .55; cursor: not-allowed; }
 .wt-btn--primary { border-color: var(--accent, #8b6cf7); color: var(--wt-on-accent); background: var(--accent, #8b6cf7); }
-.wt-btn--wide { width: 100%; }
 .wt-link { padding: 6px 4px; border: 0; color: var(--wt-accent-ink); background: none; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; min-height: 32px; }
 .wt-link:hover { text-decoration: underline; }
 .wt-note, .wt-success { margin: 14px 0 0; padding: 12px 14px; border-radius: 11px; background: color-mix(in srgb, var(--accent, #8b6cf7) 9%, transparent); font-size: 13px; line-height: 1.5; }
@@ -56,9 +55,10 @@
 .wt-profile--signin .wt-profile__fine { margin: 0; text-align: center; }
 .wt-profile__main { min-width: 0; flex: 1; }
 .wt-profile__actions { display: flex; gap: 8px; margin-top: 16px; }
-.wt-btn__mark { position: relative; width: 20px; height: 20px; border-radius: 7px; background: rgba(0, 0, 0, .18); }
-.wt-btn__mark::before, .wt-btn__mark i { content: ""; position: absolute; inset: 5px 4px; border: 1.3px solid currentColor; border-radius: 50%; }
-.wt-btn__mark i { transform: rotate(32deg) scaleX(.48); }
+.wt-profile__providers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 480px) { .wt-profile__providers { grid-template-columns: minmax(0, 1fr); } }
+.wt-btn__brand { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: #fff; }
+.wt-profile__actions--center { justify-content: center; align-items: center; margin-top: 0; }
 .wt-avatar { position: relative; flex: none; width: 84px; height: 84px; }
 .wt-avatar__face { position: relative; display: grid; place-items: center; width: 84px; height: 84px; overflow: hidden; border-radius: 50%; color: var(--wt-accent-ink); background: color-mix(in srgb, var(--accent, #8b6cf7) 18%, var(--surface, #14181f)); box-shadow: 0 0 0 2px var(--surface-2, #1a1f28), 0 0 0 4px color-mix(in srgb, var(--accent, #8b6cf7) 60%, transparent); font-size: 30px; font-weight: 800; }
 .wt-profile--signin .wt-avatar__face { width: 56px; height: 56px; font-size: 22px; flex: none; }

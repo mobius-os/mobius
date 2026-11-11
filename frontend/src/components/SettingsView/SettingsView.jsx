@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ArrowLeft, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
-import ArrowUpRight from 'lucide-react/dist/esm/icons/arrow-up-right.mjs'
+import { ArrowLeft, Folder, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
-import { api, clearQueryCache, clearToken } from '../../api/client.js'
+import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
@@ -21,28 +20,31 @@ import {
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
-import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
-import ModelSheet from '../ui/ModelSheet.jsx'
-import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
-import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
-import ProviderUsage from './ProviderUsage.jsx'
+import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
+import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
+import WalletSection from './WalletSection.jsx'
+import { useWallet } from './useWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
-import MobiusProviderAccess from './MobiusProviderAccess.jsx'
-import { formatPlanStatus } from './providerUsage.js'
+import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
+import { useMobiusAccountSummary } from '../../hooks/mobiusAccountQueries.js'
+import { formatPlanName, rowUsage, signInExpiryNotice } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
+import './SettingsPage.css'
 
 const MobiusLogo = PROVIDER_INFO.mobius?.Logo
-// The one detail page that is not a provider; every other detailPage value is a provider id.
+// The detail pages that are not providers; every other detailPage value is a provider id.
 const SHARED_FOLDERS_PAGE = 'shared-folders'
+const MOBIUS_ACCOUNT_PAGE = 'mobius-account'
 
 const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
@@ -104,78 +106,63 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
   return rows
 }
 
+// Why a provider that cannot run is unavailable: the owner turned it off (its
+// status reports `available: false`, whatever its sign-in state), or it still
+// needs connecting or, for Möbius, signing in.
+function providerOffLabel(provider, status) {
+  if (status?.available === false) return 'Turned off'
+  return provider === 'mobius' ? 'Not signed in' : 'Not connected'
+}
+
 function BackgroundProviderRow({
   row,
+  status,
   providerInfo,
   index,
   models,
+  usage,
   dragging,
   dropTarget,
   dragStyle,
-  reorderMode,
   rowRef,
-  onModelChange,
-  onEffortChange,
   onMove,
   onReorderStart,
   configuredProviders,
-  detailMode,
+  connectPrompt,
+  signInNotice,
   onOpen,
-  details,
 }) {
   const info = providerInfo || providerInfoFor(row.provider)
   const Logo = info?.Logo
+  const label = info?.label || row.provider
   const configured = configuredProviders.has(row.provider)
+  const offLabel = configured ? '' : providerOffLabel(row.provider, status)
   const enabled = configured && row.enabled !== false
   const selectedModel = enabled
     ? (row.model || defaultBackgroundModel(row.provider))
     : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
-  const efforts = info?.efforts || []
-  const selectedEfforts = modelEfforts(efforts, selectedRow)
-  const effortLabel = enabled
-    ? (selectedEfforts.find((e) => e.value === row.effort)?.label || '')
-    : ''
-  const selectedEffortIndex = Math.max(
-    0,
-    selectedEfforts.findIndex((effort) => effort.value === row.effort),
-  )
-  const [sheetOpen, setSheetOpen] = useState(false)
-
-  // This row is a fixed provider, so the sheet shows only that
-  // provider's models plus a "None" row that disables the background
-  // agent. Effort lives inside the sheet, under the selected model:
-  // providers expose different effort scales, so it belongs with the
-  // model choice (mirrors the chat composer's picker).
-  const groups = [{
-    key: row.provider,
-    label: info?.label || row.provider,
-    Logo,
-    models: configured ? models : [],
-  }]
-  const triggerLabel = enabled
+  const modelLabel = enabled
     ? (selectedRow?.label || selectedModel || 'Choose model')
     : 'None'
   return (
     <div
       ref={rowRef}
       className={
-        'settings-bg-row'
-        + (detailMode ? ' settings-bg-row--detail' : '')
+        'settings-bg-row settings-bg-row--reordering'
         + (enabled ? '' : ' settings-bg-row--off')
         + (configured ? '' : ' settings-bg-row--disconnected')
-        + (reorderMode ? ' settings-bg-row--reordering' : '')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
       }
       style={dragStyle}
-      aria-label={detailMode ? `${info?.label || row.provider} settings` : configured ? `${info?.label || row.provider} background priority ${index + 1}` : `${info?.label || row.provider}, not connected`}
+      aria-label={configured ? `${label} background priority ${index + 1}` : `${label}, ${offLabel.toLowerCase()}`}
     >
-      {reorderMode && configured && (
+      {configured ? (
         <button
           type="button"
           className="settings-bg-row__drag-handle"
-          aria-label={`Move ${info?.label || row.provider} background priority`}
+          aria-label={`Move ${label} background priority`}
           onPointerDown={(event) => {
             if (event.button !== undefined && event.button !== 0) return
             event.preventDefault()
@@ -200,90 +187,50 @@ function BackgroundProviderRow({
           {/* The SDK has no drag/reorder glyph; DotsVertical is a menu action. */}
           <GripVertical size={18} strokeWidth={2} aria-hidden="true" />
         </button>
-      )}
-      {reorderMode && !configured && <span className="settings-bg-row__drag-spacer" aria-hidden="true" />}
+      ) : <span className="settings-bg-row__drag-spacer" aria-hidden="true" />}
       <div className="settings-bg-row__body">
-        {!detailMode && <button
+        {/* The row opens the provider's own page, so it carries no arrow:
+            arrows in Settings mean "expands here". */}
+        <button
           type="button"
           className="settings-provider-summary"
           onClick={onOpen}
-          aria-label={`${info?.label || row.provider} provider settings`}
+          aria-label={`${label} provider settings`}
         >
           <span className="settings-provider-summary__icon">{Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}</span>
           <span className="settings-provider-summary__copy">
-            <span>{info?.label || row.provider}</span>
-            <small>{configured ? `Background: ${triggerLabel}` : 'Not connected'}</small>
+            <span>{label}</span>
+            {configured && signInNotice
+              ? <small className="settings-provider-summary__notice">{signInNotice.label}</small>
+              : <small>{configured ? `Background: ${modelLabel}` : offLabel}</small>}
           </span>
-          {configured && <span className="settings-provider-summary__rank">{index + 1}</span>}
-          <span className="settings-provider-summary__arrow" aria-hidden="true">›</span>
-        </button>}
-        {detailMode && <div className="settings-provider-details">
-          {details}
-          <div className="settings-provider-details__model">
-            <span>Background agent</span>
-            <button
-              type="button"
-              className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
-              title={selectedModel || triggerLabel}
-              onClick={() => setSheetOpen(true)}
-              disabled={!configured}
-              aria-haspopup="dialog"
-              aria-label={`${info?.label || row.provider} background model${effortLabel ? `, ${effortLabel} effort` : ''}`}
-            >
-              <span className="model-trigger__icon">
-                {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
-              </span>
-              <span className="model-trigger__main">
-                <span className="model-trigger__name">{triggerLabel}</span>
-                {enabled && selectedModel && (
-                  <span className="model-trigger__id">{selectedModel}</span>
-                )}
-              </span>
-              {enabled && effortLabel && (
-                <span className="settings-bg-row__effort-visual" aria-hidden="true">
-                  {selectedEfforts.map((effort, effortIndex) => (
-                    <span
-                      key={effort.value}
-                      className={
-                        'settings-bg-row__effort-dot'
-                        + (effortIndex <= selectedEffortIndex ? ' settings-bg-row__effort-dot--filled' : '')
-                        + (effortIndex === selectedEffortIndex ? ' settings-bg-row__effort-dot--on' : '')
-                      }
-                    />
-                  ))}
-                </span>
-              )}
-            </button>
-          </div>
-        </div>}
+          {configured
+            ? <UsageMeter usage={usage} />
+            : status?.available !== false && connectPrompt && <span className="settings-badge settings-badge--accent settings-badge--plain">{connectPrompt}</span>}
+        </button>
       </div>
-      <ModelSheet
-        open={sheetOpen}
-        onClose={() => setSheetOpen(false)}
-        title={`${info?.label || row.provider} model`}
-        groups={groups}
-        provider={enabled ? row.provider : ''}
-        model={selectedModel}
-        efforts={efforts}
-        effort={row.effort}
-        configuredProviders={configuredProviders}
-        onEffortChange={onEffortChange}
-        onPick={(pid, id, pickedModel) => {
-          const nextEfforts = modelEfforts(efforts, pickedModel)
-          onModelChange(id, validEffort(nextEfforts, row.effort))
-        }}
-        allowNone
-        noneLabel="None (disable)"
-        onNone={() => onModelChange('')}
-      />
     </div>
+  )
+}
+
+function SettingsSubhead({ title, mark, round = false, subtitle, onBack }) {
+  return (
+    <header className="settings-subhead">
+      <button type="button" className="settings-subhead__back" aria-label="Back to Settings" onClick={onBack}>
+        <ArrowLeft width={18} height={18} aria-hidden="true" />
+      </button>
+      {mark && <span className={`settings-subhead__mark${round ? ' settings-subhead__mark--round' : ''}`} aria-hidden="true">{mark}</span>}
+      <div className="settings-subhead__copy">
+        <h1 className="settings-subhead__title">{title}</h1>
+        {subtitle && <div className="settings-subhead__sub">{subtitle}</div>}
+      </div>
+    </header>
   )
 }
 
 export default function SettingsView({
   onThemeChange,
   onOpenChat,
-  onOpenApp,
   focusTarget = null,
   active = true,
   refreshToken = 0,
@@ -295,6 +242,11 @@ export default function SettingsView({
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
+  const mobiusAccount = useMobiusAccountSummary()
+  // The owner's own accounts (Möbius with its model credit, and GitHub) are
+  // never shown to a shared-browser guest, and their reads never run.
+  const showOwnerAccounts = !isSharedBrowserAuth()
+  const wallet = useWallet({ active: active && showOwnerAccounts })
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -302,8 +254,9 @@ export default function SettingsView({
       : 'dark'
   ))
   const [themeSwitching, setThemeSwitching] = useState(false)
-  // Which provider has its inline auth panel expanded. null = none.
-  const [expandedAuth, setExpandedAuth] = useState(null)
+  // Bumped when a provider connects or disconnects, so its connection panel
+  // starts again from its summary instead of a finished sign-in flow.
+  const [connectionEpoch, setConnectionEpoch] = useState(0)
   // Surface failures from the dark-mode toggle: a failed theme
   // persist would otherwise bounce the knob without telling the user
   // why.
@@ -311,11 +264,13 @@ export default function SettingsView({
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [githubAccountOpen, setGithubAccountOpen] = useState(false)
-  // null shows the overview; a provider id shows that provider's detail page.
-  // Usage is on demand: only an open provider page fetches its usage.
+  // null shows the overview; a provider id shows that provider's page. A page
+  // is one Back-stack entry, so the phone's back gesture returns to Settings.
   const [detailPage, setDetailPage] = useState(null)
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
-  const selectedProvider = sharedFoldersOpen ? null : detailPage
+  const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
+  const selectedProvider = sharedFoldersOpen || mobiusAccountOpen ? null : detailPage
+  const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -330,8 +285,6 @@ export default function SettingsView({
   const providerAvailability = resolveProviderAvailability(providerStatusQuery)
   const configuredProviders = providerAvailability.configuredProviders
   const codexAuthenticated = configuredProviders.has('codex')
-  // The Möbius account itself is managed in the Möbius · You app.
-  const mobiusAvailable = providerStatusQuery.data?.mobius?.available === true
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -354,11 +307,21 @@ export default function SettingsView({
   //   LOADING — no data yet and no error: the initial in-flight fetch.
   const providerReady = settingsQuery.data !== undefined
     && providerAvailability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+  // A connected sign-in near its end, for the overview row and the provider page.
+  const signInNoticeFor = provider => (
+    configuredProviders.has(provider)
+      ? signInExpiryNotice(providerStatusQuery.data?.[provider]?.login_expires_at)
+      : null
+  )
+  // The overview shows each connected provider's allowance on its row, so
+  // usage is read for every connected provider while Settings is open; a
+  // provider page reads only its own. The server coalesces these probes.
+  const usageWanted = provider => (
+    active && providerReady && configuredProviders.has(provider)
+    && (!detailPage || selectedProvider === provider)
+  )
   const codexUsageQuery = settingsQueries.providerUsage.useQuery('codex', {
-    enabled: (
-      active && providerReady && codexAuthenticated
-      && selectedProvider === 'codex'
-    ),
+    enabled: usageWanted('codex'),
   })
   const [codexRedeem, setCodexRedeem] = useState({ busy: false, result: null })
   const handleRedeemCodexReset = useCallback(async (creditId = null) => {
@@ -375,11 +338,12 @@ export default function SettingsView({
     }
   }, [queryClient])
   const claudeUsageQuery = settingsQueries.providerUsage.useQuery('claude', {
-    enabled: (
-      active && providerReady && claudeAuthenticated
-      && selectedProvider === 'claude'
-    ),
+    enabled: usageWanted('claude'),
   })
+  const mobiusUsageQuery = settingsQueries.providerUsage.useQuery('mobius', {
+    enabled: usageWanted('mobius'),
+  })
+  const usageQueries = { claude: claudeUsageQuery, codex: codexUsageQuery, mobius: mobiusUsageQuery }
   const [claudeExtraUsage, setClaudeExtraUsage] = useState({ busy: false, result: null })
   const [claudeResetRedeem, setClaudeResetRedeem] = useState({ busy: false, result: null })
   const handleRedeemClaudeReset = useCallback(async (creditId, expectedResetsLeft) => {
@@ -445,7 +409,6 @@ export default function SettingsView({
   // pointermove so the held row can follow the pointer 1:1 without a
   // React re-render per frame; render reads it for the same transform.
   const backgroundPointerYRef = useRef(0)
-  const [manageModelsProvider, setManageModelsProvider] = useState(null)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
   const configuredProvidersRef = useRef(configuredProviders)
@@ -466,9 +429,40 @@ export default function SettingsView({
     setBackgroundDraft(next)
   }, [settingsQuery.data])
 
+  const openDetailPage = useCallback((page) => {
+    if (page === MOBIUS_ACCOUNT_PAGE && !showOwnerAccounts) return
+    // Remember who was connected when the page opened, so a provider that
+    // connects from its page gets the curated first-connection defaults.
+    authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+    setDetailPage(page)
+    openDetailHistory()
+    settingsBoundaryRef.current?.scrollTo({ top: 0 })
+  }, [openDetailHistory, showOwnerAccounts])
+  const closeDetailPage = closeDetailHistory
+  // Settings requests (deep links, focus) arrive as a page id or null.
+  const navigateDetail = useCallback((page) => {
+    if (page) openDetailPage(page)
+    else closeDetailPage()
+  }, [openDetailPage, closeDetailPage])
+
+  // Display order only: connected providers lead, disconnected ones sit below
+  // outside the reorderable priority. Row indexes below are display positions.
+  const effectiveBackgroundDraft = connectedProvidersFirst(backgroundDraft ||
+    normalizeBackgroundAgents(
+      settingsQuery.data?.background_agents,
+      providerFromSettings(settingsQuery.data),
+    ), configuredProviders)
+
   useSettingsFocus({
-    focusTarget, providerReady, detailPage, setDetailPage,
-    setManageModelsProvider, setupFocusRefs, setAttentionSection,
+    focusTarget,
+    providerReady,
+    providersFailed: providerError,
+    // Chat models open on the provider that leads background work.
+    modelsProvider: effectiveBackgroundDraft.find(row => configuredProviders.has(row.provider))?.provider || null,
+    detailPage,
+    setDetailPage: navigateDetail,
+    setupFocusRefs,
+    setAttentionSection,
   })
 
   const modelsForProvider = useCallback((provider) => {
@@ -732,36 +726,6 @@ export default function SettingsView({
     }
   }, [])
 
-  // Keep connection panels independent of the read-only usage detail.
-  const toggleClaudeAuth = useCallback(
-    () => {
-      setExpandedAuth(prev => {
-        if (prev !== 'claude') {
-          authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
-        }
-        return prev === 'claude' ? null : 'claude'
-      })
-    },
-    [],
-  )
-  const toggleCodexAuth = useCallback(
-    () => {
-      setExpandedAuth(prev => {
-        if (prev !== 'codex') {
-          authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
-        }
-        return prev === 'codex' ? null : 'codex'
-      })
-    },
-    [],
-  )
-  const openDetailPage = useCallback((page) => {
-    setDetailPage(page)
-    settingsBoundaryRef.current?.scrollTo({ top: 0 })
-  }, [])
-  const openMobiusYou = useCallback(() => {
-    onOpenApp?.('identity')
-  }, [onOpenApp])
   const toggleGithub = useCallback(() => {
     setGithubAccountOpen(value => !value)
   }, [])
@@ -797,11 +761,14 @@ export default function SettingsView({
     authProvidersAtStartRef.current = null
     settingsQueries.owner.invalidate(queryClient)
     settingsQueries.providerUsage.invalidate(queryClient, provider)
-    setExpandedAuth(null)
+    setConnectionEpoch(epoch => epoch + 1)
   }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
-  const onProviderDisconnected = useCallback(() => {
-    authProvidersAtStartRef.current = null
-    setExpandedAuth(null)
+  const onProviderDisconnected = useCallback((provider) => {
+    // A later reconnect from this page counts as a first connection again.
+    const remaining = new Set(configuredProvidersRef.current)
+    remaining.delete(provider)
+    authProvidersAtStartRef.current = remaining
+    setConnectionEpoch(epoch => epoch + 1)
   }, [])
   const onClaudeAuthDone = useCallback(() => {
     onProviderConnected('claude')
@@ -852,10 +819,10 @@ export default function SettingsView({
         save: () => themeService.toggleTheme(queryClient, currentMode, api),
         reload: onStatusBarThemeReload,
       })
-    } catch {
+    } catch (err) {
       setThemeMode(currentMode)
       setThemeError(
-        'Could not save theme. Check your connection and try again.',
+        err?.detail || 'Could not save theme. Check your connection and try again.',
       )
       // Force the mode query to resync with the server. Covers the
       // write-succeeded-but-response-lost case: refetching reads
@@ -893,13 +860,6 @@ export default function SettingsView({
     }
   }
 
-  // Display order only: connected providers lead, disconnected ones sit below
-  // outside the reorderable priority. Row indexes below are display positions.
-  const effectiveBackgroundDraft = connectedProvidersFirst(backgroundDraft ||
-    normalizeBackgroundAgents(
-      settingsQuery.data?.background_agents,
-      providerFromSettings(settingsQuery.data),
-    ), configuredProviders)
   useEffect(() => {
     backgroundRowRefs.current.length = effectiveBackgroundDraft.length
   }, [effectiveBackgroundDraft.length])
@@ -944,24 +904,138 @@ export default function SettingsView({
     }
     return undefined
   }
-  const codexPlanLabel = (
-    codexUsageQuery.data?.plan_label
-    || settingsQuery.data?.provider_plans?.codex
-    || ''
-  )
-  const claudePlanLabel = (
-    claudeUsageQuery.data?.plan_label
-    || settingsQuery.data?.provider_plans?.claude
-    || ''
-  )
+  const planLabels = {
+    codex: codexUsageQuery.data?.plan_label || settingsQuery.data?.provider_plans?.codex || '',
+    claude: claudeUsageQuery.data?.plan_label || settingsQuery.data?.provider_plans?.claude || '',
+    mobius: mobiusUsageQuery.data?.plan_label || '',
+  }
+  const mobiusAccountMark = mobiusAccount.avatarUrl
+    ? <img src={mobiusAccount.avatarUrl} alt="" />
+    : mobiusAccount.avatarPending ? null : MobiusLogo && <MobiusLogo />
+  const mobiusAccountLine = mobiusAccount.handle
+    ? `@${mobiusAccount.handle}`
+    : mobiusAccount.status === 'signed_out'
+      ? 'Not signed in'
+      : mobiusAccount.status === 'loading' ? 'Checking…' : 'Account and deployments'
+
+  let subhead = null
+  let detailBody = null
+  if (mobiusAccountOpen) {
+    // The page's own Photo row shows the avatar, so the header carries the
+    // Möbius mark and the account's state rather than a second copy of it.
+    const accountState = mobiusAccount.status === 'linked'
+      ? 'Linked to mobius.you'
+      : mobiusAccount.status === 'managed'
+        ? 'Managed by mobius.you'
+        : mobiusAccount.status === 'signed_out'
+          ? 'Not signed in'
+          : mobiusAccount.status === 'loading' ? 'Checking…' : 'Account unavailable'
+    subhead = (
+      <SettingsSubhead
+        title="Möbius"
+        mark={MobiusLogo && <MobiusLogo />}
+        subtitle={<span>{accountState}</span>}
+        onBack={closeDetailPage}
+      />
+    )
+    detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+  } else if (sharedFoldersOpen) {
+    subhead = <SettingsSubhead title="Shared folders" mark={<Folder width={20} height={20} />} onBack={closeDetailPage} />
+    detailBody = <SharedFoldersPage />
+  } else if (selectedProvider) {
+    const row = effectiveBackgroundDraft.find(candidate => candidate.provider === selectedProvider)
+    const info = modelProviderInfo[selectedProvider] || providerInfoFor(selectedProvider)
+    const Logo = info?.Logo
+    const configured = configuredProviders.has(selectedProvider)
+    const planName = configured ? formatPlanName(planLabels[selectedProvider]) : ''
+    subhead = (
+      <SettingsSubhead
+        title={info?.label || selectedProvider}
+        mark={Logo ? <Logo /> : (selectedProvider[0] || '?').toUpperCase()}
+        subtitle={configured
+          ? (planName ? <span>{planName}</span> : null)
+          : <span className="settings-badge">{providerOffLabel(selectedProvider, providerStatusQuery.data?.[selectedProvider])}</span>}
+        onBack={closeDetailPage}
+      />
+    )
+    const usageQuery = usageQueries[selectedProvider]
+    const usageExtras = selectedProvider === 'codex' ? {
+      onRedeemReset: handleRedeemCodexReset,
+      redeeming: codexRedeem.busy,
+      redeemResult: codexRedeem.result,
+    } : selectedProvider === 'claude' ? {
+      onRedeemClaudeReset: handleRedeemClaudeReset,
+      claudeResetRedeeming: claudeResetRedeem.busy,
+      claudeResetResult: claudeResetRedeem.result,
+      onToggleExtraUsage: handleClaudeExtraUsage,
+      extraUsageBusy: claudeExtraUsage.busy,
+      extraUsageResult: claudeExtraUsage.result,
+    } : {}
+    const connection = selectedProvider === 'codex' ? (
+      <ProviderConnection key={connectionEpoch} provider="codex" name="OpenAI Codex" connected={codexAuthenticated} onDisconnected={() => onProviderDisconnected('codex')}>
+        <CodexAuth onConnected={onCodexAuthDone} />
+      </ProviderConnection>
+    ) : selectedProvider === 'claude' ? (
+      <ProviderConnection key={connectionEpoch} provider="claude" name="Claude Code" connected={claudeAuthenticated} onDisconnected={() => onProviderDisconnected('claude')}>
+        <ProviderAuth authenticated={claudeAuthenticated} compact onDone={onClaudeAuthDone} />
+      </ProviderConnection>
+    ) : null
+    const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null
+    // The Möbius account and its credit are the owner's: a guest sees neither.
+    const ownerAccountProvider = selectedProvider === 'mobius'
+    detailBody = row ? (
+      <div
+        className={`settings-provider-page${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
+      >
+        <ProviderPage
+          provider={selectedProvider}
+          info={info}
+          models={modelsForProvider(selectedProvider)}
+          configured={configured}
+          enabled={configured && row.enabled !== false}
+          model={row.model || defaultBackgroundModel(selectedProvider)}
+          effort={row.effort}
+          onModelChange={(model, effort) => setBackgroundProviderChoice(selectedProvider, {
+            enabled: !!model,
+            model: model || defaultBackgroundModel(selectedProvider),
+            ...(effort ? { effort } : {}),
+          })}
+          onEffortChange={(effort) => setBackgroundProviderChoice(selectedProvider, { effort })}
+          usage={usageQuery && (showOwnerAccounts || !ownerAccountProvider) ? (
+            <ProviderUsage
+              id={`provider-usage-${selectedProvider}`}
+              snapshot={usageQuery.data}
+              loading={usageQuery.isPending}
+              failed={usageQuery.isError}
+              refreshing={usageQuery.isFetching}
+              onRefresh={() => usageQuery.refetch()}
+              {...usageExtras}
+            />
+          ) : null}
+          access={!ownerAccountProvider ? null : showOwnerAccounts ? (
+            <MobiusModelAccess onSignIn={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} />
+          ) : !configured ? (
+            <p className="settings__notice">Möbius models use the owner’s Möbius account, which only the owner can sign in to.</p>
+          ) : null}
+          connection={connection}
+          signInNotice={signInNoticeFor(selectedProvider)}
+          connectionDetails={configured && version ? [{ label: 'Version', value: version }] : []}
+          chatModelsRef={(node) => setSetupFocusRef('chat-models', node)}
+          chatModelsAttention={attentionSection === 'chat-models'}
+        />
+        {backgroundError && <Alert color="info" variant="soft" description={backgroundError} />}
+      </div>
+    ) : (
+      <div className="settings__notice" role="status">Loading provider…</div>
+    )
+  }
 
   return (
     <div ref={settingsBoundaryRef} className="settings">
       <div className="settings__content">
-        <header className="settings__header">
-          {detailPage && <button type="button" className="settings__back" aria-label="Back to Settings" onClick={() => setDetailPage(null)}><ArrowLeft width={18} height={18} aria-hidden="true" /></button>}
-          <h1 className="settings__title">{sharedFoldersOpen ? 'Shared folders' : selectedProvider ? (modelProviderInfo[selectedProvider]?.label || selectedProvider) : 'Settings'}</h1>
-          {!detailPage && <button
+        {subhead || <header className="settings__header">
+          <h1 className="settings__title">Settings</h1>
+          <button
             type="button"
             className="settings__appearance-toggle"
             role="switch"
@@ -977,20 +1051,29 @@ export default function SettingsView({
             <span className={`settings__appearance-option${themeMode === 'dark' ? ' settings__appearance-option--active' : ''}`} aria-hidden="true">
               <Moon width={17} height={17} />
             </span>
-          </button>}
-        </header>
+          </button>
+        </header>}
         {themeError && <Alert color="danger" variant="soft" description={themeError} />}
 
-        {!detailPage && <section className="settings__section settings__section--accounts" aria-labelledby="settings-accounts-title">
-          <h2 className="settings__section-title" id="settings-accounts-title">Accounts</h2>
-          <div className="settings__providers">
-            {mobiusAvailable && <button type="button" className="settings__account-link" onClick={openMobiusYou}>
-              <span className="settings__account-icon settings__account-icon--mobius" aria-hidden="true">
-                {MobiusLogo && <MobiusLogo />}
+        {detailBody}
+
+        {!detailPage && <>
+        {showOwnerAccounts && <section className="settings-group" aria-labelledby="settings-accounts-title">
+          <div className="settings-group__head">
+            <div className="settings-group__heading">
+              <h2 className="settings-group__title" id="settings-accounts-title">Accounts</h2>
+            </div>
+          </div>
+          <div className="settings-list">
+            <button type="button" className="settings-item" onClick={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)} aria-label={`Möbius account: ${mobiusAccountLine}`}>
+              <span className={`settings-item__icon${mobiusAccount.avatarUrl || mobiusAccount.avatarPending ? ' settings-item__icon--round' : ''}`} aria-hidden="true">{mobiusAccountMark}</span>
+              <span className="settings-item__body">
+                <span className="settings-item__title">Möbius</span>
+                <span className="settings-item__sub">{mobiusAccountLine}</span>
               </span>
-              <span className="settings__account-link-copy"><strong>Möbius account</strong><small>Opens Möbius · You</small></span>
-              <ArrowUpRight className="settings__account-link-arrow" size={18} strokeWidth={2} aria-hidden="true" />
-            </button>}
+              {mobiusAccount.status === 'unavailable' && <span className="settings-badge settings-badge--warning">Unavailable</span>}
+              {mobiusAccount.status === 'signed_out' && <span className="settings-badge settings-badge--accent settings-badge--plain">Sign in</span>}
+            </button>
             <GithubConnection
               active={active}
               expanded={githubAccountOpen}
@@ -1002,144 +1085,58 @@ export default function SettingsView({
           </div>
         </section>}
 
-        {sharedFoldersOpen && <SharedFoldersPage />}
-
-        {!sharedFoldersOpen && <section
-          className={`settings__section settings__section--ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
+        <section
+          className={`settings-group settings-ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
           id="settings-ai-providers"
           ref={(node) => setSetupFocusRef('ai-providers', node)}
           tabIndex={-1}
+          aria-labelledby="settings-ai-title"
         >
-          {!selectedProvider && <>
-            <h2 className="settings__section-title">AI providers</h2>
-            <p className="settings__subtext settings__subtext--tight">Drag connected providers to set background-task priority. Disconnected providers stay below. New chats still use your last-picked chat model.</p>
-          </>}
+          <div className="settings-group__head">
+            <div className="settings-group__heading">
+              <h2 className="settings-group__title" id="settings-ai-title">AI providers</h2>
+              <p className="settings-group__desc">Drag to set background-task priority.</p>
+            </div>
+          </div>
           {providerReady ? (
             <div
-              className={`settings-bg-list${selectedProvider ? ' settings-bg-list--detail' : ''}${backgroundCommitting ? ' settings-bg-list--committing' : ''}`}
+              className={`settings-list settings-bg-list${backgroundCommitting ? ' settings-bg-list--committing' : ''}`}
               id="settings-background-agents"
               ref={(node) => setSetupFocusRef('background-agents', node)}
               tabIndex={-1}
             >
-              {effectiveBackgroundDraft.map((row, index) => (selectedProvider && selectedProvider !== row.provider ? null : (
-                  <BackgroundProviderRow
-                    key={row.provider}
-                    row={row}
-                    providerInfo={modelProviderInfo[row.provider]}
-                    index={index}
-                    models={modelsForProvider(row.provider)}
-                    dragging={backgroundDrag?.fromIndex === index}
-                    dropTarget={
-                      backgroundDrag?.toIndex === index
-                      && backgroundDrag?.fromIndex !== index
-                    }
-                    dragStyle={backgroundDragStyleForIndex(index)}
-                    reorderMode={!selectedProvider}
-                    rowRef={(node) => {
-                      backgroundRowRefs.current[index] = node
-                    }}
-                    onModelChange={(model, effort) => setBackgroundProviderChoice(row.provider, {
-                      enabled: !!model,
-                      model: model || defaultBackgroundModel(row.provider),
-                      ...(effort ? { effort } : {}),
-                    })}
-                    onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
-                    onMove={(delta) => {
-                      // Keyboard reorder is disabled while a pointer drag
-                      // is live, so the two reorder paths can't interleave
-                      // and mutate the list from under each other.
-                      if (backgroundDrag) return
-                      moveBackgroundProvider(index, index + delta)
-                    }}
-                    configuredProviders={configuredProviders}
-                    onReorderStart={startBackgroundReorder}
-                    detailMode={selectedProvider === row.provider}
-                    onOpen={() => openDetailPage(row.provider)}
-                    details={<>
-                      <button type="button" className="settings-provider-details__models" onClick={() => setManageModelsProvider(row.provider)} disabled={!configuredProviders.has(row.provider)}>
-                        Manage chat models
-                      </button>
-                      {row.provider === 'codex' && (
-                <ProviderRow
-                  name="OpenAI Codex"
-                  connected={codexAuthenticated}
-                  actionLabel={codexAuthenticated ? 'Manage' : 'Connect'}
-                  version={codexVersion}
-                  statusNode={codexAuthenticated ? (
-                    <span className="provider-plan-label">{formatPlanStatus(codexPlanLabel)}</span>
-                  ) : undefined}
-                  detailNode={codexAuthenticated ? (
-                    <ProviderUsage
-                      id="provider-usage-codex"
-                      snapshot={codexUsageQuery.data}
-                      loading={codexUsageQuery.isPending}
-                      failed={codexUsageQuery.isError}
-                      refreshing={codexUsageQuery.isFetching}
-                      onRefresh={() => codexUsageQuery.refetch()}
-                      onRedeemReset={handleRedeemCodexReset}
-                      redeeming={codexRedeem.busy}
-                      redeemResult={codexRedeem.result}
-                    />
-                  ) : null}
-                  expanded={expandedAuth === 'codex'}
-                  onToggleExpand={toggleCodexAuth}
-                >
-                  <ProviderConnection provider="codex" name="OpenAI Codex" connected={codexAuthenticated} onDisconnected={onProviderDisconnected}>
-                    <CodexAuth onConnected={onCodexAuthDone} />
-                  </ProviderConnection>
-                </ProviderRow>
-                      )}
-                      {row.provider === 'claude' && (
-                <ProviderRow
-                  name="Claude Code"
-                  connected={claudeAuthenticated}
-                  actionLabel={claudeAuthenticated ? 'Manage' : 'Connect'}
-                  version={claudeVersion}
-                  statusNode={claudeAuthenticated ? (
-                    <span className="provider-plan-label">{formatPlanStatus(claudePlanLabel)}</span>
-                  ) : undefined}
-                  detailNode={claudeAuthenticated ? (
-                    <ProviderUsage
-                      id="provider-usage-claude"
-                      snapshot={claudeUsageQuery.data}
-                      loading={claudeUsageQuery.isPending}
-                      failed={claudeUsageQuery.isError}
-                      refreshing={claudeUsageQuery.isFetching}
-                      onRefresh={() => claudeUsageQuery.refetch()}
-                      onRedeemClaudeReset={handleRedeemClaudeReset}
-                      claudeResetRedeeming={claudeResetRedeem.busy}
-                      claudeResetResult={claudeResetRedeem.result}
-                      onToggleExtraUsage={handleClaudeExtraUsage}
-                      extraUsageBusy={claudeExtraUsage.busy}
-                      extraUsageResult={claudeExtraUsage.result}
-                    />
-                  ) : null}
-                  expanded={expandedAuth === 'claude'}
-                  onToggleExpand={toggleClaudeAuth}
-                >
-                  <ProviderConnection provider="claude" name="Claude Code" connected={claudeAuthenticated} onDisconnected={onProviderDisconnected}>
-                    <ProviderAuth
-                      authenticated={claudeAuthenticated}
-                      compact
-                      onDone={onClaudeAuthDone}
-                    />
-                  </ProviderConnection>
-                </ProviderRow>
-                      )}
-                      {row.provider === 'mobius' &&
-                        <MobiusProviderAccess active={active} onOpenAccount={openMobiusYou} onVisibilityChange={() => {
-                          authQueries.provider.statuses.invalidate(queryClient)
-                          modelQueries.registry.invalidate(queryClient)
-                        }} />}
-                      {(row.provider === 'claude' || row.provider === 'codex') && (
-                        <div className="settings-provider-details__pricing">
-                          <span>Token rates are a reference, not your account bill. Subscription usage may be included.</span>
-                          <a href={row.provider === 'claude' ? 'https://www.anthropic.com/pricing' : 'https://platform.openai.com/pricing'} target="_blank" rel="noopener noreferrer">See current rates ↗</a>
-                        </div>
-                      )}
-                    </>}
-                  />
-              )))}
+              {effectiveBackgroundDraft.map((row, index) => (
+                <BackgroundProviderRow
+                  status={providerStatusQuery.data?.[row.provider]}
+                  key={row.provider}
+                  row={row}
+                  providerInfo={modelProviderInfo[row.provider]}
+                  index={index}
+                  models={modelsForProvider(row.provider)}
+                  usage={rowUsage(usageQueries[row.provider]?.data)}
+                  dragging={backgroundDrag?.fromIndex === index}
+                  dropTarget={
+                    backgroundDrag?.toIndex === index
+                    && backgroundDrag?.fromIndex !== index
+                  }
+                  dragStyle={backgroundDragStyleForIndex(index)}
+                  rowRef={(node) => {
+                    backgroundRowRefs.current[index] = node
+                  }}
+                  onMove={(delta) => {
+                    // Keyboard reorder is disabled while a pointer drag
+                    // is live, so the two reorder paths can't interleave
+                    // and mutate the list from under each other.
+                    if (backgroundDrag) return
+                    moveBackgroundProvider(index, index + delta)
+                  }}
+                  configuredProviders={configuredProviders}
+                  connectPrompt={row.provider !== 'mobius' ? 'Connect' : showOwnerAccounts ? 'Sign in' : null}
+                  signInNotice={signInNoticeFor(row.provider)}
+                  onReorderStart={startBackgroundReorder}
+                  onOpen={() => openDetailPage(row.provider)}
+                />
+              ))}
             </div>
           ) : providerError ? (
             <Alert color="danger" variant="soft" description={providerErrorMsg} actions={<button className="settings__btn settings__btn--outline settings__btn--sm" type="button" onClick={retryProviders}>Retry</button>} />
@@ -1147,59 +1144,72 @@ export default function SettingsView({
             <div className="settings__notice" role="status">Loading providers…</div>
           )}
           {backgroundError && <Alert color="info" variant="soft" description={backgroundError} />}
-          {manageModelsProvider && (
-            <ManageModelsModal
-              onClose={() => setManageModelsProvider(null)}
-              providerOrder={modelProviderOrder}
-              providerInfo={modelProviderInfo}
-              configuredProviders={configuredProviders}
-              onlyProvider={manageModelsProvider === 'all' ? null : manageModelsProvider}
-            />
-          )}
-        </section>}
+        </section>
 
-        {!detailPage && <>
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
+
+        {showOwnerAccounts && wallet.summary?.mode === 'customer' && (
+          <WalletSection
+            summary={wallet.summary}
+            terms={wallet.terms}
+            activity={wallet.activity}
+            busy={wallet.busy}
+            notice={wallet.notice}
+            refusal={wallet.refusal}
+            onBuy={wallet.buy}
+          />
+        )}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 
-        <section className="settings__section settings__section--compact">
-          <div className="settings__row">
-            <span className="settings__label">Session</span>
-            {signOutConfirm ? (
-              <div className="settings__confirm">
-                <button
-                  className="settings__btn settings__btn--outline settings__btn--sm"
-                  type="button"
-                  onClick={() => setSignOutConfirm(false)}
-                  disabled={signingOut}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={signOut}
-                  disabled={signingOut}
-                >
-                  {signingOut ? 'Leaving…' : onLeaveSharedAccess ? 'Leave shared access' : 'Sign out'}
-                </button>
-              </div>
-            ) : (
-              <button
-                className="settings__btn settings__btn--outline settings__btn--sm"
-                type="button"
-                onClick={() => setSignOutConfirm(true)}
-              >
-                {onLeaveSharedAccess ? 'Leave shared access' : 'Sign out'}
-              </button>
-            )}
+        <section className="settings-group" aria-labelledby="settings-session-title">
+          <div className="settings-group__head">
+            <div className="settings-group__heading">
+              <h2 className="settings-group__title" id="settings-session-title">Session</h2>
+            </div>
           </div>
-          {signOutConfirm && !signingOut && (
-            <p className="settings__subtext settings__subtext--tight">
-              This clears chats, drafts, and app sessions cached on this device.
-            </p>
-          )}
+          <div className="settings-list">
+            <div className="settings-item">
+              <span className="settings-item__body">
+                <span className="settings-item__title">{onLeaveSharedAccess ? 'Shared access' : 'This device'}</span>
+                {signOutConfirm && !signingOut && (
+                  <span className="settings-item__sub settings-item__sub--wrap">
+                    This clears chats, drafts, and app sessions cached on this device.
+                  </span>
+                )}
+              </span>
+              {signOutConfirm ? (
+                <span className="settings-item__trail settings__confirm">
+                  <button
+                    className="settings__btn settings__btn--outline settings__btn--sm"
+                    type="button"
+                    onClick={() => setSignOutConfirm(false)}
+                    disabled={signingOut}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="settings__btn settings__btn--sm settings__btn--nowrap"
+                    type="button"
+                    onClick={signOut}
+                    disabled={signingOut}
+                  >
+                    {signingOut ? 'Leaving…' : onLeaveSharedAccess ? 'Leave shared access' : 'Sign out'}
+                  </button>
+                </span>
+              ) : (
+                <span className="settings-item__trail">
+                  <button
+                    className="settings__btn settings__btn--outline settings__btn--sm"
+                    type="button"
+                    onClick={() => setSignOutConfirm(true)}
+                  >
+                    {onLeaveSharedAccess ? 'Leave shared access' : 'Sign out'}
+                  </button>
+                </span>
+              )}
+            </div>
+          </div>
         </section>
         </>}
       </div>

@@ -1,26 +1,23 @@
 /**
- * Unit tests for themeService.toggleTheme (Commit 3a).
+ * Unit tests for themeService.toggleTheme.
  *
- * These are the SHIP-BLOCKER tests from the v2 design:
- *   - Fix 1: toggleTheme MUST seed BOTH theme query keys and mark
- *            them stale, otherwise AppCanvas iframe propagation or
- *            SettingsView's switch state silently drifts.
- *   - Fix 2: toggleTheme MUST extract `newBg` from the BUILT CSS,
- *            not from the parsed-input meta.
+ * The server builds every theme; the shell only paints. The cached
+ * `/api/theme` response carries `toggle`, the theme the switch will save, so
+ * the tap paints it at once, and `POST /api/theme/mode` returns what the
+ * server then serves. What the switch writes into theme.css is tested on the
+ * server (backend/tests/test_theme_toggle.py).
  *
- * Plus a unit assertion that the cache seed IS what triggers
- * AppCanvas's useEffect path. AppCanvas reads
- * `useQuery({ queryKey: themeQueryKey })`; its useEffect on
- * [theme?.css, theme?.bg] postMessages the iframe. We simulate that
- * effect with a mock queryClient that captures setQueryData + a
- * mock useEffect-like callback that fires the postMessage, and
- * assert the call lands.
+ * Contracts held here: the paint lands before the save resolves; both theme
+ * query keys are seeded (AppCanvas posts `moebius:frame-theme` from the
+ * ['theme'] seed) and then marked stale without a refetch; a failed save
+ * restores the previous paint and throws for the caller's rollback.
  *
  * Run with:
  *   cd frontend && node --test src/lib/__tests__/themeService.toggleTheme.test.js
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { QueryClient } from '@tanstack/query-core'
 
 // Same minimal DOM stub as themeService.test.js — toggleTheme calls
 // applyThemeToDom internally, which needs it.
@@ -43,7 +40,7 @@ function makeDomStub() {
       contains: (name) => documentElement._classes.has(name),
     },
     // applyThemeToDom now syncs the inline --bg (BUG 2); capture it.
-    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] }, getPropertyValue(name) { return this._props[name] } },
   }
   const body = { style: {} }
   function makeNode(tag) {
@@ -84,79 +81,60 @@ function makeDomStub() {
   }
 }
 
-// Mock queryClient — records every invalidateQueries call so we can
-// assert BOTH theme keys were invalidated.
+// Mock queryClient over one cached ['theme'] value; records seeds and
+// invalidations.
 function makeQueryClient(seedCache) {
   const invalidated = []
-  const setData = []  // [queryKey, value] pairs from setQueryData
-  // Mirror the real cache: getQueryData reads the seeded / last-set value.
-  // Default cold (undefined) so existing tests still exercise toggleTheme's
-  // getThemeCss fallback; a warm seed exercises the synchronous-swap path.
+  const setData = []
+  const events = []
   let cache = seedCache
   return {
     invalidated,
     setData,
+    events,
     getQueryData: () => cache,
-    // toggleTheme seeds the theme query cache with the new {css,bg} so the
-    // post-invalidate refetch / useTheme re-apply can't repaint a stale
-    // SWR value over the toggle's correct paint.
-    setQueryData: (queryKey, value) => { setData.push([queryKey, value]); cache = value; return value },
+    setQueryData: (queryKey, value) => {
+      events.push('setQueryData')
+      setData.push([queryKey, value])
+      if (JSON.stringify(queryKey) === '["theme"]') cache = value
+      return value
+    },
     invalidateQueries: (opts) => {
-      invalidated.push(opts.queryKey)
+      events.push('invalidate')
+      invalidated.push(opts)
       return Promise.resolve()
     },
   }
 }
 
-// Build a sample dark-mode theme.css the way the agent or
-// /api/theme would emit. Same shape buildThemeCss produces.
-const DARK_CSS = `:root {
-  --bg: #0d0f14;
-  --surface: #151820;
-  --surface-2: #1c2028;
-  --border: #2a2f3a;
-  --border-light: #1e2330;
-  --text: #d8d8dc;
-  --muted: #6b6b76;
-  --accent: #ff00ff;
-  --font: 'Inter', sans-serif;
-  --mono: 'JetBrains Mono', monospace;
-  font-size: 15px;
-  color-scheme: dark;
-}
-`
+// Server-shaped themes. A real `css` is the server's effective theme; these
+// stand-ins only need distinct bytes and a --bg.
+const theme = (mode, bg, extra = '') => ({ css: `:root { --bg: ${bg}; }${extra}`, bg, mode })
+const DARK = theme('dark', '#0d0d0d')
+const LIGHT = theme('light', '#f0eeeb')
+const served = (current, next) => ({ ...current, toggle: next })
 
-function makeApi(initialCss = DARK_CSS) {
+// A fake `/api/theme/mode`: answers with `responses[mode]`, optionally held
+// until `release()` so a test can look at the DOM before the save resolves.
+function makeApi(responses = { light: served(LIGHT, DARK), dark: served(DARK, LIGHT) }, { hold = false, fail = false } = {}) {
   const calls = []
-  let currentCss = initialCss
+  let release
+  const gate = hold ? new Promise((resolve) => { release = resolve }) : Promise.resolve()
   return {
     calls,
-    storage: { shared: {
-      getThemeCss: () => {
-        calls.push(['getThemeCss'])
-        return Promise.resolve({
-          ok: true,
-          text: () => Promise.resolve(currentCss),
-        })
-      },
-      putThemeCss: (content) => {
-        calls.push(['putThemeCss', content])
-        currentCss = content
-        return Promise.resolve()
-      },
-      putThemeMode: (mode) => {
-        calls.push(['putThemeMode', mode])
-        return Promise.resolve()
-      },
-    }},
-    notify: {
-      send: (payload) => {
-        calls.push(['notify', payload])
-        return Promise.resolve()
+    release: () => release(),
+    theme: {
+      setMode: async (mode) => {
+        calls.push(mode)
+        await gate
+        if (fail) return { ok: false, status: 500, json: async () => ({}) }
+        return { ok: true, status: 200, json: async () => responses[mode] }
       },
     },
   }
 }
+
+const styleText = () => dom.styleNodes.get('mobius-theme')?.textContent
 
 let dom
 let themeService
@@ -181,455 +159,172 @@ beforeEach(async () => {
   themeService = await import(url)
 })
 
-test('SHIP-BLOCKER #1 — toggleTheme invalidates BOTH theme query keys', async () => {
-  // This is the test that locks in the iframe propagation contract.
-  // AppCanvas.jsx subscribes to the `['theme']` queryKey; if
-  // toggleTheme forgets to invalidate, the iframe stays on the
-  // OLD theme until next mount.
+test('a warm cache paints the server preview before the save resolves', async () => {
+  const qc = makeQueryClient(served(DARK, LIGHT))
+  const api = makeApi(undefined, { hold: true })
+  const pending = themeService.toggleTheme(qc, 'dark', api)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(api.calls, ['light'], 'the save is in flight')
+  assert.equal(styleText(), LIGHT.css, 'the preview is painted on the tap')
+  assert.equal(dom.meta.content, LIGHT.bg)
+  assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
+  api.release()
+  const result = await pending
+  assert.deepEqual(result, { newMode: 'light', newCss: LIGHT.css, newBg: LIGHT.bg })
+})
+
+test('the saved theme is painted when it differs from the preview', async () => {
+  // An agent edited theme.css after the shell loaded it: the server rewrites
+  // what is on disk, so its answer wins over the preview.
+  const edited = theme('light', '#fafafa', ' .x { gap: 1px; }')
+  const qc = makeQueryClient(served(DARK, LIGHT))
+  const result = await themeService.toggleTheme(qc, 'dark', makeApi({ light: served(edited, DARK) }))
+  assert.equal(styleText(), edited.css)
+  assert.equal(result.newBg, '#fafafa')
+  assert.deepEqual(qc.getQueryData(), served(edited, DARK), 'the cache holds the next preview too')
+})
+
+test('a cold cache waits for the server, then paints its answer', async () => {
   const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  await themeService.toggleTheme(qc, 'dark', api)
-
-  // Both keys must be in the invalidated list.
-  const keyStrs = qc.invalidated.map(k => JSON.stringify(k))
-  assert.ok(keyStrs.includes('["theme"]'),
-    `themeQueries.invalidate (key ['theme']) MUST fire — without it AppCanvas iframes stale-theme. Got: ${keyStrs.join(', ')}`)
-  assert.ok(keyStrs.includes('["theme-mode"]'),
-    `themeQueries.mode.invalidate (key ['theme-mode']) MUST fire — SettingsView seeds lightMode from this. Got: ${keyStrs.join(', ')}`)
+  const api = makeApi(undefined, { hold: true })
+  const pending = themeService.toggleTheme(qc, 'dark', api)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(styleText(), undefined, 'nothing to paint without a preview')
+  api.release()
+  await pending
+  assert.equal(styleText(), LIGHT.css)
+  assert.equal(dom.meta.content, LIGHT.bg)
 })
 
-test('SHIP-BLOCKER #2 — newBg is extracted from BUILT css, not stale meta', async () => {
-  // Dark → light toggle. The OLD meta has --bg: #0d0f14 (dark).
-  // The BUILT css for light mode has --bg: #f0eeeb. The returned
-  // newBg must reflect the BUILT value; passing the stale dark bg
-  // to applyThemeToDom would leave body.background + meta theme-
-  // color pointing at the old dark color while the <style> block
-  // shows light mode.
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-  assert.equal(result.newMode, 'light')
-  assert.equal(result.newBg, '#f0eeeb',
-    `newBg must be the NEW light bg (#f0eeeb), not the old dark bg. Got ${result.newBg}.`)
-  // And the DOM must reflect the new bg too.
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
-  assert.equal(dom.meta.content, '#f0eeeb')
+test('a preview for another starting mode is not painted', async () => {
+  // The cache says light while the screen shows dark: its preview is dark.
+  const qc = makeQueryClient(served(LIGHT, DARK))
+  const api = makeApi(undefined, { hold: true })
+  const pending = themeService.toggleTheme(qc, 'dark', api)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(styleText(), undefined)
+  api.release()
+  await pending
+  assert.deepEqual(api.calls, ['light'])
+  assert.equal(styleText(), LIGHT.css)
 })
 
-test('I4 — warm cache: toggleTheme paints WITHOUT awaiting getThemeCss (instant recolor)', async () => {
-  // Owner-reported lag: applyThemeToDom was gated behind `await getThemeCss()`,
-  // so the toggle (and page) recolored a frame after the knob slid. With the
-  // theme query cache warm (normal once useTheme has run), the swap source is
-  // read synchronously and getThemeCss is never hit — the repaint lands on the
-  // click tick.
-  const qc = makeQueryClient({ css: DARK_CSS, bg: '#0d0f14' })
-  const api = makeApi(DARK_CSS)
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-  assert.ok(!api.calls.some(c => c[0] === 'getThemeCss'),
-    `getThemeCss must NOT be fetched when the theme cache is warm (it gates the optimistic paint). Got: ${api.calls.map(c=>c[0]).join(', ')}`)
-  assert.equal(result.newMode, 'light')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
-  assert.ok(api.calls.some(c => c[0] === 'putThemeCss'), 'still persists the new css')
-})
-
-test('I4 — cold cache: toggleTheme falls back to fetching the persisted css', async () => {
-  const qc = makeQueryClient()  // cold (no seed)
-  const api = makeApi(DARK_CSS)
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-  assert.ok(api.calls.some(c => c[0] === 'getThemeCss'),
-    'cold cache MUST fall back to fetching the persisted css as the swap source')
-  assert.equal(result.newMode, 'light')
-})
-
-test('toggleTheme persists css + mode before invalidating', async () => {
-  // Order matters: if invalidation fires before persist resolves,
-  // a refetch could read the OLD css from the server and apply
-  // it back, undoing the toggle.
-  const events = []
-  const qc = {
-    invalidated: [],
-    getQueryData: () => undefined,
-    setQueryData: (queryKey, value) => {
-      events.push(['setQueryData', JSON.stringify(queryKey)])
-      return value
-    },
-    invalidateQueries: (opts) => {
-      events.push(['invalidate', JSON.stringify(opts.queryKey)])
-      qc.invalidated.push(opts.queryKey)
-      return Promise.resolve()
-    },
+// The shell's service worker answers /api/theme stale-while-revalidate: a
+// fetch gets the body the worker held when it started.
+function makeServiceWorker(body) {
+  const sw = { body }
+  globalThis.self = { location: { origin: 'http://shell.test' } }
+  globalThis.caches = {
+    open: async () => ({ put: async (_url, res) => { sw.body = await res.json() } }),
   }
-  const api = makeApi(DARK_CSS)
-  const wrappedPutCss = api.storage.shared.putThemeCss
-  api.storage.shared.putThemeCss = async (c) => {
-    events.push(['putThemeCss', c.length])
-    return wrappedPutCss(c)
-  }
-  const wrappedPutMode = api.storage.shared.putThemeMode
-  api.storage.shared.putThemeMode = async (m) => {
-    events.push(['putThemeMode', m])
-    return wrappedPutMode(m)
-  }
-  await themeService.toggleTheme(qc, 'dark', api)
-  const order = events.map(e => e[0])
-  const putIdx = order.findIndex(e => e === 'putThemeCss')
-  const invalidateIdx = order.findIndex(e => e === 'invalidate')
-  assert.ok(putIdx >= 0 && invalidateIdx >= 0)
-  assert.ok(putIdx < invalidateIdx,
-    `Persist must complete before invalidation; got order: ${order.join(' -> ')}`)
-})
-
-test('toggleTheme dark → light swaps structural colors but preserves accent', async () => {
-  // The user (or the agent) may have set a custom accent. The
-  // mode toggle must not clobber it.
-  const customCss = DARK_CSS.replace('--accent: #ff00ff', '--accent: #abcdef')
-  const qc = makeQueryClient()
-  const api = makeApi(customCss)
-  await themeService.toggleTheme(qc, 'dark', api)
-  const putCall = api.calls.find(c => c[0] === 'putThemeCss')
-  assert.ok(putCall, 'putThemeCss must have been called')
-  const newCss = putCall[1]
-  assert.ok(newCss.includes('--bg: #f0eeeb'), 'structural --bg must swap to light')
-  assert.ok(newCss.includes('--accent: #abcdef'),
-    'custom --accent must survive the mode toggle')
-})
-
-test('REGRESSION — toggleTheme preserves selectors containing -- in extra CSS', async () => {
-  // The Settings server spacing rule uses `.settings__section--compact`.
-  // parseThemeMeta used to scan the whole stylesheet for custom properties,
-  // so it treated the selector's `--compact:last-child...` as a bogus CSS
-  // variable. The next toggle rebuilt theme.css with `--compact: ...` inside
-  // :root and removed the actual rule.
-  const cssWithSettingsRule = `${DARK_CSS}
-  /* settings server spacing: keep Restart and status actions visually separate. */
-  .settings__section--server,
-  .settings .settings__content > .settings__section.settings__section--compact:last-child .settings__row:last-child {
-    gap: 14px;
-  }
-  `
-  const qc = makeQueryClient()
-  const api = makeApi(cssWithSettingsRule)
-  await themeService.toggleTheme(qc, 'dark', api)
-  const putCall = api.calls.find(c => c[0] === 'putThemeCss')
-  assert.ok(putCall, 'putThemeCss must have been called')
-  const newCss = putCall[1]
-  assert.ok(newCss.includes('.settings__section--server'),
-    'settings spacing rule must remain outside :root')
-  assert.ok(newCss.includes('.settings__section.settings__section--compact:last-child'),
-    'selector containing --compact must be preserved as a selector')
-  assert.equal(/^\s*--compact\s*:/m.test(newCss), false,
-    `selector text must not be converted into a bogus --compact variable:\n${newCss}`)
-})
-
-test('REGRESSION — toggling an accent-stripped theme restores the missing tokens', async () => {
-  // The prod "light mode completely broken" bug: a prior toggle had
-  // re-persisted theme.css with ONLY structural tokens (no --accent /
-  // --accent-hover / --accent-dim / --danger / --green), because the
-  // old `{ ...meta.colors, ...swapped }` build dropped any token the
-  // input lacked. Each subsequent toggle degraded it further. The fix
-  // spreads the full base palette first, so a toggle always re-emits a
-  // COMPLETE theme. This is the lock-in.
-  const STRIPPED_LIGHT = `:root {
-  --bg: #f0eeeb;
-  --surface: #ffffff;
-  --surface-2: #e8e6e2;
-  --border: #d4d1cc;
-  --border-light: #e2dfdb;
-  --text: #1c1b1a;
-  --muted: #6b6864;
-  --font: 'Inter', system-ui, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 15px;
-  color-scheme: light;
+  return sw
 }
-`
-  const qc = makeQueryClient()
-  const api = makeApi(STRIPPED_LIGHT)
-  await themeService.toggleTheme(qc, 'light', api)
-  const putCall = api.calls.find(c => c[0] === 'putThemeCss')
-  assert.ok(putCall, 'putThemeCss must have been called')
-  const newCss = putCall[1]
-  for (const token of ['--accent:', '--accent-hover:', '--accent-dim:', '--danger:', '--green:']) {
-    assert.ok(newCss.includes(token),
-      `toggling a stripped theme must restore ${token} from the base palette; got:\n${newCss}`)
-  }
-  // And the structural swap still happened (light -> dark bg).
-  assert.ok(newCss.includes('--bg: #0d0d0d'), 'structural --bg must swap to dark')
-})
 
-test('toggleTheme returns {newMode, newCss, newBg} for caller convenience', async () => {
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-  assert.equal(result.newMode, 'light')
-  assert.ok(typeof result.newCss === 'string' && result.newCss.length > 0)
-  assert.equal(result.newBg, '#f0eeeb')
-})
-
-test('toggleTheme light → dark works the same way', async () => {
-  const LIGHT_CSS = DARK_CSS
-    .replace('--bg: #0d0f14', '--bg: #f0eeeb')
-    .replace('color-scheme: dark', 'color-scheme: light')
-  const qc = makeQueryClient()
-  const api = makeApi(LIGHT_CSS)
-  const result = await themeService.toggleTheme(qc, 'light', api)
-  assert.equal(result.newMode, 'dark')
-  // DARK_COLORS.--bg in src/theme.js is the authoritative dark default;
-  // kept in sync with backend/app/theme.py DEFAULT_THEME. Was #0d0f14
-  // in early 2026-05; rolled to #0d0d0d when the design refresh
-  // tightened the neutrals against the lighter --surface stack.
-  assert.equal(result.newBg, '#0d0d0d')
-})
-
-test('toggleTheme throws when persist fails (caller does rollback)', async () => {
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  api.storage.shared.putThemeCss = () => Promise.reject(new Error('500'))
-  await assert.rejects(
-    themeService.toggleTheme(qc, 'dark', api),
-    /500/,
-  )
-  // Invalidation must NOT have fired on the failure path — a
-  // cache invalidate after a failed write would refetch the OLD
-  // css and clobber whatever optimistic state the caller is
-  // about to roll back.
-  assert.equal(qc.invalidated.length, 0,
-    'cache must not be invalidated when persist throws')
-})
-
-test('iframe-propagation contract — cache seed triggers AppCanvas-style postMessage', async () => {
-  // Mandatory smoke: verify that the cache seed is what AppCanvas's
-  // useEffect uses to trigger the moebius:frame-theme postMessage.
-  // We can't run the real AppCanvas under node:test (no React
-  // renderer), but we can mock its observable contract: subscribers
-  // to ['theme'] receive the new theme and call postMessage.
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  const postedMessages = []
-  let lastTheme
-
-  // Simulate AppCanvas's useQuery subscriber + useEffect on
-  // [theme?.css, theme?.bg].
-  const origSetQueryData = qc.setQueryData
-  qc.setQueryData = (queryKey, value) => {
-    const result = origSetQueryData(queryKey, value)
-    if (JSON.stringify(queryKey) === '["theme"]') {
-      const changed = !lastTheme
-        || lastTheme.css !== value.css
-        || lastTheme.bg !== value.bg
-      lastTheme = value
-      if (changed) {
-        // Stand-in for AppCanvas's effect: after the theme query data
-        // changes, the effect posts to the iframe with the new css + bg.
-        postedMessages.push({
-          type: 'moebius:frame-theme',
-          themeCss: value.css,
-          bg: value.bg,
-        })
-      }
+for (const [label, start] of [['no preview', DARK], ['a preview', served(DARK, LIGHT)]]) {
+  test(`a refetch the save's announcement starts cannot repaint over the answer (${label})`, async (t) => {
+    t.after(() => { delete globalThis.caches; delete globalThis.self })
+    const sw = makeServiceWorker(start)
+    const qc = new QueryClient()
+    qc.setQueryData(['theme'], start)
+    let refetch
+    const api = {
+      theme: {
+        setMode: async () => {
+          // The server publishes theme_updated before it answers; the shell's
+          // reaction refetches and the worker serves what it holds now.
+          const held = sw.body
+          refetch = qc.fetchQuery({
+            queryKey: ['theme'],
+            queryFn: () => new Promise((resolve) => setTimeout(() => resolve(held), 5)),
+          }).catch(() => {})
+          return { ok: true, status: 200, json: async () => served(LIGHT, DARK) }
+        },
+      },
     }
-    return result
-  }
+    await themeService.toggleTheme(qc, 'dark', api)
+    await refetch
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.deepEqual(qc.getQueryData(['theme']), served(LIGHT, DARK),
+      'the cache keeps the saved theme and its next preview')
+    assert.deepEqual(sw.body, served(LIGHT, DARK), 'the next refetch is served the saved theme')
+  })
+}
 
-  await themeService.toggleTheme(qc, 'dark', api)
-  assert.equal(postedMessages.length, 1,
-    'AppCanvas-style subscriber must observe the ["theme"] cache seed and postMessage exactly once')
-  assert.equal(postedMessages[0].type, 'moebius:frame-theme')
-  assert.equal(postedMessages[0].bg, '#f0eeeb')
-})
-
-test('theme queries are marked stale without immediate refetch after persist', async () => {
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
-  await themeService.toggleTheme(qc, 'dark', api)
+test('both theme query keys are seeded and then marked stale without a refetch', async () => {
+  const qc = makeQueryClient(served(DARK, LIGHT))
+  await themeService.toggleTheme(qc, 'dark', makeApi())
+  const seeded = qc.setData.map(([k, v]) => [JSON.stringify(k), v])
+  assert.deepEqual(seeded.at(-2), ['["theme"]', served(LIGHT, DARK)])
+  assert.deepEqual(seeded.at(-1), ['["theme-mode"]', 'light'])
   assert.deepEqual(
-    qc.invalidated.map(k => JSON.stringify(k)),
-    ['["theme"]', '["theme-mode"]'],
-    'both theme query keys should be marked stale after persist',
+    qc.invalidated.map((o) => [JSON.stringify(o.queryKey), o.refetchType]),
+    [['["theme"]', 'none'], ['["theme-mode"]', 'none']],
   )
+  assert.ok(qc.events.indexOf('setQueryData') < qc.events.indexOf('invalidate'),
+    'the cache holds the new theme before anything is marked stale')
 })
 
-
-// --- BUG 1: toggle direction must come from the VISIBLE (DOM) mode ---
-// SettingsView.toggleTheme used to derive direction from its optimistic
-// `lightMode` state, which mirrors themeModeQuery.data and LAGS the painted
-// theme through the SW. When it lagged, the toggle computed the wrong
-// direction and applyThemeToDom got handed the already-current CSS → a
-// no-op repaint that left the UI stuck. The fix reads the direction from
-// getEffectiveTheme().mode (the <html data-theme> applyThemeToDom last
-// painted). These tests lock in that the effective DOM mode is the
-// authoritative, always-current source a correct toggle must key off — so
-// a lagging `lightMode` can never send the toggle the wrong way.
-
-test('BUG 1 — getEffectiveTheme().mode reflects the PAINTED theme, not a lagging state', async () => {
-  // Paint dark, then light, via the real apply path (what the user sees).
-  themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')
-  assert.equal(themeService.getEffectiveTheme().mode, 'dark')
-  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
-  // The visible mode is now light. A lagging `lightMode=false` (dark)
-  // would disagree — but the toggle keys off THIS, which is correct.
-  assert.equal(themeService.getEffectiveTheme().mode, 'light',
-    'effective mode must follow the painted theme so toggle direction is right')
+test('the first seed is the preview, which is what AppCanvas posts to live frames', async () => {
+  const qc = makeQueryClient(served(DARK, LIGHT))
+  const api = makeApi(undefined, { hold: true })
+  const pending = themeService.toggleTheme(qc, 'dark', api)
+  await new Promise((resolve) => setImmediate(resolve))
+  const [key, value] = qc.setData[0]
+  assert.equal(JSON.stringify(key), '["theme"]')
+  assert.equal(value, LIGHT)
+  api.release()
+  await pending
 })
 
-test('BUG 1 — direction derived from effective DOM mode toggles correctly even when lightMode lags', async () => {
-  // Simulate SettingsView.toggleTheme's NEW direction logic against a
-  // VISIBLE light theme while the optimistic `lightMode` still says dark
-  // (the lag that caused the stuck-on-dark bug).
-  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // user sees LIGHT
-  const laggingLightMode = false  // stale: still thinks we're dark
-
-  // OLD (buggy) logic: newMode = !lightMode -> dark; currentMode -> 'light'
-  // by coincidence here, but the general failure is direction off the lag.
-  // NEW logic mirrors SettingsView: derive from the effective DOM mode.
-  const eff = themeService.getEffectiveTheme()
-  const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
-    ? eff.mode
-    : (laggingLightMode ? 'light' : 'dark')
-  assert.equal(currentMode, 'light',
-    'currentMode must be read from the VISIBLE theme (light), ignoring the lagging state')
-
-  // Toggling from the visible light theme must persist DARK and repaint dark.
-  const qc = makeQueryClient()
-  const LIGHT_CSS = DARK_CSS
-    .replace('--bg: #0d0f14', '--bg: #f0eeeb')
-    .replace('color-scheme: dark', 'color-scheme: light')
-  const api = makeApi(LIGHT_CSS)
-  const result = await themeService.toggleTheme(qc, currentMode, api)
-  assert.equal(result.newMode, 'dark',
-    'toggling away from the visible LIGHT theme must go DARK (not stay/flip wrong)')
-  assert.equal(dom.document.body.style.background, '#0d0d0d',
-    'the DOM must repaint to the new dark bg (no stuck no-op)')
-  assert.equal(themeService.getEffectiveTheme().mode, 'dark',
-    'after the toggle the visible mode is dark')
+test('a failed save restores the previous paint and cache, and throws', async () => {
+  const previous = served(DARK, LIGHT)
+  themeService.applyThemeToDom(DARK.css, DARK.bg, DARK.mode)
+  const qc = makeQueryClient(previous)
+  await assert.rejects(themeService.toggleTheme(qc, 'dark', makeApi(undefined, { fail: true })), /500/)
+  assert.equal(styleText(), DARK.css)
+  assert.equal(dom.meta.content, DARK.bg)
+  assert.equal(qc.getQueryData(), previous)
+  assert.equal(qc.invalidated.length, 0, 'nothing is marked stale after a failed save')
 })
 
-test('BUG 1 — repeated toggles driven by effective mode never get stuck', async () => {
-  // The owner's exact failure: dark -> light -> dark -> light rapidly.
-  // Each toggle re-reads the effective DOM mode, so direction is always
-  // right and the paint always changes.
-  let css = DARK_CSS  // start dark
-  const seen = []
-  for (let i = 0; i < 4; i++) {
-    const eff = themeService.getEffectiveTheme()
-    // First iteration: nothing painted yet, fall back to known dark start.
-    const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
-      ? eff.mode
-      : 'dark'
-    const qc = makeQueryClient()
-    const api = makeApi(css)
-    const result = await themeService.toggleTheme(qc, currentMode, api)
-    css = api.calls.find(c => c[0] === 'putThemeCss')[1]  // new persisted css
-    seen.push(themeService.getEffectiveTheme().mode)
-  }
-  // Strictly alternating, never stuck.
-  assert.deepEqual(seen, ['light', 'dark', 'light', 'dark'],
-    `repeated toggles must strictly alternate; got ${seen.join(', ')}`)
+test('a refused save carries the server reason for the owner', async () => {
+  const reason = 'theme.css has an unclosed string, comment or url(), so the light/dark switch cannot rewrite it.'
+  const api = { theme: { setMode: async () => ({ ok: false, status: 409, json: async () => ({ detail: reason }) }) } }
+  await assert.rejects(themeService.toggleTheme(makeQueryClient(), 'dark', api),
+    (err) => err.detail === reason)
 })
 
-test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted theme', async () => {
-  // toggleTheme -> applyThemeToDom must overwrite any stale inline --bg.
-  dom.documentElement.style.setProperty('--bg', '#deadbe')  // stale splash value
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)  // dark -> light
-  await themeService.toggleTheme(qc, 'dark', api)
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
-    'inline --bg must track the toggled-to light bg, not the stale splash value')
-  // Delegation: applyThemeToDom persists the {bg,mode} key the pre-paint IIFE reads.
-  assert.deepEqual(
-    JSON.parse(localStorage.getItem('mobius-theme')),
-    { bg: '#f0eeeb', mode: 'light' },
-    'toggle must persist the new {bg,mode} key so the next cold boot resolves light',
-  )
-})
-
-
-// --- REVERT RACE: toggle must not be clobbered by a stale /api/theme re-apply ---
-// Reproduced in-browser: after a toggle, an immediate /api/theme refetch could
-// receive the StaleWhileRevalidate PRE-toggle theme; useTheme's apply effect
-// then repainted that stale theme OVER the toggle's correct paint, snapping
-// the UI back (the owner's "stuck/reverts" symptom). The fix seeds the theme
-// query cache with the NEW {css,bg} via setQueryData, refreshes the SW cache,
-// and marks the queries stale without same-tick refetch churn.
-
-test('REVERT RACE — toggleTheme seeds the theme query cache with the NEW theme', async () => {
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)  // dark -> light
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-  // setQueryData(['theme'], {css,bg}) must have fired with the NEW light theme.
-  const themeSet = qc.setData.find(([k]) => JSON.stringify(k) === '["theme"]')
-  assert.ok(themeSet, 'toggleTheme must seed the ["theme"] query cache so a stale SWR re-apply cannot clobber it')
-  assert.equal(themeSet[1].bg, '#f0eeeb',
-    `seeded bg must be the NEW light bg, not the stale dark one. Got ${themeSet[1].bg}`)
-  assert.equal(themeSet[1].css, result.newCss,
-    'seeded css must equal the freshly-built/applied css')
-})
-
-test('NAV REGRESSION — Settings toggleTheme avoids View Transition snapshot navigation', async () => {
-  const qc = makeQueryClient()
-  const api = makeApi(DARK_CSS)
+test('the Settings toggle never uses a View Transition or the per-element fallback', async () => {
+  themeService.applyThemeToDom(DARK.css, DARK.bg, DARK.mode)
   let viewTransitionCalled = false
   dom.document.startViewTransition = () => {
     viewTransitionCalled = true
     throw new Error('Settings theme toggle must use the atomic paint path')
   }
-
-  const result = await themeService.toggleTheme(qc, 'dark', api)
-
-  assert.equal(viewTransitionCalled, false,
-    'theme toggles from Settings should not invoke document.startViewTransition')
-  assert.equal(dom.document.documentElement.classList.contains('theme-transitioning'), false,
-    'theme toggles from Settings should not animate descendant colors independently')
-  assert.equal(result.newMode, 'light')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  await themeService.toggleTheme(makeQueryClient(served(DARK, LIGHT)), 'dark', makeApi())
+  assert.equal(viewTransitionCalled, false)
+  assert.equal(dom.documentElement.classList.contains('theme-transitioning'), false)
+  assert.equal(dom.meta.content, LIGHT.bg)
 })
 
-test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
-  // setQueryData must land before invalidateQueries: invalidation marks the
-  // query stale for later refresh, but the cache must already hold the new
-  // theme so all subscribers see a coherent target immediately.
-  const events = []
-  const qc = {
-    setData: [],
-    getQueryData: () => undefined,
-    setQueryData: (queryKey, value) => { events.push('setQueryData'); qc.setData.push([queryKey, value]); return value },
-    invalidated: [],
-    invalidateQueries: (opts) => { events.push('invalidate'); qc.invalidated.push(opts.queryKey); return Promise.resolve() },
+test('the toggle leaves no inline --bg and records the new mode for the next boot', async () => {
+  dom.documentElement.style.setProperty('--bg', '#deadbe')  // stale splash value
+  await themeService.toggleTheme(makeQueryClient(served(DARK, LIGHT)), 'dark', makeApi())
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
+  assert.deepEqual(JSON.parse(localStorage.getItem('mobius-theme')), { bg: LIGHT.bg, mode: 'light' })
+})
+
+// SettingsView derives the direction from getEffectiveTheme().mode, the
+// <html data-theme> the last paint set, because its own state lags the paint.
+test('repeated toggles driven by the painted mode strictly alternate', async () => {
+  themeService.applyThemeToDom(DARK.css, DARK.bg, DARK.mode)
+  const qc = makeQueryClient(served(DARK, LIGHT))
+  const api = makeApi()
+  const seen = []
+  for (let i = 0; i < 4; i++) {
+    await themeService.toggleTheme(qc, themeService.getEffectiveTheme().mode, api)
+    seen.push(themeService.getEffectiveTheme().mode)
   }
-  const api = makeApi(DARK_CSS)
-  await themeService.toggleTheme(qc, 'dark', api)
-  const setIdx = events.indexOf('setQueryData')
-  const invIdx = events.indexOf('invalidate')
-  assert.ok(setIdx >= 0 && invIdx >= 0, 'both setQueryData and invalidate must fire')
-  assert.ok(setIdx < invIdx,
-    `setQueryData must precede invalidate so the refetch/re-apply sees the new theme; got ${events.join(' -> ')}`)
-})
-
-test('toggleTheme derives --accent-fg from the accent it preserved', async () => {
-  // The server injects --accent-fg into a TRAILING :root that parseThemeMeta
-  // does not read, so it is absent from meta.colors here. A fixed palette
-  // value would be spread back over the derivation and then persisted into the
-  // first :root, where _ensure_core_vars stops treating it as missing --
-  // permanently disabling the derivation for that theme.
-  const whiteAccent = DARK_CSS.replace('--accent: #ff00ff', '--accent: #ffffff')
-  const qc = makeQueryClient()
-  const api = makeApi(whiteAccent)
-  await themeService.toggleTheme(qc, 'dark', api)
-  const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
-  assert.ok(newCss.includes('--accent: #ffffff'), 'accent survives the toggle')
-  assert.ok(newCss.includes('--accent-fg: #000000'),
-    'a white accent must not keep a white foreground through a toggle')
-})
-
-test('toggleTheme keeps a foreground the theme declared for itself', async () => {
-  const declared = DARK_CSS.replace(
-    '--accent: #ff00ff',
-    '--accent: #ffffff; --accent-fg: #123456',
-  )
-  const qc = makeQueryClient()
-  const api = makeApi(declared)
-  await themeService.toggleTheme(qc, 'dark', api)
-  const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
-  assert.ok(newCss.includes('--accent-fg: #123456'),
-    'an explicitly declared foreground is never overwritten by derivation')
+  assert.deepEqual(seen, ['light', 'dark', 'light', 'dark'])
+  assert.deepEqual(api.calls, ['light', 'dark', 'light', 'dark'])
 })

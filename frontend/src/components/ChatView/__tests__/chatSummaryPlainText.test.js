@@ -3,12 +3,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
+import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 
 test('chat notes keep dollar text literal while answers still render math', async () => {
-  const vite = await createServer({ appType: 'custom', logLevel: 'error',
-    server: { middlewareMode: true, hmr: false, ws: false },
-    ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
+  const vite = await createSsrRenderServer()
   const hadWindow = 'window' in globalThis
   globalThis.window ??= { location: { href: 'http://localhost/' } }
   try {

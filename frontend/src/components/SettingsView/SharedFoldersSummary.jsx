@@ -1,4 +1,4 @@
-/* Settings → Shared folders as one row, like an AI provider: a count, what needs you, and › to the page. */
+/* Settings → Shared folders as one row, like an AI provider: a count and what needs you; the row opens the page. */
 import { Folder } from '@openai/apps-sdk-ui/components/Icon'
 import { isSharedBrowserAuth } from '../../api/client.js'
 import useSharedFolders from '../../hooks/useSharedFolders.js'
@@ -24,15 +24,21 @@ function summaryOf(state, devices) {
 
 function SummarySkeleton() {
   return (
-    <section className="settings__section shared-folders-summary" aria-labelledby="settings-shared-folders-title">
-      <h2 className="settings__section-title" id="settings-shared-folders-title">Shared folders</h2>
-      <p className="settings__subtext settings__subtext--tight">Agents use files on your devices without uploading.</p>
-      <div className="settings__account-link shared-folders-summary__row shared-folders-skeleton" role="status" aria-busy="true" aria-label="Loading shared folders">
-        <span className="shared-folders-summary__icon shared-folders-skeleton__block" aria-hidden="true" />
-        <span className="shared-folders-skeleton__lines" aria-hidden="true">
-          <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '46%' }} />
-          <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '68%' }} />
-        </span>
+    <section className="settings-group shared-folders-summary" aria-labelledby="settings-shared-folders-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-shared-folders-title">Shared folders</h2>
+          <p className="settings-group__desc">Agents use files on your devices without uploading.</p>
+        </div>
+      </div>
+      <div className="settings-list">
+        <div className="settings-item shared-folders-summary__row shared-folders-skeleton" role="status" aria-busy="true" aria-label="Loading shared folders">
+          <span className="settings-item__icon shared-folders-skeleton__block" aria-hidden="true" />
+          <span className="shared-folders-skeleton__lines" aria-hidden="true">
+            <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '46%' }} />
+            <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '68%' }} />
+          </span>
+        </div>
       </div>
     </section>
   )
@@ -52,15 +58,24 @@ function Summary({ onOpen }) {
   if (state.status === 'loading' || !loaded) return <SummarySkeleton />
   const { title, detail } = summaryOf(state, devices)
   return (
-    <section className="settings__section shared-folders-summary" aria-labelledby="settings-shared-folders-title">
-      <h2 className="settings__section-title" id="settings-shared-folders-title">Shared folders</h2>
-      <p className="settings__subtext settings__subtext--tight">Agents use files on your devices without uploading.</p>
-      <button type="button" className="settings__account-link shared-folders-summary__row" onClick={onOpen} aria-label={`Shared folders: ${title}`}>
-        <span className="shared-folders-summary__icon" aria-hidden="true"><Folder width={18} height={18} /></span>
-        <span className="settings__account-link-copy"><strong>{title}</strong><small>{detail}</small></span>
-        {needsYou > 0 && <span className="shared-folders-summary__attention">{needsYou} need{needsYou === 1 ? 's' : ''} you</span>}
-        <span className="settings__account-link-arrow" aria-hidden="true">›</span>
-      </button>
+    <section className="settings-group shared-folders-summary" aria-labelledby="settings-shared-folders-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-shared-folders-title">Shared folders</h2>
+          <p className="settings-group__desc">Agents use files on your devices without uploading.</p>
+        </div>
+      </div>
+      <div className="settings-list">
+        {/* Opens its own page, so no arrow: arrows in Settings mean "expands here". */}
+        <button type="button" className="settings-item shared-folders-summary__row" onClick={onOpen} aria-label={`Shared folders: ${title}`}>
+          <span className="settings-item__icon" aria-hidden="true"><Folder width={18} height={18} /></span>
+          <span className="settings-item__body">
+            <span className="settings-item__title">{title}</span>
+            <span className="settings-item__sub">{detail}</span>
+          </span>
+          {needsYou > 0 && <span className="settings-badge settings-badge--accent">{needsYou} need{needsYou === 1 ? 's' : ''} you</span>}
+        </button>
+      </div>
     </section>
   )
 }

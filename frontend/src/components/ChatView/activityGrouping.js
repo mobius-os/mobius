@@ -1,4 +1,4 @@
-import { isDistinctiveActivityTool } from './toolActivityLabel.js'
+import { isDistinctiveActivityTool, isRoutineTool } from './toolActivityLabel.js'
 
 /** The one display rule for agent work. Everything the agent does or receives
  * while working (tools, including peer messages; thinking; compact activity;
@@ -19,6 +19,42 @@ export function isAgentWorkBlock(item) {
 export function isActivityRunEntry(entry) {
   const item = entry?.item
   return isAgentWorkBlock(item) && item.type !== 'activity' && !isDistinctiveActivityTool(item)
+}
+
+// A settled routine call, alone or as a saved reply's compact block whose every
+// counted step is visible here and routine.
+function isRoutineEntry(entry) {
+  const item = entry?.item
+  if (item?.type === 'tool') return isRoutineTool(item)
+  if (item?.type !== 'activity' || !item.entries?.length) return false
+  // A compact block that also carries a peer message or helper result is not
+  // only bookkeeping: moving it would move that item above the answer too.
+  if (item.positioned_entries?.length) return false
+  return (!Number.isInteger(item.tool_count) || item.tool_count === item.entries.length)
+    && item.entries.every(inner => isRoutineTool(inner?.item))
+}
+
+// Routine saves usually land after a reply's prose, where on their own they add
+// a row below the answer that only says what was saved. In a settled reply, move
+// each one back across that prose to just after the activity line before it, so
+// the ordinary grouping folds it in, where it stays inspectable. Only prose is
+// crossed: a card, image or any other block keeps the save after it, and a save
+// with no activity before the prose keeps its place. Entries keep their idx (and
+// so their keys). Render-only (MsgContent); pure, inputs are not mutated.
+export function joinRoutineToActivity(entries) {
+  const out = []
+  let anchor = -1
+  for (const entry of entries) {
+    if (anchor >= 0 && anchor < out.length - 1 && isRoutineEntry(entry)) {
+      anchor += 1
+      out.splice(anchor, 0, entry)
+      continue
+    }
+    out.push(entry)
+    if (entry?.item?.type === 'activity' || isActivityRunEntry(entry)) anchor = out.length - 1
+    else if (entry?.item?.type !== 'text') anchor = -1
+  }
+  return out
 }
 
 const MAX_OPERATION_RESOURCES = 128

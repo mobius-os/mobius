@@ -82,6 +82,29 @@ test('network messages expose routing, broadcast audience and full safe text', a
  assert.match(html, /&lt;script&gt;/)
  const sent = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'self', recipient_name: 'Builder', body: 'Ready', kind: 'handoff' } }))
  assert.match(sent, /Sent to /); assert.match(sent, /Builder/); assert.doesNotMatch(sent, /This chat|<dl/)
+ assert.doesNotMatch(sent, /Show full note/)
+ const long = render(h(NetworkMessage, { chatId: 'self', message: { id: 'n1', sender_chat_id: 'peer', body: 'Head of a long note', truncated: true, kind: 'note' } }))
+ assert.match(long, /Head of a long note/)
+ assert.match(long, /<button[^>]*>Show full note<\/button>/)
+ const unreadable = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'peer', body: 'Head', truncated: true, kind: 'note' } }))
+ assert.match(unreadable, /class="peer-note-excerpt"[^>]*>Excerpt — full note not shown/)
+})
+
+test('a full note beyond the display limit is plain text revealed a page at a time', async () => {
+ const { FullNoteText } = await vite.ssrLoadModule('/src/components/ChatView/PeerNoteBody.jsx')
+ const text = '# not a heading\n' + 'x'.repeat(50_000)
+ const html = render(h(FullNoteText, { text }))
+ assert.match(html, /class="peer-note-full"># not a heading/)
+ assert.doesNotMatch(html, /<h1/)
+ assert.equal((html.match(/x/g) || []).length < 20_100, true)
+ assert.match(html, /Show more \(30,016 characters left\)/)
+})
+
+test('the transcript card reads a note by its mailbox id', async () => {
+ const { peerNoteMessageId } = await vite.ssrLoadModule('/src/components/ChatView/peerTimeline.js')
+ assert.equal(peerNoteMessageId({ id: 'peer:abc', message_id: 'abc' }), 'abc')
+ assert.equal(peerNoteMessageId({ id: 'abc' }), 'abc')
+ assert.equal(peerNoteMessageId(undefined), undefined)
 })
 
 test('expanded Goal tasks have no dependency on the agent network query', async () => {
@@ -151,4 +174,31 @@ test('a resume marker shows when the work continued', () => {
  const older = render(h(Resume, { msg: { continuation_reason: 'restart', ts: earlier.getTime() } }))
  assert.match(older, /3rd Jan 2026, 14:30<\/time>/, 'an earlier day keeps its date')
  assert.doesNotMatch(render(h(Resume, { msg: { continuation_reason: 'restart' } })), /<time/)
+})
+
+test('a Goal dependency whose claim text was shown in part offers its full text', async () => {
+ const GoalPlanDetails = await load('GoalPlanDetails')
+ const dependency = { id: 'dep-1', target_kind: 'claim_acquisition', condition: 'Ship the change', automatic: true, outcome: null }
+ const html = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [{ ...dependency, truncated: true }] }))
+ assert.match(html, /Ship the change/)
+ assert.match(html, /<button[^>]*>Show full text<\/button>/)
+ const whole = render(h(GoalPlanDetails, { plan: { tasks: [] }, dependencies: [dependency] }))
+ assert.doesNotMatch(whole, /Show full text/)
+})
+
+test('a settled dependency receipt whose claim text was shown in part offers its full text', async () => {
+ const WaitHistoryCard = await load('WaitHistoryCard')
+ const summary = { id: 'dep-2', target_kind: 'claim_acquisition', condition: 'Ship the change', disposition: 'delivered', outcome: { kind: 'completed', outcome: 'Done' } }
+ assert.match(render(h(WaitHistoryCard, { summary: { ...summary, truncated: true } })), /<button[^>]*>Show full text<\/button>/)
+ assert.doesNotMatch(render(h(WaitHistoryCard, { summary })), /Show full text/)
+ const { dependencyFullText } = await vite.ssrLoadModule('/src/components/ChatView/DependencyFullText.jsx')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: 'Done' }), 'Shared work:\nShip\n\nOutcome:\nDone')
+ assert.equal(dependencyFullText({ condition: 'Ship', outcome: null }), 'Shared work:\nShip')
+})
+
+test('a full text past the display limit nests validly inside an inline row', async () => {
+ const { FullNoteText } = await vite.ssrLoadModule('/src/components/ChatView/PeerNoteBody.jsx')
+ const html = render(h('span', null, h(FullNoteText, { text: 'y'.repeat(30_000) })))
+ assert.doesNotMatch(html, /<div/)
+ assert.match(html, /<span class="peer-note-full">/)
 })

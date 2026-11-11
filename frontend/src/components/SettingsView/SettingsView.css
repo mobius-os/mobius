@@ -1,4 +1,4 @@
-/* Settings uses the original rounded cards and spacious, two-line model rows. */
+/* Settings overview: the page frame, the header and theme switch, Updates cards, and the draggable provider rows. Shared row/section primitives live in SettingsPage.css. */
 .settings {
   height: 100%;
   overflow-y: auto;
@@ -13,71 +13,18 @@
   margin: 0 auto;
 }
 
-.settings__account-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.settings__account-link {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  min-height: 62px;
-  padding: 11px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-}
-.settings__account-link:hover { background: var(--surface-2); }
-.settings__account-link-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
-.settings__account-link-copy strong { font-weight: 500; font-size: 14px; }
-.settings__account-link-copy small { color: var(--muted); font-size: 13px; }
-.settings__account-link-arrow { color: var(--muted); font-size: 23px; line-height: 1; }
-.settings__account-link[aria-expanded="true"] .settings__account-link-arrow { transform: rotate(90deg); }
-.settings__account-detail {
-  padding: 14px 16px 16px;
-  border-top: 1px solid var(--border);
-}
-.settings-account-detail-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 11px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
-}
-.settings-account-detail-row span { color: var(--muted); }
-.settings-account-detail-row strong { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
-.settings-github-detail__actions { padding-top: 15px; }
-
 .settings__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 18px;
+  margin-bottom: 26px;
 }
 
 .settings__header .settings__title {
   flex: 1;
   margin: 0;
 }
-.settings__back {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 44px;
-  height: 44px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.settings__back:hover { background: var(--surface-2); }
-.settings__back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
 .settings__title {
   font-size: 25px;
   font-weight: 600;
@@ -85,65 +32,10 @@
   margin-bottom: 18px;
 }
 
-.settings__section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 17px;
-  margin-bottom: 10px;
-  scroll-margin-top: 24px;
-}
-
-.settings__section--compact {
-  padding: 13px 17px;
-}
-
-/* Light mode: cards in light mode lose almost all visible
-   separation from the bg because the surface↔bg contrast is
-   subtle (#f8f7f5 on #f0eeeb). A soft elevation shadow restores
-   the layered card feel from earlier iterations without making
-   the surface itself darker. Dark mode leaves cards flat — dark
-   surfaces don't need elevation. */
-[data-theme="light"] .settings__section {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 1px 3px rgba(0, 0, 0, 0.04);
-}
-
-/* Section titles: sentence-case, no tracking, no uppercase. The
-   previous uppercase-tracked treatment read as ornament. */
-.settings__section-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  text-transform: none;
-  letter-spacing: 0;
-  margin-bottom: 12px;
-}
-
-.settings__label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* "Configured" indicator now uses the shared <StatusDot> component
-   (frontend/src/components/ui/StatusDot.jsx) — both this badge
-   AND the provider-row "Connected" / "Not connected" status pull
-   from the same source so the dot size + gap + typography never
-   drift across surfaces. */
-
 .settings__subtext {
   font-size: 13px;
   color: var(--muted);
   line-height: 1.5;
-}
-
-.settings__subtext--tight {
-  margin: 4px 0 0;
 }
 
 .settings__notice {
@@ -157,20 +49,14 @@
   line-height: 1.45;
 }
 
-.settings__notice--stacked {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
 .settings__subtext a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
 }
 
 .settings__btn {
   align-self: flex-start;
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg);
   border: none;
   border-radius: 8px;
@@ -190,7 +76,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .settings__btn:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--accent-fill-hover, var(--accent-hover));
   }
 }
 
@@ -226,14 +112,6 @@
   .settings__btn--outline:hover {
     background: var(--surface-2);
   }
-}
-
-.settings__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-width: 0;
 }
 
 .settings__appearance-toggle {
@@ -281,11 +159,7 @@
   cursor: wait;
 }
 
-/* Provider rows + .settings__providers wrapper styles live in
-   ../ProviderAuth/ProviderAuth.css since the component is shared
-   between SettingsView and SetupWizard. */
-
-.settings__section:focus,
+.settings-group:focus,
 .settings-bg-list:focus,
 .settings-github:focus {
   outline: none;
@@ -299,12 +173,12 @@
 
 .settings__btn--nowrap { white-space: nowrap; }
 
+/* Provider priority list: the rows sit inside the shared .settings-list card,
+   so a row has no border of its own; while dragging, the held row lifts off
+   the card as its own surface. */
 .settings-bg-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   position: relative;
-  margin-top: 14px;
+  overflow: visible;
 }
 
 .settings-bg-row {
@@ -312,10 +186,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  min-height: 50px;
+  min-height: 64px;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 9px;
   background: var(--surface);
   user-select: none;
   -webkit-user-select: none;
@@ -323,13 +195,14 @@
   transition:
     transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
     background 0.15s ease,
-    border-color 0.15s ease,
     box-shadow 0.15s ease,
     opacity 0.15s ease;
 }
+.settings-bg-row:first-child { border-top-left-radius: 11px; border-top-right-radius: 11px; }
+.settings-bg-row:last-child { border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }
 
 .settings-bg-row--reordering {
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr);
   will-change: transform;
 }
 
@@ -338,62 +211,48 @@
 }
 
 .settings-bg-row--dragging {
-  opacity: 0.96;
-}
-
-.settings-bg-row--dragging .model-trigger,
-.settings-bg-row--drop-target .model-trigger {
-  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
+  border-radius: 11px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--border)), 0 10px 24px rgb(0 0 0 / 22%);
 }
 
 .settings-bg-row--drop-target {
-  background: transparent;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
 }
 
-.settings-bg-row--off {
-  background: transparent;
-  opacity: 0.78;
-}
-
-.settings-bg-row--disconnected:not(.settings-bg-row--detail) { opacity: 0.7; }
-
-.settings-bg-row--disconnected .model-trigger {
-  cursor: not-allowed;
-}
+/* Connected providers left out of background work, and disconnected ones,
+   read quieter than the active priority order. */
+.settings-bg-row--off .settings-provider-summary__copy small { color: color-mix(in srgb, var(--muted) 80%, transparent); }
+.settings-bg-row--disconnected .settings-provider-summary__icon { opacity: 0.7; }
 
 .settings-bg-row__drag-handle {
-  align-self: start;
-  min-width: 44px;
-  height: 62px;
+  align-self: stretch;
+  min-width: 40px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 7px;
-  padding: 0;
-  color: var(--muted);
+  border-radius: 0;
+  padding: 0 0 0 4px;
+  color: color-mix(in srgb, var(--muted) 72%, transparent);
   background: transparent;
   font: inherit;
-  font-size: 20px;
   line-height: 1;
   cursor: grab;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
 }
 
-.settings-bg-row__drag-spacer { width: 44px; height: 62px; }
+.settings-bg-row__drag-spacer { width: 40px; height: 100%; }
 
 .settings-bg-row__drag-handle:active,
 .settings-bg-row--dragging .settings-bg-row__drag-handle {
   cursor: grabbing;
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .settings-bg-row__drag-handle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: -4px;
+  border-radius: 8px;
 }
 
 .settings-bg-row__drag-handle svg {
@@ -401,42 +260,51 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .settings-bg-row__drag-handle:hover {
-    color: var(--text);
-    background: var(--surface-2);
-  }
+  .settings-bg-row__drag-handle:hover { color: var(--text); }
 }
 
-/* The body holds the full-width model trigger. */
 .settings-bg-row__body {
   min-width: 0;
 }
 
+/* The whole row opens the provider page. */
 .settings-provider-summary {
   width: 100%;
-  min-height: 62px;
+  min-height: 64px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 14px 9px 3px;
+  padding: 11px 16px 11px 2px;
   border: 0;
   background: transparent;
   color: var(--text);
+  font: inherit;
   text-align: left;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-provider-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .settings-bg-row:not(.settings-bg-row--dragging):hover { background: color-mix(in srgb, var(--text) 3%, var(--surface)); }
 }
 
 .settings-provider-summary__icon {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
   flex: none;
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--surface-2);
 }
 
 .settings-provider-summary__copy {
+  display: grid;
+  gap: 2px;
   flex: 1;
   min-width: 0;
   font-size: 14px;
@@ -445,148 +313,23 @@
 
 .settings-provider-summary__copy small {
   display: block;
-  margin-top: 2px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.settings-provider-summary__rank {
-  color: var(--muted);
-  font-size: 12px;
-}
+.settings-provider-summary__copy small.settings-provider-summary__notice { color: var(--warning-text, var(--warning)); }
 
-.settings-provider-summary__arrow { color: var(--muted); font-size: 23px; line-height: 1; }
+/* Background-model row on a provider page. */
+.settings-model-row--off .settings-item__title { color: var(--muted); }
 
-.settings-provider-summary:focus-visible,
-.settings-provider-details__models:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.settings-provider-details {
-  border-top: 1px solid var(--border);
-  padding: 10px 14px 14px 3px;
-}
-
-.settings-provider-details__models {
-  display: block;
-  width: 100%;
-  padding: 12px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-}
-
-.settings-provider-details .provider-row {
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.settings-provider-details .provider-row__name {
-  display: none;
-}
-
-.settings-provider-details__model {
-  margin-top: 10px;
-}
-
-.settings-provider-details__model > span {
-  display: block;
-  margin: 0 0 5px 12px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.settings-provider-details__pricing {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 14px 12px 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.settings-provider-details__pricing a {
-  flex: none;
-  color: var(--accent);
-}
-
-@container settings (max-width: 400px) {
-  .settings-provider-details__pricing {
-    flex-direction: column;
-    gap: 4px;
-  }
-}
-
-/* The account rows are one list, not cards inside another card. The AI
-   heading sits above its controls so the provider list reads as one unit. */
-.settings__section--accounts { padding: 0; overflow: hidden; }
-.settings__section--accounts .settings__section-title { margin: 0; padding: 14px 16px 7px; }
-.settings__section--accounts .settings__providers { gap: 0; }
-.settings__section--accounts .settings__account-link {
-  min-height: 62px;
-  border: 0;
-  border-radius: 0;
-  padding: 10px 16px;
-}
-.settings__section--accounts .settings-github { border-top: 1px solid var(--border); }
-.settings__section--ai { padding: 0; border: 0; background: transparent; }
-[data-theme="light"] .settings__section--ai { box-shadow: none; }
-.settings__section--ai > .settings__section-title { margin: 0 0 5px; }
-.settings__section--ai > .settings__subtext { margin: 0; }
-.settings__section--ai .settings-bg-list {
-  gap: 0;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-}
-.settings__section--ai .settings-bg-row {
-  border: 0;
-  border-radius: 0;
-}
-.settings__section--ai .settings-bg-row + .settings-bg-row { border-top: 1px solid var(--border); }
-.settings__section--ai .settings-bg-list--detail { border: 0; background: transparent; }
-.settings__section--ai .settings-bg-row--detail { background: transparent; opacity: 1; user-select: auto; -webkit-user-select: auto; }
-.settings__section--ai .settings-bg-row--detail .settings-provider-details {
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.settings__account-icon {
-  width: 34px;
-  height: 34px;
-  flex: none;
-  object-fit: contain;
-  border-radius: 8px;
-}
-
-.settings__account-icon--mobius,
-.settings__account-icon--github {
-  display: grid;
-  place-items: center;
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.settings__account-icon--github svg {
-  width: 20px;
-  height: 20px;
-}
+/* The Connection panel reuses the provider sign-in components. */
+.settings-provider-connection { padding-top: 14px; padding-bottom: 14px; }
+.settings-provider-page > .alert,
+.settings-provider-page > [role="alert"] { margin-top: 12px; }
 
 /* Quiet, read-only effort preview inside the model button. The actual shared
    effort stepper remains in the sheet opened by this whole button. */
@@ -645,14 +388,29 @@
    the old viewport @media, which missed the narrow-pane-in-wide-screen case
    entirely. When Settings is the full-bleed overlay the container width tracks
    the viewport, so the phone case is unchanged. */
+/* Narrow panes: a section's side controls (Usage's reading time and Refresh)
+   wrap under its heading instead of squeezing it. */
 @container settings (max-width: 620px) {
-  .settings-bg-row {
-    padding-inline: 0;
-  }
+  .settings-group__head { flex-wrap: wrap; align-items: flex-start; }
+  .settings-group__aside { flex: 1 1 100%; justify-content: space-between; }
+}
 
-  .settings-bg-row--reordering {
-    grid-template-columns: 44px minmax(0, 1fr);
+/* Phones and narrow panes: the usage meter moves under the provider's name so
+   the background model it runs gets the full width instead of being cut off. */
+@container settings (max-width: 480px) {
+  .settings-provider-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "icon copy trail" ". meter meter";
+    column-gap: 10px;
+    row-gap: 8px;
+    padding-right: 14px;
   }
+  .settings-provider-summary__icon { grid-area: icon; width: 32px; height: 32px; }
+  .settings-provider-summary__copy { grid-area: copy; }
+  .settings-provider-summary > .settings-badge { grid-area: trail; }
+  .settings-provider-summary > .settings-meter--compact { grid-area: meter; width: 100%; }
+  .settings-provider-summary > .settings-meter--compact .settings-meter__label { justify-content: space-between; }
 }
 
 /* At the 280px pane minimum the outer/section padding eats too much of the
@@ -666,23 +424,6 @@
   .settings__title {
     margin-bottom: 16px;
   }
-
-  .settings__section {
-    padding: 16px 14px;
-  }
-
-  .settings__section--compact {
-    padding: 12px 14px;
-  }
-
-  /* A label + trailing action that cannot both fit on one line stacks instead
-     of pushing past the pane edge; the action keeps its own left edge. */
-  .settings__row {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-
 }
 
 /* Account actions keep their explicit confirmation together. */
@@ -694,21 +435,6 @@
 /* Keep full action labels intact without changing the shared provider layout. */
 .settings .provider-row__action { white-space: nowrap; }
 
-/* GitHub account row: the only style its shared provider panel lacks. */
-.settings-github__check {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.settings-github__check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-
-.settings-github__permission-guide {
-  display: grid;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
+/* A provider page's sign-in notice: the badge, then when the sign-in may end. */
+.settings-signin-notice { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.settings-signin-notice__when { color: var(--muted); font-size: 13px; }

@@ -3582,6 +3582,18 @@ async def test_native_prompt_hook_refuses_work_after_card_or_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_queued_prompt_gate_fails_closed_and_tool_result_hooks_stay_permissive(monkeypatch):
+  """A failing Stop/card gate refuses the prompt; a failing card-end hook must
+  not turn the saved card's completed tool call into an error result."""
+  clients = _install_fake_client(monkeypatch)
+  await _run_turn("prompt-gate-fail-closed")
+  hooks = clients[0].options.hooks
+  assert [m.on_failure for m in hooks["UserPromptSubmit"]] == ["block"]
+  for event in ("PostToolUse", "PreCompact", "Stop"):
+    assert all(m.on_failure is None for m in hooks[event]), event
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("replayed", [False, True])
 async def test_ambiguous_native_write_retains_uuid_until_receipt_or_terminal(monkeypatch, replayed):
   from app import chat_event_sink
@@ -3851,3 +3863,10 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
   await _run_turn("answer-check-card-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_wedged_claude_turn_is_reported_not_stopped():
+  """stop(timeout) is the only drain budget; a wedged turn reports False."""
+  handle = claude_sdk_runner.ActiveClaudeClient(_FakeClient(None), chat_id="wedged-turn")
+  assert await handle.stop(timeout=0.2) is False

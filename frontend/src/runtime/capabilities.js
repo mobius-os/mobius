@@ -22,12 +22,23 @@ function asCapabilityError(msg, capability) {
   )
 }
 
-export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
+export function makeCapabilities({ declarations = {}, hostWindow, selfWindow, visibility } = {}) {
   const ownWindow = selfWindow || globalThis.window
   const parentWindow = hostWindow || ownWindow?.parent
   const embedded = !!ownWindow && parentWindow && parentWindow !== ownWindow
   const sessions = new Map()
   let currentDeclarations = declarations && typeof declarations === 'object' ? declarations : {}
+  // The in-frame speech engine stays loaded between sessions only while this
+  // app is on screen and still declares speech; see speech.js.
+  let speech = null
+  let visible = visibility?.visible ?? true
+  const syncSpeechRetention = () => speech?.retainSpeechEngine(
+    visible && !!currentDeclarations[SPEECH_CAPABILITY],
+  )
+  const stopWatchingVisibility = visibility?.onVisibilityChange?.((next) => {
+    visible = next
+    syncSpeechRetention()
+  })
 
   function describe(name) {
     const value = currentDeclarations?.[name]
@@ -191,9 +202,13 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
         try { listener(value) } catch { /* an app listener must not break speech */ }
       }
     }
-    import('./speech.js').then(({ synthesizeInFrame }) => {
+    import('./speech.js').then((module) => {
+      if (!speech) {
+        speech = module
+        syncSpeechRetention()
+      }
       if (internal.settled) return
-      const engine = synthesizeInFrame({
+      const engine = speech.synthesizeInFrame({
         input,
         maxTextChars: Number(declaration?.limits?.max_text_chars) || 50_000,
         channel: { event: emit },
@@ -236,14 +251,18 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
     },
     _updateDeclarations(next) {
       currentDeclarations = next && typeof next === 'object' ? next : {}
+      syncSpeechRetention()
     },
     _destroy() {
       ownWindow?.removeEventListener?.('message', onMessage)
+      stopWatchingVisibility?.()
       for (const session of sessions.values()) {
+        session.localControl?.cancel()
         settle(session, 'error', new CapabilityError('aborted', 'Capability host was detached.', {
           name: 'AbortError', capability: session.capability,
         }))
       }
+      speech?.releaseSpeechEngine()
     },
   }
 }

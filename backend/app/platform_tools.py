@@ -29,11 +29,15 @@ CHECKPOINT_CHAT_TOOL_NAME = "checkpoint_chat"
 NOTIFY_OWNER_TOOL_NAME = "notify_owner"
 OPEN_ITEM_TOOL_NAME = "open_item"
 SECRET_TOOL_NAME = "request_secret"
+# App building is ordinary work a helper may do too; owner-facing interaction
+# (pushes, workspace placement, cards) stays with the top-level turn.
 APP_BUILD_TOOL_NAMES = ("list_apps", "apply_app", "screenshot")
 LIST_PEERS_TOOL_NAME = "list_agent_peers"
 SEND_MESSAGE_TOOL_NAME = "send_agent_message"
+READ_MESSAGE_TOOL_NAME = "read_agent_message"
 CLAIM_WORK_TOOL_NAME = "claim_agent_work"
 FINISH_WORK_TOOL_NAME = "finish_agent_work"
+READ_CLAIM_TOOL_NAME = "read_work_claim"
 SPAWN_AGENT_TOOL_NAME = "spawn_agent"
 MESSAGE_AGENT_TOOL_NAME = "message_agent"
 STOP_AGENT_TOOL_NAME = "stop_agent"
@@ -52,10 +56,12 @@ HELPER_TOOL_NAMES = (
 PEER_TOOL_NAMES = (
   LIST_PEERS_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
+  READ_MESSAGE_TOOL_NAME,
 )
 WORK_OWNERSHIP_TOOL_NAMES = (
   CLAIM_WORK_TOOL_NAME,
   FINISH_WORK_TOOL_NAME,
+  READ_CLAIM_TOOL_NAME,
 )
 OWNER_CONTROL_TOOL_NAMES = (
   *HELPER_TOOL_NAMES,
@@ -82,6 +88,10 @@ DELEGATED_CONTROL_TOOL_NAMES = (
   *APP_BUILD_TOOL_NAMES,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
+# Bookkeeping whose successful call has nothing for the owner to act on. The
+# chat folds it into the surrounding activity (agent_activity.is_routine_tool);
+# apps declare the same for their own tools with `tools[].routine`.
+ROUTINE_CONTROL_TOOL_NAMES = frozenset({CHECKPOINT_CHAT_TOOL_NAME})
 # Above app_tools.TOOL_TIMEOUT_SECONDS and the control server's own HTTP wait,
 # so the innermost limit is the one that reports.
 CONTROL_TOOL_TIMEOUT_SECONDS = 630

@@ -9,7 +9,6 @@ import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { contrastingAccentFg } from '../../theme.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -44,19 +43,24 @@ import {
   attributedFrameVersion,
   attributedShellShortcutAction,
   confirmAppFileExport,
+  confirmAppOwnerGrant,
   navPushOutcome,
   retireStaleAppFileExport,
+  retireStaleAppOwnerGrant,
   serveAppFileExportRequest,
+  serveAppOwnerGrantRequest,
   serveClipboardWrite,
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
 import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
 import {
-  blockEventDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
+  blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { finishAppFileExport } from '../../lib/appFileExport.js'
+import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
+import { closeAppOwnerGrant } from '../../lib/appOwnerGrant.js'
+import OwnerConfirmSheet from './OwnerConfirmSheet.jsx'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -67,11 +71,6 @@ import './AppCanvas.css'
 function appFrameRequestUrl(appId, version, frameRev) {
   return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
     + (frameRev ? `-${frameRev}` : '')
-}
-
-function fileExportInk(color) {
-  const contrast = contrastingAccentFg(color)
-  return contrast === '#000000' ? '#172008' : contrast || undefined
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {
@@ -155,6 +154,10 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //   File export: {type:'moebius:file-export', requestId, path, name?}
 //      live visible frame → shell confirmation → own storage file download.
 //      The app supplies no app id or token; result is file-export-result.
+//   Owner grant: {type:'moebius:owner-grant', requestId, action, scope, body}
+//      live visible frame → shell-drawn confirm sheet (the server words it) →
+//      short-lived grant minted with the owner's bearer; result is
+//      owner-grant-result {ok | cancelled | error, code?}. No app id, no grant id.
 //
 //   2. {type: 'moebius:frame-mounted', appId, supportsAppBlocks} frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
@@ -251,6 +254,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      the document generation; frame-mounted (`blockGeneration`) and every
 //      app-block-state must name that exact generation, or they are dropped;
 //      each owner event is posted once, to the generation it was dispatched for. It grants no app authority.
+//      moebius:app-block-refresh {sessionId, generation, reason} is a host
+//      hint to re-read (a turn settled in this chat, the tab became visible),
+//      posted once per hint to the generation it was raised for.
 //
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
@@ -454,7 +460,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   navigationTarget = true,
   pendingIntent = null,
   // Optional transcript block session (see 6b above).
-  blockSession = null, blockEvent = null, onBlockState, onBlockCapability,
+  blockSession = null, blockEvent = null, blockRefresh = null, onBlockState, onBlockCapability,
   shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
@@ -468,6 +474,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [cameraPreview, setCameraPreview] = useState(null)
   const [pendingFileExport, setPendingFileExport] = useState(null)
   const pendingFileExportRef = useRef(null)
+  const [pendingOwnerGrant, setPendingOwnerGrant] = useState(null)
+  const pendingOwnerGrantRef = useRef(null)
   const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
@@ -606,6 +614,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const blockDocumentsRef = useRef(null)
   blockDocumentsRef.current ??= createBlockDocuments()
   const sentBlockNonceRef = useRef(null)
+  const sentBlockRefreshRef = useRef(null)
   const reportedBlockRef = useRef(null)
   const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
   // Tell the block host about the live document's negotiation once per
@@ -707,6 +716,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           if (pendingExport?.source === detachedSource) {
             finishFileExport(pendingExport, { cancelled: true })
           }
+          if (pendingOwnerGrantRef.current?.source === detachedSource) cancelOwnerGrant()
           capabilityHostRef.current?.detachSource?.(
             detachedSource,
           )
@@ -766,6 +776,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       getLiveVersion: () => liveVersionRef.current,
       getSourceVersion: source => attributedFrameVersion(framesRef.current, source),
       getToken: () => hostTokenRef.current })
+  }
+  function cancelOwnerGrant() {
+    closeAppOwnerGrant({ pendingRef: pendingOwnerGrantRef, setPending: setPendingOwnerGrant })
+  }
+  function confirmOwnerGrant() {
+    return confirmAppOwnerGrant({ pendingRef: pendingOwnerGrantRef, setPending: setPendingOwnerGrant,
+      appId, visible: visibleRef.current, liveVersion: liveVersionRef.current, frames: framesRef.current })
   }
   const capabilityContractRef = useRef(capabilityContract)
   capabilityContractRef.current = capabilityContract
@@ -989,6 +1006,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         frames: framesRef.current, liveVersion: liveVersionRef.current,
         visible: visibleRef.current, pendingRef: pendingFileExportRef,
         setPending: setPendingFileExport, appId })) return
+      if (serveAppOwnerGrantRequest({ message: msg, source: e.source,
+        frames: framesRef.current, liveVersion: liveVersionRef.current,
+        visible: visibleRef.current, pendingRef: pendingOwnerGrantRef,
+        setPending: setPendingOwnerGrant, appId })) return
       // ATTRIBUTE the message to the exact frame that sent it. Two frames are
       // alive during a swap, so we must NOT assume a single contentWindow —
       // compare e.source to each mounted frame's window and recover its version.
@@ -1409,10 +1430,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     retireStaleAppFileExport({ pendingRef: pendingFileExportRef,
       setPending: setPendingFileExport, appId, visible,
       liveVersion: swap.liveVersion, frames: framesRef.current })
+    retireStaleAppOwnerGrant({ pendingRef: pendingOwnerGrantRef,
+      setPending: setPendingOwnerGrant, appId, visible,
+      liveVersion: swap.liveVersion, frames: framesRef.current })
   }, [appId, visible, swap.liveVersion])
   useEffect(() => () => {
     const request = pendingFileExportRef.current
     if (request) finishFileExport(request, { cancelled: true })
+    cancelOwnerGrant()
   }, [appId])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
@@ -1589,6 +1614,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     sentBlockNonceRef.current = message.nonce
     postToFrame(swap.liveVersion, message)
   }, [swap.liveLoaded, swap.liveVersion, blockSession, blockEvent, blockDocumentRevision])
+  useEffect(() => {
+    if (!swap.liveLoaded) return
+    const message = blockRefreshDelivery({ session: blockSession, refresh: blockRefresh,
+      document: blockDocumentsRef.current.get(swap.liveVersion), sentSeq: sentBlockRefreshRef.current })
+    if (!message) return
+    sentBlockRefreshRef.current = blockRefresh.seq
+    postToFrame(swap.liveVersion, message)
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockRefresh, blockDocumentRevision])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
@@ -2069,6 +2102,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         <AppFileExportDialog appName={appName} themeColor={themeColor} request={pendingFileExport}
           onCancel={cancelFileExport}
           onConfirm={confirmFileExport} />
+      )}
+      {pendingOwnerGrant && visible && (
+        <OwnerConfirmSheet appName={appName} themeColor={themeColor} request={pendingOwnerGrant}
+          onCancel={cancelOwnerGrant} onConfirm={confirmOwnerGrant} />
       )}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it

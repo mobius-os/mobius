@@ -114,11 +114,28 @@ class PlatformApplyIn(BaseModel):
   )
 
 
-def _with_stall(read_status, **kwargs) -> PlatformStatus:
-  """Status plus whether its unfinished update has stalled (resolver chat state)."""
-  status = read_status(**kwargs)
-  with SessionLocal() as db:
-    return platform_update.with_update_stall(db, status)
+async def _owner_status(read_status, *, stall: bool = True, **kwargs) -> PlatformStatus:
+  """Status for Settings: Cancel is offered only when cancelling can succeed,
+  decided before the stall view, whose actions depend on it.
+
+  The updater alone cannot tell whether a bound replacement ended; the
+  deployment controller can.
+  """
+  status = await asyncio.to_thread(read_status, **kwargs)
+  pending = status.get("unfinished_update")
+  if (
+    pending and pending["cancellable"]
+    and await deployment_control.bound_replacement_may_run()
+  ):
+    status["unfinished_update"] = {**pending, "cancellable": False}
+  if not stall:
+    return status
+
+  def with_stall() -> PlatformStatus:
+    with SessionLocal() as db:
+      return platform_update.with_update_stall(db, status)
+
+  return await asyncio.to_thread(with_stall)
 
 
 @router.get("/status")
@@ -137,11 +154,10 @@ async def get_platform_status(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        _with_stall, platform_update.platform_status,
-        target_sha=release["build_sha"],
+      return await _owner_status(
+        platform_update.platform_status, target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(_with_stall, platform_update.platform_status)
+    return await _owner_status(platform_update.platform_status)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -169,11 +185,11 @@ async def check_platform_updates(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        platform_update.check_for_updates,
+      return await _owner_status(
+        platform_update.check_for_updates, stall=False,
         target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(platform_update.check_for_updates)
+    return await _owner_status(platform_update.check_for_updates, stall=False)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
