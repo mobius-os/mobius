@@ -1905,6 +1905,7 @@ def list_project_agent_messages(
     "broadcast": row["broadcast"],
     "body": row["body"],
     "created_at": row["created_at"],
+    **{key: row[key] for key in ("truncated", "body_chars") if key in row},
   } for row in rows]
 
 
