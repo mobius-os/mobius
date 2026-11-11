@@ -231,7 +231,7 @@ def _quote(seller: str, priced_app: str, action: str,
 
   Anything the credits service would refuse is refused here, before the owner
   is asked to pay for it: an action the seller never priced (or switched off),
-  or a price above what the app agreed to pay.
+  a price that cannot be read, or a price above what the app agreed to pay.
   """
   listed = credits_client.prices(seller, priced_app).get("prices") or []
   match = next((p for p in listed if isinstance(p, dict) and p.get("action") == action), None)
@@ -242,7 +242,11 @@ def _quote(seller: str, priced_app: str, action: str,
     })
   price_micro = match.get("price_micro")
   if not isinstance(price_micro, int) or isinstance(price_micro, bool) or price_micro < 0:
-    price_micro = max_price_micro  # the service did not say: the most it can cost
+    # The owner is never asked to approve a price nobody can show them.
+    raise HTTPException(502, {
+      "code": "price_unreadable",
+      "message": "The creator's price couldn't be read. Try again later.",
+    })
   if price_micro > max_price_micro:
     raise HTTPException(409, {
       "code": "price_changed",

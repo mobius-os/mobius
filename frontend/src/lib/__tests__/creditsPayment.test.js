@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  WAITING_PAYMENTS_POLL_MS, answerRefusal, answerRefusalSheet, paymentAmount, paysWithCredits,
-  pressCounts, waitingPaymentNotice, waitingPaymentsRefresh, withoutPayment,
+  PRESS_ARM_MS, WAITING_PAYMENTS_POLL_MS, WAITING_PAYMENTS_SAFETY_POLL_MS, answerRefusal,
+  answerRefusalSheet, armPay, armingWait, paymentAmount, paysWithCredits, pressCounts,
+  restartArming, startArming, waitingPaymentNotice, waitingPaymentsRefresh, withoutPayment,
 } from '../creditsPayment.js'
 
 test('Pay ignores a press while the sheet is still arming', () => {
@@ -26,19 +27,60 @@ test('a keyboard press counts once Pay has armed', () => {
   assert.equal(pressCounts({ armedAt: 800, pressStartedAt: null, keyboard: true }), true)
 })
 
+// Plays taps on the sheet as the dialog sees them: the arming timer has fired
+// by each tap's time, the tap restarts a wait still running, and its press
+// counts as the click lands. Returns how many taps paid.
+function tapsThatPay(shownAt, tapTimes) {
+  let arming = startArming(shownAt)
+  let paid = 0
+  for (const at of tapTimes) {
+    arming = armPay(arming, at)
+    arming = restartArming(arming, at)
+    if (pressCounts({ armedAt: arming.armedAt, pressStartedAt: at, keyboard: false })) paid += 1
+  }
+  return paid
+}
+
+test('continuous tapping through the sheet never arms Pay', () => {
+  // An app's rapid-tap screen: the owner taps every 150 ms for ten seconds,
+  // well past the arming pause, and every tap lands where Pay sits.
+  const taps = Array.from({ length: 67 }, (_, i) => 50 + i * 150)
+  assert.equal(tapsThatPay(0, taps), 0)
+  // A tap only just inside the pause still restarts it.
+  assert.equal(tapsThatPay(0, [PRESS_ARM_MS - 1, 2 * PRESS_ARM_MS - 2]), 0)
+})
+
+test('one deliberate tap after a quiet pause pays', () => {
+  const taps = Array.from({ length: 20 }, (_, i) => 50 + i * 150)
+  const lastTap = taps.at(-1)
+  assert.equal(tapsThatPay(0, [...taps, lastTap + PRESS_ARM_MS]), 1)
+  assert.equal(tapsThatPay(0, [PRESS_ARM_MS]), 1)
+})
+
+test('Pay waits out the rest of its quiet pause, and stays armed once armed', () => {
+  const arming = restartArming(startArming(0), 300)
+  assert.equal(armingWait(arming, 400), PRESS_ARM_MS - 100)
+  assert.equal(armPay(arming, 999), arming)
+  const armed = armPay(arming, 300 + PRESS_ARM_MS)
+  assert.equal(armed.armedAt, 300 + PRESS_ARM_MS)
+  assert.equal(armingWait(armed, 0), 0)
+  // The deliberate press itself must not turn Pay off again.
+  assert.equal(restartArming(armed, 5000), armed)
+})
+
 test('a credits payment shows the creator price and the app ceiling when higher', () => {
   const shown = paymentAmount({
-    method: 'credits', price_micro: 400_000, price: '0.40', max_price_micro: 500_000, max_price: '0.50',
+    price_micro: 400_000, price: '0.40', max_price_micro: 500_000, max_price: '0.50',
   })
   assert.deepEqual(shown, { figure: '0.40', ceiling: '0.50' })
   assert.equal(paymentAmount({
-    method: 'credits', price_micro: 500_000, price: '0.50', max_price_micro: 500_000, max_price: '0.50',
+    price_micro: 500_000, price: '0.50', max_price_micro: 500_000, max_price: '0.50',
   }).ceiling, null)
 })
 
 test('a free action shows its zero price, not the ceiling', () => {
   const shown = paymentAmount({
-    method: 'credits', price_micro: 0, price: '0.00', max_price_micro: 500_000, max_price: '0.50',
+    price_micro: 0, price: '0.00', max_price_micro: 500_000, max_price: '0.50',
   })
   assert.equal(shown.figure, '0.00')
   assert.equal(shown.ceiling, '0.50')
@@ -104,10 +146,14 @@ test('an app on its own page polls its waiting payments while on screen', () => 
   assert.equal(waitingPaymentsRefresh({ pushed: false, visible: false }).refetchInterval, false)
 })
 
-test('the shell reads waiting payments on its events, not by polling', () => {
+test('the shell reads waiting payments on its events, with a slow safety read', () => {
+  // Each payment is announced once: one lost while the stream was down must
+  // still bring up its Pay sheet while the app is on screen.
   const shell = waitingPaymentsRefresh({ pushed: true, visible: true })
-  assert.equal(shell.refetchInterval, false)
+  assert.equal(shell.refetchInterval, WAITING_PAYMENTS_SAFETY_POLL_MS)
+  assert.ok(WAITING_PAYMENTS_SAFETY_POLL_MS > WAITING_PAYMENTS_POLL_MS)
   assert.equal(shell.refetchOnWindowFocus, true)
+  assert.equal(waitingPaymentsRefresh({ pushed: true, visible: false }).refetchInterval, false)
 })
 
 test('a payment from an app off screen raises a shell notice naming it', () => {

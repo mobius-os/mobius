@@ -39,7 +39,9 @@ test('Pay is off when the payment sheet first appears', () => {
     appId: 1, appName: 'Market', payment: PAYMENT, busy: false, error: '',
     onCancel: noop, onPay: noop, onClose: noop,
   }))
-  assert.match(button(html, 'Pay 0.40 credits'), /disabled/)
+  // Off without `disabled`, so presses on it still restart the arming wait.
+  assert.match(button(html, 'Pay 0.40 credits'), /aria-disabled="true"/)
+  assert.doesNotMatch(button(html, 'Pay 0.40 credits'), / disabled=""/)
   assert.doesNotMatch(button(html, 'Cancel'), /disabled/)
   assert.match(html, /By @ana · in Market/)
   assert.match(html, /pays at most 0.50 credits/)

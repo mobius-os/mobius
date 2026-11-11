@@ -113,9 +113,10 @@ Nothing is charged until the owner presses Pay on a sheet the shell shows
 over the app: until then the charge answers 409 `confirmation_required` (the
 app retries the same key). A cancel answers 403 `payment_declined` to every
 retry with that key for ten minutes; asking again takes a new key. A price
-that cannot be read, is unpriced, or exceeds `max_price_micro` is refused
-before the owner is asked. Charges are paid from credits only: any `method`
-other than `"credits"` answers 422 `payment_method_unsupported`. One app may
+that cannot be read (502 `price_unreadable`), is unpriced (`price_not_found`), or
+exceeds `max_price_micro` (`price_changed`) is refused before the owner is
+asked. Charges are paid from credits only: any `method` other than
+`"credits"` answers 422 `payment_method_unsupported`. One app may
 have at most five payments waiting (429 `too_many_payments_waiting`).
 Other refusals keep the service's `detail.code` and message (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,

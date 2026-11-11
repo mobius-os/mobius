@@ -345,8 +345,9 @@ function useAppConsentQuery(appId) {
 
 // Whether a new waiting payment reaches this page as a system event: the shell
 // provides true, since its stream invalidates the waiting payments on
-// `credits_charge_requested`. Elsewhere (an app on its own page) they are
-// polled while the app is on screen (see waitingPaymentsRefresh).
+// `credits_charge_requested`, and reads them slowly anyway in case one was
+// lost. Elsewhere (an app on its own page) they are polled faster while the
+// app is on screen (see waitingPaymentsRefresh).
 export const WaitingPaymentsPushedContext = createContext(false)
 
 // The app's credits charges waiting for the owner's Pay or Cancel. `visible`

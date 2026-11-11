@@ -4,11 +4,38 @@
  */
 
 /**
- * How long Pay stays off after its sheet appears. An app's service
+ * How long the sheet must stay quiet before Pay arms. An app's service
  * chooses when to raise a charge, so the sheet can land under a tap meant for
  * the app; browsers hold their own permission prompts back the same way.
  */
 export const PRESS_ARM_MS = 700
+
+/** Pay's arming for a sheet that appeared at `at`: off, and quiet since then. */
+export function startArming(at) {
+  return { quietSince: at, armedAt: null }
+}
+
+/**
+ * Pay's arming after the owner pressed or typed on the sheet at `at`. While
+ * Pay is still off, any press or key restarts the quiet wait, so an owner
+ * tapping on through the sheet (aiming at the app beneath it) never arms Pay
+ * under a later tap. Once armed, Pay stays armed: the deliberate press itself
+ * must not turn it off again.
+ */
+export function restartArming(arming, at) {
+  return arming.armedAt != null ? arming : startArming(at)
+}
+
+/** How long Pay still waits at `at` before it arms; 0 once it may. */
+export function armingWait(arming, at) {
+  if (arming.armedAt != null) return 0
+  return Math.max(0, arming.quietSince + PRESS_ARM_MS - at)
+}
+
+/** Pay's arming at `at`: armed once the sheet has been quiet for PRESS_ARM_MS. */
+export function armPay(arming, at) {
+  return arming.armedAt == null && armingWait(arming, at) === 0 ? { ...arming, armedAt: at } : arming
+}
 
 /**
  * Whether a press on Pay counts as the owner's answer.
@@ -91,17 +118,27 @@ export function paysWithCredits(contract) {
 export const WAITING_PAYMENTS_POLL_MS = 5_000
 
 /**
+ * How often the shell reads them anyway while the app is on screen. Each
+ * payment is announced once, so one lost while the event stream was down
+ * would otherwise hide its Pay sheet until the payment lapsed.
+ */
+export const WAITING_PAYMENTS_SAFETY_POLL_MS = 30_000
+
+/**
  * How an app's waiting payments stay current. The shell hears each new one as
  * a system event (`pushed`), so it reads them on that event and on a return to
- * the tab. A page without that stream (an app on its own page,
- * /apps/<slug>/) polls while the app is on screen instead, or a charge would
- * wait unseen until it lapsed. Polling pauses while the tab is hidden, and a
- * return to the tab reads them at once.
+ * the tab, plus a slow safety read while the app is on screen in case an event
+ * was missed. A page without that stream (an app on its own page,
+ * /apps/<slug>/) polls faster while the app is on screen instead, or a charge
+ * would wait unseen until it lapsed. Polling pauses while the app is off
+ * screen or the tab is hidden, and a return to the tab reads them at once.
  */
 export function waitingPaymentsRefresh({ pushed, visible }) {
+  let refetchInterval = false
+  if (visible) refetchInterval = pushed ? WAITING_PAYMENTS_SAFETY_POLL_MS : WAITING_PAYMENTS_POLL_MS
   return {
     staleTime: pushed ? 30_000 : 0,
-    refetchInterval: !pushed && visible ? WAITING_PAYMENTS_POLL_MS : false,
+    refetchInterval,
     refetchOnWindowFocus: true,
   }
 }

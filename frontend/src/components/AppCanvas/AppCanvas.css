@@ -439,6 +439,7 @@
 .canvas-credits__figure { font-size: 34px; font-weight: 800; line-height: 1; letter-spacing: -.02em; }
 .canvas-credits__unit { color: var(--muted, #a1a1aa); font-size: 14px; font-weight: 600; }
 .canvas-credits .app-consent__actions .app-consent__btn { flex: 1 1 0; }
+.canvas-credits .app-consent__btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 @media (max-width: 560px) {
   .canvas-credits { place-items: end stretch; padding: 0; }
   .canvas-credits__sheet {

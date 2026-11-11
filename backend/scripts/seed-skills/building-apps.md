@@ -1175,7 +1175,8 @@ the service may still have charged. Retry with the same key, never a new one;
 the client never retries automatically. Do the paid work only after a 200,
 and explain each refusal by its `detail.code`: `not_paired`
 (the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
-`price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
+`price_not_found`, `price_unreadable` (the creator's price could not be read;
+nothing was asked or charged), `key_spend_cap`, or `key_refused` / `invalid_api_key`
 (the credits service refused the key; the owner needs to pair again).
 The key is scoped to your app, so another app's identical key never replays
 your charge.

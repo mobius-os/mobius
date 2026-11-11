@@ -1227,6 +1227,24 @@ def test_a_failed_price_lookup_refuses_without_asking(
   assert _charges_upstream(paired) == []
 
 
+@pytest.mark.parametrize("price_micro", [None, "400000", -1, True, 0.4],
+                         ids=["missing", "text", "negative", "bool", "fraction"])
+def test_an_unreadable_price_refuses_without_asking(
+  client, auth, db, paired, real_payments, price_micro,
+):
+  """A listed price with no readable amount is never put to the owner as a Pay."""
+  app = _app(db, "payer")
+  listed = {"action": "run", "description": "Run: Meeting notes"}
+  if price_micro is not None:
+    listed["price_micro"] = price_micro
+  paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [listed]})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 502 and refused.json()["detail"]["code"] == "price_unreadable"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+
 def test_a_charge_before_pairing_refuses_without_asking(client, auth, db, service, real_payments):
   app = _app(db, "payer")
   refused = client.post("/api/identity/credits/charges", json=CHARGE,
