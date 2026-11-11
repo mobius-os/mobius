@@ -8,6 +8,10 @@ rebuilds the same words and refuses, 409 owner_grant_changed, when they differ
 from what the owner saw. Only the owner's own browser session can preview or
 mint: an app, an agent or a shared-browser guest is refused.
 
+The preview only reads the facts it shows. The route does its own checks and
+may still refuse after the owner confirmed: the grant then expires unused, or
+is burned when the route had already spent it, and the owner confirms again.
+
 ``GUARDED`` is the one list of actions a grant can cover. Each entry names the
 route's own request model, so preview, mint and the route that spends the
 grant (owner_grants.consume_owner_grant) parse one request the same way.
@@ -24,23 +28,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app import contribution_direct_merge as direct_merge
-from app import contribution_pr_facts as pr_facts
 from app import contribution_pr_machine as machine
 from app import contribution_pull_status as pull_status
 from app import contribution_review_runs as reviews
 from app import models, owner_grants
 from app.config import get_settings
 from app.database import get_db
-from app.deps import (
-  Principal, get_agent_run_principal, get_current_owner_for_owner_input, get_principal,
-  reject_cross_site, require_installation_owner_control,
-)
+from app.deps import Principal, get_agent_run_principal, get_principal, reject_cross_site
 from app.github_contributions import _validate_submit_app
 from app.routes import contribution_reviews as routes
 
 router = APIRouter(prefix="/api/owner-grants", tags=["owner-grants"])
 
-STALE_VERDICT = "This verdict was already decided or no longer matches the reviewed version. Refresh before deciding."
 MERGE_VERBS = {"squash": "Squash and merge", "merge": "Merge", "rebase": "Rebase and merge",
                None: "Add to the merge queue"}
 REVIEW_EVENTS = {"APPROVE": ("Approve", "an approval"), "REQUEST_CHANGES": ("Request changes", "a request for changes"),
@@ -55,8 +54,6 @@ QUIET_VERDICTS = {
                      "The review agent continues the guarded merge of the approval GitHub already holds. "
                      "Merging still checks GitHub first."),
 }
-REVIEW_MODES = {"review": "Review only", "review_merge": "Review and merge",
-                "review_fix_merge": "Takeover: review, repair and merge"}
 
 
 class RespondPostResult(BaseModel):
@@ -117,8 +114,7 @@ def _standing(facts: dict) -> dict:
 
 async def _describe_merge(ask: Ask) -> dict:
   body = ask.body
-  target, repo, pull, checks, facts = await _read(direct_merge._read_mergeable_pull, body)
-  direct_merge._require_clear(target, repo, pull, checks, facts)
+  _target, repo, pull, checks, facts = await _read(direct_merge._read_mergeable_pull, body)
   verb = MERGE_VERBS[direct_merge._method_to_send(body.method, repo, checks)]
   return _sheet(f"Merge {body.repo}#{body.number}", [
     *_pull_facts(body, pull), _fact("Method", verb),
@@ -137,47 +133,53 @@ def _asked_of(body) -> list[dict]:
 
 
 async def _describe_status(ask: Ask, name: str) -> dict:
-  """A status change on a pull request, refused here exactly where its own route would refuse it."""
+  """A status change on a pull request, in the PR machine's own words for that action."""
   change, body = pull_status.CHANGES[name], ask.body
   _target, pull, facts = await _read(pull_status._read_pull_facts, body)
-  pr_facts.require_allowed(facts, change.machine_action)
-  change.check(facts, pull, body)
-  action = next(a for a in machine.decide(facts)["actions"] if a["id"] == change.machine_action)
+  action = next((a for a in machine.decide(facts)["actions"] if a["id"] == change.machine_action), None)
+  if action is None:  # the machine has no words for an action this role does not have
+    raise HTTPException(409, machine.action_blocker(facts, change.machine_action))
   detail = [_fact("What happens", action["detail"])] if action["detail"] else []
   return _sheet(f"{action['title']}: {body.repo}#{body.number}",
                 [*_pull_facts(body, pull), *detail, *_asked_of(body), _standing(facts)], action["title"],
                 "caution" if name in ("close", "ask-approval") else "plain")
 
 
-async def _describe_verdict(ask: Ask) -> dict:
-  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
+def _stored_proposal(ask: Ask) -> dict:
+  """The run's stored verdict proposal, only when it is the exact one the request names: the sheet quotes its text."""
   body = ask.body
+  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
   proposal = ((row.outcomes_json or {}).get(reviews.key(body.model_dump())) or {}).get("verdict_proposal") or {}
   if proposal.get("id") != body.proposal_id or proposal.get("head_sha") != body.head_sha:
-    raise HTTPException(409, STALE_VERDICT)
+    raise HTTPException(409, routes.VERDICT_CHANGED)
+  return proposal
+
+
+async def _describe_verdict(ask: Ask) -> dict:
+  body = ask.body
   pr = f"{body.repo}#{body.number}"
   facts = [_fact("Pull request", pr), _fact("Version", body.head_sha[:7])]
   if body.decision != "submit":
     headline, verb, tone, result = QUIET_VERDICTS[body.decision]
     return _sheet(headline.format(pr=pr), [*facts, _fact("Result", result)], verb, tone)
+  proposal = _stored_proposal(ask)
   event = body.event or proposal.get("event")
   text = proposal.get("comment_body" if event == "COMMENT" else "body")
   if event not in REVIEW_EVENTS or not text:
-    raise HTTPException(409, STALE_VERDICT)
+    raise HTTPException(409, routes.VERDICT_CHANGED)
   verb, words = REVIEW_EVENTS[event]
   return _sheet(f"Post {words} on {pr}", [*facts, _fact("Posted exactly as", text)], verb, "caution")
 
 
 async def _describe_repair(ask: Ask) -> dict:
-  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
-  routes._repair_allowed(row)
-  _original, _target, attempt = routes._proposed_repair(row, ask.body)
   body = ask.body
   pr = f"{body.repo}#{body.number}"
   if body.decision == "discard":
     return _sheet(f"Discard the proposed repair of {pr}", [
       _fact("Pull request", pr), _fact("Result", "The repair is thrown away. Nothing is pushed.")],
       "Discard", "plain")
+  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
+  _original, _target, attempt = routes._proposed_repair(row, body)
   return _sheet(f"Push the proposed repair to {pr}", [
     _fact("Pull request", pr), _fact("Pushes to", f"{attempt.get('head_repo')}, branch {attempt.get('head_ref')}"),
     _fact("Version change", f"{attempt['from_sha'][:7]} to {attempt['head_sha'][:7]}"),
@@ -185,28 +187,6 @@ async def _describe_repair(ask: Ask) -> dict:
     _fact("Files", ", ".join(attempt.get("files") or []) or "none"),
     _fact("Result", "A new commit lands on the pull request's branch on GitHub."),
   ], "Push this fix", "caution")
-
-
-def _agent_may(options) -> list[str]:
-  """What the review's agent is allowed to publish on its own; empty when it only reports back."""
-  asked = options or routes.ReviewOptions()
-  return [words for chosen, words in (
-    (asked.post_review, "post its review on GitHub"),
-    (asked.propose_verdict, "propose an approve or request-changes verdict for you to send"),
-    (asked.agent_submits_verdict, "send its own approve or request-changes verdict without asking you again"),
-  ) if chosen]
-
-
-async def _describe_review_start(ask: Ask) -> dict:
-  body = ask.body
-  agent_may = _agent_may(body.options)
-  return _sheet("Start a review", [
-    _fact("Mode", REVIEW_MODES[body.mode]),
-    _fact("Pull requests", "\n".join(f"{item.repo}#{item.number} at {item.head_sha[:7]}" for item in body.items)),
-    _fact("The agent may", "; ".join(agent_may) or "only report back to you"),
-    *([_fact("Why you take it over", body.takeover_reason)] if body.takeover_reason else []),
-    *([_fact("Agent", f"{body.agent.provider} {body.agent.model}")] if body.agent else []),
-  ], "Start review", "caution" if agent_may else "plain")
 
 
 async def _describe_respond_post(ask: Ask) -> dict:
@@ -224,11 +204,25 @@ async def _describe_respond_post(ask: Ask) -> dict:
     _fact("Pull request", f"{body.repo}#{body.number}: {pull.get('title')}"),
     _fact("Author", (pull.get("user") or {}).get("login")),
     _fact("Conversation", chat.title),
-    _fact("Prepared response", f"{body.result_id}, fingerprint {body.digest[:12]}"),
+    _fact("Prepared response", body.result_id),
     _fact("What is posted", "The replies and changes you read in Contribute. They are not shown here."),
   ], "Post to GitHub", "caution")
 
 
+# The one list of actions a grant can cover: the owner-tap routes of
+# contribution_reviews.py (Merge, the five status changes, a verdict decision
+# and a repair decision) and Post. Review start is not here: who may start a
+# publishing review is for the platform design to settle, because a start
+# approved in chat conflicts with a grant rule.
+#
+# Which PUBLIC writes need the owner's tap is not one rule today, and this list
+# is not it. The publication routes in routes/github.py that write to GitHub
+# under the owner's name (submit, ready, update-existing, submit-stack,
+# update-stack, land-stack) use require_account_owner_control and
+# _validate_submit_app, so they accept github_access app tokens and top-level
+# agents, and land-stack fast-forwards an upstream branch. They are NOT covered
+# here. Whether they need the owner's tap is an open policy decision for the
+# platform; no grant check may claim that gap closed while they stand.
 GUARDED = {
   "merge": Guarded(routes.DirectMerge, _describe_merge),
   "open_for_review": Guarded(routes.PullStatusChange, partial(_describe_status, name="ready")),
@@ -238,7 +232,6 @@ GUARDED = {
   "ask_approval": Guarded(routes.ApprovalRequest, partial(_describe_status, name="ask-approval")),
   "verdict": Guarded(routes.VerdictDecision, _describe_verdict, ("run_id",)),
   "repair": Guarded(routes.RepairDecision, _describe_repair, ("run_id",)),
-  "review_start": Guarded(routes.StartReviews, _describe_review_start),
   "respond_post": Guarded(RespondPost, _describe_respond_post),
 }
 
@@ -262,12 +255,10 @@ class ConsumePost(BaseModel):
   body: RespondPostResult
 
 
-def owner_hands(
-  _owner: models.Owner = Depends(get_current_owner_for_owner_input),
-  principal: Principal = Depends(get_principal),
-) -> Principal:
+def owner_hands(principal: Principal = Depends(get_principal)) -> Principal:
   """The installation owner's own browser session: never an app, an agent, a helper or a guest."""
-  require_installation_owner_control(principal)
+  if not owner_grants.is_owner_hands(principal):
+    raise HTTPException(403, "Only you, in your own Möbius session, can confirm this.")
   return principal
 
 
@@ -280,7 +271,8 @@ async def _described(ask: GrantAsk, principal: Principal, db: Session) -> tuple[
     body = guarded.model.model_validate(ask.body)
   except ValidationError as exc:
     raise HTTPException(422, "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())) from exc
-  nonce = _validate_submit_app(ask.app_id, principal, db)
+  # Checked as the asking app's own token is at the route, which needs github_access.
+  nonce = _validate_submit_app(ask.app_id, Principal(owner=principal.owner, app_id=ask.app_id, scope="app"), db)
   sheet = await guarded.describe(Ask(db, principal, ask.app_id, ask.scope, body))
   binding = owner_grants.binding_sha256(ask.action, ask.app_id, ask.scope, body)
   return nonce, binding, sheet, owner_grants.sha256_json({"binding": binding, "sheet": sheet})
