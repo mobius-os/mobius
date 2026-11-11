@@ -59,3 +59,37 @@ export function paysWithCredits(contract) {
   const targets = contract?.data?.spend_credits
   return Array.isArray(targets) && targets.length > 0
 }
+
+/** How often a page that hears no payment events reads them, while on screen. */
+export const WAITING_PAYMENTS_POLL_MS = 5_000
+
+/**
+ * How an app's waiting payments stay current. The shell hears each new one as
+ * a system event (`pushed`), so it reads them on that event and on a return to
+ * the tab. A page without that stream (an app on its own page,
+ * /apps/<slug>/) polls while the app is on screen instead, or a charge would
+ * wait unseen until it lapsed. Polling pauses while the tab is hidden, and a
+ * return to the tab reads them at once.
+ */
+export function waitingPaymentsRefresh({ pushed, visible }) {
+  return {
+    staleTime: pushed ? 30_000 : 0,
+    refetchInterval: !pushed && visible ? WAITING_PAYMENTS_POLL_MS : false,
+    refetchOnWindowFocus: true,
+  }
+}
+
+/**
+ * The shell notice for a payment an app raised, or null when the owner already
+ * sees its Pay sheet. The sheet shows over the paying app only, so an app off
+ * screen would otherwise wait unseen until its payment lapsed.
+ */
+export function waitingPaymentNotice({ appId, visibleAppIds, apps }) {
+  const id = appId == null ? '' : String(appId)
+  if (!id || [...(visibleAppIds || [])].some(visible => String(visible) === id)) return null
+  const name = (apps || []).find(app => String(app?.id) === id)?.name || 'An app'
+  return {
+    message: `${name} is asking you to confirm a payment. Open it to Pay or Cancel.`,
+    noticeKey: `credits-payment:${id}`,
+  }
+}

@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  answerRefusal, paymentAmount, paysWithCredits, pressCounts,
+  WAITING_PAYMENTS_POLL_MS, answerRefusal, paymentAmount, paysWithCredits, pressCounts,
+  waitingPaymentNotice, waitingPaymentsRefresh,
 } from '../creditsPayment.js'
 
 test('Pay ignores a press while the sheet is still arming', () => {
@@ -58,4 +59,35 @@ test('only an app whose contract may spend credits reads its waiting payments', 
   // Managing credits raises no payment, and a local app never manages them.
   assert.equal(paysWithCredits({ data: { credits_manage: true } }), false)
   assert.equal(paysWithCredits({ data: { spend_credits: ['*/prompts'] } }), true)
+})
+
+test('an app on its own page polls its waiting payments while on screen', () => {
+  // No shell stream tells this page a charge arrived, so it must ask.
+  const shown = waitingPaymentsRefresh({ pushed: false, visible: true })
+  assert.equal(shown.refetchInterval, WAITING_PAYMENTS_POLL_MS)
+  assert.equal(shown.staleTime, 0)
+  assert.equal(shown.refetchOnWindowFocus, true)
+  assert.equal(waitingPaymentsRefresh({ pushed: false, visible: false }).refetchInterval, false)
+})
+
+test('the shell reads waiting payments on its events, not by polling', () => {
+  const shell = waitingPaymentsRefresh({ pushed: true, visible: true })
+  assert.equal(shell.refetchInterval, false)
+  assert.equal(shell.refetchOnWindowFocus, true)
+})
+
+test('a payment from an app off screen raises a shell notice naming it', () => {
+  const apps = [{ id: 7, name: 'Market' }, { id: 8, name: 'Notes' }]
+  assert.deepEqual(waitingPaymentNotice({ appId: '7', visibleAppIds: ['8'], apps }), {
+    message: 'Market is asking you to confirm a payment. Open it to Pay or Cancel.',
+    noticeKey: 'credits-payment:7',
+  })
+  assert.equal(waitingPaymentNotice({ appId: '9', visibleAppIds: new Set(), apps }).message,
+    'An app is asking you to confirm a payment. Open it to Pay or Cancel.')
+})
+
+test('a payment from an app on screen raises no notice: its Pay sheet shows', () => {
+  const apps = [{ id: 7, name: 'Market' }]
+  assert.equal(waitingPaymentNotice({ appId: '7', visibleAppIds: new Set([7]), apps }), null)
+  assert.equal(waitingPaymentNotice({ appId: null, visibleAppIds: [], apps }), null)
 })

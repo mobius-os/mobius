@@ -66,8 +66,10 @@ import {
   ownerQueries,
   projectQueries,
   settingsQueries,
+  WaitingPaymentsPushedContext,
 } from '../../hooks/queries.js'
 import { consumeProjectCopyRequest, clearProjectCopyRequest } from '../../lib/projectCopies.js'
+import { waitingPaymentNotice } from '../../lib/creditsPayment.js'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { buildEventProjectId, isArtifactBuildEvent, projectEntryTarget, resultDisplayName } from '../../lib/projectArtifacts.js'
 import { projectChatTabLabel } from '../../lib/projectChats.js'
@@ -1374,6 +1376,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // visibility:false).
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
+  const visibleAppIdsRef = useRef(visibleAppIds)
+  useEffect(() => { visibleAppIdsRef.current = visibleAppIds }, [visibleAppIds])
   // Retained chat surfaces for BOTH layout worlds. A chat selected in Standard's
   // slot and a Builder pane has two physical layout owners: Standard remains
   // full-bleed and Builder remains pane-sized, so neither world's ResizeObserver /
@@ -3354,6 +3358,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     } else if (ev.type === 'credits_charge_requested' || ev.type === 'credits_charge_answered') {
       // An app asked to charge the owner's credits, or a device answered it.
       if (ev.appId) void appQueries.creditsPayments.invalidate(queryClient, ev.appId)
+      // The Pay sheet shows over the paying app only: tell the owner about a
+      // payment from an app they are not looking at.
+      const notice = ev.type === 'credits_charge_requested' && waitingPaymentNotice({
+        appId: ev.appId, visibleAppIds: visibleAppIdsRef.current, apps: appsRef.current,
+      })
+      if (notice) notifyShell(notice.message, { noticeKey: notice.noticeKey })
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void chatAppArtifactQueries.invalidateAll(queryClient)
@@ -3586,7 +3596,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
-    markStreamingAcknowledged, markStreamingEnd, observeManagedAppEvent,
+    markStreamingAcknowledged, markStreamingEnd, notifyShell, observeManagedAppEvent,
     onNotificationCreated, openSettingsSection, placeInWorkspace, projectChatLookup,
     queryClient, refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
@@ -4766,6 +4776,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
+    <WaitingPaymentsPushedContext.Provider value>
     <HistoryDismissProvider
       openHistoryDismiss={openHistoryDismiss}
       closeHistoryDismiss={closeHistoryDismiss}
@@ -5780,5 +5791,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       })()}
     </div>
     </HistoryDismissProvider>
+    </WaitingPaymentsPushedContext.Provider>
   )
 }

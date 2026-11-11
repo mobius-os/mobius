@@ -478,6 +478,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   // opening reads the waiting payments.
   const paymentsQuery = appQueries.creditsPayments.useQuery(appId, {
     enabled: paysWithCredits(capabilityContract),
+    visible,
   })
   const waitingPayment = paymentsQuery.data?.payments?.[0] || null
   const [paymentBusy, setPaymentBusy] = useState(false)

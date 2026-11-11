@@ -1,7 +1,9 @@
+import { createContext, useContext } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
+import { waitingPaymentsRefresh } from '../lib/creditsPayment.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -341,13 +343,21 @@ function useAppConsentQuery(appId) {
   })
 }
 
-// The app's credits charges waiting for the owner's Pay or Cancel.
-function useAppWaitingPaymentsQuery(appId, { enabled = true } = {}) {
+// Whether a new waiting payment reaches this page as a system event: the shell
+// provides true, since its stream invalidates the waiting payments on
+// `credits_charge_requested`. Elsewhere (an app on its own page) they are
+// polled while the app is on screen (see waitingPaymentsRefresh).
+export const WaitingPaymentsPushedContext = createContext(false)
+
+// The app's credits charges waiting for the owner's Pay or Cancel. `visible`
+// is whether the app is on screen, where its Pay sheet can show.
+function useAppWaitingPaymentsQuery(appId, { enabled = true, visible = true } = {}) {
+  const pushed = useContext(WaitingPaymentsPushedContext)
   return useQuery({
     queryKey: ['app-credits-payments', appId],
     enabled: !!appId && enabled,
     queryFn: async () => jsonOrThrow(await api.apps.waitingPayments(appId), 'waiting payments fetch failed:'),
-    staleTime: 30_000,
+    ...waitingPaymentsRefresh({ pushed, visible }),
   })
 }
 
