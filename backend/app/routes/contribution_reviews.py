@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only
 
-from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, providers, transcript_rows, settled
+from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
 from app import contribution_review_presets as presets
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
@@ -46,11 +46,14 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
+# owner_confirm: the shell can confirm an action for an app (window.mobius.ownerGrant). The older owner_grant
+# key is deliberately never advertised: released Contribute reads it as proof of the owner's tap and turns Post on.
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True}
+                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
+                       "owner_confirm": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -1166,9 +1169,13 @@ class VerdictDecision(PullIdentity):
     return self
 
 
+VERDICT_CHANGED = "This verdict no longer matches the reviewed version. Refresh before deciding."
+
+
 def _require_owner_hands(principal: Principal, refusal: str) -> None:
-  """A public action only the owner's own tap may take: any agent bearer is refused."""
-  if principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None:
+  """A public action only the owner's own tap may take: an agent bearer, and the app token one minted, are refused."""
+  if (principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None
+      or principal.via_agent_chat is not None):
     raise HTTPException(403, refusal)
 
 
@@ -1206,6 +1213,7 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
   """The owner's own submit or discard of one exact proposed verdict, dismissal of an unconfirmed one,
   or continuing the merge of an approval GitHub already holds."""
   _require_owner_hands(principal, "Only you can submit, discard or dismiss a verdict. An agent cannot decide its own proposal.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "verdict", body, run_id=run_id)
   row = _row(db, app_id, run_id, principal)
   item_key = reviews.key(body.model_dump())
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -1219,7 +1227,7 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
     proposal = item.get("verdict_proposal") or {}
     if (target is None or target["head_sha"] != body.head_sha or proposal.get("id") != body.proposal_id
         or proposal.get("head_sha") != body.head_sha):
-      raise HTTPException(409, "This verdict no longer matches the reviewed version. Refresh before deciding.")
+      raise HTTPException(409, VERDICT_CHANGED)
     if body.decision in {"discard", "dismiss"}:
       (verdicts.discard if body.decision == "discard" else verdicts.dismiss)(db, row, item_key, body.proposal_id)
       return {"run": _run_view(db, row)}
@@ -1266,6 +1274,7 @@ async def merge_pull_now(app_id: int, body: DirectMerge, db: Session = Depends(g
   outcome is unknown. See contribution_direct_merge.
   """
   _require_owner_hands(principal, "Only you can merge a pull request from here. An agent cannot press Merge.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "merge", body)
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
   return await direct_merge.merge_exact_pull(
@@ -1318,6 +1327,7 @@ async def _owner_status_change(app_id, name, body, db, principal):
   write's outcome is unknown. See contribution_pull_status.
   """
   _require_owner_hands(principal, "Only you can change a pull request's status from here. An agent cannot press it.")
+  owner_grants.consume_owner_grant(db, principal, app_id, pull_status.CHANGES[name].machine_action, body)
   nonce = _authorize_context(db, app_id, principal)
   cwd = Path(get_settings().data_dir) / "platform"
   return await pull_status.change_pull_status(
@@ -1832,6 +1842,7 @@ async def decide_repair(app_id: int | None, run_id: str, body: RepairDecision,
   decided, no longer matches the PR's version, or the PR machine refuses.
   """
   _require_owner_hands(principal, "Only you can push or discard a repair. An agent cannot approve its own push.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "repair", body, run_id=run_id)
   row = _row(db, app_id, run_id, principal)
   _repair_allowed(row)
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):

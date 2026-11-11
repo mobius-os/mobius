@@ -1697,6 +1697,23 @@ export const api = {
       { method: 'DELETE' },
     ),
   },
+  // The shell's owner confirmation of one sensitive app action: the server
+  // describes it in words (preview), then records the owner's tap (mint).
+  // Errors carry the platform's sentence as `message` and its `code`.
+  ownerGrants: {
+    preview: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants/preview', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not check this request',
+    ),
+    mint: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not confirm this request',
+    ),
+  },
   sharedFolders: {
     list: () => apiFetch('/shared-folders'),
     report: (subscriptionId, body) => apiFetch(
