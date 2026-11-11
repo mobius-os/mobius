@@ -23,7 +23,7 @@ if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
 from app import app_python_env, cron_tz
 from app.process_groups import RUN_MARKER_ENV, run_marker
-from app.resource_pressure import resource_status
+from app.resource_pressure import disk_is_critical
 from app.manifest_contract import (
   ManifestContractError,
   job_interpreter,
@@ -394,7 +394,7 @@ def _execute_job(
       # uninstall without checking the backend was up at this stamp.
       _log(app_id, "skipped: app not live (uninstalled/tombstoned) or backend unreachable")
       return 4
-    if _storage_critical():
+    if disk_is_critical(DATA_DIR):
       # The storage guard is pausing work so the data volume does not fill;
       # a job started now would only be stopped again within a second.
       _log(app_id, "skipped: storage is critically low; runs again at its next schedule")
@@ -462,11 +462,6 @@ def _execute_job(
       lease.parent.rmdir()
     except OSError:
       pass
-
-
-def _storage_critical() -> bool:
-  status = resource_status(DATA_DIR, memory={})
-  return status["pressure"]["disk"].get("state") == "critical"
 
 
 def run() -> int:

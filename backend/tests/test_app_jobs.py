@@ -877,17 +877,47 @@ def test_job_context_uses_configured_public_origin_not_request_host(
   assert "untrusted.example" not in json.dumps(response.json())
 
 
-def test_jobs_wait_while_storage_is_critical(monkeypatch):
+def test_jobs_wait_while_storage_is_critical(tmp_path, monkeypatch):
   """A job started on a critical volume would only be stopped again by the
   storage guard within a second, so it is skipped until its next schedule."""
   runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "memory-job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda app_id: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda app_id, token=None: True)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  checked = []
+  monkeypatch.setattr(
+    runner, "disk_is_critical", lambda path: checked.append(path) or True,
+  )
+  monkeypatch.setattr(
+    runner, "_job_context",
+    lambda *_args: pytest.fail("a skipped job must not fetch its context"),
+  )
+  monkeypatch.setattr(
+    runner.subprocess, "Popen",
+    lambda *_args, **_kwargs: pytest.fail("a skipped job must not launch"),
+  )
+  monkeypatch.setattr(runner.sys, "argv", ["app-job-runner.py", "57", str(job)])
 
-  def status(state):
-    return lambda *_args, **_kwargs: {"pressure": {"disk": {"state": state}}}
+  assert runner.run() == 4
+  assert checked == [data_dir]
 
-  monkeypatch.setattr(runner, "resource_status", status("critical"))
-  assert runner._storage_critical() is True
-  monkeypatch.setattr(runner, "resource_status", status("constrained"))
-  assert runner._storage_critical() is False
-  monkeypatch.setattr(runner, "resource_status", status("unknown"))
-  assert runner._storage_critical() is False
+
+def test_storage_counts_as_critical_only_below_the_critical_line():
+  from types import SimpleNamespace
+
+  from app.resource_pressure import disk_is_critical
+
+  def volume(free):
+    total = 8 * 1024 ** 3
+    return lambda _path: SimpleNamespace(total=total, used=total - free, free=free)
+
+  assert disk_is_critical("/data", disk_usage=volume(300 * 1024 ** 2)) is True
+  assert disk_is_critical("/data", disk_usage=volume(600 * 1024 ** 2)) is False
+  assert disk_is_critical("/data", disk_usage=volume(4 * 1024 ** 3)) is False

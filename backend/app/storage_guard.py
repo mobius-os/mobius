@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from app import disk_reserve
-from app.resource_pressure import MIB, resource_status
+from app.resource_pressure import MIB, disk_is_critical, resource_status
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +44,9 @@ log = logging.getLogger(__name__)
 # several seconds to consume the remaining headroom.
 NORMAL_TICK_SECS = 5.0
 PRESSURE_TICK_SECS = 1.0
-# A failed arm (no room, unsupported filesystem) is retried this rarely, so a
-# volume that cannot hold a reserve is not rewritten every tick.
+# A failed arm (no room, a write error) is retried this rarely, so a volume
+# that cannot hold a reserve yet is not rewritten every tick. A filesystem that
+# cannot hold one at all is not retried while this process runs.
 ARM_RETRY_SECS = 600.0
 
 def disk_level(disk: dict[str, Any], free_bytes: int) -> str:
@@ -325,7 +327,9 @@ class StorageGuard:
       if result.state == "armed":
         log.info("storage guard armed a %d MiB recovery reserve", result.held_bytes // MIB)
       return
-    self._next_arm_attempt = now + ARM_RETRY_SECS
+    self._next_arm_attempt = (
+      math.inf if result.state == "unsupported" else now + ARM_RETRY_SECS
+    )
     self.reserve_state, self.reserve_detail = (
       "unavailable" if result.state == "unsupported" else "released",
       result.detail,
@@ -375,8 +379,7 @@ def release_reserve_at_boot(data_dir: str | Path) -> int:
   A healthy volume keeps its reserve through the restart; the guard's first
   ticks handle everything else.
   """
-  status = resource_status(data_dir, memory={})
-  if status["pressure"]["disk"].get("state") != "critical":
+  if not disk_is_critical(data_dir):
     return 0
   freed = disk_reserve.release(data_dir)
   if freed:

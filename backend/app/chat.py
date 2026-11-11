@@ -231,9 +231,13 @@ _park_handoffs: dict[str, _ParkHandoff] = {}
 
 
 def _handoff_owns_run(chat_id: str | None, run_token: str | None) -> bool:
-  """Whether an interrupter took over the turn running as ``run_token``."""
+  """Whether an interrupter took over the turn running as ``run_token``.
+
+  A turn without a run token cannot be matched: two unknown tokens are not the
+  same turn.
+  """
   handoff = _park_handoffs.get(chat_id or "")
-  return handoff is not None and handoff.run_token == run_token
+  return bool(run_token) and handoff is not None and handoff.run_token == run_token
 
 
 def _take_park_handoff(chat_id: str, run_gen: int) -> bool:
@@ -1717,6 +1721,12 @@ async def _interrupt_and_park_live_turns(
     if not isinstance(stopped_gen, int):
       # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
       continue
+    if _clear_after_terminal_generation.get(chat_id) == stopped_gen - 1:
+      # Another interrupter already ended this live turn and recorded its
+      # outcome (an owner Stop whose provider has not finished stopping).
+      # Taking it over would overwrite that outcome and park work the owner
+      # stopped; the turn's own terminal transition settles it instead.
+      continue
     # Mark BEFORE bumping so the turn's finally (which may run the instant the
     # interrupt lands) observes the drain and leaves the marker set.
     _park_handoffs[chat_id] = _ParkHandoff(
@@ -1854,7 +1864,13 @@ async def pause_live_turns_for_storage(spare_chat_ids: frozenset[str]) -> int:
   ``park_reason='storage'``, so the continuation sweep resumes it once
   admission would succeed again. A restart drain owns every turn while it
   runs, and a turn another interrupter already took over is left to it.
-  Returns how many turns reached the durable park.
+
+  The pause holds each chat's lifecycle transition lock from takeover to park,
+  like Stop does, and skips a chat whose lock is already held: a Stop, send or
+  settings change in progress owns that chat, and the guard looks again on
+  its next tick. A Stop arriving mid-pause therefore waits and then ends the
+  parked run rather than racing the park. Returns how many turns reached the
+  durable park.
   """
   if draining:
     return 0
@@ -1863,22 +1879,32 @@ async def pause_live_turns_for_storage(spare_chat_ids: frozenset[str]) -> int:
     sink = get_active_sink(chat_id)
     return sink is not None and _handoff_owns_run(chat_id, sink.run_token)
 
-  chat_ids = [
-    chat_id for chat_id in sorted(registry.all_alive_chat_ids())
-    if chat_id not in spare_chat_ids and not handed_off(chat_id)
-  ]
-  if not chat_ids:
-    return 0
-  parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
-  parked = await _interrupt_and_park_live_turns(
-    chat_ids,
-    note=_park_event(STORAGE_PAUSE_MESSAGE, parked_until, "storage"),
-    park_reason="storage",
-    parked_until=parked_until,
-    timeout=RESTART_HANDLE_STOP_TIMEOUT_SECS,
-    label="storage-pause",
-  )
-  return len(parked)
+  held = []
+  chat_ids: list[str] = []
+  try:
+    for chat_id in sorted(registry.all_alive_chat_ids()):
+      if chat_id in spare_chat_ids or handed_off(chat_id):
+        continue
+      lock = chat_queue.get_transition_lock(chat_id)
+      if not lock.try_acquire():
+        continue
+      held.append(lock)
+      chat_ids.append(chat_id)
+    if not chat_ids:
+      return 0
+    parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+    parked = await _interrupt_and_park_live_turns(
+      chat_ids,
+      note=_park_event(STORAGE_PAUSE_MESSAGE, parked_until, "storage"),
+      park_reason="storage",
+      parked_until=parked_until,
+      timeout=RESTART_HANDLE_STOP_TIMEOUT_SECS,
+      label="storage-pause",
+    )
+    return len(parked)
+  finally:
+    for lock in held:
+      lock.release()
 
 
 async def drain_all_for_restart(

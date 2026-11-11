@@ -9,6 +9,7 @@ without closing the restart drain gate and without touching spared chats.
 import asyncio
 
 from app import chat as chat_mod
+from app.database import SessionLocal
 from app.runner_registry import registry
 
 from tests.test_drain_for_restart import _Handle, _chat, _drain_writer, _live_turn, _run
@@ -152,3 +153,120 @@ def test_a_turn_that_never_stops_is_interrupted_once_and_kept_as_one_entry():
   assert stuck.stop_calls == 1
   assert list(chat_mod._park_handoffs) == [cid]
   registry.unregister(cid, stuck.kind)
+
+
+# --- an owner's Stop and the storage pause never take a turn from each other -
+
+
+class _GatedHandle(_Handle):
+  """A provider that stops only once the test opens its gate."""
+
+  def __init__(self, chat_id: str):
+    super().__init__(chat_id)
+    self.stopping = asyncio.Event()
+    self.gate = asyncio.Event()
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    self.stopping.set()
+    await self.gate.wait()
+    return await super().stop(timeout)
+
+
+def _gated_live_turn(chat_id: str) -> _GatedHandle:
+  _, _, plain = _live_turn(chat_id)
+  registry.unregister(chat_id, plain.kind)
+  handle = _GatedHandle(chat_id)
+  registry.register(handle)
+  return handle
+
+
+async def _stop(chat_id: str):
+  db = SessionLocal()
+  try:
+    return await chat_mod.stop_chat_for(chat_id, db=db)
+  finally:
+    db.close()
+
+
+def test_storage_pause_leaves_a_turn_the_owners_stop_is_still_ending():
+  """Stop has recorded the turn as stopped and waits for its provider; a
+  storage tick in that window must not re-record and park it, or the work the
+  owner stopped resumes by itself once space returns."""
+  cid = "storage-vs-stop-first"
+  handle = _gated_live_turn(cid)
+  stopped_generation = chat_mod.current_run_generation(cid)
+
+  async def scenario():
+    stop = asyncio.create_task(_stop(cid))
+    await handle.stopping.wait()
+    pause = asyncio.create_task(chat_mod.pause_live_turns_for_storage(frozenset()))
+    await asyncio.sleep(0.05)
+    handle.gate.set()
+    return await pause, await stop
+
+  paused, outcome = asyncio.run(scenario())
+  _drain_writer()
+
+  assert paused == 0
+  assert outcome.stopped is True
+  assert handle.stop_calls == 1
+  # The dying turn's terminal transition finds Stop's own record and closes
+  # its run as stopped; nothing parked it in the meantime.
+  assert chat_mod._clear_after_terminal_generation[cid] == stopped_generation
+  assert chat_mod._clear_after_terminal_status[cid] == "stopped"
+  assert chat_mod.current_run_generation(cid) == stopped_generation + 1
+  assert cid not in chat_mod._park_handoffs
+  assert _run(cid)["status"] == "running"
+
+
+def test_storage_pause_never_overwrites_a_stop_whose_provider_did_not_stop():
+  """Stop timed out and released the chat, but its turn is still live."""
+  cid = "storage-vs-stuck-stop"
+  _live_turn(cid)
+  registry.unregister(cid, _Handle(cid).kind)
+  stuck = _Handle(cid, stops=False)
+  registry.register(stuck)
+  stopped_generation = chat_mod.current_run_generation(cid)
+
+  assert asyncio.run(_stop(cid)).stopped is False
+  assert _pause() == 0
+
+  assert stuck.stop_calls == 1
+  assert chat_mod._clear_after_terminal_generation[cid] == stopped_generation
+  assert chat_mod._clear_after_terminal_status[cid] == "stopped"
+  assert cid not in chat_mod._park_handoffs
+  registry.unregister(cid, stuck.kind)
+
+
+def test_owner_stop_during_a_storage_pause_ends_the_parked_run():
+  """A Stop pressed while the pause is interrupting the turn waits for it,
+  then ends the parked storage wait instead of leaving it to resume."""
+  cid = "storage-vs-stop-second"
+  handle = _gated_live_turn(cid)
+
+  async def scenario():
+    pause = asyncio.create_task(chat_mod.pause_live_turns_for_storage(frozenset()))
+    await handle.stopping.wait()
+    stop = asyncio.create_task(_stop(cid))
+    await asyncio.sleep(0.05)
+    handle.gate.set()
+    return await pause, await stop
+
+  paused, outcome = asyncio.run(scenario())
+  _drain_writer()
+
+  assert paused == 1
+  assert outcome.stopped is True
+  assert outcome.receipt is not None
+  assert _run(cid)["status"] == "stopped"
+
+
+def test_a_turn_without_a_run_token_is_never_matched_to_a_handoff():
+  cid = "storage-tokenless-handoff"
+  chat_mod._park_handoffs[cid] = chat_mod._ParkHandoff(
+    generation=chat_mod.current_run_generation(cid), run_token=None,
+  )
+
+  assert chat_mod._handoff_owns_run(cid, None) is False
+  assert chat_mod._handoff_owns_run(cid, "") is False
+  chat_mod._park_handoffs.pop(cid, None)

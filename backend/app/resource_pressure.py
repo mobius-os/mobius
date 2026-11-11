@@ -376,3 +376,17 @@ def resource_status(
     "facts": facts,
     "pressure": assess_resource_pressure(facts),
   }
+
+
+def disk_is_critical(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> bool:
+  """Whether the data volume is below its critical free-space line.
+
+  Disk only, so it is cheap enough to ask before anything writes: at startup
+  (the recovery reserve) and before a scheduled app job launches.
+  """
+  status = resource_status(data_dir, disk_usage=disk_usage, memory={})
+  return status["pressure"]["disk"].get("state") == "critical"

@@ -171,6 +171,10 @@ class _CrossLoopTransitionLock:
       await asyncio.sleep(0.01)
     return True
 
+  def try_acquire(self) -> bool:
+    """Take the lock only if it is free right now; never wait."""
+    return self._lock.acquire(blocking=False)
+
   def release(self) -> None:
     self._lock.release()
 

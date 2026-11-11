@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import disk_reserve, storage_guard
+from app import disk_reserve, resource_pressure, storage_guard
 
 MIB = 1024 * 1024
 TOTAL = 8 * 1024 * MIB
@@ -106,19 +106,20 @@ async def test_reserve_is_not_armed_when_it_would_push_the_volume_into_pressure(
   assert recorder.names() == []
 
 
+def _failing_arm(state, attempts):
+  def arm(data_dir, *, target_bytes, disk_usage):
+    attempts.append(target_bytes)
+    return disk_reserve.ArmOutcome(state, 0, "simulated")
+  return arm
+
+
 @pytest.mark.asyncio
 async def test_failed_arm_is_not_retried_every_tick(tmp_path, no_continued_turns):
   volume = Volume(COMFORTABLE)
-  recorder = Recorder(volume)
   attempts = []
-
-  def unsupported(data_dir, *, target_bytes, disk_usage):
-    attempts.append(target_bytes)
-    return disk_reserve.ArmOutcome("unsupported", 0, "compressed away")
-
   now = [0.0]
-  guard = _guard(tmp_path, volume, recorder, clock=lambda: now[0])
-  guard.effects.arm_reserve = unsupported
+  guard = _guard(tmp_path, volume, Recorder(volume), clock=lambda: now[0])
+  guard.effects.arm_reserve = _failing_arm("no_room", attempts)
 
   await guard.tick()
   await guard.tick()
@@ -126,8 +127,28 @@ async def test_failed_arm_is_not_retried_every_tick(tmp_path, no_continued_turns
   await guard.tick()
 
   assert len(attempts) == 2
-  assert storage_guard.reserve_report(tmp_path)["state"] in ("released", "unavailable")
+  assert guard.reserve_state == "released"
+
+
+@pytest.mark.asyncio
+async def test_a_filesystem_that_cannot_hold_a_reserve_is_not_rewritten_again(
+  tmp_path, no_continued_turns,
+):
+  """Each attempt may write the whole reserve; the filesystem will not change."""
+  volume = Volume(COMFORTABLE)
+  attempts = []
+  now = [0.0]
+  guard = _guard(tmp_path, volume, Recorder(volume), clock=lambda: now[0])
+  guard.effects.arm_reserve = _failing_arm("unsupported", attempts)
+
+  await guard.tick()
+  for _ in range(3):
+    now[0] += storage_guard.ARM_RETRY_SECS + 1
+    await guard.tick()
+
+  assert len(attempts) == 1
   assert guard.reserve_state == "unavailable"
+  assert storage_guard.reserve_report(tmp_path)["state"] in ("released", "unavailable")
 
 
 @pytest.mark.asyncio
@@ -258,11 +279,12 @@ def test_startup_releases_the_reserve_only_on_a_critical_volume(tmp_path, monkey
     tmp_path, target_bytes=1 * MIB, disk_usage=Volume(COMFORTABLE),
   )
 
-  monkeypatch.setattr(storage_guard, "resource_status", _status_for(COMFORTABLE))
+  comfortable, critical = _status_for(COMFORTABLE), _status_for(CRITICAL)
+  monkeypatch.setattr(resource_pressure, "resource_status", comfortable)
   assert storage_guard.release_reserve_at_boot(tmp_path) == 0
   assert disk_reserve.held_bytes(tmp_path) > 0
 
-  monkeypatch.setattr(storage_guard, "resource_status", _status_for(CRITICAL))
+  monkeypatch.setattr(resource_pressure, "resource_status", critical)
   assert storage_guard.release_reserve_at_boot(tmp_path) > 0
   assert disk_reserve.held_bytes(tmp_path) == 0
 

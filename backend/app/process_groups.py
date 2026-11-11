@@ -273,17 +273,32 @@ def _agent_runtime_processes(marked: dict[int, _MarkedProcess]) -> set[int]:
   """The marked processes that are an agent runtime's own machinery.
 
   A runtime root is a process this server launched itself (the Claude CLI,
-  the Codex app-server wrapper, whatever its executable is called). Each is
-  launched as the leader of a private session, and everything that stays in
-  that session belongs to the runtime: the native Codex binary behind its
-  ``node`` wrapper and the stdio MCP servers the runtime started. Providers
-  start every tool command in a session of its own (see RUN_MARKER_ENV), so a
-  command and all its descendants fall outside it, and an orphaned command
-  re-parented away from its runtime can never pass for one.
+  the Codex app-server wrapper, whatever its executable is called). Every
+  descendant that stayed in its root's session belongs to the runtime: the
+  native Codex binary behind its ``node`` wrapper and the stdio MCP servers
+  the runtime started. The root's session is compared rather than assumed to
+  be its own, so a runtime launched without ``setsid`` (a development host
+  without it) still keeps its MCP servers. An orphaned command re-parented
+  away from its runtime can never pass for one.
+
+  This rests on one provider behaviour, which the run marker relies on too
+  (see RUN_MARKER_ENV): each tool command starts in a new session, so it and
+  its descendants leave the runtime's session. The Claude CLI is observed to
+  do this; for Codex it is assumed, not observed. A provider that gave commands
+  only a new process group would have them spared here, and they would end
+  with the turn's pause instead, a few seconds later.
   """
   server = os.getpid()
   roots = {pid for pid, proc in marked.items() if proc.parent == server}
-  return roots | {pid for pid, proc in marked.items() if proc.session in roots}
+  runtime = set(roots)
+  for pid, proc in marked.items():
+    ancestor, seen = proc.parent, {pid}
+    while ancestor in marked and ancestor not in roots and ancestor not in seen:
+      seen.add(ancestor)
+      ancestor = marked[ancestor].parent
+    if ancestor in roots and proc.session == marked[ancestor].session:
+      runtime.add(pid)
+  return runtime
 
 
 def stop_agent_commands(*, spare_markers: frozenset[str] = frozenset()) -> int:

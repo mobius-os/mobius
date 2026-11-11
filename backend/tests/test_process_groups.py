@@ -323,7 +323,9 @@ time.sleep(60)
 class _Turn:
   """A runtime launched as ``runtime_name`` plus its MCP server and command."""
 
-  def __init__(self, marker, *, runtime_name="node", command_name="npm"):
+  def __init__(
+    self, marker, *, runtime_name="node", command_name="npm", own_session=True,
+  ):
     import os
     import subprocess
     import sys
@@ -333,7 +335,7 @@ class _Turn:
     # argv[0] is ``node``, not ``codex``.
     self.runtime = subprocess.Popen(
       [runtime_name, "-c", _RUNTIME, command_name, sys.executable],
-      executable=sys.executable, env=env, start_new_session=True,
+      executable=sys.executable, env=env, start_new_session=own_session,
       stdout=subprocess.PIPE, text=True,
     )
     self.mcp, self.command = map(int, self.runtime.stdout.readline().split())
@@ -404,6 +406,24 @@ def test_storage_stop_keeps_the_runtimes_mcp_servers(monkeypatch):
     process_groups.stop_agent_commands()
     assert _ended(turn.command)
     assert _alive(turn.mcp)
+  finally:
+    turn.close()
+
+
+def test_storage_stop_keeps_mcp_servers_of_a_runtime_launched_without_setsid(
+  monkeypatch,
+):
+  """Without ``setsid`` (a development host) the runtime shares the server's
+  session; what stayed in it is still the runtime's, and its commands still
+  leave it."""
+  turn = _Turn(f"no-setsid-{uuid4().hex}", runtime_name="claude", own_session=False)
+  try:
+    _scoped_to(monkeypatch, *turn.pids)
+
+    assert process_groups.stop_agent_commands() == 1
+    assert _ended(turn.command)
+    assert _alive(turn.mcp)
+    assert turn.runtime.poll() is None
   finally:
     turn.close()
 
