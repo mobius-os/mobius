@@ -948,20 +948,19 @@ class ActiveCodexTurn:
       raise
 
   async def interrupt(self) -> None:
-    """Signals the live turn and waits for runner-side drain."""
+    """Signals the live turn and waits for runner-side drain.
+
+    The `_finished` wait has no bound of its own: ``stop(timeout)`` is the
+    only budget, so a wedged runner makes ``stop`` time out and report the
+    turn as not stopped.
+    """
     self._interrupt_requested = True
     self._reject_pending_steer()
     try:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      log.warning(
-        "codex active_turn._finished never resolved within 5s; runner is wedged"
-      )
-      return
+    await asyncio.shield(self._finished)
 
   async def clear_goal(self) -> None:
     """Stop this attempt; the platform writer owns Goal dismissal."""
