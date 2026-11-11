@@ -9,20 +9,29 @@ from app import contribution_review_runs as domain, models
 from app import schema_migrations
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import ITEM, CHECKS, REPO, PULL, TARGET, setup, report, snapshot_owning_chat
+from tests.test_contribution_review_runs import ITEM, CHECKS, REPO, PULL, TARGET, setup, report, snapshot_owning_chat, settle_fixture_review
 from scripts import github_review as cli
 from scripts.github_review_selection import review_path, start_body, verify_selection
 from app.contribution_review_effects import NotDispatched, classify_dispatch_error, graphql_mutation_result
 from app.contribution_errors import ContributionSubmitError
 
 
+CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
+                "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
+                "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
+                "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
+                "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
+                "owner_confirm": True}
+
 def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
   assert "/api/github/review-preview" in paths
   assert "/api/github/review-runs/{run_id}/outcomes" in paths
   assert "/api/github/review-runs/{run_id}/repairs" in paths
-  assert routes.REVIEW_CAPABILITIES == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
-  assert "/api/github/review-runs/{run_id}/ready" in paths
+  assert routes.REVIEW_CAPABILITIES == CAPABILITIES
+  assert "/api/github/review-runs/{run_id}/repairs/decision" in paths
+  # A takeover never marks a draft ready: only the owner's own tap opens it for review.
+  assert "/api/github/review-runs/{run_id}/ready" not in paths
 
 
 def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
@@ -30,8 +39,8 @@ def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
   for name in ("api", "prepare_selection", "freeze_preview", "verify_selection", "start_body", "review_path"):
     assert callable(getattr(cli, name))
   assert tuple(signature(cli.prepare_selection).parameters) == ("references", "mode", "chat_id", "app_id")
-  assert tuple(signature(cli.freeze_preview).parameters) == ("selection", "options", "agent", "allow_mark_ready")
-  assert signature(cli.freeze_preview).parameters["allow_mark_ready"].default is False
+  assert tuple(signature(cli.freeze_preview).parameters) == ("selection", "options", "agent", "takeover_reason")
+  assert signature(cli.freeze_preview).parameters["takeover_reason"].default is None
   monkeypatch.setattr(cli, "inspect_pr", lambda ref: {**ITEM, "title": "Safe change", "url": "https://github.com/example/project/pull/7"})
   snapshot = {"review_prompt": "Review", "merge_prompt": "Merge",
     "provider": "codex", "model": "test-model",
@@ -52,6 +61,7 @@ def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
 
 def test_core_admission_is_null_app_and_app_context_is_read_only(setup, monkeypatch):
   db, existing, principal = setup
+  settle_fixture_review(db, existing)
   snapshot_owning_chat(db, principal)
   principal.scope = "owner"
   monkeypatch.setattr(domain, "inspect_target", lambda *a: existing.targets_json[0])
@@ -501,7 +511,7 @@ def test_core_migration_preserves_exact_post_0079_nullable_shape(tmp_path):
       conn.execute(text("INSERT INTO contribution_review_runs VALUES ('duplicate', NULL, NULL, 1, 'same-request', '{}')"))
 
 
-def test_canonical_cli_allow_mark_ready_is_exact_frozen_scope(monkeypatch):
+def test_canonical_cli_freezes_the_takeover_reason_and_never_a_ready_scope(monkeypatch):
   monkeypatch.setattr(cli, "inspect_pr", lambda ref: {**ITEM, "title": "Safe change",
     "url": "https://github.com/example/project/pull/7"})
   snapshot = {"review_prompt": "Review", "fix_prompt": "Fix", "merge_prompt": "Merge",
@@ -511,24 +521,38 @@ def test_canonical_cli_allow_mark_ready_is_exact_frozen_scope(monkeypatch):
     "preview_sha256": routes._fingerprint(snapshot)})
   selection = cli.prepare_selection(["example/project#7"], "review_fix_merge", "chat-1")
   ordinary = cli.freeze_preview(selection)
-  ready = cli.freeze_preview(selection, allow_mark_ready=True)
-  assert start_body(ready)["confirmation_scope"] == "named_pr_repairs_ready_and_reviewed_successors"
-  assert ready["request_id"] != ordinary["request_id"]
+  reasoned = cli.freeze_preview(selection, takeover_reason=" The author asked for help. ")
+  body = start_body(reasoned)
+  assert body["confirmation_scope"] == "named_pr_repairs_and_reviewed_successors"
+  assert body["takeover_reason"] == "The author asked for help."
+  assert reasoned["request_id"] != ordinary["request_id"]
+  verify_selection(reasoned)
   with pytest.raises(ValueError):
-    cli.freeze_preview(cli.prepare_selection(["example/project#7"], "review_merge", "chat-1"),
-      allow_mark_ready=True)
+    cli.freeze_preview(cli.prepare_selection(["example/project#7"], "review", "chat-1"), takeover_reason="Why")
+  with pytest.raises(ValueError):
+    verify_selection({**reasoned, "confirmation_scope": "named_pr_repairs_ready_and_reviewed_successors"})
 
 
-def test_cli_preview_flag_reaches_frozen_ready_scope(monkeypatch, tmp_path, capsys):
+def test_canonical_cli_review_merge_needs_the_owners_verdict(monkeypatch):
+  monkeypatch.setattr(cli, "inspect_pr", lambda ref: {**ITEM, "title": "Safe change",
+    "url": "https://github.com/example/project/pull/7"})
+  selection = cli.prepare_selection(["example/project#7"], "review_merge", "chat-1")
+  with pytest.raises(ValueError, match="propose_verdict"):
+    cli.freeze_preview(selection, {"post_review": True})
+
+
+def test_cli_preview_passes_the_takeover_reason_through(monkeypatch, tmp_path, capsys):
   seen = []
   monkeypatch.setenv("CHAT_ID", "owning-chat")
   monkeypatch.setattr(cli, "prepare_selection", lambda *a: {"mode": "review_fix_merge"})
-  def freeze(selection, options=None, agent=None, *, allow_mark_ready=False):
-    seen.append(allow_mark_ready)
-    return {"confirmation_scope": "named_pr_repairs_ready_and_reviewed_successors"}
+  def freeze(selection, options=None, agent=None, *, takeover_reason=None):
+    seen.append(takeover_reason)
+    return {"takeover_reason": takeover_reason}
   monkeypatch.setattr(cli, "freeze_preview", freeze)
   monkeypatch.setattr(cli, "save_preview", lambda path, selection: None)
-  cli.main(["preview", "--mode", "review_fix_merge", "--allow-mark-ready",
+  cli.main(["preview", "--mode", "review_fix_merge", "--takeover-reason", "The author asked for help.",
     "--output", str(tmp_path / "frozen.json"), "example/project#7"])
-  assert seen == [True]
-  assert "named_pr_repairs_ready_and_reviewed_successors" in capsys.readouterr().out
+  assert seen == ["The author asked for help."]
+  with pytest.raises(SystemExit):
+    cli.main(["preview", "--mode", "review_fix_merge", "--allow-mark-ready",
+      "--output", str(tmp_path / "other.json"), "example/project#7"])

@@ -1042,6 +1042,56 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Owner confirmation — `window.mobius.ownerGrant.request`
+
+A few actions must be the owner's own decision, not just something the app's
+token is allowed to do (merging or reviewing a pull request on GitHub). Ask the
+shell to confirm it first, then repeat your normal request unchanged:
+
+```js
+// Feature-detect: older shells do not have it.
+if (typeof window.mobius.ownerGrant?.request === 'function') {
+  // The platform's action id, the route's path parameters (besides your app
+  // id) as a flat object of strings, and the exact JSON body you will send.
+  const confirmed = await window.mobius.ownerGrant.request(
+    'merge', {}, { repo: 'owner/name', number: 123, head_sha: sha, method: 'squash' })
+  if (!confirmed) return // the owner cancelled
+}
+await publicWrite(...) // the same request as always
+```
+
+The action ids are `merge`, `open_for_review`, `back_to_draft`, `close`,
+`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`), and
+`respond_post`. The shell draws its own sheet outside your frame, and the server
+writes its words from what it knows, so pass identifiers, never text for the
+owner to read. The promise resolves `true` once the owner tapped Confirm,
+`false` if they cancelled or the frame was hidden, and rejects with the
+platform's own sentence in `error.message` (and `error.code`) when the action
+cannot go ahead, or when this tab's shell is too old to answer (it never
+acknowledges the request, and the promise rejects after a few seconds): show
+that sentence rather than your own. The server does not check the action's own
+rules when it describes it, so the route may still refuse after the owner
+confirmed.
+
+You never receive a grant. It lives briefly on the server (120 seconds), bound
+to your app and that exact request, and one request spends it: send the request
+as you normally would. A request the route then refuses has already spent it,
+so the owner confirms again.
+
+Enforcement is your choice, per app. An app that declares
+`"owner_confirm": true` in `mobius.json` (a top-level boolean, beside
+`embeds_agent`) is refused `403 owner_grant_required` at the guarded routes
+unless a matching grant exists: Merge, the five status changes, a verdict
+decision and a repair decision. An app without it is not refused. The platform
+reads the declaration from the installed manifest, so it changes only when the
+owner installs or updates a version of your app that carries it. Declaring it
+adds no permission row to the owner's first-open consent and cannot make an
+installed app wait for approval when it updates. Declare it only in a version
+that asks the shell before every one of those taps. No manifest permission is
+needed to ask. For GitHub review and merge flows the platform advertises
+support as `owner_confirm: true` in the `capabilities` of the review-presets
+response; use the sheet when both that key and the function above are present.
+
 ## Phone location tracking
 
 The Möbius phone app can record the device's location, including in the

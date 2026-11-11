@@ -1276,12 +1276,23 @@ export const api = {
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
+  chatWaits: {
+    // The whole claim texts a Goal or wait view showed in part.
+    dependencyText: (dependencyId, options = {}) => apiFetch(
+      `/chat-waits/dependencies/${encodeURIComponent(dependencyId)}/text`,
+      options,
+    ),
+  },
   agentCoordination: {
     history: (chatId, { before, limit = 50 } = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
     ),
     chat: (chatId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    message: (chatId, messageId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
       options,
     ),
     project: (projectId, options = {}) => apiFetch(
@@ -1689,6 +1700,23 @@ export const api = {
     stop: (sessionId) => apiFetch(
       `/screen-control/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' },
+    ),
+  },
+  // The shell's owner confirmation of one sensitive app action: the server
+  // describes it in words (preview), then records the owner's tap (mint).
+  // Errors carry the platform's sentence as `message` and its `code`.
+  ownerGrants: {
+    preview: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants/preview', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not check this request',
+    ),
+    mint: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not confirm this request',
     ),
   },
   sharedFolders: {

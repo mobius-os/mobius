@@ -131,6 +131,58 @@
 .canvas-file-export__actions button:disabled { opacity: .6; cursor: wait; }
 .canvas-file-export__actions .canvas-file-export__primary { background: var(--file-export-accent); color: var(--file-export-ink); border-color: var(--file-export-accent); }
 
+/* The owner confirm sheet (OwnerConfirmSheet) is drawn on the file-export card
+   above; these rules add only its server-built fact list and caution verb. */
+.canvas-owner-confirm .canvas-file-export__eyebrow { text-transform: uppercase; overflow-wrap: anywhere; }
+
+.canvas-owner-confirm__facts {
+  margin: 0;
+  padding: 4px 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  text-align: left;
+  /* A verdict shows its review text whole: the list scrolls so the buttons stay on screen. */
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.canvas-owner-confirm__fact {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 30%) minmax(0, 1fr);
+  gap: 2px 12px;
+  padding: 11px 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.canvas-owner-confirm__fact + .canvas-owner-confirm__fact { border-top: 1px solid var(--border); }
+.canvas-owner-confirm__fact dt { color: var(--muted); }
+.canvas-owner-confirm__fact dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--text); font-weight: 600; }
+
+.canvas-file-export__card .canvas-owner-confirm__notice {
+  margin: 0 0 12px;
+  color: var(--warning-text, var(--warning));
+  font-weight: 700;
+}
+
+.canvas-file-export__card .canvas-owner-confirm__error { color: var(--danger-text, var(--danger)); }
+
+/* A server-written verb can be long: let the buttons stack when they cannot share a row. */
+.canvas-owner-confirm .canvas-file-export__actions { flex-wrap: wrap; }
+.canvas-owner-confirm .canvas-file-export__actions button { flex: 1 1 9.5rem; }
+.canvas-owner-confirm .canvas-file-export__actions .canvas-file-export__primary { flex-basis: 11rem; }
+
+.canvas-file-export__actions .canvas-file-export__primary.canvas-owner-confirm__caution {
+  border-color: var(--danger-fill, var(--danger));
+  background: var(--danger-fill, var(--danger));
+  color: var(--accent-fg, #fff);
+}
+
+@media (max-width: 480px) {
+  .canvas-owner-confirm__fact { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* Camera frames remain top-level shell resources. The opaque app sends only
    bounded viewfinder geometry; this non-interactive layer paints the stream in
    that slot without exposing MediaStream, tracks, or shell DOM to the app. */
