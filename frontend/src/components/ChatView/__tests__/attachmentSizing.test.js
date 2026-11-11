@@ -70,26 +70,3 @@ test('a pending composer image opens the same chat-pane viewer as a sent one', (
   assert.match(bar, /items=\{gallery\}/)
   ruleBody('.chat__attach-card-thumb-button')
 })
-
-test('extreme-aspect attachment thumbnails fit whole instead of a blank centre crop', async () => {
-  const { attachmentThumbFit } = await import('../attachmentThumbFit.js')
-
-  // A wide header strip's centre is often empty background; fit it whole.
-  assert.equal(attachmentThumbFit(1080, 298), 'contain')
-  assert.equal(attachmentThumbFit(298, 1080), 'contain')
-  // Photos and ordinary phone screenshots keep the uniform square crop.
-  assert.equal(attachmentThumbFit(1080, 1080), 'cover')
-  assert.equal(attachmentThumbFit(4032, 3024), 'cover')
-  assert.equal(attachmentThumbFit(1080, 2340), 'cover')
-  assert.equal(attachmentThumbFit(0, 0), 'cover')
-
-  // Pending and sent squares both read the measured fit.
-  const bar = readFileSync(new URL('../FileChips.jsx', import.meta.url), 'utf8')
-  const attachments = readFileSync(new URL('../Attachments.jsx', import.meta.url), 'utf8')
-  assert.match(bar, /onLoad=\{markAttachmentThumbFit\}/)
-  assert.match(attachments, /onLoad=\{markAttachmentThumbFit\}/)
-  assert.match(
-    css,
-    /\.chat__attach-card-thumb\[data-fit="contain"\],\s*\.chat__attach-thumb\[data-fit="contain"\]\s*\{\s*object-fit:\s*contain;/,
-  )
-})

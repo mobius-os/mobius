@@ -3636,8 +3636,9 @@
 
 .chat__attach-thumb {
   /* Match the composer's attachment card after send — same `--attach-card`
-     token, so the two can't drift. The thumbnail is a consistent square
-     crop; tapping it still opens the full source image. */
+     token, so the two can't drift. The thumbnail is a square centre crop,
+     except that an extreme-aspect image is fitted whole (the `data-fit`
+     rule above); tapping it still opens the full source image. */
   width: 100%;
   height: 100%;
   object-fit: cover;
