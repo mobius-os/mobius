@@ -1061,20 +1061,36 @@ await publicWrite(...) // the same request as always
 ```
 
 The action ids are `merge`, `open_for_review`, `back_to_draft`, `close`,
-`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`),
-`review_start` and `respond_post`. The shell draws its own sheet outside your
-frame, and the server writes its words from what it knows, so pass identifiers,
-never text for the owner to read. The promise resolves `true` once the owner
-tapped Confirm, `false` if they cancelled or the frame was hidden, and rejects
-with the platform's own sentence in `error.message` (and `error.code`) when the
-action cannot go ahead; show that sentence rather than your own. You never
-receive a grant. It lives briefly on the server, bound to your app and that
-exact request, so send the request as you normally would; once the platform
-enforces grants, the server may refuse the request if no matching grant exists.
-No manifest permission or consent row is needed. For GitHub review and merge
-flows the platform advertises support as `owner_confirm: true` in the
-`capabilities` of the review-presets response; use the sheet when both that key
-and the function above are present.
+`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`), and
+`respond_post`. The shell draws its own sheet outside your frame, and the server
+writes its words from what it knows, so pass identifiers, never text for the
+owner to read. The promise resolves `true` once the owner tapped Confirm,
+`false` if they cancelled or the frame was hidden, and rejects with the
+platform's own sentence in `error.message` (and `error.code`) when the action
+cannot go ahead, or when this tab's shell is too old to answer (it never
+acknowledges the request, and the promise rejects after a few seconds): show
+that sentence rather than your own. The server does not check the action's own
+rules when it describes it, so the route may still refuse after the owner
+confirmed.
+
+You never receive a grant. It lives briefly on the server (120 seconds), bound
+to your app and that exact request, and one request spends it: send the request
+as you normally would. A request the route then refuses has already spent it,
+so the owner confirms again.
+
+Enforcement is your choice, per app. An app that declares
+`"owner_confirm": true` in `mobius.json` (a top-level boolean, beside
+`embeds_agent`) is refused `403 owner_grant_required` at the guarded routes
+unless a matching grant exists: Merge, the five status changes, a verdict
+decision and a repair decision. An app without it is not refused. The platform
+reads the declaration from the installed manifest, so it changes only when the
+owner installs or updates a version of your app that carries it. Declaring it
+adds no permission row to the owner's first-open consent and cannot make an
+installed app wait for approval when it updates. Declare it only in a version
+that asks the shell before every one of those taps. No manifest permission is
+needed to ask. For GitHub review and merge flows the platform advertises
+support as `owner_confirm: true` in the `capabilities` of the review-presets
+response; use the sheet when both that key and the function above are present.
 
 ## Phone location tracking
 

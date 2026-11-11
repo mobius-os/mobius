@@ -624,7 +624,12 @@ server, and the frame never receives it. A confirmation is a restriction, not a
 power, so it must not cost the owner a consent row or make a Store app dormant;
 `fileExport` and `clipboard` are the precedent. It keeps the broker's identity
 rules: the host binds it to the exact visible `contentWindow`, the app id is
-never taken from the payload, and the sheet's words come from the server.
+never taken from the payload, and the sheet's words come from the server. The
+shell acks a request it accepts, and the runtime rejects it after a short wait
+without an ack, so a tab whose shell predates the request fails fast. Enforcement
+is per app: only an app that declares `"owner_confirm": true` in its manifest is
+refused at the guarded routes without a grant. That key is not part of the
+capability contract, so it adds no consent row and cannot make an app dormant.
 
 ## Provider contract
 
