@@ -132,6 +132,7 @@ import {
   resolveNewChatIntentId,
   resumedNewChatPresentation,
   reusableChatDetailVerdict,
+  reusableProjectChatDetailVerdict,
   reusableProjectEmptyChat,
   shouldRetryNewChatAllocation,
   stageVerifiedNewChatHandoff,
@@ -1833,9 +1834,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }
 
   // A project page's New chat reopens that project's untouched chat rather
-  // than piling up another blank. The project list, with the shell's live
-  // facts overlaid as the page shows them, only nominates it: a fresh detail
-  // read must prove it is still empty, since another browser may have started
+  // than piling up another blank, unless the owner kept that blank by pinning
+  // or renaming it. The project list, with the shell's live facts overlaid as
+  // the page shows them, only nominates it: a fresh detail read must prove it
+  // is still empty and still not kept, since another browser may have started
   // using it.
   async function newProjectChat(project) {
     const projectRows = queryClient.getQueryData(projectQueries.keys.chats(project.id)) ?? project.chats
@@ -1844,6 +1846,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       {
         recoveredChatIds: recoveredChatIdsRef.current,
         streamingChatIds: streamingChatIdsRef.current,
+        pinnedChatIds,
       },
     )
     if (candidate && online) {
@@ -1853,7 +1856,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           `/chats/${encodeURIComponent(candidate.id)}?limit=1`,
           { timeoutMs: 5000 },
         )
-        verdict = reusableChatDetailVerdict({
+        verdict = reusableProjectChatDetailVerdict({
           ok: res.ok,
           status: res.status,
           detail: res.ok ? await res.json() : null,

@@ -959,6 +959,10 @@ def _chat_detail_response(
   response = {
     "id": chat.id,
     "title": chat.title,
+    # An owner-named or pinned chat is kept on purpose; a fresh read of an
+    # empty one must say so before a project's New chat may reopen it.
+    "title_locked": bool(chat.title_locked),
+    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     # Settled large-output excerpts are omitted here because the disclosure
     # already fetches them from their durable sidecar on demand. Live turns

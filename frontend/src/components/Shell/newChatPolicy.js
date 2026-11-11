@@ -140,14 +140,21 @@ export function currentReusableEmptyChat(chats, {
   if (activeChatId == null) return null
 
   const activeId = normalizedId(activeChatId)
-  const recoveredIds = new Set([...recoveredChatIds].map(normalizedId))
-  const streamingIds = new Set([...streamingChatIds].map(normalizedId))
-
   const chat = (chats || []).find(row => normalizedId(row?.id) === activeId)
-  if (!chat || chat.has_messages) return null
-  if (recoveredIds.has(activeId) || streamingIds.has(activeId)) return null
-  if (chat.running) return null
-  return chat
+  const isReusableBlank = reusableBlankRule({ recoveredChatIds, streamingChatIds })
+  return isReusableBlank(chat) ? chat : null
+}
+
+/**
+ * The list-level rule both New chat paths share: the row has no messages, no
+ * run, and this browser is neither streaming into it nor recovering it.
+ */
+function reusableBlankRule({ recoveredChatIds, streamingChatIds }) {
+  const busyIds = new Set([...recoveredChatIds, ...streamingChatIds].map(normalizedId))
+  return chat => {
+    const id = normalizedId(chat?.id)
+    return id != null && !chat.has_messages && !chat.running && !busyIds.has(id)
+  }
 }
 
 /**
@@ -157,24 +164,25 @@ export function currentReusableEmptyChat(chats, {
  * Only the project's own rows are candidates, so New chat never lands in
  * another project's chat. Like currentReusableEmptyChat this is provisional:
  * the list can be stale across browsers, so the caller must prove the chat is
- * still empty with a fresh detail read before opening it. Archived chats stay
- * filed away.
+ * still reusable with reusableProjectChatDetailVerdict before opening it.
+ * Archived chats stay filed away, and a blank the owner kept (pinned, or
+ * renamed so its title is locked) is never reopened for a new conversation:
+ * whatever the owner asks next would stay filed under that name and pin. A row
+ * that does not say whether its title is locked counts as kept.
  */
 export function reusableProjectEmptyChat(projectChats, {
   recoveredChatIds = new Set(),
   streamingChatIds = new Set(),
+  pinnedChatIds = new Set(),
 } = {}) {
-  const recoveredIds = new Set([...recoveredChatIds].map(normalizedId))
-  const streamingIds = new Set([...streamingChatIds].map(normalizedId))
-  return (projectChats || []).find(chat => {
-    const id = normalizedId(chat?.id)
-    return id != null
-      && !chat.has_messages
+  const isReusableBlank = reusableBlankRule({ recoveredChatIds, streamingChatIds })
+  const pinnedIds = new Set([...pinnedChatIds].map(normalizedId))
+  return (projectChats || []).find(chat => (
+    isReusableBlank(chat)
       && !chat.archived_at
-      && !chat.running
-      && !recoveredIds.has(id)
-      && !streamingIds.has(id)
-  }) || null
+      && chat.title_locked === false
+      && !pinnedIds.has(normalizedId(chat.id))
+  )) || null
 }
 
 /**
@@ -213,6 +221,21 @@ export function reusableChatDetailVerdict({ ok, status, detail }) {
   if (!Object.hasOwn(detail, 'session_id')) return 'uncertain'
   if (!Object.hasOwn(detail, 'created_by_app_id')) return 'uncertain'
   return 'occupied'
+}
+
+/**
+ * The fresh detail probe for a project's New chat. Beyond being untouched, the
+ * chat must not have been kept by the owner since the list was read: a pin or
+ * an owner rename (a locked title) makes it 'kept'. A response that omits
+ * either fact is uncertain, so the caller creates a fresh chat instead.
+ */
+export function reusableProjectChatDetailVerdict(probe) {
+  const verdict = reusableChatDetailVerdict(probe)
+  if (verdict !== 'empty') return verdict
+  const { detail } = probe
+  if (typeof detail.title_locked !== 'boolean') return 'uncertain'
+  if (!Object.hasOwn(detail, 'pinned_at')) return 'uncertain'
+  return detail.title_locked || detail.pinned_at != null ? 'kept' : 'empty'
 }
 
 /** Convert a complete create response into ChatView's persisted cache shape.

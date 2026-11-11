@@ -20,6 +20,7 @@ import {
   rememberCreatedChat,
   resolveNewChatIntentId,
   reusableChatDetailVerdict,
+  reusableProjectChatDetailVerdict,
   reusableProjectEmptyChat,
   validNewChatIntentId,
   writeNewChatIntent,
@@ -448,10 +449,14 @@ test('id comparison is stable across numeric and string representations', () => 
   }), active)
 })
 
+// A project chat row as the project list reports it: its title is unlocked
+// until the owner (or an app) names it.
+const projectBlank = (id, extra = {}) => empty(id, { title_locked: false, ...extra })
+
 test('project New chat nominates its newest untouched chat instead of adding a blank', () => {
-  const used = empty('used', { has_messages: true })
-  const newest = empty('newest')
-  const older = empty('older')
+  const used = projectBlank('used', { has_messages: true })
+  const newest = projectBlank('newest')
+  const older = projectBlank('older')
   assert.equal(reusableProjectEmptyChat([used, newest, older]), newest)
   assert.equal(reusableProjectEmptyChat([used]), null)
   assert.equal(reusableProjectEmptyChat([]), null)
@@ -460,15 +465,35 @@ test('project New chat nominates its newest untouched chat instead of adding a b
 
 test('project New chat never nominates an archived, running, recovered, or streaming chat', () => {
   assert.equal(reusableProjectEmptyChat([
-    empty('archived', { archived_at: '2026-10-01T00:00:00Z' }),
+    projectBlank('archived', { archived_at: '2026-10-01T00:00:00Z' }),
   ]), null)
-  assert.equal(reusableProjectEmptyChat([empty('running', { running: true })]), null)
-  assert.equal(reusableProjectEmptyChat([empty(7)], {
+  assert.equal(reusableProjectEmptyChat([projectBlank('running', { running: true })]), null)
+  assert.equal(reusableProjectEmptyChat([projectBlank(7)], {
     recoveredChatIds: new Set(['7']),
   }), null)
-  assert.equal(reusableProjectEmptyChat([empty('streaming'), empty('idle')], {
+  assert.equal(reusableProjectEmptyChat([projectBlank('streaming'), projectBlank('idle')], {
     streamingChatIds: new Set(['streaming']),
   })?.id, 'idle')
+})
+
+test('project New chat never reopens a blank the owner pinned or named to keep', () => {
+  const kept = projectBlank('kept', { title: 'Release notes', title_locked: true })
+  const pinned = projectBlank(8)
+  const blank = projectBlank('blank')
+  assert.equal(reusableProjectEmptyChat([kept, blank])?.id, 'blank')
+  assert.equal(reusableProjectEmptyChat([pinned, blank], {
+    pinnedChatIds: new Set(['8']),
+  })?.id, 'blank')
+  assert.equal(reusableProjectEmptyChat([kept, pinned], {
+    pinnedChatIds: new Set([8]),
+  }), null)
+  // A template-named chat is not locked; its first message names it.
+  assert.equal(
+    reusableProjectEmptyChat([projectBlank('template', { title: 'Site plan' })])?.id,
+    'template',
+  )
+  // A row that does not say whether its name is locked counts as kept.
+  assert.equal(reusableProjectEmptyChat([empty('unknown')]), null)
 })
 
 function untouchedDetail(extra = {}) {
@@ -518,6 +543,26 @@ test('fresh detail probe separates occupied, missing, and uncertain rows', () =>
   }), 'uncertain')
   assert.equal(reusableChatDetailVerdict({
     ok: true, status: 200, detail: { messages: [], pending_messages: [] },
+  }), 'uncertain')
+})
+
+test('project New chat rechecks a fresh read for a pin or owner name', () => {
+  const keepable = extra => ({
+    ok: true, status: 200, detail: untouchedDetail({ title_locked: false, pinned_at: null, ...extra }),
+  })
+  assert.equal(reusableProjectChatDetailVerdict(keepable()), 'empty')
+  assert.equal(reusableProjectChatDetailVerdict(keepable({ title_locked: true })), 'kept')
+  assert.equal(reusableProjectChatDetailVerdict(keepable({
+    pinned_at: '2026-11-01T00:00:00Z',
+  })), 'kept')
+  assert.equal(reusableProjectChatDetailVerdict(keepable({ total: 1, messages: [{}] })), 'occupied')
+  assert.equal(reusableProjectChatDetailVerdict({ ok: false, status: 404, detail: null }), 'missing')
+  // A read that omits either fact cannot prove the chat was not kept.
+  assert.equal(reusableProjectChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail({ pinned_at: null }),
+  }), 'uncertain')
+  assert.equal(reusableProjectChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail({ title_locked: false }),
   }), 'uncertain')
 })
 
