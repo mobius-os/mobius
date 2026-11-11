@@ -445,24 +445,15 @@ export default function Drawer({
   useEffect(() => {
     if (openMenu && !activeMenuItem) closeItemMenu()
   }, [openMenu, activeMenuItem, closeItemMenu])
-  const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
-  // Mirrors `renaming` synchronously (not via useEffect — that's one render
-  // behind) so outside-tap cancellation sees the current edit immediately.
-  const renamingRef = useRef(null)
-  const overlayCancelRef = useRef(false)
+  const [renaming, setRenaming] = useState(null) // { kind, id, surface } | null
   // Closing on pointerdown makes the drawer feel immediate, but WebKit may
   // retarget the compatibility click from that same touch to content revealed
   // beneath the scrim. Keep ownership of exactly that click. A new pointer or
   // keyboard activation clears a stale claim first, so a touch sequence that
   // produces no click cannot poison the owner's next action.
   const outsideDismissClickRef = useRef(false)
-  const renaming = renamingState
-  const setRenaming = useCallback((next) => {
-    renamingRef.current = next
-    setRenamingState(next)
-  }, [])
   // The app whose "Add to home screen" sheet is open,
-  // or null. Mirrors openMenu/renamingState — one at a time, owned here
+  // or null. Mirrors openMenu/renaming — one at a time, owned here
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
   const [appQuery, setAppQuery] = useState('')
@@ -550,10 +541,6 @@ export default function Drawer({
     submitRename(kind, id, previous, next) {
       const current = rowActionInputsRef.current
       current.setRenaming(null)
-      if (current.overlayCancelRef.current) {
-        current.overlayCancelRef.current = false
-        return
-      }
       if (!next || next === previous) return
       if (kind === 'chat') current.onRenameChat(id, next)
       else if (kind === 'project') current.renameProject(id, next)
@@ -605,15 +592,6 @@ export default function Drawer({
     // content underneath. Primary pointerdown both acknowledges the outside
     // tap immediately and pairs with the scrim's touch-action:none contract.
     if (e.button !== 0 || !e.isPrimary) return
-    if (renamingRef.current || overlayCancelRef.current) {
-      // Defensive fallback for browsers that reach the overlay before the
-      // rename row's document-capture listener. Cancel the rename and let this
-      // same outside gesture close the drawer; one tap should never be needed
-      // merely to clear an intermediate drawer state.
-      overlayCancelRef.current = true
-      renamingRef.current = null
-      setRenaming(null)
-    }
     outsideDismissClickRef.current = true
     e.preventDefault()
     e.stopPropagation()
@@ -1121,7 +1099,6 @@ export default function Drawer({
     setInstallingApp,
     resetAppsSurfaceUi,
     setSharingApp,
-    overlayCancelRef,
     renameApp,
     renameProject,
     pins,

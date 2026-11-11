@@ -1,6 +1,7 @@
 /* The one inline rename field for drawer rows, launcher cards, and project
-   chat rows. Enter or tabbing away saves a changed name; Escape or a tap
-   outside the field discards the edit. */
+   chat rows. Enter, tabbing away, a tap or click outside the field, and the
+   app losing focus all save a changed name; Escape discards the edit. An
+   empty or unchanged name saves nothing, and nothing saves mid-composition. */
 
 import { useEffect, useRef } from 'react'
 
@@ -20,6 +21,10 @@ export default function InlineRenameInput({
   // field, so it is reclaimed once. The first pointer, key, or edit ends this
   // handoff, and every later blur settles normally.
   const menuFocusPendingRef = useRef(true)
+  const composingRef = useRef(false)
+  // Leaving the field mid-composition saves once the IME hands over the
+  // finished text, not the half-composed string.
+  const saveAfterCompositionRef = useRef(false)
   const latestRef = useRef(null)
 
   function finishMenuFocusHandoff() {
@@ -33,7 +38,15 @@ export default function InlineRenameInput({
     if (next && next !== initialValue) onSubmit(next)
     else onCancel()
   }
-  latestRef.current = { settle }
+
+  function saveTyped() {
+    if (composingRef.current) {
+      saveAfterCompositionRef.current = true
+      return
+    }
+    settle(inputRef.current?.value)
+  }
+  latestRef.current = { saveTyped }
 
   useEffect(() => {
     // Select a frame later: focusing synchronously races the browser moving
@@ -42,41 +55,40 @@ export default function InlineRenameInput({
       inputRef.current?.focus()
       inputRef.current?.select()
     })
-    // A tap outside cancels instead of letting another row, Settings, or New
-    // chat act on it; the rename just exits. Both events are claimed:
-    // pointerdown prevents the focus shift, and some browsers fire the click
-    // regardless. The drawer scrim is the one exception: it stays a reliable
-    // close surface, so its tap cancels and carries on to close the drawer.
-    let swallowClick = false
+    // A tap outside saves before it reaches its target, so the tapped row,
+    // button, or drawer scrim then acts as usual and closing the drawer or
+    // moving focus cannot lose the typed name.
     function onOutsidePointer(event) {
       finishMenuFocusHandoff()
       const input = inputRef.current
       if (!input || input.contains(event.target)) return
-      latestRef.current.settle(null)
-      if (event.target?.closest?.('.drawer-overlay')) return
-      event.preventDefault()
-      event.stopPropagation()
-      swallowClick = true
+      latestRef.current.saveTyped()
     }
-    function onOutsideClick(event) {
-      if (!swallowClick) return
-      swallowClick = false
-      event.preventDefault()
-      event.stopPropagation()
+    // Switching windows or apps leaves the field as the page's active
+    // element, so its own blur settles nothing, and a hidden page may never
+    // come back. The window also blurs when focus moves into an app frame.
+    function onWindowBlur() {
+      latestRef.current.saveTyped()
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'hidden') latestRef.current.saveTyped()
     }
     document.addEventListener('pointerdown', onOutsidePointer, true)
-    document.addEventListener('click', onOutsideClick, true)
+    window.addEventListener('blur', onWindowBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       cancelAnimationFrame(frame)
       document.removeEventListener('pointerdown', onOutsidePointer, true)
-      document.removeEventListener('click', onOutsideClick, true)
+      window.removeEventListener('blur', onWindowBlur)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [])
 
   function onKeyDown(event) {
     finishMenuFocusHandoff()
-    // Enter and Escape also confirm or dismiss an IME candidate.
-    if (event.nativeEvent?.isComposing) return
+    // Enter and Escape also confirm or dismiss an IME candidate. Safari sends
+    // that confirming key after compositionend, marked only by keyCode 229.
+    if (event.nativeEvent?.isComposing || event.nativeEvent?.keyCode === 229) return
     if (event.key === 'Enter') {
       event.preventDefault()
       settle(event.currentTarget.value)
@@ -84,6 +96,13 @@ export default function InlineRenameInput({
       event.preventDefault()
       settle(null)
     }
+  }
+
+  function onCompositionEnd() {
+    composingRef.current = false
+    if (!saveAfterCompositionRef.current) return
+    saveAfterCompositionRef.current = false
+    saveTyped()
   }
 
   function onBlur() {
@@ -100,7 +119,7 @@ export default function InlineRenameInput({
         input.focus()
         return
       }
-      settle(input?.value)
+      saveTyped()
     })
   }
 
@@ -113,6 +132,8 @@ export default function InlineRenameInput({
       aria-label={ariaLabel}
       onChange={finishMenuFocusHandoff}
       onKeyDown={onKeyDown}
+      onCompositionStart={() => { composingRef.current = true }}
+      onCompositionEnd={onCompositionEnd}
       onBlur={onBlur}
     />
   )
