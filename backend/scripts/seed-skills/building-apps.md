@@ -1576,9 +1576,10 @@ badge), the open app hears it at the same instant as the sidebar:
 useEffect(() => window.mobius.onActivity?.(() => refresh()), [])
 ```
 
-The nudge carries no content, so treat it as "check now" and keep polling as
-the fallback for nudges missed during a reconnect or on an older Möbius
-(`window.mobius.runtimeFeatures?.appActivity`).
+The nudge carries no content, so treat it as "check now". After a dropped
+connection Möbius nudges each open app once. Keep polling as the fallback for
+an older Möbius (`window.mobius.runtimeFeatures?.appActivity`) and the
+standalone app page.
 
 ### Shell shortcuts
 

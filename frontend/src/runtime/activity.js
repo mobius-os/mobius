@@ -6,8 +6,9 @@
 // to the app's frames as `moebius:app-activity`, so an open app can refresh at
 // the same instant the sidebar does instead of waiting for its next poll.
 //
-// The nudge carries no content: it only says "check now". Apps keep their own
-// polling as the fallback for missed nudges (reconnects, older shells).
+// The nudge carries no content: it only says "check now". Nudges do not
+// replay; the shell nudges every open app once when its stream reconnects.
+// Apps keep their own polling as the fallback (older shells, standalone pages).
 // Trust is the sender check `event.source === window.parent`, as in
 // visibility.js.
 

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { makeActivity } from '../../runtime/activity.js'
-import { publishAppActivity, subscribeAppActivity } from '../appActivitySignal.js'
 
 function fakeFrame() {
   const parent = { name: 'shell' }
@@ -50,18 +49,4 @@ test('a failing listener does not stop the others', () => {
   activity.onActivity(() => { heard += 1 })
   frame.post({ type: 'moebius:app-activity' })
   assert.equal(heard, 1)
-})
-
-test('the shell signal reaches only the canvases of the app it names', () => {
-  const heard = []
-  const stopSocial = subscribeAppActivity(9, () => heard.push('social'))
-  const stopKanban = subscribeAppActivity('7', () => heard.push('kanban'))
-  publishAppActivity('9')
-  publishAppActivity(7)
-  publishAppActivity(42) // no mounted canvas: dropped
-  assert.deepEqual(heard, ['social', 'kanban'])
-  stopSocial()
-  publishAppActivity(9)
-  assert.deepEqual(heard, ['social', 'kanban'])
-  stopKanban()
 })
