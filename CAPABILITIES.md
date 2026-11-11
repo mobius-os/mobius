@@ -90,7 +90,7 @@ The paired service keeps the owner's credits, never this Möbius's database.
 consent. Owner-built local apps never get it, even if their `mobius.json`
 declares it; their account requests receive 403. A local app may still pay
 with `spend_credits`, with no standing grant, because every charge waits for
-the owner's Pay (below).
+the owner's Pay (below), and may check a charge (below).
 
 A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
@@ -128,6 +128,22 @@ A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
 and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.
 Balance, history and purchase reads refuse a shared-browser guest.
+
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
 
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing

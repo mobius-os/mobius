@@ -187,7 +187,7 @@ def test_every_contract_permission_has_a_row():
       "github_access": True, "github_connect": True, "connections_manage": True,
       "connect_manage": True, "identity_manage": True, "credits_manage": True,
       "railway_manage": True, "location_history_read": True,
-      "spend_credits": ["ana/prompts"],
+      "spend_credits": ["ana/prompts"], "check_credits_charges": ["prompts"],
       "job_secret_read": ["TOKEN"],
     },
   }
@@ -199,7 +199,8 @@ def test_every_contract_permission_has_a_row():
           "filesystem_access", "manage_apps", "manage_skills", "github_access",
           "github_connect", "connections_manage", "connect_manage",
           "identity_manage", "credits_manage", "railway_manage",
-          "location_history_read", "spend_credits", "job_secret_read"} <= ids
+          "location_history_read", "spend_credits", "check_credits_charges",
+          "job_secret_read"} <= ids
 
 
 def test_helper_activity_read_has_a_non_critical_row():
@@ -305,6 +306,21 @@ def test_named_secrets_are_part_of_the_accepted_answer(db):
   assert [r["id"] for r in app_consent.needed_rows(app)] == ["job_secret_read"]
   app.capability_contract = _contract(job_secret_read=["B"])
   assert app_consent.status(app) == "required"
+
+
+def test_checking_charges_is_its_own_read_only_row_naming_the_apps():
+  rows = app_consent.rows_from_contract(_contract(check_credits_charges=["prompts"]))
+  assert [(r["id"], r["title"], r["critical"], r["scope"]) for r in rows] == [
+    ("check_credits_charges", "Check payments for your apps", False, ["prompts"]),
+  ]
+  assert "cannot move credits" in rows[0]["text"]
+
+
+def test_checking_a_new_apps_charges_asks_again(db):
+  app = _accepted(db, "market", _contract(check_credits_charges=["prompts"]))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(check_credits_charges=["notes", "prompts"])
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["check_credits_charges"]
 
 
 def test_paying_a_new_seller_asks_again(db):

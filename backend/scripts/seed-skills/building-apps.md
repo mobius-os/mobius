@@ -1145,8 +1145,9 @@ control is planned. Shared-browser guests and delegated helpers cannot pair.
 consent. An owner-built local app never gets it, even if its `mobius.json`
 declares it: its account requests receive 403. A local app may still pay with
 `spend_credits` (below): it needs no standing grant, because every charge
-waits for the owner's Pay. A delegated helper cannot spend credits, including
-through an otherwise approved app service.
+waits for the owner's Pay. It may also check a charge (below). A delegated
+helper cannot spend credits, including through an otherwise approved app
+service.
 
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
@@ -1194,6 +1195,22 @@ A 200 answer tells your app only about its own charge — the
 `charge_id`, the amount charged, and `replayed` when the service replayed an
 earlier identical call — never the owner's balance, and a refusal omits balance
 figures too.
+
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
 
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
