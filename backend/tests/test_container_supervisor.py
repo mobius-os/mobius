@@ -188,6 +188,27 @@ def test_killed_boot_without_a_restart_request_reports_a_crash(tmp_path):
   assert len(_log_lines(log, "boot")) == 1
 
 
+def test_only_the_first_boot_keeps_an_inherited_boot_id(tmp_path):
+  # The self-hosted boot-admission wrapper sets MOBIUS_BOOT_ID for the boot it
+  # admitted, then execs tini and this supervisor. Each in-place rerun is a
+  # new boot: the entrypoint's real boot-id line must mint a fresh id for it,
+  # or the restart ledger never binds the accepted restart to the new boot.
+  source = ENTRYPOINT.read_text()
+  boot_id = re.search(r'^MOBIUS_BOOT_ID="\$\{MOBIUS_BOOT_ID:-.*\n', source, re.M)
+  assert boot_id, "entrypoint.sh boot id line not found"
+  script = boot_id.group(0) + 'echo "id $MOBIUS_BOOT_ID" >> "$BOOT_LOG"\n' + FAKE_BOOT
+  log = tmp_path / "boots.log"
+  proc = _launch(script, BOOT_LOG=str(log), MOBIUS_BOOT_ID="admitted-boot")
+  for boots in (2, 3):
+    _wait_for(lambda: len(_log_lines(log, "service")) == boots - 1)
+    proc.send_signal(signal.SIGUSR1)
+    _wait_for(lambda: len(_log_lines(log, "service")) == boots)
+  ids = [line[0] for line in _log_lines(log, "id")]
+  assert len(ids) == 3
+  assert ids[0] == "admitted-boot"
+  assert len(set(ids)) == 3
+
+
 def _entrypoint_restart_poller() -> str:
   """The entrypoint's real restart poller, plus the lines that hand it the
   supervisor pid, as shell source that can run outside the image."""

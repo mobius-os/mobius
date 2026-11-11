@@ -45,6 +45,9 @@ HOST_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUI
 _HANDLED_SIGNALS = (PLANNED_RESTART_SIGNAL, *HOST_STOP_SIGNALS)
 # The entrypoint's restart poller reads this to find the process it signals.
 SUPERVISOR_PID_ENV = "MOBIUS_SUPERVISOR_PID"
+# The boot's identity. entrypoint.sh keeps an inherited value and only mints a
+# fresh one when it is unset.
+BOOT_ID_ENV = "MOBIUS_BOOT_ID"
 # Leftovers get a polite SIGTERM, then SIGKILL. Uvicorn's own graceful window
 # has already passed by the time the boot's main process exits.
 LEFTOVER_TERM_GRACE_SECONDS = 5.0
@@ -146,6 +149,7 @@ class Supervisor:
     self.child: int | None = None
     self.restart_requested = False
     self.stop_signal: int | None = None
+    self.boots_started = 0
 
   def _on_planned_restart(self, signum, frame) -> None:
     self.restart_requested = True
@@ -170,14 +174,23 @@ class Supervisor:
     is set, so a stop or restart signal is either seen by that check or
     forwarded to the new boot, never lost in between. A restart request can
     only belong to the boot that is running when it arrives.
+
+    Only the first boot keeps an inherited boot id: a wrapper that admitted
+    this container (the self-hosted boot-admission gate) bound that id to the
+    first boot alone. Every rerun is a new boot and must mint its own id, or
+    the restart ledger would not bind the accepted restart to it and nothing
+    could tell the new boot from the old one.
     """
     env = dict(os.environ)
     env[SUPERVISOR_PID_ENV] = str(os.getpid())
+    if self.boots_started:
+      env.pop(BOOT_ID_ENV, None)
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, _HANDLED_SIGNALS)
     try:
       if self.stop_signal is not None:
         return False
       self.restart_requested = False
+      self.boots_started += 1
       # Python ignores SIGPIPE and SIGXFSZ at startup; the boot must start
       # with the same default signal handling (and an empty signal mask) it
       # had directly under tini.
