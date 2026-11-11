@@ -93,6 +93,24 @@ def test_valid_relative_linked_pointers_and_separate_git_directory(recycled, tmp
   assert contribution_staging.checkout_branch(separate)
 
 
+def test_one_pointer_parser_names_the_git_directory_for_both_callers(recycled, tmp_path):
+  source, _, current = recycled
+  admin = Path((current / ".git").read_text().split(":", 1)[1].strip()).resolve()
+  assert git_checkout.linked_git_dir(current) == admin
+  (current / ".git").write_text(f"gitdir: {os.path.relpath(admin, current)}\n")
+  assert git_checkout.linked_git_dir(current) == admin
+  assert git_checkout.linked_git_dir(source) is None
+  assert git_checkout.linked_git_dir(tmp_path / "absent") is None
+  alias = tmp_path / "alias"
+  alias.mkdir()
+  (alias / ".git").symlink_to(current / ".git")
+  assert git_checkout.linked_git_dir(alias) is None
+  for pointer in ("not-a-pointer", "gitdir: "):
+    (alias / ".git").unlink()
+    (alias / ".git").write_text(pointer)
+    assert git_checkout.linked_git_dir(alias) is None
+
+
 @pytest.mark.parametrize("damage", ["missing", "empty", "other", "symlink"])
 def test_linked_checkout_requires_its_reciprocal_pointer(recycled, damage):
   _, _, current = recycled

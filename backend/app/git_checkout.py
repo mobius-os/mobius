@@ -9,6 +9,34 @@ which folder owns that state. This is a point-in-time preflight, not a lock.
 from pathlib import Path
 
 
+def linked_git_dir(repo: Path) -> Path | None:
+  """The resolved Git directory named by a checkout's `.git` pointer file.
+
+  Linked worktrees and separate-Git-directory clones both use such a file.
+  None means there is no regular pointer file (an ordinary repository, a
+  symbolic link or no marker at all) or its `gitdir:` line is unusable.
+  """
+  marker = repo / ".git"
+  if marker.is_symlink() or not marker.is_file():
+    return None
+  try:
+    value = marker.read_text().strip()
+  except (OSError, ValueError):
+    return None
+  if not value.startswith("gitdir:"):
+    return None
+  raw = value.removeprefix("gitdir:").strip()
+  if not raw:
+    return None
+  git_dir = Path(raw)
+  if not git_dir.is_absolute():
+    git_dir = marker.parent / git_dir
+  try:
+    return git_dir.resolve()
+  except (OSError, RuntimeError):
+    return None
+
+
 def linked_worktree_owns_checkout(repo: Path, git_dir: Path) -> bool:
   """Whether a linked administrative directory still registers this folder."""
   back_reference = git_dir / "gitdir"
@@ -38,14 +66,10 @@ def checkout_ownership_error(repo: Path) -> str | None:
     return "The checkout's .git marker is a symbolic link, so ownership is ambiguous."
   if not marker.is_file():
     return None
+  git_dir = linked_git_dir(repo)
+  if git_dir is None:
+    return "The checkout's .git pointer is invalid or unreadable."
   try:
-    value = marker.read_text().strip()
-    if not value.startswith("gitdir:") or not value[7:].strip():
-      return "The checkout's .git pointer is invalid."
-    git_dir = Path(value[7:].strip())
-    if not git_dir.is_absolute():
-      git_dir = marker.parent / git_dir
-    git_dir = git_dir.resolve()
     if not git_dir.is_dir():
       return "The checkout's Git administrative directory is missing."
     # A separate-git-dir clone has neither pointer. Check either so damage to
@@ -53,6 +77,6 @@ def checkout_ownership_error(repo: Path) -> str | None:
     if (git_dir / "commondir").exists() or (git_dir / "gitdir").exists():
       if not linked_worktree_owns_checkout(repo, git_dir):
         return "The checkout's Git state is registered to another or missing folder."
-  except (OSError, RuntimeError, ValueError):
+  except OSError:
     return "The checkout's Git ownership could not be read."
   return None

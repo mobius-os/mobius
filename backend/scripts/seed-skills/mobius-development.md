@@ -88,14 +88,6 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
 
 ## Validation
 
-Before reusing an existing review checkout, run
-`python3 /data/platform/backend/scripts/check-review-checkout.py <checkout>`
-before any Git command or edit there. A retained folder can point at a recycled
-linked-worktree administrative slot and silently use another review's branch
-and index. A refusal means preserve the folder and prepare a fresh checkout,
-not rewrite its pointers. The preflight is read-only and does not replace the
-review worktree's lock. Staging and publication also check this ownership.
-
 The app container has no Docker (see `platform-reference`), which is not a
 reason to hide or skip validation. Inside Möbius:
 

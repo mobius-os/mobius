@@ -1297,21 +1297,8 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
   # Linked worktrees and separate-git-dir checkouts both use a .git file.
   if marker.is_file():
-    try:
-      marker_value = marker.read_text().strip()
-    except OSError:
-      return False
-    if not marker_value.startswith("gitdir:"):
-      return False
-    raw_git_dir = marker_value.removeprefix("gitdir:").strip()
-    if not raw_git_dir:
-      return False
-    marker_git_dir = Path(raw_git_dir)
-    if not marker_git_dir.is_absolute():
-      marker_git_dir = marker.parent / marker_git_dir
-    try:
-      marker_git_dir = marker_git_dir.resolve()
-    except (OSError, RuntimeError):
+    marker_git_dir = git_checkout.linked_git_dir(repo)
+    if marker_git_dir is None:
       return False
 
     separate_git_dir = (
