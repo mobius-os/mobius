@@ -211,7 +211,8 @@ def provider_site(base_url: str) -> dict | None:
   path = url.path.rstrip("/") + "/responses"
   if (
     url.scheme != "https" or url.port not in (None, 443) or not url.hostname
-    or any(ch in path for ch in "*?[]")  # a literal path, never a site pattern
+    # A literal address, never a site pattern: the manifest is the app's word.
+    or "*" in url.hostname or any(ch in path for ch in "*?[]")
   ):
     return None
   return {"host": url.hostname, "methods": ["POST"], "paths": [path]}
@@ -223,8 +224,7 @@ def model_provider_key_in(keys: list[dict], app_id: int, name: str, base_url: st
   The platform sends the value to the provider's ``base_url`` for the app, so
   the key, whether the app created it or the owner lets it borrow one, must
   allow that destination by the same site rule a use through the vault meets.
-  An app's own key starts with that site (``store_app_key``), and the
-  ``provider-sites`` upgrade gave one to keys saved before that.
+  An app's own key starts with that site (``store_app_key``).
   """
   key = resolve_key_in(keys, app_id, name)
   site = provider_site(base_url)
@@ -413,23 +413,18 @@ async def for_granted_apps(key_name: str, app_ids: list[int], installations: dic
     yield
 
 
-def _provider_declarations(app_id: int | None = None) -> dict[int, dict]:
-  """Installed apps' accepted model-provider declarations that name a key, by app id."""
+def _provider_declaration(app_id: int) -> dict | None:
+  """The installed app's accepted model-provider declaration, when it names a key."""
   from app import models
   from app.database import SessionLocal
   with SessionLocal() as db:
-    query = db.query(models.App.id, models.App.capability_contract).filter(
-      models.App.deleted_at.is_(None),
-    )
-    if app_id is not None:
-      query = query.filter(models.App.id == int(app_id))
-    rows = query.all()
-  declared = {}
-  for row_id, contract in rows:
-    provider = contract.get("model_provider") if isinstance(contract, dict) else None
-    if isinstance(provider, dict) and isinstance(provider.get("secret_name"), str):
-      declared[row_id] = provider
-  return declared
+    contract = db.query(models.App.capability_contract).filter(
+      models.App.id == int(app_id), models.App.deleted_at.is_(None),
+    ).scalar()
+  provider = contract.get("model_provider") if isinstance(contract, dict) else None
+  if isinstance(provider, dict) and isinstance(provider.get("secret_name"), str):
+    return provider
+  return None
 
 
 def _own_provider_sites(provider: dict | None, name: str) -> list[dict]:
@@ -448,33 +443,12 @@ async def store_app_key(app_id: int, name: str, value: str) -> str:
   new key for the app's model provider starts allowed on the provider's site
   only, which the owner sees and can change in Settings › Keys.
   """
-  provider = (await asyncio.to_thread(_provider_declarations, app_id)).get(int(app_id))
+  provider = await asyncio.to_thread(_provider_declaration, app_id)
   saved = await vault_call("POST", "/owned", {
     "app": int(app_id), "name": name, "value": value,
     "sites": _own_provider_sites(provider, name),
   })
   return saved["name"]
-
-
-async def give_provider_keys_their_sites() -> list[str]:
-  """Run the vault's one-time ``provider-sites`` upgrade; return the keys changed.
-
-  Earlier versions sent an app's own model-provider key to its provider
-  without checking the key's sites, and created it with none. Narrowing the
-  key's sites now applies to the provider too, so each such key that still
-  has no sites gets exactly its provider's site, and working providers keep
-  working. The vault records the upgrade, so later calls change nothing.
-  """
-  declared = await asyncio.to_thread(_provider_declarations)
-  entries = [
-    {"app": app_id, "name": provider["secret_name"],
-     "sites": _own_provider_sites(provider, provider["secret_name"])}
-    for app_id, provider in declared.items()
-  ]
-  result = await vault_call("POST", "/upgrades/provider-sites", {"keys": entries})
-  if result.get("seeded"):
-    log.info("key vault: gave %d model-provider key(s) their provider's site", len(result["seeded"]))
-  return result.get("seeded") or []
 
 
 async def release_app_key(app_id: int, name: str) -> dict | None:
@@ -638,14 +612,13 @@ async def forget_app(app_id: int) -> None:
 
 
 async def _import_when_ready() -> None:
-  """Run the one-time legacy import and store upgrades once the vault answers.
+  """Run the one-time legacy import once the vault answers.
 
-  Installations with nothing to move and no stored keys never wait on the
+  Installations with nothing left to move (the usual case) never wait on the
   vault or touch it.
   """
   root = _legacy_root()
-  importing = bool(_pending_legacy_secrets(root, _read_ledger(root)))
-  if not importing and not _vault_ever_used():
+  if not _pending_legacy_secrets(root, _read_ledger(root)):
     return
   for _ in range(60):
     try:
@@ -656,19 +629,14 @@ async def _import_when_ready() -> None:
   else:
     log.warning("key vault did not start; legacy app secrets stay where they are")
     return
-  if importing:
-    from app import models
-    from app.database import SessionLocal
-    with SessionLocal() as db:
-      live = {row.id for row in db.query(models.App.id).all()}
-    try:
-      await import_legacy_app_secrets(live)
-    except Exception:
-      log.exception("key vault: legacy app-secret import failed; it is retried on the next start")
+  from app import models
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    live = {row.id for row in db.query(models.App.id).all()}
   try:
-    await give_provider_keys_their_sites()
+    await import_legacy_app_secrets(live)
   except Exception:
-    log.exception("key vault: provider-sites upgrade failed; it is retried on the next start")
+    log.exception("key vault: legacy app-secret import failed; it is retried on the next start")
 
 
 async def supervise_key_vault() -> None:

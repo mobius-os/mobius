@@ -178,6 +178,25 @@ def test_approving_an_existing_key_adds_only_the_app(vault):
     vault.authorize("echo", ("app", "9"), "GET", "maps.example.com", "/v1/route")
 
 
+@pytest.mark.parametrize("host", [
+  "*.supabase.co", "*.workers.dev", "*.vercel.app", "*.execute-api.us-east-1.amazonaws.com",
+])
+def test_an_app_cannot_ask_for_every_subdomain_where_a_stranger_could_own_one(vault, host):
+  """On a shared domain anyone can stand up a subdomain that logs the key it
+  receives, so an approved wildcard request would send the owner's value to
+  the app author's own host."""
+  asked = {**ASK, "key": "SUPABASE_SERVICE_KEY",
+           "sites": [ASK["sites"][0], {"host": host, "methods": ["POST"], "paths": ["/rest/v1/*"]}]}
+  with pytest.raises(kv.VaultError, match="exact sites") as refused:
+    vault.request_access(7, asked)
+  assert refused.value.status == 400
+  assert vault.list_requests() == []
+  # The owner can still choose a wildcard for a key on its own page.
+  vault.put_key("SUPABASE_SERVICE_KEY", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants(
+    apps=[], sites=[{"host": host, "methods": ["POST"], "paths": ["/rest/v1/*"]}],
+  )})
+
+
 def test_a_narrower_path_is_within_a_wider_one_only_when_every_match_is():
   within = kv._pattern_within
   assert within("/v1/*", "/v1/*") and within("/v1/a*", "/v1/*") and within("/v1/x", "/*")
@@ -576,31 +595,6 @@ def test_the_apps_own_save_keeps_its_ownership(vault):
 PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/responses"]}
 
 
-def test_provider_sites_upgrade_runs_once_per_store_and_only_on_an_older_store(tmp_path):
-  fresh = kv.Vault(tmp_path / "fresh")
-  fresh.save_owned(9, "api_key", DUMMY)
-  entry = [{"app": 9, "name": "api_key", "sites": [PROVIDER_SITE]}]
-  # A store this version created has nothing to upgrade.
-  assert fresh.seed_owned_sites(entry) == {"seeded": [], "done": True}
-  assert fresh.list_keys()[0]["grants"]["sites"] == []
-
-  older = kv.Vault(tmp_path / "older")
-  older.save_owned(9, "api_key", DUMMY)
-  payload = json.loads(older.store_path.read_text())
-  del payload["upgrades"]                    # as an earlier version wrote it
-  older.store_path.write_text(json.dumps(payload))
-  reloaded = kv.Vault(tmp_path / "older")
-  unusable = {"app": 9, "name": "api_key", "sites": [{"host": "bad host"}]}
-  assert reloaded.seed_owned_sites([unusable, *entry]) == {"seeded": ["api_key"], "done": True}
-  assert reloaded.list_keys()[0]["grants"]["sites"] == [PROVIDER_SITE]
-  # Recorded with the store: a restart never runs it again.
-  again = kv.Vault(tmp_path / "older")
-  record = again.list_keys()[0]
-  again.put_key("api_key", {"inject": record["inject"], "grants": {**record["grants"], "sites": []}})
-  assert kv.Vault(tmp_path / "older").seed_owned_sites(entry) == {"seeded": [], "done": True}
-  assert kv.Vault(tmp_path / "older").list_keys()[0]["grants"]["sites"] == []
-
-
 def test_a_new_own_key_starts_on_the_sites_the_server_names_and_a_resave_keeps_the_owners(vault):
   created = vault.save_owned(9, "api_key", DUMMY, sites=[PROVIDER_SITE])
   assert created == {"name": "api_key", "created": True}
@@ -711,16 +705,6 @@ def test_a_new_key_request_without_a_slot_is_sent_as_a_bearer_token(vault):
   asked = vault.request_access(9, {k: v for k, v in ASK.items() if k != "inject"})
   vault.approve_request(asked["id"], {"value": DUMMY, "ticket": _ticket(vault, asked["id"])})
   assert next(k for k in vault.list_keys() if k["name"] == ASK["key"])["inject"] == HEADER_SLOT
-
-
-def test_an_origin_stored_without_its_apps_grant_is_dropped_on_load(tmp_path, vault):
-  name = vault.save_owned(5, "token", DUMMY)["name"]
-  # As an earlier build left it: the app's grant gone, its origin kept.
-  vault._records[name]["grants"]["apps"] = []
-  vault._save()
-  reloaded = kv.Vault(tmp_path / "vault")
-  assert next(k for k in reloaded.list_keys() if k["name"] == name).get("origin") is None
-  assert "origin" not in json.loads(reloaded.store_path.read_text())["keys"][name]
 
 
 def test_only_one_vault_runs_on_a_folder(tmp_path):

@@ -17,7 +17,11 @@ Status: draft for review.
 
 1. **Ask.** An app sends `POST /api/keys/requests` with its own app token:
    the key name, a reason, the sites it needs and how the key is sent. The
-   server reads the app's identity from the token, never from the request.
+   sites are exact hosts: a wildcard (`*.workers.dev`) is refused, because on
+   a shared domain the app's author can own a subdomain, and that host reads
+   the key from the request itself. Only the owner adds a wildcard, on the
+   key's page. The server reads the app's identity from the token, never
+   from the request.
    The answer is `granted`, `pending` or `denied`; asking again is how the app
    checks, and only a new request notifies the owner.
 2. **Approve.** The owner sees the app's name, reason and requested sites,
@@ -119,18 +123,6 @@ stays for them), as the per-app store did. A ledger
 never re-imported, unreadable values are retried, and a purged app's leftover
 values are skipped because its id may be reused. The old ciphertext stays in
 place for one release.
-
-**Provider keys saved before site checks.** Earlier builds of the vault sent
-an app's own model-provider key to its provider without checking the key's
-sites, and saved it with none. Checking sites would have silently broken those
-providers, and skipping the check would leave them unrestricted, so the
-vault's one-time `provider-sites` store upgrade
-(`give_provider_keys_their_sites`, run after the import) gives each such key
-that still has no sites exactly its provider's `POST <base_url>/responses`
-site. A key the owner already gave sites keeps them, even if they leave the
-provider out. The vault records the upgrade in its store (a new store starts
-with it done), so it runs once: a site the owner removes afterwards stays
-removed.
 
 **Transition.** For one release, `/api/apps/{id}/secrets/{name}`
 (`routes/app_secrets_compat.py`, marked `Deprecation: true`) answers from the

@@ -202,6 +202,14 @@ def test_an_app_cannot_borrow_another_apps_grant(client, auth, db, vault):
   assert client.get(path, headers=_app_auth(db, weather)).status_code == 200
 
 
+def test_an_app_asks_for_exact_sites_only(client, auth, db, vault, pushes):
+  app_auth = _app_auth(db, _app(db, "tenant"))
+  wildcard = {**ASK, "sites": [{**SITE, "host": "*.supabase.co"}]}
+  refused = client.post("/api/keys/requests", headers=app_auth, json=wildcard)
+  assert refused.status_code == 400 and "exact sites" in refused.text
+  assert client.get("/api/keys", headers=auth).json()["requests"] == [] and pushes == []
+
+
 def test_only_apps_ask_and_only_the_owner_manages(client, auth, db, vault):
   weather = _app(db, "weather")
   app_auth = _app_auth(db, weather)
@@ -498,6 +506,16 @@ def test_a_borrowed_key_reaches_only_a_model_provider_on_its_sites(client, auth,
   assert reveal(other.id, "shared-provider", "https://api.example.com/v1") is None
 
 
+def test_an_apps_own_provider_key_never_starts_on_every_subdomain(client, auth, db, vault):
+  """The manifest's provider address is the app's word: a wildcard there must
+  not become the site a new key starts on."""
+  app = _app(db, "tenant-provider", provider_key="api_key", base_url="https://*.workers.dev/v1")
+  path = f"/api/apps/{app.id}/secrets/api_key"
+  assert client.put(path, headers=_app_auth(db, app), json={"value": DUMMY}).status_code == 204
+  [record] = client.get("/api/keys", headers=auth).json()["keys"]
+  assert record["grants"]["sites"] == []
+
+
 def test_narrowing_an_apps_own_provider_key_stops_its_provider(client, auth, db, vault):
   """An app-saved provider key obeys its sites like a borrowed one: narrowed
   to another site in Settings › Keys, it is no longer sent to the provider."""
@@ -524,42 +542,6 @@ def test_narrowing_an_apps_own_provider_key_stops_its_provider(client, auth, db,
   assert reveal(app.id, "api_key", provider) is None
   # Still the app's own key: narrowing changed where it goes, not whose it is.
   assert key_vault.owned_key_in(vault.list_keys(), app.id, "api_key") is not None
-
-
-def test_upgrade_gives_earlier_siteless_provider_keys_their_providers_site(client, auth, db, vault):
-  """Provider keys an earlier version saved with no sites keep working, now
-  on their provider's site; keys the owner already restricted keep their
-  sites; and the upgrade runs once, so a site removed later stays removed."""
-  import asyncio
-  quiet = _app(db, "quiet", provider_key="api_key")
-  narrowed = _app(db, "narrowed", provider_key="token", base_url="https://other.example.com/v1")
-  plain = _app(db, "plain")
-  # As earlier versions stored them: no sites, on a store from before the upgrade.
-  vault.save_owned(quiet.id, "api_key", "quiet-value")
-  vault.save_owned(narrowed.id, "token", "narrowed-value",
-                   sites=[{"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]}])
-  vault.save_owned(plain.id, "api_key", "plain-value")
-  vault._upgrades.discard("provider-sites")
-  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) is None
-
-  seeded = asyncio.run(key_vault.give_provider_keys_their_sites())
-  keys = vault.list_keys()
-  quiet_key = key_vault.owned_key_in(keys, quiet.id, "api_key")
-  assert seeded == [quiet_key["name"]]
-  assert quiet_key["grants"]["sites"] == [PROVIDER_SITE]
-  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) == "quiet-value"
-  # The owner's narrowing wins over the provider's address.
-  assert key_vault.owned_key_in(keys, narrowed.id, "token")["grants"]["sites"][0]["host"] == "safe.example.com"
-  assert key_vault.reveal_model_provider_key(
-    narrowed.id, "token", "https://other.example.com/v1",
-  ) is None
-  assert key_vault.owned_key_in(keys, plain.id, "api_key")["grants"]["sites"] == []
-
-  # The owner removes the site afterwards; a later start never puts it back.
-  vault.put_key(quiet_key["name"], {"inject": quiet_key["inject"],
-                                    "grants": {**quiet_key["grants"], "sites": []}})
-  assert asyncio.run(key_vault.give_provider_keys_their_sites()) == []
-  assert key_vault.reveal_model_provider_key(quiet.id, "api_key", PROVIDER) is None
 
 
 def test_an_owner_filled_key_is_no_longer_the_apps_to_replace_delete_or_send(client, auth, db, vault):

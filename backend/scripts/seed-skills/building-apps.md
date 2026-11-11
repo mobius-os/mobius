@@ -783,7 +783,7 @@ Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path;
 
 Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs, and never build a field that asks the owner to paste a key into the app. Keys live in the owner's key vault (**Settings › Keys**). The owner and the owner's agents may read them; **an app never receives a value**, not in its frame, service or job. An app borrows a key: it names the key and the destination, and Möbius sends the request with the key added.
 
-1. **Ask once.** `POST /api/keys/requests` with the app's own token. It answers `granted`, `pending` or `denied`, and asking again is how the app checks; the owner is notified only the first time. Describe exactly what the app needs: the sites, methods and paths, and how the key is sent (a header, with an optional prefix, or a query parameter). The owner sees the app's name and your reason, adds the key if it is new, and approves. Approving never changes a key the owner already has: the app may use it only on that key's existing sites, and the owner adds any other site on the key's page.
+1. **Ask once.** `POST /api/keys/requests` with the app's own token. It answers `granted`, `pending` or `denied`, and asking again is how the app checks; the owner is notified only the first time. Describe exactly what the app needs: the sites, methods and paths, and how the key is sent (a header, with an optional prefix, or a query parameter). Name exact hosts: a request for `*.example.com` is refused, because on a shared domain (`*.workers.dev`, `*.vercel.app`, `*.supabase.co`) anyone can own a subdomain. Only the owner can allow every subdomain, on the key's page. The owner sees the app's name and your reason, adds the key if it is new, and approves. Approving never changes a key the owner already has: the app may use it only on that key's existing sites, and the owner adds any other site on the key's page.
 2. **Borrow.** Send the ordinary HTTPS request to `/api/keys/use/<key>/<host>/<path>?<query>` with the app's token. Möbius identifies the app from that token, the vault checks the owner's grant and the key's allowed sites, adds the key, and returns the site's answer. HTTPS on port 443 only; redirects come back unfollowed; an echoed key is redacted.
 
 ```jsx
@@ -809,7 +809,9 @@ A service or job does the same with its `APP_TOKEN` against `$API_BASE_URL`. The
 
 An agent setting an app up saves a key the owner provides through a sealed card (`python3 /data/platform/backend/scripts/store-key.py NAME --site HOST:METHODS:PATHS` as the consumer) and tests it by borrowing it the same way (`mapi /api/keys/use/NAME/<host>/<path>`). Read the value (`GET /api/keys/<name>/value`) only when a tool needs the raw key, and never print it: command output stays in the chat log. Approving an app's request stays the owner's decision in Settings; an agent replacing an existing key notifies the owner.
 
-The old `/api/apps/{id}/secrets/{name}` routes still answer for one release, deprecated, on top of the vault: an app can save, check and delete its own values there, but nothing reads one back with an app token. Move to the handshake above.
+The vault adds a key only as a header or a query parameter. A secret used any other way has no borrow path, so an app cannot use it: a webhook signing secret, HMAC or SigV4 request signing, an OAuth client secret sent in a form body, a private key. Do not work around that by asking the owner to paste it into the app.
+
+The old `/api/apps/{id}/secrets/{name}` routes still answer for one release, deprecated, on top of the vault: an app can save, check and delete its own values there, but nothing reads one back with an app token, including the app's own service and jobs. Code that read a value that way stops working when this vault ships; move it to the handshake above.
 
 ### Concurrent writers — compare-and-swap, not last-write-wins
 
