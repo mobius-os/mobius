@@ -350,7 +350,10 @@ HELPER
 probe() {  # <command>
   local cid backend
   cid=$(app_container) || fail "cannot identify the app"
-  backend=$(docker exec -u mobius "$cid" sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"') \
+  # -o, not -n: the server is the oldest match; a child it is starting (say, a
+  # build in the frontend folder) carries the server's command line in its own
+  # cwd until it execs.
+  backend=$(docker exec -u mobius "$cid" sh -c 'readlink "/proc/$(pgrep -o -u mobius -f "/bin/uvicorn app\.main:app")/cwd"') \
     && [[ -n $backend ]] || fail "cannot locate the serving uvicorn process"
   docker cp "$ROOT/scripts/transcript_rollback_probe.py" "$cid:/tmp/probe.py" || fail "cannot copy the transcript probe"
   docker exec -u mobius -w "$backend" -e PYTHONPATH="$backend" "$cid" python3 /tmp/probe.py "$1" \

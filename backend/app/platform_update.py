@@ -83,7 +83,8 @@ except ImportError:  # only a transitive dependency; pip vendors the same librar
   from pip._vendor.packaging.version import InvalidVersion, Version
 
 from app import (
-  app_git, local_change_tests, platform_activation, removed_references, runtime_provenance,
+  app_git, local_change_tests, platform_activation, removed_references,
+  runtime_provenance,
 )
 from app.platform_activation import PlatformActivationImpact
 from app.restart_util import run_candidate_startup_check
@@ -209,6 +210,7 @@ _HOOK_SOURCES = (
   ("scripts/githooks/pre-push", "pre-push"),
   ("scripts/frontend-deps.sh", "frontend-deps.sh"),
   ("scripts/check-frontend-deps.mjs", "check-frontend-deps.mjs"),
+  ("scripts/wt-npm.sh", "wt-npm.sh"),
 )
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
@@ -379,10 +381,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # Conflict-only backlog signal. This remains false outside ``state ==
-  # "conflict"`` even when ``available`` is true. While resolving a conflict it
-  # becomes true when origin/main advances past the pinned release, letting
-  # Settings offer one combined review+resolve instead of one per release.
+  # Backlog signal for an in-flight update: true when ``unfinished_update``
+  # is pinned to a release (resolving, prepared/finishing or settling) and
+  # the selected release strictly descends it. It stays false for an ordinary
+  # ``available`` update with nothing in flight: that release is itself the
+  # thing to apply. Settings uses it to suggest cancelling the stale update
+  # and reviewing the latest instead; nothing switches automatically.
   # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
@@ -1827,8 +1831,12 @@ def reviewed_container_rebuild_plan(
     base = _git(
       "merge-base", current_sha, target_sha, repo=repo, check=False,
     ).stdout.strip() or current_sha
-    incoming_activation = _incoming_activation_impact(repo, base, target_sha)
-    activation = _owed_activation(repo, base, target_sha)
+    # The owner reviewed this with the host's evidence; the request is
+    # judged by the same evidence, never on a boot path.
+    incoming_activation = _incoming_activation_impact(
+      repo, base, target_sha, read_host=True,
+    )
+    activation = _owed_activation(repo, base, target_sha, read_host=True)
     return PlatformReviewedRebuild(
       target_sha=target_sha,
       image_digest=image_digest,
@@ -1984,6 +1992,7 @@ def serves_image_release(
   if activation is None:
     activation = _platform_activation_impact(
       repo, served_to_head=_activation_paths_between(repo, served_sha, head),
+      read_host=True,
     )
   return activation["level"] == platform_activation.ActivationLevel.LIVE.value
 
@@ -2111,31 +2120,65 @@ def _without_python_inputs_installed_for(
   return [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
 
 
+def _without_certified_host_helper(
+  repo: Path, paths: list[str], release: str | None,
+) -> list[str]:
+  """Drop the helper migration marker once the host has done that work.
+
+  Reinstalling the helper is host work the container cannot perform, but the
+  host's root-owned status certifies the protocol its last completed install
+  provides, the same evidence that gates replacement dispatch. Status or a
+  requirement that cannot be read keeps the work owed.
+
+  Only owner-facing status and reviews ask (``read_host=True``). Boot, record
+  and finalize paths never do: they run from the image's boot closure, which
+  does not include deployment_control, and the marker must keep recording
+  the requirement anyway.
+  """
+  marker = platform_activation.HOST_HELPER_REQUIREMENT_PATH
+  if marker not in paths:
+    return paths
+  from app import deployment_control  # it imports this module
+
+  release = release or _contained_official_source(repo)
+  if not deployment_control.host_helper_meets_release(release, repo):
+    return paths
+  return [path for path in paths if path != marker]
+
+
 def _incoming_activation_impact(
   repo: Path,
   before: str | None,
   target_sha: str | None,
+  *,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
-  """Classify target work that is not already proven active in this image."""
-  return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(
-      repo, _activation_paths_between(repo, before, target_sha), target_sha,
-    ),
+  """Classify target work that is not already proven active in this image.
+  ``read_host`` also discounts host work the host certifies as done."""
+  paths = _without_python_inputs_installed_for(
+    repo, _activation_paths_between(repo, before, target_sha), target_sha,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, target_sha)
+  return platform_activation.classify_activation(paths)
 
 
 def _owed_activation(
   repo: Path, before: str, target: str, *, release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Everything the running process owes once it serves ``target``: its
   still-pending activation plus the changes from ``before``. Image work is
   judged against the official ``release`` ``target`` carries (``target``
-  itself unless it is a prepared local revision on top of one)."""
+  itself unless it is a prepared local revision on top of one). ``read_host``
+  (reviews only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, release=release or target,
     additional_served_paths=_activation_paths_between(repo, before, target),
   )
   owed_paths = _without_python_inputs_installed_for(repo, paths, target)
+  if read_host:
+    owed_paths = _without_certified_host_helper(repo, owed_paths, release or target)
   return platform_activation.classify_activation(
     owed_paths,
     served_restart_paths=served_restart,
@@ -2412,10 +2455,15 @@ def _platform_activation_impact(
   *,
   served_to_head: list[str] | None = None,
   release: str | None = None,
+  read_host: bool = False,
 ) -> PlatformActivationImpact:
+  """What the running process still owes. ``read_host`` (status and reviews
+  only) also discounts host work the host certifies as done."""
   paths, served_restart = _pending_activation_work(
     repo, served_to_head=served_to_head, release=release,
   )
+  if read_host:
+    paths = _without_certified_host_helper(repo, paths, release)
   return platform_activation.classify_activation(
     paths, served_restart_paths=served_restart,
   )
@@ -2427,7 +2475,9 @@ def _complete_boot_activation(repo: Path) -> None:
   A fresh server always satisfies ``server_restart``.  A new image identity
   that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
-  cannot observe or control those external planes.
+  cannot observe or control those external planes. The marker keeps the
+  helper requirement; only status and reviews discount it against the host's
+  certified helper (``_without_certified_host_helper``), never this boot step.
   """
   marker = _read_activation_marker()
   if not marker:
@@ -3442,10 +3492,14 @@ class PreparedUpdate(TypedDict):
   local_tests: dict | None  # best-effort evidence, not complete local coverage
   late: str | None  # live state saved at the swap, in-progress edits on top
   late_committed: str | None  # its committed part
-  # The late edits merged back before the server imported anything; the
-  # record stays swapped until it is confirmed, so a merged tree that cannot
-  # start is still returned to ``late`` by the boot transaction.
+  # The late edits merged back into the live checkout; the record stays
+  # swapped until a server serves them, so a merged tree that cannot start is
+  # still returned to ``late`` by the boot transaction.
   replayed: str | None
+  # The boot already serving when ``replayed`` merged back (None when it
+  # merged before the server imported). That boot never loaded it, even when
+  # the commit is the one it serves (the edits came back uncommitted).
+  replayed_boot: str | None
   # The container replacement whose success confirms an image-requiring
   # update: ``{"controller": "railway" | "host", "id": ...}``. Only that exact
   # operation retires the record (``reconcile_bound_operation``). None means
@@ -3457,8 +3511,10 @@ class PreparedUpdate(TypedDict):
   # Bookkeeping the swap replaced, restored exactly if the swap is reverted:
   # ``{"upstream": sha | None, "activation": marker text | None}``.
   restore: dict | None
-  # The complete working tree (in-progress edits included) the merge-back
-  # left, so a revert sets aside only work made after it.
+  # The tree the boot itself established, so a revert sets aside only work
+  # made after it: what the boot's merge-back left (in-progress edits
+  # included), or the update alone when a resolver merged the late edits
+  # back later; that answer is resolver work, not boot state.
   booted_tree: str | None
 
 
@@ -3482,6 +3538,7 @@ def read_prepared_update() -> PreparedUpdate | None:
     late=record.get("late") or None,
     late_committed=record.get("late_committed") or None,
     replayed=record.get("replayed") or None,
+    replayed_boot=record.get("replayed_boot"),
     operation=_valid_operation(record.get("operation")),
     protocol=record.get("protocol") if isinstance(record.get("protocol"), int) else 0,
     restore=record.get("restore") if isinstance(record.get("restore"), dict) else None,
@@ -3613,7 +3670,7 @@ def _prepare(
     state="prepared", snapshot=snapshot, prepared=prepared, target=target,
     image_digest=image_digest, requires_image=requires_image, late=None,
     local_tests=local_report,
-    late_committed=None, replayed=None, operation=None,
+    late_committed=None, replayed=None, replayed_boot=None, operation=None,
     protocol=BOOT_PROTOCOL, restore=None, booted_tree=None,
   )
   _write_prepared_update(record)
@@ -3724,8 +3781,8 @@ def _swap_in(repo: Path, record: PreparedUpdate) -> PreparedUpdate:
   late = carried.pre
   swapped = PreparedUpdate(**{
     **record, "state": "swapped", "late": late,
-    "late_committed": carried.served, "replayed": None, "restore": restore,
-    "booted_tree": None,
+    "late_committed": carried.served, "replayed": None, "replayed_boot": None,
+    "restore": restore, "booted_tree": None,
   })
   try:
     _git("update-ref", _LATE_REF, late, repo=repo)
@@ -3867,13 +3924,23 @@ def late_edits_pending() -> bool:
   )
 
 
+def _current_boot_id() -> str:
+  """This server process's boot identity (``restart_ledger.current_boot_id``).
+
+  Read directly: this module runs in the baked boot step, whose closure must
+  not grow to include the restart ledger.
+  """
+  return os.environ.get("MOBIUS_BOOT_ID", "")
+
+
 def _serves_replayed(record: PreparedUpdate, repo: Path = PLATFORM_REPO) -> bool:
-  """Whether this server imported the merged-back late edits (or newer)."""
+  """Whether this server imported the merged-back late edits (or newer):
+  it serves them and started after they merged back."""
   served = _served_platform_sha()
   return bool(record["replayed"] and served and (
     served == record["replayed"]
     or _is_ancestor(repo, record["replayed"], served)
-  ))
+  ) and record["replayed_boot"] != _current_boot_id())
 
 
 def _swap_position(repo: Path, record: PreparedUpdate, head: str) -> str:
@@ -3901,9 +3968,12 @@ def _replay_parked(record: PreparedUpdate) -> bool:
   )
 
 
-def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
+def _replay_late_edits(
+  repo: Path, record: PreparedUpdate, *, serving_boot: str | None = None,
+) -> str:
   """Merge late edits onto the booted update, or park them; the caller holds
-  the reconcile lock and has checked the checkout is exactly the update."""
+  the reconcile lock and has checked the checkout is exactly the update.
+  ``serving_boot`` is the boot that already imported the update, if any."""
   local = _local_branch(repo)
   head = record["prepared"]
   # Late edits are local work and the booted update is the incoming
@@ -3933,7 +4003,7 @@ def _replay_late_edits(repo: Path, record: PreparedUpdate) -> str:
     _restore_working_edits(repo, local)
   replayed = _rev(repo, local)
   _write_prepared_update(PreparedUpdate(**{
-    **record, "replayed": replayed,
+    **record, "replayed": replayed, "replayed_boot": serving_boot,
     "booted_tree": _working_tree_oid(repo, replayed),
   }))
   return "replayed"
@@ -4619,7 +4689,8 @@ def _settle_reverted(
       RESTART_NEEDED_FLAG.unlink(missing_ok=True)
   prepared = PreparedUpdate(**{
     **record, "state": "prepared", "late": None, "late_committed": None,
-    "replayed": None, "operation": None, "restore": None, "booted_tree": None,
+    "replayed": None, "replayed_boot": None, "operation": None, "restore": None,
+    "booted_tree": None,
   })
   if set_aside:
     reason += f" Work made on the new version is kept at {set_aside}."
@@ -4684,7 +4755,9 @@ def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
       # so it cannot have loaded them: merge now and record the restart that
       # loads them. The record stays, so the next boot can still return a
       # tree that cannot start to the saved previous state.
-      outcome = _replay_late_edits(repo, record)
+      outcome = _replay_late_edits(
+        repo, record, serving_boot=_current_boot_id(),
+      )
       if outcome == "replayed":
         _record_update_activation(
           repo, _rev(repo, local), recorded_upstream_sha(repo),
@@ -4870,12 +4943,14 @@ def _working_overlay_commit(repo: Path, parent: str, tree: str) -> str:
 
 
 def _record_update_activation(
-  repo: Path, head: str | None, target: str | None,
+  repo: Path, head: str | None, target: str | None, *, read_host: bool = False,
 ) -> PlatformActivationImpact:
   """Record what the running process still owes for the release at ``head``.
 
   Compare what this process imported to the new head, not only the incoming
   target: local commits made while uvicorn ran are part of the same remainder.
+  The marker always records host work; ``read_host`` (the owner's Apply
+  response) only discounts certified host work in the returned impact.
   """
   served = _served_platform_sha()
   changed_paths = _activation_paths_between(repo, served, head)
@@ -4891,7 +4966,7 @@ def _record_update_activation(
       upstream_sha=target, repo=repo,
     )
   return _platform_activation_impact(
-    repo, served_to_head=changed_paths, release=release,
+    repo, served_to_head=changed_paths, release=release, read_host=read_host,
   )
 
 
@@ -4965,6 +5040,15 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
         _working_overlay_commit(repo, committed, late.merged_tree_oid),
         late_working,
       )
+    record = read_prepared_update() if parked.get("replay") else None
+    if record is not None and not record["booted_tree"]:
+      # The boot established only the update; the answer is resolver work,
+      # which a revert sets aside (``_set_aside_unsaved_update_work``).
+      # Recorded before the merge clears the conflict flag, after which a boot
+      # would take the merged tree for its own (``_settle_swap``).
+      _write_prepared_update(PreparedUpdate(**{
+        **record, "booted_tree": _commit_tree_oid(repo, record["prepared"]),
+      }))
     _reattach_detached_head(repo, local)
     carried = _carry_working_edits(repo, local)
     if parked.get("replay") and resolved_working is not None:
@@ -5001,16 +5085,16 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _record_update_activation(repo, head, target)
       return result.status
     # The server booted before these edits returned, so it still owes the
-    # restart that loads them.
+    # restart that loads them. The swap stays until a later boot serves them
+    # (``confirm_platform_swap_loaded``) or its bound replacement confirms it,
+    # so that boot can still return a merged tree that cannot start.
     _record_update_activation(repo, head, recorded_upstream_sha(repo))
     record = read_prepared_update()
-    if record is not None and record["operation"] is not None:
-      # Its replacement still confirms it; the restart loads this.
+    if record is not None:
       _write_prepared_update(PreparedUpdate(**{
-        **record, "replayed": head, "booted_tree": _working_tree_oid(repo, head),
+        **record, "replayed": head,
+        "replayed_boot": _current_boot_id(),
       }))
-    elif record is not None:
-      _retire_swap(repo, record)
     return result.status
 
 
@@ -5685,7 +5769,7 @@ def platform_status(
   if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
     rolled_back = False
     rollback = None
-  activation = _platform_activation_impact(repo)
+  activation = _platform_activation_impact(repo, read_host=True)
   activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
@@ -5711,18 +5795,18 @@ def platform_status(
   current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
   blocker = restart_blocker(repo)
+  # Newer releases stacked up behind the update in flight wait until it
+  # finishes or is cancelled; ``target`` is the last-fetched selected release.
+  pending = unfinished_update(repo)
+  pinned = pending["target_sha"] if pending else None
+  newer_available = bool(
+    target and pinned and target != pinned
+    and _is_ancestor(repo, pinned, target)
+  )
 
   if conflict:
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
-    # `target` is the last-fetched origin/main. If it strictly descends the
-    # version this conflict is pinned to, newer releases stacked up behind it.
-    # They wait until this one finishes (see ``unfinished_update``).
-    conflict_target = flag.get("upstream")
-    newer_available = bool(
-      target and conflict_target and target != conflict_target
-      and _is_ancestor(repo, conflict_target, target)
-    )
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
@@ -5742,7 +5826,7 @@ def platform_status(
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
       recovery_refs=recovery_refs,
-      unfinished_update=unfinished_update(repo),
+      unfinished_update=pending,
       local_overlay=local_overlay_summary(repo, local=local, target=target),
       restart_blocker=blocker,
       )
@@ -5787,11 +5871,11 @@ def platform_status(
     current_build_committed_at=current_build_committed_at,
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
-    newer_updates_available=False,
+    newer_updates_available=newer_available,
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
     recovery_refs=recovery_refs,
-    unfinished_update=unfinished_update(repo),
+    unfinished_update=pending,
     local_overlay=local_overlay_summary(repo, local=local, target=target),
     restart_blocker=blocker,
   )
@@ -5903,7 +5987,9 @@ def prepared_update_preview(
     return None
   current = _update_source_tip(repo)
   activation = _with_prepared_image_requirement(
-    _incoming_activation_impact(repo, record["snapshot"], record["prepared"]),
+    _incoming_activation_impact(
+      repo, record["snapshot"], record["prepared"], read_host=True,
+    ),
     record,
   )
   preview = empty_platform_update_preview(
@@ -6083,7 +6169,7 @@ def _platform_update_preview_unlocked(
       current_sha=local_sha, target_sha=target,
       image_digest=image_digest,
     )
-    activation = _platform_activation_impact(repo, release=target)
+    activation = _platform_activation_impact(repo, release=target, read_host=True)
     if local_sha and target and activation["level"] != "live":
       preview.update(
         state=_state_for_activation(activation).value,
@@ -6138,7 +6224,9 @@ def _platform_update_preview_unlocked(
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
-  incoming_activation = _incoming_activation_impact(repo, base, target)
+  incoming_activation = _incoming_activation_impact(
+    repo, base, target, read_host=True,
+  )
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     actionable=True, operation="update",
@@ -6290,7 +6378,7 @@ def _apply_platform_update_sync(
       chat_id: str | None = None
 
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
-        return _record_update_activation(repo, head, res.target_sha)
+        return _record_update_activation(repo, head, res.target_sha, read_host=True)
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
@@ -6330,7 +6418,7 @@ def _apply_platform_update_sync(
         raise PlatformUpdateError(res.error or res.status)
 
       if res.status in {"conflict", "rolled_back"}:
-        activation = _platform_activation_impact(repo)
+        activation = _platform_activation_impact(repo, read_host=True)
 
       final_phase = (
         PlatformUpdatePhase.BLOCKED
@@ -6372,42 +6460,49 @@ def _apply_platform_update_sync(
       raise
 
 
+# A second click (or startup) waits for the first, then finds the chat it bound.
+_resolver_creation_lock = asyncio.Lock()
+
+
 async def create_platform_conflict_resolver_chat(
-  db: Session, repo: Path = PLATFORM_REPO, *, replace_bound: bool = False,
+  db: Session, repo: Path = PLATFORM_REPO, *, replace_chat_id: str | None = None,
 ) -> PlatformConflictResolverChatOut:
   """Create or return the owner-clicked resolver chat for a platform conflict.
 
-  ``replace_bound`` opens a new one even when the bound chat still exists
-  (resuming a chat that cannot take a system turn) and rebinds the update.
+  The conflict flag's ``chat_id`` is the resolver's identity.
+  ``replace_chat_id`` names a bound chat the caller found unusable (it cannot
+  take a system turn): a new resolver replaces it and is bound to the update,
+  unless a concurrent caller already replaced it, whose chat is returned.
   """
-  flag = _read_conflict_flag() or {}
-  if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
-    raise PlatformUpdateError("No unresolved platform update conflict.")
+  async with _resolver_creation_lock:
+    flag = _read_conflict_flag() or {}
+    if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
+      raise PlatformUpdateError("No unresolved platform update conflict.")
 
-  existing = None if replace_bound else _bound_resolver_chat(db, flag)
-  if existing is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=existing.id, created=False, started=False,
+    existing = _bound_resolver_chat(db, flag)
+    if existing is not None and existing.id != replace_chat_id:
+      return PlatformConflictResolverChatOut(
+        chat_id=existing.id, created=False, started=False,
+      )
+
+    conflict_paths = flag.get("paths") or _unmerged_paths(repo)
+    target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+    parked = flag.get("overlay")
+    if not target_sha:
+      raise PlatformUpdateError("Platform conflict target is unavailable.")
+    result = await spawn_platform_conflict_chat(
+      db, conflict_paths, target_sha, parked,
     )
+    if result is None:
+      raise PlatformUpdateError("Could not open resolver chat.")
 
-  conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
-  parked = flag.get("overlay")
-  if not target_sha:
-    raise PlatformUpdateError("Platform conflict target is unavailable.")
-  result = await spawn_platform_conflict_chat(
-    db, conflict_paths, target_sha, parked,
-  )
-  if result is None:
-    raise PlatformUpdateError("Could not open resolver chat.")
-
-  _write_conflict_flag(
-    target_sha,
-    conflict_paths,
-    result["chat_id"],
-    overlay=parked,
-  )
-  return result
+    _write_conflict_flag(
+      target_sha,
+      conflict_paths,
+      result["chat_id"],
+      overlay=parked,
+    )
+    return result
 
 
 async def resume_platform_conflict_resolver(
@@ -6435,7 +6530,7 @@ async def resume_platform_conflict_resolver(
       content=_platform_conflict_resolver_resume_message(flag),
     )
   except ProgrammaticChatModelRequired:
-    return await create_platform_conflict_resolver_chat(db, repo, replace_bound=True)
+    return await create_platform_conflict_resolver_chat(db, repo, replace_chat_id=chat.id)
   return PlatformConflictResolverChatOut(chat_id=chat.id, created=False, started=started)
 
 
@@ -6519,7 +6614,7 @@ def _platform_conflict_resolver_message(
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
-      "Paused chats resume once these edits are back.\n\n"
+      "Paused chats resume once a restart loads these edits.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
       "both the update and the intent of those edits.\n\n"
       + review + "Stage the resolved files, then run "
@@ -6527,8 +6622,8 @@ def _platform_conflict_resolver_message(
       "import continue_platform_overlay_update as c; print(c())\"`. It "
       "merges your answer into the live checkout with the normal build and "
       "import checks. If it prints `conflict`, newer live edits overlap your "
-      "answer; resolve the fresh markers and run it again. Backend edits "
-      "load at the next restart."
+      "answer; resolve the fresh markers and run it again. When it prints "
+      "`updated`, request a restart so the server loads the merged edits."
     )
   if overlay and overlay.get("mode") == "net":
     opening = (
@@ -6607,7 +6702,8 @@ async def spawn_platform_conflict_chat(
 ) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
-  update-conflict resolver chat. Dedupes on a running resolver."""
+  update-conflict resolver chat. Reuse is the caller's: the conflict flag
+  binds the update's chat (``create_platform_conflict_resolver_chat``)."""
   import uuid
 
   from app import models, providers
@@ -6615,27 +6711,8 @@ async def spawn_platform_conflict_chat(
   from app.chat_writer import create_chat
   from app.config import get_settings
   from app.push import notify_owner
-  from app.run_state import running_chat_ids
 
   title = "Resolve platform update conflict"
-  candidate_ids = [
-    row.id for row in (
-      db.query(models.Chat.id)
-      .filter(models.Chat.title == title)
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
-  ]
-  running_ids = running_chat_ids(db, candidate_ids)
-  running_id = next(
-    (chat_id for chat_id in candidate_ids if chat_id in running_ids),
-    None,
-  )
-  if running_id is not None:
-    return PlatformConflictResolverChatOut(
-      chat_id=running_id, created=False, started=False,
-    )
-
   owner = db.query(models.Owner).first()
   if owner is None:
     return None

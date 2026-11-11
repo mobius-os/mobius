@@ -220,7 +220,7 @@ def test_free_text_cannot_claim_restart_but_post_stop_button_still_does():
       chat_id="restart-guard", question_id=qid,
       answers={"restart": "Restart now"},
     ))
-  assert _submit(PrepareChatStop(chat_id="restart-guard")) == 1
+  assert _submit(PrepareChatStop(chat_id="restart-guard")).cancelled_activations == 1
   with SessionLocal() as db:
     chat = db.get(models.Chat, "restart-guard")
     wait = db.get(models.ChatWait, wait_id)
@@ -696,8 +696,15 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     expires_delta=timedelta(minutes=5),
   )
   try:
+    # The restart card shares the 20,000-character closing-message limit.
+    over = client.post(
+      f"/api/chats/{chat.id}/restart-request", json={"message": "x" * 20_001},
+      headers={"Authorization": f"Bearer {token}"},
+    )
+    assert over.status_code == 422
     saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
+      f"/api/chats/{chat.id}/restart-request",
+      json={"message": "The fix is committed and tested." + " " + "y" * 19_967},
       headers={"Authorization": f"Bearer {token}"},
     )
     assert saved.status_code == 200, saved.text
@@ -705,6 +712,8 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
       block = list(transcript_rows.history(row))[-1]["blocks"][-1]
+      assert block["message"] == "The fix is committed and tested." + " " + "y" * 19_967
+      assert len(block["message"]) == 20_000
       prompt = block["questions"][0]["question"]
       wait_id = block["platform_action"]["wait_id"]
     response = client.post(
@@ -1195,6 +1204,35 @@ def test_uncommitted_restart_paths_lists_only_restart_loaded_working_edits(
   ]
 
 
+def test_uncommitted_restart_paths_name_dual_use_boot_module_edits(
+  tmp_path, monkeypatch,
+):
+  # Boot modules classify as image work, yet the restarted server still
+  # imports their served copy, so an unfinished edit there goes live too.
+  import subprocess
+
+  from app import platform_restart, platform_update
+
+  def git(*args):
+    subprocess.run(
+      ["git", "-C", str(tmp_path), *args], check=True, capture_output=True,
+    )
+
+  git("init", "-q")
+  git("config", "user.email", "t@example.com")
+  git("config", "user.name", "t")
+  (tmp_path / "backend/app").mkdir(parents=True)
+  (tmp_path / "backend/app/config.py").write_text("a = 1\n")
+  git("add", "-A")
+  git("commit", "-qm", "base")
+  (tmp_path / "backend/app/config.py").write_text("a = 2\n")
+  monkeypatch.setattr(platform_update, "PLATFORM_REPO", tmp_path)
+
+  assert platform_restart.uncommitted_restart_paths() == [
+    "backend/app/config.py",
+  ]
+
+
 def test_each_chat_saves_its_own_restart_decision_without_a_shared_claim(
   client, auth, db, monkeypatch,
 ):
@@ -1258,7 +1296,7 @@ def test_any_restart_card_wakes_all_registered_chats_once_without_bypassing_inpu
       "role": "user", "content": "B", "cid": f"b-{chat_id}", "ts": 3,
     }))
   stopped_id, _, stopped_wait, _, _ = participants["stopped"]
-  assert _submit(PrepareChatStop(chat_id=stopped_id)) == 1
+  assert _submit(PrepareChatStop(chat_id=stopped_id)).cancelled_activations == 1
   input_id, input_qid, input_wait, _, _ = participants["unrelated-input"]
   newer_qid = "unrelated-owner-decision"
   with SessionLocal() as read:

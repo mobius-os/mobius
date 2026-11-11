@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from app import platform_tools
+
 
 def _control(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
@@ -90,8 +92,8 @@ def test_wait_for_decision_is_exact_top_level_operation_not_an_external_poll(mon
   control = _control(monkeypatch)
   captured = []
   monkeypatch.setattr(control._WAITS, "_call", lambda *args: captured.append(args) or {"status": "waiting"})
-  assert control.WAIT_FOR_DECISION_TOOL in control.OWNER_TOOLS
-  assert control.WAIT_FOR_DECISION_TOOL not in control.DELEGATED_TOOLS
+  assert control.WAIT_FOR_DECISION_TOOL in platform_tools.OWNER_CONTROL_TOOL_NAMES
+  assert control.WAIT_FOR_DECISION_TOOL not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   assert control._call_wait_for_decision({"chat_id": "source", "question_id": "card"}) == {"status": "waiting"}
   assert captured == [("POST", "/api/chat-waits/decision", {"chat_id": "source", "question_id": "card"})]
   assert "wait_for_decision" in control.DECLARE_WAIT_DESCRIPTION

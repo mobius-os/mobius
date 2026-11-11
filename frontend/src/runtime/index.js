@@ -26,6 +26,7 @@
 //   window.mobius.storage.setText(path, str, opts?)-> {synced} | {queued}   opts.contentType
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
 //   window.mobius.fileExport.save(path, name?)    -> Promise<boolean> (shell-confirmed own-file download)
+//   window.mobius.ownerGrant.request(action, scope?, body?) -> Promise<boolean> (shell-confirmed; false = cancelled)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
 //   window.mobius.storage.list(prefix, opts?)     -> entries[]  (best-known compatibility view)
@@ -106,6 +107,7 @@ import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
 import { makeFileExport } from './fileExport.js'
+import { makeOwnerGrant } from './ownerGrant.js'
 import { makeProjects } from './projects.js'
 import { makeVisibility } from './visibility.js'
 import { tokenMatchesRuntime } from './token.js'
@@ -222,6 +224,7 @@ export function init({
     _runtimeContext.projects?._destroy?.()
     _runtimeContext.chat?._destroy?.()
     _runtimeContext.fileExport?._destroy?.()
+    _runtimeContext.ownerGrant?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -236,10 +239,14 @@ export function init({
     isOnline: () => _online,
   })
   const signal = makeSignal(appId, storage, appInstanceId)
-  const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
+  const capabilities = makeCapabilities({
+    declarations: capabilityContract?.runtime || {},
+    visibility: _visibility,
+  })
   const projects = makeProjects()
   const chat = makeChat({ appId, getToken: scopedToken, storage })
   const fileExport = makeFileExport()
+  const ownerGrant = makeOwnerGrant()
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -279,10 +286,11 @@ export function init({
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
     fileExport,
+    ownerGrant,
     projects,
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, fileExport, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, fileExport, ownerGrant, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive

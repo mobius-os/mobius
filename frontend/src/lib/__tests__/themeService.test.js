@@ -4,9 +4,8 @@
  * Run with:
  *   cd frontend && node --test src/lib/__tests__/themeService.test.js
  *
- * Covers applyThemeToDom (Commit 2) and persistTheme (Commit 2).
- * toggleTheme + cache-invalidation contract lives in Commit 3a and
- * is asserted in a separate test file added with that commit.
+ * Covers applyThemeToDom and getEffectiveTheme. toggleTheme and its
+ * cache-invalidation contract are in themeService.toggleTheme.test.js.
  *
  * We provide a tiny DOM stub instead of pulling in jsdom — the
  * surface applyThemeToDom touches is small enough that the stub
@@ -51,7 +50,7 @@ function makeDomStub() {
     },
     // colorScheme captured so the delegation tests can assert applyThemeToDom
     // now sets documentElement.style.colorScheme via the shared library.
-    style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+    style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] }, getPropertyValue(name) { return this._props[name] } },
   }
 
   function makeNode(tag) {
@@ -197,9 +196,9 @@ test('applyThemeToDom removes prior font links before adding new ones', () => {
   assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
 })
 
-test('applyThemeToDom updates body.style.background when bg is valid hex', () => {
+test('applyThemeToDom paints body from the cascade, not the bg hint', () => {
   themeService.applyThemeToDom(':root {}', '#abcdef')
-  assert.equal(dom.document.body.style.background, '#abcdef')
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
 })
 
 test('applyThemeToDom updates <meta name="theme-color"> when bg is valid hex', () => {
@@ -214,7 +213,7 @@ test('applyThemeToDom ignores non-hex bg', () => {
   dom.document.body.style.background = '#initial'
   dom.meta.content = '#initial'
   themeService.applyThemeToDom(':root {}', 'expression(alert(1))')
-  assert.equal(dom.document.body.style.background, '#initial')
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
   assert.equal(dom.meta.content, '#initial')
 })
 
@@ -242,7 +241,7 @@ test('applyThemeToDom uses View Transitions for post-boot theme changes', async 
     'the view-transition CSS class should be present while the DOM mutates')
   assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-x'), '23px')
   assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-y'), '45px')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 
   await Promise.resolve()
   await Promise.resolve()
@@ -266,7 +265,7 @@ test('applyThemeToDom can opt out of View Transitions for back-stack-sensitive t
   )
 
   assert.equal(called, false)
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 })
 
 test('applyThemeToDom can make a post-boot theme change atomically', () => {
@@ -286,56 +285,7 @@ test('applyThemeToDom can make a post-boot theme change atomically', () => {
 
   assert.equal(called, false)
   assert.equal(dom.documentElement.classList.contains('theme-transitioning'), false)
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
-})
-
-test('persistTheme writes CSS + mode + sends notify in parallel', async () => {
-  const calls = []
-  const api = {
-    storage: { shared: {
-      putThemeCss: (content) => { calls.push(['putThemeCss', content]); return Promise.resolve() },
-      putThemeMode: (mode) => { calls.push(['putThemeMode', mode]); return Promise.resolve() },
-    }},
-    notify: { send: (payload) => { calls.push(['notify', payload]); return Promise.resolve() } },
-  }
-  await themeService.persistTheme(':root {}', 'dark', api)
-  // Both PUTs must happen.
-  assert.ok(calls.some(c => c[0] === 'putThemeCss' && c[1] === ':root {}'))
-  assert.ok(calls.some(c => c[0] === 'putThemeMode' && c[1] === 'dark'))
-  assert.ok(calls.some(c => c[0] === 'notify'
-    && c[1].type === 'theme_updated'))
-})
-
-test('persistTheme throws when a PUT fails (caller does rollback)', async () => {
-  // SettingsView's catch block hinges on this throw. Swallowing
-  // the rejection would let the optimistic UI persist while
-  // server-side state lagged behind.
-  const api = {
-    storage: { shared: {
-      putThemeCss: () => Promise.reject(new Error('500')),
-      putThemeMode: () => Promise.resolve(),
-    }},
-    notify: { send: () => Promise.resolve() },
-  }
-  await assert.rejects(
-    themeService.persistTheme(':root {}', 'dark', api),
-    /500/,
-  )
-})
-
-test('persistTheme swallows notify.send failures (best-effort)', async () => {
-  // /notify is a best-effort SSE side-channel. A failing notify
-  // must not roll back the user's theme — they already see the
-  // persisted state.
-  const api = {
-    storage: { shared: {
-      putThemeCss: () => Promise.resolve(),
-      putThemeMode: () => Promise.resolve(),
-    }},
-    notify: { send: () => Promise.reject(new Error('network')) },
-  }
-  // Should not throw.
-  await themeService.persistTheme(':root {}', 'light', api)
+  assert.equal(dom.meta.content, '#f0eeeb')
 })
 
 test('getEffectiveTheme reads back the applied LIGHT theme (offline-safe iframe source)', () => {
@@ -359,17 +309,16 @@ test('getEffectiveTheme returns null when no theme has been applied', () => {
 })
 
 
-// --- applyThemeToDom syncs the inline --bg + structured persistence ---
-// The splash script sets an INLINE --bg on <html> before first paint. An inline
-// style beats `:root{}`, so applyThemeToDom must overwrite it with the theme it
-// actually paints.
+// --- applyThemeToDom drops the splash's inline --bg + structured persistence ---
+// The splash script may set an INLINE --bg on <html> before first paint. An
+// inline style beats every stylesheet rule, so once theme css is applied the
+// inline value is removed and the stylesheet owns --bg.
 
-test('applyThemeToDom syncs the inline --bg on <html> to the active bg', () => {
-  // Seed a STALE inline value the splash would have written (dark).
+test('applyThemeToDom removes the splash inline --bg once theme css applies', () => {
   dom.documentElement.style.setProperty('--bg', '#0d0d0d')
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
-    'inline --bg on <html> must track the painted theme, not the stale splash value')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined,
+    'a stale or guessed inline --bg must not outrank the theme stylesheet')
 })
 
 test('applyThemeToDom writes the structured theme for the next boot', () => {
@@ -380,25 +329,25 @@ test('applyThemeToDom writes the structured theme for the next boot', () => {
   )
 })
 
-test('applyThemeToDom does NOT touch inline --bg or localStorage for a non-hex bg', () => {
-  // Defensive: a malformed bg must not corrupt the inline var or the
+test('applyThemeToDom never writes a non-hex bg inline or into localStorage', () => {
+  // Defensive: a malformed bg must not reach the inline var or the
   // persisted structured theme (same gate as body/meta).
   dom.documentElement.style.setProperty('--bg', '#initial')
   localStorage.setItem('mobius-theme', JSON.stringify({ bg: '#initial', mode: 'dark' }))
   themeService.applyThemeToDom(':root {}', 'expression(alert(1))')
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#initial')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   assert.equal(localStorage.getItem('mobius-theme'), JSON.stringify({ bg: '#initial', mode: 'dark' }))
 })
 
-test('applyThemeToDom dark→light then light→dark leaves a consistent inline --bg', () => {
-  // The owner's exact scenario in miniature: repeated toggles must keep
-  // the inline --bg in lockstep with the painted theme each time.
+test('applyThemeToDom dark→light then light→dark never leaves an inline --bg behind', () => {
+  // The owner's exact scenario in miniature: repeated toggles must leave the
+  // stylesheet in charge of --bg each time.
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // light
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')  // dark
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#0d0d0d')
+  assert.equal(dom.meta.content, '#0d0d0d')
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // back to light
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   assert.equal(JSON.parse(localStorage.getItem('mobius-theme')).bg, '#f0eeeb')
 })
 

@@ -6,7 +6,8 @@ provider registry used by chats, model pickers, app pickers, and background
 agents. That includes owner-built local apps: their `mobius.json` declaration
 is accepted with each source Apply (and kept across owner permission edits),
 limited to the HTTPS app-secret transport below; the broker transport stays
-reserved for the reviewed Möbius · You package. The provider appears shortly
+reserved for the reviewed Möbius · You package, whose declaration the registry
+ignores (see below). The provider appears shortly
 after install/Apply and disappears shortly after uninstall (registry reads are
 throttled for one second). Existing chats
 retain their saved provider/model selection but
@@ -53,29 +54,34 @@ installed providers. The provider identity is the stable local app row ID
 change labels, efforts, context limits, and models, but the accepted declaration
 changes only after the normal reviewed update/Apply boundary.
 
-Möbius · You uses an accepted declaration for its model names, effort levels,
-context ceilings, and endpoint too. Its `identity_broker` transport has a
-fixed `http://127.0.0.1:8765/v1` endpoint and no app secret; only the
-`identity` app with the reviewed `identity_manage` grant may declare it. The
-image-owned broker keeps account credentials and signs inference requests.
-Other connector apps use HTTPS and their own encrypted keys. Any app model
-connection can use the default-on
-`GET/PATCH /api/auth/providers/{provider_id}/enabled` switch; only its declaring app or
-the owner may change it. Turning one off removes it from pickers and blocks
-new turns without deleting saved chats.
+The Möbius subscription models are not an app declaration. The platform owns
+their catalogue (`backend/app/mobius_models.json`: model names, effort levels,
+context ceilings), and it changes only with a platform release. The built-in
+`mobius` provider serves it through the image-owned identity broker at a fixed
+`http://127.0.0.1:8765/v1` endpoint with no app secret; the broker keeps
+account credentials and signs inference requests. The `identity_broker`
+transport stays valid in a manifest (reserved to the reviewed `identity` app),
+but the registry ignores an installed app's declaration of it. Other connector
+apps use HTTPS and their own encrypted keys. Any model connection can use the
+default-on `GET/PATCH /api/auth/providers/{provider_id}/enabled` switch; for
+an app provider only its declaring app or the owner may change it. Turning one
+off removes it from pickers and blocks new turns without deleting saved chats.
 
 ## Boundaries and next steps
 
-- Claude and Codex remain built in. The image-owned Möbius broker adapter
-  keeps the stable `mobius` provider identity for existing chats but offers no
-  models until Möbius · You supplies its declaration. Both broker and external
-  app connections use the Responses harness and one picker/agent registry.
-- Möbius · You is an optional account/setup app, not a runtime dependency for
-  Claude, Codex, or app-provided providers. Its **Möbius models** switch is on
-  by default and can be changed while signed out. Turning it off removes only
-  Möbius from model pickers and prevents new turns in chats still set to a
-  Möbius model; those chats remain saved. The preference lives in shared agent
-  settings, so uninstalling and reinstalling the app does not silently reset it.
+- Claude, Codex and Möbius are built in. The Möbius provider keeps the stable
+  `mobius` identity for existing chats and offers its platform-owned models
+  with no app installed. Both broker and external app connections use the
+  Responses harness and one picker/agent registry.
+- The Möbius account (sign-in, profile, deployments) and its **Möbius models**
+  switch live in Settings. New deployments no longer install Möbius · You; an
+  existing copy is an ordinary app and is not a runtime dependency for any
+  provider. The switch is on by default and can be changed while signed out.
+  Turning it off removes only Möbius from model pickers and prevents new turns
+  in chats still set to a Möbius model; those chats remain saved. Signing in
+  never turns Möbius on as a background-task provider; the owner chooses that.
+  The preference lives in shared agent settings, so it survives any app
+  install or uninstall.
 - App models are currently manifest-declared, not discovered live. An app can
   publish an update when its upstream model list changes. A later version can
   add an app-owned model-discovery service without changing picker consumers.

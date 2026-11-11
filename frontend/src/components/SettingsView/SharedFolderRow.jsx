@@ -8,10 +8,10 @@ import {
 import { rightsLabel } from './sharedFolderLabels.js'
 
 const STATUS = {
-  ready: { color: '--green', label: 'Ready' },
+  ready: { color: '--green-text', label: 'Ready' },
   paused: { color: '--muted', label: 'Paused' },
-  needs_permission: { color: '--accent', label: 'Needs your OK' },
-  needs_pick: { color: '--accent', label: 'Pick again to share' },
+  needs_permission: { color: '--accent-text', label: 'Needs your OK' },
+  needs_pick: { color: '--accent-text', label: 'Pick again to share' },
 }
 
 // A folder this browser remembers is the normal case and needs no note.

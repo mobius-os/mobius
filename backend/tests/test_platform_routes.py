@@ -392,6 +392,54 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
   }
 
 
+def test_status_offers_cancel_only_when_no_bound_replacement_may_run(
+  client, auth, monkeypatch,
+):
+  """Cancel refuses while a bound replacement may still run, so status must
+  not offer it then; once the replacement provably ended, cancel releases the
+  binding and succeeds, so status offers it again."""
+  pending = {"target_sha": "2" * 40, "stage": "finish", "action": "replace",
+             "cancellable": True}
+
+  def status(**_kwargs):
+    return {
+      "state": "activation_needed", "available": False, "needs_restart": False,
+      "activation": classify_activation([]),
+      "current_build_sha": None, "served_sha": None, "image_build_applied": None,
+      "update_contains_image_release": False, "checked_target_sha": None,
+      "installed_release_sha": None, "recorded_upstream_sha": None,
+      "contained_upstream_sha": None, "contained_upstream_committed_at": None,
+      "current_build_committed_at": None, "upstream_checked_at": None,
+      "seed_required": False, "conflict_paths": [], "conflict_chat_id": None,
+      "newer_updates_available": False,
+      "rollback_target_sha": None, "rollback_error": None,
+      "unfinished_update": dict(pending),
+    }
+
+  may_run = [True]
+
+  async def bound_replacement_may_run():
+    return may_run[0]
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind", lambda: "self_hosted",
+  )
+  monkeypatch.setattr("app.routes.platform.platform_update.platform_status", status)
+  monkeypatch.setattr("app.routes.platform.platform_update.check_for_updates", status)
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.bound_replacement_may_run",
+    bound_replacement_may_run,
+  )
+  for request in (
+    lambda: client.get("/api/platform/status", headers=auth),
+    lambda: client.post("/api/platform/check", headers=auth),
+  ):
+    may_run[0] = True
+    assert request().json()["unfinished_update"]["cancellable"] is False
+    may_run[0] = False
+    assert request().json()["unfinished_update"]["cancellable"] is True
+
+
 def test_status_failure_does_not_claim_up_to_date(
   client, auth, monkeypatch,
 ):

@@ -142,6 +142,11 @@ class RuntimeSupervisors:
 
   async def start_process_services(self) -> None:
     """Start services that are safe without a serviceable database."""
+    from app import stall_recorder
+    self._spawn(
+      "stall-recorder",
+      stall_recorder.run(Path(self.settings.data_dir) / "logs"),
+    )
     await self._start_frontend_watcher()
     from app.connect_outbound import supervise_outbound_connects
     self._spawn("connect-outbound", supervise_outbound_connects())
@@ -412,6 +417,13 @@ class RuntimeSupervisors:
             raise
           except Exception as exc:
             self.log.error("dependency delivery sweep failed: %s", exc, exc_info=True)
+          try:
+            from app.agent_coordination import recover_work_claim_revocations
+            await recover_work_claim_revocations()
+          except asyncio.CancelledError:
+            raise
+          except Exception as exc:
+            self.log.error("claim revocation sweep failed: %s", exc, exc_info=True)
       finally:
         system_broadcast.unsubscribe(events)
 

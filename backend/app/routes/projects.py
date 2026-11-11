@@ -49,13 +49,14 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
-  get_project_principal, reject_cross_site, resolve_project_principal,
+  get_project_principal, reject_cross_site, require_account_owner_control,
+  resolve_project_principal,
 )
 from app.path_utils import validate_path_within_base
 from app.storage_io import make_parent_folders, require_parent_folders
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
-from app.theme import DEFAULT_THEME, theme_data
+from app.theme import DEFAULT_THEME, shipped_palettes_css, theme_data
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, serialize_project_lifecycle
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -1883,6 +1884,7 @@ def list_project_agent_messages(
     "broadcast": row["broadcast"],
     "body": row["body"],
     "created_at": row["created_at"],
+    **{key: row[key] for key in ("truncated", "body_chars") if key in row},
   } for row in rows]
 
 
@@ -2519,7 +2521,8 @@ async def pull_project_git_remote(
 
 
 @router.post(
-  "/{project_id}/git/push", dependencies=[Depends(reject_cross_site)],
+  "/{project_id}/git/push",
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 def push_project_git_remote(
   project_id: str,
@@ -2693,7 +2696,7 @@ def get_project_theme_source(
   principal: ProjectPrincipal = Depends(get_project_principal),
   db: Session = Depends(get_db),
 ):
-  """Inspect the two fixed CSS sources without effective-theme augmentation.
+  """Inspect the saved stylesheet and the shipped defaults, unaugmented.
 
   No caller-supplied path: project membership grants only this theme resource,
   not access to shared storage. Keep absence distinct from an empty override.
@@ -2707,6 +2710,7 @@ def get_project_theme_source(
     pass
   else:
     files.append({"name": "theme.css", "content": content})
+  files.append({"name": "palettes.css", "content": shipped_palettes_css()})
   files.append({"name": "default-theme.css", "content": DEFAULT_THEME})
   return {"files": files}
 
