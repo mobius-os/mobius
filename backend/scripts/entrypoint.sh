@@ -1111,13 +1111,16 @@ if [ -d "$_scripts_dir" ]; then
   done
 fi
 
-# --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
-# uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat
-# SSE stream never closes on its own — so a restart (the container supervisor
-# SIGTERMs this boot for an in-app Restart; the host does for a stop) hangs the
-# process in shutdown limbo: it stops serving but never exits, so the boot never
-# ends ("pressed Restart, server never came back"). Bounding the drain makes
-# every SIGTERM-based restart reliably end the boot.
+# --timeout-graceful-shutdown bounds uvicorn's own SIGTERM drain. Without it,
+# uvicorn waits FOREVER for open connections to close — and the chat SSE stream
+# never closes on its own — so a SIGTERM that reached uvicorn alone would leave
+# it in shutdown limbo: serving nothing, never exiting, the boot never ending
+# ("pressed Restart, server never came back").
+# The bound that actually applies to a boot's stop is shorter: the util-linux
+# `su` below forwards SIGTERM (the container supervisor's for an in-app
+# Restart, the host's for a stop) to uvicorn, waits 2 s, then SIGKILLs it, so
+# the boot ends about 2 s after the signal. The in-app restart drains live
+# turns before any signal is sent, so that cut loses nothing.
 _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
 # `$_env_scrub` is applied to the uvicorn exec so the served process runs with
 # the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
