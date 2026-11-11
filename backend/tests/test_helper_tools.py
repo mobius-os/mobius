@@ -460,6 +460,7 @@ def test_claude_stop_does_not_wake_an_unread_helper_result(
 
   async def settle_then_stop():
     handle = ActiveClaudeClient(_Client(), chat_id=parent_id)
+    handle.mark_connected()
     registry.register(handle)
     try:
       await delegations_mod.wake_parent_after_child_settled(child_id)

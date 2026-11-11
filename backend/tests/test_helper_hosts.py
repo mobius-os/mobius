@@ -1157,6 +1157,62 @@ async def test_reused_claude_host_keeps_dispatch_names_across_capability_changes
   assert seen == (["high", None] if initial_support else [None, None])
 
 
+@pytest.mark.asyncio
+async def test_stop_while_claude_helper_host_starts_never_dispatches_the_turn(
+  tmp_path, monkeypatch,
+):
+  """A Stop during host start found no handle; the stale turn must not run unseen."""
+  from contextlib import asynccontextmanager
+  from app import process_groups, providers
+  from app.runner_registry import RunnerKind, registry
+
+  chat_id = "stop-during-helper-host-start"
+  dispatched = []
+  reaped = []
+
+  class Host:
+    session_id = "host-session"
+
+    async def run_turn(self, turn, on_started):
+      dispatched.append(turn.spec)
+      turn.finish("completed")
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    # What Stop does while the host starts and no handle is registered yet.
+    registry.bump_generation(chat_id)
+    yield Host()
+
+  async def supports_effort(data_dir, model):
+    return True
+
+  monkeypatch.setattr(providers, "model_supports_effort", supports_effort)
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr(
+    process_groups, "terminate_run_processes",
+    lambda marker, **_kw: reaped.append(marker),
+  )
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    result = await claude_host.run_claude_host_turn(
+      user_message="inspect", session_id=None,
+      base_env={"TMPDIR": str(tmp_path), "MOBIUS_RUN_MARKER": "m-stale"},
+      chat_id=chat_id, skill_text="", bc=None, agent_settings=None,
+      skills_enabled=False, run_policy=None, connector_plan=None,
+      helper_host_key=helper_hosts.HostKey("parent", "claude", str(tmp_path), "setup"),
+      data_dir=str(tmp_path), run_generation=run_gen,
+    )
+
+    assert result["prompt_sent"] is False
+    assert result["error"] is None
+    assert dispatched == []
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+    assert not list(tmp_path.glob(".helper-turn-*.env"))
+    assert reaped == ["m-stale"]
+  finally:
+    registry.forget(chat_id)
+
+
 def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypatch):
   from types import SimpleNamespace
 
