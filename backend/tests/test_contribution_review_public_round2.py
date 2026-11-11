@@ -8,7 +8,7 @@ from app import models, contribution_review_runs as domain, contribution_review_
 from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import ITEM, TARGET, setup, report
+from tests.test_contribution_review_runs import ITEM, TARGET, setup, report, settle_fixture_review
 from tests.test_contribution_review_public import opted_in
 
 
@@ -70,6 +70,7 @@ def test_owner_question_stays_private_until_explicit_public_verdict(setup, monke
 
 def test_route_preview_start_freeze_opt_in_and_publish_requires_explicit_signal(setup, monkeypatch):
   db, _old, principal = setup
+  settle_fixture_review(db, _old)
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, 'resolve_round_choice', lambda db: {
     'provider': 'codex', 'model': 'gpt-5', 'effort': 'xhigh'})

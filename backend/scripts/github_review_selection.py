@@ -4,7 +4,7 @@ import json
 
 IDENTITY_FIELDS = ("repo", "number", "head_sha", "base_ref", "base_sha")
 OPTION_FIELDS = ("review_prompt", "merge_prompt")
-OPTIONAL_OPTION_FIELDS = ("post_review", "fix_prompt", "max_rounds")
+OPTIONAL_OPTION_FIELDS = ("post_review", "propose_verdict", "agent_submits_verdict", "fix_prompt", "max_rounds")
 
 
 def preview_digest(snapshot):
@@ -34,7 +34,8 @@ def review_path(app_id, suffix):
 def start_body(selection):
   return {"request_id": selection["request_id"], "mode": selection["mode"],
           "source_chat_id": selection["source_chat_id"],
-          **{key: selection[key] for key in ("options", "agent", "preview_sha256", "confirmation_scope") if key in selection},
+          **{key: selection[key] for key in ("options", "agent", "preview_sha256", "confirmation_scope", "takeover_reason")
+             if key in selection},
           "items": [{key: item[key] for key in IDENTITY_FIELDS} for item in selection["items"]]}
 
 
@@ -48,7 +49,7 @@ def verify_selection(selection):
   if selection.get("mode") not in ("review", "review_merge", "review_fix_merge"):
     raise ValueError("Invalid saved selection mode.")
   if selection.get("mode") == "review_fix_merge" and (
-      not selection.get("preview_sha256") or selection.get("confirmation_scope") not in {"named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"}):
+      not selection.get("preview_sha256") or selection.get("confirmation_scope") != "named_pr_repairs_and_reviewed_successors"):
     raise ValueError("Takeover requires an exact frozen scoped preview.")
   if selection.get("preview_sha256"):
     snapshot = selection["resolved_snapshot"]

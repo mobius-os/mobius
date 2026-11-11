@@ -90,7 +90,7 @@ def uncommitted_restart_paths() -> list[str]:
   never blocks a restart, and any error yields an empty list.
   """
   try:
-    from app import platform_update
+    from app import platform_activation, platform_update
 
     repo = platform_update.PLATFORM_REPO
     paths: set[str] = set()
@@ -102,7 +102,13 @@ def uncommitted_restart_paths() -> list[str]:
       if proc.returncode != 0:
         return []
       paths.update(line.strip() for line in proc.stdout.splitlines())
-    return _restart_loaded(path for path in paths if path)
+    paths.discard("")
+    # The server imports dual-use boot modules from the served checkout even
+    # while their baked copy is image work, so their edits go live too.
+    served_boot = paths.intersection(
+      platform_activation.IMAGE_PLATFORM_BOOT_MODULES,
+    )
+    return sorted({*_restart_loaded(paths), *served_boot})
   except Exception:
     return []
 
