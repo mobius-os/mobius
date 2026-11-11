@@ -210,7 +210,7 @@ async def _describe_respond_post(ask: Ask) -> dict:
 
 
 # The one list of actions a grant can cover: the owner-tap routes of
-# contribution_reviews.py (Merge, the five status changes, a verdict decision
+# contribution_reviews.py (Merge, the six status changes, a verdict decision
 # and a repair decision) and Post. Review start is not here: who may start a
 # publishing review is for the platform design to settle, because a start
 # approved in chat conflicts with a grant rule.
@@ -228,6 +228,7 @@ GUARDED = {
   "open_for_review": Guarded(routes.PullStatusChange, partial(_describe_status, name="ready")),
   "back_to_draft": Guarded(routes.PullStatusChange, partial(_describe_status, name="draft")),
   "close": Guarded(routes.PullStatusChange, partial(_describe_status, name="close")),
+  "request_review": Guarded(routes.ReviewerRequest, partial(_describe_status, name="request-review")),
   "ask_rereview": Guarded(routes.ReviewerRequest, partial(_describe_status, name="request-reviewers")),
   "ask_approval": Guarded(routes.ApprovalRequest, partial(_describe_status, name="ask-approval")),
   "verdict": Guarded(routes.VerdictDecision, _describe_verdict, ("run_id",)),
