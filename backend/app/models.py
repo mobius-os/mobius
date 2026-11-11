@@ -1073,6 +1073,39 @@ class MobiusLoginHandoffGrant(Base):
   consumed_at = Column(DateTime, nullable=True, default=None, index=True)
 
 
+class OwnerGrant(Base):
+  """The owner's own confirmation of one sensitive action, spent at most once.
+
+  Minted only by the shell with the owner's bearer, after its own confirm
+  sheet; bound to an app, an action and the exact request (``binding_sha256``,
+  see ``owner_grants``). It carries no secret and is never given to an app:
+  the matching request finds it by that binding. The owner epoch and the app's
+  token nonce are stored so signing out everywhere or reinstalling the app
+  kills it.
+
+  This is a new table, so ``create_all`` creates it on existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "owner_grants"
+  __table_args__ = (Index("ix_owner_grants_binding", "app_id", "action", "binding_sha256"),)
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_epoch = Column(Integer, nullable=False)
+  # No foreign key: a hard delete of the app must not need grant cleanup, and
+  # the nonce already voids a grant for a reinstalled app.
+  app_id = Column(Integer, nullable=False)
+  app_nonce = Column(String(64), nullable=False)
+  action = Column(String(32), nullable=False)
+  binding_sha256 = Column(String(64), nullable=False)
+  # What the owner saw: the digest of the binding and the sheet's words.
+  seen_sha256 = Column(String(64), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  consumed_by = Column(String(160), nullable=True, default=None)
+
+
 class App(Base):
   """A mini-app created and managed by the agent."""
 
@@ -1530,6 +1563,23 @@ class AgentCoordinationMessage(Base):
   delivery = Column(
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
+  body = Column(Text, nullable=False)
+  # The shared body of a send stored once (AgentCoordinationNoteBody). When
+  # set, it is the note's text and ``body`` is empty; rows written before
+  # shared bodies keep their text in ``body``.
+  body_id = Column(String(64), nullable=True, index=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationNoteBody(Base):
+  """One peer-note body shared by every recipient row of one send.
+
+  Retention deletes a body once no message references it.
+  """
+
+  __tablename__ = "agent_coordination_note_bodies"
+
+  id = Column(String(64), primary_key=True)
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 

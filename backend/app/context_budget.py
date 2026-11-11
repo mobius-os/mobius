@@ -9,6 +9,8 @@ naming the paged read. The Goal objective was never capped (an owner's /goal
 is not) and is shown whole, as before.
 """
 
+import re
+
 TITLE_CHARS = 160
 # A task's note, result and completion condition.
 TEXT_CHARS = 1_000
@@ -18,11 +20,13 @@ NEXT_ACTION_CHARS = 2_000
 LIST_ITEMS = 64
 DEPENDENCY_IDS = 16
 
-# Peer notes and work claims, shown where Möbius repeats them: a note in a
-# turn's coordination block, a send receipt, a claim tool result, a transfer
-# notice and a dependency notice. Each equals the input cap that text has, so
-# anything accepted today is shown exactly as before; a longer stored text
-# becomes a marked excerpt and stays whole in storage.
+# Peer notes and work claims are not capped where they are written. These
+# limits apply where Möbius repeats them: a note in a turn's coordination
+# block and its send receipt (and the transcript card), a claim tool result, a
+# transfer notice and a dependency notice. Each equals the input cap that text
+# once had, so anything that fit then is shown exactly as before; a longer text
+# becomes a marked excerpt naming its paged full read (read_agent_message or
+# read_work_claim) and stays whole in storage.
 PEER_NOTE_CHARS = 4_000
 CLAIM_SUMMARY_CHARS = 500
 CLAIM_TEXT_CHARS = 1_000  # a takeover reason or an outcome
@@ -66,6 +70,14 @@ def text_page(text: str, offset: int = 0, budget: int = READ_PAGE_BYTES) -> dict
     "text": text[offset:end], "offset": offset, "total_chars": len(text),
     "next_offset": end if end < len(text) else None,
   }
+
+
+_EXCERPT_MARKER = re.compile(r"… \[excerpt: \d+ of \d+ characters; [^\]]*\]$")
+
+
+def without_excerpt_marker(text: str) -> str:
+  """An excerpt's head ending in "…", for a reader its marker's read is not for."""
+  return _EXCERPT_MARKER.sub("…", text)
 
 
 def excerpt(text: str, limit: int, read_full: str, *, total: int | None = None) -> str:

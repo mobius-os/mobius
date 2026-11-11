@@ -8,10 +8,11 @@ from datetime import UTC, datetime
 import json
 import logging
 import time
+from types import SimpleNamespace
 from typing import Any
 import uuid
 
-from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_
+from sqlalchemy import LargeBinary, String, and_, cast, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,9 +36,9 @@ MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
 # A turn's coordination block carries at most this many notes, each whole up
-# to context_budget.PEER_NOTE_CHARS (the send cap, so every note sent today
-# arrives whole). A longer stored note arrives as a marked excerpt naming
-# read_agent_message, so the block stays bounded and its cursor still advances.
+# to context_budget.PEER_NOTE_CHARS. A longer note arrives as a marked excerpt
+# naming read_agent_message, so the block stays bounded and its cursor still
+# advances.
 MAX_CONTEXT_MESSAGES = 12
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
@@ -100,9 +101,22 @@ class CoordinationContextDelivery:
   delivered_through: PeerMessageCursor | None
 
 
+# A send has no recipient count limit, so queries over a recipient list run
+# in batches well below SQLite's bound-parameter limit.
+_ID_BATCH = 500
+
+
+def _batches(values) -> list[list[str]]:
+  ordered = list(dict.fromkeys(values))
+  return [ordered[start:start + _ID_BATCH] for start in range(0, len(ordered), _ID_BATCH)]
+
+
 def _latest_runs(
   db: Session, chat_ids: list[str] | set[str],
 ) -> dict[str, Any]:
+  if len(chat_ids) > _ID_BATCH:
+    return {key: row for batch in _batches(chat_ids)
+            for key, row in _latest_runs(db, batch).items()}
   if not chat_ids:
     return {}
   latest_started = db.query(
@@ -410,6 +424,8 @@ def _agent_chat_ids(
   db: Session, candidate_ids: list[str] | set[str],
 ) -> set[str]:
   """Return non-deleted chats with a run or durable Delegation identity."""
+  if len(candidate_ids) > _ID_BATCH:
+    return set().union(*(_agent_chat_ids(db, batch) for batch in _batches(candidate_ids)))
   if not candidate_ids:
     return set()
   live_chat_ids = {
@@ -592,26 +608,66 @@ def _channel_query(db: Session, scope: CoordinationScope):
 _HEAD_BYTES = 4 * PEER_NOTE_CHARS
 
 
+def note_text():
+  """A message's text: its shared body when it references one, else its own."""
+  message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
+  return func.coalesce(
+    select(shared.body).where(shared.id == message.body_id).scalar_subquery(),
+    message.body,
+  )
+
+
+def _message_columns():
+  message = models.AgentCoordinationMessage
+  return [column for column in message.__table__.columns if column.key != "body"]
+
+
+def with_note_text(query):
+  """Select whole messages with each one's text as ``body``."""
+  return query.with_entities(*_message_columns(), note_text().label("body"))
+
+
 def with_note_heads(query):
-  """Select each note's head and length instead of its whole body.
+  """Select each note's head and length instead of its whole text.
 
   Lists and snapshots show at most PEER_NOTE_CHARS of a note, so they never
-  load a longer body. PostgreSQL text cannot hold U+0000.
+  load a longer text. PostgreSQL text cannot hold U+0000.
   """
-  message = models.AgentCoordinationMessage
+  text = note_text()
   if query.session.get_bind().dialect.name == "sqlite":
-    blob = cast(message.body, LargeBinary)
+    blob = cast(text, LargeBinary)
     head = [
       func.substr(blob, 1, _HEAD_BYTES).label("body"),
       func.length(blob).label("body_bytes"),
     ]
   else:
-    head = [func.substr(message.body, 1, PEER_NOTE_CHARS).label("body")]
+    head = [func.substr(text, 1, PEER_NOTE_CHARS).label("body")]
   return query.with_entities(
-    *(column for column in message.__table__.columns if column.key != "body"),
-    *head,
-    func.length(message.body).label("body_chars"),
+    *_message_columns(), *head, func.length(text).label("body_chars"),
   )
+
+
+def delete_unreferenced_bodies(db: Session, body_ids=None) -> None:
+  """Delete shared bodies no message references, without loading any.
+
+  A prune passes the bodies its deleted rows referenced, so it touches only
+  those. Two prunes that each delete one of a body's last two references
+  concurrently both still see the other's row and keep it; the full sweep
+  (``body_ids`` None, run by chat purge and at startup) removes any such
+  body later, so cleanup converges. No writer adds a reference to a
+  committed body (a send inserts its body and rows in one transaction, and a
+  retry reuses existing rows), so neither can remove a body a writer is
+  about to reference.
+  """
+  message, shared = models.AgentCoordinationMessage, models.AgentCoordinationNoteBody
+  unreferenced = ~select(message.id).where(message.body_id == shared.id).exists()
+  if body_ids is None:
+    db.query(shared).filter(unreferenced).delete(synchronize_session=False)
+    return
+  for batch in _batches(value for value in body_ids if value):
+    db.query(shared).filter(shared.id.in_(batch), unreferenced).delete(
+      synchronize_session=False,
+    )
 
 
 def _note_head(row) -> tuple[str, int]:
@@ -631,7 +687,7 @@ def _note_head(row) -> tuple[str, int]:
 
 
 def serialize_message(
-  row: models.AgentCoordinationMessage,
+  row: Any,  # a message, or a row selected through with_note_text or with_note_heads
   names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
   """One note for an owner, embed or agent view.
@@ -686,7 +742,7 @@ def _oldest_message_rows(query, *, limit: int) -> list[Any]:
 
 
 def _message_names(
-  db: Session, rows: list[models.AgentCoordinationMessage],
+  db: Session, rows: list[Any],
 ) -> dict[str, str]:
   chat_ids = {
     str(value)
@@ -694,8 +750,13 @@ def _message_names(
     for value in (row.from_chat_id, row.to_chat_id)
     if value
   }
-  if not chat_ids:
-    return {}
+  names: dict[str, str] = {}
+  for batch in _batches(chat_ids):
+    names.update(_names_for(db, batch))
+  return names
+
+
+def _names_for(db: Session, chat_ids: list[str]) -> dict[str, str]:
   names = {
     str(row.child_chat_id): str(row.task_key)
     for row in db.query(
@@ -712,7 +773,7 @@ def _message_names(
 
 
 def serialize_messages(
-  db: Session, rows: list[models.AgentCoordinationMessage],
+  db: Session, rows: list[Any],
 ) -> list[dict[str, Any]]:
   names = _message_names(db, rows)
   return [serialize_message(row, names) for row in rows]
@@ -766,19 +827,55 @@ def peer_message_for_chat(
   db: Session, chat_id: str, message_id: str,
 ) -> dict[str, Any] | None:
   """One whole note this chat may read, by the chat's history visibility."""
-  row = chat_message_history_query(db, chat_id).filter(
+  row = with_note_text(chat_message_history_query(db, chat_id).filter(
     models.AgentCoordinationMessage.id == message_id,
-  ).first()
+  )).first()
   if row is None:
     return None
   return serialize_messages(db, [row])[0]
 
 
-def peer_message_for_agent(
-  db: Session, chat_id: str, message_id: str,
+def _utf8_page(page: bytes, *, at_end: bool) -> tuple[str, int]:
+  """Decode a byte page, ending on a character boundary unless it is the end."""
+  if not at_end:
+    for cut in range(len(page), max(len(page) - 4, 0), -1):
+      try:
+        return page[:cut].decode("utf-8"), cut
+      except UnicodeDecodeError:
+        continue
+  return page.decode("utf-8", "replace"), len(page)
+
+
+def peer_message_page_for_agent(
+  db: Session, chat_id: str, message_id: str, *, offset: int, page_bytes: int,
 ) -> dict[str, Any] | None:
-  message = peer_message_for_chat(db, chat_id, message_id)
-  return model_message(message) if message is not None else None
+  """One page of one note this chat may read, by the chat's history
+  visibility. Only the page's bytes are read, at a UTF-8 byte offset, so a
+  long note is never loaded whole to serve one page."""
+  text = note_text()
+  binary = (cast(text, LargeBinary) if db.get_bind().dialect.name == "sqlite"
+            else func.convert_to(text, "UTF8"))
+  row = chat_message_history_query(db, chat_id).filter(
+    models.AgentCoordinationMessage.id == message_id,
+  ).with_entities(
+    *_message_columns(),
+    func.substr(binary, offset + 1, page_bytes).label("page"),
+    func.length(binary).label("total_bytes"),
+  ).first()
+  if row is None:
+    return None
+  if offset and offset >= row.total_bytes:
+    raise ValueError(
+      f"offset {offset} is past the end of this {row.total_bytes}-byte note; "
+      "start again from offset 0"
+    )
+  page = bytes(row.page or b"")
+  body, used = _utf8_page(page, at_end=offset + len(page) >= row.total_bytes)
+  end = offset + used
+  values = {key: getattr(row, key) for key in row._fields if key not in ("page", "total_bytes")}
+  message = model_message(serialize_messages(db, [SimpleNamespace(**values, body=body)])[0])
+  return {**message, "offset": offset, "total_bytes": row.total_bytes,
+          "next_offset": end if end < row.total_bytes else None}
 
 
 def visible_peer_messages(
@@ -1316,8 +1413,6 @@ def _clean_message(kind: str, body: str) -> str:
   if "\x00" in clean_body:
     # PostgreSQL text cannot store it and SQLite's text functions stop at it.
     raise ValueError("Message body must not contain U+0000.")
-  if len(clean_body) > 4000:
-    raise ValueError("Message body must be 4000 characters or fewer.")
   return clean_body
 
 
@@ -1340,6 +1435,19 @@ def _clean_delivery(delivery: str, *, broadcast: bool) -> str:
   return delivery
 
 
+# A send's rows, as plain values. Every recipient row of one send carries the
+# same body, so a send returns them sharing the one body string the caller
+# already holds rather than loading and copying it once per recipient.
+_SEND_COLUMNS = tuple(
+  column.key for column in models.AgentCoordinationMessage.__table__.columns
+  if column.key != "body"
+)
+
+
+def _send_snapshot(row, body: str) -> SimpleNamespace:
+  return SimpleNamespace(**{key: getattr(row, key) for key in _SEND_COLUMNS}, body=body)
+
+
 def _matching_retry(
   db: Session,
   *,
@@ -1351,13 +1459,20 @@ def _matching_retry(
   kind: str,
   delivery: str,
   body: str,
-) -> list[models.AgentCoordinationMessage] | None:
+) -> list[SimpleNamespace] | None:
+  """The rows of an exact earlier send with this identity as snapshots
+  carrying ``body``; None when there is none."""
   if sender_run_id is None or send_id is None:
     return None
-  rows = db.query(models.AgentCoordinationMessage).filter(
-    models.AgentCoordinationMessage.from_run_id == sender_run_id,
-    models.AgentCoordinationMessage.send_id == send_id,
-  ).order_by(models.AgentCoordinationMessage.id.asc()).all()
+  message = models.AgentCoordinationMessage
+  # The database compares each note's text, shared or its own; none is loaded.
+  rows = db.query(
+    *(getattr(message, key) for key in _SEND_COLUMNS),
+    (note_text() == body).label("same_body"),
+  ).filter(
+    message.from_run_id == sender_run_id,
+    message.send_id == send_id,
+  ).order_by(message.id.asc()).all()
   if not rows:
     return None
   expected_targets = {None} if broadcast else set(recipients)
@@ -1370,13 +1485,16 @@ def _matching_retry(
       and row.room_id == channel.id
       and row.kind == kind
       and row.delivery == delivery
-      and row.body == body
+      and row.same_body
       for row in rows
     )
   )
   if not exact:
     raise ValueError("send_id is already bound to a different peer message.")
-  return rows
+  # Answer in the original send's recipient order, as its receipt was.
+  position = {target: index for index, target in enumerate(recipients)}
+  return [_send_snapshot(row, body) for row in sorted(
+    rows, key=lambda row: position.get(row.to_chat_id, -1))]
 
 
 def _delete_beyond(db: Session, query, keep: int) -> None:
@@ -1385,15 +1503,17 @@ def _delete_beyond(db: Session, query, keep: int) -> None:
   Retention counts notes; it never loads or measures their bodies.
   """
   message = models.AgentCoordinationMessage
-  stale = [row.id for row in query.with_entities(message.id).order_by(
+  rows = query.with_entities(message.id, message.body_id).order_by(
     message.created_at.desc(), message.id.desc(),
-  ).offset(keep).all()]
-  if not stale:
+  ).offset(keep).all()
+  if not rows:
     return
-  db.query(models.ChatActivityPosition).filter(
-    models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in stale]),
-  ).delete(synchronize_session=False)
-  db.query(message).filter(message.id.in_(stale)).delete(synchronize_session=False)
+  for batch in _batches([row.id for row in rows]):
+    db.query(models.ChatActivityPosition).filter(
+      models.ChatActivityPosition.event_id.in_([f"peer:{value}" for value in batch]),
+    ).delete(synchronize_session=False)
+    db.query(message).filter(message.id.in_(batch)).delete(synchronize_session=False)
+  delete_unreferenced_bodies(db, [row.body_id for row in rows])
 
 
 def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
@@ -1446,6 +1566,11 @@ def _publish_message_hint(
     )
 
 
+def _retried(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Mark rows an exact retry found already stored: nothing is sent again."""
+  return [{**row, "retry": True} for row in rows]
+
+
 def _persist_send(
   db: Session,
   channel: CoordinationScope,
@@ -1474,10 +1599,13 @@ def _persist_send(
     body=clean_body,
   )
   if retry is not None:
-    return serialize_messages(db, retry)
+    return _retried(serialize_messages(db, retry))
 
   resolved_send_id = requested_send_id or str(uuid.uuid4())
   targets: list[str | None] = [None] if broadcast else recipients
+  # The body is stored once per send; each recipient row references it and
+  # keeps an empty body of its own.
+  shared = models.AgentCoordinationNoteBody(id=str(uuid.uuid4()), body=clean_body)
   rows = [
     models.AgentCoordinationMessage(
       id=str(uuid.uuid4()),
@@ -1490,10 +1618,12 @@ def _persist_send(
       send_target_key=target or "",
       kind=kind,
       delivery=clean_delivery,
-      body=clean_body,
+      body="",
+      body_id=shared.id,
     )
     for target in targets
   ]
+  db.add(shared)
   db.add_all(rows)
   try:
     db.flush()
@@ -1508,6 +1638,8 @@ def _persist_send(
       _prune_direct_inboxes(db, channel, recipients)
     else:
       _prune_scope_channel(db, channel)
+    # Flushed values, before commit expires them: no row is reloaded.
+    sent = [_send_snapshot(row, clean_body) for row in rows]
     db.commit()
   except IntegrityError:
     db.rollback()
@@ -1523,20 +1655,18 @@ def _persist_send(
       body=clean_body,
     )
     if retry is not None:
-      return serialize_messages(db, retry)
+      return _retried(serialize_messages(db, retry))
     raise
   except Exception:
     db.rollback()
     raise
-  for row in rows:
-    db.refresh(row)
   _publish_message_hint(
     channel,
     sender_chat_id=sender_chat_id,
     recipients=recipients,
     broadcast=broadcast,
   )
-  return serialize_messages(db, rows)
+  return serialize_messages(db, sent)
 
 
 def send_scope_message(
@@ -2008,6 +2138,53 @@ async def _steer_running_recipient(chat_id: str) -> str:
     return "steered" if accepted else "queued"
 
 
+def _has_undelivered_interrupt(
+  db: Session, chat_id: str, *, chat: models.Chat,
+) -> bool:
+  """Whether an interrupting note to this chat is past every delivery it had:
+  its admitted turns' cursor and any contiguous steer carrier."""
+  admitted = db.query(
+    models.ChatRun.peer_message_through_created_at,
+    models.ChatRun.peer_message_through_id,
+  ).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.peer_message_through_created_at.isnot(None),
+    models.ChatRun.peer_message_through_id.isnot(None),
+  ).order_by(
+    models.ChatRun.peer_message_through_created_at.desc(),
+    models.ChatRun.peer_message_through_id.desc(),
+  ).first()
+  cursors = [cursor for cursor in (
+    PeerMessageCursor(created_at=admitted.peer_message_through_created_at,
+                      message_id=str(admitted.peer_message_through_id)) if admitted else None,
+    _peer_carrier_cursor(db, chat_id, chat=chat, contiguous_only=True),
+  ) if cursor is not None]
+  message = models.AgentCoordinationMessage
+  query = db.query(message.id).filter(
+    message.to_chat_id == chat_id,
+    message.from_chat_id != chat_id,
+    message.delivery == DELIVERY_INTERRUPT,
+  )
+  if cursors:
+    through = max(cursors)
+    query = query.filter(or_(
+      message.created_at > through.created_at,
+      and_(message.created_at == through.created_at, message.id > through.message_id),
+    ))
+  return query.first() is not None
+
+
+def unreachable_for_interrupt(db: Session, chat_ids: list[str]) -> dict[str, str]:
+  """Recorded reasons nothing will read a note soon, for an interrupt: a chat
+  whose latest run failed can still be woken under its paused Goal."""
+  reasons = unreachable_reasons(db, chat_ids)
+  for chat_id in list(reasons):
+    if reasons[chat_id] != "the chat is deleted" and paused_goal_run(db, chat_id) is not None:
+      del reasons[chat_id]
+  return reasons
+
+
 async def _wake_idle_recipient(
   *, chat_id: str, kind: str, sender_chat_id: str,
 ) -> bool:
@@ -2029,6 +2206,10 @@ async def _wake_idle_recipient(
         return False
       goal_run = paused_goal_run(db, chat_id)
       if goal_run is None:
+        return False
+      # Wake only for an interrupt not yet delivered, so attempting delivery
+      # again (a retried send) never wakes the same note twice.
+      if not _has_undelivered_interrupt(db, chat_id, chat=chat):
         return False
       sender = db.query(models.Chat.title).filter(
         models.Chat.id == sender_chat_id,
@@ -2060,6 +2241,9 @@ def unreachable_reasons(
   physical run that failed, or one stopped before its provider turn began. A
   running, parked, resuming, or idle chat is queued for its next turn.
   """
+  if len(chat_ids) > _ID_BATCH:
+    return {key: reason for batch in _batches(chat_ids)
+            for key, reason in unreachable_reasons(db, batch).items()}
   if not chat_ids:
     return {}
   ids = list(dict.fromkeys(chat_ids))
@@ -2083,20 +2267,43 @@ def unreachable_reasons(
   return reasons
 
 
-def _classify_undelivered(chat_ids: list[str]) -> tuple[list[str], dict[str, str]]:
-  """Split undelivered recipients into queued and (reasoned) unreachable."""
+def classify_undelivered(
+  chat_ids: list[str], *, interrupt: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+  """Split undelivered recipients into queued and (reasoned) unreachable.
+
+  For an interrupt, a recipient its wake can still reach is not unreachable.
+  """
   if not chat_ids:
     return [], {}
   from app.database import SessionLocal
 
   try:
     with SessionLocal() as db:
-      reasons = unreachable_reasons(db, chat_ids)
+      reasons = (unreachable_for_interrupt if interrupt else unreachable_reasons)(db, chat_ids)
   except Exception:
     # Reporting must never fail a committed send; queued is the safe claim.
     log.warning("peer reachability check failed", exc_info=True)
     reasons = {}
   return [chat_id for chat_id in chat_ids if chat_id not in reasons], reasons
+
+
+async def interrupt_recipients(
+  *, recipients: list[str], kind: str, sender_chat_id: str,
+) -> None:
+  """Steer or wake each recipient of a stored interrupt, after the send.
+
+  Each recipient is attempted on its own: one that fails is logged and the
+  rest are still attempted. One that cannot take the interrupt now reads
+  the note on its next turn, which needs nothing from here.
+  """
+  for chat_id in dict.fromkeys(recipients):
+    try:
+      state = await _steer_running_recipient(chat_id)
+      if state == "idle":
+        await _wake_idle_recipient(chat_id=chat_id, kind=kind, sender_chat_id=sender_chat_id)
+    except Exception:
+      log.exception("peer interrupt delivery failed chat=%s", chat_id)
 
 
 async def deliver_peer_recipients(
@@ -2128,7 +2335,7 @@ async def deliver_peer_recipients(
       woken.append(chat_id)
       continue
     undelivered.append(chat_id)
-  queued, reasons = _classify_undelivered(undelivered)
+  queued, reasons = classify_undelivered(undelivered)
   return PeerDeliveryResult(
     steered=steered, woken=woken, queued=queued,
     unreachable=[chat_id for chat_id in undelivered if chat_id in reasons],

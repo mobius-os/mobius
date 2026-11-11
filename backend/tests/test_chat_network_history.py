@@ -129,7 +129,7 @@ def test_history_never_loads_a_whole_body(db, monkeypatch):
   assert all(len(row['body']) <= 4000 for row in page['messages'])
   selects = [statement for statement in seen
              if 'agent_coordination_messages.body' in statement and 'count(' not in statement]
-  assert selects and all('substr(CAST(agent_coordination_messages.body AS BLOB)' in statement
+  assert selects and all('substr(CAST(coalesce(' in statement
                          for statement in selects)
 
 
@@ -158,9 +158,6 @@ def test_a_stored_note_with_u0000_is_shown_whole_or_marked_truncated(client, aut
 
 def test_a_note_body_with_u0000_is_refused(client, db):
   from app.agent_coordination import _clean_message
-  from app.routes.agent_coordination import AgentMessageCreate
 
   with pytest.raises(ValueError, match='U\\+0000'):
     _clean_message('note', 'one\x00two')
-  with pytest.raises(ValueError, match='U\\+0000'):
-    AgentMessageCreate(recipients=['peer'], body='one\x00two')
