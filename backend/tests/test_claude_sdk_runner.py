@@ -3863,3 +3863,10 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
   await _run_turn("answer-check-card-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_wedged_claude_turn_is_reported_not_stopped():
+  """stop(timeout) is the only drain budget; a wedged turn reports False."""
+  handle = claude_sdk_runner.ActiveClaudeClient(_FakeClient(None), chat_id="wedged-turn")
+  assert await handle.stop(timeout=0.2) is False

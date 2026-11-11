@@ -166,6 +166,19 @@ test('a settled pause names its cause and offers no recovery action', () => {
  }
 })
 
+test('every resource wait kind names its cause in pause and resume history', async () => {
+ const { RESOURCE_PAUSE_KINDS, RESOURCE_PAUSE_LABELS } = await vite.ssrLoadModule('/src/components/ChatView/waitingPresentation.js')
+ assert.ok(RESOURCE_PAUSE_KINDS.has('processes'))
+ for (const kind of RESOURCE_PAUSE_KINDS) {
+  const paused = render(h(PauseRecord, { block: { type: 'pause_record', source: { type: 'error', resumable: true, pause: { kind } } } }))
+  const resumed = render(h(Resume, { msg: { continuation_reason: kind } }))
+  assert.ok(paused.includes(RESOURCE_PAUSE_LABELS[kind].paused), kind)
+  assert.ok(resumed.includes(RESOURCE_PAUSE_LABELS[kind].resumed), kind)
+  assert.doesNotMatch(paused, />Paused</, `${kind} history must not fall back to a generic pause`)
+  assert.doesNotMatch(resumed, /Interrupted work recovered/, `${kind} resume must not fall back to a generic recovery`)
+ }
+})
+
 test('a resume marker shows when the work continued', () => {
  const today = new Date(); today.setHours(9, 5, 0, 0)
  const earlier = new Date(2026, 0, 3, 14, 30)

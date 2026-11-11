@@ -237,7 +237,7 @@ async def test_background_conversion_stops_before_turns_are_deferred(monkeypatch
   monkeypatch.setattr(resource_pressure, "resource_status", facts)
   await chat_writer.convert_remaining_transcripts()
   assert chat_writer.transcript_conversion_status["state"] == "blocked"
-  assert agent_admission._deferral(facts()) is None
+  assert agent_admission._deferral(facts(), starting_turns=0) is None
   assert facts()["pressure"]["disk"]["state"] != "critical"
 
 

@@ -642,6 +642,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
   if perms.get("spend_credits"):
     contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
+  if perms.get("check_credits_charges"):
+    contract["data"]["check_credits_charges"] = sorted(perms["check_credits_charges"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -780,6 +782,7 @@ def contract_from_app_state(
         contract_grants.get("location_history_read", False)
       ),
       "spend_credits": contract_grants.get("spend_credits", []),
+      "check_credits_charges": contract_grants.get("check_credits_charges", []),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
@@ -1016,7 +1019,7 @@ _BOOLEAN_GRANTS = {
 
 _LIST_GRANTS = {
   "agent.skills", "agent.tools", "data.job_secret_read", "data.spend_credits",
-  "public.network",
+  "data.check_credits_charges", "public.network",
 }
 
 

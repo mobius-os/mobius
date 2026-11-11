@@ -6,11 +6,14 @@ from datetime import timedelta
 import pytest
 
 from app import chat as runtime, models, schemas
-from app.agent_admission import require_agent_turn_admission
+from app.agent_admission import TurnStartHolds, require_agent_turn_admission
 from app.chat_writer import (
   StartTurn, StartTurnRecoveryChanged, get_writer,
 )
-from app.continuations import LOW_STORAGE_NOTICE, manual_resume_matches
+from app.continuations import (
+  LOW_STORAGE_NOTICE, PROCESS_LIMIT_NOTICE, manual_resume_matches,
+)
+from app.resource_pressure import assess_resource_pressure
 from app.timeutil import now_naive_utc
 
 
@@ -55,6 +58,16 @@ def test_storage_continue_survives_receipt_retry_without_consuming_pending_work(
   assert isinstance(submit(changed), StartTurnRecoveryChanged)
 
 
+def test_process_wait_accepts_the_same_one_shot_continue_anyway(db, chat):
+  park(db, chat, "processes")
+  result = submit(request(chat))
+  assert result["history"][-1].content.startswith("Resume the interrupted")
+  db.expire_all()
+  control = db.get(models.ChatRun, "manual-storage").continuation_json
+  assert control["allow_low_storage"] is True
+  assert control["supersedes_run_token"] == "waiting-run"
+
+
 @pytest.mark.parametrize("reason", ["memory", "usage_limit", "restart"])
 def test_storage_override_cannot_relabel_another_wait(db, chat, reason):
   park(db, chat, reason)
@@ -85,7 +98,7 @@ def test_saved_question_keeps_authority_over_storage_override(db, chat):
 
 def test_storage_override_requires_explicit_manual_run_target():
   for fields in ({}, {"continuation": "manual"}, {"resume_run_id": "waiting-run"}):
-    with pytest.raises(ValueError, match="exact storage-waiting run"):
+    with pytest.raises(ValueError, match="exact waiting run"):
       schemas.SendMessage(content="", allow_low_storage=True, **fields)
 
 
@@ -160,14 +173,30 @@ def test_malformed_permission_is_no_permission(db, chat, control):
     continuation_json=control,
   ))
   db.commit()
-  assert runtime._run_allows_low_storage(chat.id, "odd-run") is False
+  assert runtime._run_allows_continue_anyway(chat.id, "odd-run") is False
 
 
-def _low_storage(data_dir, *, allow_low_storage=False):
+def _low_storage(data_dir, *, owner_overrides=frozenset()):
   return require_agent_turn_admission(
-    data_dir, allow_low_storage=allow_low_storage, scratch_sweeper=_no_sweep,
+    data_dir, owner_overrides=owner_overrides, scratch_sweeper=_no_sweep,
     status_reader=lambda _: {"facts": {"disk": {"free_bytes": 945 * 1024**2}},
       "pressure": {"disk": {"state": "critical", "critical_below_bytes": 1024**3}}},
+    holds=TurnStartHolds(),
+  )
+
+
+def _near_task_cap(data_dir, *, owner_overrides=frozenset(), low_storage=False):
+  facts = {
+    "disk": {"free_bytes": (945 if low_storage else 8192) * 1024**2},
+    "processes": {"available": True, "current_tasks": 900, "limit_tasks": 1000},
+  }
+  pressure = assess_resource_pressure(facts)
+  if low_storage:
+    pressure["disk"] = {"state": "critical", "critical_below_bytes": 1024**3}
+  return require_agent_turn_admission(
+    data_dir, owner_overrides=owner_overrides, scratch_sweeper=_no_sweep,
+    status_reader=lambda _: {"facts": facts, "pressure": pressure},
+    holds=TurnStartHolds(),
   )
 
 
@@ -212,9 +241,9 @@ def test_unreadable_permission_keeps_normal_storage_admission(db, chat, monkeypa
     raise RuntimeError("database unavailable")
 
   monkeypatch.setattr("app.database.SessionLocal", unreadable)
-  assert runtime._run_allows_low_storage(chat.id, "admission-run") is False
+  assert runtime._run_allows_continue_anyway(chat.id, "admission-run") is False
   monkeypatch.undo()
-  monkeypatch.setattr(runtime, "_run_allows_low_storage", lambda *_: False)
+  monkeypatch.setattr(runtime, "_run_allows_continue_anyway", lambda *_: False)
   entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
   assert entered == [] and run.park_reason == "storage"
   assert run.status == "parked", "a read error is a storage wait, not a setup failure"
@@ -227,7 +256,7 @@ def test_admitted_turn_never_reads_the_permission(db, chat, monkeypatch):
   def read(*_args):
     pytest.fail("only a storage wait consults the saved permission")
 
-  monkeypatch.setattr(runtime, "_run_allows_low_storage", read)
+  monkeypatch.setattr(runtime, "_run_allows_continue_anyway", read)
   entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", admitted)
   assert entered == [run.id]
   assert prompts == ["Resume the interrupted work."], (
@@ -263,3 +292,35 @@ def test_admitted_turn_is_not_spared_by_the_storage_guard(db, chat, monkeypatch)
   monkeypatch.setattr(storage_guard, "_continued", {})
   _run_turn(db, chat, monkeypatch, "manual", admitted)
   assert storage_guard._continued == {}
+
+
+def test_process_only_continue_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  """Only a turn whose storage floor was lifted is the owner's cleanup."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)
+  assert entered == [run.id]
+  assert storage_guard._continued == {}
+
+
+def test_continue_anyway_admits_one_turn_near_the_task_cap(db, chat, monkeypatch):
+  """When the cap is held by something other than agent work, the owner has a way out."""
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)
+  assert entered == [run.id]
+  assert prompts[-1] == f"Resume the interrupted work.\n\n{PROCESS_LIMIT_NOTICE}"
+  assert LOW_STORAGE_NOTICE not in prompts[-1]
+
+
+def test_process_wait_without_permission_still_parks(db, chat, monkeypatch):
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "processes", _near_task_cap)
+  assert entered == [] and run.park_reason == "processes"
+
+
+def test_one_continue_anyway_lifts_storage_and_process_floors_and_names_both(db, chat, monkeypatch):
+  async def both(data_dir, **kwargs):
+    return await _near_task_cap(data_dir, low_storage=True, **kwargs)
+
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", both)
+  assert entered == [run.id]
+  assert prompts[-1].endswith(f"{LOW_STORAGE_NOTICE}\n\n{PROCESS_LIMIT_NOTICE}")
