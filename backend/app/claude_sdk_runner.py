@@ -112,6 +112,9 @@ from app.runtime_types import RunnerResult
 log = logging.getLogger(__name__)
 
 _CONTROL_MCP_READY_TIMEOUT_SECONDS = 10.0
+# How long Stop's interrupt waits for the runner to drain before reporting
+# the turn as wedged (not stopped).
+_INTERRUPT_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 async def _await_control_mcp_ready(
@@ -792,12 +795,13 @@ class ActiveClaudeClient:
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
-    Bounds the `_finished` wait at 5s as a defense-in-depth so a
-    wedged runner (one that never reaches its `finally` block) can't
-    hang Stop indefinitely, and raises ``asyncio.TimeoutError`` then so
-    ``stop`` reports the turn as not stopped. `chat.py:stop_chat_for` adds
-    its own 2s bound at the call site; this inner timeout protects any other
-    direct caller, such as the restart drain's longer budget.
+    Bounds the `_finished` wait at `_INTERRUPT_DRAIN_TIMEOUT_SECONDS` as a
+    defense-in-depth so a wedged runner (one that never reaches its `finally`
+    block) can't hang Stop indefinitely, and raises ``asyncio.TimeoutError``
+    then so ``stop`` reports the turn as not stopped. Ordinary Stop gives
+    ``stop`` its own 2s bound in `chat.py:_stop_handle_with_escalation`; this
+    inner timeout protects any other caller, such as the restart drain's
+    longer budget.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
@@ -807,12 +811,14 @@ class ActiveClaudeClient:
     if not await self.cancel_native_queue():
       await self._client.interrupt()
     try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
+      await asyncio.wait_for(
+        asyncio.shield(self._finished), timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS,
+      )
     except asyncio.TimeoutError:
       import logging
       logging.getLogger("moebius.chat").warning(
-        "ActiveClaudeClient._finished never resolved within 5s; "
-        "runner is wedged",
+        "ActiveClaudeClient._finished never resolved within %gs; "
+        "runner is wedged", _INTERRUPT_DRAIN_TIMEOUT_SECONDS,
       )
       raise
 
