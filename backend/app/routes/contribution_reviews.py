@@ -46,6 +46,8 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
+# request_review_now: Contribute's Request review button. Retire the key once the Store's minimum Möbius includes
+# the release that added it, because the app then no longer needs to ask whether this platform has the route.
 # owner_confirm: the shell can confirm an action for an app (window.mobius.ownerGrant). The older owner_grant
 # key is deliberately never advertised: released Contribute reads it as proof of the owner's tap and turns Post on.
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
