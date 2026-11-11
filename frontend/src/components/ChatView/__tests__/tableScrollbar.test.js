@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   tableScrollbarThumb,
-  tableScrollForTrackDistance,
+  tableScrollLeftForDrag,
   tableScrollLeftForTrackTap,
 } from '../markdown/tableScrollbar.js'
 
@@ -41,10 +41,21 @@ test('a table that fits, or has no width yet, gets a full idle thumb', () => {
 })
 
 test('dragging keeps the thumb under the pointer', () => {
-  const scrolled = tableScrollForTrackDistance(40, wide)
+  const scrolled = tableScrollLeftForDrag(0, 40, wide)
   assert.equal(scrolled, 120)
   assertNear(thumbSpan(scrolled).left, 40)
-  assert.equal(tableScrollForTrackDistance(40, { ...wide, trackWidth: 0 }), 0)
+  assertNear(thumbSpan(tableScrollLeftForDrag(scrolled, -30, wide)).left, 10)
+  assert.equal(tableScrollLeftForDrag(120, 40, { ...wide, trackWidth: 0 }), 120)
+})
+
+test('a drag past either end stops there and picks the thumb back up under the pointer', () => {
+  // Grab the thumb at the start, drag 250px right (past the end), then 100px back.
+  assert.equal(tableScrollLeftForDrag(0, 250, wide), 600)
+  const back = tableScrollLeftForDrag(0, 150, wide)
+  assertNear(thumbSpan(back).left, 150)
+  // The same from the far end: past the start, then forward again.
+  assert.equal(tableScrollLeftForDrag(600, -250, wide), 0)
+  assertNear(thumbSpan(tableScrollLeftForDrag(600, -150, wide)).left, 50)
 })
 
 test('a track tap centres the thumb there, clamped to the table edges', () => {

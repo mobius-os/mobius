@@ -10,7 +10,7 @@ import AppBlock from './AppBlock.jsx'
 import { appBlockFromToken } from './appBlock.js'
 import {
   tableScrollbarThumb,
-  tableScrollForTrackDistance,
+  tableScrollLeftForDrag,
   tableScrollLeftForTrackTap,
 } from './tableScrollbar.js'
 
@@ -166,10 +166,10 @@ function useTableScrollbar() {
     const drag = new AbortController()
     dragRef.current = drag
     track.setPointerCapture(event.pointerId)
-    let lastX = event.clientX
+    const startX = event.clientX
+    const startScrollLeft = scroller.scrollLeft
     track.addEventListener('pointermove', (move) => {
-      scroller.scrollLeft += tableScrollForTrackDistance(move.clientX - lastX, geometry)
-      lastX = move.clientX
+      scroller.scrollLeft = tableScrollLeftForDrag(startScrollLeft, move.clientX - startX, geometry)
     }, { signal: drag.signal })
     // Capture ends on pointerup and pointercancel alike.
     track.addEventListener('lostpointercapture', () => drag.abort(), { signal: drag.signal })

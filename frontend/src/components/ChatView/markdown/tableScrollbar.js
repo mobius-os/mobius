@@ -17,10 +17,19 @@ export function tableScrollbarThumb({ clientWidth, scrollWidth, scrollLeft }) {
   }
 }
 
-/** How far the table scrolls when the pointer moves `distance` px along the
- * track, so the thumb stays under the pointer. */
-export function tableScrollForTrackDistance(distance, { scrollWidth, trackWidth }) {
-  return trackWidth > 0 ? distance * (scrollWidth / trackWidth) : 0
+/** The scrollLeft for a drag whose pointer is `distance` px along the track
+ * from where it started, with the table at `startScrollLeft` then, clamped to
+ * the table's scroll range. Measuring from the drag's start rather than adding
+ * each move keeps the thumb under the pointer after it is held at either end. */
+export function tableScrollLeftForDrag(
+  startScrollLeft,
+  distance,
+  { clientWidth, scrollWidth, trackWidth },
+) {
+  if (!(trackWidth > 0)) return startScrollLeft
+  const maxScroll = Math.max(scrollWidth - clientWidth, 0)
+  const scrolled = startScrollLeft + distance * (scrollWidth / trackWidth)
+  return Math.min(Math.max(scrolled, 0), maxScroll)
 }
 
 /** The scrollLeft that centres the thumb on a tap `offsetX` px into the
