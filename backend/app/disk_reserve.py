@@ -2,9 +2,9 @@
 
 Möbius keeps one file of real, allocated blocks in the data volume's runtime
 directory. Nothing else can use that space. The storage guard releases it only
-when free space is nearly exhausted (or at boot when the disk is already
-critical), which gives the database room to commit and the owner room for one
-cleanup turn. Once the disk has comfortable room again the guard re-arms it.
+when free space is nearly exhausted (at runtime or at boot), which gives the
+database room to commit and the owner room for one cleanup turn. Once the disk
+has comfortable room again the guard re-arms it.
 
 The file is the whole state: present and fully allocated means armed. No
 database row records it, because the database may be unable to write exactly
@@ -14,10 +14,15 @@ content.
 
 A reserve only helps if its blocks are real. ``fallocate(2)`` allocates them
 instantly on ext4, XFS and btrfs. On a filesystem without it, or one that
-compresses or deduplicates allocated-but-unwritten space, the file is filled
-with random bytes instead, which cannot be compressed away; if even that does
-not show up as allocated blocks, :func:`arm` reports ``unsupported`` rather
+compresses or deduplicates allocated-but-unwritten space itself, the file is
+filled with random bytes instead, which cannot be compressed away; if even that
+does not show up as allocated blocks, :func:`arm` reports ``unsupported`` rather
 than pretending the space is held.
+
+The reserve protects the filesystem's own block accounting, which is what
+refuses a write with ENOSPC. It cannot see below the filesystem: on thin
+provisioning (a sparse zvol, a thin LVM volume) whose backing pool fills up,
+writes fail whatever ``statvfs`` and the reserve report.
 """
 
 from __future__ import annotations

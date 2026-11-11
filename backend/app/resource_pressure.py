@@ -91,6 +91,22 @@ def _memory_facts(snapshot: dict[str, Any]) -> dict[str, Any]:
   return {key: snapshot.get(key) for key in keys if key in snapshot}
 
 
+def _disk_facts(
+  data_dir: str | Path, disk_usage: Callable[[str | Path], Any],
+) -> dict[str, Any]:
+  try:
+    usage = disk_usage(data_dir)
+  except OSError:
+    return {"available": False, "path": str(data_dir)}
+  return {
+    "available": True,
+    "path": str(data_dir),
+    "total_bytes": int(usage.total),
+    "used_bytes": int(usage.used),
+    "free_bytes": int(usage.free),
+  }
+
+
 def resource_facts(
   data_dir: str | Path,
   *,
@@ -104,20 +120,7 @@ def resource_facts(
   implied by this function.
   """
   captured_at = datetime.now(UTC).isoformat()
-  try:
-    usage = disk_usage(data_dir)
-    disk = {
-      "available": True,
-      "path": str(data_dir),
-      "total_bytes": int(usage.total),
-      "used_bytes": int(usage.used),
-      "free_bytes": int(usage.free),
-    }
-  except OSError:
-    disk = {
-      "available": False,
-      "path": str(data_dir),
-    }
+  disk = _disk_facts(data_dir, disk_usage)
 
   memory_snapshot = (
     cgroup_memory_snapshot() if memory is None else memory
@@ -378,15 +381,26 @@ def resource_status(
   }
 
 
+def disk_status(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> dict[str, Any]:
+  """The data volume's facts and pressure alone, shaped like one resource of
+  :func:`resource_status`.
+
+  It reads one ``statvfs`` and no cgroup file, so it is cheap enough to ask
+  every second and before anything writes: the storage guard, startup (the
+  recovery reserve) and a scheduled app job's launch.
+  """
+  disk = _disk_facts(data_dir, disk_usage)
+  return {"facts": disk, "pressure": _disk_pressure(disk)}
+
+
 def disk_is_critical(
   data_dir: str | Path,
   *,
   disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
 ) -> bool:
-  """Whether the data volume is below its critical free-space line.
-
-  Disk only, so it is cheap enough to ask before anything writes: at startup
-  (the recovery reserve) and before a scheduled app job launches.
-  """
-  status = resource_status(data_dir, disk_usage=disk_usage, memory={})
-  return status["pressure"]["disk"].get("state") == "critical"
+  """Whether the data volume is below its critical free-space line."""
+  return disk_status(data_dir, disk_usage=disk_usage)["pressure"]["state"] == "critical"

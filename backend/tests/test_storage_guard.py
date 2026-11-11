@@ -31,13 +31,17 @@ class Volume:
 
 
 class Recorder:
-  def __init__(self, volume, *, reclaim_frees=0):
+  def __init__(
+    self, volume, *, reclaim_frees=0, reserve=245 * MIB, release_frees=False,
+  ):
     self.volume = volume
     self.reclaim_frees = reclaim_frees
+    self.reserve = reserve
+    self.release_frees = release_frees
     self.calls: list[tuple] = []
 
-  async def reclaim(self, _data_dir):
-    self.calls.append(("reclaim",))
+  async def reclaim(self, _data_dir, tier):
+    self.calls.append(("reclaim", tier))
     self.volume.free += self.reclaim_frees
     return self.reclaim_frees
 
@@ -58,7 +62,13 @@ class Recorder:
 
   def release(self, _data_dir):
     self.calls.append(("release",))
-    return 245 * MIB
+    released, self.reserve = self.reserve, 0
+    if self.release_frees:
+      self.volume.free += released
+    return released
+
+  def held(self, _data_dir):
+    return self.reserve
 
   def names(self):
     return [call[0] for call in self.calls]
@@ -78,6 +88,7 @@ def _guard(tmp_path, volume, recorder, clock=lambda: 0.0):
     notify=recorder.notify,
     arm_reserve=recorder.arm,
     release_reserve=recorder.release,
+    reserve_held=recorder.held,
   )
   return storage_guard.StorageGuard(tmp_path, effects=effects, clock=clock)
 
@@ -164,6 +175,53 @@ async def test_warning_line_reclaims_disposable_data_once_per_episode(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_deeper_pressure_reclaims_again_with_the_emergency_sweep(
+  tmp_path, no_continued_turns,
+):
+  volume = Volume(CONSTRAINED)
+  recorder = Recorder(volume)
+  guard = _guard(tmp_path, volume, recorder)
+
+  await guard.tick()
+  volume.free = CRITICAL
+  await guard.tick()
+  await guard.tick()
+  volume.free = CONSTRAINED
+  await guard.tick()
+
+  reclaims = [call[1] for call in recorder.calls if call[0] == "reclaim"]
+  assert reclaims == ["constrained", "critical"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("tier", "idle_seconds"),
+  [("constrained", 24 * 60 * 60), ("critical", 15 * 60)],
+)
+async def test_scratch_keeps_its_day_of_retention_until_storage_is_critical(
+  tmp_path, monkeypatch, tier, idle_seconds,
+):
+  """A chat idle for minutes, such as a parent waiting on its helpers, keeps
+  its clones at the warning line; only critical pressure outranks that."""
+  from app import agent_scratch, provider_session_retention
+
+  sweeps = []
+
+  async def sweep(*, idle_seconds):
+    sweeps.append(idle_seconds)
+    return {"bytes": 0}
+
+  monkeypatch.setattr(agent_scratch, "sweep_idle_scratch", sweep)
+  monkeypatch.setattr(
+    provider_session_retention, "sweep_stale_provider_sessions", lambda _d: {},
+  )
+
+  await storage_guard._reclaim_disposable(str(tmp_path), tier)
+
+  assert sweeps == [idle_seconds]
+
+
+@pytest.mark.asyncio
 async def test_reclaim_that_frees_enough_stops_writers_but_pauses_no_turns(
   tmp_path, no_continued_turns,
 ):
@@ -225,7 +283,8 @@ async def test_exhausted_volume_stops_continued_commands_then_releases_the_reser
   outcome = await _guard(tmp_path, volume, recorder).tick()
 
   assert outcome.level == "exhausted"
-  # Writers are stopped before the reserve is freed, so they cannot take it;
+  # Writers, the continued turn's included, are stopped before the reserve
+  # is freed, so they cannot take it;
   # the reserve is freed before turns are paused, so the pauses can commit.
   assert recorder.names() == ["stop", "release", "reclaim", "pause", "notify"]
   stop = next(call for call in recorder.calls if call[0] == "stop")
@@ -235,6 +294,83 @@ async def test_exhausted_volume_stops_continued_commands_then_releases_the_reser
   # owner's explicit choice and make them start over.
   assert pause[1] == frozenset({"continued-chat"})
   assert outcome.reserve_released_bytes == 245 * MIB
+
+
+def _continued_guard(tmp_path, monkeypatch, volume, recorder):
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  monkeypatch.setattr(storage_guard, "_is_live_run", lambda chat_id, run_token: True)
+  storage_guard.spare_continued_turn("continued-chat", "continued-run")
+  return _guard(tmp_path, volume, recorder)
+
+
+def _stop_spares(recorder):
+  return [call[1] for call in recorder.calls if call[0] == "stop"]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_volume_without_a_reserve_spares_the_owners_cleanup(
+  tmp_path, monkeypatch,
+):
+  """With nothing left to release, stopping the continued turn's commands
+  buys nothing while its cleanup is freeing space; Continue anyway must still
+  be able to free space at exactly this level."""
+  from app.process_groups import run_marker
+
+  volume = Volume(EXHAUSTED)
+  recorder = Recorder(volume, reserve=0)
+  guard = _continued_guard(tmp_path, monkeypatch, volume, recorder)
+
+  for _ in range(5):
+    await guard.tick()
+    volume.free += 1 * MIB
+
+  spared = frozenset({run_marker("continued-run")})
+  assert _stop_spares(recorder) == [spared] * 5
+  assert "release" in recorder.names()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_volume_stops_continued_commands_while_space_still_falls(
+  tmp_path, monkeypatch,
+):
+  from app.process_groups import run_marker
+
+  volume = Volume(EXHAUSTED)
+  recorder = Recorder(volume, reserve=0)
+  guard = _continued_guard(tmp_path, monkeypatch, volume, recorder)
+  spared = frozenset({run_marker("continued-run")})
+
+  await guard.tick()
+  # The turn's own transcript writes a little every tick; that is not a fill.
+  volume.free -= 256 * 1024
+  await guard.tick()
+  volume.free -= 8 * MIB
+  await guard.tick()
+  await guard.tick()
+
+  assert _stop_spares(recorder) == [spared, spared, frozenset(), spared]
+
+
+@pytest.mark.asyncio
+async def test_released_reserve_being_eaten_counts_as_space_still_falling(
+  tmp_path, monkeypatch,
+):
+  """The next tick compares against the space the release left, so a writer
+  taking the freed reserve is caught even though free space is still above
+  where the release found it."""
+  from app.process_groups import run_marker
+
+  volume = Volume(10 * MIB)
+  recorder = Recorder(volume, reserve=16 * MIB, release_frees=True)
+  guard = _continued_guard(tmp_path, monkeypatch, volume, recorder)
+  spared = frozenset({run_marker("continued-run")})
+
+  await guard.tick()
+  volume.free -= 8 * MIB
+  await guard.tick()
+  await guard.tick()
+
+  assert _stop_spares(recorder) == [frozenset(), frozenset(), spared]
 
 
 @pytest.mark.asyncio
@@ -274,36 +410,43 @@ async def test_guard_looks_every_second_under_pressure(tmp_path, no_continued_tu
   assert guard.interval() == storage_guard.PRESSURE_TICK_SECS
 
 
-def test_startup_releases_the_reserve_only_on_a_critical_volume(tmp_path, monkeypatch):
+def test_startup_releases_the_reserve_only_on_an_exhausted_volume(tmp_path):
+  """A critical volume, which can stay critical for days, keeps its reserve
+  through restarts; the boot releases it at the running guard's own line."""
   disk_reserve.arm(
     tmp_path, target_bytes=1 * MIB, disk_usage=Volume(COMFORTABLE),
   )
 
-  comfortable, critical = _status_for(COMFORTABLE), _status_for(CRITICAL)
-  monkeypatch.setattr(resource_pressure, "resource_status", comfortable)
-  assert storage_guard.release_reserve_at_boot(tmp_path) == 0
-  assert disk_reserve.held_bytes(tmp_path) > 0
+  for free in (COMFORTABLE, CRITICAL):
+    assert storage_guard.release_reserve_at_boot(tmp_path, disk_usage=Volume(free)) == 0
+    assert disk_reserve.held_bytes(tmp_path) > 0
 
-  monkeypatch.setattr(resource_pressure, "resource_status", critical)
-  assert storage_guard.release_reserve_at_boot(tmp_path) > 0
+  assert storage_guard.release_reserve_at_boot(
+    tmp_path, disk_usage=Volume(EXHAUSTED),
+  ) > 0
   assert disk_reserve.held_bytes(tmp_path) == 0
 
 
-def _status_for(free):
-  from app.resource_pressure import resource_status
+def test_the_storage_guard_reads_no_cgroup_facts(tmp_path, monkeypatch):
+  """It looks every second; only the disk is its business."""
+  def unexpected(*_args, **_kwargs):
+    raise AssertionError("the storage guard read a cgroup fact")
 
-  def read(data_dir, **kwargs):
-    kwargs["disk_usage"] = Volume(free)
-    return resource_status(data_dir, **kwargs)
+  monkeypatch.setattr(resource_pressure, "cgroup_memory_snapshot", unexpected)
+  monkeypatch.setattr(resource_pressure, "resource_facts", unexpected)
 
-  return read
+  assert storage_guard.StorageGuard(
+    tmp_path, effects=storage_guard.GuardEffects(disk_usage=Volume(CRITICAL)),
+  )._measure()[0] == "critical"
+  assert resource_pressure.disk_is_critical(tmp_path, disk_usage=Volume(CRITICAL))
+  assert storage_guard.release_reserve_at_boot(tmp_path, disk_usage=Volume(EXHAUSTED)) == 0
 
 
 
 def test_container_start_releases_the_reserve_before_any_boot_write():
   """On a full volume the image's boot transaction cannot commit and the
   container refuses to start; the entrypoint frees the reserve first, using
-  the server's own critical check so a healthy volume keeps it."""
+  the server's own check so any other volume keeps it."""
   from pathlib import Path
 
   entrypoint = (
