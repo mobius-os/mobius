@@ -117,13 +117,14 @@ that cannot be read, is unpriced, or exceeds `max_price_micro` is refused
 before the owner is asked. Charges are paid from credits only: any `method`
 other than `"credits"` answers 422 `payment_method_unsupported`. One app may
 have at most five payments waiting (429 `too_many_payments_waiting`).
-Other refusals keep the service's `detail.code` and fields (`not_paired`,
+Other refusals keep the service's `detail.code` and message (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
 `key_spend_cap`). The 200 answer gives the paying app only its own charge: the
 charge id, the amount charged, and whether the service replayed an earlier
-identical charge; a refusal likewise omits any figure that would reveal the
-owner's balance (such as `available_micro`). An app that also holds
-`credits_manage` keeps seeing the balance. `not_paired` means the owner has not connected credits yet.
+identical charge; a refusal likewise keeps only the figures about the call
+(`required_micro`, `price_micro`, `max_price_micro`), never the owner's
+balance or a key's spend cap. An app that also holds `credits_manage` keeps
+every field. `not_paired` means the owner has not connected credits yet.
 A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
 and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.

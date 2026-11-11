@@ -551,6 +551,37 @@ def test_a_refused_charge_hides_the_balance_from_a_spend_only_app(client, auth, 
   assert "available_micro" not in detail
 
 
+def test_a_refused_charge_hides_every_owner_figure_from_a_spend_only_app(
+  client, auth, db, paired
+):
+  """Only the fields about the app's own call pass; a spend cap, what the key
+  has spent, or any field the service adds later never reaches a payer."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "key_spend_cap", "message": "this key reached its spend cap",
+    "cap_micro": 10_000_000, "spent_micro": 9_800_000, "remaining_micro": 200_000,
+    "balance_micro": 42_000_000, "window": "day", "required_micro": 500_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 402
+  assert refused.json()["detail"] == {
+    "code": "key_spend_cap", "message": "this key reached its spend cap",
+    "required_micro": 500_000}
+
+
+def test_a_spend_only_app_still_learns_a_changed_price(client, auth, db, paired):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (409, {"detail": {
+    "code": "price_changed", "message": "the price is higher than the caller agreed to",
+    "price_micro": 750_000, "max_price_micro": 500_000, "available_micro": 1}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 409
+  assert refused.json()["detail"] == {
+    "code": "price_changed", "message": "the price is higher than the caller agreed to",
+    "price_micro": 750_000, "max_price_micro": 500_000}
+
+
 def test_a_credits_manager_still_sees_the_balance_on_its_charge(client, auth, db, paired):
   """An app that manages credits keeps the balance a charge answer carries."""
   app = _app(db, "manager", credits_manage=True)

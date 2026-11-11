@@ -78,12 +78,16 @@ def as_http(error: CreditsUnavailable) -> HTTPException:
 CHARGE_OUTCOME_UNKNOWN = "charge_outcome_unknown"
 
 # A charge answer from the service carries the owner's running balance
-# (``balance``/``balance_micro``), and a refusal can carry it too
-# (``available_micro`` on ``insufficient_credits``). A paying app learns only
-# its own charge, never the owner's balance, unless it also holds
-# ``credits_manage``.
+# (``balance``/``balance_micro``), and a refusal can carry the owner's own
+# figures too (``available_micro`` on ``insufficient_credits``, a key's spend
+# cap and what it has spent on ``key_spend_cap``). A paying app learns only
+# about its own charge, never the owner's figures, unless it also holds
+# ``credits_manage``. Both views are allowlists, so a field the service adds
+# later stays hidden until it is known to be safe.
 _PAYER_CHARGE_FIELDS = ("charge_id", "amount_micro", "amount", "replayed")
-_BALANCE_FIELDS = ("balance", "balance_micro", "available_micro")
+# What a refused payer may act on: what its call would cost and what it agreed
+# to pay (``price_changed``, ``insufficient_credits``).
+_PAYER_REFUSAL_FIELDS = ("required_micro", "price_micro", "max_price_micro")
 
 
 def payer_charge_view(answer: dict) -> dict:
@@ -93,10 +97,10 @@ def payer_charge_view(answer: dict) -> dict:
   return {name: answer[name] for name in _PAYER_CHARGE_FIELDS if name in answer}
 
 
-def without_balance(error: CreditsUnavailable) -> CreditsUnavailable:
-  """The same refusal with any figure that would reveal the owner's balance
-  removed from its fields."""
-  extra = {name: value for name, value in error.extra.items() if name not in _BALANCE_FIELDS}
+def payer_refusal_view(error: CreditsUnavailable) -> CreditsUnavailable:
+  """The same refusal keeping only the fields about the app's own call, so no
+  figure of the owner's (balance, spend cap, amount spent) reaches it."""
+  extra = {name: error.extra[name] for name in _PAYER_REFUSAL_FIELDS if name in error.extra}
   return CreditsUnavailable(error.message, status=error.status, code=error.code, extra=extra)
 
 

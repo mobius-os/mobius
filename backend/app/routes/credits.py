@@ -221,7 +221,7 @@ def charge_credits_for_call(
     # replay the same confirmed payment, so leave the confirmation in place.
     if error.code != credits_client.CHARGE_OUTCOME_UNKNOWN:
       credits_confirmations.forget(payment)
-    raise credits_client.as_http(error if manages else credits_client.without_balance(error)) from error
+    raise credits_client.as_http(error if manages else credits_client.payer_refusal_view(error)) from error
   return charged if manages else credits_client.payer_charge_view(charged)
 
 

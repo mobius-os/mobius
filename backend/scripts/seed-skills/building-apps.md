@@ -1193,8 +1193,9 @@ once; another answers 429 `too_many_payments_waiting`. The `*` in a
 
 A 200 answer tells your app only about its own charge — the
 `charge_id`, the amount charged, and `replayed` when the service replayed an
-earlier identical call — never the owner's balance, and a refusal omits balance
-figures too.
+earlier identical call — never the owner's balance. A refusal keeps only its
+`code`, `message` and the figures about your call (`required_micro`,
+`price_micro`, `max_price_micro`), never the owner's balance or spend cap.
 
 A marketplace that unlocks an item for a buyer on another Möbius checks the
 charge id that buyer's Möbius reports before unlocking:
