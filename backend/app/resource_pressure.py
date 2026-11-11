@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from app.memory_observability import cgroup_memory_snapshot
+from app.memory_observability import cgroup_memory_snapshot, cgroup_tasks_snapshot
 
 
 MIB = 1024 * 1024
@@ -44,6 +44,12 @@ _MEMORY_CONSTRAINED_SOME_AVG60 = 1.0
 _MEMORY_CONSTRAINED_FULL_AVG60 = 0.5
 _MEMORY_CRITICAL_SOME_AVG60 = 10.0
 _MEMORY_CRITICAL_FULL_AVG60 = 2.0
+
+# Every thread in the container counts against the cgroup task cap. A new agent
+# turn adds a CLI with dozens of threads plus its tools, and running turns keep
+# spawning, so admission stops short of the cap rather than at it.
+_TASKS_CONSTRAINED_RATIO = 0.70
+_TASKS_CRITICAL_RATIO = 0.85
 
 _STATE_RANK = {
   "unknown": -1,
@@ -89,6 +95,7 @@ def resource_facts(
   *,
   disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
   memory: dict[str, Any] | None = None,
+  processes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Read one cheap point-in-time capacity snapshot.
 
@@ -119,6 +126,7 @@ def resource_facts(
     "captured_at": captured_at,
     "disk": disk,
     "memory": _memory_facts(memory_snapshot),
+    "processes": cgroup_tasks_snapshot() if processes is None else processes,
   }
 
 
@@ -302,6 +310,44 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def _process_pressure(processes: dict[str, Any]) -> dict[str, Any]:
+  """Assess the cgroup task cap; uncapped or unreadable telemetry is unknown."""
+  current = processes.get("current_tasks")
+  limit = processes.get("limit_tasks")
+  if (
+    not processes.get("available")
+    or not isinstance(current, int)
+    or not isinstance(limit, int)
+    or limit <= 0
+  ):
+    return {
+      "state": "unknown",
+      "reason": {"resource": "processes", "code": "process_limit_unavailable"},
+    }
+  ratio = current / limit
+  state = (
+    "critical" if ratio >= _TASKS_CRITICAL_RATIO
+    else "constrained" if ratio >= _TASKS_CONSTRAINED_RATIO
+    else "normal"
+  )
+  result = {
+    "state": state,
+    "tasks_ratio": ratio,
+    "current_tasks": current,
+    "limit_tasks": limit,
+    "constrained_at_ratio": _TASKS_CONSTRAINED_RATIO,
+    "critical_at_ratio": _TASKS_CRITICAL_RATIO,
+    "reason": None,
+  }
+  if state != "normal":
+    result["reason"] = {
+      "resource": "processes",
+      "code": f"process_pressure_{state}",
+      "tasks_ratio": ratio,
+    }
+  return result
+
+
 def assess_memory_pressure(
   memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -323,7 +369,10 @@ def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:
   memory = _memory_pressure(
     facts.get("memory") if isinstance(facts.get("memory"), dict) else {},
   )
-  assessments = (disk, memory)
+  processes = _process_pressure(
+    facts.get("processes") if isinstance(facts.get("processes"), dict) else {},
+  )
+  assessments = (disk, memory, processes)
   known = [
     assessment["state"]
     for assessment in assessments
@@ -343,6 +392,7 @@ def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:
     "reasons": reasons,
     "disk": disk,
     "memory": memory,
+    "processes": processes,
   }
 
 
@@ -351,12 +401,14 @@ def resource_status(
   *,
   disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
   memory: dict[str, Any] | None = None,
+  processes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Return the stable facts/pressure seam future policy can consume."""
   facts = resource_facts(
     data_dir,
     disk_usage=disk_usage,
     memory=memory,
+    processes=processes,
   )
   return {
     "facts": facts,
