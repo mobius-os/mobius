@@ -251,7 +251,8 @@ its turn, and must not duplicate its approval, mutation, or monitor. Claims sett
 (`update_goal(complete: true, finished_claims: ["WORK_KEY"])`) and releases the
 rest; Stop, dismissal, or chat deletion releases them. Call `finish_agent_work` only to settle earlier or for a
 claim taken outside a Goal; transfer only for a concrete reason, naming the
-observed owner. Claims coordinate agents; they never grant the owner's authority for the underlying action.
+observed owner. When a claim result or notice shows only an excerpt of a claim's text, `read_work_claim` with the
+digest it names reads that text whole. Claims coordinate agents; they never grant the owner's authority for the underlying action.
 
 ---
 

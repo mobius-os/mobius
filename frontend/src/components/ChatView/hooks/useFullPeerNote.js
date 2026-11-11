@@ -1,25 +1,28 @@
-/* useFullPeerNote reads one truncated peer note whole, on request. */
+/* useFullPeerNote reads one truncated text whole, on request. */
 import { useState } from 'react'
 
-// The chats are tried in order: a Project view can read a note through either
-// end of it, and one end may since have been deleted (404).
-export default function useFullPeerNote(chatIds, messageId, read) {
+// `readers` are the ways to read it, tried in order: a Project view can read a
+// note through either end of it, and one end may since have been deleted
+// (404). Each resolves to the whole text. When every reader finds nothing the
+// text is "unavailable": retrying could never succeed.
+export default function useFullPeerNote(readers) {
   const [full, setFull] = useState(null)
   const [state, setState] = useState('idle')
-  const candidates = (Array.isArray(chatIds) ? chatIds : [chatIds]).filter(Boolean)
   const load = async () => {
     setState('loading')
-    for (const chatId of candidates) {
+    for (const read of readers) {
       try {
-        const note = await read(chatId, messageId)
-        setFull(note.body)
+        setFull(await read())
         setState('idle')
         return
       } catch (error) {
-        if (error?.status !== 404) break
+        if (error?.status !== 404) {
+          setState('error')
+          return
+        }
       }
     }
-    setState('error')
+    setState('unavailable')
   }
-  return { full, state, load, readable: Boolean(messageId && candidates.length) }
+  return { full, state, load, readable: readers.length > 0 && state !== 'unavailable' }
 }

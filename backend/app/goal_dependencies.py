@@ -96,7 +96,7 @@ def _shared_outcome(outcome: dict | None) -> dict | None:
 
 
 def _notice_outcome(row):
-  """The shared outcome with a claim's texts within their input caps.
+  """The shared outcome with a claim's texts within their display limits.
 
   The excerpt is deterministic, so startup orphan checks still match the
   notice text; the stored outcome and the claim keep the whole texts.
@@ -105,9 +105,9 @@ def _notice_outcome(row):
   if outcome is None or row.target_kind != "claim_acquisition":
     return outcome
   from app.agent_work_claims import claim_text
-  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
-  return {**outcome, **{key: claim_text(outcome[key], limit) for key, limit in (
-    ("summary", CLAIM_SUMMARY_CHARS), ("outcome", CLAIM_TEXT_CHARS)) if key in outcome}}
+  work_key = outcome.get("work_key")
+  return {**outcome, **{field: claim_text(outcome[field], work_key, field)
+                        for field in ("summary", "outcome") if field in outcome}}
 
 
 def dependency_notice(row):
@@ -221,7 +221,7 @@ def _retain_source_context(db, rows):
       from app.decision_cards import saved_decision
       if saved_decision(db, row.target_chat_id, row.target_question_id) is None:
         continue
-    summary = dependency_summary(db, row)
+    summary = dependency_summary(db, row, bounded=False)
     db.query(models.GoalDependency).filter(
       models.GoalDependency.id == row.id, models.GoalDependency.resolved_at.is_(None),
       models.GoalDependency.result_disposition.is_(None),
@@ -284,12 +284,45 @@ def goal_dependency_handoffs(db, goal, *, include_foreign_context=True):
       "id", "target_kind", "condition", "source_chat_id", "source_chat_title",
       "source_question_id", "source_deleted", "outcome")})
     result[-1].update(automatic=automatic, delivery_pending=row.resolved_at is not None,
-      resume_blocker=blocker)
+      resume_blocker=blocker, truncated=bool(context.get("truncated")))
   return result
 
 
-def dependency_summary(db, row, *, include_foreign_context=True):
-  """Safe source identity shared by settled history and transcript receipts."""
+def _bounded_claim_texts(summary):
+  """Owner and embed views show a claim's texts within the claim display
+  limits, marked truncated; dependency_full_texts reads them whole."""
+  from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS
+  truncated = False
+  condition = summary["condition"]
+  if isinstance(condition, str) and len(condition) > CLAIM_SUMMARY_CHARS:
+    summary["condition"], truncated = condition[:CLAIM_SUMMARY_CHARS], True
+  outcome = summary["outcome"]
+  if isinstance(outcome, dict):
+    bounded = dict(outcome)
+    for key, limit in (("summary", CLAIM_SUMMARY_CHARS), ("outcome", CLAIM_TEXT_CHARS)):
+      if isinstance(bounded.get(key), str) and len(bounded[key]) > limit:
+        bounded[key], truncated = bounded[key][:limit], True
+    summary["outcome"] = bounded
+  if truncated:
+    summary["truncated"] = True
+  return summary
+
+
+def dependency_full_texts(db, row, *, include_foreign_context=True):
+  """The whole condition and outcome text a bounded view showed in part."""
+  summary = dependency_summary(db, row, include_foreign_context=include_foreign_context,
+                               bounded=False)
+  outcome = summary["outcome"] if isinstance(summary["outcome"], dict) else {}
+  return {"id": row.id, "condition": summary["condition"],
+          "outcome": outcome.get("outcome") if isinstance(outcome.get("outcome"), str) else None}
+
+
+def dependency_summary(db, row, *, include_foreign_context=True, bounded=True):
+  """Safe source identity shared by settled history and transcript receipts.
+
+  ``bounded`` (every view) shows a claim's texts within the claim display
+  limits; the whole texts stay on the dependency and the claim.
+  """
   outcome = row.outcome_json or {}
   # Exact-chat embeds may display facts already saved on their subscription,
   # never enrich them from another chat or export its navigation identifiers.
@@ -312,13 +345,16 @@ def dependency_summary(db, row, *, include_foreign_context=True):
   if not include_foreign_context and safe_outcome is not None:
     safe_outcome = {key: value for key, value in outcome.items()
       if key in {"kind", "summary", "answers", "outcome"}}
-  return {"id": row.id, "target_kind": row.target_kind,
+  summary = {"id": row.id, "target_kind": row.target_kind,
     "condition": condition, "source_chat_id": source_id,
     "source_question_id": row.target_question_id if include_foreign_context else None,
     "source_chat_title": title, "source_deleted": deleted,
     "automatic": False, "delivery_pending": row.result_disposition is None,
     "outcome": safe_outcome, "disposition": row.result_disposition,
     "result_disposition": row.result_disposition, "received_run_id": row.received_run_id}
+  if bounded and row.target_kind == "claim_acquisition":
+    return _bounded_claim_texts(summary)
+  return summary
 
 
 def goal_dependency_history(db, goal, *, include_foreign_context=True):
