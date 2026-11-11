@@ -3,11 +3,13 @@ from app import chat_writer
 from app.chat_writer import create_chat
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
+from app import contribution_review_merge_actions as merge_actions
 from app import contribution_review_runs as domain, contribution_review_public as public, models
 from app.contribution_review_effects import DispatchResult
 from app.contribution_errors import ContributionSubmitError
@@ -272,6 +274,24 @@ def test_merge_refused_unless_someone_else_approved_this_exact_head(setup, monke
   monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged without an approval of this head"))
   item = report(setup)["run"]["items"][0]
   assert (item["state"], item["summary"]) == ("needs_you", reason)
+
+
+def test_an_approval_withdrawn_while_the_merge_waited_for_its_locks_is_never_merged_on(setup, monkeypatch):
+  """The merge guard was answered before the waits; it is asked again on GitHub's answer right before dispatch."""
+  db, row, _ = setup
+  real_transaction = merge_actions._github_connection_transaction
+
+  @asynccontextmanager
+  async def approval_dismissed_meanwhile():
+    async with real_transaction():
+      monkeypatch.setattr(domain, "pull_checks", lambda *args: with_reviews([]))
+      yield
+
+  monkeypatch.setattr(merge_actions, "_github_connection_transaction", approval_dismissed_meanwhile)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged after the approval was dismissed"))
+  item = report(setup)["run"]["items"][0]
+  assert (item["state"], item["summary"]) == ("needs_you", "Nobody but the author has approved it yet.")
+  assert db.get(models.ContributionReviewRun, row.id).outcomes_json[domain.key(ITEM)]["merge_attempted"] is False
 
 
 def test_merge_refused_when_only_approval_is_on_an_older_commit(setup, monkeypatch):
@@ -634,6 +654,16 @@ def test_peer_claim_result_only_promises_goal_follow_when_registered(setup, monk
   result = domain.arm_merge(db, row, TARGET, {"head_sha": SHA}, principal)
   assert result["goal_follow_status"] == follow_status
   assert "Your Goal follows this claim" in result["summary"]
+
+
+def test_an_unconfirmed_one_tap_merge_of_this_head_stops_a_review_merge_from_arming(setup):
+  db, row, principal = setup
+  db.add(models.DirectMergeAttempt(owner_id=row.owner_id, work_key=domain.merge_work_key(TARGET),
+                                   state="unknown", armed_at=domain.utc_now_iso()))
+  db.commit()
+  result = domain.arm_merge(db, row, TARGET, {"head_sha": SHA}, principal)
+  assert result["state"] == "needs_you" and "one-tap Merge" in result["summary"]
+  assert not domain.merge_attempted(row.outcomes_json.get(domain.key(TARGET), {}))
 
 
 @pytest.mark.parametrize("conflict", [

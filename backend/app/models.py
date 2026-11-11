@@ -2374,6 +2374,25 @@ class ContributionReviewRun(Base):
   )
 
 
+class DirectMergeAttempt(Base):
+  """The owner's one-tap merge of one exact PR head, saved before its write is sent.
+
+  The unique owner/work key is the fence: the same key a review run's merge
+  uses, so one tap and one review grant can never both send a write for the
+  same version. A row stays ``attempting`` or ``unknown`` until GitHub's answer
+  is known; only a read-only look, or the one-hour dispatch window, frees it.
+
+  This new table is created by normal startup metadata.create_all.
+  """
+  __tablename__ = "contribution_direct_merge_attempts"
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  work_key = Column(String(256), nullable=False)
+  state = Column(String(16), nullable=False)  # attempting, unknown, merged or queued
+  armed_at = Column(String(32), nullable=False)  # UTC ISO, the dispatch window's start
+  __table_args__ = (UniqueConstraint("owner_id", "work_key", name="uq_direct_merge_attempt_key"),)
+
+
 class ProjectSourceCopy(Base):
   """An immutable reviewed source package, separate from live membership."""
   __tablename__ = 'project_source_copies'

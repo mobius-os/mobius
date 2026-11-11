@@ -115,6 +115,17 @@ def test_recovery_scans_later_page_and_keeps_legacy_uncertainty():
   assert legacy['state'] == 'unknown'
 
 
+def test_find_review_still_matches_a_review_dismissed_after_it_was_sent():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  sent = {'id': 5, 'user': {'id': 42}, 'commit_id': ITEM['head_sha'], 'state': 'DISMISSED', 'body': receipt['marker']}
+  gh = lambda *a: SimpleNamespace(stdout=json.dumps([sent]))
+  for event in ('APPROVE', 'REQUEST_CHANGES'):
+    review, complete = public.find_review(gh, None, ITEM, receipt, '42', event)
+    assert (review['id'], review['state'], complete) == (5, 'DISMISSED', True)
+  other = {**sent, 'user': {'id': 99}}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout=json.dumps([other])), None, ITEM, receipt, '42', 'APPROVE') == (None, True)
+
+
 def test_find_review_proves_absence_only_when_the_whole_list_was_read():
   receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
   assert public.find_review(lambda *a: SimpleNamespace(stdout='[]'), None, ITEM, receipt, '42') == (None, True)
