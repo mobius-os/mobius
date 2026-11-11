@@ -8,11 +8,7 @@ import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 import AppBlock from './AppBlock.jsx'
 import { appBlockFromToken } from './appBlock.js'
-import {
-  tableScrollbarThumb,
-  tableScrollLeftForDrag,
-  tableScrollLeftForTrackTap,
-} from './tableScrollbar.js'
+import { followTableScrollbarPointer, tableScrollbarThumb } from './tableScrollbar.js'
 
 /**
  * Block-level markdown components.
@@ -144,35 +140,13 @@ function useTableScrollbar() {
   useEffect(sync, [overflowing])
   useEffect(() => () => dragRef.current?.abort(), [])
 
-  // A tap on the track outside the thumb jumps there; from then on the table
-  // follows the pointer by the same proportion as the thumb.
   const onPointerDown = (event) => {
     const scroller = scrollRef.current
     const thumb = thumbRef.current
     if (!scroller || !thumb || event.button !== 0) return
     event.preventDefault()
-    const track = event.currentTarget
-    const geometry = {
-      clientWidth: scroller.clientWidth,
-      scrollWidth: scroller.scrollWidth,
-      trackWidth: track.clientWidth,
-    }
-    const thumbBox = thumb.getBoundingClientRect()
-    if (event.clientX < thumbBox.left || event.clientX > thumbBox.right) {
-      const offsetX = event.clientX - track.getBoundingClientRect().left
-      scroller.scrollLeft = tableScrollLeftForTrackTap(offsetX, geometry)
-    }
     dragRef.current?.abort()
-    const drag = new AbortController()
-    dragRef.current = drag
-    track.setPointerCapture(event.pointerId)
-    const startX = event.clientX
-    const startScrollLeft = scroller.scrollLeft
-    track.addEventListener('pointermove', (move) => {
-      scroller.scrollLeft = tableScrollLeftForDrag(startScrollLeft, move.clientX - startX, geometry)
-    }, { signal: drag.signal })
-    // Capture ends on pointerup and pointercancel alike.
-    track.addEventListener('lostpointercapture', () => drag.abort(), { signal: drag.signal })
+    dragRef.current = followTableScrollbarPointer(event, scroller, thumb)
   }
 
   return { scrollRef, thumbRef, overflowing, sync, onPointerDown }

@@ -147,14 +147,17 @@
 }
 
 /* The drawn bar under a table that cannot fit (see useTableScrollbar). The
-   padded track is the touch target; the thumb is the visible part. */
+   padded track is the touch target; the thumb is the visible part. A vertical
+   swipe that starts on the bar still scrolls the chat (pan-y); the bar takes
+   horizontal drags. */
 .md-table-scrollbar {
   padding: 6px 0 4px;
-  cursor: grab;
-  touch-action: none;
+  cursor: pointer;
+  touch-action: pan-y;
 }
 
 .md-table-scrollbar__thumb {
+  cursor: grab;
   height: 6px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--muted) 45%, transparent);

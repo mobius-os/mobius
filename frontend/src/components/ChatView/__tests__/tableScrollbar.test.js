@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  followTableScrollbarPointer,
   tableScrollbarThumb,
   tableScrollLeftForDrag,
   tableScrollLeftForTrackTap,
@@ -66,4 +67,51 @@ test('a track tap centres the thumb there, clamped to the table edges', () => {
   assert.equal(tableScrollLeftForTrackTap(5, wide), 0)
   assert.equal(tableScrollLeftForTrackTap(299, wide), 600)
   assert.equal(tableScrollLeftForTrackTap(150, { ...wide, trackWidth: 0 }), 0)
+})
+
+/** A press at `clientX` on a bar under the `wide` table, which starts at the
+ * table's left edge; the thumb covers track pixels 0-100. */
+function pressBar(clientX, pointerType) {
+  const scroller = { ...wide, scrollLeft: 0 }
+  const track = Object.assign(new EventTarget(), {
+    clientWidth: wide.trackWidth,
+    getBoundingClientRect: () => ({ left: 0 }),
+    setPointerCapture() {},
+  })
+  const thumb = { getBoundingClientRect: () => ({ left: 0, right: 100 }) }
+  followTableScrollbarPointer({ currentTarget: track, clientX, pointerId: 1, pointerType }, scroller, thumb)
+  const send = (type, x = clientX) => track.dispatchEvent(Object.assign(new Event(type), { clientX: x }))
+  return { scroller, send }
+}
+
+test('a swipe from the bar that the browser takes to scroll the chat leaves the table where it was', () => {
+  for (const at of [50, 250]) {
+    const { scroller, send } = pressBar(at, 'touch')
+    send('pointermove', at + 4)
+    send('pointercancel')
+    send('lostpointercapture')
+    assert.equal(scroller.scrollLeft, 0)
+    send('pointermove', at + 60)
+    assert.equal(scroller.scrollLeft, 0)
+  }
+})
+
+test('a touch on the track jumps when it lifts, and a mouse press jumps at once', () => {
+  const touch = pressBar(150, 'touch')
+  assert.equal(touch.scroller.scrollLeft, 0)
+  touch.send('pointerup')
+  assert.equal(touch.scroller.scrollLeft, 300)
+
+  const mouse = pressBar(150, 'mouse')
+  assert.equal(mouse.scroller.scrollLeft, 300)
+})
+
+test('a sideways touch drag on the thumb moves the table until it lifts', () => {
+  const { scroller, send } = pressBar(50, 'touch')
+  send('pointermove', 90)
+  assert.equal(scroller.scrollLeft, 120)
+  send('pointerup', 90)
+  send('lostpointercapture')
+  send('pointermove', 150)
+  assert.equal(scroller.scrollLeft, 120)
 })
