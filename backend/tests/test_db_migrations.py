@@ -1886,6 +1886,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0099_app_chat_scope_starts",
     "0100_chat_branch_origin",
     "0101_claim_revocation_outbox",
+    "0102_work_claim_text",
+    "0103_shared_peer_note_bodies",
   ]
   assert second == first
 
@@ -4827,3 +4829,54 @@ def test_retired_write_journal_tables_are_dropped_idempotently(tmp_path):
   tables = set(inspect(eng).get_table_names())
   assert not {"agent_write_streams", "agent_write_intents"} & tables
   assert {"chats", "chat_runs"} <= tables
+
+
+def test_work_claim_text_widens_postgres_columns_and_skips_sqlite(monkeypatch):
+  import sqlalchemy
+
+  statements = []
+
+  class RecordingEngine:
+    dialect = SimpleNamespace(name="postgresql")
+
+    def begin(self):
+      return self
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def execute(self, statement):
+      statements.append(str(statement))
+
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda _eng: SimpleNamespace(
+    get_table_names=lambda: ["agent_work_claims"]))
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == [
+    f"ALTER TABLE agent_work_claims ALTER COLUMN {column} TYPE TEXT"
+    for column in ("summary", "takeover_reason", "outcome")
+  ]
+  statements.clear()
+  RecordingEngine.dialect = SimpleNamespace(name="sqlite")
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == []
+
+
+def test_shared_peer_note_bodies_migration_is_additive_and_idempotent(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-bodies.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE agent_coordination_messages (id VARCHAR(64) PRIMARY KEY, body TEXT NOT NULL)"
+    ))
+    conn.execute(text("INSERT INTO agent_coordination_messages VALUES ('old', 'Old body')"))
+  migrations._add_shared_peer_note_bodies(eng)
+  migrations._add_shared_peer_note_bodies(eng)
+  inspector = inspect(eng)
+  assert "agent_coordination_note_bodies" in inspector.get_table_names()
+  assert "body_id" in {c["name"] for c in inspector.get_columns("agent_coordination_messages")}
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT body, body_id FROM agent_coordination_messages"
+    )).one() == ("Old body", None)

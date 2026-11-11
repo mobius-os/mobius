@@ -7068,6 +7068,53 @@ def _add_claim_revocation_outbox(eng) -> None:
     ))
 
 
+def _widen_work_claim_text(eng) -> None:
+  """Let work-claim summaries, takeover reasons and outcomes hold any length.
+
+  SQLite does not enforce VARCHAR lengths, so only PostgreSQL changes. TEXT
+  still reads and writes as before for a rolled-back release.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  if eng.dialect.name != "postgresql":
+    return
+  if "agent_work_claims" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    for column in ("summary", "takeover_reason", "outcome"):
+      conn.execute(text(
+        f"ALTER TABLE agent_work_claims ALTER COLUMN {column} TYPE TEXT"
+      ))
+
+
+def _add_shared_peer_note_bodies(eng) -> None:
+  """Let one peer-note body be stored once and referenced by each recipient.
+
+  Expand only: a new table and a nullable reference, so a release that knows
+  neither reads every row's own body as before.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "agent_coordination_messages" not in tables:
+    return
+  columns = {c["name"] for c in inspector.get_columns("agent_coordination_messages")}
+  with eng.begin() as conn:
+    if "agent_coordination_note_bodies" not in tables:
+      conn.execute(text(
+        "CREATE TABLE agent_coordination_note_bodies ("
+        "id VARCHAR(64) NOT NULL PRIMARY KEY, body TEXT NOT NULL, "
+        "created_at TIMESTAMP NOT NULL)"
+      ))
+    if "body_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE agent_coordination_messages ADD COLUMN body_id VARCHAR(64)"
+      ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_agent_coordination_messages_body_id "
+      "ON agent_coordination_messages (body_id)"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7191,6 +7238,8 @@ _SCHEMA_MIGRATIONS = (
   ("0099_app_chat_scope_starts", _add_app_chat_scope_starts),
   ("0100_chat_branch_origin", _add_chat_branch_origin),
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
+  ("0102_work_claim_text", _widen_work_claim_text),
+  ("0103_shared_peer_note_bodies", _add_shared_peer_note_bodies),
 )
 
 

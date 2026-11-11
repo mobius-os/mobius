@@ -439,7 +439,8 @@ def test_a_long_compile_refusal_survives_the_http_error_body_read(monkeypatch):
   text = str(caught.value)
   assert text.startswith("Refused (422): Compilation failed.\n[UNRESOLVED_IMPORT] missing-0")
   assert not text.lstrip("Refused (422): ").startswith("{")
-  assert len(text) < 5200
+  # The server caps the diagnostic; the client shows what it read whole.
+  assert text.endswith(stderr)
 
 
 def test_only_a_compile_refusal_appends_stderr():
@@ -986,13 +987,29 @@ def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_
 
   with pytest.raises(ValueError) as target:
     control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
-  assert "list of at most 24 agent/chat ids" in str(target.value)
+  assert "list of agent/chat ids" in str(target.value)
   assert "secret-peer" not in str(target.value)
 
   send = control._TOOL_DEFINITIONS["send_agent_message"]
   followup = control._TOOL_DEFINITIONS["message_agent"]
   assert "finished helper's follow-up" in send["description"]
   assert "live helper" in followup["description"]
+
+
+def test_agent_prose_fields_carry_no_guessed_length_budgets():
+  control = _control_module()
+  spawn = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]["properties"]
+  update = control._TOOL_DEFINITIONS["update_goal"]["inputSchema"]["properties"]
+  task = update["tasks"]["items"]["properties"]
+  assert "maxLength" not in spawn["task"]
+  assert "maxItems" not in update["tasks"]
+  assert "maxItems" not in update["finished_claims"]
+  for name in ("next_action", "cancel", "defer"):
+    assert "maxLength" not in update[name]
+  for name in ("reason", "efforts", "unmet_outcome"):
+    assert "maxLength" not in update["cannot_complete"]["properties"][name]
+  for name in ("title", "completion_condition", "note", "result"):
+    assert "maxLength" not in task[name]
 
 
 def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
@@ -1450,8 +1467,8 @@ def test_screenshot_in_a_read_only_sandbox_says_why_it_cannot_capture(monkeypatc
 
 
 @pytest.mark.parametrize(("body", "reason"), [
-  ('{"detail":{"code":"invalid_plan","message":"note for a must be at most 1000 characters","task_id":"a"}}',
-   "note for a must be at most 1000 characters"),
+  ('{"detail":{"code":"invalid_plan","message":"depends_on for a must be a list of ids","task_id":"a"}}',
+   "depends_on for a must be a list of ids"),
   ('{"detail":"A recipient is not an addressable Möbius peer."}',
    "A recipient is not an addressable Möbius peer."),
   ('{"detail":[{"loc":["body","tasks",0,"id"],"msg":"Field required"}]}',
@@ -1462,6 +1479,184 @@ def test_refusals_read_as_their_reason_not_the_wire_envelope(body, reason):
   control = _control_module()
   assert control._refusal_message(body) == reason
   assert "{" not in control._refusal_message(body) or body.startswith("<")
+
+
+def test_a_non_json_error_page_is_shown_as_a_marked_head():
+  control = _control_module()
+  page = "<html>" + "gateway " * 5000 + "</html>"
+  rendered = control._refusal_message(page)
+  assert rendered.startswith("<html>gateway")
+  assert rendered.endswith(f"[excerpt of a {len(page)}-character non-JSON error body]")
+  assert len(rendered) < 2100
+
+
+def test_a_refusal_cut_at_the_transport_read_is_labelled_truncated(monkeypatch):
+  import io
+  import urllib.error
+
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://backend.test")
+  monkeypatch.setenv("AGENT_TOKEN", "t")
+  body = json.dumps({"detail": "R" * 200_000}).encode()
+
+  def refuse(request, timeout=None):
+    raise urllib.error.HTTPError(request.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
+
+  monkeypatch.setattr(control, "urlopen", refuse)
+  with pytest.raises(RuntimeError) as caught:
+    control._agent_api_json("POST", "/api/x")
+  assert "truncated at the 65536-byte read" in str(caught.value)
+  assert "non-JSON" not in str(caught.value)
+
+
+def _next_page(footer):
+  tail = footer.rsplit("offset=", 1)[1].rstrip(")]")
+  offset, version = tail.split(", version=")
+  return {"offset": int(offset), "version": version}
+
+
+def _read_all_pages(control, name, arguments):
+  pieces, more = [], {}
+  while True:
+    text = control._call_tool({"name": name, "arguments": {**arguments, **more}})["content"][0]["text"]
+    # The whole result, footer included, fits the smallest provider's limit.
+    assert len(text.encode("utf-8", "surrogatepass")) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES
+    if not text.endswith("]") or "[Result characters" not in text.rsplit("\n", 1)[-1]:
+      return pieces + [text]
+    text, footer = text.rsplit("\n", 1)
+    pieces.append(text)
+    if "end of result" in footer:
+      return pieces
+    more = _next_page(footer)
+
+
+def test_pages_of_a_plan_that_changed_in_between_are_refused(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": "x" * 200} for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: payload)
+  first = control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"]
+  page = _next_page(first.rsplit("\n", 1)[1])
+  payload["goal"]["revision"] = 4
+  tasks[0]["title"] = "changed"
+  refused = control._call_tool({"name": "update_goal", "arguments": page})
+  assert refused["isError"]
+  assert "start again from offset 0" in refused["content"][0]["text"]
+
+
+def test_a_long_plan_report_reads_in_pages_and_reassembles_exactly(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  tasks = [{"id": f"t{index:04d}", "status": "pending", "title": f"Task {index} " + "x" * 200}
+           for index in range(800)]
+  payload = {"goal": {"status": "open", "revision": 3, "objective": "Ship"},
+             "plan": {"tasks": tasks, "summary": {"total": 800}}}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or payload)
+  full = control._goal_report(payload, full=True)
+  assert len(full) > 2 * control._CONTEXT_BUDGET.READ_PAGE_BYTES
+
+  assert "".join(_read_all_pages(control, "update_goal", {})) == full
+  # Every page is the plain read: no change is ever sent or re-run for a page.
+  assert all(body == {} for body in sent)
+  refused = control._call_tool({"name": "update_goal",
+                                "arguments": {"offset": 5, "next_action": "x"}})
+  assert refused["isError"] and "pass it alone" in refused["content"][0]["text"]
+
+  small = {"goal": {"status": "open", "revision": 1, "objective": "Ship"},
+           "plan": {"tasks": tasks[:3], "summary": {"total": 3}}}
+  monkeypatch.setattr(control, "_agent_api_call", lambda *args, **kwargs: small)
+  assert control._call_tool({"name": "update_goal", "arguments": {}})["content"][0]["text"] == (
+    control._goal_report(small, full=True))
+
+
+def test_read_goal_pages_a_long_task_view_and_a_long_field(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  view = {"role": "coordinator", "helpers": [], "goal": {
+    "focus": "parent", "children": [{"id": f"c{index}", "title": "T" * 300} for index in range(400)]}}
+  note = "".join(f"{index:07d}" for index in range(30_000))
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "parent", "text": note} if "field=" in path else view))
+
+  joined = "".join(_read_all_pages(control, "read_goal", {"task": "parent"}))
+  assert json.loads(joined) == view
+  # An explicit null is not repeated into the next-page call.
+  first = control._call_tool({"name": "read_goal", "arguments": {"task": "parent", "field": None}})
+  footer = first["content"][0]["text"].rsplit("\n", 1)[1]
+  assert "None" not in footer and "task=parent" in footer
+  assert "".join(_read_all_pages(control, "read_goal", {"task": "parent", "field": "note"})) == note
+
+
+def test_a_change_reply_bounds_what_it_echoes():
+  control = _control_module()
+  running = [f"t{index:04d}" for index in range(3000)]
+  payload = {"goal": {"status": "cannot_complete", "revision": 9, "result": "R" * 100_000},
+             "plan": {"tasks": [], "summary": {"total": 3000, "running": running}}}
+  reply = control._goal_report(payload, full=False)
+  assert len(reply.encode()) < control._CONTEXT_BUDGET.READ_PAGE_BYTES
+  assert "update_goal with no arguments shows it whole" in reply
+  payload["goal"]["status"] = "open"
+  reply = control._goal_report(payload, full=False)
+  assert "and 2950 more (update_goal with no arguments lists them all)" in reply
+  # The paged full report still lists everything.
+  assert all(task in control._goal_report(payload, full=True) for task in running[-3:])
+
+
+def test_read_pages_are_sized_in_bytes_so_cjk_text_fits_one_result(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  note = "目標達成のための詳細な記録。" * 6_000  # 3 bytes per character
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note}))
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note
+  assert len(pages) > 1
+  assert all(len(page.encode()) <= control._CONTEXT_BUDGET.READ_PAGE_BYTES for page in pages)
+
+
+def test_the_pager_carries_a_lone_surrogate_through(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  # Pages are sized and fingerprinted as surrogate-passing UTF-8, like the brief.
+  note = "half \ud800 pair"
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "note", "task": "a", "text": note * 20_000} if "field=" in path
+    else {"role": "coordinator", "helpers": [], "goal": {"focus": "a", "note": note}}))
+  view = control._call_tool({"name": "read_goal", "arguments": {"task": "a"}})
+  assert not view.get("isError"), view
+  pages = _read_all_pages(control, "read_goal", {"task": "a", "field": "note"})
+  assert "".join(pages) == note * 20_000
+
+
+def test_read_goal_only_adds_the_no_goal_fallback_to_whole_views(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    {"field": "objective", "task": None, "text": "Ship it"} if "field=" in path
+    else {"role": "coordinator", "goal": None, "helpers": []}))
+  assert control._call_read_goal({"field": "objective"}) == "Ship it"
+  # field=null is the whole view, never a missing-text failure.
+  assert control._call_read_goal({"task": "a", "field": None})["goal"] == "This chat has no Goal."
+  assert control._call_read_goal({"task": "a"})["goal"] == "This chat has no Goal."
+
+
+def test_a_refusal_reason_is_shown_whole():
+  control = _control_module()
+  reason = "R" * 5000
+  assert control._refusal_message(json.dumps({"detail": reason})) == reason
+  issues = [{"loc": ["body", f"field{index}"], "msg": "Field required"} for index in range(8)]
+  rendered = control._refusal_message(json.dumps({"detail": issues}))
+  assert rendered.count("Field required") == 8
+  assert "field7: Field required" in rendered
 
 
 def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):
@@ -1608,3 +1803,155 @@ def test_helper_checklist_edits_use_the_calling_turn_identity_on_a_shared_host(
   assert sent == [('http://api.test/api/chats/turn-chat/goal/tasks', 'Bearer turn-token')]
   assert os.environ['CHAT_ID'] == 'host-chat'
 
+
+
+def test_read_agent_message_returns_a_note_plain_and_pages_a_long_one(monkeypatch):
+  """The backend serves one byte page at a time; the tool names the next one."""
+  import re
+  from urllib.parse import parse_qs, urlparse
+
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  note = "".join(f"{index:07d}\n" for index in range(5_000))
+  paths = []
+
+  def backend(method, path):
+    paths.append((method, path))
+    offset = int(parse_qs(urlparse(path).query).get("offset", ["0"])[0])
+    end = min(offset + 10_000, len(note))
+    return {"id": "note/1", "kind": "finding", "body": note[offset:end], "offset": offset,
+            "total_bytes": len(note), "next_offset": end if end < len(note) else None}
+
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  pieces, arguments = [], {"message_id": "note/1"}
+  while True:
+    text = control._call_tool({"name": "read_agent_message", "arguments": arguments})["content"][0]["text"]
+    body, footer = text.rsplit("\n", 1)
+    pieces.append(body)
+    found = re.search(r"next page: read_agent_message\(message_id=note/1, offset=(\d+)\)", footer)
+    if not found:
+      assert "end of note" in footer
+      break
+    arguments = {"message_id": "note/1", "offset": int(found.group(1))}
+  assert "".join(pieces) == note
+  assert paths[0] == ("GET", "/api/agent-coordination/messages/note%2F1")
+  assert paths[1] == ("GET", "/api/agent-coordination/messages/note%2F1?offset=10000")
+
+  monkeypatch.setattr(control, "_agent_api_call", lambda *_args: {
+    "id": "n", "body": "Short", "offset": 0, "total_bytes": 5, "next_offset": None})
+  assert control._call_tool({"name": "read_agent_message",
+                             "arguments": {"message_id": "n"}})["content"][0]["text"] == "Short"
+  refused = control._call_tool({"name": "read_agent_message", "arguments": {"id": "n"}})
+  assert refused["isError"] and "needs message_id" in refused["content"][0]["text"]
+  assert platform_tools.READ_MESSAGE_TOOL_NAME in platform_tools.PEER_TOOL_NAMES
+
+
+def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
+  control = _control_module()
+  sent = []
+  recipients = [f"peer-{index:03d}" for index in range(120)]
+
+  def backend(method, path, body=None):
+    sent.append(body)
+    return {"messages": [], "recipient_count": 120, "recipient_names": recipients,
+            "interrupt_requested": recipients[:100], "queued": [], "unreachable": recipients[100:],
+            "unreachable_reasons": {chat_id: "the chat is deleted" for chat_id in recipients[100:]}}
+
+  monkeypatch.setattr(control, "_agent_api_call", backend)
+  result = control._call_send_agent_message({"recipients": recipients, "body": "Note"})
+  shown = control._CONTEXT_BUDGET.REPLY_IDS
+  assert result["recipient_names"] == recipients[:shown] and result["recipient_names_more"] == 70
+  assert len(result["interrupt_requested"]) == shown and result["interrupt_requested_more"] == 50
+  assert result["unreachable"] == recipients[100:] and "unreachable_more" not in result
+  assert set(result["unreachable_reasons"]) == set(recipients[100:])
+  assert sent[0]["send_id"]
+
+  def times_out(method, path, body=None):
+    sent.append(body)
+    raise control.TransportFailure("coordination request failed: request timed out")
+
+  monkeypatch.setattr(control, "_agent_api_call", times_out)
+  with pytest.raises(RuntimeError) as timed_out:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  send_id = sent[-1]["send_id"]
+  assert f"send_id={send_id}" in str(timed_out.value)
+  assert "may already be stored" in str(timed_out.value)
+  with pytest.raises(RuntimeError):
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note", "send_id": send_id})
+  assert sent[-1]["send_id"] == send_id
+
+  def resets(method, path, body=None):
+    sent.append(body)
+    raise control.TransportFailure("coordination request failed: Connection reset by peer")
+
+  monkeypatch.setattr(control, "_agent_api_call", resets)
+  with pytest.raises(RuntimeError) as reset:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert f"send_id={sent[-1]['send_id']}" in str(reset.value)
+
+  # A body cut short after the server answered is a transport failure too.
+  import http.client
+
+  class CutShort:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def read(self):
+      raise http.client.IncompleteRead(b"{", 10)
+
+  monkeypatch.setattr(control, "urlopen", lambda *_args, **_kwargs: CutShort())
+  monkeypatch.setenv("API_BASE_URL", "http://backend.invalid")
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  with pytest.raises(control.TransportFailure):
+    control._agent_api_json("POST", "/api/agent-coordination/messages", {})
+
+  def refuses(method, path, body=None):
+    raise RuntimeError("Refused (422): body must not be blank")
+
+  monkeypatch.setattr(control, "_agent_api_call", refuses)
+  with pytest.raises(RuntimeError) as refused:
+    control._call_send_agent_message({"recipients": ["peer"], "body": "Note"})
+  assert "send_id=" not in str(refused.value)
+
+
+def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):
+  control = _control_module()
+  send = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
+  claim = control._TOOL_DEFINITIONS["claim_agent_work"]["inputSchema"]["properties"]
+  finish = control._TOOL_DEFINITIONS["finish_agent_work"]["inputSchema"]["properties"]
+  assert "maxLength" not in send["body"] and "maxItems" not in send["recipients"]
+  assert "maxLength" not in claim["summary"] and "maxLength" not in finish["outcome"]
+  assert claim["takeover_reason"] == {"type": "string", "minLength": 10}
+  sent = []
+  monkeypatch.setattr(control, "_agent_api_call",
+                      lambda method, path, body=None: sent.append(body) or {"messages": []})
+  recipients = [f"peer-{index}" for index in range(100)]
+  control._call_send_agent_message({"recipients": recipients, "body": "x" * 50_000})
+  assert sent[0]["recipients"] == recipients and len(sent[0]["body"]) == 50_000
+
+
+def test_read_work_claim_pages_one_claim_text(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  outcome = "".join(f"{index:07d}\n" for index in range(20_000))
+  paths = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path: (
+    paths.append(path) or {"text": outcome}))
+  arguments = {"work_key": "pr:1#merge", "field": "outcome"}
+  assert "".join(_read_all_pages(control, "read_work_claim", arguments)) == outcome
+  assert set(paths) == {"/api/agent-coordination/work-claims/text?work_key=pr%3A1%23merge&field=outcome"}
+  refused = control._call_tool({"name": "read_work_claim", "arguments": {"work_key": "pr:1"}})
+  assert refused["isError"] and "needs work_key and field" in refused["content"][0]["text"]
+  digested = {**arguments, "digest": "abc123def456"}
+  paths.clear()
+  control._call_tool({"name": "read_work_claim", "arguments": digested})
+  assert paths[0].endswith("&field=outcome&digest=abc123def456")
+  for bad in ({**arguments, "field": 3}, {**arguments, "digest": ""}):
+    refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
+    assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
+  assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES
