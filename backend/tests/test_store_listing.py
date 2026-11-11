@@ -1646,33 +1646,80 @@ def _ready_files(**manifest_fields) -> list[dict]:
   ]
 
 
+@pytest.mark.parametrize("listed", [False, True])
 @pytest.mark.parametrize("declared", [None, "", "Proprietary", "MIT AND CC-BY-3.0-IGO"])
-def test_publishing_requires_an_offered_license(declared):
+def test_publishing_requires_an_offered_license(declared, listed):
+  """Being listed already keeps only another free license, never these."""
   fields = {} if declared is None else {"license": declared}
   files = _ready_files(**fields) + [_file("LICENSE", b"All rights reserved.")]
 
-  review = store_listing_review(files)
+  review = store_listing_review(files, listed=listed)
 
   item = next(item for item in review["checklist"] if item["id"] == "license")
   assert item["done"] is False and item["optional"] is False
-  assert "Choose a free license" in item["message"]
+  assert item["message"] == (
+    "Choose a free license so people know how they may use and share your app."
+  )
   assert review["ready"] is False and review["draft"]["license"] == ""
   with pytest.raises(CommunityPublicationError) as refused:
-    public_store_listing(files)
+    public_store_listing(files, listed=listed)
   assert refused.value.code == "listing_incomplete"
 
 
-def test_an_offered_license_also_needs_its_text():
-  without_text = store_listing_review(_ready_files(license="Apache-2.0"))
+@pytest.mark.parametrize("listed", [False, True])
+def test_an_offered_license_also_needs_its_text(listed):
+  without_text = store_listing_review(_ready_files(license="Apache-2.0"), listed=listed)
   item = next(item for item in without_text["checklist"] if item["id"] == "license")
   assert item["done"] is False and "LICENSE" in item["message"]
   assert without_text["draft"]["license"] == "Apache-2.0"
 
   with_text = store_listing_review(
     _ready_files(license="Apache-2.0") + [_file("license.md", b"Apache text")],
+    listed=listed,
   )
   assert with_text["ready"] is True
   assert with_text["listing"]["license"] == "Apache-2.0"
+
+
+def test_a_listed_app_keeps_publishing_under_its_other_free_license():
+  """An app listed under BSD before the rule can still publish updates; the
+  Host checks the license is the listed revision's own."""
+  files = _ready_files(license="BSD-3-Clause") + [_file("LICENSE", b"BSD text")]
+
+  review = store_listing_review(files, listed=True)
+
+  assert review["ready"] is True
+  assert _item(review, "license") == {
+    "id": "license", "label": "License", "optional": False,
+    "done": True, "code": "", "message": "",
+  }
+  assert review["listing"]["license"] == "BSD-3-Clause"
+  # The picker still offers only the three and selects none of them.
+  assert [item["spdx"] for item in review["license_options"]] == [
+    "MIT", "Apache-2.0", "GPL-3.0-or-later",
+  ]
+  assert review["draft"]["license"] == ""
+  assert review["draft"]["declared_license"] == "BSD-3-Clause"
+  assert public_store_listing(files, listed=True)["license"] == "BSD-3-Clause"
+
+  without_text = store_listing_review(_ready_files(license="BSD-3-Clause"), listed=True)
+  assert "LICENSE" in _item(without_text, "license")["message"]
+
+
+def test_a_first_listing_cannot_use_another_free_license():
+  files = _ready_files(license="BSD-3-Clause") + [_file("LICENSE", b"BSD text")]
+
+  review = store_listing_review(files)
+
+  assert review["ready"] is False
+  assert _item(review, "license")["message"] == (
+    "Choose a free license the Store offers. Only an app the Store already "
+    "lists under BSD-3-Clause can keep publishing under it."
+  )
+  assert review["draft"]["declared_license"] == "BSD-3-Clause"
+  with pytest.raises(CommunityPublicationError) as refused:
+    public_store_listing(files)
+  assert refused.value.code == "listing_incomplete"
 
 
 @pytest.mark.parametrize(

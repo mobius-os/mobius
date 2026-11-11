@@ -810,10 +810,16 @@ def _listing_screenshots(store: dict, by_path: dict[str, dict]) -> list[dict]:
   return projected
 
 
-def _listing_license(manifest: dict, by_path: dict[str, dict]) -> str:
-  """The offered license the source declares, with its text beside it."""
-  spdx = store_licenses.offered_license(manifest)
+def _listing_license(manifest: dict, by_path: dict[str, dict], listed: bool) -> str:
+  """The license publishing accepts from the source, with its text beside it."""
+  spdx = store_licenses.publishable_license(manifest, listed=listed)
   if not spdx:
+    declared = store_licenses.declared_license(manifest)
+    if declared in store_licenses.LISTED_FREE_SPDX:
+      raise _incomplete(
+        f"Choose a free license the Store offers. Only an app the Store "
+        f"already lists under {declared} can keep publishing under it.",
+      )
     raise _incomplete(
       "Choose a free license so people know how they may use and share your app.",
     )
@@ -849,8 +855,9 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
-    # The choice the editor shows, and what the source declares now, so
-    # the owner can see that a license the Store doesn't offer is there.
+    # The choice the editor shows (only an offered one), and what the
+    # source declares now, so the owner can see a license the Store doesn't
+    # offer, including one an already listed app keeps.
     "license": store_licenses.offered_license(manifest),
     "declared_license": store_licenses.declared_license(manifest),
   }
@@ -900,6 +907,8 @@ def _published_images_with_metadata(
 def store_listing_review(
   files: list[dict[str, str]],
   source_problems: list[CommunityPublicationError] | tuple = (),
+  *,
+  listed: bool = False,
 ) -> dict:
   """Check every Store listing requirement of one accepted snapshot at once.
 
@@ -912,6 +921,9 @@ def store_listing_review(
   directly without a copy step. It remains ordinary accepted source rather
   than ``static_assets`` package input; the manifest contract reserves this
   subtree so installer-owned runtime bytes cannot collide with it.
+  ``listed`` says the Store already lists this app, so the License item
+  also accepts the other free licenses it may keep (see
+  ``keeps_a_listed_license``).
   """
   by_path = {
     str(item.get("path") or ""): item
@@ -964,7 +976,7 @@ def store_listing_review(
     store, "description", "a description", DESCRIPTION_MAX_BYTES,
   ))
   check("screenshots", lambda: _listing_screenshots(store, by_path))
-  check("license", lambda: _listing_license(manifest, by_path))
+  check("license", lambda: _listing_license(manifest, by_path, listed))
   check("hero", lambda: (
     _listing_asset(store.get("hero"), "banner image", by_path)
     if store.get("hero") not in (None, "") else None
@@ -1002,9 +1014,24 @@ def store_listing_review(
   }
 
 
-def public_store_listing(files: list[dict[str, str]]) -> dict:
+def keeps_a_listed_license(files: list[dict[str, str]]) -> bool:
+  """Whether the snapshot's license is publishable only for an already listed app.
+
+  Only then does publishing need to ask the Store whether the app is listed.
+  The Host still admits the update only when its listed revision declares
+  the same license.
+  """
+  by_path = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
+  try:
+    manifest = _parsed_manifest(by_path)
+  except CommunityPublicationError:
+    return False
+  return store_licenses.declared_license(manifest) in store_licenses.LISTED_FREE_SPDX
+
+
+def public_store_listing(files: list[dict[str, str]], *, listed: bool = False) -> dict:
   """Return the publishable listing, or raise its first unmet requirement."""
-  review = store_listing_review(files)
+  review = store_listing_review(files, listed=listed)
   if review["listing"] is None:
     first = next(item for item in review["checklist"] if not item["done"])
     raise CommunityPublicationError(first["message"], first["code"])

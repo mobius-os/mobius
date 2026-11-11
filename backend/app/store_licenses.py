@@ -5,7 +5,8 @@ say how others may use it. The choice lives where every app tool already
 looks for it: an SPDX identifier in ``mobius.json``'s ``license`` and the
 full text in a root ``LICENSE`` file. Saving the listing writes both, but
 replaces only license text it wrote itself; the publish gate refuses a
-snapshot missing either.
+snapshot missing either. An app the Store already lists may keep publishing
+under another free license it declares (``LISTED_FREE_SPDX``).
 """
 
 from __future__ import annotations
@@ -58,6 +59,17 @@ OFFERED_LICENSES = (
   StoreLicense("GPL-3.0-or-later", "GNU GPL v3.0 or later"),
 )
 OFFERED_SPDX = frozenset(item.spdx for item in OFFERED_LICENSES)
+# Other free (OSI-approved) SPDX ids an app the Store already lists may keep
+# publishing updates under. The Host's registry keeps the same set
+# (LISTED_FREE_LICENSES) and admits such an update only when the listed
+# revision declares that same id. New listings need an offered license.
+LISTED_FREE_SPDX = frozenset({
+  "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Artistic-2.0",
+  "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0", "EPL-2.0", "GPL-2.0-only",
+  "GPL-2.0-or-later", "GPL-3.0-only", "ISC", "LGPL-2.1-only",
+  "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MPL-2.0",
+  "Unlicense", "Zlib",
+})
 
 
 def license_options() -> list[dict[str, str]]:
@@ -75,6 +87,18 @@ def offered_license(manifest: dict) -> str:
   """The manifest's license when it is one the Store offers, else ""."""
   value = declared_license(manifest)
   return value if value in OFFERED_SPDX else ""
+
+
+def publishable_license(manifest: dict, *, listed: bool) -> str:
+  """The manifest's license when publishing accepts it, else "".
+
+  That is an offered license, or for an app the Store already lists
+  (``listed``), one of ``LISTED_FREE_SPDX``.
+  """
+  value = declared_license(manifest)
+  if value in OFFERED_SPDX or (listed and value in LISTED_FREE_SPDX):
+    return value
+  return ""
 
 
 def copyright_holder(manifest: dict) -> str:

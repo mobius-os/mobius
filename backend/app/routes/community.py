@@ -30,6 +30,7 @@ from app.community_publish import (
   accepted_history_contains,
   build_public_snapshot,
   delete_publication_journal,
+  keeps_a_listed_license,
   list_publication_journals,
   new_publication_journal,
   public_store_listing,
@@ -317,6 +318,40 @@ def _remote_publication_is_current(
     and local_updated is not None
     and remote_updated >= local_updated
   )
+
+
+def _local_app_id(app: models.App) -> str:
+  return f"app:{app.id}:{app.slug}"
+
+
+async def _listed_in_store(app: models.App, files: list[dict[str, str]]) -> bool:
+  """Whether the Store lists this app, when its license makes that matter.
+
+  An app the Store already lists may keep publishing under another free
+  license it declares; the Host admits that update only when its listed
+  revision declares the same one. A listing is this identity's publication
+  of the app linked to a listed revision. Any other license never asks.
+  """
+  if not keeps_a_listed_license(files):
+    return False
+  local_app_id = _local_app_id(app)
+  offset: object = 0
+  while isinstance(offset, int) and offset <= 10_000:
+    payload, _, _ = await _broker_result(
+      "GET", f"{COMMUNITY_PREFIX}/publications",
+      params={"limit": 100, "offset": offset},
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+      return False
+    if any(
+      isinstance(item, dict)
+      and item.get("local_app_id") == local_app_id
+      and item.get("revision_id")
+      for item in payload["items"]
+    ):
+      return True
+    offset = payload.get("next_offset")
+  return False
 
 
 def _publication_journal(
@@ -627,13 +662,14 @@ async def publish_local_app_to_github(
   try:
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       accepted_commit, files = await settled.run_settled(build_public_snapshot, app)
-    await asyncio.to_thread(public_store_listing, files)
+    listed = await _listed_in_store(app, files)
+    await asyncio.to_thread(public_store_listing, files, listed=listed)
   except CommunityPublicationError as exc:
     raise HTTPException(
       exc.status_code, {"code": exc.code, "message": exc.detail},
     ) from exc
 
-  local_app_id = f"app:{app.id}:{app.slug}"
+  local_app_id = _local_app_id(app)
   async with _publication_lock(local_app_id):
     repository_name = body.repository_name.casefold()
     journal = _publication_journal(
@@ -929,9 +965,17 @@ async def preview_local_app_publication(
       accepted_commit, files, problems = await settled.run_settled(
         read_public_snapshot, app,
       )
+    try:
+      listed = await _listed_in_store(app, files)
+    except HTTPException:
+      # Without the Store's answer, the License item says what a new
+      # listing needs; publishing asks again.
+      listed = False
     # The review is pure work on the bytes already read (decoding images,
     # scanning for metadata), so it holds no lock.
-    review = await asyncio.to_thread(store_listing_review, files, problems)
+    review = await asyncio.to_thread(
+      store_listing_review, files, problems, listed=listed,
+    )
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       await settled.run_settled(
         store_listing_source.note_what_saving_fixes,
