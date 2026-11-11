@@ -33,7 +33,11 @@ BOOLEAN_PERMISSIONS = (
 # ``"<seller handle>/<app>"`` entries naming the creators' priced apps.
 SPEND_CREDITS_TARGET = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 SPEND_CREDITS_MAX = 16
-RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits")
+# The owner's own priced apps whose sales an app's service may check by charge
+# id: read-only, so it is its own permission rather than a spend grant.
+CHECK_CREDITS_CHARGES_APP = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
+CHECK_CREDITS_CHARGES_MAX = 16
+RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits", "check_credits_charges")
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
 # The one size bound for an app package: every file its manifest declares
@@ -790,7 +794,7 @@ def validate_manifest_contract(manifest) -> None:
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 
-  for field in ("offline_capable", "embeds_agent", "shell_shortcuts"):
+  for field in ("offline_capable", "embeds_agent", "shell_shortcuts", "owner_confirm"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
 
@@ -837,6 +841,17 @@ def validate_manifest_contract(manifest) -> None:
     _fail(
       "Manifest `permissions.spend_credits` must list up to "
       f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" entries it may pay for."
+    )
+  checked_apps = permissions.get("check_credits_charges", [])
+  if (
+    not isinstance(checked_apps, list) or len(checked_apps) > CHECK_CREDITS_CHARGES_MAX
+    or any(not isinstance(app, str) or not CHECK_CREDITS_CHARGES_APP.fullmatch(app)
+           for app in checked_apps)
+    or len(set(checked_apps)) != len(checked_apps)
+  ):
+    _fail(
+      "Manifest `permissions.check_credits_charges` must list up to "
+      f"{CHECK_CREDITS_CHARGES_MAX} unique priced app names whose charges it checks."
     )
   for field in BOOLEAN_PERMISSIONS:
     if field in permissions and not isinstance(permissions[field], bool):

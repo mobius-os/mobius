@@ -3895,7 +3895,7 @@ class ChatWriterActor:
     # The resume_run_id check above already pinned prior to that exact run.
     if cmd.allow_low_storage and (
       not cmd.owner_input or cmd.resume_run_id is None
-      or prior.park_reason != "storage"
+      or prior.park_reason not in models.OWNER_OVERRIDABLE_RESOURCES
       or prior.status not in {"parked", "resume_pending", "interrupted"}
     ):
       db.rollback()

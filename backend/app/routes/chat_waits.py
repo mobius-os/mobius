@@ -23,8 +23,14 @@ from app.chat_waits import (
   serialize_wait,
 )
 from app.database import get_db
-from app.deps import Principal, get_agent_run_principal, get_principal
-from app.resource_access import get_active_chat_or_404
+from app.deps import (
+  Principal,
+  get_agent_run_principal,
+  get_owner_or_chat_embed_principal,
+  get_principal,
+  require_chat_embed_operation,
+)
+from app.resource_access import get_active_chat_or_404, require_active_chat_access
 from app.wait_checks import GitHubChecks
 
 router = APIRouter(prefix="/api/chat-waits", tags=["chat-waits"])
@@ -177,6 +183,24 @@ def _withdraw_dependency_chat(dependency_id: str, principal_chat_id: str | None)
       raise HTTPException(status_code=403, detail="Not this chat's follow.")
     get_active_chat_or_404(db, row.waiting_chat_id)
     return row.waiting_chat_id
+
+
+@router.get("/dependencies/{dependency_id}/text")
+def read_dependency_text(
+  dependency_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """The whole claim texts a Goal view showed in part, for its waiting chat."""
+  require_chat_embed_operation(principal, "chat:read")
+  row = db.get(models.GoalDependency, dependency_id)
+  if row is None:
+    raise HTTPException(status_code=404, detail="No such follow.")
+  require_active_chat_access(db, row.waiting_chat_id, principal)
+  from app.goal_dependencies import dependency_full_texts
+  return dependency_full_texts(
+    db, row, include_foreign_context=principal.scope != "chat_embed",
+  )
 
 
 @router.post("/dependencies/{dependency_id}/withdraw")

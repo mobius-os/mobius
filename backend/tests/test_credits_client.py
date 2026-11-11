@@ -459,6 +459,122 @@ def test_charging_before_pairing_says_so(client, auth, db, service):
   assert not service.calls
 
 
+CHARGE_ID = "0b5c2a3e-6f1d-4c8e-9a7b-1d2e3f405162"
+RECEIPT = {"charge_id": CHARGE_ID, "seller": "ana", "buyer": "bo", "app": "prompts",
+           "action": "run", "amount_micro": 500_000}
+
+
+def _receipt(service, *, handle="ana", **fields):
+  service.answers[f"charges/{CHARGE_ID}"] = (200, {**RECEIPT, **fields})
+  service.answers["balance"] = (200, {"balance_micro": 0, "handle": handle})
+
+
+def _checker(db, slug, *, apps=("prompts",), **options):
+  return _app(db, slug, spend_credits=(), check_credits_charges=list(apps), **options)
+
+
+def test_checking_a_charge_needs_its_own_read_only_grant_not_a_spend_grant(
+  client, auth, db, paired,
+):
+  checker, spender = _checker(db, "market"), _app(db, "spender")
+  url = f"/api/identity/credits/charges/{CHARGE_ID}"
+  _receipt(paired)
+  calls = len(paired.calls)
+  for headers in (_as(db, checker, None), _as(db, spender, "private"),
+                  _as(db, spender, "public"), auth):
+    refused = client.get(url, headers=headers)
+    assert refused.status_code == 403, refused.text
+  assert "check_credits_charges" in client.get(
+    url, headers=_as(db, spender, "private")).json()["detail"]
+  assert len(paired.calls) == calls
+  # Both lanes: the public one is where a marketplace checks a visitor's claim.
+  for lane in ("private", "public"):
+    checked = client.get(url, headers=_as(db, checker, lane))
+    assert checked.status_code == 200, checked.text
+    assert checked.json() == RECEIPT
+  assert paired.calls[-2]["url"].endswith(f"/api/billing/charges/{CHARGE_ID}")
+
+
+@pytest.mark.parametrize(("fields", "reads_handle"), [
+  ({"app": "notes"}, False),            # this owner's sale of an app it does not name
+  ({"seller": "cy"}, True),             # another creator's sale of the same app
+  ({"seller": "cy", "buyer": "ana"}, True),  # the owner's own purchase
+  ({"seller": None}, False),
+])
+def test_a_receipt_is_shown_only_for_this_owners_sale_of_a_named_app(
+  client, auth, db, paired, fields, reads_handle,
+):
+  checker = _checker(db, "market")
+  _receipt(paired, **fields)
+  paired.calls.clear()
+  refused = client.get(f"/api/identity/credits/charges/{CHARGE_ID}",
+                       headers=_as(db, checker, "public"))
+  assert refused.status_code == 404
+  assert refused.json()["detail"]["code"] == "charge_not_found"
+  assert any(call["url"].endswith("/balance") for call in paired.calls) is reads_handle
+
+
+def test_a_renamed_account_never_matches_its_old_handle(paired):
+  _receipt(paired, handle="ana-renamed")
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(CHARGE_ID, ["prompts"])
+  assert refused.value.code == "charge_not_found"
+
+
+def test_a_local_app_may_check_its_own_sales(client, auth, db, paired):
+  local = _checker(db, "local-market", store=False)
+  _receipt(paired)
+  checked = client.get(f"/api/identity/credits/charges/{CHARGE_ID}",
+                       headers=_as(db, local, "public"))
+  assert checked.status_code == 200 and checked.json()["seller"] == "ana"
+
+
+def test_a_store_app_cannot_check_charges_before_the_owner_accepts_the_grant(
+  client, auth, db, paired,
+):
+  app = _app(db, "market-update", spend_credits=())
+  headers = _as(db, app, "public")
+  # An update that newly declares the grant waits for consent; its tokens stop.
+  app.capability_contract = {"data": {"check_credits_charges": ["prompts"]}}
+  db.commit()
+  _receipt(paired)
+  paired.calls.clear()
+  refused = client.get(f"/api/identity/credits/charges/{CHARGE_ID}", headers=headers)
+  assert refused.status_code == 401, refused.text
+  assert refused.json()["detail"] == "App has not been approved."
+  assert not paired.calls
+
+
+@pytest.mark.parametrize("charge_id", [
+  "..", ".", "c-1/../balance", "c 1", "", "c-1", CHARGE_ID.upper(), CHARGE_ID + "0",
+])
+def test_an_invalid_charge_id_never_sends_the_installation_key(paired, charge_id):
+  paired.calls.clear()
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(charge_id, ["prompts"])
+  assert refused.value.code == "invalid_name"
+  assert not paired.calls
+
+
+def test_a_failed_charge_receipt_read_keeps_the_services_refusal(paired):
+  # Reading a receipt moves no money, so a 5xx is not an unknown charge outcome.
+  paired.answers[f"charges/{CHARGE_ID}"] = (
+    503, {"detail": {"code": "busy", "message": "busy"}})
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(CHARGE_ID, ["prompts"])
+  assert refused.value.code == "busy" and refused.value.status == 503
+
+
+def test_only_the_public_resolver_marks_the_public_lane(auth, db):
+  app = _checker(db, "lane")
+  for lane, public in (("public", True), ("private", False), (None, False)):
+    token = _as(db, app, lane)["Authorization"].split(" ", 1)[1]
+    principal = deps.get_principal_or_public_service(token=token, db=db)
+    assert principal.app_is_public_service is public
+  with pytest.raises(HTTPException):
+    deps.get_principal(token=_as(db, app, "public")["Authorization"].split(" ", 1)[1], db=db)
+
+
 def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
   credits_client.pair("https://www.mobius.you/credits", "mbc_example_key")
   terms = {"currency": "usd", "amounts_cents": [500, 1000], "waiver_required": True}
@@ -642,9 +758,10 @@ def test_every_credits_route_has_exactly_one_gate():
   gates would mean one of them is not saying the whole rule."""
   from app.routes import credits
   gates = {deps.get_credits_reader, deps.get_credits_controller,
-           deps.get_credits_spender, deps.get_credits_price_reader}
+           deps.get_credits_spender, deps.get_credits_price_reader,
+           deps.get_credits_receipt_reader}
   routes = [route for route in credits.router.routes if hasattr(route, "dependant")]
-  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 1  # and the app charge
+  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 2  # and the app charge and its receipt
   for route in routes:
     used = {dep.call for dep in route.dependant.dependencies} & gates
     assert len(used) == 1, (route.path, used)

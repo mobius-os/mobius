@@ -97,7 +97,8 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read", "spend_credits"} | {key for key, *_ in _FLAGS}
+   "job_secret_read", "spend_credits", "check_credits_charges"}
+  | {key for key, *_ in _FLAGS}
 )
 
 
@@ -167,6 +168,14 @@ def rows_from_contract(
       "Its service can pay for priced calls from your Möbius credits, at the "
       "price each creator sets, to: " + ", ".join(targets) + ".",
       scope=[str(target) for target in targets],
+    ))
+  checked_apps = data.get("check_credits_charges")
+  if isinstance(checked_apps, list) and checked_apps:
+    rows.append(_row(
+      "check_credits_charges", "Check payments for your apps",
+      "Its service can confirm that someone paid you for: " + ", ".join(checked_apps)
+      + ". It sees who paid, for what and how much, and cannot move credits.",
+      scope=[str(app) for app in checked_apps],
     ))
   background = contract.get("background")
   if isinstance(background, dict):

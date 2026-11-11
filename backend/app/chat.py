@@ -51,8 +51,13 @@ from app.broadcast import (
 )
 from app.agent_admission import (
   AgentTurnDeferred,
+  TurnStartHold,
   agent_turn_deferral,
   require_agent_turn_admission,
+)
+from app.memory_observability import (
+  cgroup_process_cap_hit_since,
+  cgroup_process_cap_hits,
 )
 from app.chat_event_sink import (
   ChatEventSink as _ChatEventSink,
@@ -4066,6 +4071,10 @@ MEMORY_KILL_MESSAGE = (
   "Möbius ran low on memory and this turn was stopped. Your work is safe; it "
   "continues automatically when memory settles."
 )
+PROCESS_CAP_MESSAGE = (
+  "Möbius reached its limit on processes and threads and this turn was "
+  "stopped. Your work is safe; it continues automatically once enough are free."
+)
 
 
 @dataclass(frozen=True)
@@ -4212,6 +4221,7 @@ async def _park_run_strict(
 def _park_exit(
   sink, runner_result: dict | None, error_text: str | None,
   *, provider_id: str | None = None, db: Session | None = None,
+  process_cap_hits_before: int | None = None,
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
@@ -4230,6 +4240,10 @@ def _park_exit(
   evidence. A generic failure cannot claim another process's cgroup kill;
   explicit size rejections never become memory retries. A separately fenced
   note recovery may construct a smaller context after the failure is saved.
+
+  Process-cap recovery is coarser: ``process_cap_hits_before`` is the cgroup's
+  refused-fork count read before the provider started, and any failure while
+  that count rose waits for process headroom instead of ending the turn.
 
   A planned restart is already the authoritative terminal outcome by the time
   the provider exits: ``drain_all_for_restart`` publishes the resumable pause
@@ -4336,6 +4350,23 @@ def _park_exit(
       "parked": True,
       "parked_until": parked_until,
       "park_reason": park_reason,
+    }
+  # At the task cap a provider fails as "can't start new thread" or a fork
+  # EAGAIN, in whatever words its runtime uses, so the cgroup counter is the
+  # evidence rather than the text. It cannot name the failing process: a turn
+  # that failed for another reason while something else hit the cap waits once
+  # for headroom and then retries, which is cheaper than losing the work of
+  # every turn the cap actually stopped.
+  if (
+    not limit and failed
+    and cgroup_process_cap_hit_since(process_cap_hits_before)
+  ):
+    parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+    sink.publish(_park_event(PROCESS_CAP_MESSAGE, parked_until, "processes"))
+    return {
+      "parked": True,
+      "parked_until": parked_until,
+      "park_reason": "processes",
     }
   if not limit:
     if runner_result is not None and runner_result.get("resume_incomplete"):
@@ -4873,8 +4904,11 @@ async def _complete_turn(
   return disposition
 
 
-def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
-  """Whether this exact run is the owner's warned low-storage Continue anyway.
+def _run_allows_continue_anyway(chat_id: str, run_token: str) -> bool:
+  """Whether this exact run is the owner's warned Continue anyway.
+
+  The saved control keeps its original ``allow_low_storage`` name; it lifts
+  every floor in ``models.OWNER_OVERRIDABLE_RESOURCES`` for this run alone.
 
   An unreadable control means no permission: the turn keeps normal admission.
   """
@@ -4891,6 +4925,34 @@ def _run_allows_low_storage(chat_id: str, run_token: str) -> bool:
       exc_info=True,
     )
     return False
+
+
+async def _admit_run(chat_id: str, run_token: str | None) -> tuple[TurnStartHold, list[str]]:
+  """Admit this physical run, lifting the floors its Continue anyway covers.
+
+  Returns the start hold and the resources lifted, in the order admission
+  reported them. Only a storage or process wait consults the committed
+  control, which belongs to this run alone, never its later retries,
+  helpers, queued follow-ups or other chats. Memory is never lifted.
+  """
+  lifted: list[str] = []
+  while True:
+    try:
+      hold = await require_agent_turn_admission(
+        get_settings().data_dir, owner_overrides=frozenset(lifted),
+      )
+      return hold, lifted
+    except AgentTurnDeferred as deferred:
+      if (
+        deferred.resource not in models.OWNER_OVERRIDABLE_RESOURCES
+        or deferred.resource in lifted
+        or not (
+          chat_id and run_token
+          and await asyncio.to_thread(_run_allows_continue_anyway, chat_id, run_token)
+        )
+      ):
+        raise
+      lifted.append(deferred.resource)
 
 
 async def run_chat(
@@ -4938,27 +5000,16 @@ async def run_chat(
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
   setup_failure_settled = False
+  start_hold = None
   try:
-    try:
-      await require_agent_turn_admission(get_settings().data_dir)
-    except AgentTurnDeferred as deferred:
-      # Only a storage wait consults the committed Continue anyway control,
-      # which belongs to this physical run alone, never its later retries,
-      # helpers, queued follow-ups or other chats.
-      if deferred.resource != "storage" or not (
-        chat_id and run_token
-        and await asyncio.to_thread(_run_allows_low_storage, chat_id, run_token)
-      ):
-        raise
-      await require_agent_turn_admission(
-        get_settings().data_dir, allow_low_storage=True,
-      )
-      # Only a turn the override actually admitted is told storage is low.
-      from app.continuations import LOW_STORAGE_NOTICE
-      if messages:
-        messages = [*messages[:-1], messages[-1].model_copy(update={
-          "content": f"{messages[-1].content}\n\n{LOW_STORAGE_NOTICE}",
-        })]
+    start_hold, lifted = await _admit_run(chat_id, run_token)
+    # Only a turn the override actually admitted is told which floor it is past.
+    if lifted and messages:
+      from app.continuations import CONTINUE_ANYWAY_NOTICES
+      notices = "\n\n".join(CONTINUE_ANYWAY_NOTICES[resource] for resource in lifted)
+      messages = [*messages[:-1], messages[-1].model_copy(update={
+        "content": f"{messages[-1].content}\n\n{notices}",
+      })]
     # A prior turn may still be releasing this chat's browser resources.
     async with _browser_lifecycle_lock(chat_id):
       pass
@@ -5087,6 +5138,8 @@ async def run_chat(
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
   finally:
+    if start_hold is not None:
+      start_hold.release()
     browser_cancelled = None
     sink = get_active_sink(chat_id) if chat_id else None
     if run_token and sink is not None and getattr(sink, "run_token", None) == run_token:
@@ -6456,6 +6509,8 @@ async def _run_chat_impl_with_db(
   runtime_kind = provider_runtime_kind(provider)
   is_claude = runtime_kind == "claude_sdk"
   is_codex = runtime_kind == "codex_sdk"
+  # Correlates a failed turn with forks refused at the task cap (_park_exit).
+  process_cap_hits_before = cgroup_process_cap_hits()
   if is_codex:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
@@ -6584,6 +6639,7 @@ async def _run_chat_impl_with_db(
       # transcript, not just the live wire.
       park_kwargs = _park_exit(
         sink, None, str(exc), provider_id=provider_id, db=db,
+        process_cap_hits_before=process_cap_hits_before,
       )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -6597,6 +6653,7 @@ async def _run_chat_impl_with_db(
     # fields when the terminal was a limit kill).
     park_kwargs = _park_exit(
       sink, runner_result, err, provider_id=provider_id, db=db,
+      process_cap_hits_before=process_cap_hits_before,
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -6802,6 +6859,7 @@ async def _run_chat_impl_with_db(
       # transcript, not just the live wire.
       park_kwargs = _park_exit(
         sink, None, str(exc), provider_id=provider_id, db=db,
+        process_cap_hits_before=process_cap_hits_before,
       )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -6813,6 +6871,7 @@ async def _run_chat_impl_with_db(
     # (enriched with the park fields when the terminal was a limit kill).
     park_kwargs = _park_exit(
       sink, runner_result, err, provider_id=provider_id, db=db,
+      process_cap_hits_before=process_cap_hits_before,
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,

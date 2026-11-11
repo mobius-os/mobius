@@ -37,8 +37,12 @@ from app.tool_output_storage import CompressedToolOutputText
 
 CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
 NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
-# Parks that wait for this installation's own memory or storage headroom.
-RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
+# Parks that wait for this installation's own memory, storage or process
+# headroom.
+RESOURCE_PARK_REASONS = frozenset({"memory", "storage", "processes"})
+# Waits the owner may lift for one warned run (Continue anyway). Never memory:
+# past that floor the kernel kills running work, not only the new turn.
+OWNER_OVERRIDABLE_RESOURCES = frozenset({"storage", "processes"})
 
 
 class Owner(Base):
@@ -1069,6 +1073,39 @@ class MobiusLoginHandoffGrant(Base):
   consumed_at = Column(DateTime, nullable=True, default=None, index=True)
 
 
+class OwnerGrant(Base):
+  """The owner's own confirmation of one sensitive action, spent at most once.
+
+  Minted only by the shell with the owner's bearer, after its own confirm
+  sheet; bound to an app, an action and the exact request (``binding_sha256``,
+  see ``owner_grants``). It carries no secret and is never given to an app:
+  the matching request finds it by that binding. The owner epoch and the app's
+  token nonce are stored so signing out everywhere or reinstalling the app
+  kills it.
+
+  This is a new table, so ``create_all`` creates it on existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "owner_grants"
+  __table_args__ = (Index("ix_owner_grants_binding", "app_id", "action", "binding_sha256"),)
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_epoch = Column(Integer, nullable=False)
+  # No foreign key: a hard delete of the app must not need grant cleanup, and
+  # the nonce already voids a grant for a reinstalled app.
+  app_id = Column(Integer, nullable=False)
+  app_nonce = Column(String(64), nullable=False)
+  action = Column(String(32), nullable=False)
+  binding_sha256 = Column(String(64), nullable=False)
+  # What the owner saw: the digest of the binding and the sheet's words.
+  seen_sha256 = Column(String(64), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  consumed_by = Column(String(160), nullable=True, default=None)
+
+
 class App(Base):
   """A mini-app created and managed by the agent."""
 
@@ -1527,6 +1564,23 @@ class AgentCoordinationMessage(Base):
     String(16), nullable=False, default="next_turn", server_default="next_turn",
   )
   body = Column(Text, nullable=False)
+  # The shared body of a send stored once (AgentCoordinationNoteBody). When
+  # set, it is the note's text and ``body`` is empty; rows written before
+  # shared bodies keep their text in ``body``.
+  body_id = Column(String(64), nullable=True, index=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationNoteBody(Base):
+  """One peer-note body shared by every recipient row of one send.
+
+  Retention deletes a body once no message references it.
+  """
+
+  __tablename__ = "agent_coordination_note_bodies"
+
+  id = Column(String(64), primary_key=True)
+  body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
@@ -1663,7 +1717,7 @@ class AgentWorkClaim(Base):
   owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
                     nullable=False, index=True)
   work_key = Column(String(256), nullable=False)
-  summary = Column(String(500), nullable=False)
+  summary = Column(Text, nullable=False)
   owner_chat_id = Column(
     String(64), ForeignKey("chats.id", ondelete="SET NULL"),
     nullable=True, index=True,
@@ -1673,7 +1727,7 @@ class AgentWorkClaim(Base):
   # Last-transfer projection, never the recovery source for revocations.
   # AgentWorkClaimRevocation retains each obligation independently.
   previous_owner_chat_id = Column(String(64), nullable=True)
-  takeover_reason = Column(String(1000), nullable=True)
+  takeover_reason = Column(Text, nullable=True)
   revision = Column(Integer, nullable=False, default=1, server_default="1")
   notification_revision = Column(
     Integer, nullable=False, default=1, server_default="1"
@@ -1683,7 +1737,7 @@ class AgentWorkClaim(Base):
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
-  outcome = Column(String(1000), nullable=True)
+  outcome = Column(Text, nullable=True)
 
 
 class AgentWorkClaimRevocation(Base):
@@ -2372,6 +2426,25 @@ class ContributionReviewRun(Base):
       postgresql_where=text("app_id IS NULL"),
     ),
   )
+
+
+class DirectMergeAttempt(Base):
+  """The owner's one-tap merge of one exact PR head, saved before its write is sent.
+
+  The unique owner/work key is the fence: the same key a review run's merge
+  uses, so one tap and one review grant can never both send a write for the
+  same version. A row stays ``attempting`` or ``unknown`` until GitHub's answer
+  is known; only a read-only look, or the one-hour dispatch window, frees it.
+
+  This new table is created by normal startup metadata.create_all.
+  """
+  __tablename__ = "contribution_direct_merge_attempts"
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  work_key = Column(String(256), nullable=False)
+  state = Column(String(16), nullable=False)  # attempting, unknown, merged or queued
+  armed_at = Column(String(32), nullable=False)  # UTC ISO, the dispatch window's start
+  __table_args__ = (UniqueConstraint("owner_id", "work_key", name="uq_direct_merge_attempt_key"),)
 
 
 class ProjectSourceCopy(Base):

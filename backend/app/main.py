@@ -94,7 +94,7 @@ from app.routes import (
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
-  contribution_reviews_router,
+  contribution_reviews_router, owner_grants_router,
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
   github_access_router,
@@ -1110,10 +1110,13 @@ app.include_router(uploads_router)
 app.include_router(generated_files_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
+# Before github_router: its /contributions/{app_id}/{record_id}/<action> paths would take
+# an owner action at /contributions/{app_id}/pulls/<action> as a record named "pulls".
+app.include_router(contribution_reviews_router)
+app.include_router(owner_grants_router)
 app.include_router(github_router)
 app.include_router(github_access_router)
 app.include_router(reviewer_router)
-app.include_router(contribution_reviews_router)
 app.include_router(identity_router)
 app.include_router(credits_router)
 app.include_router(push_router)
@@ -1264,8 +1267,9 @@ def ready_agent(response: Response):
 
   Basic `/api/ready` remains the container healthcheck so history can keep
   serving when agent work is resource-degraded. This public facet adds the
-  agent runtime's storage and memory prerequisites while returning stable codes
-  only; account state, exact capacity, paths, and writer details stay private.
+  agent runtime's storage, memory and process prerequisites while returning
+  stable codes only; account state, exact capacity, paths, and writer details
+  stay private.
   """
   response.headers["Cache-Control"] = "no-store"
   from app.agent_readiness import agent_readiness

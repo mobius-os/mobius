@@ -3996,3 +3996,10 @@ def test_registry_refuses_a_runner_whose_run_was_superseded():
   finally:
     registry.unregister(_Handle.chat_id, RunnerKind.CLAUDE_SDK)
     registry.forget(_Handle.chat_id)
+
+
+@pytest.mark.asyncio
+async def test_wedged_claude_turn_is_reported_not_stopped():
+  """stop(timeout) is the only drain budget; a wedged turn reports False."""
+  handle = claude_sdk_runner.ActiveClaudeClient(_FakeClient(None), chat_id="wedged-turn")
+  assert await handle.stop(timeout=0.2) is False

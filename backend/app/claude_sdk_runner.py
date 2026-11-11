@@ -802,11 +802,11 @@ class ActiveClaudeClient:
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
-    Bounds the `_finished` wait at 5s as a defense-in-depth so a
-    wedged runner (one that never reaches its `finally` block) can't
-    hang Stop indefinitely. `chat.py:stop_chat_for` adds its own 2s
-    bound at the call site; this inner timeout protects any other
-    direct caller.
+    Waits on `_finished` without a bound of its own: ``stop(timeout)`` is
+    the only budget, so its caller decides how long a drain may take (2s for
+    ordinary Stop, longer for the restart drain). A wedged runner (one that
+    never reaches its `finally` block) makes ``stop`` time out and report the
+    turn as not stopped.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
@@ -818,14 +818,7 @@ class ActiveClaudeClient:
     # its pre-prompt `accepts_native_prompt` check and ends cleanly.
     if not await self.cancel_native_queue() and self._connected:
       await self._client.interrupt()
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      import logging
-      logging.getLogger("moebius.chat").warning(
-        "ActiveClaudeClient._finished never resolved within 5s; "
-        "runner is wedged",
-      )
+    await asyncio.shield(self._finished)
 
   @property
   def interrupt_requested(self) -> bool:

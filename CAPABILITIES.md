@@ -87,9 +87,10 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
 For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use
-`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
-their account, price and charge requests receive 403.
+accepted owner consent, except checking a charge (below). Owner-built local
+apps cannot use `credits_manage` or `spend_credits`, even if their
+`mobius.json` declares them; their account, price and charge requests
+receive 403.
 
 A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
@@ -115,6 +116,22 @@ A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
 and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.
 Balance, history and purchase reads refuse a shared-browser guest.
+
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
 
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing
@@ -614,6 +631,22 @@ The host binds each request to the exact `contentWindow` that opened it. Payload
 app ids are never identity. Only the visible frame may open sessions. Controls
 from other frames, duplicate request ids, undeclared names, version mismatches,
 and stale results are ignored or rejected without changing another session.
+
+One undeclared request is the documented exception to routing new shell
+operations through this broker: `moebius:owner-grant`, behind
+`window.mobius.ownerGrant.request(action, scope, body)`. It asks the shell to
+confirm a sensitive action with the owner in a sheet the shell draws outside the
+frame; only the owner's tap records a short-lived, single-use grant on the
+server, and the frame never receives it. A confirmation is a restriction, not a
+power, so it must not cost the owner a consent row or make a Store app dormant;
+`fileExport` and `clipboard` are the precedent. It keeps the broker's identity
+rules: the host binds it to the exact visible `contentWindow`, the app id is
+never taken from the payload, and the sheet's words come from the server. The
+shell acks a request it accepts, and the runtime rejects it after a short wait
+without an ack, so a tab whose shell predates the request fails fast. Enforcement
+is per app: only an app that declares `"owner_confirm": true` in its manifest is
+refused at the guarded routes without a grant. That key is not part of the
+capability contract, so it adds no consent row and cannot make an app dormant.
 
 ## Provider contract
 
