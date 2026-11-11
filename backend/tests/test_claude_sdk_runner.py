@@ -1398,6 +1398,7 @@ async def test_claude_interrupt_marks_owner_request_before_sdk_await():
       observed.append(handle.interrupt_requested)
 
   handle = ActiveClaudeClient(_Client(), chat_id="claude-owned-stop")
+  handle.mark_connected()
   task = asyncio.create_task(handle.interrupt())
   while not observed:
     await asyncio.sleep(0)
@@ -3933,6 +3934,50 @@ async def test_stop_while_claude_connects_ends_the_turn_before_its_prompt(monkey
     assert clients[0].queries == []
     assert clients[0].disconnected is True
     assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+  finally:
+    registry.forget(chat_id)
+
+
+@pytest.mark.asyncio
+async def test_stop_that_finds_the_handle_while_connecting_ends_the_turn_cleanly(monkeypatch):
+  """Stop reaching the handle mid-connect must not need the hard-kill path."""
+  connecting = asyncio.Event()
+  release = asyncio.Event()
+
+  class _SdkLikeConnect(_FakeClient):
+    connected = False
+
+    async def connect(self):
+      connecting.set()
+      await release.wait()
+      self.connected = True
+
+    async def interrupt(self):
+      if not self.connected:
+        # What the real SDK raises before connect() returns.
+        raise RuntimeError("Not connected. Call connect() first.")
+      await super().interrupt()
+
+  clients = _install_fake_client(monkeypatch, _SdkLikeConnect)
+  chat_id = "stop-handle-during-claude-connect"
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    task = asyncio.create_task(claude_sdk_runner.run_claude_sdk_turn(
+      user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+      chat_id=chat_id, skill_text="system", bc=_ChatBus(), run_generation=run_gen,
+    ))
+    await connecting.wait()
+    handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
+    registry.bump_generation(chat_id)
+    stop = asyncio.create_task(handle.stop())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await stop is True
+    result = await task
+    assert result["prompt_sent"] is False
+    assert clients[0].queries == []
+    assert clients[0].disconnected is True
   finally:
     registry.forget(chat_id)
 

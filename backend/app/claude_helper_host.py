@@ -41,6 +41,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.runtime_types import prompt_not_sent_result
 from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
@@ -1243,10 +1244,7 @@ async def run_claude_host_turn(
       if not registry.register(candidate, run_generation=run_generation):
         candidate.mark_finished()
         log.info("Claude helper turn superseded before dispatch chat_id=%s", chat_id)
-        return {
-          "session_id": session_id, "cost_usd": None, "error": None,
-          "prompt_sent": False,
-        }
+        return prompt_not_sent_result(session_id)
       handle = candidate
       started_at = time.monotonic()
 

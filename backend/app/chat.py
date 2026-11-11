@@ -149,6 +149,7 @@ from app.providers import (
   registered_provider,
 )
 from app.runner_registry import registry
+from app.runtime_types import prompt_not_sent_result
 from app.session_links import resume_retired
 
 
@@ -6746,7 +6747,7 @@ async def _run_chat_impl_with_db(
           if _run_generation_superseded(chat_id, run_gen):
             # Stopped between the attempts: end as stopped, without a retry.
             _log_superseded_run(chat_id, "claude-branch-fork-retry")
-            runner_result = {"session_id": None, "cost_usd": None, "error": None, "prompt_sent": False}
+            runner_result = prompt_not_sent_result(None)
           else:
             runner_result = await claude_turn(
               user_message=with_resumed_context(user_message, resumed_context_fallback),

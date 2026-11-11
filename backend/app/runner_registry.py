@@ -106,7 +106,7 @@ class RunnerRegistry:
     self,
     handle: RunnerHandle,
     *,
-    run_generation: int | float | None = None,
+    run_generation: int | None = None,
   ) -> bool:
     """Registers or replaces the handle for one `(chat_id, kind)`.
 
