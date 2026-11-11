@@ -162,12 +162,17 @@ def _process_deferral(status: dict[str, Any], *, starting_turns: int) -> str | N
 def _deferral(
   status: dict[str, Any],
   *,
-  allow_low_storage: bool = False,
+  owner_overrides: frozenset[str] = frozenset(),
   starting_turns: int,
 ) -> AgentTurnDeferred | None:
   """One attempt: the owner-facing deferral for measured critical memory,
   storage, or process headroom, or ``None`` when the turn may start. Unknown
-  telemetry fails open."""
+  telemetry fails open.
+
+  ``owner_overrides`` names the floors one warned Continue anyway lifts
+  (``storage``, ``processes``); memory admission always applies.
+  ``starting_turns`` is required so every caller accounts for admitted turns
+  the measured task count does not include yet."""
   memory_reason = _memory_deferral(status)
   if memory_reason is not None:
     return AgentTurnDeferred(
@@ -176,14 +181,16 @@ def _deferral(
       "automatically when memory settles.",
       resource="memory",
     )
-  storage_reason = None if allow_low_storage else _storage_deferral(status)
+  storage_reason = None if "storage" in owner_overrides else _storage_deferral(status)
   if storage_reason is not None:
     return AgentTurnDeferred(
       f"This turn is waiting because Möbius has {storage_reason}. It will "
       "continue automatically after cleanup frees space.",
       resource="storage",
     )
-  process_reason = _process_deferral(status, starting_turns=starting_turns)
+  process_reason = None if "processes" in owner_overrides else _process_deferral(
+    status, starting_turns=starting_turns,
+  )
   if process_reason is not None:
     return AgentTurnDeferred(
       f"This turn is waiting because Möbius has {process_reason}. Finish or "
@@ -200,7 +207,7 @@ async def require_agent_turn_admission(
   *,
   status_reader: Callable[[str | Path], dict[str, Any]] = resource_status,
   scratch_sweeper: Callable[[], Awaitable[dict[str, Any]]] | None = None,
-  allow_low_storage: bool = False,
+  owner_overrides: frozenset[str] = frozenset(),
   holds: TurnStartHolds | None = None,
 ) -> TurnStartHold:
   """Admit a turn or raise its owner-facing :class:`AgentTurnDeferred`.
@@ -213,7 +220,7 @@ async def require_agent_turn_admission(
   holds = START_HOLDS if holds is None else holds
   deferral = await agent_turn_deferral(
     data_dir, status_reader=status_reader, scratch_sweeper=scratch_sweeper,
-    allow_low_storage=allow_low_storage, holds=holds,
+    owner_overrides=owner_overrides, holds=holds,
   )
   if deferral is not None:
     raise deferral
@@ -225,7 +232,7 @@ async def agent_turn_deferral(
   *,
   status_reader: Callable[[str | Path], dict[str, Any]] = resource_status,
   scratch_sweeper: Callable[[], Awaitable[dict[str, Any]]] | None = None,
-  allow_low_storage: bool = False,
+  owner_overrides: frozenset[str] = frozenset(),
   holds: TurnStartHolds | None = None,
 ) -> AgentTurnDeferred | None:
   """Why a new turn must wait now, reclaiming idle scratch once first.
@@ -240,15 +247,15 @@ async def agent_turn_deferral(
   """
   holds = START_HOLDS if holds is None else holds
   status = status_reader(data_dir)
-  # One warned owner continuation may start below the disk floor.
+  # One warned owner continuation may start past the disk or process floor.
   # Memory admission still applies; this is not a global resource bypass.
   deferral = _deferral(
-    status, allow_low_storage=allow_low_storage,
+    status, owner_overrides=owner_overrides,
     starting_turns=holds.starting_turns(),
   )
   if deferral is None:
     return None
-  if _storage_deferral(status) is None:
+  if "storage" in owner_overrides or _storage_deferral(status) is None:
     # Deleting paused chats' scratch frees no memory.
     return deferral
   if scratch_sweeper is None:
@@ -266,6 +273,6 @@ async def agent_turn_deferral(
     # owns whether the turn may start.
     pass
   return _deferral(
-    status_reader(data_dir), allow_low_storage=allow_low_storage,
+    status_reader(data_dir), owner_overrides=owner_overrides,
     starting_turns=holds.starting_turns(),
   )

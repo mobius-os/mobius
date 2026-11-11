@@ -332,6 +332,16 @@ LOW_STORAGE_NOTICE = (
   " avoid large writes. Delete only files this chat created; ask the"
   " owner before deleting anything else."
 )
+PROCESS_LIMIT_NOTICE = (
+  "The owner let this turn start near the shared process and thread limit;"
+  " avoid starting browsers, servers or parallel tools. Stop only processes"
+  " this chat started; ask the owner before stopping anything else."
+)
+# What a Continue anyway turn is told about each floor it was admitted past.
+CONTINUE_ANYWAY_NOTICES = {
+  "storage": LOW_STORAGE_NOTICE,
+  "processes": PROCESS_LIMIT_NOTICE,
+}
 
 
 def continuation_protocol_source(

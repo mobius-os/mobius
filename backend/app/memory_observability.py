@@ -219,6 +219,43 @@ def _pressure_fields(text: str | None) -> dict[str, dict[str, float | int]]:
   return result
 
 
+def _cgroup_path_levels(
+  *,
+  proc_root: Path = Path("/proc"),
+  cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> list[Path]:
+  """This process's cgroup and its ancestors up to the visible root.
+
+  Ancestors hidden by a cgroup namespace cannot be seen and so cannot be
+  accounted for.
+  """
+  leaf = _cgroup_dir(proc_root=proc_root, cgroup_root=cgroup_root)
+  return [leaf, *(p for p in leaf.parents if p.is_relative_to(cgroup_root))]
+
+
+def _binding_pids_dir(
+  *,
+  proc_root: Path = Path("/proc"),
+  cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> Path:
+  """The cgroup level whose ``pids.max`` this process reaches first.
+
+  Docker's ``--pids-limit`` caps the container's own cgroup, but a Kubernetes
+  pod limit or a systemd slice caps an ancestor while the leaf reads ``max``.
+  Keep the level with the least headroom; the leaf when nothing is capped.
+  """
+  levels = _cgroup_path_levels(proc_root=proc_root, cgroup_root=cgroup_root)
+  binding, least_headroom = levels[0], None
+  for level in levels:
+    limit = _read_int(level / "pids.max")
+    current = _read_int(level / "pids.current")
+    if limit is None or current is None:
+      continue
+    if least_headroom is None or limit - current < least_headroom:
+      binding, least_headroom = level, limit - current
+  return binding
+
+
 def cgroup_tasks_snapshot(
   *,
   proc_root: Path = Path("/proc"),
@@ -228,9 +265,10 @@ def cgroup_tasks_snapshot(
 
   Every thread counts as a task, so a burst of agent CLIs can exhaust this cap
   while memory and disk look healthy; past it, no process in the container can
-  start a thread. ``limit_tasks`` is ``None`` when the cgroup is uncapped.
+  start a thread. Both numbers come from the binding level (see
+  ``_binding_pids_dir``). ``limit_tasks`` is ``None`` when no level is capped.
   """
-  root = _cgroup_dir(proc_root=proc_root, cgroup_root=cgroup_root)
+  root = _binding_pids_dir(proc_root=proc_root, cgroup_root=cgroup_root)
   current = _read_int(root / "pids.current")
   if current is None:
     return {"available": False}
@@ -239,6 +277,40 @@ def cgroup_tasks_snapshot(
     "current_tasks": current,
     "limit_tasks": _read_int(root / "pids.max"),
   }
+
+
+def cgroup_process_cap_hits(
+  *,
+  proc_root: Path = Path("/proc"),
+  cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int | None:
+  """Kernel count of forks and thread starts refused at a task cap.
+
+  Sums the ``max`` entry of ``pids.events`` from this cgroup up to the visible
+  root: before Linux 6.13 the refusal is counted in the forking cgroup, since
+  then in the capped level and its ancestors. Only a rise is meaningful. Like
+  :func:`cgroup_oom_kill_count` it covers every process under those levels,
+  so a rise only says some process hit a cap while it was being watched.
+  ``None`` when no level reports the counter.
+  """
+  hits = None
+  for level in _cgroup_path_levels(proc_root=proc_root, cgroup_root=cgroup_root):
+    for line in (_read_text(level / "pids.events") or "").splitlines():
+      key, separator, raw = line.partition(" ")
+      if separator and key == "max" and raw.strip().isdigit():
+        hits = (hits or 0) + int(raw)
+  return hits
+
+
+def cgroup_process_cap_hit_since(hits_before: int | None) -> bool:
+  """Whether the task cap refused a fork after ``hits_before`` was read.
+
+  A missing reading on either side is no evidence.
+  """
+  if hits_before is None:
+    return False
+  hits = cgroup_process_cap_hits()
+  return hits is not None and hits > hits_before
 
 
 def cgroup_oom_kill_count(

@@ -238,7 +238,7 @@ async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
 @pytest.mark.asyncio
 async def test_warned_storage_override_admits_the_turn_under_storage_pressure():
   await require_agent_turn_admission(
-    "/data", allow_low_storage=True,
+    "/data", owner_overrides=frozenset({"storage"}),
     status_reader=lambda _path: _status("critical"), scratch_sweeper=_no_sweep,
   )
   with pytest.raises(AgentTurnDeferred) as waiting:
@@ -261,7 +261,7 @@ async def test_storage_override_does_not_override_critical_memory():
   )["pressure"]["memory"]
   with pytest.raises(AgentTurnDeferred) as waiting:
     await require_agent_turn_admission(
-      "/data", allow_low_storage=True,
+      "/data", owner_overrides=frozenset({"storage"}),
       status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
     )
   assert waiting.value.resource == "memory"
@@ -388,3 +388,59 @@ async def test_unknown_task_cap_never_holds_turns_for_starting_ones():
     "/data", status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
     holds=holds,
   )
+
+
+@pytest.mark.asyncio
+async def test_warned_process_override_admits_one_turn_and_still_holds_its_start():
+  """Continue anyway is the owner's way out when the cap is held elsewhere."""
+  holds = TurnStartHolds()
+  status = _tasks_status(900)
+  hold = await require_agent_turn_admission(
+    "/data", owner_overrides=frozenset({"processes"}),
+    status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+    holds=holds,
+  )
+  assert holds.starting_turns() == 1, "an overridden turn still counts while it starts"
+  hold.release()
+  with pytest.raises(AgentTurnDeferred) as waiting:
+    await require_agent_turn_admission(
+      "/data", status_reader=lambda _path: status,
+      scratch_sweeper=_sweep_frees_no_threads, holds=holds,
+    )
+  assert waiting.value.resource == "processes", "later turns retain normal admission"
+
+
+@pytest.mark.asyncio
+async def test_each_override_lifts_only_its_own_floor():
+  status = _tasks_status(900)
+  status["facts"]["disk"]["free_bytes"] = 945 * 1024**2
+  status["pressure"]["disk"] = {"state": "critical", "critical_below_bytes": 1024**3}
+  with pytest.raises(AgentTurnDeferred) as storage_lifted:
+    await require_agent_turn_admission(
+      "/data", owner_overrides=frozenset({"storage"}),
+      status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+      holds=TurnStartHolds(),
+    )
+  assert storage_lifted.value.resource == "processes"
+  with pytest.raises(AgentTurnDeferred) as processes_lifted:
+    await require_agent_turn_admission(
+      "/data", owner_overrides=frozenset({"processes"}),
+      status_reader=lambda _path: status, scratch_sweeper=_no_sweep,
+      holds=TurnStartHolds(),
+    )
+  assert processes_lifted.value.resource == "storage"
+
+
+@pytest.mark.asyncio
+async def test_process_override_does_not_override_critical_memory():
+  status = _tasks_status(900)
+  status["pressure"]["memory"] = _memory_status(
+    "critical", working_set_ratio=0.94,
+  )["pressure"]["memory"]
+  with pytest.raises(AgentTurnDeferred) as waiting:
+    await require_agent_turn_admission(
+      "/data", owner_overrides=frozenset({"processes", "storage"}),
+      status_reader=lambda _path: status, scratch_sweeper=_sweep_frees_no_threads,
+      holds=TurnStartHolds(),
+    )
+  assert waiting.value.resource == "memory"

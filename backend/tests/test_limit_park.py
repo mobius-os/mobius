@@ -3329,6 +3329,56 @@ def test_park_exit_uses_runner_correlated_oom_evidence_for_memory_recovery():
   }
 
 
+@pytest.mark.parametrize("runner_result, message", [
+  (None, "can't start new thread"),
+  ({"error": "spawn EAGAIN"}, "spawn EAGAIN"),
+])
+def test_turn_that_failed_while_the_task_cap_refused_forks_waits_for_processes(
+  monkeypatch, runner_result, message,
+):
+  """A turn the cap stopped mid-run resumes once processes free up."""
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: 7)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink, runner_result, message, process_cap_hits_before=5,
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "processes"
+  assert kwargs["parked_until"] - datetime.now(UTC).replace(tzinfo=None) <= (
+    chat_mod._PARK_MIN_DELAY
+  )
+  event = sink.events[-1]
+  assert event["pause"]["kind"] == "processes"
+  assert event["message"] == chat_mod.PROCESS_CAP_MESSAGE
+
+
+@pytest.mark.parametrize("before, after, result, message", [
+  (7, 7, None, "can't start new thread"),
+  (None, 7, None, "can't start new thread"),
+  (5, None, None, "can't start new thread"),
+  (5, 7, {}, None),
+])
+def test_process_cap_park_needs_a_failure_and_a_counter_rise_during_this_turn(
+  monkeypatch, before, after, result, message,
+):
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: after)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, result, message, process_cap_hits_before=before)
+  assert kwargs == {"parked": False}
+  assert all("pause" not in event for event in sink.events)
+
+
+def test_provider_limit_keeps_its_own_park_while_the_task_cap_refused_forks(monkeypatch):
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: 9)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink, {"api_error_status": 429}, "You've hit your usage limit",
+    process_cap_hits_before=1,
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] != "processes"
+
+
 @pytest.mark.parametrize("message", [
   '{"error":"request body is too large"}',
   "Invalid authentication credentials",
@@ -3750,7 +3800,7 @@ async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
   _seed_chat(cid)
   _seed_run(cid, "rt-setup-failure")
 
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False

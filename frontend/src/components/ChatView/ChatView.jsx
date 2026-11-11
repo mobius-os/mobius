@@ -5946,7 +5946,7 @@ export default function ChatView({
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
-      canOverrideStorage={canStartFreshSession}
+      canContinueAnyway={canStartFreshSession}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}

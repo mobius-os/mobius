@@ -37,8 +37,12 @@ from app.tool_output_storage import CompressedToolOutputText
 
 CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
 NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
-# Parks that wait for this installation's own memory or storage headroom.
+# Parks that wait for this installation's own memory, storage or process
+# headroom.
 RESOURCE_PARK_REASONS = frozenset({"memory", "storage", "processes"})
+# Waits the owner may lift for one warned run (Continue anyway). Never memory:
+# past that floor the kernel kills running work, not only the new turn.
+OWNER_OVERRIDABLE_RESOURCES = frozenset({"storage", "processes"})
 
 
 class Owner(Base):

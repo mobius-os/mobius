@@ -9,6 +9,7 @@ from app.memory_observability import (
   _process_identity,
   allocation_report,
   cgroup_memory_snapshot,
+  cgroup_process_cap_hits,
   cgroup_tasks_snapshot,
   estimate_payload_bytes,
   memory_map_summary,
@@ -283,3 +284,52 @@ def test_cgroup_task_snapshot_reads_current_count_and_cap(tmp_path):
   assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=cgroup)["limit_tasks"] is None
   (cgroup / "pids.current").unlink()
   assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=cgroup) == {"available": False}
+
+
+def _nested_cgroup(tmp_path):
+  proc = tmp_path / "proc"
+  (proc / "self").mkdir(parents=True)
+  (proc / "self" / "cgroup").write_text("0::/pod/container\n")
+  root = tmp_path / "cgroup"
+  container = root / "pod" / "container"
+  container.mkdir(parents=True)
+  return proc, root, container.parent, container
+
+
+def test_task_cap_on_an_ancestor_cgroup_is_not_read_as_uncapped(tmp_path):
+  """A pod-level or slice cap leaves the leaf at ``max``; the gate must still see it."""
+  proc, root, pod, container = _nested_cgroup(tmp_path)
+  (container / "pids.current").write_text("40\n")
+  (container / "pids.max").write_text("max\n")
+  (pod / "pids.current").write_text("900\n")
+  (pod / "pids.max").write_text("1000\n")
+  (pod / "pids.events").write_text("max 3\n")
+  (container / "pids.events").write_text("max 0\n")
+  assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=root) == {
+    "available": True, "current_tasks": 900, "limit_tasks": 1000,
+  }
+  assert cgroup_process_cap_hits(proc_root=proc, cgroup_root=root) == 3
+  (container / "pids.events").write_text("max 2\n")
+  assert cgroup_process_cap_hits(proc_root=proc, cgroup_root=root) == 5, (
+    "a refusal counted in the forking cgroup (before Linux 6.13) also counts"
+  )
+
+
+def test_tightest_task_cap_is_the_level_with_least_headroom(tmp_path):
+  proc, root, pod, container = _nested_cgroup(tmp_path)
+  (container / "pids.current").write_text("450\n")
+  (container / "pids.max").write_text("500\n")
+  (pod / "pids.current").write_text("900\n")
+  (pod / "pids.max").write_text("4000\n")
+  assert cgroup_tasks_snapshot(proc_root=proc, cgroup_root=root) == {
+    "available": True, "current_tasks": 450, "limit_tasks": 500,
+  }
+
+
+def test_process_cap_hits_read_the_max_event_and_absence_is_unknown(tmp_path):
+  proc, root, _pod, container = _nested_cgroup(tmp_path)
+  (container / "pids.current").write_text("10\n")
+  (container / "pids.max").write_text("100\n")
+  assert cgroup_process_cap_hits(proc_root=proc, cgroup_root=root) is None
+  (container / "pids.events").write_text("max 12\nmax.imposed 4\n")
+  assert cgroup_process_cap_hits(proc_root=proc, cgroup_root=root) == 12

@@ -35,7 +35,7 @@ class _Writer:
 
 
 async def _run_broken_setup(chat, monkeypatch, writer, *, error=None):
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False
@@ -124,7 +124,7 @@ async def test_failed_helper_setup_wakes_parent_with_settled_result(db, monkeypa
   ))
   db.commit()
 
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False
@@ -216,7 +216,7 @@ async def test_setup_failure_does_not_end_a_successor_stream(chat, monkeypatch, 
 async def test_setup_cancellation_still_propagates(chat, monkeypatch):
   admitted = False
 
-  async def admit(_data_dir):
+  async def admit(_data_dir, **_kwargs):
     nonlocal admitted
     admitted = True
 
@@ -243,7 +243,7 @@ async def test_admitted_turn_releases_its_start_hold_when_it_ends(chat, monkeypa
   """A turn that ends inside the start window stops counting as starting."""
   holds = TurnStartHolds()
 
-  async def admit(_data_dir):
+  async def admit(_data_dir, **_kwargs):
     return holds.hold()
 
   async def impl(*_args, **_kwargs):
@@ -275,7 +275,7 @@ async def test_disk_admission_deferral_persists_resumable_pause(
   """The incident case: a disk-pressure deferral must leave a DURABLE, RESUMABLE
   pause card (so a reopen shows the reason + Resume affordance), not a transient
   broadcast that reloads as a saved user message with an empty assistant reply."""
-  async def defer(_data_dir):
+  async def defer(_data_dir, **_kwargs):
     raise AgentTurnDeferred(
       "This turn is waiting for storage headroom because only 512 MiB remains.",
       resource="storage",

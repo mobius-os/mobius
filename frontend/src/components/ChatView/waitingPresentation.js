@@ -33,7 +33,9 @@ function cadenceLabel(wait) {
 
 // The one owner-facing label table for platform-resource waits. A kind listed
 // here is an automatic resource wait on every surface: the live Waiting card,
-// the settled pause record and the continuation marker that resumed it.
+// the settled pause record and the continuation marker that resumed it. A
+// kind with `continueAnyway` copy also offers the owner's warned one-turn
+// override (the server's OWNER_OVERRIDABLE_RESOURCES); memory never does.
 export const RESOURCE_PAUSE_LABELS = {
   memory: {
     summary: 'Waiting for memory to settle',
@@ -46,12 +48,14 @@ export const RESOURCE_PAUSE_LABELS = {
     pressure: 'Storage reached its measured critical boundary',
     paused: 'Paused while storage was low',
     resumed: 'Storage freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite low storage—for example, to free space. If the disk fills completely, saving may fail.',
   },
   processes: {
     summary: 'Waiting for process headroom',
     pressure: 'Running processes and threads reached their measured critical boundary',
     paused: 'Paused while processes and threads were near the limit',
     resumed: 'Processes and threads freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite the process limit—for example, to find what is holding processes. If the limit is reached, tools may fail to start.',
   },
 }
 
