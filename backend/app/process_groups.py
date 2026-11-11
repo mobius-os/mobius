@@ -273,13 +273,14 @@ def _agent_runtime_processes(marked: dict[int, _MarkedProcess]) -> set[int]:
   """The marked processes that are an agent runtime's own machinery.
 
   A runtime root is a process this server launched itself (the Claude CLI,
-  the Codex app-server wrapper, whatever its executable is called). Every
-  descendant that stayed in its root's session belongs to the runtime: the
-  native Codex binary behind its ``node`` wrapper and the stdio MCP servers
-  the runtime started. The root's session is compared rather than assumed to
-  be its own, so a runtime launched without ``setsid`` (a development host
-  without it) still keeps its MCP servers. An orphaned command re-parented
-  away from its runtime can never pass for one.
+  the Codex app-server wrapper, whatever its executable is called). Everything
+  that stayed in its root's session belongs to the runtime: the native Codex
+  binary behind its ``node`` wrapper and the stdio MCP servers the runtime
+  started. A root launched with ``setsid`` leads that session, so only its
+  own processes can be in it. A root launched without it (a development host
+  without ``setsid``) shares the server's session, so there a process must
+  also descend from the root. An orphaned command re-parented away from its
+  runtime can never pass for one.
 
   This rests on one provider behaviour, which the run marker relies on too
   (see RUN_MARKER_ENV): each tool command starts in a new session, so it and
@@ -292,6 +293,9 @@ def _agent_runtime_processes(marked: dict[int, _MarkedProcess]) -> set[int]:
   roots = {pid for pid, proc in marked.items() if proc.parent == server}
   runtime = set(roots)
   for pid, proc in marked.items():
+    if proc.session in roots:
+      runtime.add(pid)
+      continue
     ancestor, seen = proc.parent, {pid}
     while ancestor in marked and ancestor not in roots and ancestor not in seen:
       seen.add(ancestor)
