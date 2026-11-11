@@ -1158,6 +1158,7 @@ export default function SettingsView({
             notice={wallet.notice}
             refusal={wallet.refusal}
             onBuy={wallet.buy}
+            onReconnect={wallet.pairWithAccount}
           />
         )}
         {showOwnerAccounts && creditsSection(wallet.summary) === 'connect' && (

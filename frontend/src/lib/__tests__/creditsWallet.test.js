@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import WalletSection, { WalletConnect } from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, checkoutPage, creditsSection, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
+import { activityLabel, canReconnect, checkoutPage, creditsSection, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -58,6 +58,27 @@ test('the connect card says why a connection was refused and holds while connect
   assert.match(busy, /Connecting…/)
   assert.match(busy, /disabled=""/)
   assert.match(busy, /role="alert">mobius\.you could not connect your credits just now\.</)
+})
+
+test('a wallet whose key the service refuses offers to reconnect through mobius.you', () => {
+  const refused = {
+    mode: 'customer', service_host: 'www.mobius.you', balance: null, can_pair_with_account: true,
+    error: { code: 'key_refused', message: "The credits service refused this installation's key. It may have been revoked." },
+  }
+  assert.equal(canReconnect(refused), true)
+  assert.equal(canReconnect({ ...refused, error: { code: 'invalid_api_key', message: 'no' } }), true)
+  // A key that may still work is never replaced, and a self-hosted Möbius cannot ask.
+  assert.equal(canReconnect({ ...refused, error: { code: '', message: 'Could not reach www.mobius.you.' } }), false)
+  assert.equal(canReconnect({ ...refused, can_pair_with_account: false }), false)
+  assert.equal(canReconnect({ ...refused, can_pair_with_account: undefined }), false)
+  assert.equal(canReconnect(SUMMARY), false)
+
+  const html = render({ summary: refused, terms: null })
+  assert.match(html, /may have been revoked/)
+  assert.match(html, />Reconnect credits</)
+  assert.match(render({ summary: refused, terms: null, busy: true }), /disabled=""[^>]*>Connecting…</)
+  assert.doesNotMatch(render({ summary: { ...refused, can_pair_with_account: false }, terms: null }), /Reconnect/)
+  assert.doesNotMatch(render({}), /Reconnect/)
 })
 
 test('activity labels fall back to the service wording', () => {

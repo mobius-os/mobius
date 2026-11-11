@@ -1,6 +1,6 @@
 /** The credits service's wallet for app purchases, distinct from model credit. */
 import { useState } from 'react'
-import { activityLabel, money } from '../../lib/creditsWallet.js'
+import { activityLabel, canReconnect, money } from '../../lib/creditsWallet.js'
 import './WalletSection.css'
 
 const WAIVER = 'I want my credits straight away, and I understand that I lose my right '
@@ -16,7 +16,7 @@ function when(at) {
 
 export default function WalletSection({
   summary, terms, activity, busy = false, notice = null, refusal = null,
-  onBuy = () => {},
+  onBuy = () => {}, onReconnect = () => {},
 }) {
   const balance = summary?.balance
   const owed = typeof balance?.balance === 'string' && balance.balance.startsWith('-')
@@ -53,6 +53,13 @@ export default function WalletSection({
           </div>
           {owed && <span className="settings-item__trail"><span className="settings-badge settings-badge--warning">Owed</span></span>}
         </div>
+        {!balance && canReconnect(summary) && (
+          <div className="settings-item settings-item--block">
+            <div className="settings-actions">
+              <ConnectButton busy={busy} label="Reconnect credits" onClick={onReconnect} />
+            </div>
+          </div>
+        )}
         {balance && terms?.amounts_cents?.length ? (
           // A choice or waiver for one service never carries over to another.
           <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} />
@@ -88,17 +95,33 @@ export default function WalletSection({
 /** Credits for a Möbius launched from mobius.you that is not connected yet. */
 export function WalletConnect({ busy = false, refusal = null, onConnect = () => {} }) {
   return (
-    <section className="settings__section credits">
-      <h2 className="settings__section-title">Credits</h2>
-      <p className="credits__quiet">
-        Connect this Möbius to your mobius.you credits to buy credits and use
-        apps that charge per use.
-      </p>
-      {refusal && <p className="credits__refusal" role="alert">{refusal}</p>}
-      <button type="button" className="credits__buy" disabled={busy} aria-busy={busy} onClick={onConnect}>
-        {busy ? 'Connecting…' : 'Connect credits'}
-      </button>
+    <section className="settings-group" aria-labelledby="settings-credits-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-credits-title">Credits wallet</h2>
+          <p className="settings-group__desc">
+            Connect this Möbius to your mobius.you credits to buy credits and use
+            apps that charge per use.
+          </p>
+        </div>
+      </div>
+      <div className="settings-list">
+        <div className="settings-item settings-item--block">
+          <div className="settings-actions">
+            <ConnectButton busy={busy} label="Connect credits" onClick={onConnect} />
+          </div>
+        </div>
+      </div>
+      {refusal && <p className="settings-message settings-message--error" role="alert">{refusal}</p>}
     </section>
+  )
+}
+
+function ConnectButton({ busy, label, onClick }) {
+  return (
+    <button type="button" className="settings__btn settings__btn--sm" disabled={busy} aria-busy={busy} onClick={onClick}>
+      {busy ? 'Connecting…' : label}
+    </button>
   )
 }
 

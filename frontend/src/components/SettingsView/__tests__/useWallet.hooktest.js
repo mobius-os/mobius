@@ -275,15 +275,22 @@ test('a paid checkout refreshes the balance and releases its lifecycle', async t
   assert.equal(hook.result.current.notice, 'paid')
 })
 
-/** An unpaired Möbius launched from mobius.you, which the launcher can pair. */
-function stubUnpaired({ refuse = false } = {}) {
+/**
+ * A Möbius launched from mobius.you that the launcher can pair: unpaired, or
+ * with `revoked`, paired with a key the service now refuses.
+ */
+function stubUnpaired({ refuse = false, revoked = false } = {}) {
   const server = { paired: false, calls: [] }
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^.*\/api/, '')
     server.calls.push({ path, method: init.method || 'GET' })
     if (path === '/identity/credits') {
-      return json(server.paired
-        ? { mode: 'customer', pairing: 'p-account', balance: { available: '0.00' } }
+      if (server.paired) {
+        return json({ mode: 'customer', pairing: 'p-account', balance: { available: '0.00' }, can_pair_with_account: true })
+      }
+      return json(revoked
+        ? { mode: 'customer', pairing: 'p-revoked', balance: null, can_pair_with_account: true,
+            error: { code: 'key_refused', message: 'The credits service refused this installation\'s key.' } }
         : { mode: 'unpaired', pairing: null, can_pair_with_account: true })
     }
     if (path === '/identity/credits/pair/account') {
@@ -294,7 +301,11 @@ function stubUnpaired({ refuse = false } = {}) {
       return json({ paired: true })
     }
     if (path.startsWith('/identity/credits/transactions')) return json({ transactions: [] })
-    if (path === '/identity/credits/purchase-terms') return json({ ...USD, pairing: 'p-account' })
+    if (path === '/identity/credits/purchase-terms') {
+      // A refused key cannot read the service's terms either.
+      if (!server.paired) return json({ detail: { code: 'key_refused', message: 'refused' } }, 409)
+      return json({ ...USD, pairing: 'p-account' })
+    }
     throw new Error(`unexpected ${path}`)
   }
   return server
@@ -327,4 +338,19 @@ test('a_refused_connection_says_why_and_stays_unpaired', async () => {
   assert.equal(result.current.summary.mode, 'unpaired')
   assert.equal(result.current.refusal, 'mobius.you could not connect your credits just now.')
   assert.equal(result.current.busy, false)
+})
+
+test('reconnecting_a_refused_key_shows_the_wallet_again', async () => {
+  const server = stubUnpaired({ revoked: true })
+  const { result } = renderHook(useWallet, { active: true })
+  await tick()
+  assert.equal(result.current.summary.error.code, 'key_refused')
+
+  await result.current.pairWithAccount()
+  await tick()
+
+  assert.ok(server.calls.some(c => c.path === '/identity/credits/pair/account' && c.method === 'POST'))
+  assert.equal(result.current.summary.pairing, 'p-account')
+  assert.deepEqual(result.current.summary.balance, { available: '0.00' })
+  assert.equal(result.current.refusal, null)
 })

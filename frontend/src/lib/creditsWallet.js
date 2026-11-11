@@ -115,6 +115,17 @@ export function creditsSection(summary) {
 }
 
 /**
+ * Whether the wallet offers to reconnect: the service refuses the key this
+ * Möbius holds (revoked, or retired by a later connect), and the launcher can
+ * issue a new one. A key that may still work is never replaced.
+ */
+export function canReconnect(summary) {
+  return summary?.mode === 'customer'
+    && summary.can_pair_with_account === true
+    && ['key_refused', 'invalid_api_key'].includes(summary.error?.code)
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the

@@ -20,10 +20,14 @@ class FakeService:
   def __init__(self):
     self.calls = []
     self.answers = {}
+    self.refused_keys = {}  # key -> the 401 body it is refused with, as once revoked
 
   def __call__(self, method, url, json=None, headers=None, **_kwargs):
     self.calls.append({"method": method, "url": url, "json": json, "headers": headers})
     path = url.split("/api/billing/", 1)[1]
+    key = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+    if key in self.refused_keys:
+      return httpx.Response(401, json=self.refused_keys[key], request=httpx.Request(method, url))
     status, body = self.answers.get(path, (200, {"balance": "0.00"}))
     return httpx.Response(status, json=body, request=httpx.Request(method, url))
 
@@ -205,12 +209,13 @@ def test_a_launcher_key_the_service_refuses_is_not_kept(client, auth, service, l
 
 
 @pytest.mark.parametrize("first", ["pasted", "account"])
+@pytest.mark.parametrize("service_state", ["accepts-the-key", "unavailable"])
 def test_a_paired_installation_is_not_asked_for_another_key(
-  client, auth, service, launcher, first
+  client, auth, service, launcher, first, service_state
 ):
   # Asking the launcher retires this installation's current key before the new
   # one is checked, and its answer could name another service: either would
-  # break a working pairing, so a paired installation never asks.
+  # break a pairing that may still work, so only a refused key is replaced.
   if first == "pasted":
     credits_client.pair("https://credits.example", "mbc_pasted_key")
   else:
@@ -218,6 +223,8 @@ def test_a_paired_installation_is_not_asked_for_another_key(
   kept = credits_client.load_credentials()
   asked = list(launcher.posts)
   launcher.body = {"service_url": "https://other-operator.example", "key": "mbc_other"}
+  if service_state == "unavailable":
+    service.answers["balance"] = (503, {"detail": {"code": "", "message": "down"}})
 
   refused = client.post("/api/identity/credits/pair/account", headers=auth)
 
@@ -225,6 +232,46 @@ def test_a_paired_installation_is_not_asked_for_another_key(
   assert refused.json()["detail"]["code"] == "already_paired"
   assert launcher.posts == asked
   assert credits_client.load_credentials() == kept
+
+
+@pytest.mark.parametrize("first", ["pasted", "account"])
+@pytest.mark.parametrize("refusal, code", [
+  ({"detail": {"code": "invalid_api_key", "message": "Invalid API key."}}, "invalid_api_key"),
+  ({}, "key_refused"),
+], ids=["invalid_api_key", "key_refused"])
+def test_a_refused_key_is_replaced_through_the_launcher(
+  client, auth, service, launcher, first, refusal, code
+):
+  # Revoked, retired by a direct broker call, or restored from an older /data:
+  # a key the service refuses has nothing left to retire, so the owner can
+  # reconnect in one tap instead of being stuck until someone unpairs by hand.
+  if first == "pasted":
+    credits_client.pair("https://credits.example", "mbc_pasted_key")
+  else:
+    assert client.post("/api/identity/credits/pair/account", headers=auth).status_code == 200
+  service.refused_keys[credits_client.load_credentials()["key"]] = refusal
+  launcher.body = {"service_url": "https://www.mobius.you/credits", "key": "mbc_reissued"}
+
+  stuck = client.get("/api/identity/credits", headers=auth).json()
+  assert stuck["mode"] == "customer" and stuck["error"]["code"] == code
+  assert stuck["can_pair_with_account"] is True
+
+  reconnected = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert reconnected.status_code == 200, reconnected.text
+  assert launcher.posts[-1] == "/managed/api/instance/v1/credits/key"
+  assert credits_client.load_credentials()["key"] == "mbc_reissued"
+  after = client.get("/api/identity/credits", headers=auth).json()
+  assert after["mode"] == "customer" and after["error"] is None
+
+
+def test_a_self_hosted_paired_installation_is_not_offered_account_pairing(
+  client, auth, paired
+):
+  paired.refused_keys["mbc_example_key"] = {}
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["mode"] == "customer" and body["error"]["code"] == "key_refused"
+  assert body["can_pair_with_account"] is False
 
 
 def test_concurrent_account_pairings_ask_the_launcher_once(service, launcher, monkeypatch):
