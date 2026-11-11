@@ -778,6 +778,7 @@ Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
 - `device.storage`, `device.asset-cache`
+- `network.direct` (exact outside origins for images and requests)
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.tracking` (phone app), `location.current`, `location.watch`
@@ -800,6 +801,34 @@ methods; wildcard access can remain possible through explicit owner approval.
 Moving credential possession into a generic host request transport would not
 change that authorization model. Likewise, app storage and cross-app access are
 durable server capabilities, not browser-session providers.
+
+### Direct requests to declared outside sites
+
+Some providers require that searches and media loads come from the person's own
+device rather than a server proxy (GIF providers are one example), and the
+opaque app frame's policy otherwise allows no outside image or request origin.
+`network.direct` lets an app declare up to eight exact HTTPS origins:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
+
+There is no broker call. Once the owner accepted the grant, that app's frame
+policy adds the origins to `img-src` and `connect-src` only; scripts, styles,
+fonts and frames never widen, so the grant cannot add code. The origins are the
+consent row's scope, so a new site asks again and dropping one does not. An app
+still waiting for consent gets none, and the frame's validator changes with the
+grant so a cached frame never keeps an old policy. Wildcards, paths, plain HTTP
+and bare hosts without a public name are refused. The owner reads that those
+sites see the device's internet address and what the app asks them for.
+A published public app runs in the same frame, so its visitors' devices reach
+those sites too.
 
 ### Small device-local app state
 

@@ -226,9 +226,12 @@ def rows_from_contract(
   for capability, declaration in sorted((contract.get("runtime") or {}).items()):
     if not isinstance(declaration, dict):
       continue
+    origins = declaration.get("origins")
     rows.append(_row(
       capability, str(declaration.get("title") or capability),
       _runtime_text(capability, declaration),
+      # The named sites are the grant: adding one is a new question.
+      scope=[str(origin) for origin in origins] if isinstance(origins, list) else None,
       limits={
         key: int(value) for key, value in (declaration.get("limits") or {}).items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -321,6 +324,11 @@ def _runtime_text(capability: str, declaration: dict[str, Any]) -> str:
   text = str(declaration.get("description") or capability)
   if isinstance(duration, (int, float)) and not isinstance(duration, bool):
     text = f"{text.rstrip('.')} for up to {round(duration / 1000, 1):g} seconds per request."
+  origins = declaration.get("origins")
+  if isinstance(origins, list) and origins:
+    text += " Sites: " + ", ".join(
+      str(origin).removeprefix("https://") for origin in origins
+    ) + "."
   if limits:
     ordered = [key for key in _LIMIT_WORDS if key in limits]
     ordered += sorted(key for key in limits if key not in _LIMIT_WORDS)
@@ -351,12 +359,26 @@ def rows_for_manifest(manifest: dict[str, Any], contract: dict[str, Any]) -> lis
 
 def gated(app: models.App) -> bool:
   """Only Store-installed apps with a reviewed contract use first-open consent."""
-  return app.manifest_url is not None and isinstance(app.capability_contract, dict)
+  return (
+    getattr(app, "manifest_url", None) is not None
+    and isinstance(app.capability_contract, dict)
+  )
+
+
+def granted_direct_origins(app: Any) -> tuple[str, ...]:
+  """The outside sites the app's frame may reach: none until the owner
+  answered, so a waiting app's frame stays closed."""
+  from app.app_capabilities import direct_network_origins
+
+  if dormant(app):
+    return ()
+  return tuple(direct_network_origins(app.capability_contract))
 
 
 def current_rows(app: models.App) -> list[dict[str, Any]]:
   return rows_from_contract(
-    app.capability_contract, project_builders=bool(app.project_templates_json),
+    app.capability_contract,
+    project_builders=bool(getattr(app, "project_templates_json", None)),
   )
 
 
@@ -389,7 +411,7 @@ def _record(rows: list[dict[str, Any]], via: str) -> dict[str, Any]:
 def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
   """Row id to its accepted ``rank``, ``scope`` and ``limits``; None when never
   accepted."""
-  record = app.accepted_consent
+  record = getattr(app, "accepted_consent", None)
   if not isinstance(record, dict):
     return None
   stored = record.get("rows")

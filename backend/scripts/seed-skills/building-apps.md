@@ -1258,6 +1258,22 @@ The same capability works in the signed-in shell and in a hosted public app.
 It is device-local, best-effort, and partitioned by app installation; use
 `window.mobius.storage` for durable owner data or public server-side state.
 
+When a provider's terms require that requests and media loads come straight
+from the person's device (not through your service), declare the exact sites
+with `network.direct`. The frame may then load images from and `fetch` those
+origins; scripts never widen. Prefer a service proxy whenever terms allow it,
+since every listed site sees the viewer's device address:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
+
 ## Local zoom surfaces
 
 The Möbius shell keeps its toolbar, drawer, chat, and app frame at one stable
