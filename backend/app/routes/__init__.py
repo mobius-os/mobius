@@ -88,7 +88,9 @@ github_router = _load("github")
 github_access_router = _load("github_access")
 reviewer_router = _load("reviewer")
 contribution_reviews_router = _load("contribution_reviews")
+owner_grants_router = _load("contribution_owner_grants")
 identity_router = _load("identity")
+credits_router = _load("credits")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
@@ -148,7 +150,9 @@ __all__ = [
   "github_access_router",
   "reviewer_router",
   "contribution_reviews_router",
+  "owner_grants_router",
   "identity_router",
+  "credits_router",
   "push_router",
   "notifications_router",
   "debug_router",

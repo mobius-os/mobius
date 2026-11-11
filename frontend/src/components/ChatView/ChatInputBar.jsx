@@ -359,6 +359,7 @@ export default function ChatInputBar({
   onToggleVoice,
   onStop,
   onSteer,
+  onSendQueue,
   canSteer,
   showSteer = canSteer,
   steerReady = true,
@@ -807,6 +808,7 @@ export default function ChatInputBar({
       canSteer,
       canRequestSteer,
       canSubmitSteer,
+      canSendQueue: !!onSendQueue && !submissionBlocked,
       isTouchPrimary: isTouchPrimary(),
     })
     if (!action) return
@@ -823,6 +825,7 @@ export default function ChatInputBar({
       return
     }
     if (action === 'steer') onSteer()
+    if (action === 'send-queue') onSendQueue()
   }
 
   // Enter and the send button. A queued message open here is saved in place

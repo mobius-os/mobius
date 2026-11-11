@@ -163,7 +163,7 @@ test('ChatView retains settled goals independently of transport liveness', () =>
   )
   assert.match(
     chatView,
-    /if \(endingGoal \|\| pendingQueue\.pendingMessagesRef\.current\.length > 0\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    /if \(endingGoal \|\| \(pendingQueue\.pendingMessagesRef\.current\.length > 0\s*&& !handlingStopRef\.current\)\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
     'the existing authoritative refresh owns completed versus paused Goal status',
   )
   assert.match(
@@ -467,7 +467,7 @@ test('an idle Wait cancelled with an unchanged transcript still refreshes its ca
       }
     },
     runtime() {
-      return { running: false, updated_at: '2026-11-04T10:00:00', restart_observation_key: '[[],null]',
+      return { running: false, updated_at: '2026-11-04T10:00:00',
         lifecycle_projection_key: this.lifecycleKey, pending_messages: [] }
     },
   }

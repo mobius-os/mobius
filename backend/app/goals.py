@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 from sqlalchemy import or_, update
 from app import models
+from app.prompt_blocks import json_block_data
 
 log = logging.getLogger(__name__)
 
@@ -118,22 +118,18 @@ def admit_goal(db, chat_id, goal_id, objective, message=None):
       goal.revision += 1
 
 
-def scoped_goal_context(db, goal, task_id=None, *, role="coordinator"):
-  from app.goal_context import project_goal
+def scoped_goal_context(db, goal, task_id=None, *, role="coordinator", brief=False):
+  """The Goal view; ``brief`` shows the per-turn copy within its display limits."""
+  from app.goal_context import fit_brief, project_goal
   payload = project_goal(goal, task_id, role=role)
-  if role != "coordinator":
-    return payload
-  others = db.query(models.ChatGoal).filter(
-    models.ChatGoal.chat_id == goal.chat_id, models.ChatGoal.id != goal.id,
-    models.ChatGoal.status == "open",
-  ).order_by(models.ChatGoal.created_at, models.ChatGoal.id).all()
-  if others:
-    payload["other_open_goals"] = [{"id": g.id, "objective": g.objective} for g in others]
-  return payload
-
-
-def _compact_json(payload):
-  return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+  if role == "coordinator":
+    others = db.query(models.ChatGoal).filter(
+      models.ChatGoal.chat_id == goal.chat_id, models.ChatGoal.id != goal.id,
+      models.ChatGoal.status == "open",
+    ).order_by(models.ChatGoal.created_at, models.ChatGoal.id).all()
+    if others:
+      payload["other_open_goals"] = [{"id": g.id, "objective": g.objective} for g in others]
+  return fit_brief(payload, payload.get("focus"), role=role) if brief else payload
 
 
 def resume_context(db, run_id):
@@ -154,14 +150,15 @@ def resume_context(db, run_id):
     "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
     "If the owner defers a step, continue other authorized work. When none can proceed, "
     "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
-    "<mobius_goal>" + _compact_json(scoped_goal_context(db, goal)) + "</mobius_goal>"
+    "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal, brief=True))
+    + "</mobius_goal>"
   )
 
 
-def helper_goal_view(db, assignment, task_id=None):
+def helper_goal_view(db, assignment, task_id=None, *, brief=False):
   """The assigned Goal as one helper may read it, focused on its task by default."""
   payload = scoped_goal_context(
-    db, assignment.goal, task_id or assignment.plan_task, role="helper",
+    db, assignment.goal, task_id or assignment.plan_task, role="helper", brief=brief,
   )
   payload["assignment"] = {
     "delegation_id": assignment.delegation_id, "helper": assignment.helper,
@@ -191,7 +188,7 @@ def helper_goal_brief(db, chat_id):
     "brief, for example after context compaction; read_goal(task=<id>) shows "
     "any task of this Goal in full, and read_goal(task=<parent id>) lists "
     "your neighbouring tasks.\n"
-    "<mobius_goal_brief>" + _compact_json(helper_goal_view(db, assignment))
+    "<mobius_goal_brief>" + json_block_data(helper_goal_view(db, assignment, brief=True))
     + "</mobius_goal_brief>"
   )
 
@@ -202,8 +199,29 @@ COORDINATOR_READ_GOAL_NEEDS_TASK = (
 )
 
 
+def _coordinator_goal(db, chat_id, run_id):
+  """A coordinator reads its run's Goal, else the chat's presented Goal."""
+  from app.goal_plans import presented_goal_rows
+  goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
+  if goal is None:
+    rows = presented_goal_rows(db, chat_id)
+    goal = rows[1] if rows is not None else None
+  return goal
+
+
+def _helper_assignment(db, chat_id, delegation_id):
+  from app.goal_plans import goal_assignment
+  assignment = goal_assignment(db, chat_id)
+  if assignment is not None and assignment.delegation_id != delegation_id:
+    raise PermissionError("This helper may read only its own assignment")
+  return assignment
+
+
 def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
-  """What read_goal returns: the same projection as the turn's brief.
+  """What read_goal returns: the turn brief's projection, whole.
+
+  The per-turn brief shows long plan texts as marked excerpts; this read is
+  where those excerpts point, so it never clips.
 
   read_goal(task) is the one per-task expansion at both levels. With no
   task a helper re-reads its assignment brief, its only Goal read. A
@@ -218,24 +236,53 @@ def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
   """
   from app.delegations import own_helper_statuses
   if delegation_id is not None:
-    from app.goal_plans import goal_assignment
-    assignment = goal_assignment(db, chat_id)
-    if assignment is not None and assignment.delegation_id != delegation_id:
-      raise PermissionError("This helper may read only its own assignment")
+    assignment = _helper_assignment(db, chat_id, delegation_id)
     view = helper_goal_view(db, assignment, task_id) if assignment else None
     role = "helper"
   else:
-    from app.goal_plans import presented_goal_rows
-    goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
-    if goal is None:
-      rows = presented_goal_rows(db, chat_id)
-      goal = rows[1] if rows is not None else None
+    goal = _coordinator_goal(db, chat_id, run_id)
     if goal is not None and task_id is None:
       raise ValueError(COORDINATOR_READ_GOAL_NEEDS_TASK)
     view = scoped_goal_context(db, goal, task_id) if goal is not None else None
     role = "coordinator"
   return {"role": role, "goal": view,
           "helpers": own_helper_statuses(db, chat_id, run_id) if run_id else []}
+
+
+class GoalTextNotFound(Exception):
+  """read_goal(field) names a text this Goal or task does not have."""
+
+
+GOAL_TEXT_FIELDS = ("objective", "next_action", "checkpoint")
+TASK_TEXT_FIELDS = ("title", "note", "result", "completion_condition")
+
+
+def read_goal_text(db, chat_id, run_id, *, delegation_id=None, task_id=None, field):
+  """One Goal or task text, whole, as far as this agent may read it."""
+  from app.goal_context import COORDINATOR_ONLY_FIELDS
+  allowed = TASK_TEXT_FIELDS if task_id else GOAL_TEXT_FIELDS
+  if field not in allowed:
+    raise ValueError(f"field must be one of: {', '.join(allowed)}")
+  if delegation_id is not None:
+    assignment = _helper_assignment(db, chat_id, delegation_id)
+    goal = assignment.goal if assignment is not None else None
+    if field in COORDINATOR_ONLY_FIELDS:
+      raise PermissionError("A helper does not read the owner's next step or checkpoint")
+  else:
+    goal = _coordinator_goal(db, chat_id, run_id)
+  if goal is None:
+    raise GoalTextNotFound("No Goal to read here.")
+  if task_id:
+    task = next((task for task in (goal.plan_json or {}).get("tasks") or []
+                 if task.get("id") == task_id), None)
+    if task is None:
+      raise ValueError("Task not found in this Goal")
+    text = task.get(field)
+  else:
+    text = getattr(goal, field, None)
+  if not isinstance(text, str) or not text:
+    raise GoalTextNotFound(f"No {field} to read here.")
+  return {"field": field, "task": task_id, "text": text}
 
 
 def turn_goal_brief(db, chat_id, run_id, *, delegated):
@@ -341,21 +388,22 @@ def _helper_blockers(db, run, goal) -> list[str]:
   what reaches the coordinator, so blocking would be uncleared forever.
   """
   from app.delegations import _self_resuming_helper_rows
-  from app.goal_plans import _delegation_tree, active_goal_helpers
+  from app.goal_plans import active_goal_helpers, goal_helper_tree
 
-  tree_ids, owners, frontier = set(), {goal.chat_id}, _delegation_tree(
-    db, run, goal, all_attempts=True,
-  )
+  tree = goal_helper_tree(db, run, goal)
+  tree_ids, owners, frontier = set(), {goal.chat_id}, list(tree)
   while frontier:
     node = frontier.pop()
     tree_ids.add(node["id"])
     frontier.extend(node.get("children") or [])
   owners |= {row.child_chat_id for row in db.query(models.Delegation.child_chat_id)
              .filter(models.Delegation.id.in_(tree_ids))} if tree_ids else set()
-  return active_goal_helpers(db, run, goal) + [
+  # A still-working helper is already named by its task; list it only once.
+  active = active_goal_helpers(tree)
+  return list(active.values()) + [
     "helper:" + row.id
     for row, _status in _self_resuming_helper_rows(db, owners)
-    if row.app_id is None and (
+    if row.app_id is None and row.id not in active and (
       row.id in tree_ids
       or (row.parent_chat_id == goal.chat_id and row.goal_id == goal.id)
     )
@@ -425,8 +473,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
-    GoalPlanConflict, GoalPlanError, active_goal_helpers, normalize_tasks,
-    staged_task_edits,
+    GoalPlanConflict, GoalPlanError, named_ids, normalize_tasks, staged_task_edits,
   )
   # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (
@@ -547,7 +594,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         "Goal has unfinished tasks, unexplained settlements, active delegations, "
         "or results it has not received yet (read helpers with list_agents; "
         "Wait and dependency results arrive on the next exact-Goal turn): "
-        + ", ".join(blockers),
+        + named_ids(blockers),
         code="goal_completion_blocked", completion_blockers=blockers,
       )
     from app.agent_work_claims import completable_claim_keys, held_claims_hint
@@ -555,7 +602,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     unknown = set(finished_claims) - held
     if unknown:
       raise GoalPlanError(
-        "Not an open work claim of this Goal: " + ", ".join(sorted(unknown))
+        "Not an open work claim of this Goal: " + named_ids(sorted(unknown))
         + ". " + held_claims_hint(held)
       )
     values.update(status=status, result=outcome_text, next_action=None,

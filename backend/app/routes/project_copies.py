@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app import models, workspace_files
 from app.federation_transport import federation_request, FederationTransportError
 from app.config import get_settings
+from app.credential_files import is_credential_file
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.project_retention import PROJECT_LIFECYCLE_LOCK
@@ -32,7 +33,12 @@ router = APIRouter(prefix="/api/project-copies", tags=["project-copies"])
 MAX_PACKAGE = 16 * 1024 * 1024
 MAX_SOURCE = 10 * 1024 * 1024
 MAX_FILES = 500
-EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius'})
+EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', '.env', 'credentials', 'cli-auth', 'app-secrets'})
+# Saved app data is private by nature; credential files follow the shared rule.
+DATA_SUFFIXES = ('.sqlite', '.sqlite3', '.db')
+# A copy is an unreviewed snapshot, so it also skips .pem files, which can
+# hold a private key; Store publication reads their content instead.
+PEM_SUFFIXES = ('.pem',)
 SOURCE_SUFFIXES = frozenset({'.jsx', '.tsx', '.js', '.ts', '.html', '.htm', '.css', '.scss', '.json', '.md', '.txt', '.py', '.tex', '.bib', '.sty', '.cls', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.toml', '.yaml', '.yml'})
 WARNING = 'Only selected files are shared. Check them for private information or passwords written into the files. Chats, saved app data, and built previews are not included.'
 
@@ -61,9 +67,10 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower == '.env' or lower.startswith('.env.') or lower.endswith(('.pem', '.key', '.p12', '.sqlite', '.sqlite3', '.db')) or lower in {'credentials', 'credentials.json', 'secrets.json', '.npmrc', '.pypirc', '.secret-key', 'service-token.txt', 'cli-auth', 'app-secrets'}:
+    if lower in EXCLUDED or lower.startswith('.env.') or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES):
       return False
-  return True
+  # The shared rule names credential files; private folders are EXCLUDED above.
+  return not is_credential_file(rel.name)
 
 
 def digest(value: dict) -> str:
