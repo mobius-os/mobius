@@ -358,6 +358,76 @@ def test_project_creation_retry_is_idempotent(client, auth, db):
   assert db.query(models.Chat).count() == 0
 
 
+class _SimulatedProcessCrash(BaseException):
+  """Skips the route's ``except Exception`` cleanup, as a killed process would."""
+
+
+def test_project_creation_retry_succeeds_after_a_crash_mid_build(
+  client, auth, db, monkeypatch,
+):
+  import app.routes.projects as projects_route
+
+  body = {"name": "Crash-safe", "template_id": "blank", "recovery_request_id": "crashed-1"}
+  project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:project:crashed-1"))
+  root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
+  real_copy = projects_route._copy_template_files
+
+  def crash_mid_copy(target, *_args):
+    (target / "partial.txt").write_text("half-written")
+    raise _SimulatedProcessCrash
+
+  monkeypatch.setattr(projects_route, "_copy_template_files", crash_mid_copy)
+  with pytest.raises(_SimulatedProcessCrash):
+    projects_route.create_project(projects_route.ProjectCreate(**body), None, db)
+  assert not root.exists()
+
+  monkeypatch.setattr(projects_route, "_copy_template_files", real_copy)
+  retried = client.post("/api/projects", headers=auth, json=body)
+  assert retried.status_code == 200, retried.text
+  assert retried.json()["id"] == project_id
+  assert root.is_dir()
+  assert not (root / "partial.txt").exists()
+  assert not root.with_name(".creating-" + project_id).exists()
+
+
+def test_github_import_leftover_from_a_crash_is_swept_and_the_retry_succeeds(
+  client, auth, db, monkeypatch,
+):
+  import app.routes.projects as projects_route
+
+  body = {"repository": "octo/example", "recovery_request_id": "crashed-import"}
+  project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:github-project:crashed-import"))
+  root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
+  staging = root.with_name(".creating-" + project_id)
+
+  def crash_mid_clone(command, **_kwargs):
+    target = Path(command[4])
+    target.mkdir(parents=True)
+    (target / "partial.txt").write_text("half-cloned")
+    raise _SimulatedProcessCrash
+
+  def clone(command, **_kwargs):
+    target = Path(command[4])
+    target.mkdir(parents=True)
+    (target / "index.html").write_text("<h1>Hello</h1>")
+    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
+
+  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
+  monkeypatch.setattr(projects_route.subprocess, "run", crash_mid_clone)
+  with pytest.raises(_SimulatedProcessCrash):
+    projects_route.import_github_project(projects_route.GitHubImport(**body), None, db)
+  assert staging.is_dir() and not root.exists()
+
+  purge_expired_project_tombstones(db)
+  assert not staging.exists()
+
+  monkeypatch.setattr(projects_route.subprocess, "run", clone)
+  retried = client.post("/api/projects/import-github", headers=auth, json=body)
+  assert retried.status_code == 200, retried.text
+  assert (root / "index.html").is_file()
+  assert not (root / "partial.txt").exists()
+
+
 def test_project_color_can_be_set_and_cleared_without_affecting_other_fields(
   client, auth,
 ):
@@ -1353,10 +1423,11 @@ def test_project_retention_finishes_interrupted_delete_on_next_pass(
 
   import app.project_retention as retention
   real_rmtree = retention.shutil.rmtree
-  monkeypatch.setattr(
-    retention.shutil, "rmtree",
-    lambda _path: (_ for _ in ()).throw(OSError("filesystem busy")),
-  )
+
+  def busy_rmtree(*_args, **_kwargs):
+    raise OSError("filesystem busy")
+
+  monkeypatch.setattr(retention.shutil, "rmtree", busy_rmtree)
   assert purge_expired_project_tombstones(db) == [project["id"]]
   assert db.get(models.Project, project["id"]) is None
   assert not root.exists()

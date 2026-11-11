@@ -18,9 +18,9 @@ from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 log = logging.getLogger(__name__)
 
 # Project creation and TTL purge both mutate the owner-managed ``data/projects``
-# namespace. Serializing them prevents an orphan sweep from observing a freshly
-# created root in the narrow interval before its database row commits. Recovery
-# uses the same lock so a project cannot cross the TTL boundary in both paths.
+# namespace. Serializing them keeps the marked-root sweep from removing the
+# ``.creating-`` folder of a creation that is still assembling it. Recovery uses
+# the same lock so a project cannot cross the TTL boundary in both paths.
 PROJECT_LIFECYCLE_LOCK = threading.RLock()
 
 
@@ -84,6 +84,14 @@ def _owned_native_root(project_id: str, root_path: str) -> Path | None:
 
 
 RETIRED_ROOT_PREFIX = ".purging-"
+CREATING_ROOT_PREFIX = ".creating-"
+
+
+def _remove_marked_root(path: Path) -> None:
+  if path.is_symlink():
+    path.unlink(missing_ok=True)
+  elif path.exists():
+    shutil.rmtree(path)
 
 
 def retire_owned_root(root: Path) -> None:
@@ -91,7 +99,7 @@ def retire_owned_root(root: Path) -> None:
 
   The root is renamed to a ``.purging-`` sibling before deletion, so a delete
   that fails or is interrupted leaves an explicitly marked leftover for
-  ``sweep_retired_roots`` to finish. Leftover cleanup never infers ownership
+  ``sweep_marked_roots`` to finish. Leftover cleanup never infers ownership
   from a missing database row: an empty, restored, or misdirected database
   would otherwise erase every owner folder it does not know about. If the
   rename itself fails, the folder keeps its name and stays on disk.
@@ -102,26 +110,37 @@ def retire_owned_root(root: Path) -> None:
   if not root.exists():
     return
   retired = root.with_name(RETIRED_ROOT_PREFIX + root.name)
-  if retired.exists():
-    shutil.rmtree(retired)
+  _remove_marked_root(retired)
   root.rename(retired)
   shutil.rmtree(retired)
 
 
-def sweep_retired_roots(parent: Path) -> None:
-  """Finish deletions that ``retire_owned_root`` marked but did not complete."""
+def creation_staging_root(root: Path) -> Path:
+  """Return an empty, marked sibling in which a new native root is assembled.
+
+  Creation renames the finished folder onto ``root`` just before its row
+  commits, so a crash while assembling leaves only this ``.creating-`` folder.
+  The next sweep, or the next attempt for the same project id, removes it;
+  an unmarked leftover would instead be kept and refuse every retry of a
+  deterministic project id. Callers hold PROJECT_LIFECYCLE_LOCK, so an existing
+  folder with this name is an interrupted earlier attempt, never a live one.
+  """
+  staging = root.with_name(CREATING_ROOT_PREFIX + root.name)
+  _remove_marked_root(staging)
+  return staging
+
+
+def sweep_marked_roots(parent: Path, prefixes: tuple[str, ...]) -> None:
+  """Finish removing leftovers that this module marked with ``prefixes``."""
   if not parent.is_dir() or parent.is_symlink():
     return
   for child in parent.iterdir():
-    if not child.name.startswith(RETIRED_ROOT_PREFIX):
+    if not child.name.startswith(prefixes):
       continue
     try:
-      if child.is_symlink():
-        child.unlink(missing_ok=True)
-      else:
-        shutil.rmtree(child)
+      _remove_marked_root(child)
     except OSError:
-      log.exception("Could not finish removing retired root %s", child)
+      log.exception("Could not finish removing marked root %s", child)
 
 
 def purge_expired_project_tombstones(db: Session) -> list[str]:
@@ -130,7 +149,8 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
   The project rows commit away before any filesystem deletion. Thus a failed
   transaction leaves the project fully recoverable. A failed or interrupted
   delete after that commit leaves a marked ``.purging-`` leftover under
-  ``data/projects`` that the next pass finishes. Linked roots outside that
+  ``data/projects`` that the next pass finishes, together with any
+  ``.creating-`` folder an interrupted creation left. Linked roots outside that
   namespace are never passed to filesystem cleanup.
   """
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
@@ -181,5 +201,8 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
           retire_owned_root(root)
         except OSError:
           log.exception("Could not remove project-owned shared-app snapshot %s", root)
-    sweep_retired_roots(Path(get_settings().data_dir).resolve() / "projects")
+    sweep_marked_roots(
+      Path(get_settings().data_dir).resolve() / "projects",
+      (RETIRED_ROOT_PREFIX, CREATING_ROOT_PREFIX),
+    )
     return project_ids

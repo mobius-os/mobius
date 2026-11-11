@@ -11,8 +11,9 @@ from app import models
 from app.config import get_settings
 from app.project_retention import (
   PROJECT_LIFECYCLE_LOCK,
+  RETIRED_ROOT_PREFIX,
   retire_owned_root,
-  sweep_retired_roots,
+  sweep_marked_roots,
 )
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
@@ -94,8 +95,9 @@ def purge_expired_shared_apps(db: Session) -> list[str]:
           retire_owned_root(root)
         except OSError:
           log.exception("Could not remove expired shared-app snapshot %s", root)
-    sweep_retired_roots(
+    sweep_marked_roots(
       Path(get_settings().data_dir).resolve() / "shared" / "app-instances",
+      (RETIRED_ROOT_PREFIX,),
     )
     return ids
 

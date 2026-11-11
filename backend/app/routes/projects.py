@@ -57,7 +57,11 @@ from app.storage_io import make_parent_folders, require_parent_folders
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
 from app.theme import DEFAULT_THEME, shipped_palettes_css, theme_data
-from app.project_retention import PROJECT_LIFECYCLE_LOCK, serialize_project_lifecycle
+from app.project_retention import (
+  PROJECT_LIFECYCLE_LOCK,
+  creation_staging_root,
+  serialize_project_lifecycle,
+)
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 
@@ -1119,6 +1123,21 @@ def _new_chat(
   )
 
 
+def _place_and_commit_new_root(db: Session, staging: Path, root: Path) -> None:
+  """Move an assembled project root into place and commit its pending row.
+
+  The rename runs immediately before the commit, so only a crash inside that
+  commit can leave an unmarked root without a row. That leftover is kept and
+  refuses retries rather than risking owner files.
+  """
+  staging.rename(root)
+  try:
+    db.commit()
+  except Exception:
+    shutil.rmtree(root, ignore_errors=True)
+    raise
+
+
 def _copy_template_files(root: Path, template: dict, app: models.App | None) -> None:
   files = template.get("files") or {}
   if not files:
@@ -1195,13 +1214,14 @@ def create_project(
     root = (Path(get_settings().data_dir) / root_locator).resolve()
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
-    root.mkdir(parents=True)
+    staging = creation_staging_root(root)
+    staging.mkdir(parents=True)
     try:
-      _copy_template_files(root, template, app)
+      _copy_template_files(staging, template, app)
       snapshot = _safe_template(template, app)
       # Declared previews become buildable artifacts up front, so the file
       # grid, artifact list, and build button share one explicit registry.
-      artifacts = _declared_previews_to_artifacts(snapshot, root)
+      artifacts = _declared_previews_to_artifacts(snapshot, staging)
       project = models.Project(
         id=project_id,
         name=body.name,
@@ -1213,10 +1233,10 @@ def create_project(
         artifacts_json=artifacts or None,
       )
       db.add(project)
-      db.commit()
+      _place_and_commit_new_root(db, staging, root)
     except Exception:
       db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
+      shutil.rmtree(staging, ignore_errors=True)
       raise
   db.refresh(project)
   return _project_response(project)
@@ -1249,6 +1269,7 @@ def import_github_project(
     root = (Path(get_settings().data_dir) / root_locator).resolve()
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
+    staging = creation_staging_root(root)
     env = {
       **os.environ,
       "GH_TOKEN": token,
@@ -1257,7 +1278,7 @@ def import_github_project(
     }
     try:
       result = subprocess.run(
-        ["gh", "repo", "clone", body.repository, str(root), "--", "--depth=1"],
+        ["gh", "repo", "clone", body.repository, str(staging), "--", "--depth=1"],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         env=env,
@@ -1265,10 +1286,10 @@ def import_github_project(
         check=False,
       )
     except (OSError, subprocess.TimeoutExpired) as exc:
-      shutil.rmtree(root, ignore_errors=True)
+      shutil.rmtree(staging, ignore_errors=True)
       raise HTTPException(502, "GitHub import did not finish in time.") from exc
     if result.returncode != 0:
-      shutil.rmtree(root, ignore_errors=True)
+      shutil.rmtree(staging, ignore_errors=True)
       lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
       detail = lines[-1][:300] if lines else "GitHub could not clone that repository."
       raise HTTPException(502, detail)
@@ -1295,7 +1316,7 @@ def import_github_project(
       "source_app_version": None,
     }
     try:
-      artifacts = _declared_previews_to_artifacts(snapshot, root)
+      artifacts = _declared_previews_to_artifacts(snapshot, staging)
       project = models.Project(
         id=project_id,
         name=body.name or body.repository.split("/", 1)[1],
@@ -1307,10 +1328,10 @@ def import_github_project(
         artifacts_json=artifacts or None,
       )
       db.add(project)
-      db.commit()
+      _place_and_commit_new_root(db, staging, root)
     except Exception:
       db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
+      shutil.rmtree(staging, ignore_errors=True)
       raise
   db.refresh(project)
   return _project_response(project)
