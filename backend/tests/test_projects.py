@@ -358,10 +358,6 @@ def test_project_creation_retry_is_idempotent(client, auth, db):
   assert db.query(models.Chat).count() == 0
 
 
-class _SimulatedProcessCrash(BaseException):
-  """Skips the route's ``except Exception`` cleanup, as a killed process would."""
-
-
 def test_project_creation_retry_succeeds_after_a_crash_mid_build(
   client, auth, db, monkeypatch,
 ):
@@ -370,27 +366,31 @@ def test_project_creation_retry_succeeds_after_a_crash_mid_build(
   body = {"name": "Crash-safe", "template_id": "blank", "recovery_request_id": "crashed-1"}
   project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:project:crashed-1"))
   root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
+  staging = root.with_name(".creating-" + project_id)
   real_copy = projects_route._copy_template_files
 
-  def crash_mid_copy(target, *_args):
+  def interrupted_copy(target, *_args):
     (target / "partial.txt").write_text("half-written")
-    raise _SimulatedProcessCrash
+    raise KeyboardInterrupt
 
-  monkeypatch.setattr(projects_route, "_copy_template_files", crash_mid_copy)
-  with pytest.raises(_SimulatedProcessCrash):
+  monkeypatch.setattr(projects_route, "_copy_template_files", interrupted_copy)
+  with pytest.raises(KeyboardInterrupt):
     projects_route.create_project(projects_route.ProjectCreate(**body), None, db)
-  assert not root.exists()
+  assert not root.exists() and not staging.exists()
 
+  # A killed process runs no cleanup and leaves its half-built staging folder.
+  staging.mkdir(parents=True)
+  (staging / "partial.txt").write_text("half-written")
   monkeypatch.setattr(projects_route, "_copy_template_files", real_copy)
   retried = client.post("/api/projects", headers=auth, json=body)
   assert retried.status_code == 200, retried.text
   assert retried.json()["id"] == project_id
   assert root.is_dir()
   assert not (root / "partial.txt").exists()
-  assert not root.with_name(".creating-" + project_id).exists()
+  assert not staging.exists()
 
 
-def test_github_import_leftover_from_a_crash_is_swept_and_the_retry_succeeds(
+def test_github_import_leftover_from_a_killed_process_is_swept_and_the_retry_succeeds(
   client, auth, db, monkeypatch,
 ):
   import app.routes.projects as projects_route
@@ -399,33 +399,79 @@ def test_github_import_leftover_from_a_crash_is_swept_and_the_retry_succeeds(
   project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:github-project:crashed-import"))
   root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
   staging = root.with_name(".creating-" + project_id)
-
-  def crash_mid_clone(command, **_kwargs):
-    target = Path(command[4])
-    target.mkdir(parents=True)
-    (target / "partial.txt").write_text("half-cloned")
-    raise _SimulatedProcessCrash
-
-  def clone(command, **_kwargs):
-    target = Path(command[4])
-    target.mkdir(parents=True)
-    (target / "index.html").write_text("<h1>Hello</h1>")
-    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
-
-  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
-  monkeypatch.setattr(projects_route.subprocess, "run", crash_mid_clone)
-  with pytest.raises(_SimulatedProcessCrash):
-    projects_route.import_github_project(projects_route.GitHubImport(**body), None, db)
-  assert staging.is_dir() and not root.exists()
+  # A killed process runs no cleanup and leaves its half-cloned staging folder.
+  staging.mkdir(parents=True)
+  (staging / "partial.txt").write_text("half-cloned")
 
   purge_expired_project_tombstones(db)
   assert not staging.exists()
 
+  def clone(command, **_kwargs):
+    target = Path(command[4])
+    assert target == staging and target.is_dir() and not any(target.iterdir())
+    (target / "index.html").write_text("<h1>Hello</h1>")
+    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
+
+  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
   monkeypatch.setattr(projects_route.subprocess, "run", clone)
   retried = client.post("/api/projects/import-github", headers=auth, json=body)
   assert retried.status_code == 200, retried.text
   assert (root / "index.html").is_file()
   assert not (root / "partial.txt").exists()
+  assert not staging.exists()
+
+
+def test_github_clone_runs_outside_the_lifecycle_lock_and_survives_a_sweep(
+  client, auth, monkeypatch,
+):
+  import app.project_retention as retention
+  import app.routes.projects as projects_route
+
+  projects_root = Path(os.environ["DATA_DIR"]).resolve() / "projects"
+  seen = {}
+
+  def clone(command, **_kwargs):
+    target = Path(command[4])
+    (target / "index.html").write_text("<h1>Hello</h1>")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      # Another request (for example a chat deletion) takes the lock and
+      # sweeps while the clone is still running.
+      def other_request():
+        if not retention.PROJECT_LIFECYCLE_LOCK.acquire(timeout=5):
+          return False
+        try:
+          retention.sweep_marked_roots(projects_root, (retention.CREATING_ROOT_PREFIX,))
+          return True
+        finally:
+          retention.PROJECT_LIFECYCLE_LOCK.release()
+      seen["lock_free"] = pool.submit(other_request).result()
+    seen["survived_sweep"] = (target / "index.html").is_file()
+    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
+
+  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
+  monkeypatch.setattr(projects_route.subprocess, "run", clone)
+  response = client.post(
+    "/api/projects/import-github", headers=auth, json={"repository": "octo/example"},
+  )
+  assert response.status_code == 200, response.text
+  assert seen == {"lock_free": True, "survived_sweep": True}
+  root = projects_root / response.json()["id"]
+  assert (root / "index.html").is_file()
+
+
+def test_a_second_request_cannot_assemble_the_same_root_concurrently(tmp_path):
+  from app.project_retention import RootStillAssembling, creation_staging_root
+
+  root = tmp_path / "projects" / str(uuid.uuid4())
+  with creation_staging_root(root) as staging:
+    (staging / "partial.txt").write_text("in progress")
+    with pytest.raises(RootStillAssembling):
+      with creation_staging_root(root):
+        pass
+    assert (staging / "partial.txt").is_file()
+  assert not staging.exists()
+  with creation_staging_root(root) as staging:
+    assert staging.is_dir()
 
 
 def test_project_color_can_be_set_and_cleared_without_affecting_other_fields(
@@ -1084,7 +1130,8 @@ def test_github_import_creates_a_private_project_owned_repository(
     assert command[:4] == ["gh", "repo", "clone", "octo/example"]
     assert kwargs["env"]["GH_TOKEN"] == "secret-test-token"
     root = Path(command[4])
-    root.mkdir(parents=True)
+    # git clone accepts an existing empty destination.
+    assert root.is_dir() and not any(root.iterdir())
     (root / "index.html").write_text("<h1>Hello</h1>", encoding="utf-8")
     for git_args in (
       ["git", "-C", str(root), "init", "-b", "main"],

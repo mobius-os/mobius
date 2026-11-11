@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.config import get_settings
 from app.project_retention import (
+  CREATING_ROOT_PREFIX,
   PROJECT_LIFECYCLE_LOCK,
   RETIRED_ROOT_PREFIX,
   retire_owned_root,
@@ -97,7 +98,7 @@ def purge_expired_shared_apps(db: Session) -> list[str]:
           log.exception("Could not remove expired shared-app snapshot %s", root)
     sweep_marked_roots(
       Path(get_settings().data_dir).resolve() / "shared" / "app-instances",
-      (RETIRED_ROOT_PREFIX,),
+      (RETIRED_ROOT_PREFIX, CREATING_ROOT_PREFIX),
     )
     return ids
 

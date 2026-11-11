@@ -7,7 +7,6 @@ import hashlib
 import json
 import re
 import secrets
-import shutil
 import uuid
 
 import httpx
@@ -25,7 +24,7 @@ from app.config import get_settings
 from app.credential_files import is_credential_file
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
-from app.project_retention import PROJECT_LIFECYCLE_LOCK
+from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.routes.projects import _live_project, _project_root, _project_response, _template_by_id, _safe_template
 from app.timeutil import now_naive_utc
 
@@ -269,19 +268,18 @@ async def import_copy(body: CopyImport, _: models.Owner = Depends(get_current_ow
     snapshot['source_copy'] = {'digest': body.digest}
     if root.exists() or root.is_symlink():
       raise HTTPException(409, 'The project destination already exists.')
-    root.mkdir(parents=True)
-    try:
-      for item in package['files']:
-        target = workspace_files.resolve_path(root, item['path'])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(item['content'], validate=True))
-      project = models.Project(id=project_id, name=(body.name or package['name']).strip() or 'Project copy', project_type=template_id, root_path=locator.as_posix(), chat_id=None, source_app_id=app.id if app is not None else None, template_snapshot_json=snapshot, artifacts_json=None)
-      db.add(project)
-      db.commit()
-    except Exception:
-      db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
-      raise
+    with creation_staging_root(root) as staging:
+      try:
+        for item in package['files']:
+          target = workspace_files.resolve_path(staging, item['path'])
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_bytes(base64.b64decode(item['content'], validate=True))
+        project = models.Project(id=project_id, name=(body.name or package['name']).strip() or 'Project copy', project_type=template_id, root_path=locator.as_posix(), chat_id=None, source_app_id=app.id if app is not None else None, template_snapshot_json=snapshot, artifacts_json=None)
+        db.add(project)
+        place_and_commit_new_root(db, staging, root)
+      except Exception:
+        db.rollback()
+        raise
     db.refresh(project)
     return {**_project_response(project), 'copy_warning': warning}
 

@@ -59,7 +59,9 @@ from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
 from app.theme import DEFAULT_THEME, shipped_palettes_css, theme_data
 from app.project_retention import (
   PROJECT_LIFECYCLE_LOCK,
+  RootStillAssembling,
   creation_staging_root,
+  place_and_commit_new_root,
   serialize_project_lifecycle,
 )
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -1123,21 +1125,6 @@ def _new_chat(
   )
 
 
-def _place_and_commit_new_root(db: Session, staging: Path, root: Path) -> None:
-  """Move an assembled project root into place and commit its pending row.
-
-  The rename runs immediately before the commit, so only a crash inside that
-  commit can leave an unmarked root without a row. That leftover is kept and
-  refuses retries rather than risking owner files.
-  """
-  staging.rename(root)
-  try:
-    db.commit()
-  except Exception:
-    shutil.rmtree(root, ignore_errors=True)
-    raise
-
-
 def _copy_template_files(root: Path, template: dict, app: models.App | None) -> None:
   files = template.get("files") or {}
   if not files:
@@ -1214,30 +1201,28 @@ def create_project(
     root = (Path(get_settings().data_dir) / root_locator).resolve()
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
-    staging = creation_staging_root(root)
-    staging.mkdir(parents=True)
-    try:
-      _copy_template_files(staging, template, app)
-      snapshot = _safe_template(template, app)
-      # Declared previews become buildable artifacts up front, so the file
-      # grid, artifact list, and build button share one explicit registry.
-      artifacts = _declared_previews_to_artifacts(snapshot, staging)
-      project = models.Project(
-        id=project_id,
-        name=body.name,
-        project_type=_template_key(template, app),
-        root_path=root_locator.as_posix(),
-        chat_id=None,
-        source_app_id=app.id if app is not None else None,
-        template_snapshot_json=snapshot,
-        artifacts_json=artifacts or None,
-      )
-      db.add(project)
-      _place_and_commit_new_root(db, staging, root)
-    except Exception:
-      db.rollback()
-      shutil.rmtree(staging, ignore_errors=True)
-      raise
+    with creation_staging_root(root) as staging:
+      try:
+        _copy_template_files(staging, template, app)
+        snapshot = _safe_template(template, app)
+        # Declared previews become buildable artifacts up front, so the file
+        # grid, artifact list, and build button share one explicit registry.
+        artifacts = _declared_previews_to_artifacts(snapshot, staging)
+        project = models.Project(
+          id=project_id,
+          name=body.name,
+          project_type=_template_key(template, app),
+          root_path=root_locator.as_posix(),
+          chat_id=None,
+          source_app_id=app.id if app is not None else None,
+          template_snapshot_json=snapshot,
+          artifacts_json=artifacts or None,
+        )
+        db.add(project)
+        place_and_commit_new_root(db, staging, root)
+      except Exception:
+        db.rollback()
+        raise
   db.refresh(project)
   return _project_response(project)
 
@@ -1252,87 +1237,100 @@ def import_github_project(
   token = github_auth.get_token()
   if not token:
     raise HTTPException(409, "Connect GitHub before importing a repository.")
-  with PROJECT_LIFECYCLE_LOCK:
-    if body.recovery_request_id:
-      project_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL, f"mobius:github-project:{body.recovery_request_id}",
-      ))
-      existing = db.query(models.Project).filter(models.Project.id == project_id).first()
-      if existing is not None:
-        if existing.deleted_at is not None:
-          raise HTTPException(409, "Project was deleted.")
-        return _project_response(existing, _live_project_chat_rows(db, existing.id))
-    else:
-      project_id = str(uuid.uuid4())
+  if body.recovery_request_id:
+    project_id = str(uuid.uuid5(
+      uuid.NAMESPACE_URL, f"mobius:github-project:{body.recovery_request_id}",
+    ))
+  else:
+    project_id = str(uuid.uuid4())
+  root_locator = Path("projects") / project_id
+  root = (Path(get_settings().data_dir) / root_locator).resolve()
 
-    root_locator = Path("projects") / project_id
-    root = (Path(get_settings().data_dir) / root_locator).resolve()
+  def existing_import() -> dict[str, Any] | None:
+    existing = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if existing is None:
+      return None
+    if existing.deleted_at is not None:
+      raise HTTPException(409, "Project was deleted.")
+    return _project_response(existing, _live_project_chat_rows(db, existing.id))
+
+  with PROJECT_LIFECYCLE_LOCK:
+    existing = existing_import()
+    if existing is not None:
+      return existing
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
-    staging = creation_staging_root(root)
-    env = {
-      **os.environ,
-      "GH_TOKEN": token,
-      "GIT_TERMINAL_PROMPT": "0",
-      "LC_ALL": "C",
-    }
-    try:
-      result = subprocess.run(
-        ["gh", "repo", "clone", body.repository, str(staging), "--", "--depth=1"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        env=env,
-        timeout=120,
-        check=False,
-      )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-      shutil.rmtree(staging, ignore_errors=True)
-      raise HTTPException(502, "GitHub import did not finish in time.") from exc
-    if result.returncode != 0:
-      shutil.rmtree(staging, ignore_errors=True)
-      lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
-      detail = lines[-1][:300] if lines else "GitHub could not clone that repository."
-      raise HTTPException(502, detail)
-
-    repository_url = f"https://github.com/{body.repository}"
-    snapshot: dict[str, Any] = {
-      "key": "github:repository",
-      "id": "repository",
-      "name": "GitHub repository",
-      "description": f"Imported from {body.repository}",
-      "guidance": (
-        "Work inside this project root. Preview and test changes locally. "
-        "The owner controls commits and any later publication."
-      ),
-      "skills": [],
-      "dependencies": [],
-      "previews": [],
-      "actions": [],
-      "artifact_types": [],
-      "files": {},
-      "repository": {"slug": body.repository, "url": repository_url},
-      "source_app_id": None,
-      "source_app_name": None,
-      "source_app_version": None,
-    }
-    try:
-      artifacts = _declared_previews_to_artifacts(snapshot, staging)
-      project = models.Project(
-        id=project_id,
-        name=body.name or body.repository.split("/", 1)[1],
-        project_type="github:repository",
-        root_path=root_locator.as_posix(),
-        chat_id=None,
-        source_app_id=None,
-        template_snapshot_json=snapshot,
-        artifacts_json=artifacts or None,
-      )
-      db.add(project)
-      _place_and_commit_new_root(db, staging, root)
-    except Exception:
-      db.rollback()
-      shutil.rmtree(staging, ignore_errors=True)
-      raise
+  env = {
+    **os.environ,
+    "GH_TOKEN": token,
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C",
+  }
+  repository_url = f"https://github.com/{body.repository}"
+  snapshot: dict[str, Any] = {
+    "key": "github:repository",
+    "id": "repository",
+    "name": "GitHub repository",
+    "description": f"Imported from {body.repository}",
+    "guidance": (
+      "Work inside this project root. Preview and test changes locally. "
+      "The owner controls commits and any later publication."
+    ),
+    "skills": [],
+    "dependencies": [],
+    "previews": [],
+    "actions": [],
+    "artifact_types": [],
+    "files": {},
+    "repository": {"slug": body.repository, "url": repository_url},
+    "source_app_id": None,
+    "source_app_name": None,
+    "source_app_version": None,
+  }
+  try:
+    with creation_staging_root(root) as staging:
+      # The clone can take minutes, so it runs outside PROJECT_LIFECYCLE_LOCK:
+      # chat deletion and other retention callers wait on that lock.
+      try:
+        result = subprocess.run(
+          ["gh", "repo", "clone", body.repository, str(staging), "--", "--depth=1"],
+          stdin=subprocess.DEVNULL,
+          capture_output=True,
+          env=env,
+          timeout=120,
+          check=False,
+        )
+      except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(502, "GitHub import did not finish in time.") from exc
+      if result.returncode != 0:
+        lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = lines[-1][:300] if lines else "GitHub could not clone that repository."
+        raise HTTPException(502, detail)
+      with PROJECT_LIFECYCLE_LOCK:
+        existing = existing_import()
+        if existing is not None:
+          return existing
+        if root.exists():
+          raise HTTPException(409, "Project root already exists.")
+        try:
+          artifacts = _declared_previews_to_artifacts(snapshot, staging)
+          project = models.Project(
+            id=project_id,
+            name=body.name or body.repository.split("/", 1)[1],
+            project_type="github:repository",
+            root_path=root_locator.as_posix(),
+            chat_id=None,
+            source_app_id=None,
+            template_snapshot_json=snapshot,
+            artifacts_json=artifacts or None,
+          )
+          db.add(project)
+          place_and_commit_new_root(db, staging, root)
+        except Exception:
+          db.rollback()
+          raise
+  except RootStillAssembling as exc:
+    raise HTTPException(409, "This repository import is still in progress.") from exc
   db.refresh(project)
   return _project_response(project)
 

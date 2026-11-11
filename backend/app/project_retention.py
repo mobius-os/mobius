@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -18,10 +19,12 @@ from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 log = logging.getLogger(__name__)
 
 # Project creation and TTL purge both mutate the owner-managed ``data/projects``
-# namespace. Serializing them keeps the marked-root sweep from removing the
-# ``.creating-`` folder of a creation that is still assembling it. Recovery uses
-# the same lock so a project cannot cross the TTL boundary in both paths.
+# namespace. The lock orders their database checks and commits; recovery uses
+# it so a project cannot cross the TTL boundary in both paths. Folder assembly
+# may run outside it (a GitHub clone can take minutes): the marked-root sweep
+# skips every ``.creating-`` folder registered in ``_ASSEMBLING``.
 PROJECT_LIFECYCLE_LOCK = threading.RLock()
+_ASSEMBLING: set[Path] = set()
 
 
 @asynccontextmanager
@@ -115,32 +118,66 @@ def retire_owned_root(root: Path) -> None:
   shutil.rmtree(retired)
 
 
-def creation_staging_root(root: Path) -> Path:
-  """Return an empty, marked sibling in which a new native root is assembled.
+class RootStillAssembling(Exception):
+  """Another request is still assembling the same new root."""
 
-  Creation renames the finished folder onto ``root`` just before its row
-  commits, so a crash while assembling leaves only this ``.creating-`` folder.
-  The next sweep, or the next attempt for the same project id, removes it;
-  an unmarked leftover would instead be kept and refuse every retry of a
-  deterministic project id. Callers hold PROJECT_LIFECYCLE_LOCK, so an existing
-  folder with this name is an interrupted earlier attempt, never a live one.
+
+@contextmanager
+def creation_staging_root(root: Path) -> Iterator[Path]:
+  """Yield an empty, marked sibling in which a new native root is assembled.
+
+  ``place_and_commit_new_root`` renames the finished folder onto ``root`` just
+  before its row commits, so a crash while assembling leaves only this
+  ``.creating-`` folder. While this scope is open the sweep leaves the folder
+  alone, even without PROJECT_LIFECYCLE_LOCK held; once the process is gone,
+  the next sweep or the next attempt for the same id removes it. An unmarked
+  leftover would instead be kept and refuse every retry of a deterministic id.
+  Raises RootStillAssembling while another request assembles the same root.
   """
   staging = root.with_name(CREATING_ROOT_PREFIX + root.name)
-  _remove_marked_root(staging)
-  return staging
+  key = root.parent.resolve() / staging.name
+  with PROJECT_LIFECYCLE_LOCK:
+    if key in _ASSEMBLING:
+      raise RootStillAssembling(staging)
+    _ASSEMBLING.add(key)
+  try:
+    _remove_marked_root(staging)
+    staging.mkdir(parents=True)
+    yield staging
+  finally:
+    # A placed root has already moved away; anything else is unfinished.
+    shutil.rmtree(staging, ignore_errors=True)
+    with PROJECT_LIFECYCLE_LOCK:
+      _ASSEMBLING.discard(key)
+
+
+def place_and_commit_new_root(db: Session, staging: Path, root: Path) -> None:
+  """Move an assembled root into place and commit its pending row.
+
+  The rename runs immediately before the commit, so only a crash inside that
+  commit can leave an unmarked root without a row. That leftover is kept and
+  refuses retries rather than risking owner files.
+  """
+  staging.rename(root)
+  try:
+    db.commit()
+  except Exception:
+    shutil.rmtree(root, ignore_errors=True)
+    raise
 
 
 def sweep_marked_roots(parent: Path, prefixes: tuple[str, ...]) -> None:
   """Finish removing leftovers that this module marked with ``prefixes``."""
   if not parent.is_dir() or parent.is_symlink():
     return
-  for child in parent.iterdir():
-    if not child.name.startswith(prefixes):
-      continue
-    try:
-      _remove_marked_root(child)
-    except OSError:
-      log.exception("Could not finish removing marked root %s", child)
+  with PROJECT_LIFECYCLE_LOCK:
+    for child in parent.iterdir():
+      if not child.name.startswith(prefixes) or child in _ASSEMBLING:
+        continue
+      try:
+        _remove_marked_root(child)
+      except OSError:
+        log.exception("Could not finish removing marked root %s", child)
 
 
 def purge_expired_project_tombstones(db: Session) -> list[str]:
