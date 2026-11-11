@@ -89,7 +89,7 @@ _BALANCE_FIELDS = ("balance", "balance_micro", "available_micro")
 def payer_charge_view(answer: dict) -> dict:
   """A charge answer with only the fields its paying app needs to act on it:
   the charge's id, what it paid, and whether the service replayed an earlier
-  identical charge. The card path's receipt carries the same id and amount."""
+  identical charge."""
   return {name: answer[name] for name in _PAYER_CHARGE_FIELDS if name in answer}
 
 
@@ -417,28 +417,6 @@ def charge(seller: str, app: str, action: str, idempotency_key: str,
     "seller": seller, "app": app, "action": action,
     "idempotency_key": app_scoped_key(payer, idempotency_key),
     "max_price_micro": int(max_price_micro), "buyer_app": buyer_app})
-
-
-def start_purchase(seller: str, app: str, action: str, scoped_key: str,
-                   max_price_micro: int, *, buyer_app: str) -> dict:
-  """A Stripe Checkout page paying ``seller``'s priced action by card.
-
-  ``scoped_key`` is already the app-scoped key (``app_scoped_key``): the same
-  key a credits payment of this call would use, so the service settles the
-  card payment into exactly that charge. The owner pressed Pay in Möbius's
-  own confirmation, which is also their acceptance that it is delivered at
-  once (the waiver).
-  """
-  started = _call("POST", "purchases", _paired(), {
-    "seller": seller, "app": app, "action": action, "idempotency_key": scoped_key,
-    "max_price_micro": int(max_price_micro), "waiver_accepted": True, "buyer_app": buyer_app})
-  page = started.get("checkout_url")
-  return {**started, "checkout_url": _stripe_page(page, "checkout.stripe.com") if page else None}
-
-
-def read_purchase(purchase_id: str) -> dict:
-  """A card purchase's state; ``status: charged`` carries the charge receipt."""
-  return _call("GET", f"purchases/{_path_piece(purchase_id, _TOPUP_ID)}", _paired())
 
 
 def app_scoped_key(payer: str, idempotency_key: str) -> str:

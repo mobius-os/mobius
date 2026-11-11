@@ -69,19 +69,17 @@ export function AppCreditsPaymentDialog({
     containerRef: dialogRef, initialFocusRef: cancelRef, onClose: refusal ? onClose : onCancel,
   })
   const name = appName || payment.app_name || 'This app'
-  const byCard = payment.method === 'card'
-  const { figure, unit, ceiling } = paymentAmount(payment)
-  const shownFigure = byCard ? figure : `${figure} credits`
+  const { figure, ceiling } = paymentAmount(payment)
   return (
     <div className="canvas-credits" role="dialog" aria-modal="true"
       aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
       <section className="app-consent canvas-credits__sheet">
         <CreditsSheetHead appId={appId} name={name} titleId={titleId}
-          eyebrow={byCard ? 'Card payment' : 'Credits payment'}
+          eyebrow="Credits payment"
           title={refusal ? 'This payment didn’t go through' : 'Confirm your purchase'} />
         <div className="canvas-credits__amount">
           <span className="canvas-credits__figure">{figure}</span>
-          <span className="canvas-credits__unit">{unit}</span>
+          <span className="canvas-credits__unit">credits</span>
         </div>
         <ul className="app-consent__list">
           <li className="app-consent__row">
@@ -92,10 +90,8 @@ export function AppCreditsPaymentDialog({
           </li>
           <li className="app-consent__row">
             <div>
-              <strong>{byCard ? 'Card' : 'Möbius credits'}</strong>
-              <span>{byCard
-                ? 'You finish on Stripe’s secure page.'
-                : 'Taken from your Möbius credits balance.'}</span>
+              <strong>Möbius credits</strong>
+              <span>Taken from your Möbius credits balance.</span>
             </div>
           </li>
         </ul>
@@ -110,19 +106,17 @@ export function AppCreditsPaymentDialog({
           <>
             {ceiling && (
               <p className="app-consent__meta">
-                If the creator’s price rises first, {name} pays at most {byCard ? ceiling : `${ceiling} credits`}.
+                If the creator’s price rises first, {name} pays at most {ceiling} credits.
               </p>
             )}
-            <p className="app-consent__meta">{byCard
-              ? 'You get it as soon as it’s paid, so it can’t be cancelled after.'
-              : 'Nothing is paid until you confirm.'}</p>
+            <p className="app-consent__meta">Nothing is paid until you confirm.</p>
             {error && <p className="app-consent__error" role="alert">{error}</p>}
             <div className="app-consent__actions">
               <button type="button" className="app-consent__btn" ref={cancelRef}
                 onClick={onCancel} disabled={busy}>Cancel</button>
               <button type="button" className="app-consent__btn app-consent__btn--primary"
                 onPointerDown={pay.onPointerDown} onClick={pay.onClick} disabled={busy || !pay.armed}>
-                {busy ? (byCard ? 'Opening Stripe…' : 'Paying…') : `Pay ${shownFigure}`}
+                {busy ? 'Paying…' : `Pay ${figure} credits`}
               </button>
             </div>
           </>

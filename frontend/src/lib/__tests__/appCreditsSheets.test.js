@@ -13,7 +13,7 @@ after(() => vite.close())
 
 const PAYMENT = {
   id: 'p1', app_name: 'Market', seller: 'ana', app: 'prompts', action: 'run',
-  description: 'Run: Meeting notes', method: 'credits',
+  description: 'Run: Meeting notes',
   price_micro: 400_000, price: '0.40', max_price_micro: 500_000, max_price: '0.50',
 }
 
@@ -45,16 +45,15 @@ test('Pay is off when the payment sheet first appears', () => {
   assert.match(html, /pays at most 0.50 credits/)
 })
 
-test('a refused payment keeps its sheet with the reason and only a Close', () => {
+test('a payment no longer waiting keeps its sheet with the reason and only a Close', () => {
   const html = render(createElement(AppCreditsPaymentDialog, {
-    appId: 1, appName: 'Market', payment: { ...PAYMENT, method: 'card', currency: 'gbp' },
-    busy: false, error: '', refusal: 'Card payments start at £0.50.',
+    appId: 1, appName: 'Market', payment: PAYMENT,
+    busy: false, error: '', refusal: 'That payment is no longer waiting. Try it again in the app.',
     onCancel: noop, onPay: noop, onClose: noop,
   }))
-  assert.match(html, /role="alert">Card payments start at £0.50.</)
+  assert.match(html, /role="alert">That payment is no longer waiting. Try it again in the app.</)
   assert.match(html, /didn’t go through/)
   button(html, 'Close')
   assert.doesNotMatch(html, />Pay /)
-  assert.match(html, /£0.40/)
-  assert.doesNotMatch(html, /\$/)
+  assert.match(html, /0.40/)
 })

@@ -59,7 +59,6 @@ import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { checkoutPage, openStripeWindow } from '../../lib/creditsWallet.js'
 import { answerRefusal, paysWithCredits } from '../../lib/creditsPayment.js'
 import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
 import { closeAppOwnerGrant } from '../../lib/appOwnerGrant.js'
@@ -483,38 +482,25 @@ const AppCanvas = forwardRef(function AppCanvas({
   const waitingPayment = paymentsQuery.data?.payments?.[0] || null
   const [paymentBusy, setPaymentBusy] = useState(false)
   const [paymentError, setPaymentError] = useState('')
-  // A payment the server refused (a card payment Stripe could not start, or
-  // one no longer waiting) leaves the waiting list at once, so its reason is
-  // kept here until the owner closes it.
+  // A payment that is no longer waiting when the owner answers (it lapsed, or
+  // another device answered it) leaves the waiting list at once, so the reason
+  // is kept here until the owner closes it.
   const [paymentRefusal, setPaymentRefusal] = useState(null)
   const shownPayment = paymentRefusal?.payment || waitingPayment
   async function answerPayment(pay) {
     const payment = waitingPayment
     if (!payment) return
-    // A card payment's Stripe window opens inside the tap, before the page is
-    // known, or the browser blocks it; it is pointed at Stripe once known.
-    const popup = pay && payment.method === 'card' ? openStripeWindow() : null
-    if (pay && payment.method === 'card' && !popup) {
-      setPaymentError('Your browser blocked the Stripe window. Allow popups for this Möbius, then try again.')
-      return
-    }
     setPaymentBusy(true)
     setPaymentError('')
     try {
       const res = await api.apps.answerPayment(appId, payment.id, pay)
-      const body = await res.json().catch(() => ({}))
-      if (res.ok && popup) {
-        const page = checkoutPage(body?.checkout_url)
-        if (page) popup.location.href = page
-        else popup.close()
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({}))
+        setPaymentRefusal({ payment, message: answerRefusal(body) })
       } else if (!res.ok) {
-        popup?.close()
-        // 409: the server settled this payment (refused it, or it lapsed).
-        if (res.status === 409) setPaymentRefusal({ payment, message: answerRefusal(body) })
-        else setPaymentError('That could not be saved. Try again.')
+        setPaymentError('That could not be saved. Try again.')
       }
     } catch {
-      popup?.close()
       setPaymentError('That could not be saved. Try again.')
     } finally {
       setPaymentBusy(false)

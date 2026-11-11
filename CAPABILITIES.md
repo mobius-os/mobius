@@ -111,12 +111,12 @@ transport failure or unreadable receipt on `/charges` answers 503
 idempotency key, never a new one. The client never retries automatically.
 Nothing is charged until the owner presses Pay on a sheet the shell shows
 over the app: until then the charge answers 409 `confirmation_required` (the
-app retries the same key), a cancel answers 403 `payment_declined`, and a
-price that cannot be read, is unpriced, or exceeds `max_price_micro` is
-refused before the owner is asked. `"method": "card"` pays on Stripe's page
-(409 `payment_in_progress` until it settles); a confirmed card payment is
-kept on disk until that page can no longer be paid. One app may have at most
-five payments waiting (429 `too_many_payments_waiting`).
+app retries the same key). A cancel answers 403 `payment_declined` to every
+retry with that key for ten minutes; asking again takes a new key. A price
+that cannot be read, is unpriced, or exceeds `max_price_micro` is refused
+before the owner is asked. Charges are paid from credits only: any `method`
+other than `"credits"` answers 422 `payment_method_unsupported`. One app may
+have at most five payments waiting (429 `too_many_payments_waiting`).
 Other refusals keep the service's `detail.code` and fields (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
 `key_spend_cap`). The 200 answer gives the paying app only its own charge: the

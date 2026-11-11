@@ -1183,11 +1183,12 @@ Every charge waits for the owner. The first request answers 409
 `confirmation_required` while Möbius shows the owner who is paid, for what and
 the price; retry the same charge with the same key every few seconds. It
 answers 200 once they press Pay, or 403 `payment_declined` if they cancel.
-Send `"method": "card"` to have the owner pay by card on Stripe's page
-instead: after Pay, retries answer 409 `payment_in_progress` until Stripe
-finishes. At most five of your app's payments wait at once; another answers
-429 `too_many_payments_waiting`. The `*` in a `"*/<app>"` grant means any
-creator of that app; it is never itself a seller.
+A cancel holds: every retry with that key keeps answering `payment_declined`,
+so stop retrying it; a new purchase in your app takes a new key. Payments come
+from credits only; a `method` other than `"credits"` answers 422
+`payment_method_unsupported`. At most five of your app's payments wait at
+once; another answers 429 `too_many_payments_waiting`. The `*` in a
+`"*/<app>"` grant means any creator of that app; it is never itself a seller.
 
 A 200 answer tells your app only about its own charge — the
 `charge_id`, the amount charged, and `replayed` when the service replayed an

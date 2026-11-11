@@ -21,8 +21,6 @@ where the app contract documents them.
 
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -75,8 +73,9 @@ class _ChargeRequest(BaseModel):
   idempotency_key: str = Field(min_length=8, max_length=200)
   # The price the app showed the owner; a higher current price refuses.
   max_price_micro: int = Field(ge=0)
-  # From the owner's credits, or by card on Stripe's page (at least $0.50).
-  method: Literal["credits", "card"] = "credits"
+  # Only "credits" for now; any other method is refused rather than ignored,
+  # so an app asking for a card payment is never charged credits instead.
+  method: str = Field(default="credits", max_length=20)
 
 
 def _credits(action, *args):
@@ -181,6 +180,11 @@ def charge_credits_for_call(
   It pays only the ``"<seller>/<app>"`` (or ``"*/<app>"``) entries the owner
   allowed.
   """
+  if body.method != "credits":
+    raise HTTPException(422, {
+      "code": "payment_method_unsupported",
+      "message": "Only payments from Möbius credits are supported.",
+    })
   if not spend_credits_allows(app, body.seller, body.app):
     raise HTTPException(403, {
       "code": "seller_not_allowed",
@@ -198,13 +202,10 @@ def charge_credits_for_call(
     key=credits_client.app_scoped_key(payer, body.idempotency_key),
     seller=body.seller, priced_app=body.app, action=body.action,
     max_price_micro=body.max_price_micro,
-    describe=lambda: _quote(body.seller, body.app, body.action, body.max_price_micro, body.method),
-    method=body.method, buyer_app=app.package_id or app.slug)
+    describe=lambda: _quote(body.seller, body.app, body.action, body.max_price_micro))
   # A payer may read its own charge; only an app that also manages the owner's
   # credits may read the owner's balance the service returns alongside it.
   manages = app_manages_credits(app)
-  if payment.method == credits_confirmations.CARD:
-    return _card_payment(payment, manages)
   try:
     charged = credits_client.charge(
       body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro,
@@ -219,41 +220,13 @@ def charge_credits_for_call(
   return charged if manages else credits_client.payer_charge_view(charged)
 
 
-def _card_payment(payment, manages: bool) -> dict:
-  """Where a confirmed card payment is: the charge receipt once Stripe paid.
-
-  The app retries the same charge while the owner is on Stripe's page; each
-  retry reads the purchase and answers ``payment_in_progress`` until it ends.
-  """
-  purchase = _credits(lambda: credits_client.read_purchase(payment.purchase_id))
-  status = purchase.get("status")
-  if status == "charged":
-    charge = purchase["charge"]
-    return charge if manages else credits_client.payer_charge_view(charge)
-  if status == "pending":
-    raise HTTPException(409, {"code": "payment_in_progress", "message": "Finish paying on Stripe's page."})
-  credits_confirmations.forget(payment)
-  error = purchase.get("error") if isinstance(purchase.get("error"), dict) else None
-  if error:
-    # Paid, but the charge was refused (the price rose, it was switched off):
-    # the card payment stays in the owner's credits.
-    raise HTTPException(409, {
-      "code": str(error.get("code") or "charge_failed"),
-      "message": f"{error.get('message') or 'The purchase could not be completed.'} "
-                 "Your card payment was added to your credits.",
-    })
-  raise HTTPException(402, {"code": "payment_not_completed",
-                            "message": "The card payment wasn't completed."})
-
-
-def _quote(seller: str, priced_app: str, action: str, max_price_micro: int,
-           method: str) -> credits_confirmations.Quote:
+def _quote(seller: str, priced_app: str, action: str,
+           max_price_micro: int) -> credits_confirmations.Quote:
   """What the owner is asked to pay: the seller's own description and price.
 
   Anything the credits service would refuse is refused here, before the owner
   is asked to pay for it: an action the seller never priced (or switched off),
-  or a price above what the app agreed to pay. A card payment also names the
-  currency the service sells in, so the owner sees the amount their card pays.
+  or a price above what the app agreed to pay.
   """
   listed = credits_client.prices(seller, priced_app).get("prices") or []
   match = next((p for p in listed if isinstance(p, dict) and p.get("action") == action), None)
@@ -271,11 +244,8 @@ def _quote(seller: str, priced_app: str, action: str, max_price_micro: int,
       "message": "The creator's price is higher than this app agreed to pay.",
       "price_micro": price_micro, "max_price_micro": max_price_micro,
     })
-  currency = ""
-  if method == credits_confirmations.CARD:
-    currency = str(credits_client.purchase_terms().get("currency") or "")
   return credits_confirmations.Quote(
-    description=str(match.get("description") or ""), price_micro=price_micro, currency=currency)
+    description=str(match.get("description") or ""), price_micro=price_micro)
 
 
 @router.post("/connect")

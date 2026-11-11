@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import activity, app_consent, credits_client, credits_confirmations, models
+from app import activity, app_consent, credits_confirmations, models
 from app.app_skills import deactivate_app_skills, restore_app_skills
 from app.app_jobs import launch_app_job
 from app.broadcast import get_system_broadcast
@@ -157,37 +157,11 @@ def answer_payment(
   """Pay or Cancel one waiting charge. Only a human owner can answer."""
   require_installation_owner_control(principal)
   app = _live_app(db, app_id)
-  gone = HTTPException(status_code=409, detail={
-    "code": "payment_gone",
-    "message": "That payment is no longer waiting. Try it again in the app.",
-  })
-  payment = credits_confirmations.waiting_payment(app.id, payment_id)
-  if payment is None:
-    raise gone
-  checkout_url = None
-  purchase_id = ""
-  if body.pay and payment.method == credits_confirmations.CARD:
-    # Pay opens Stripe's page for exactly this price; the app's retries then
-    # wait for it. If no page can be opened, the app hears why.
-    try:
-      started = credits_client.start_purchase(
-        payment.seller, payment.priced_app, payment.action, payment.key,
-        payment.max_price_micro, buyer_app=payment.buyer_app)
-    except credits_client.CreditsUnavailable as error:
-      refusal = {"code": error.code or "payment_failed", "message": error.message}
-      credits_confirmations.answer(app.id, payment_id, True, error=refusal)
-      raise HTTPException(status_code=409, detail=refusal) from error
-    purchase_id = str(started.get("purchase_id") or "")
-    checkout_url = started.get("checkout_url")
-    if not purchase_id or not checkout_url:
-      # Without both there is nothing to pay and nothing to follow: refuse now
-      # rather than leave the app retrying until the question lapses.
-      refusal = {"code": "payment_failed", "message": "Stripe's page could not be opened. Try again."}
-      credits_confirmations.answer(app.id, payment_id, True, error=refusal)
-      raise HTTPException(status_code=409, detail=refusal)
-  if not credits_confirmations.answer(app.id, payment_id, body.pay, purchase_id=purchase_id):
-    raise gone
+  if not credits_confirmations.answer(app.id, payment_id, body.pay):
+    raise HTTPException(status_code=409, detail={
+      "code": "payment_gone",
+      "message": "That payment is no longer waiting. Try it again in the app.",
+    })
   activity.log_event("app_credits_payment", app_id=app.id, slug=app.slug,
-                     action=("paid" if body.pay else "cancelled"), method=payment.method)
-  return {"app_id": app.id, "id": payment_id, "state": "confirmed" if body.pay else "declined",
-          "checkout_url": checkout_url}
+                     action=("paid" if body.pay else "cancelled"))
+  return {"app_id": app.id, "id": payment_id, "state": "confirmed" if body.pay else "declined"}

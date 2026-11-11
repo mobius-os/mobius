@@ -3,8 +3,6 @@
  * waits for the owner's Pay. Kept here so they are tested rather than eyeballed.
  */
 
-import { money } from './creditsWallet.js'
-
 /**
  * How long Pay stays off after its sheet appears. An app's service
  * chooses when to raise a charge, so the sheet can land under a tap meant for
@@ -29,27 +27,22 @@ export function pressCounts({ armedAt, pressStartedAt, keyboard }) {
 
 /**
  * What the payment sheet shows the owner: the creator's price, and the most
- * the app agreed to pay when that is higher. A card pays in the currency the
- * credits service sells in, where one credit is one unit of that currency.
+ * the app agreed to pay when that is higher. Credits read as the server wrote
+ * them (`price`, `max_price`).
  */
 export function paymentAmount(payment) {
   const maxMicro = Number(payment?.max_price_micro) || 0
   const priceMicro = payment?.price_micro == null ? maxMicro : Number(payment.price_micro)
-  const byCard = payment?.method === 'card'
-  // Credits read as the server wrote them (`price`, `max_price`).
-  const price = byCard ? money(priceMicro / 10_000, payment?.currency) : payment?.price || payment?.max_price
-  const most = byCard ? money(maxMicro / 10_000, payment?.currency) : payment?.max_price
   return {
-    figure: price,
-    unit: byCard ? 'by card' : 'credits',
-    ceiling: maxMicro > priceMicro ? most : null,
+    figure: payment?.price || payment?.max_price,
+    ceiling: maxMicro > priceMicro ? payment?.max_price : null,
   }
 }
 
 /**
  * Why an answer to a payment did not go through, in the server's words when
- * it gave any. A refused card payment is no longer waiting, so this is all the
- * owner learns of it.
+ * it gave any. The payment is no longer waiting, so this is all the owner
+ * learns of it.
  */
 export function answerRefusal(body) {
   const detail = body?.detail
