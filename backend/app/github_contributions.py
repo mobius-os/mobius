@@ -31,6 +31,7 @@ from app import (
   contribution_staging,
   fs_locks,
   github_auth,
+  git_checkout,
   github_contribution_git as _git_ops,
   models,
   settled,
@@ -743,7 +744,7 @@ def _recheck_submit_app(db: Session, app_id: int, expected_nonce: str | None) ->
     raise HTTPException(status_code=404, detail="App not found.")
 
 
-def _safe_repo_path(raw: object) -> Path:
+def _durable_repo_path(raw: object) -> Path:
   if not isinstance(raw, str) or not raw:
     raise ContributionSubmitError(
       "This record needs to be prepared again: it has no durable repo_path."
@@ -776,6 +777,13 @@ def _safe_repo_path(raw: object) -> Path:
     "/data/contributions, /data/apps, or /data/platform; nothing was sent "
     "to GitHub."
   )
+
+
+def _safe_repo_path(raw: object) -> Path:
+  """A durable review folder whose Git state still belongs to that folder."""
+  repo = _durable_repo_path(raw)
+  contribution_staging.require_checkout_ownership(repo)
+  return repo
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
@@ -819,12 +827,21 @@ def _safe_equivalence_source_path(raw: object) -> Path:
 
 
 def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
-  """Return ``(durable source, review checkout)`` for one contribution."""
+  """Return ``(durable source, review checkout)`` for one contribution.
+
+  The review checkout is only located here, not trusted: a recorded
+  ``source_repo_path`` must stay reachable after its disposable review folder
+  went stale, or settling a finished PR would leave its bookkeeping behind.
+  Publishing callers check the folder's ownership with ``_safe_repo_path``.
+  """
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  review_repo = _safe_repo_path(plan.get("repo_path"))
+  review_repo = _durable_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
   if raw_source_repo:
     return _safe_equivalence_source_path(raw_source_repo), review_repo
+  # Without a recorded source, the folder's own Git state names the source,
+  # so that state must still belong to this folder.
+  contribution_staging.require_checkout_ownership(review_repo)
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo
@@ -916,14 +933,20 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
   # Older cleanup could remove a linked review worktree before the merged-state
   # poll created its durable witness. The reviewed commits remain in the live
   # repository, but only reuse it when both immutable commits still resolve.
+  # A stale folder that no longer owns its Git state is never read: only the
+  # durable source can stand in for it.
+  review_owned = git_checkout.checkout_ownership_error(review_repo) is None
   if (
-    not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
+    not review_owned
+    or not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
     or not app_git.ref_exists(review_repo, f"{head_sha}^{{commit}}")
   ) and (
     app_git.ref_exists(source_repo, f"{base_sha}^{{commit}}")
     and app_git.ref_exists(source_repo, f"{head_sha}^{{commit}}")
   ):
     review_repo = source_repo
+  elif not review_owned:
+    return None
 
   try:
     current_source = app_git.head_sha(source_repo, "HEAD")
@@ -1260,7 +1283,9 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
-  repo = _safe_repo_path(raw_repo)
+  # Cleanup must still handle stale folders without touching the replacement
+  # checkout's administrative state; its reciprocal check below owns that case.
+  repo = _durable_repo_path(raw_repo)
   recorded_repo = Path(raw_repo)
   if not recorded_repo.is_absolute() or recorded_repo != repo:
     return False
@@ -1287,21 +1312,8 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
   # Linked worktrees and separate-git-dir checkouts both use a .git file.
   if marker.is_file():
-    try:
-      marker_value = marker.read_text().strip()
-    except OSError:
-      return False
-    if not marker_value.startswith("gitdir:"):
-      return False
-    raw_git_dir = marker_value.removeprefix("gitdir:").strip()
-    if not raw_git_dir:
-      return False
-    marker_git_dir = Path(raw_git_dir)
-    if not marker_git_dir.is_absolute():
-      marker_git_dir = marker.parent / marker_git_dir
-    try:
-      marker_git_dir = marker_git_dir.resolve()
-    except (OSError, RuntimeError):
+    marker_git_dir = git_checkout.linked_git_dir(repo)
+    if marker_git_dir is None:
       return False
 
     separate_git_dir = (
@@ -1317,17 +1329,7 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
     # Git can recycle a pruned worktree admin slot for a newer checkout. Every
     # linked admin directory must still point back to this exact checkout.
-    back_reference = marker_git_dir / "gitdir"
-    owns_checkout = False
-    if back_reference.is_file() and not back_reference.is_symlink():
-      try:
-        registered_marker = Path(back_reference.read_text().strip())
-        if not registered_marker.is_absolute():
-          registered_marker = back_reference.parent / registered_marker
-        owns_checkout = registered_marker.resolve() == marker.resolve()
-      except (OSError, RuntimeError):
-        owns_checkout = False
-    if not owns_checkout:
+    if not git_checkout.linked_worktree_owns_checkout(repo, marker_git_dir):
       shutil.rmtree(repo)
       return True
 
