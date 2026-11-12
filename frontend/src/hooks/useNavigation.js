@@ -20,6 +20,7 @@ import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  previousPageDied,
   readRestoredCanvas,
   readStoredChatId,
 } from '../lib/navigationPersistence.js'
@@ -100,6 +101,9 @@ export const deepLink = parseShellDeepLink(window.location)
 if (deepLink?.view === 'chat' && deepLink.focusQuestion) {
   requestChatQuestionReveal(deepLink.chatId, deepLink.questionId)
 }
+
+// Read once per page load: the browser killed this tab's previous page.
+const pageDiedBeforeLoad = previousPageDied()
 
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
@@ -1507,6 +1511,15 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('app', initialNav.appId))
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
+      }
+
+      // A page killed while showing an app (iOS Safari kills a page that runs out
+      // of memory, then reloads it) must not reopen that app on its own: it would
+      // crash again until Safari gives up with "A problem repeatedly occurred".
+      // Go home (the latest chat, or the empty chat home); the app stays one tap away.
+      if (pageDiedBeforeLoad && snapshotRoute().view === 'canvas') {
+        restoreRoute(navRoute('chat', null, null, bootPaneId, { homeSeed: true }))
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
 
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
