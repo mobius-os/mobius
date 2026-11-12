@@ -165,6 +165,11 @@ elif [ "${MOBIUS_WT_PYTEST_NODE_DRIFT:-0}" = "1" ]; then
   # Opt-in only: refusing by default is what stops compiler tests from running
   # against the wrong bundler (a mass false alarm), but Python-only tests do
   # not need the locked tools.
+  if ! backend_test_node_deps "$MAIN/frontend"; then
+    echo "wt-pytest: MOBIUS_WT_PYTEST_NODE_DRIFT=1 needs the primary checkout's Node tools, and $MAIN/frontend/node_modules lacks them" >&2
+    echo "  install them with: (cd \"$MAIN/frontend\" && npm ci)" >&2
+    exit 1
+  fi
   NODE_MODULES="$SHARED_NODE_MODULES"
   echo "wt-pytest: WARNING — this checkout locks different backend Node tools; tests that compile apps are not dependency-authoritative" >&2
 else
