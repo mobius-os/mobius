@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, memo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
@@ -137,7 +137,8 @@ function useTableScrollbar() {
     return () => observer.disconnect()
   }, [])
 
-  useEffect(sync, [overflowing])
+  // Before paint, so a newly shown bar never flashes a full-width thumb.
+  useLayoutEffect(sync, [overflowing])
   useEffect(() => () => dragRef.current?.abort(), [])
 
   const onPointerDown = (event) => {
