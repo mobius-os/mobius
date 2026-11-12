@@ -137,6 +137,19 @@ export function panesShareScreen({ viewMode, projection, layoutMode }) {
     && layoutMode !== 'phone'
 }
 
+// The content box panesShareScreen's layout mode is read from. Applying
+// immersive grows the measured box (the top bar hides, a docked sidebar gives
+// back its margin), so reading the live box would let a phone split climb to
+// compact or wide, withdraw immersive, shrink back to phone and repeat forever.
+// While immersive is applied, the decision instead keeps the box measured with
+// the chrome in place: `latch` is { applied, rect } from the last commit, and
+// its rect was the box this decision read when immersive was granted. A box
+// with no area (before the first measurement) is never held.
+export function screenShareRect(latch, contentRect) {
+  const held = latch?.applied ? latch.rect : null
+  return held && held.w > 0 && held.h > 0 ? held : contentRect
+}
+
 // deriveContentVisibility({ workspace, projection, settingsOverlayOpen,
 // immersiveActive, immersiveAppId, viewMode }) → the render flags.
 //

@@ -5,7 +5,7 @@ import * as tabModel from '../tabModel.js'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan, projectFocusedPane,
   MODE_MOTION,
-  EMPTY_SINGLE_SURFACE_KEY, panesShareScreen,
+  EMPTY_SINGLE_SURFACE_KEY, panesShareScreen, screenShareRect,
 } from '../workspaceView.js'
 
 const { makeTab, tabKey } = tabModel
@@ -593,4 +593,51 @@ test('side-by-side panes share the screen; a maximized pane, single view, or pho
   assert.equal(panesShareScreen({ viewMode: 'panes', projection: alone, layoutMode: 'wide' }), false)
   assert.equal(panesShareScreen({ viewMode: 'single', projection: tiled, layoutMode: 'wide' }), false)
   assert.equal(panesShareScreen({ viewMode: 'panes', projection: tiled, layoutMode: 'phone' }), false)
+})
+
+// Applying immersive grows the measured content box: below 1024px the 58px top
+// bar hides, and on desktop a docked sidebar gives back its margin. Each pair is
+// [box with the chrome in place, box once immersive is applied] for a geometry
+// whose layout mode crosses out of phone when immersive is applied, which made
+// the share decision withdraw immersive, shrink the box, and re-apply forever.
+const IMMERSIVE_GROWTH_GEOMETRIES = [
+  ['800x560 window, no sidebar', { w: 800, h: 502 }, { w: 800, h: 560 }],
+  ['1100-wide window, 450px docked sidebar', { w: 650, h: 800 }, { w: 1100, h: 800 }],
+]
+
+for (const [label, chromeRect, immersiveRect] of IMMERSIVE_GROWTH_GEOMETRIES) {
+  test(`share decision ignores the box immersive frees up: ${label}`, () => {
+    const tiled = { visibleLeaves: ['p0', 'p1'] }
+    const shares = (rect) => panesShareScreen({
+      viewMode: 'panes', projection: tiled, layoutMode: paneModel.modeForRect(rect),
+    })
+    // The geometry really does cross modes, so the live box would oscillate.
+    assert.equal(paneModel.modeForRect(chromeRect), 'phone')
+    assert.notEqual(paneModel.modeForRect(immersiveRect), 'phone')
+
+    // Same decision whether or not immersive is applied.
+    const before = shares(screenShareRect({ applied: false, rect: chromeRect }, chromeRect))
+    const during = shares(screenShareRect({ applied: true, rect: chromeRect }, immersiveRect))
+    assert.equal(during, before)
+
+    // Drive Shell's loop (decide, commit the latch, re-measure) and check the
+    // verdict settles instead of flipping each measurement.
+    let latch = { applied: false, rect: chromeRect }
+    let contentRect = chromeRect
+    const verdicts = []
+    for (let step = 0; step < 6; step += 1) {
+      const rect = screenShareRect(latch, contentRect)
+      const applied = !shares(rect) // a held request from the focused app
+      verdicts.push(applied)
+      latch = { applied, rect }
+      contentRect = applied ? immersiveRect : chromeRect
+    }
+    assert.deepEqual(verdicts, Array(6).fill(true))
+  })
+}
+
+test('the share box is never held before the first measurement', () => {
+  const live = { w: 1400, h: 900 }
+  assert.equal(screenShareRect({ applied: true, rect: { w: 0, h: 0 } }, live), live)
+  assert.equal(screenShareRect(null, live), live)
 })
