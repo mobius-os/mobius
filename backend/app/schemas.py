@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import PurePath
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
@@ -288,6 +288,9 @@ class AppOut(BaseModel):
   # Internal publication inputs. Clients receive the typed projections below,
   # never the nullable persistence fields or executable path.
   published_manifest_url: str | None = Field(default=None, exclude=True)
+  # Consent inputs to the frame reload key (granted direct sites).
+  accepted_consent: dict | None = Field(default=None, exclude=True)
+  project_templates_json: Any = Field(default=None, exclude=True)
   public_name: str | None = Field(default=None, exclude=True)
   public_bundle_path: str | None = Field(default=None, exclude=True)
   public_bundle_digest: str | None = Field(default=None, exclude=True)

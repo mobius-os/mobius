@@ -103,10 +103,15 @@ def app_frame_version(app) -> str:
     app.capability_contract.get("runtime")
     if isinstance(app.capability_contract, Mapping) else None
   )
+  # Granted outside sites live in the frame's own policy, so an owner's answer
+  # that grants or withdraws them must reload the frame, not reuse it.
+  from app.app_consent import granted_direct_origins
+
+  direct = list(granted_direct_origins(app))
   identity = json.dumps(
     [
       Path(app.compiled_path or "").name, runtime or {}, app.token_nonce or "",
-      app.runtime_revision or "",
+      app.runtime_revision or "", *([direct] if direct else []),
     ],
     sort_keys=True,
     separators=(",", ":"),

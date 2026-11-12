@@ -293,6 +293,9 @@ def public_access_declaration_from_contract(
 # Capability ids are stable names. Each capability evolves independently via
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
+NETWORK_DIRECT_CAPABILITY = "network.direct"
+_DIRECT_ORIGIN_LIMIT = 8
+
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
   # Runs accepted app code in a hidden frame while one of its chat blocks is
   # near the viewport. See CAPABILITIES.md "Passive transcript sessions".
@@ -439,6 +442,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "max_bytes": (64 * 1024, 256 * 1024 * 1024),
     },
   },
+  # Adds the declared exact HTTPS origins to this app's own frame policy, so
+  # its screen can load images from and send requests to those sites directly
+  # (a provider whose terms require end-user-client delivery, for example).
+  # The origins are the grant: adding one asks the owner again.
+  NETWORK_DIRECT_CAPABILITY: {
+    "version": 1,
+    "kind": "frame_policy",
+    "title": "Connect to outside sites",
+    "description": (
+      "Let this app's screen load images from, and send requests to, the "
+      "sites listed here. Those sites see your device's internet address and "
+      "what the app asks them for."
+    ),
+    "risk": "network",
+    "lifecycle": "active_frame",
+    "default_limits": {},
+    "hard_limits": {},
+    "origins": True,
+  },
   "workspace.screen-control": {
     "version": 1,
     "kind": "session",
@@ -522,7 +544,7 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
         )
       limits[key] = int(value)
 
-    normalized[capability_id] = {
+    entry = {
       "version": definition["version"],
       "kind": definition["kind"],
       "title": definition["title"],
@@ -532,7 +554,47 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
       "reason": reason.strip() if isinstance(reason, str) else None,
       "limits": limits,
     }
+    if definition.get("origins"):
+      entry["origins"] = _normalize_direct_origins(capability_id, raw.get("origins"))
+    elif "origins" in raw:
+      raise ValueError(f"Capability `{capability_id}` does not take origins.")
+    normalized[capability_id] = entry
   return normalized
+
+
+def _normalize_direct_origins(capability_id: str, raw: Any) -> list[str]:
+  """Exact, distinct HTTPS origins: no wildcard, path, credential or port games."""
+  if not isinstance(raw, list) or not raw or len(raw) > _DIRECT_ORIGIN_LIMIT:
+    raise ValueError(
+      f"Capability `{capability_id}` origins must list 1-{_DIRECT_ORIGIN_LIMIT} "
+      "HTTPS origins."
+    )
+  origins: list[str] = []
+  for value in raw:
+    try:
+      parsed = urlsplit(value.strip()) if isinstance(value, str) else None
+      port = parsed.port if parsed else None
+    except ValueError:
+      parsed = None
+    host = (parsed.hostname or "").lower() if parsed else ""
+    if (
+      parsed is None
+      or parsed.scheme != "https"
+      or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host)
+      or parsed.username is not None
+      or parsed.password is not None
+      or parsed.path not in ("", "/")
+      or parsed.query
+      or parsed.fragment
+    ):
+      raise ValueError(
+        f"Capability `{capability_id}` origin `{value}` must be an exact "
+        "HTTPS origin such as https://media.example.com."
+      )
+    origins.append(f"https://{host}" if port in (None, 443) else f"https://{host}:{port}")
+  if len(set(origins)) != len(origins):
+    raise ValueError(f"Capability `{capability_id}` origins contain duplicates.")
+  return sorted(origins)
 
 
 def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -706,7 +768,25 @@ def runtime_declaration_from_contract(
       "reason": value.get("reason"),
       "limits": dict(value.get("limits") or {}),
     }
+    if isinstance(value.get("origins"), list):
+      declaration[capability_id]["origins"] = list(value["origins"])
   return declaration
+
+
+def direct_network_origins(contract: dict[str, Any] | None) -> list[str]:
+  """The outside origins a contract's ``network.direct`` grant names, if any."""
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(NETWORK_DIRECT_CAPABILITY) if isinstance(runtime, dict) else None
+  if not isinstance(grant, dict) or grant.get("version") != 1:
+    return []
+  origins = grant.get("origins")
+  if not isinstance(origins, list):
+    return []
+  # Re-validate: a stored contract is data, and this feeds a CSP header.
+  try:
+    return _normalize_direct_origins(NETWORK_DIRECT_CAPABILITY, origins)
+  except ValueError:
+    return []
 
 
 def agent_tools_from_contract(contract: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1128,6 +1208,11 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     suffix = path.removeprefix(prefix)
     if suffix == "reason":
       return False  # Explanatory copy grants no additional access.
+    if suffix == "origins":
+      # Dropping a site narrows the grant; any new site widens it.
+      return not isinstance(before, list) or not isinstance(after, list) or any(
+        item not in before for item in after
+      )
     limit_key = suffix.removeprefix("limits.")
     if suffix.startswith("limits.") and limit_key in definition["hard_limits"]:
       if after is None:
