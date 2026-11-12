@@ -1896,13 +1896,42 @@ async def core_publish_repair(run_id: str, body: RepairPublish, db: Session = De
   return await publish_repair(None, run_id, body, db, principal)
 
 
+# A head and base admit one reviewer; a replacement is only for one that failed
+# without reporting, and this bounds how many such failures it can absorb.
+MAX_REVIEWER_ATTEMPTS = 3
+
+
+def _reviewer_task_key(row, target, attempt):
+  """The first reviewer keeps the original key; a replacement adds its attempt."""
+  seed = f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}"
+  return "review-" + hashlib.sha256((f"{seed}:{attempt}" if attempt else seed).encode()).hexdigest()
+
+
+def _reviewer_failed_unreported(db, reviewer, previous, target) -> bool:
+  """Whether a registered reviewer ended in error and recorded no evidence.
+
+  Only that reviewer may be replaced. One that is live, armed, paused, stopped,
+  finished or waiting on a question keeps its seat, and any receipt for this
+  head and base is final: a verdict is never replaced by asking another reviewer.
+  """
+  from app.chat import is_chat_busy
+  from app.delegations import delegation_statuses
+  if any(r.get("head_sha") == target["head_sha"] and r.get("base_sha") == target["base_sha"]
+         for r in previous.get("independent_reviews", [])):
+    return False
+  child = db.get(models.Chat, reviewer.child_chat_id)
+  return (child is not None and not is_chat_busy(db, child)
+    and delegation_statuses(db, [reviewer])[reviewer.id] in {"failed", "needs_review"})
+
+
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/reviewers",
              dependencies=[Depends(reject_cross_site)])
 async def start_independent_reviewer(app_id: int | None, run_id: str, body: PullIdentity,
                                      db: Session = Depends(get_db),
                                      principal: Principal = Depends(get_agent_run_principal)):
   from app.delegations import (DelegationIntent, create_or_attach_delegation,
-    ensure_delegation_started, serialize_delegation, parent_root_run_id)
+    ensure_delegation_started, serialize_delegation, parent_root_run_id,
+    latch_cancelled, mark_cancelled)
   row = _row(db, app_id, run_id, principal)
   _parent(db, row, principal)
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -1925,16 +1954,22 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
       if not frozen.get("model"):
         raise HTTPException(409, "A fresh selection with run-frozen prompt/model is required.")
       prompt = reviews.independent_brief(row, target)
-      task_key = "review-" + hashlib.sha256(f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}".encode()).hexdigest()
+      attempts = sum(s.get("head_sha") == target["head_sha"] and s.get("base_sha") == target["base_sha"]
+                     for s in previous.get("reviewer_steps", []))
+      task_key = _reviewer_task_key(row, target, max(attempts - 1, 0))
       existing = db.query(models.Delegation).filter_by(parent_chat_id=row.chat_id, task_key=task_key).first()
+      superseded = None
       if existing:
         # Never revive a stopped child when observing a saved step, even across
         # parent turns with a fresh logical root id.
         _assert_independent_reviewer(row, existing, target)
-        if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
-          await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
-          _parent(db, row, principal)
-        return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
+        if attempts < MAX_REVIEWER_ATTEMPTS and _reviewer_failed_unreported(db, existing, previous, target):
+          superseded, task_key = existing, _reviewer_task_key(row, target, attempts)
+        else:
+          if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
+            await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
+            _parent(db, row, principal)
+          return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
       # Registration resets the item to reviewing. That would hide a live merge
       # from /observe and the cross-grant fence, or mask an unclear push.
       if _merge_attempted(previous) or any(a.get("state") in {"pushing", "push_unknown"}
@@ -1950,6 +1985,9 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
         provider=frozen["provider"], model=frozen["model"], effort=frozen.get("reasoning_effort"),
         cwd=str(Path(get_settings().data_dir)), notify_parent_on_complete=True)
       def register_reviewer(admitted):
+        if superseded:
+          # Committed with the replacement, so the old reviewer can never report late.
+          latch_cancelled(db, superseded)
         reviews.write_outcome(db, row, reviews.key(target), {**previous,
           "state": "reviewing", "head_sha": target["head_sha"],
           "reviewer_steps": [*previous.get("reviewer_steps", []), {
@@ -1957,6 +1995,8 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
             "prompt_sha256": admitted.prompt_sha256, "provider": admitted.provider, "model": admitted.model,
             "effort": admitted.effort}]})
       child, _ = create_or_attach_delegation(db, intent, admit_child=register_reviewer)
+      if superseded:
+        mark_cancelled(db, superseded)  # the cancelled lifecycle event; the latch above already committed
       db.refresh(row)
       _assert_independent_reviewer(row, child, target)
       _parent(db, row, principal)

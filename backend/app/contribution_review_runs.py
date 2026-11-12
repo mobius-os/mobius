@@ -32,6 +32,14 @@ READY_UNKNOWN_RECOVERY = ("If you choose to mark it ready in GitHub yourself, ru
   "so this old receipt can become unattributable. Do not retry readiness on this head.")
 
 
+# The run endpoints take the owner bearer minted for the run ($AGENT_TOKEN,
+# which `mapi` sends); MOBIUS_RUN_TOKEN is a different token and is refused.
+RUN_BEARER_NOTE = (
+  "(use `mapi`, or `Authorization: Bearer $AGENT_TOKEN`; "
+  "MOBIUS_RUN_TOKEN is not the bearer)"
+)
+
+
 def key(item: dict) -> str:
   return f"{item['repo'].lower()}#{item['number']}"
 
@@ -872,7 +880,7 @@ cards in this owning chat for scope ambiguities or unsafe/unclear results. Each 
 security/privacy and technical debt, full diff and relevant owning invariants.
 Do not edit any author's public branch, post comments/reviews, approve your own PR,
 push, or call raw GitHub mutations. Your own PRs are eligible for private review.
-For EACH target submit POST {endpoint} with your run bearer and JSON
+For EACH target submit POST {endpoint} with your run bearer {RUN_BEARER_NOTE} and JSON
 {{"repo": "owner/repo", "number": 1, "head_sha": "exact selected SHA",
 {publish_field} "state": "all_clear" or "needs_you", "summary": "evidence or concrete question",
  "scope": ["correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"], "tests": "checks run and exact evidence, or justified limitations"}}.
@@ -889,7 +897,7 @@ POST {run_endpoint(row)}/observe performs only read-only reconciliation, even if
 cycle complete while queued. For pending checks use the same waiting capability; do not leave an in-memory poll running. Report every item.
 When your exact merge is confirmed merged, finish its existing work claim using
 finish_agent_work, or POST /api/agent-coordination/work-claims/finish with your
-run bearer and {{"work_key":"github:<repo-lowercase>:pr:<number>:<head_sha>:merge",
+run bearer {RUN_BEARER_NOTE} and {{"work_key":"github:<repo-lowercase>:pr:<number>:<head_sha>:merge",
 "outcome":"Merged at <confirmed merge SHA>","release":false}}. This owning
 operation notifies followers; do not leave a completed merge claim unfinished.
 If the item points to another review_chat_id, follow that owner instead: never
@@ -1068,13 +1076,15 @@ For each exact head obtain a fresh read-only durable independent child review of
 the FULL diff, six-scope rubric and tests against the exact current target base.
 Start that reviewer via POST {endpoint}/reviewers with repo, number, head_sha.
 The server freezes its prompt/provider/model/effort and durable child identity.
-Each exact head and base admits ONE reviewer and one verdict; /reviewers returns
-that same reviewer again, so its needs_you verdict cannot be replaced by asking
-another. Continue only through a new repair (a new head), an observed target-base
-advance, or a new owner grant.
+Each exact head and base admits ONE verdict. /reviewers returns that same reviewer
+again, except when it ended in error without reporting: then it cancels that
+reviewer and starts a replacement (at most 3 attempts). Live, paused, stopped
+and finished reviewers are never replaced, and once a receipt exists its needs_you
+verdict cannot be replaced by asking another. Continue only through a new repair
+(a new head), an observed target-base advance, or a new owner grant.
 The child must POST {endpoint}/independent-reviews with repo, number, head_sha,
 reviewed_base_sha, state, summary, scope, tests and tests_passed using its own
-run bearer. This produces an independent_receipt_id. A repair author must never
+run bearer {RUN_BEARER_NOTE}. This produces an independent_receipt_id. A repair author must never
 serve as that independent reviewer. Failed tests mean needs_you, never all_clear.
 If repair is needed POST {endpoint}/repair-checkout with repo, number, head_sha,
 findings (specific in-scope issues). The response is the ONLY dedicated checkout
@@ -1181,7 +1191,7 @@ quota is in /sys/fs/cgroup/cpu.max and memory.max). Run only the focused tests
 for the changed files, one process at a time, and never `pytest -n` above 2:
 every xdist worker loads the whole app, so many workers exhaust memory and
 restart the instance for every chat.
-POST {run_endpoint(row)}/independent-reviews with your own run bearer:
+POST {run_endpoint(row)}/independent-reviews with your own run bearer {RUN_BEARER_NOTE}:
 repo, number, head_sha, reviewed_base_sha, state all_clear or needs_you, summary,
 all six scope values, tests and tests_passed boolean. Failed or unclear tests
 must not be all_clear. Return findings to the owning parent conversation.
