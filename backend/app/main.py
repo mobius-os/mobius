@@ -293,6 +293,13 @@ async def lifespan(app):
   # behind are ended; their helpers' durable turns recover like any other.
   from app import helper_hosts
   helper_hosts.end_orphaned_hosts()
+  # A data volume that is already full gets its recovery reserve back
+  # before database initialization writes anything (see storage_guard).
+  from app.storage_guard import release_reserve_at_boot
+  try:
+    release_reserve_at_boot(settings.data_dir)
+  except Exception:
+    _log.warning("startup recovery-reserve check failed", exc_info=True)
   from app.startup import (
     StartupContext,
     run_startup_plan,

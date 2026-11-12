@@ -206,13 +206,57 @@ _clear_after_terminal_status: dict[str, str] = {}
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
 # turns, and the finished-run marker sweep stands down so it cannot race the
-# drain's own interrupt. `_restart_draining_chats` records the chats
-# whose live turn the drain interrupted, so each turn's terminal transition
-# (run_chat's finally) leaves its exact run intact long enough for the drain to
-# move it to the existing durable continuation state. If that transaction fails,
-# the still-set generic marker is deliberately left for manual boot recovery.
+# drain's own interrupt. `_park_handoffs` records, per chat, the exact live
+# turn an interrupter (the restart drain, or the storage guard pausing turns
+# that are filling the disk) took over, so that turn's terminal transition
+# (run_chat's finally) leaves its exact run intact long enough for that
+# interrupter to move it to the durable continuation state. If that transaction
+# fails, the still-set generic marker is left for manual recovery: boot
+# reconcile after a restart, the wedged-run sweep otherwise.
 draining = False
-_restart_draining_chats: set[str] = set()
+
+
+@dataclass(frozen=True)
+class _ParkHandoff:
+  """One live turn an interrupter took over (_interrupt_and_park_live_turns).
+
+  It names that exact turn, not just its chat: a handoff the turn never
+  consumed (it ended before the interrupter marked it, or never stopped) must
+  not reach a later turn of the same chat, whose own Stop, provider-limit
+  park and storage pause behave as if no interrupter existed. The finally
+  matches by generation; the sink-side checks, which hold only the sink,
+  match by run token. One entry per chat at most; the next handoff replaces
+  it.
+  """
+
+  generation: int
+  run_token: str | None
+
+
+_park_handoffs: dict[str, _ParkHandoff] = {}
+
+
+def _handoff_owns_run(chat_id: str | None, run_token: str | None) -> bool:
+  """Whether an interrupter took over the turn running as ``run_token``.
+
+  A turn without a run token cannot be matched: two unknown tokens are not the
+  same turn.
+  """
+  handoff = _park_handoffs.get(chat_id or "")
+  return bool(run_token) and handoff is not None and handoff.run_token == run_token
+
+
+def _take_park_handoff(chat_id: str, run_gen: int) -> bool:
+  """Consume the handoff for the turn of generation ``run_gen``, if any.
+
+  Called once by that turn's own terminal transition; a handoff for another
+  generation is left untouched.
+  """
+  handoff = _park_handoffs.get(chat_id)
+  if handoff is None or handoff.generation != run_gen:
+    return False
+  del _park_handoffs[chat_id]
+  return True
 
 # Budget for the drain to interrupt live turns + flush their notes. The restart
 # utility arms its SIGKILL backstop at DRAIN_TIMEOUT + grace; the existing short
@@ -1652,6 +1696,227 @@ async def _stop_handle_with_escalation(
     return False, True
 
 
+async def _interrupt_and_park_live_turns(
+  chat_ids: list[str],
+  *,
+  note: dict,
+  park_reason: str,
+  parked_until: datetime | None,
+  timeout: float,
+  restart_nonce: str = "",
+  label: str,
+) -> list[dict[str, str]]:
+  """Interrupt each chat's live turn and move its exact run to a durable park.
+
+  The shared core of every interrupter-owned pause: publish ``note`` through
+  the turn's sink, hand the turn to this caller (it joins ``_park_handoffs``
+  before its generation bumps, so the dying turn's finally leaves the exact
+  run and the pending queue intact), stop every
+  handle concurrently, then finalize the transcript and ``ParkRun`` with
+  ``park_reason``. ``parked_until=None`` means due now. A restart parks only a
+  nonce-bound run: without that binding authenticated boot recovery owns it.
+  Returns the exact runs that reached the durable park.
+  """
+  log = _get_logger()
+  parked_runs: list[dict[str, str]] = []
+  candidates: list[tuple[str, list, object | None]] = []
+  for chat_id in chat_ids:
+    handles = registry.get_handles(chat_id)
+    if not handles:
+      # A chat reserved 'starting' but with no live handle yet — nothing to
+      # interrupt. Its send is durable and reconciles on the next boot.
+      continue
+    sink = get_active_sink(chat_id)
+    stopped_gen = current_run_generation(chat_id)
+    if not isinstance(stopped_gen, int):
+      # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
+      continue
+    if _clear_after_terminal_generation.get(chat_id) == stopped_gen - 1:
+      # Another interrupter already ended this live turn and recorded its
+      # outcome (an owner Stop whose provider has not finished stopping).
+      # Taking it over would overwrite that outcome and park work the owner
+      # stopped; the turn's own terminal transition settles it instead.
+      continue
+    # Mark BEFORE bumping so the turn's finally (which may run the instant the
+    # interrupt lands) observes the drain and leaves the marker set.
+    _park_handoffs[chat_id] = _ParkHandoff(
+      generation=stopped_gen, run_token=getattr(sink, "run_token", None),
+    )
+    bump_run_generation(chat_id)
+    _clear_after_terminal_generation[chat_id] = stopped_gen
+    _clear_after_terminal_status[chat_id] = "interrupted"
+
+    if sink is not None:
+      sink.publish(dict(note))
+    else:
+      bc = get_broadcast(chat_id)
+      if bc is not None:
+        # Transport-only fallback (handle live but no sink). The note isn't
+        # persisted here; boot reconcile still adds the resumable interrupted
+        # note for this marker.
+        bc.publish(dict(note))
+    candidates.append((chat_id, handles, sink))
+
+  async def _stop_candidate(chat_id: str, handles: list) -> bool:
+    all_interrupted = True
+    for handle in handles:
+      # Every parked turn must stay resumable; a handle whose stop would end
+      # its work for good offers suspend (see RunnerHandle).
+      end = getattr(handle, "suspend", None) or handle.stop
+      try:
+        stopped = await end(
+          timeout=min(RESTART_HANDLE_STOP_TIMEOUT_SECS, timeout)
+        )
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        log.warning(
+          "%s interrupt failed chat_id=%s kind=%s",
+          label, chat_id, getattr(handle, "kind", "?"), exc_info=True,
+        )
+        stopped = False
+      if not stopped:
+        log.warning(
+          "%s stop timed out; authenticated boot "
+          "reconciliation will preserve chat_id=%s kind=%s",
+          label, chat_id, getattr(handle, "kind", "?"),
+        )
+        all_interrupted = False
+    return all_interrupted
+
+  stop_results = await asyncio.gather(*(
+    _stop_candidate(chat_id, handles)
+    for chat_id, handles, _sink in candidates
+  ))
+
+  for (chat_id, _handles, sink), all_interrupted in zip(
+    candidates, stop_results, strict=True,
+  ):
+    if all_interrupted:
+      run_token = sink.run_token if sink is not None else None
+      # Own the terminal snapshot fence here instead of assuming the runner's
+      # teardown won the scheduling race. This force-completes running tool
+      # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
+      # marker. A failed Finalize leaves that marker + its already-committed
+      # restart nonce intact for authenticated startup recovery.
+      if sink is not None:
+        try:
+          await sink.finalize()
+        except Exception:
+          log.warning(
+            "%s terminal snapshot failed; authenticated boot "
+            "recovery will continue chat_id=%s run_token=%s",
+            label, chat_id, run_token, exc_info=True,
+          )
+          continue
+      if run_token and (restart_nonce or park_reason != "restart"):
+        try:
+          parked = await _park_run_strict(
+            chat_id,
+            run_token,
+            parked_until or datetime.now(UTC).replace(tzinfo=None),
+            park_reason,
+            restart_nonce=restart_nonce,
+          )
+          if parked:
+            parked_runs.append({
+              "chat_id": chat_id,
+              "run_token": run_token,
+            })
+          else:
+            log.warning(
+              "%s could not park exact run; authenticated boot "
+              "recovery will continue chat_id=%s run_token=%s",
+              label,
+              chat_id,
+              run_token,
+            )
+        except Exception:
+          # Restart must still proceed. ParkRun is transactional; on failure
+          # the generic running marker remains for safe manual reconciliation.
+          log.warning(
+            "%s park failed; authenticated boot recovery "
+            "will continue "
+            "chat_id=%s run_token=%s",
+            label,
+            chat_id,
+            run_token,
+            exc_info=True,
+          )
+      else:
+        log.warning(
+          "%s has no exact run token/nonce; leaving manual "
+          "recovery chat_id=%s run_token=%s",
+          label, chat_id, run_token,
+        )
+  # Flush the writer so every paused note (the sink's fire-and-forget
+  # PersistError above) is durably committed before the worker restarts.
+  try:
+    ack = get_writer().submit(Barrier())
+    await _await_ack(ack, timeout=min(timeout, 10.0))
+  except Exception:
+    log.warning("%s writer flush failed", label, exc_info=True)
+  return parked_runs
+
+
+STORAGE_PAUSE_MESSAGE = (
+  "Paused because Möbius storage is almost full. Your work is saved and "
+  "continues by itself once space is freed. If an agent needs to free the "
+  "space, use Continue anyway."
+)
+
+
+async def pause_live_turns_for_storage(spare_chat_ids: frozenset[str]) -> int:
+  """Pause every live turn except ``spare_chat_ids`` into a storage wait.
+
+  The storage guard's response to a volume that is about to fill. Each turn
+  gets the same storage card admission uses and parks with
+  ``park_reason='storage'``, so the continuation sweep resumes it once
+  admission would succeed again. A restart drain owns every turn while it
+  runs, and a turn another interrupter already took over is left to it.
+
+  The pause holds each chat's lifecycle transition lock from takeover to park,
+  like Stop does, and skips a chat whose lock is already held: a Stop, send or
+  settings change in progress owns that chat, and the guard looks again on
+  its next tick. A Stop arriving mid-pause therefore waits and then ends the
+  parked run rather than racing the park. Returns how many turns reached the
+  durable park.
+  """
+  if draining:
+    return 0
+
+  def handed_off(chat_id: str) -> bool:
+    sink = get_active_sink(chat_id)
+    return sink is not None and _handoff_owns_run(chat_id, sink.run_token)
+
+  held = []
+  chat_ids: list[str] = []
+  try:
+    for chat_id in sorted(registry.all_alive_chat_ids()):
+      if chat_id in spare_chat_ids or handed_off(chat_id):
+        continue
+      lock = chat_queue.get_transition_lock(chat_id)
+      if not lock.try_acquire():
+        continue
+      held.append(lock)
+      chat_ids.append(chat_id)
+    if not chat_ids:
+      return 0
+    parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+    parked = await _interrupt_and_park_live_turns(
+      chat_ids,
+      note=_park_event(STORAGE_PAUSE_MESSAGE, parked_until, "storage"),
+      park_reason="storage",
+      parked_until=parked_until,
+      timeout=RESTART_HANDLE_STOP_TIMEOUT_SECS,
+      label="storage-pause",
+    )
+    return len(parked)
+  finally:
+    for lock in held:
+      lock.release()
+
+
 async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
@@ -1684,7 +1949,7 @@ async def drain_all_for_restart(
       note that is equally resumable);
     - mirrors explicit Stop's clean-interrupt handoff — bump the generation so
       the turn-end drain sees a stale generation and does NOT
-      promote the queue — BUT records the chat in `_restart_draining_chats` so
+      promote the queue — BUT records the turn in `_park_handoffs` so
       the turn's finally does not clear the exact run before this drain can
       transition it. After every handle stops, the same writer transaction used
       by provider-limit recovery moves that exact run to ``parked`` with
@@ -1713,7 +1978,6 @@ async def drain_all_for_restart(
         "drain-for-restart intent preparation failed; fallbacks stay manual",
         exc_info=True,
       )
-  parked_runs: list[dict[str, str]] = []
   # `resumable` rides the event LIVE (events.process_event carries the
   # whitelisted extras onto the persisted block), so a drained turn's manual
   # Resume fallback renders immediately. The exact ChatRun transition below,
@@ -1722,133 +1986,15 @@ async def drain_all_for_restart(
   # lets the card render in the calm "Paused" family instead of the danger-red
   # error styling reserved for genuine failures.
   note = _pause_note(PAUSED_FOR_RESTART_MESSAGE, kind="restart")
-  candidates: list[tuple[str, list, object | None]] = []
-  for chat_id in sorted(registry.all_alive_chat_ids()):
-    handles = registry.get_handles(chat_id)
-    if not handles:
-      # A chat reserved 'starting' but with no live handle yet — nothing to
-      # interrupt. Its send is durable and reconciles on the next boot.
-      continue
-    sink = get_active_sink(chat_id)
-    stopped_gen = current_run_generation(chat_id)
-    if not isinstance(stopped_gen, int):
-      # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
-      continue
-    # Mark BEFORE bumping so the turn's finally (which may run the instant the
-    # interrupt lands) observes the drain and leaves the marker set.
-    _restart_draining_chats.add(chat_id)
-    bump_run_generation(chat_id)
-    _clear_after_terminal_generation[chat_id] = stopped_gen
-    _clear_after_terminal_status[chat_id] = "interrupted"
-
-    if sink is not None:
-      sink.publish(dict(note))
-    else:
-      bc = get_broadcast(chat_id)
-      if bc is not None:
-        # Transport-only fallback (handle live but no sink). The note isn't
-        # persisted here; boot reconcile still adds the resumable interrupted
-        # note for this marker.
-        bc.publish(dict(note))
-    candidates.append((chat_id, handles, sink))
-
-  async def _stop_candidate(chat_id: str, handles: list) -> bool:
-    all_interrupted = True
-    for handle in handles:
-      # Every parked turn must stay resumable; a handle whose stop would end
-      # its work for good offers suspend (see RunnerHandle).
-      end = getattr(handle, "suspend", None) or handle.stop
-      try:
-        stopped = await end(
-          timeout=min(RESTART_HANDLE_STOP_TIMEOUT_SECS, timeout)
-        )
-      except asyncio.CancelledError:
-        raise
-      except Exception:
-        log.warning(
-          "drain-for-restart interrupt failed chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"), exc_info=True,
-        )
-        stopped = False
-      if not stopped:
-        log.warning(
-          "drain-for-restart stop timed out; authenticated boot "
-          "reconciliation will preserve chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"),
-        )
-        all_interrupted = False
-    return all_interrupted
-
-  stop_results = await asyncio.gather(*(
-    _stop_candidate(chat_id, handles)
-    for chat_id, handles, _sink in candidates
-  ))
-
-  for (chat_id, _handles, sink), all_interrupted in zip(
-    candidates, stop_results, strict=True,
-  ):
-    if all_interrupted:
-      run_token = sink.run_token if sink is not None else None
-      # Own the terminal snapshot fence here instead of assuming the runner's
-      # teardown won the scheduling race. This force-completes running tool
-      # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
-      # marker. A failed Finalize leaves that marker + its already-committed
-      # restart nonce intact for authenticated startup recovery.
-      if sink is not None:
-        try:
-          await sink.finalize()
-        except Exception:
-          log.warning(
-            "drain-for-restart terminal snapshot failed; authenticated boot "
-            "recovery will continue chat_id=%s run_token=%s",
-            chat_id, run_token, exc_info=True,
-          )
-          continue
-      if run_token and restart_nonce:
-        try:
-          parked = await _park_run_strict(
-            chat_id,
-            run_token,
-            datetime.now(UTC).replace(tzinfo=None),
-            "restart",
-            restart_nonce=restart_nonce,
-          )
-          if parked:
-            parked_runs.append({
-              "chat_id": chat_id,
-              "run_token": run_token,
-            })
-          else:
-            log.warning(
-              "drain-for-restart could not park exact run; authenticated boot "
-              "recovery will continue chat_id=%s run_token=%s",
-              chat_id,
-              run_token,
-            )
-        except Exception:
-          # Restart must still proceed. ParkRun is transactional; on failure
-          # the generic running marker remains for safe manual reconciliation.
-          log.warning(
-            "drain-for-restart park failed; authenticated boot recovery "
-            "will continue "
-            "chat_id=%s run_token=%s",
-            chat_id,
-            run_token,
-            exc_info=True,
-          )
-      else:
-        log.warning(
-          "drain-for-restart has no exact run token/nonce; leaving manual "
-          "recovery chat_id=%s run_token=%s",
-          chat_id, run_token,
-        )
-  # Flush the writer so every paused note (the sink's fire-and-forget
-  # PersistError above) is durably committed before the worker restarts.
-  try:
-    ack = get_writer().submit(Barrier())
-    await _await_ack(ack, timeout=min(timeout, 10.0))
-  except Exception:
-    log.warning("drain-for-restart writer flush failed", exc_info=True)
+  parked_runs = await _interrupt_and_park_live_turns(
+    sorted(registry.all_alive_chat_ids()),
+    note=note,
+    park_reason="restart",
+    parked_until=None,
+    timeout=timeout,
+    restart_nonce=restart_nonce,
+    label="drain-for-restart",
+  )
   if parked_runs:
     log.info(
       "drain-for-restart parked %d exact turn(s): %s",
@@ -4251,13 +4397,15 @@ def _park_exit(
 
   A planned restart is already the authoritative terminal outcome by the time
   the provider exits: ``drain_all_for_restart`` publishes the resumable pause
-  before interrupting the handle and records the chat in
-  ``_restart_draining_chats``. Provider teardown errors after that point
+  before interrupting the handle and records the turn in
+  ``_park_handoffs``. Provider teardown errors after that point
   describe HOW the requested interrupt completed, not a second user-visible
   outcome, so they must not replace the pause card. Returns the
   `_complete_turn` kwargs for the limit disposition.
   """
-  if getattr(sink, "chat_id", None) in _restart_draining_chats:
+  if _handoff_owns_run(
+    getattr(sink, "chat_id", None), getattr(sink, "run_token", None),
+  ):
     return {"parked": False}
   # Claude reports 413 and 429 as `api_error_status`, and the Codex runner
   # turns a reached rate-limit window into 429. Results without a status, and
@@ -5007,6 +5155,11 @@ async def run_chat(
   start_hold = None
   try:
     start_hold, lifted = await _admit_run(chat_id, run_token)
+    if "storage" in lifted:
+      # The storage guard pauses work that keeps filling a critical volume;
+      # this turn is the owner's explicit choice to free space, so it stays.
+      from app.storage_guard import spare_continued_turn
+      spare_continued_turn(chat_id, run_token)
     # Only a turn the override actually admitted is told which floor it is past.
     if lifted and messages:
       from app.continuations import CONTINUE_ANYWAY_NOTICES
@@ -5204,16 +5357,15 @@ async def run_chat(
     # claim leaves it alive, and then we leave the marker for that new owner
     # (STALE_NO_ACTION-equivalent — no clear).
     if chat_id and clear_stopped_run and run_gen is not None:
-      if chat_id in _restart_draining_chats:
+      if _take_park_handoff(chat_id, run_gen):
         # Drain-for-restart handoff: this turn was interrupted for a graceful
         # restart. Leave the exact running row and pending queue intact so
         # drain_all_for_restart can move that row to the durable due-restart
         # state after every handle reports stopped. The deliberate difference
         # from Stop is that the else-branch below clears the exact row instead.
         # `_complete_turn` already finalized the partials + paused note; the
-        # bumped generation prevented queue promotion. Discard the in-memory
-        # handoff flag once this dying wrapper has observed it.
-        _restart_draining_chats.discard(chat_id)
+        # bumped generation prevented queue promotion. Taking the handoff
+        # discards it now that this dying wrapper has observed it.
         disposition = chat_queue.TerminalDisposition.DRAINED_FOR_RESTART
       else:
         try:

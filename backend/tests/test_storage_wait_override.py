@@ -272,6 +272,38 @@ def test_continue_anyway_tells_the_agent_storage_is_still_low(db, chat, monkeypa
   assert "ask the owner before deleting anything else" in LOW_STORAGE_NOTICE
 
 
+def test_storage_guard_spares_the_turn_the_owner_continued(db, chat, monkeypatch):
+  """The guard pauses work that keeps filling a critical volume, but a turn
+  the owner continued anyway is their explicit choice to free space."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [run.id]
+  assert storage_guard._continued == {chat.id: run.id}
+
+
+def test_admitted_turn_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  from app import storage_guard
+
+  async def admitted(_data_dir, **_kwargs):
+    pass
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  _run_turn(db, chat, monkeypatch, "manual", admitted)
+  assert storage_guard._continued == {}
+
+
+def test_process_only_continue_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  """Only a turn whose storage floor was lifted is the owner's cleanup."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)
+  assert entered == [run.id]
+  assert storage_guard._continued == {}
+
+
 def test_continue_anyway_admits_one_turn_near_the_task_cap(db, chat, monkeypatch):
   """When the cap is held by something other than agent work, the owner has a way out."""
   entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)

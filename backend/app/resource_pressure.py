@@ -34,6 +34,13 @@ _DISK_CONSTRAINED_CEILING = 2 * GIB
 _DISK_CRITICAL_FRACTION = 0.05
 _DISK_CRITICAL_FLOOR = 32 * MIB
 _DISK_CRITICAL_CEILING = 1 * GIB
+# Below this the volume is about to refuse writes outright. The storage guard
+# then releases the recovery reserve (app.disk_reserve) so the database can
+# still commit. It is not a separate pressure state: consumers that only care
+# about admission keep reading "critical".
+_DISK_EXHAUSTED_FRACTION = 0.0075
+_DISK_EXHAUSTED_FLOOR = 16 * MIB
+_DISK_EXHAUSTED_CEILING = 64 * MIB
 
 # memory.current includes reclaimable file cache, so pressure is based on the
 # existing cgroup working-set estimate.  PSI catches sustained contention that
@@ -90,6 +97,22 @@ def _memory_facts(snapshot: dict[str, Any]) -> dict[str, Any]:
   return {key: snapshot.get(key) for key in keys if key in snapshot}
 
 
+def _disk_facts(
+  data_dir: str | Path, disk_usage: Callable[[str | Path], Any],
+) -> dict[str, Any]:
+  try:
+    usage = disk_usage(data_dir)
+  except OSError:
+    return {"available": False, "path": str(data_dir)}
+  return {
+    "available": True,
+    "path": str(data_dir),
+    "total_bytes": int(usage.total),
+    "used_bytes": int(usage.used),
+    "free_bytes": int(usage.free),
+  }
+
+
 def resource_facts(
   data_dir: str | Path,
   *,
@@ -104,20 +127,7 @@ def resource_facts(
   implied by this function.
   """
   captured_at = datetime.now(UTC).isoformat()
-  try:
-    usage = disk_usage(data_dir)
-    disk = {
-      "available": True,
-      "path": str(data_dir),
-      "total_bytes": int(usage.total),
-      "used_bytes": int(usage.used),
-      "free_bytes": int(usage.free),
-    }
-  except OSError:
-    disk = {
-      "available": False,
-      "path": str(data_dir),
-    }
+  disk = _disk_facts(data_dir, disk_usage)
 
   memory_snapshot = (
     cgroup_memory_snapshot() if memory is None else memory
@@ -171,6 +181,12 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     floor_bytes=_DISK_CRITICAL_FLOOR,
     ceiling_bytes=_DISK_CRITICAL_CEILING,
   )
+  exhausted_below = _bounded_headroom(
+    total,
+    fraction=_DISK_EXHAUSTED_FRACTION,
+    floor_bytes=_DISK_EXHAUSTED_FLOOR,
+    ceiling_bytes=_DISK_EXHAUSTED_CEILING,
+  )
   state = "normal"
   reason = None
   if free < critical_below:
@@ -194,6 +210,7 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     "free_ratio": free / total,
     "constrained_below_bytes": constrained_below,
     "critical_below_bytes": critical_below,
+    "exhausted_below_bytes": exhausted_below,
     "reason": reason,
   }
 
@@ -414,3 +431,28 @@ def resource_status(
     "facts": facts,
     "pressure": assess_resource_pressure(facts),
   }
+
+
+def disk_status(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> dict[str, Any]:
+  """The data volume's facts and pressure alone, shaped like one resource of
+  :func:`resource_status`.
+
+  It reads one ``statvfs`` and no cgroup file, so it is cheap enough to ask
+  every second and before anything writes: the storage guard, startup (the
+  recovery reserve) and a scheduled app job's launch.
+  """
+  disk = _disk_facts(data_dir, disk_usage)
+  return {"facts": disk, "pressure": _disk_pressure(disk)}
+
+
+def disk_is_critical(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> bool:
+  """Whether the data volume is below its critical free-space line."""
+  return disk_status(data_dir, disk_usage=disk_usage)["pressure"]["state"] == "critical"
