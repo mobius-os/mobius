@@ -465,7 +465,10 @@ def test_autopilot_round_restages_its_open_pr_in_place(staging, monkeypatch):
     "body": "Adds a greeting.",
   }
   monkeypatch.setattr(github_routes, "_autopilot_live_target", lambda *_: live)
-  monkeypatch.setattr(contribution_autopilot, "get_row", lambda *_: object())
+  monkeypatch.setattr(
+    contribution_autopilot, "get_row",
+    lambda *_: github_routes.models.ContributionAutopilot(push_mode="auto"),
+  )
   monkeypatch.setattr(
     contribution_autopilot, "verify_claim",
     lambda _row, run_id: run_id == "round-1",

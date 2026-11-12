@@ -1889,8 +1889,44 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0102_work_claim_text",
     "0103_shared_peer_note_bodies",
     "0104_claude_session_costs",
+    "0105_autopilot_push_mode",
   ]
   assert second == first
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_autopilot_push_mode_exists_after_fresh_and_frozen_upgrade(tmp_path, start):
+  """A follow-up grant stamped before ask-before-push existed keeps pushing by itself."""
+  db_path = tmp_path / "push-mode-boot.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+      connection.execute(
+        "INSERT INTO contribution_autopilot "
+        "(app_id, record_id, enabled, state, rounds_used, max_rounds, consecutive_failures) "
+        "VALUES (1, 'sent-earlier', 1, 'idle', 0, 5, 0)"
+      )
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_autopilot_push_mode(eng)  # Idempotent on a crash retry.
+
+  assert "0105_autopilot_push_mode" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO contribution_autopilot "
+      "(app_id, record_id, enabled, state, rounds_used, max_rounds, consecutive_failures) "
+      "VALUES (1, 'sent-now', 1, 'idle', 0, 5, 0)"
+    ))
+    modes = dict(conn.execute(text(
+      "SELECT record_id, push_mode FROM contribution_autopilot"
+    )).all())
+  assert set(modes.values()) == {"auto"}
+  assert ("sent-earlier" in modes) is (start == "schema_0013")
+  eng.dispose()
 
 
 @pytest.mark.parametrize("start", ["fresh", "schema_0013"])
