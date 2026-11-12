@@ -635,6 +635,20 @@ def test_independent_review_brief_bounds_parallel_tests_to_the_container_quota()
   assert "focused tests" in brief
 
 
+@pytest.mark.parametrize("mode,build", [
+  ("review", lambda row: domain.brief(row)),
+  ("review_fix_merge", lambda row: domain.takeover_brief(row)),
+  ("review", lambda row: domain.independent_brief(row, {**TARGET, "base_sha": "b" * 40, "head_sha": "h" * 40})),
+])
+def test_every_run_bearer_instruction_names_the_token_that_works(setup, mode, build):
+  """The run endpoints refuse MOBIUS_RUN_TOKEN, so no brief may leave the bearer unnamed."""
+  row = setup[1]
+  row.mode = mode
+  text = " ".join(build(row).split())
+  assert text.count("run bearer") == text.count(domain.RUN_BEARER_NOTE) >= 1
+  assert "$AGENT_TOKEN" in text and "MOBIUS_RUN_TOKEN is not the bearer" in text
+
+
 def test_independent_reviewer_admission_is_durable_same_model_and_never_restarts(setup, monkeypatch):
   from app import delegations
   db, row, principal = takeover(setup, monkeypatch)
@@ -682,6 +696,63 @@ def test_durable_reviewer_reports_after_spawning_turn_completes(setup, monkeypat
   db.get(models.ChatRun, parent.run_id).status = "completed"
   db.commit()
   assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+
+
+def start_reviewer(db, row, parent):
+  return asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, parent))
+
+
+def reviewer_steps(db, row):
+  db.refresh(row)
+  return [step["delegation_id"] for step in row.outcomes_json[domain.key(ITEM)]["reviewer_steps"]]
+
+
+def test_reviewer_that_failed_without_a_receipt_is_replaced_and_cannot_report_late(setup, monkeypatch):
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.commit()
+  replacement = start_reviewer(db, row, parent)["delegation"]["id"]
+  assert replacement != child.id
+  assert reviewer_steps(db, row) == [child.id, replacement]
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == replacement
+  with pytest.raises(HTTPException) as late:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert late.value.status_code == 403
+  # The all-clear is still recorded only through a registered step: the new one.
+  fresh_chat = db.get(models.Delegation, replacement).child_chat_id
+  db.add(models.ChatRun(id="replacement-run", chat_id=fresh_chat, status="running"))
+  db.commit()
+  fresh = Principal(owner=parent.owner, app_id=None, chat_id=fresh_chat, run_id="replacement-run",
+    delegation_id=replacement)
+  assert asyncio.run(routes.independent_review(1, row.id, body, db, fresh))["independent_receipt_id"]
+
+
+@pytest.mark.parametrize("status", ["running", "parked", "stopped", "completed", "interrupted"])
+def test_reviewer_that_is_working_paused_stopped_or_finished_keeps_its_seat(setup, monkeypatch, status):
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = status
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
+
+
+def test_failed_reviewer_with_queued_work_is_not_replaced(setup, monkeypatch):
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.get(models.Chat, child.child_chat_id).pending_messages = [{"content": "resume the review"}]
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
+
+
+def test_reviewer_with_a_recorded_receipt_is_never_replaced(setup, monkeypatch):
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  needs_you = body.model_copy(update={"state": "needs_you", "summary": "A real bug"})
+  asyncio.run(routes.independent_review(1, row.id, needs_you, db, reviewer))
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
 
 
 def owner_run_views(db, row, parent):

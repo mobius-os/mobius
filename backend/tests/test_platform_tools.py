@@ -624,6 +624,22 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
   assert "agents in other Möbius chats" not in instructions
 
 
+def test_peer_tool_refusal_names_the_gate_and_the_alternative(monkeypatch):
+  """A parent without peer tools learns why and what to use instead."""
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "isolated-owner-run")
+  monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
+  control = _control_module()
+
+  refused = control._call_tool_as_caller("list_agent_peers", {})
+  assert refused["isError"] is True
+  text = refused["content"][0]["text"]
+  assert "another agent is live" in text
+  assert "message_agent" in text
+
+  other = control._call_tool_as_caller("unknown_tool", {})
+  assert "peer" not in other["content"][0]["text"].lower()
+
+
 def test_peer_tool_descriptions_cut_coordination_calls():
   """Descriptions steer agents to paths, quiet delivery, and one-call approval."""
   control = _control_module()

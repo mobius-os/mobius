@@ -58,6 +58,10 @@ contract instead of rebuilding or replacing it. Keep the same scope declared
 in `mobius.json`, then verify the returned `chat_log_access`. This is an owner
 permission action, not a substitute for applying the source revision.
 
+Other privileged grants (`github_access`, `manage_apps`, and the rest listed in
+`building-apps-quickstart.md`) have no such route: only a reviewed Store
+install can hold them, and a local app's manifest value is ignored.
+
 ---
 
 ## Packaging / wrapping a pre-built or third-party web app
