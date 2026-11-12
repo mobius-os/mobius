@@ -5310,7 +5310,7 @@ async def cleanup_contribution_staging(
           app_id, record_id, exc_info=True,
         )
     cleaned = await settled.run_settled(
-      _cleanup_terminal_staging_checkout, settled_record,
+      _cleanup_terminal_staging_checkout, settled_record, app_id=app_id,
     )
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).

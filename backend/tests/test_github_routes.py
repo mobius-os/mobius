@@ -7202,7 +7202,7 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
     "status": "open",
     "plan": {"repo_path": str(disposable)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is False
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is False
   assert disposable.exists()
 
   for status in ("merged", "closed", "superseded", "commented", "abandoned"):
@@ -7213,7 +7213,7 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
       "status": status,
       "plan": {"repo_path": str(candidate)},
     }
-    assert _cleanup_terminal_staging_checkout(record) is True
+    assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
     assert not candidate.exists()
     # The emptied per-record folder goes with its checkout.
     assert not candidate.parent.exists()
@@ -7223,14 +7223,14 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
   (kept / ".git").mkdir(parents=True)
   (kept.parent / "notes.md").write_text("owner notes")
   record = {"status": "merged", "plan": {"repo_path": str(kept)}}
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not kept.exists()
   assert (kept.parent / "notes.md").read_text() == "owner notes"
 
   live_repo = data_dir / "apps" / "terminal-cleanup-live"
   (live_repo / ".git").mkdir(parents=True)
   record["plan"]["repo_path"] = str(live_repo)
-  assert _cleanup_terminal_staging_checkout(record) is False
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is False
   assert live_repo.exists()
 
 
@@ -7301,7 +7301,7 @@ def test_contribution_lifecycle_persists_equivalence_in_live_linked_repo():
   assert landed and app_git.ref_exists(live, landed)
   assert not app_git.ref_exists(live, pending)
 
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not review.exists()
   assert app_git.ref_exists(live, landed)
 
@@ -7477,7 +7477,7 @@ def test_standalone_app_review_persists_equivalence_in_installed_repo():
   record["status"] = "merged"
   landed = _settle_equivalence(record)
   assert landed and app_git.ref_exists(live, landed)
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not review.exists()
   assert app_git.ref_exists(live, landed)
 
@@ -7517,7 +7517,7 @@ def test_cleanup_terminal_staging_checkout_unlocks_and_unregisters_linked_worktr
     "status": "merged",
     "plan": {"repo_path": str(checkout)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not checkout.exists()
   listed = subprocess.run(
     ["git", "-C", str(owner), "worktree", "list", "--porcelain"],
@@ -7542,7 +7542,7 @@ def test_cleanup_terminal_staging_checkout_removes_stale_missing_admin():
     "status": "closed",
     "plan": {"repo_path": str(checkout)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not checkout.exists()
 
 
@@ -7583,7 +7583,7 @@ def test_cleanup_terminal_staging_checkout_preserves_recycled_worktree_slot():
     "status": "merged",
     "plan": {"repo_path": str(stale)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not stale.exists()
   assert current.exists()
   assert (admin_dir / "gitdir").read_text().strip() == str(current / ".git")
@@ -7615,7 +7615,7 @@ def test_cleanup_terminal_staging_checkout_preserves_reciprocal_outside_owner():
     "status": "closed",
     "plan": {"repo_path": str(checkout)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is False
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is False
   assert checkout.exists()
   assert (outside_owner / "sentinel").read_text() == "keep\n"
 
@@ -7634,7 +7634,7 @@ def test_cleanup_terminal_staging_checkout_rejects_repo_symlink_alias():
     "status": "closed",
     "plan": {"repo_path": str(alias)},
   }
-  assert _cleanup_terminal_staging_checkout(record) is False
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is False
   assert alias.is_symlink()
   assert (target / "sentinel").read_text() == "keep\n"
 
@@ -7650,8 +7650,8 @@ def test_cleanup_terminal_staging_checkout_is_idempotent_after_removal():
     "plan": {"repo_path": str(checkout)},
   }
 
-  assert _cleanup_terminal_staging_checkout(record) is True
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
 
 
 def test_cleanup_terminal_staging_checkout_retries_separate_git_dir_partial_failure(
@@ -7685,11 +7685,11 @@ def test_cleanup_terminal_staging_checkout_retries_separate_git_dir_partial_fail
 
   monkeypatch.setattr(shutil, "rmtree", fail_checkout_once)
   with pytest.raises(OSError, match="simulated checkout removal failure"):
-    _cleanup_terminal_staging_checkout(record)
+    _cleanup_terminal_staging_checkout(record, app_id=1)
   assert checkout.exists()
   assert not git_dir.exists()
 
-  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record, app_id=1) is True
   assert not checkout.exists()
   assert not git_dir.exists()
 

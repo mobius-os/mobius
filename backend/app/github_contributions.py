@@ -52,6 +52,7 @@ from app.contribution_records import (
   now_iso as _now_iso,
   read_record as _read_record,
   record_paths as _record_paths,
+  records_dir as _records_dir,
   write_record as _write_record,
 )
 from app.deps import Principal
@@ -1275,11 +1276,44 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
   return None
 
 
-def _cleanup_terminal_staging_checkout(record: dict) -> bool:
+_TERMINAL_RECORD_STATUSES = frozenset({
+  "merged", "closed", "superseded", "commented", "abandoned",
+})
+
+
+def _checkout_used_by_open_record(app_id: int, record: dict, repo: Path) -> str | None:
+  """Another unfinished contribution of this app staged from ``repo``, by id.
+
+  Contributions can share one checkout, such as a follow-up PR prepared in the
+  clone of the PR before it. A finished one must not delete the checkout while
+  another still needs it; whichever finishes last removes it.
+  """
+  own = str(record.get("id") or "")
+  for path in sorted(_records_dir(app_id).glob("*.json")):
+    if path.stem == own:
+      continue
+    try:
+      other = _read_record(path)
+    except Exception:
+      continue
+    if other.get("status") in _TERMINAL_RECORD_STATUSES:
+      continue
+    plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
+    raw_repo = plan.get("repo_path")
+    if not isinstance(raw_repo, str) or not raw_repo:
+      continue
+    try:
+      other_repo = Path(raw_repo).resolve()
+    except (OSError, RuntimeError):
+      continue
+    if other_repo.is_relative_to(repo) or repo.is_relative_to(other_repo):
+      return str(other.get("id") or path.stem)
+  return None
+
+
+def _cleanup_terminal_staging_checkout(record: dict, *, app_id: int) -> bool:
   """Remove a terminal contribution checkout through its owning Git shape."""
-  if record.get("status") not in {
-    "merged", "closed", "superseded", "commented", "abandoned",
-  }:
+  if record.get("status") not in _TERMINAL_RECORD_STATUSES:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
@@ -1292,6 +1326,8 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   data_dir = Path(get_settings().data_dir).resolve()
   roots = (data_dir / "contrib", data_dir / "contributions")
   if not any(repo.is_relative_to(root) for root in roots):
+    return False
+  if _checkout_used_by_open_record(app_id, record, repo) is not None:
     return False
   cleaned = not repo.exists() or _remove_staging_checkout(repo, data_dir)
   if cleaned and repo.parent.parent in roots:

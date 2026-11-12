@@ -290,3 +290,63 @@ def test_cancelled_cleanup_holds_the_source_lock_through_its_settlement(
 
   assert isinstance(outcome, asyncio.CancelledError), repr(outcome)
   assert checkout.exists()  # No cleanup step starts after the cancel.
+
+
+def _standalone_checkout(name: str) -> Path:
+  checkout = Path(get_settings().data_dir) / "contrib" / name / "repo"
+  checkout.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+  return checkout
+
+
+def _cleanup(client, auth, app_id: int, record_id: str) -> dict:
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/cleanup-staging",
+    headers=auth,
+  )
+  assert response.status_code == 200, response.text
+  return response.json()
+
+
+def test_a_checkout_shared_with_an_open_contribution_outlives_the_finished_one(
+  client, auth,
+):
+  app = create_local_app(client, auth, name="Cleanup shared checkout")
+  checkout = _standalone_checkout("cleanup-shared-checkout")
+  _write_terminal_record(app["id"], "shared-first", {
+    "id": "shared-first", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  # A follow-up PR prepared in the same clone is still open.
+  _write_terminal_record(app["id"], "shared-follow-up", {
+    "id": "shared-follow-up", "type": "pr", "status": "draft",
+    "plan": {"repo_path": str(checkout)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "shared-first") == {"cleaned": False}
+  assert checkout.is_dir()
+
+  # Whichever finishes last removes the checkout.
+  _write_terminal_record(app["id"], "shared-follow-up", {
+    "id": "shared-follow-up", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  assert _cleanup(client, auth, app["id"], "shared-follow-up") == {"cleaned": True}
+  assert not checkout.exists()
+  assert _cleanup(client, auth, app["id"], "shared-first") == {"cleaned": True}
+
+
+def test_an_open_contribution_using_an_enclosing_folder_keeps_the_checkout(client, auth):
+  app = create_local_app(client, auth, name="Cleanup enclosing checkout")
+  checkout = _standalone_checkout("cleanup-enclosing-checkout")
+  _write_terminal_record(app["id"], "nested-finished", {
+    "id": "nested-finished", "type": "pr", "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  })
+  _write_terminal_record(app["id"], "enclosing-open", {
+    "id": "enclosing-open", "type": "pr", "status": "prepared",
+    "plan": {"repo_path": str(checkout.parent)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "nested-finished") == {"cleaned": False}
+  assert checkout.is_dir()
