@@ -487,10 +487,12 @@
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
 /* Older replies reveal actions only on tap/click; hovering must not expose
    another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. */
+   reply's row visible. Reveal by inheriting, never forcing `visible`: a
+   hidden shell view keeps its ChatView mounted behind an app, and a forced
+   `visible` descendant would paint the row over that app. */
 .chat__msg-meta--visible {
   opacity: 1;
-  visibility: visible;
+  visibility: inherit;
   pointer-events: auto;
   transition-delay: 0s;
 }
