@@ -105,11 +105,11 @@
   --attach-card: 96px;
   --chat-status-font-size: 12px;
   /* The composer's gap above the bottom edge, shared by the foot, the
-     transcript clearance and the fade. The shell sets --chat-foot-bottom-inset
-     to 0 while fitted above a keyboard (chat-only for now); otherwise this is
-     the platform's share of the device bottom safe area. */
+     transcript clearance and the fade. The shell sets --shell-bottom-inset
+     to 0 while fitted above a keyboard (app frames share it); otherwise this
+     is the platform's share of the device bottom safe area. */
   --chat-foot-safe-bottom: var(
-    --chat-foot-bottom-inset,
+    --shell-bottom-inset,
     calc(env(safe-area-inset-bottom, 0px) * var(--chat-foot-inset-reserve, 1))
   );
   display: flex;

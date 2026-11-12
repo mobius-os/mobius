@@ -1,6 +1,9 @@
 .shared-app {
   --shared-accent: #8b5cf6;
   min-height: 100dvh;
+  /* The shared app frame runs to the bottom of the page and reads 0 for env(),
+     so the page keeps it above the home indicator / navigation bar. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   background: #0b0b0d;
   color: #f7f5fb;
   display: flex;

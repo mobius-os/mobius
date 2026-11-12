@@ -2,7 +2,10 @@
 .settings {
   height: 100%;
   overflow-y: auto;
-  padding: 28px 22px 20px;
+  /* The shell draws edge-to-edge, so the last rows must scroll clear of the
+     device's navigation bar / home indicator. --shell-bottom-inset is 0 while
+     the shell is fitted above a keyboard, which already covers the bar. */
+  padding: 28px 22px calc(20px + var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px)));
   scrollbar-gutter: stable;
 }
 
@@ -418,7 +421,7 @@
    overflow. Tested against the 280px pane floor. */
 @container settings (max-width: 400px) {
   .settings {
-    padding: 18px 14px 16px;
+    padding: 18px 14px calc(16px + var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px)));
   }
 
   .settings__title {
