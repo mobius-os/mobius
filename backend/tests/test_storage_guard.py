@@ -507,3 +507,28 @@ def test_continue_anyway_covers_only_the_run_it_admitted(monkeypatch):
   live_sink.run_token = "run-b"
 
   assert storage_guard.continued_turns() == {}
+
+
+def test_the_test_runtime_starts_no_acting_storage_guard(monkeypatch):
+  """Entering the app lifespan in tests arms no reserve and never ticks."""
+  import os
+  from pathlib import Path
+
+  from fastapi.testclient import TestClient
+  from app.main import app
+
+  ticks = []
+
+  async def record_tick(self):
+    ticks.append(self)
+
+  monkeypatch.setattr(storage_guard.StorageGuard, "tick", record_tick)
+  reserve = disk_reserve.reserve_path(Path(os.environ["DATA_DIR"]))
+
+  with TestClient(app) as client:
+    assert client.get("/api/health").status_code == 200
+    task = app.state.runtime_supervisors._tasks["storage-guard"]
+    assert not task.done()
+
+  assert ticks == []
+  assert not reserve.exists()
