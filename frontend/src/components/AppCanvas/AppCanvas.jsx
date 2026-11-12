@@ -54,7 +54,9 @@ import {
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
-import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
+import {
+  useAppActivityFrameForwarding, useManagedAppFrameForwarding,
+} from '../../hooks/useManagedAppEvents.js'
 import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
@@ -204,6 +206,11 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      unless backgroundPlayback says the document owns an open media session
 //      (deliberate playback the drawer still controls). covered holds the same
 //      work while the modal drawer is over a frame that stays painted.
+//
+//   3d. {type: 'moebius:app-activity'}                     parent → frame
+//      The shell saw new activity for this app, or its system stream reopened
+//      (useAppActivityFrameForwarding in hooks/useManagedAppEvents.js).
+//      Carries no content; the runtime's onActivity listeners refresh.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -886,6 +893,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   }
 
   useManagedAppFrameForwarding(framesRef, subscribeManagedAppEvents, capabilityContract)
+  useAppActivityFrameForwarding(framesRef, loadedDocsRef, subscribeManagedAppEvents, appId)
 
   // A host that owns the browser-history cursor may ask the visible app to
   // follow it. Keep exact contentWindow selection here rather than making the

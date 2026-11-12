@@ -3211,7 +3211,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
-  const [subscribeManagedAppEvents, observeManagedAppEvent] = useManagedAppEvents()
+  const [
+    subscribeManagedAppEvents, observeManagedAppEvent, observeSystemStreamReopened,
+  ] = useManagedAppEvents()
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
@@ -3616,6 +3618,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const listTimeoutMs = reconnectListTimeoutMs(failedAttempts)
     // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
+    // App activity nudges do not replay, so each mounted app checks once now.
+    observeSystemStreamReopened()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
@@ -3646,6 +3650,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [
     fetchFreshChats,
     markChatRunReconcile,
+    observeSystemStreamReopened,
     reconcileLocalChatRuns,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
