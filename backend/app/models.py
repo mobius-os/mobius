@@ -2071,6 +2071,38 @@ class PushDevice(Base):
   registered_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class NotificationChannel(Base):
+  """An outside place owner notifications are copied to (Slack, Discord, …).
+
+  A channel receives a notification exactly when phones and browsers would
+  get a push: not while the owner is watching its source, never for quiet
+  maintenance notices. ``app_ids`` limits it to those apps' notifications;
+  null means every notification. The webhook URL is itself a credential, so it
+  is stored encrypted (``app.notification_channels``) and never returned;
+  ``url_hint`` names it in Settings. Delivery is best effort, like a push:
+  ``last_*`` records the latest outcome so Settings can show a broken link.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "notification_channels"
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  kind = Column(String(16), nullable=False)
+  label = Column(String(80), nullable=False)
+  url_encrypted = Column(Text, nullable=False)
+  url_hint = Column(String(200), nullable=False)
+  app_ids = Column(JSON, nullable=True)
+  include_body = Column(Boolean, nullable=False, default=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  last_sent_at = Column(DateTime, nullable=True)
+  last_error = Column(String(300), nullable=True)
+
+
 class Notification(Base):
   """Record of a sent push notification."""
 

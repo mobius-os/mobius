@@ -1844,5 +1844,20 @@ export const api = {
         keepalive: true,
       }),
     },
+    // Outside channels (Slack, Discord, ntfy, webhooks) that get a copy of
+    // notifications. The link goes in once and is never read back.
+    channels: {
+      list: () => apiFetch('/push/channels'),
+      add: (payload) => apiFetch('/push/channels', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      update: (id, payload) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
+      remove: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+      test: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+    },
   },
 }

@@ -16,12 +16,15 @@ export const SETTINGS_SECTIONS = Object.freeze([
   // trial and Möbius models).
   'mobius-account',
   'mobius-models',
+  // Settings › Notifications elsewhere (Slack, Discord, ntfy, webhooks).
+  'notifications-elsewhere',
 ])
 
 /** The sub-page a section id opens, or null for a section on the overview. */
 export function settingsSectionPage(section) {
   if (section === 'mobius-account') return 'mobius-account'
   if (section === 'mobius-models') return 'mobius'
+  if (section === 'notifications-elsewhere') return 'notifications-elsewhere'
   return null
 }
 
