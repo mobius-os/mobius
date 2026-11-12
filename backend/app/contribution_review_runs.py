@@ -1076,10 +1076,12 @@ For each exact head obtain a fresh read-only durable independent child review of
 the FULL diff, six-scope rubric and tests against the exact current target base.
 Start that reviewer via POST {endpoint}/reviewers with repo, number, head_sha.
 The server freezes its prompt/provider/model/effort and durable child identity.
-Each exact head and base admits ONE reviewer and one verdict; /reviewers returns
-that same reviewer again, so its needs_you verdict cannot be replaced by asking
-another. Continue only through a new repair (a new head), an observed target-base
-advance, or a new owner grant.
+Each exact head and base admits ONE verdict. /reviewers returns that same reviewer
+again, except when it ended in error without reporting: then it cancels that
+reviewer and starts a replacement (at most 3 attempts). Live, paused, stopped
+and finished reviewers are never replaced, and once a receipt exists its needs_you
+verdict cannot be replaced by asking another. Continue only through a new repair
+(a new head), an observed target-base advance, or a new owner grant.
 The child must POST {endpoint}/independent-reviews with repo, number, head_sha,
 reviewed_base_sha, state, summary, scope, tests and tests_passed using its own
 run bearer {RUN_BEARER_NOTE}. This produces an independent_receipt_id. A repair author must never

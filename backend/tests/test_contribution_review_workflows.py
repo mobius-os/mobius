@@ -487,9 +487,13 @@ def test_second_report_from_one_reviewer_names_the_real_recovery(setup, monkeypa
   assert "/reviewers returns this same one" in detail
   assert "new repair (a new head)" in detail and "target-base advance" in detail and "new grant" in detail
   brief = " ".join(domain.takeover_brief(row).split())
-  assert "/reviewers returns that same reviewer again" in brief
   skill = Path(__file__).resolve().parents[1] / "scripts" / "seed-skills" / "github-workflows.md"
-  assert "`/reviewers` returns that same reviewer again" in " ".join(skill.read_text().split())
+  skill_text = " ".join(skill.read_text().split())
+  # Both sets of instructions state the rule and its one exception, so a parent learns the replacement path.
+  assert "/reviewers returns that same reviewer again, except when it ended in error without reporting" in brief
+  assert "at most 3 attempts" in brief and "once a receipt exists" in brief
+  assert "`/reviewers` returns that same reviewer again" in skill_text
+  assert "ended in error without reporting" in skill_text and "at most 3 attempts" in skill_text
 
 
 def configure_repair(setup, monkeypatch):
