@@ -1888,6 +1888,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0101_claim_revocation_outbox",
     "0102_work_claim_text",
     "0103_shared_peer_note_bodies",
+    "0104_claude_session_costs",
   ]
   assert second == first
 
