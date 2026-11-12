@@ -358,6 +358,122 @@ def test_project_creation_retry_is_idempotent(client, auth, db):
   assert db.query(models.Chat).count() == 0
 
 
+def test_project_creation_retry_succeeds_after_a_crash_mid_build(
+  client, auth, db, monkeypatch,
+):
+  import app.routes.projects as projects_route
+
+  body = {"name": "Crash-safe", "template_id": "blank", "recovery_request_id": "crashed-1"}
+  project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:project:crashed-1"))
+  root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
+  staging = root.with_name(".creating-" + project_id)
+  real_copy = projects_route._copy_template_files
+
+  def interrupted_copy(target, *_args):
+    (target / "partial.txt").write_text("half-written")
+    raise KeyboardInterrupt
+
+  monkeypatch.setattr(projects_route, "_copy_template_files", interrupted_copy)
+  with pytest.raises(KeyboardInterrupt):
+    projects_route.create_project(projects_route.ProjectCreate(**body), None, db)
+  assert not root.exists() and not staging.exists()
+
+  # A killed process runs no cleanup and leaves its half-built staging folder.
+  staging.mkdir(parents=True)
+  (staging / "partial.txt").write_text("half-written")
+  monkeypatch.setattr(projects_route, "_copy_template_files", real_copy)
+  retried = client.post("/api/projects", headers=auth, json=body)
+  assert retried.status_code == 200, retried.text
+  assert retried.json()["id"] == project_id
+  assert root.is_dir()
+  assert not (root / "partial.txt").exists()
+  assert not staging.exists()
+
+
+def test_github_import_leftover_from_a_killed_process_is_swept_and_the_retry_succeeds(
+  client, auth, db, monkeypatch,
+):
+  import app.routes.projects as projects_route
+
+  body = {"repository": "octo/example", "recovery_request_id": "crashed-import"}
+  project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "mobius:github-project:crashed-import"))
+  root = Path(os.environ["DATA_DIR"]) / "projects" / project_id
+  staging = root.with_name(".creating-" + project_id)
+  # A killed process runs no cleanup and leaves its half-cloned staging folder.
+  staging.mkdir(parents=True)
+  (staging / "partial.txt").write_text("half-cloned")
+
+  purge_expired_project_tombstones(db)
+  assert not staging.exists()
+
+  def clone(command, **_kwargs):
+    target = Path(command[4])
+    assert target == staging and target.is_dir() and not any(target.iterdir())
+    (target / "index.html").write_text("<h1>Hello</h1>")
+    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
+
+  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
+  monkeypatch.setattr(projects_route.subprocess, "run", clone)
+  retried = client.post("/api/projects/import-github", headers=auth, json=body)
+  assert retried.status_code == 200, retried.text
+  assert (root / "index.html").is_file()
+  assert not (root / "partial.txt").exists()
+  assert not staging.exists()
+
+
+def test_github_clone_runs_outside_the_lifecycle_lock_and_survives_a_sweep(
+  client, auth, monkeypatch,
+):
+  import app.project_retention as retention
+  import app.routes.projects as projects_route
+
+  projects_root = Path(os.environ["DATA_DIR"]).resolve() / "projects"
+  seen = {}
+
+  def clone(command, **_kwargs):
+    target = Path(command[4])
+    (target / "index.html").write_text("<h1>Hello</h1>")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      # Another request (for example a chat deletion) takes the lock and
+      # sweeps while the clone is still running.
+      def other_request():
+        if not retention.PROJECT_LIFECYCLE_LOCK.acquire(timeout=5):
+          return False
+        try:
+          retention.sweep_marked_roots(projects_root, (retention.CREATING_ROOT_PREFIX,))
+          return True
+        finally:
+          retention.PROJECT_LIFECYCLE_LOCK.release()
+      seen["lock_free"] = pool.submit(other_request).result()
+    seen["survived_sweep"] = (target / "index.html").is_file()
+    return projects_route.subprocess.CompletedProcess(command, 0, b"", b"")
+
+  monkeypatch.setattr(projects_route.github_auth, "get_token", lambda: "token")
+  monkeypatch.setattr(projects_route.subprocess, "run", clone)
+  response = client.post(
+    "/api/projects/import-github", headers=auth, json={"repository": "octo/example"},
+  )
+  assert response.status_code == 200, response.text
+  assert seen == {"lock_free": True, "survived_sweep": True}
+  root = projects_root / response.json()["id"]
+  assert (root / "index.html").is_file()
+
+
+def test_a_second_request_cannot_assemble_the_same_root_concurrently(tmp_path):
+  from app.project_retention import RootStillAssembling, creation_staging_root
+
+  root = tmp_path / "projects" / str(uuid.uuid4())
+  with creation_staging_root(root) as staging:
+    (staging / "partial.txt").write_text("in progress")
+    with pytest.raises(RootStillAssembling):
+      with creation_staging_root(root):
+        pass
+    assert (staging / "partial.txt").is_file()
+  assert not staging.exists()
+  with creation_staging_root(root) as staging:
+    assert staging.is_dir()
+
+
 def test_project_color_can_be_set_and_cleared_without_affecting_other_fields(
   client, auth,
 ):
@@ -1014,7 +1130,8 @@ def test_github_import_creates_a_private_project_owned_repository(
     assert command[:4] == ["gh", "repo", "clone", "octo/example"]
     assert kwargs["env"]["GH_TOKEN"] == "secret-test-token"
     root = Path(command[4])
-    root.mkdir(parents=True)
+    # git clone accepts an existing empty destination.
+    assert root.is_dir() and not any(root.iterdir())
     (root / "index.html").write_text("<h1>Hello</h1>", encoding="utf-8")
     for git_args in (
       ["git", "-C", str(root), "init", "-b", "main"],
@@ -1338,7 +1455,7 @@ def test_project_retention_does_not_touch_root_when_database_commit_fails(
   assert db.get(models.Chat, chat["id"]) is not None
 
 
-def test_project_retention_retries_native_orphan_after_filesystem_failure(
+def test_project_retention_finishes_interrupted_delete_on_next_pass(
   client, auth, db, monkeypatch,
 ):
   project = client.post(
@@ -1347,22 +1464,42 @@ def test_project_retention_retries_native_orphan_after_filesystem_failure(
   ).json()
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
+  retired = root.with_name(".purging-" + root.name)
   chat = _create_project_chat(client, auth, project, "Retry cleanup chat")
   _expire_project_pair(db, project["id"], chat["id"])
 
   import app.project_retention as retention
-  real_remove = retention._remove_owned_root
-  monkeypatch.setattr(
-    retention, "_remove_owned_root",
-    lambda _root: (_ for _ in ()).throw(OSError("filesystem busy")),
-  )
+  real_rmtree = retention.shutil.rmtree
+
+  def busy_rmtree(*_args, **_kwargs):
+    raise OSError("filesystem busy")
+
+  monkeypatch.setattr(retention.shutil, "rmtree", busy_rmtree)
   assert purge_expired_project_tombstones(db) == [project["id"]]
   assert db.get(models.Project, project["id"]) is None
-  assert root.is_dir()
-
-  monkeypatch.setattr(retention, "_remove_owned_root", real_remove)
-  assert purge_expired_project_tombstones(db) == []
   assert not root.exists()
+  assert retired.is_dir()
+
+  monkeypatch.setattr(retention.shutil, "rmtree", real_rmtree)
+  assert purge_expired_project_tombstones(db) == []
+  assert not retired.exists()
+
+
+def test_retention_never_deletes_project_folders_the_database_does_not_know(db):
+  """An empty, restored, or misdirected database must not erase owner files."""
+  data_root = Path(os.environ["DATA_DIR"])
+  project_root = data_root / "projects" / str(uuid.uuid4())
+  snapshot_root = data_root / "shared" / "app-instances" / str(uuid.uuid4())
+  for root in (project_root, snapshot_root / "build"):
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("only copy")
+  assert db.query(models.Project).count() == 0
+
+  purge_expired_chat_tombstones(db)
+  purge_expired_project_tombstones(db)
+
+  assert (project_root / "README.md").read_text() == "only copy"
+  assert (snapshot_root / "build" / "README.md").read_text() == "only copy"
 
 
 @pytest.fixture
