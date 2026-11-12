@@ -1930,8 +1930,8 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
                                      db: Session = Depends(get_db),
                                      principal: Principal = Depends(get_agent_run_principal)):
   from app.delegations import (DelegationIntent, create_or_attach_delegation,
-    ensure_delegation_started, serialize_delegation, parent_root_run_id)
-  from app.timeutil import now_naive_utc
+    ensure_delegation_started, serialize_delegation, parent_root_run_id,
+    latch_cancelled, mark_cancelled)
   row = _row(db, app_id, run_id, principal)
   _parent(db, row, principal)
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -1987,7 +1987,7 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
       def register_reviewer(admitted):
         if superseded:
           # Committed with the replacement, so the old reviewer can never report late.
-          superseded.cancelled_at = now_naive_utc()
+          latch_cancelled(db, superseded)
         reviews.write_outcome(db, row, reviews.key(target), {**previous,
           "state": "reviewing", "head_sha": target["head_sha"],
           "reviewer_steps": [*previous.get("reviewer_steps", []), {
@@ -1995,6 +1995,8 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
             "prompt_sha256": admitted.prompt_sha256, "provider": admitted.provider, "model": admitted.model,
             "effort": admitted.effort}]})
       child, _ = create_or_attach_delegation(db, intent, admit_child=register_reviewer)
+      if superseded:
+        mark_cancelled(db, superseded)  # the cancelled lifecycle event; the latch above already committed
       db.refresh(row)
       _assert_independent_reviewer(row, child, target)
       _parent(db, row, principal)

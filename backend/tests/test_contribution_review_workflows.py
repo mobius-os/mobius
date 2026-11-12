@@ -719,6 +719,13 @@ def test_reviewer_that_failed_without_a_receipt_is_replaced_and_cannot_report_la
   assert replacement != child.id
   assert reviewer_steps(db, row) == [child.id, replacement]
   assert start_reviewer(db, row, parent)["delegation"]["id"] == replacement
+  # The old reviewer goes through the ordinary cancel path: terminal event, no auto-resume.
+  db.refresh(child)
+  old_chat = db.get(models.Chat, child.child_chat_id)
+  assert child.cancelled_at is not None
+  assert not old_chat.auto_resume_on_restart and not old_chat.auto_resume_on_limit
+  assert db.query(models.AgentLifecycleEvent).filter_by(
+    source_event_id=f"delegation:{child.id}:terminal:cancelled", event_type="agent_terminal").count() == 1
   with pytest.raises(HTTPException) as late:
     asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
   assert late.value.status_code == 403
