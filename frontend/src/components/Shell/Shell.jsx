@@ -199,7 +199,7 @@ import {
 import LazySurface, { SurfaceLoading, createLaunchCoverHold } from '../ErrorBoundary/LazySurface.jsx'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan,
-  MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
+  MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY, panesShareScreen, screenShareRect,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
 import {
@@ -514,12 +514,28 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [])
   // Immersive is a temporary overlay lease, independent of the durable builder /
   // single worlds. A verified request from the focused app may therefore solo
-  // that app over EITHER world; clearing the lease reveals the exact world below
+  // that app over EITHER world once it has the screen to itself (never while
+  // side-by-side panes share it); clearing the lease reveals the exact world below
   // without changing its workspace mode, pane tree, tabs, or single-screen slot.
   // Settings keeps its builder invariant because isImmersiveActive additionally
   // requires the active shell view to be the requesting canvas, and AppCanvas
   // forwards live requests only from its focused active frame.
-  const immersiveActive = isImmersiveActive(immersiveRequest, activeView, activeAppId)
+  // The share decision reads its layout mode from a box immersive cannot grow
+  // (screenShareRect); the live workspaceMode would loop at a phone split.
+  const immersiveShareLatchRef = useRef({ applied: false, rect: contentRect })
+  const shareRect = screenShareRect(immersiveShareLatchRef.current, contentRect)
+  const immersiveActive = isImmersiveActive(
+    immersiveRequest, activeView, activeAppId,
+    {
+      sharesScreen: panesShareScreen({
+        viewMode: effectiveViewMode, projection,
+        layoutMode: paneModel.modeForRect(shareRect),
+      }),
+    },
+  )
+  useLayoutEffect(() => {
+    immersiveShareLatchRef.current = { applied: immersiveActive, rect: shareRect }
+  }, [immersiveActive, shareRect])
   useLayoutEffect(() => {
     if (!immersiveActive) return
     const drawer = document.getElementById('navigation-drawer')
