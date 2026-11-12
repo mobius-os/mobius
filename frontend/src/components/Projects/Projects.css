@@ -1209,6 +1209,14 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .artifact-preview__frame { flex: 1; width: 100%; min-height: 0; border: 0; background: white; }
 .artifact-preview--image { align-items: center; justify-content: center; overflow: auto; padding: 18px; }
 .artifact-preview--image img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+/* A preview frame reads 0 for env(), so the containers that run a frame to
+   the bottom of the screen keep it above the home indicator / navigation bar.
+   --shell-bottom-inset is 0 while the shell is fitted above a keyboard. */
+.project-preview:not(.project-preview--asset),
+.project-finder__live-preview,
+.artifact-viewer__website {
+  padding-bottom: var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
 
 @media (max-width: 700px) {
   .project-menu__scrim {
