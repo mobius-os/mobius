@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   followTableScrollbarPointer,
   tableScrollbarThumb,
@@ -9,6 +10,27 @@ import {
 
 // A 300px column showing a 900px table; the track is as wide as the column.
 const wide = { clientWidth: 300, scrollWidth: 900, trackWidth: 300 }
+
+test('prose tables grow to readable wrapped columns rather than squeezing into the chat', () => {
+  const css = readFileSync(new URL('../markdown.css', import.meta.url), 'utf8')
+  const table = css.match(/\.md-table\s*\{([^}]+)\}/)[1]
+  const cells = css.match(/\.md-table th,\s*\.md-table td\s*\{([^}]+)\}/)[1]
+  const content = css.match(/\.md-table-cell\s*\{([^}]+)\}/)[1]
+
+  assert.match(table, /width:\s*max-content;/)
+  assert.match(table, /min-width:\s*100%;/)
+  assert.match(content, /display:\s*inline-block;/,
+    'cell content must continue to honor the column text alignment')
+  assert.match(content, /width:\s*max-content;/)
+  assert.match(content, /max-width:\s*32ch;/)
+  assert.match(content, /min-width:\s*min-content;/)
+  assert.match(cells, /word-break:\s*normal;/)
+  assert.match(cells, /overflow-wrap:\s*break-word;/)
+  assert.doesNotMatch(cells, /(?:min-width|white-space):/,
+    'short columns must not inherit a blanket minimum, and prose must still wrap')
+  assert.doesNotMatch(cells, /max-width:/,
+    'the prose measure belongs inside the cell so unbroken code can widen its column')
+})
 
 function assertNear(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} is not ${expected}`)

@@ -166,7 +166,8 @@
 .md-table {
   border-collapse: collapse;
   font-size: 13px;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
 }
 
 .md-table th,
@@ -175,6 +176,18 @@
   border: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.md-table-cell {
+  /* Bound prose without squeezing short columns or letting unbroken code
+     spill over its neighbours: min-content keeps those spans inside the cell. */
+  display: inline-block;
+  vertical-align: top;
+  width: max-content;
+  max-width: 32ch;
+  min-width: min-content;
 }
 
 /* Prose wraps, but ids, versions and commands in code spans stay whole; a

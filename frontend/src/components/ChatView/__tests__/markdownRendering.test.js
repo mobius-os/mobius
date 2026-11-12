@@ -87,6 +87,6 @@ test('a server-rendered table keeps its scroll wrapper and never draws the scrol
   const html = renderToStaticMarkup(React.createElement(BlockToken, { token: table }))
 
   assert.match(html, /<div class="md-table-wrap"><table class="md-table">/)
-  assert.match(html, /<td><code class="md-inline-code">run-2026-11-10<\/code><\/td>/)
+  assert.match(html, /<td><div class="md-table-cell"><code class="md-inline-code">run-2026-11-10<\/code><\/div><\/td>/)
   assert.doesNotMatch(html, /md-table-scrollbar/)
 })

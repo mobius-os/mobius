@@ -162,11 +162,13 @@ export function Table({ token, onInternalNav, mediaDimensions }) {
             <tr>
               {token.header.map((cell, i) => (
                 <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
-                  <InlineContent
-                    tokens={cell.tokens}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={mediaDimensions}
-                  />
+                  <div className="md-table-cell">
+                    <InlineContent
+                      tokens={cell.tokens}
+                      onInternalNav={onInternalNav}
+                      mediaDimensions={mediaDimensions}
+                    />
+                  </div>
                 </th>
               ))}
             </tr>
@@ -176,11 +178,13 @@ export function Table({ token, onInternalNav, mediaDimensions }) {
               <tr key={i}>
                 {row.map((cell, j) => (
                   <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
-                    <InlineContent
-                      tokens={cell.tokens}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={mediaDimensions}
-                    />
+                    <div className="md-table-cell">
+                      <InlineContent
+                        tokens={cell.tokens}
+                        onInternalNav={onInternalNav}
+                        mediaDimensions={mediaDimensions}
+                      />
+                    </div>
                   </td>
                 ))}
               </tr>
