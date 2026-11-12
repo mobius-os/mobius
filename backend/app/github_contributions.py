@@ -827,12 +827,21 @@ def _safe_equivalence_source_path(raw: object) -> Path:
 
 
 def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
-  """Return ``(durable source, review checkout)`` for one contribution."""
+  """Return ``(durable source, review checkout)`` for one contribution.
+
+  The review checkout is only located here, not trusted: a recorded
+  ``source_repo_path`` must stay reachable after its disposable review folder
+  went stale, or settling a finished PR would leave its bookkeeping behind.
+  Publishing callers check the folder's ownership with ``_safe_repo_path``.
+  """
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  review_repo = _safe_repo_path(plan.get("repo_path"))
+  review_repo = _durable_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
   if raw_source_repo:
     return _safe_equivalence_source_path(raw_source_repo), review_repo
+  # Without a recorded source, the folder's own Git state names the source,
+  # so that state must still belong to this folder.
+  contribution_staging.require_checkout_ownership(review_repo)
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo
@@ -924,14 +933,20 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
   # Older cleanup could remove a linked review worktree before the merged-state
   # poll created its durable witness. The reviewed commits remain in the live
   # repository, but only reuse it when both immutable commits still resolve.
+  # A stale folder that no longer owns its Git state is never read: only the
+  # durable source can stand in for it.
+  review_owned = git_checkout.checkout_ownership_error(review_repo) is None
   if (
-    not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
+    not review_owned
+    or not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
     or not app_git.ref_exists(review_repo, f"{head_sha}^{{commit}}")
   ) and (
     app_git.ref_exists(source_repo, f"{base_sha}^{{commit}}")
     and app_git.ref_exists(source_repo, f"{head_sha}^{{commit}}")
   ):
     review_repo = source_repo
+  elif not review_owned:
+    return None
 
   try:
     current_source = app_git.head_sha(source_repo, "HEAD")
