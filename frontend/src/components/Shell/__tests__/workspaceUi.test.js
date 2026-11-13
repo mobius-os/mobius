@@ -1426,6 +1426,27 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   // Both cold-restore probes read the SAME contract (rhyme, not two copies).
   assert.match(appFrameCache, /probeDeletion\(`\/apps\//)
   assert.match(shell, /probeDeletion\(`\/chats\//)
+  assert.match(shell, /probeDeletion\(`\/projects\//)
+})
+
+// A tab for a project deleted elsewhere renders nothing, so restoring it used to
+// leave a blank shell that never finished loading. It must be closed, and only on
+// a direct 404, with the Projects list shown if it was on screen.
+test('a deleted project tab is closed on proof of deletion, never left blank', () => {
+  const start = shell.indexOf('const projectsLiveFetched')
+  const effect = shell.slice(start, shell.indexOf('// App delete lives here', start))
+  assert.ok(start > 0)
+  assert.match(effect, /projectsQuery\.isSuccess && projectsQuery\.isFetchedAfterMount/)
+  assert.match(effect, /projectById\.has\(id\) \|\| parseAppSourceProjectId\(id\)/)
+  assert.match(effect, /verdict === 'deleted' && !reappeared\) closeRemovedProject\(projectId\)/)
+  const helper = shell.slice(shell.indexOf('function closeRemovedProject'), start)
+  assert.match(helper, /if \(showProjects \|\| showing\) navTo\('projects'\)/)
+  // One reducer action clears builder panes AND the Standard single-screen slot;
+  // a per-tab close would miss a result saved only in that slot.
+  assert.match(helper, /dispatchWorkspace\(\{ type: 'CLOSE_PROJECT_TABS', projectId: id \}\)/)
+  assert.doesNotMatch(helper, /type: 'CLOSE_TAB'/)
+  // Deleting a project here takes the same path.
+  assert.match(shell, /closeRemovedProject\(projectId, \{ showProjects: true \}\)/)
 })
 
 test('round4-3: the null-slot landing is passive and interactive New Chat uses ChatView', () => {

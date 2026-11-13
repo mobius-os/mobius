@@ -394,6 +394,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
   const desktopSidebarReserved = persistentDrawer && desktopSidebarOpen
+  // Live mirrors for async project cleanup (closeRemovedProject).
+  const activeProjectIdRef = useRef(activeProjectId)
+  activeProjectIdRef.current = activeProjectId
+  const activeArtifactRefRef = useRef(activeArtifactRef)
+  activeArtifactRefRef.current = activeArtifactRef
   const primeDesktopSidebarContentRect = useCallback((nextReserved) => {
     const el = contentElRef.current
     if (!el) return
@@ -4698,24 +4703,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       clearComposerDraft(chatId)
       chatQueries.messages.remove(queryClient, chatId)
     }
-    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(projectId), exact: true })
-    queryClient.setQueryData(projectQueries.keys.all, current => (
-      Array.isArray(current)
-        ? current.filter(candidate => String(candidate.id) !== projectId)
-        : current
-    ))
-    navStackRef.current = navStackRef.current.filter(entry => (
-      String(entry.projectId ?? '') !== projectId
-      && !chatIds.includes(String(entry.chatId ?? ''))
-    ))
-    tombstoneRoute('project', projectId)
+    navStackRef.current = navStackRef.current.filter(entry => !chatIds.includes(String(entry.chatId ?? '')))
     for (const chatId of chatIds) tombstoneRoute('chat', chatId)
-    navTo('projects')
-    dispatchWorkspace({
-      type: 'CLOSE_TAB',
-      tabKey: tabModel.tabKey(tabModel.projectTab(projectId)),
-      reason: 'deleted',
-    })
+    closeRemovedProject(projectId, { showProjects: true })
     for (const chatId of chatIds) {
       dispatchWorkspace({
         type: 'CLOSE_TAB',
@@ -4729,6 +4719,56 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ])
     return true
   }
+
+  // Forget a project that no longer exists: its cached rows, history entries,
+  // route, and every place showing it (the project and its results, in builder
+  // panes and the Standard single-screen slot alike). A project tab whose
+  // project is gone renders nothing, so if it is on screen, show the Projects
+  // list instead of a blank page.
+  function closeRemovedProject(projectId, { showProjects = false } = {}) {
+    const id = String(projectId)
+    const ownsArtifact = ref => String(tabModel.parseArtifactTabId(ref)?.projectId ?? '') === id
+    const showing = (activeViewRef.current === 'project' && String(activeProjectIdRef.current ?? '') === id)
+      || (activeViewRef.current === 'artifact' && ownsArtifact(activeArtifactRefRef.current))
+    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(id), exact: true })
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current) ? current.filter(candidate => String(candidate.id) !== id) : current
+    ))
+    navStackRef.current = navStackRef.current.filter(entry => String(entry.projectId ?? '') !== id)
+    tombstoneRoute('project', id)
+    if (showProjects || showing) navTo('projects')
+    dispatchWorkspace({ type: 'CLOSE_PROJECT_TABS', projectId: id })
+  }
+
+  // A project can be deleted while its tab is open elsewhere (another device),
+  // and saved tabs can restore it later. Same deletion-evidence contract as
+  // chat and app restores: absence from the live list only prompts a direct
+  // probe of that project, and only a 404 closes its tabs.
+  const projectsLiveFetched = projectsQuery.isSuccess && projectsQuery.isFetchedAfterMount
+  const probedMissingProjectsRef = useRef(new Set())
+  useEffect(() => {
+    if (!projectsLiveFetched) return
+    const missing = new Set(renderedProjectIds.map(String))
+    for (const ref of renderedArtifactIds) {
+      const parsed = tabModel.parseArtifactTabId(ref)
+      if (parsed) missing.add(String(parsed.projectId))
+    }
+    for (const id of [...missing]) {
+      if (projectById.has(id) || parseAppSourceProjectId(id)) missing.delete(id)
+    }
+    const probed = probedMissingProjectsRef.current
+    for (const id of [...probed]) if (!missing.has(id)) probed.delete(id)
+    for (const projectId of missing) {
+      if (probed.has(projectId)) continue
+      probed.add(projectId)
+      void probeDeletion(`/projects/${encodeURIComponent(projectId)}`).then(verdict => {
+        const reappeared = projectsRef.current.some(row => String(row.id) === projectId)
+        if (verdict === 'deleted' && !reappeared) closeRemovedProject(projectId)
+      })
+    }
+  // closeRemovedProject reads live refs; listing it would re-run on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectsLiveFetched, renderedProjectIds, renderedArtifactIds, projectById])
 
   // App delete lives here (not in Drawer) so we have access to notifyShell.
   // The Drawer's local deleteApp swallowed all errors silently — 409 means
