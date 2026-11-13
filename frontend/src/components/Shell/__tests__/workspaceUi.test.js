@@ -1420,8 +1420,10 @@ test('a deleted project tab is closed on proof of deletion, never left blank', (
   assert.match(effect, /verdict === 'deleted' && !reappeared\) closeRemovedProject\(projectId\)/)
   const helper = shell.slice(shell.indexOf('function closeRemovedProject'), start)
   assert.match(helper, /if \(showProjects \|\| showing\) navTo\('projects'\)/)
-  assert.match(helper, /tab\.kind === 'artifact' && ownsArtifact\(tab\.id\)/)
-  assert.match(helper, /reason: 'deleted'/)
+  // One reducer action clears builder panes AND the Standard single-screen slot;
+  // a per-tab close would miss a result saved only in that slot.
+  assert.match(helper, /dispatchWorkspace\(\{ type: 'CLOSE_PROJECT_TABS', projectId: id \}\)/)
+  assert.doesNotMatch(helper, /type: 'CLOSE_TAB'/)
   // Deleting a project here takes the same path.
   assert.match(shell, /closeRemovedProject\(projectId, \{ showProjects: true \}\)/)
 })

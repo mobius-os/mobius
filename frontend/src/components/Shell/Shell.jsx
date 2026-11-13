@@ -4647,9 +4647,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }
 
   // Forget a project that no longer exists: its cached rows, history entries,
-  // route, and every tab showing it (the project and its results). A project
-  // tab whose project is gone renders nothing, so if it is on screen, show the
-  // Projects list instead of a blank page.
+  // route, and every place showing it (the project and its results, in builder
+  // panes and the Standard single-screen slot alike). A project tab whose
+  // project is gone renders nothing, so if it is on screen, show the Projects
+  // list instead of a blank page.
   function closeRemovedProject(projectId, { showProjects = false } = {}) {
     const id = String(projectId)
     const ownsArtifact = ref => String(tabModel.parseArtifactTabId(ref)?.projectId ?? '') === id
@@ -4662,12 +4663,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     navStackRef.current = navStackRef.current.filter(entry => String(entry.projectId ?? '') !== id)
     tombstoneRoute('project', id)
     if (showProjects || showing) navTo('projects')
-    const tabs = paneModel.flatten(workspaceStateRef.current.ws)
-      .filter(tab => (tab.kind === 'project' && String(tab.id) === id) || (tab.kind === 'artifact' && ownsArtifact(tab.id)))
-    if (!tabs.some(tab => tab.kind === 'project')) tabs.push(tabModel.projectTab(id))
-    for (const tab of tabs) {
-      dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tab), reason: 'deleted' })
-    }
+    dispatchWorkspace({ type: 'CLOSE_PROJECT_TABS', projectId: id })
   }
 
   // A project can be deleted while its tab is open elsewhere (another device),
