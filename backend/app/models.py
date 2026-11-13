@@ -2353,7 +2353,8 @@ class ContributionAutopilot(Base):
   is AGENT-WRITABLE, so nothing there can be trusted as consent or as claim
   truth. This table is the trust anchor: one row per (app_id, record_id), written
   ONLY by platform code — the submit endpoints stamp the grant when the owner
-  clicks Send, and the autopilot endpoints move the claim/round state. A forged
+  clicks Send, the owner-confirmed toggle stamps it for a PR that is already
+  open, and the autopilot endpoints move the claim/round state. A forged
   ``autopilot`` block in the ledger changes nothing; every enforcement path reads
   this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
 
@@ -2384,6 +2385,10 @@ class ContributionAutopilot(Base):
   target_head_repository = Column(String(256), nullable=True, default=None)
   target_branch = Column(String(256), nullable=True, default=None)
   target_repo_path = Column(String(1024), nullable=True, default=None)
+  # "auto": a round pushes its validated fix itself. "ask": a round only
+  # prepares the update and the owner's Update PR press publishes it. Held here
+  # because the agent-writable ledger must not be able to widen it.
+  push_mode = Column(String(8), nullable=False, default="auto", server_default="auto")
   # "idle" between rounds; "responding" while a round holds the claim;
   # "blocked" while an escalation awaits a reviewed repair. A blocker does
   # not revoke owner consent; only an explicit Pause disables that grant.

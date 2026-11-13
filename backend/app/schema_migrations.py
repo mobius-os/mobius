@@ -7279,6 +7279,22 @@ def _repair_claude_session_costs(eng) -> None:
       previous_usage, previous_total = usage, total
 
 
+def _add_autopilot_push_mode(eng) -> None:
+  """Every existing follow-up grant keeps pushing by itself ("auto")."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "contribution_autopilot" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("contribution_autopilot")}
+  if "push_mode" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE contribution_autopilot "
+        "ADD COLUMN push_mode VARCHAR(8) NOT NULL DEFAULT 'auto'"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7405,6 +7421,7 @@ _SCHEMA_MIGRATIONS = (
   ("0102_work_claim_text", _widen_work_claim_text),
   ("0103_shared_peer_note_bodies", _add_shared_peer_note_bodies),
   ("0104_claude_session_costs", _repair_claude_session_costs),
+  ("0105_autopilot_push_mode", _add_autopilot_push_mode),
 )
 
 
