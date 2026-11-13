@@ -3925,11 +3925,13 @@ async def update_existing_contribution(
   merged-parent successor carries an additional reviewed journal and uses the
   exact lease-rewrite + base-retarget state machine instead. Normal Send keeps
   refusing existing branches, so an agent cannot turn an ordinary PR card into
-  a silent rewrite.
+  a silent rewrite. A pull request followed in ask-before-push mode is
+  published only by the owner's own press, never by an agent.
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
   from app import contribution_autopilot as autopilot
   row = autopilot.get_row(db, app_id, record_id)
+  _require_owner_press_in_ask_mode(row, principal)
   if row is not None and row.enabled and row.state == "responding":
     raise HTTPException(
       status_code=409,
@@ -5819,6 +5821,18 @@ def _autopilot_refuse_push_in_ask_mode(
     raise HTTPException(status_code=409, detail=autopilot.ASK_MODE_REFUSAL)
 
 
+def _require_owner_press_in_ask_mode(
+  row: models.ContributionAutopilot | None, principal: Principal,
+) -> None:
+  """Under ask-before-push the owner's own Update PR press publishes the
+  prepared update; an agent bearer, or an app token an agent minted, cannot."""
+  from app import contribution_autopilot as autopilot
+  from app.routes.contribution_reviews import _require_owner_hands
+
+  if row is not None and row.push_mode == "ask":
+    _require_owner_hands(principal, autopilot.ASK_MODE_OWNER_ONLY)
+
+
 def _autopilot_grant_fields(record: dict) -> dict:
   """The grant a published record supports, as ``stamp_grant`` stores it.
 
@@ -6685,8 +6699,9 @@ async def autopilot_follow_change(
   """The exact following change a toggle asks the owner to confirm.
 
   Read the same way by the owner's sheet and by the route that spends the
-  confirmation. ``grant`` holds the fields of a new grant and is None for a
-  mode change, whose target is the existing grant's own.
+  confirmation. ``grant`` holds the fields of a new grant, at the head the
+  pull request has on GitHub now, and is None for a mode change, whose target
+  is the existing grant's own.
   """
   from app import contribution_autopilot as autopilot
 
@@ -6708,10 +6723,33 @@ async def autopilot_follow_change(
       status_code=409,
       detail="This contribution does not belong to the pull request named.",
     )
+  if grant is not None:
+    grant = await _autopilot_grant_at_live_head(grant)
   return {
     "grant": grant, "repo": repo, "number": number,
     "branch": target["target_branch"], "push_mode": body.push_mode or "auto",
   }
+
+
+async def _autopilot_grant_at_live_head(grant: dict) -> dict:
+  """The new grant, at the head GitHub has now instead of the ledger's.
+
+  The branch can move after Send, outside Möbius, and a grant at the ledger's
+  head would then refuse every follow-up as outside the grant. The owner's
+  sheet shows this head, and ``/update`` still accepts only a head this grant
+  or the round itself pushed.
+  """
+  live = await asyncio.to_thread(
+    _autopilot_live_target,
+    grant["target_repo"], grant["target_pr_number"],
+    grant["target_head_repository"], grant["target_branch"],
+  )
+  if live["error"]:
+    raise HTTPException(
+      status_code=409,
+      detail=f"Following was not switched on: {live['error']}",
+    )
+  return {**grant, "head_sha": live["head_sha"]}
 
 
 def _autopilot_apply_follow_change(

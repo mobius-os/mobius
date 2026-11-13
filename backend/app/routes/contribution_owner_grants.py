@@ -229,10 +229,13 @@ async def _describe_follow(ask: Ask) -> dict:
   if pull.get("state") != "open":
     raise HTTPException(409, "This pull request is no longer open, so it cannot be followed.")
   starts = change["grant"] is not None
+  # A new grant covers the head the owner reads here, as Merge covers its version.
+  version = [_fact("Version", f"{change['grant']['head_sha'][:7]}, as it is on GitHub now")] if starts else []
   return _sheet(f"Follow {pr}" if starts else f"Change how {pr} is followed", [
     _fact("Pull request", f"{pr}: {pull.get('title')}"),
     _fact("Author", (pull.get("user") or {}).get("login")),
     _fact("Branch", change["branch"]),
+    *version,
     _fact("Pushes", FOLLOW_MODES[change["push_mode"]]),
     _fact("Replies", "An agent may answer review comments on GitHub with your connected account."),
     _fact("Result", "Stays on until you pause it or the pull request is merged or closed."),
@@ -253,7 +256,10 @@ async def _describe_follow(ask: Ask) -> dict:
 # _validate_submit_app, so they accept github_access app tokens and top-level
 # agents, and land-stack fast-forwards an upstream branch. They are NOT covered
 # here. Whether they need the owner's tap is an open policy decision for the
-# platform; no grant check may claim that gap closed while they stand.
+# platform; no grant check may claim that gap closed while they stand. One
+# narrow case is settled: update-existing for a pull request followed in
+# ask-before-push mode refuses every caller but the owner's own press (no grant
+# is spent), so an agent cannot publish what it only prepared.
 GUARDED = {
   "merge": Guarded(routes.DirectMerge, _describe_merge),
   "open_for_review": Guarded(routes.PullStatusChange, partial(_describe_status, name="ready")),

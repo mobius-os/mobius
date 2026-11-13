@@ -4,6 +4,7 @@ The grant stays the platform's own row: a first grant or another push mode
 needs the owner's confirmation, an ask-mode round can prepare an update but
 never push it, and ``prepared`` is recorded only when the record proves it.
 """
+import hashlib
 import json
 from pathlib import Path
 
@@ -23,7 +24,25 @@ _github_limiter.enabled = False
 
 HEAD = "a" * 40
 NEXT_HEAD = "c" * 40
+MOVED_HEAD = "d" * 40  # where the branch is after someone pushed to it outside Möbius
 FOLLOW = {"enabled": True, "repo": NAME, "number": NUMBER}
+
+
+@pytest.fixture(autouse=True)
+def live_pull(monkeypatch):
+  """What GitHub holds for the sent pull request now: its head, or why it cannot be read."""
+  live = {"head_sha": HEAD, "error": None}
+
+  def read(repo, number, head_repository, branch):
+    if (repo, number, head_repository, branch) != (NAME, NUMBER, "octocat/project", "fix/x"):
+      return {"error": "The live pull request no longer matches the approved target.", "head_sha": None}
+    if live["error"]:
+      return {"error": live["error"], "head_sha": None}
+    return {"error": None, "head_sha": live["head_sha"], "base_branch": "main", "base_sha": "e" * 40,
+            "title": "A change", "body": "Body"}
+
+  monkeypatch.setattr(publication, "_autopilot_live_target", read)
+  return live
 
 
 def _record_path(app_id, record_id="rec1"):
@@ -66,6 +85,12 @@ def _agent_headers(db):
   owner = db.query(models.Owner).first()
   return {"Authorization": "Bearer " + auth_mod.create_agent_token(
     "desk-chat", owner.username, owner.token_epoch, run_id="desk-run")}
+
+
+def _agent_minted_app_headers(desk, db):
+  """An app token an agent minted: it carries the agent's chat, so it is not the owner's tap."""
+  minted = desk.client.post("/api/auth/app-token", json={"app_id": desk.app_id}, headers=_agent_headers(db))
+  return {"Authorization": f"Bearer {minted.json()['token']}"}
 
 
 def _row(db, app_id, record_id="rec1"):
@@ -231,6 +256,56 @@ def test_an_ask_mode_round_cannot_restage_in_place(desk, db):
   assert json.loads(_record_path(desk.app_id).read_text()) == record
 
 
+# Publishing a prepared update under ask-before-push
+
+def _update_existing(desk, headers):
+  return desk.client.post(f"/api/github/contributions/{desk.app_id}/rec1/update-existing", headers=headers)
+
+
+@pytest.fixture
+def prepared_update_is_never_started(monkeypatch):
+  """Fails the test if the route got as far as claiming a prepared update."""
+  monkeypatch.setattr(publication, "confirmed_publication_records",
+                      lambda *_a, **_k: pytest.fail("publication work started"))
+
+
+@pytest.mark.parametrize("who", ["agent", "app_token_an_agent_minted"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_an_agent_cannot_publish_a_prepared_update_under_ask_mode(
+  desk, db, who, enabled, prepared_update_is_never_started,
+):
+  record = _sent_record()
+  _write(desk.app_id, record)
+  _grant(db, desk.app_id, record, "ask")
+  autopilot.set_enabled(db, desk.app_id, "rec1", enabled)
+  agent = _agent_headers(db) if who == "agent" else _agent_minted_app_headers(desk, db)
+  refused = _update_existing(desk, agent)
+  assert refused.status_code == 403 and refused.json()["detail"] == autopilot.ASK_MODE_OWNER_ONLY
+  assert json.loads(_record_path(desk.app_id).read_text()) == record
+
+
+@pytest.mark.parametrize("who", ["owner", "contribute"])
+def test_the_owners_own_press_still_publishes_a_prepared_update_under_ask_mode(desk, db, who):
+  record = _sent_record()
+  _write(desk.app_id, record)
+  _grant(db, desk.app_id, record, "ask")
+  headers = desk.owner if who == "owner" else _app_headers(db)
+  response = _update_existing(desk, headers)
+  # Past the owner check: this sent record is no prepared update, which is the route's own refusal.
+  assert response.status_code != 403, response.text
+  assert response.json()["detail"] != autopilot.ASK_MODE_OWNER_ONLY
+
+
+@pytest.mark.parametrize("grant", [None, "auto"])
+def test_update_existing_keeps_its_callers_where_nothing_asks_the_owner(desk, db, grant):
+  record = _sent_record()
+  _write(desk.app_id, record)
+  if grant:
+    _grant(db, desk.app_id, record, grant)
+  response = _update_existing(desk, _agent_headers(db))
+  assert response.status_code != 403, response.text
+
+
 # The round's brief
 
 def _brief(db, mode):
@@ -315,6 +390,94 @@ def test_the_grant_goes_only_to_the_pull_request_the_request_names(desk, db, nam
   assert _row(db, desk.app_id) is None
 
 
+def test_a_branch_that_moved_after_send_is_followed_from_where_it_is_now(desk, db, live_pull):
+  # The branch was updated outside Möbius after Send: the ledger still holds the sent head.
+  _write(desk.app_id, _sent_record())
+  live_pull["head_sha"] = MOVED_HEAD
+  facts = {fact["label"]: fact["value"] for fact in _preview(desk, FOLLOW).json()["facts"]}
+  assert facts["Version"].startswith(MOVED_HEAD[:7])
+  assert _toggle(desk, FOLLOW).status_code == 200
+  assert _row(db, desk.app_id).granted_head_sha == MOVED_HEAD
+
+
+def _follow_up_update(desk, db, monkeypatch):
+  """A round's /update of a fix on top of the PR's head, with the push itself faked.
+
+  Returns the response and the heads the push was asked to replace.
+  """
+  record = _sent_record()
+  diff = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+  digest = hashlib.sha256(diff.encode()).hexdigest()
+  plan = {**record["plan"], "action": "pr_update", "head_sha": NEXT_HEAD, "base_sha": "e" * 40,
+          "diff_sha256": digest, "title": "A change", "body_draft": "Body",
+          "pr_metadata": {"old_title": "A change", "old_body": "Body"}}
+  _write(desk.app_id, {**record, "plan": plan})
+  _record_path(desk.app_id).with_suffix(".diff").write_text(diff)
+  pushes = []
+  for name, fake in {
+    "_autopilot_changed_paths": lambda *_a: ["x.py"],
+    "_resolve_reviewed_commit": lambda _repo, value, _label: str(value),
+    "_equivalence_source_repo": lambda _record: None,
+    "_assert_reviewed_update_contains_live_head": lambda *_a: None,
+    "_assert_personal_publication_source": lambda *_a: None,
+    "_submit_prepared_pr": lambda *_a, **kwargs: (
+      pushes.append(kwargs["expected_existing_head_sha"]) or (record["url"], NUMBER, {})),
+  }.items():
+    monkeypatch.setattr(publication, name, fake)
+  response = desk.client.post(
+    f"/api/github/contributions/{desk.app_id}/rec1/update", headers=desk.owner,
+    json={"run_id": _claim(db, desk.app_id), "head_sha": NEXT_HEAD, "diff_sha256": digest})
+  return response, pushes
+
+
+def test_a_follow_up_can_push_to_a_branch_that_moved_before_following(desk, db, live_pull, monkeypatch):
+  _write(desk.app_id, _sent_record())
+  live_pull["head_sha"] = MOVED_HEAD
+  assert _toggle(desk, FOLLOW).status_code == 200
+  response, pushes = _follow_up_update(desk, db, monkeypatch)
+  assert response.status_code == 200, response.text
+  assert pushes == [MOVED_HEAD]  # the push replaces exactly the head the owner granted
+
+
+def test_the_outside_grant_protection_still_stops_a_push_after_the_branch_moves_again(desk, db, live_pull, monkeypatch):
+  _write(desk.app_id, _sent_record())
+  assert _toggle(desk, FOLLOW).status_code == 200
+  live_pull["head_sha"] = MOVED_HEAD  # an outside push after Follow: the grant does not cover it
+  response, pushes = _follow_up_update(desk, db, monkeypatch)
+  assert response.status_code == 409 and response.json()["detail"]["code"] == "pr_moved_outside_grant"
+  assert response.json()["detail"]["published"] is False and pushes == []
+
+
+def test_a_branch_that_moves_after_the_owner_looked_is_not_granted(desk, db, live_pull):
+  _write(desk.app_id, _sent_record())
+  declare_owner_confirm(db, "contribute")
+  ask = {"app_id": desk.app_id, "action": "follow", "scope": {"record_id": "rec1"}, "body": FOLLOW}
+  sheet = desk.client.post("/api/owner-grants/preview", json=ask, headers=desk.owner).json()
+  live_pull["head_sha"] = MOVED_HEAD
+  moved = desk.client.post("/api/owner-grants", json={**ask, "digest": sheet["digest"]}, headers=desk.owner)
+  assert moved.status_code == 409 and moved.json()["detail"]["code"] == "owner_grant_changed"
+  assert _row(db, desk.app_id) is None
+
+
+@pytest.mark.parametrize("error", ["GitHub not connected.", "The live pull request no longer matches the approved target."])
+def test_a_pull_request_whose_head_cannot_be_read_gets_no_grant(desk, db, live_pull, error):
+  _write(desk.app_id, _sent_record())
+  live_pull["error"] = error
+  refused = _toggle(desk, FOLLOW)
+  assert refused.status_code == 409 and refused.json()["detail"] == f"Following was not switched on: {error}"
+  assert _preview(desk, FOLLOW).status_code == 409
+  assert _row(db, desk.app_id) is None
+
+
+def test_a_mode_change_keeps_the_existing_grants_head_and_reads_nothing_live(desk, db, live_pull, monkeypatch):
+  record = _sent_record()
+  _write(desk.app_id, record)
+  _grant(db, desk.app_id, record, "ask")
+  monkeypatch.setattr(publication, "_autopilot_live_target", lambda *_a: pytest.fail("a mode change reads no head"))
+  assert _toggle(desk, {**FOLLOW, "push_mode": "auto"}).status_code == 200
+  assert _row(db, desk.app_id).granted_head_sha == HEAD
+
+
 def test_a_missing_record_gets_no_grant(desk, db):
   assert _toggle(desk, FOLLOW).status_code == 404
   assert _row(db, desk.app_id) is None
@@ -338,12 +501,6 @@ def test_an_app_that_declares_owner_confirm_starts_following_only_with_the_owner
   assert _toggle(desk, body, app).status_code == 200
   assert _row(db, desk.app_id).push_mode == "ask"
   assert db.query(models.OwnerGrant).filter(models.OwnerGrant.consumed_at.is_(None)).count() == 0
-
-
-def _agent_minted_app_headers(desk, db):
-  """An app token an agent minted: it carries the agent's chat, so it is not the owner's tap."""
-  minted = desk.client.post("/api/auth/app-token", json={"app_id": desk.app_id}, headers=_agent_headers(db))
-  return {"Authorization": f"Bearer {minted.json()['token']}"}
 
 
 @pytest.mark.parametrize("who", ["agent", "app_token_an_agent_minted"])
@@ -434,12 +591,15 @@ def test_the_sheet_names_the_pull_request_and_what_each_mode_pushes(desk, db):
   assert (sheet["headline"], sheet["verb"], sheet["tone"]) == (f"Follow {NAME}#{NUMBER}", "Follow", "caution")
   assert facts["Pull request"] == f"{NAME}#{NUMBER}: A change"  # GitHub's title, not the ledger's
   assert (facts["Author"], facts["Branch"]) == ("octocat", "fix/x")
+  assert facts["Version"] == f"{HEAD[:7]}, as it is on GitHub now"
   assert facts["Pushes"] == grants.FOLLOW_MODES["ask"] and "Update PR" in facts["Pushes"]
-  assert _preview(desk, FOLLOW).json()["facts"][3]["value"] == grants.FOLLOW_MODES["auto"]
+  auto = {fact["label"]: fact["value"] for fact in _preview(desk, FOLLOW).json()["facts"]}
+  assert auto["Pushes"] == grants.FOLLOW_MODES["auto"]
 
   _grant(db, desk.app_id, record, "ask")
   change = _preview(desk, {**FOLLOW, "push_mode": "auto"}).json()
   assert (change["headline"], change["verb"]) == (f"Change how {NAME}#{NUMBER} is followed", "Change")
+  assert "Version" not in {fact["label"] for fact in change["facts"]}  # the existing grant keeps its own head
   assert _row(db, desk.app_id).push_mode == "ask"  # a preview changes nothing
 
 

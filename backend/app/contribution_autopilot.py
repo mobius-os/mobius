@@ -73,6 +73,10 @@ ASK_MODE_REFUSAL = (
   "Following on this pull request asks the owner before each push, so a "
   "round cannot push by itself."
 )
+ASK_MODE_OWNER_ONLY = (
+  "Following on this pull request asks the owner before each push, so only "
+  "you can publish its update, by pressing Update PR. An agent cannot."
+)
 
 
 # ─────────────────────────── row access ────────────────────────────
