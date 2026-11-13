@@ -91,7 +91,47 @@ def _keep(tool: dict, web: bool) -> bool:
   kind = str(tool.get("type") or "")
   if kind.startswith(_PROVIDER_WEB):
     return web
+  environment = tool.get("environment")
+  local = isinstance(environment, dict) and environment.get("type") == "local"
+  if "container" in tool or (environment is not None and not local):
+    # The provider would run it in its own container, outside the room.
+    return False
+  if kind == "shell":
+    # OpenAI's shell tool is hosted unless it names a local environment.
+    return local
   return kind in _AGENT_RUN or kind.startswith(_AGENT_RUN_PREFIXES)
+
+
+# tool_choice types that choose a mode or a named tool, not a hosted tool.
+_CHOICE_MODES = frozenset(
+  {
+    "auto",
+    "any",
+    "none",
+    "required",
+    "tool",
+    "function",
+    "custom",
+    "allowed_tools",
+  }
+)
+
+
+def _refuse_forced_removed_tool(choice: Any, tools: list[dict]) -> None:
+  """A request that exists only to run a removed tool fails honestly instead
+  of letting the model invent the tool's result."""
+  if not isinstance(choice, dict):
+    return
+  name, kind = choice.get("name"), str(choice.get("type") or "")
+  if name and name not in {tool.get("name") for tool in tools}:
+    raise GatewayError(403, f"{name} is not one of this app's agent tools.")
+  if (
+    not name
+    and kind
+    and kind not in _CHOICE_MODES
+    and kind not in {str(tool.get("type") or "") for tool in tools}
+  ):
+    raise GatewayError(403, f"{kind} is not one of this app's agent tools.")
 
 
 def _filter_tools(tools: Any, web: bool, removed: list[str]) -> Any:
@@ -121,16 +161,10 @@ def prepare_body(key: AgentKey, raw: bytes) -> tuple[bytes, list[str]]:
   web = _web(key)
   removed = [field for field in _SERVER_FIELDS if body.pop(field, None) is not None]
   if "tools" in body:
+    if not isinstance(body["tools"], list):
+      raise GatewayError(400, "The request's tools must be a list.")
     body["tools"] = _filter_tools(body["tools"], web, removed)
-    forced = (
-      body.get("tool_choice") if isinstance(body.get("tool_choice"), dict) else {}
-    )
-    if forced.get("name") and forced["name"] not in {
-      t.get("name") for t in body["tools"]
-    }:
-      # A request that exists only to run a removed tool fails honestly
-      # instead of letting the model invent the tool's result.
-      raise GatewayError(403, f"{forced['name']} is not one of this app's agent tools.")
+    _refuse_forced_removed_tool(body.get("tool_choice"), body["tools"])
     if not body["tools"]:
       body.pop("tools")
       body.pop("tool_choice", None)

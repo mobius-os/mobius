@@ -45,7 +45,8 @@ import sys
 import threading
 
 EXIT_ROOM_UNAVAILABLE = 125
-MIN_LANDLOCK_ABI = 4
+# ABI 6 scopes signals: below it, the room could signal processes outside.
+MIN_LANDLOCK_ABI = 6
 
 _SYS_LANDLOCK_CREATE_RULESET = 444
 _SYS_LANDLOCK_ADD_RULE = 445
@@ -190,7 +191,7 @@ def availability() -> dict:
   reasons = []
   if abi < MIN_LANDLOCK_ABI:
     reasons.append(
-      f"Landlock ABI {abi} is below {MIN_LANDLOCK_ABI} (needs Linux 6.7 or later)."
+      f"Landlock ABI {abi} is below {MIN_LANDLOCK_ABI} (needs Linux 6.12 or later)."
     )
   if not seccomp:
     reasons.append("libseccomp is not installed.")
@@ -253,16 +254,12 @@ def _add_path(ruleset: int, path: str, access: int, handled: int) -> None:
     os.close(fd)
 
 
-def _apply_walls(
-  *, home: str, rw: list[str], ro: list[str], ports: set[int], abi: int
-) -> None:
-  handled = ((1 << 13) - 1) | FS_REFER | FS_TRUNCATE | (FS_IOCTL_DEV if abi >= 5 else 0)
+def _apply_walls(*, home: str, rw: list[str], ro: list[str], ports: set[int]) -> None:
+  handled = ((1 << 13) - 1) | FS_REFER | FS_TRUNCATE | FS_IOCTL_DEV
   attr = _RulesetAttr(
-    handled,
-    NET_BIND_TCP | NET_CONNECT_TCP,
-    (SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL) if abi >= 6 else 0,
+    handled, NET_BIND_TCP | NET_CONNECT_TCP, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL
   )
-  size = ctypes.sizeof(attr) if abi >= 6 else 16
+  size = ctypes.sizeof(attr)
   ruleset = _libc.syscall(
     _SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(size), 0
   )
@@ -434,7 +431,6 @@ def run_in_room(
         rw=list(map(os.path.realpath, rw)),
         ro=list(map(os.path.realpath, ro)),
         ports={p for _, p in doors},
-        abi=state["landlock_abi"],
       )
       listener = _apply_seccomp()
       socket.send_fds(child_end, [b"x"], [listener])

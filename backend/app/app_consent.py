@@ -424,10 +424,20 @@ def granted_direct_origins(app: Any) -> tuple[str, ...]:
 
 
 def current_rows(app: models.App) -> list[dict[str, Any]]:
-  return rows_from_contract(
+  rows = rows_from_contract(
     app.capability_contract,
     project_builders=bool(getattr(app, "project_templates_json", None)),
   )
+  accepted = accepted_rows(app)
+  if (
+    accepted is not None and "agent_role" in accepted
+    and not any(row.get("group") == "agent" for row in rows)
+  ):
+    # Dropping an accepted role leaves the app's agents unconfined. That is
+    # full access, so it is asked for like any other widening.
+    rows.append(_agent_row({"embeds_agent": True}))
+    rows.sort(key=lambda row: (not row["critical"], row["title"]))
+  return rows
 
 
 def _stored_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -481,6 +491,9 @@ def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
 
 def _covered(row: dict[str, Any], accepted: dict[str, dict[str, Any]]) -> bool:
   held = accepted.get(row["id"])
+  if held is None and row["id"] == "agent_role" and "agent_start" in accepted:
+    # Full agent access, once accepted, covers every confined role.
+    return True
   # A limit missing from the answer was never shown to the owner (answers
   # saved before limits were recorded), so it covers nothing.
   return (
@@ -572,6 +585,26 @@ def _note(row: dict[str, Any], held: dict[str, list[tuple[str, int]]]) -> str:
   return " ".join(parts)
 
 
+def _agent_update(
+  row: dict[str, Any], accepted: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+  """The AI agents block on an update: only the tools it adds, and the role it
+  replaces. It speaks otherwise only in the app's own reason."""
+  held = (accepted or {}).get("agent_role") if row["id"] == "agent_role" else None
+  if held is None:
+    return {**row, "note": None}
+  scope = held["scope"]
+  before = (
+    "Editor" if "data:write" in scope else "Viewer" if "data:read" in scope
+    else "Explorer"
+  )
+  return {
+    **row,
+    "tools": [tool for tool in row["tools"] if f"tool:{tool['id']}" not in scope],
+    "note": f"Previously {before}." if before != row["level"] else None,
+  }
+
+
 def build_request(db: Session, app: models.App) -> dict[str, Any]:
   """What the popup shows: only the rows not yet accepted, with context."""
   held = _holders(db, app)
@@ -581,9 +614,11 @@ def build_request(db: Session, app: models.App) -> dict[str, Any]:
     "app_description": app.description,
     "digest": request_digest(current_rows(app)),
     "is_update": accepted_rows(app) is not None,
-    # The AI agents block speaks only in the app's own reason.
-    "rows": [{**row, "note": None if row.get("group") else _note(row, held)}
-             for row in needed_rows(app)],
+    "rows": [
+      _agent_update(row, accepted_rows(app)) if row.get("group")
+      else {**row, "note": _note(row, held)}
+      for row in needed_rows(app)
+    ],
     "baseline": BASELINE,
   }
 

@@ -28,6 +28,15 @@ test('a confined role shows its chip, the app’s own reason and its agent tools
   assert.doesNotMatch(html, /app-consent__dot/)
 })
 
+test('an update names the role it replaces', () => {
+  const html = render({
+    id: 'agent_role', level: 'Editor', critical: false, text: 'Edits your notes.',
+    note: 'Previously Viewer.', tools: [],
+  })
+  assert.match(html, /app-consent__agents-note">Previously Viewer\.</)
+  assert.doesNotMatch(html, /Agent tools/)
+})
+
 test('an owner role adds the fixed full-access line and the critical dot, with no tools list', () => {
   const html = render({
     id: 'agent_start', level: 'Owner', critical: true, text: 'Manages your apps.', tools: [],

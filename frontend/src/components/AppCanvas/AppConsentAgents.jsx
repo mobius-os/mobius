@@ -24,6 +24,7 @@ export default function AppConsentAgents({ row }) {
       {row.critical && <span className="app-consent__dot" role="img" aria-label="Critical: can change your Möbius" title="Critical: can change your Möbius" />}
     </div>
     <p className="app-consent__agents-why">{row.text}</p>
+    {row.note && <p className="app-consent__agents-note">{row.note}</p>}
     {owner && <p className="app-consent__agents-owner">{OWNER_LINE}</p>}
     {tools.length > 0 && <>
       <p className="app-consent__agents-label">Agent tools</p>

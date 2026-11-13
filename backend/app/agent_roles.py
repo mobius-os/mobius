@@ -108,6 +108,11 @@ class AgentRole:
   def confined(self) -> bool:
     return self.spec.confined
 
+  @property
+  def grant(self) -> str:
+    """What this role reaches, e.g. ``viewer+notify+web``; names its room."""
+    return "+".join((self.role, *self.tools))
+
 
 def normalize_declaration(value: Any) -> dict[str, Any]:
   """Validate a manifest ``agent_role`` and return its contract form."""
@@ -116,15 +121,15 @@ def normalize_declaration(value: Any) -> dict[str, Any]:
       "mobius.json `agent_role` must be an object with role, tools and why."
     )
   role = value.get("role")
-  if role not in ROLES:
+  if not isinstance(role, str) or role not in ROLES:
     raise ValueError(
       "mobius.json `agent_role.role` must be one of " + ", ".join(ROLES) + "."
     )
   tools = value.get("tools", [])
   if (
     not isinstance(tools, list)
-    or len(set(map(str, tools))) != len(tools)
-    or not set(tools) <= set(TOOLS)
+    or not all(isinstance(tool, str) and tool in TOOLS for tool in tools)
+    or len(set(tools)) != len(tools)
   ):
     raise ValueError(
       "mobius.json `agent_role.tools` may list: " + ", ".join(TOOLS) + "."
@@ -194,6 +199,10 @@ class AgentKey:
       frozenset(map(str, claims.get("agent_tools") or ())),
       str(claims.get("agent_provider") or ""),
     )
+
+  def matches(self, role: AgentRole | None) -> bool:
+    """Whether this key's grant is still the app's current confined role."""
+    return role is not None and role.role == self.role and set(role.tools) == self.tools
 
   def may_call(self, method: str, path: str) -> bool:
     """Default deny: the gateway, the app's own data by role, declared tools."""
@@ -314,10 +323,17 @@ def _port(url: str) -> int:
 
 @dataclass(frozen=True)
 class Room:
-  """One run's room: its folders and settings, derived from the role."""
+  """One run's room: its folders and settings, derived from the role.
+
+  Each grant gets its own home, so a narrower role never finds what a wider
+  one left there. The room writes only its home; Möbius never writes into it,
+  because anything there may be a link the agent planted. What Möbius hands
+  the runtime goes in ``config`` beside it, which the room can only read.
+  """
 
   role: AgentRole
   home: Path  # run state: agent settings, sessions and temp files
+  config: Path  # settings Möbius writes for the runtime; read-only inside
   data: Path | None  # the app's files, read-only or writable by role
   api_base_url: str
 
@@ -325,14 +341,16 @@ class Room:
   def for_run(
     cls, role: AgentRole, *, scratch: Path, storage_dir: Path, api_base_url: str
   ) -> "Room":
-    home = scratch / "room"
+    home = scratch / f"room-{role.grant}"
     for sub in (".claude", ".codex", ".tmp"):
       (home / sub).mkdir(parents=True, exist_ok=True)
+    config = scratch / f"room-{role.grant}.config"
+    config.mkdir(exist_ok=True)
     data = None
     if role.spec.data is not None:
       storage_dir.mkdir(parents=True, exist_ok=True)
       data = storage_dir
-    return cls(role, home, data, api_base_url.rstrip("/"))
+    return cls(role, home, config, data, api_base_url.rstrip("/"))
 
   @property
   def cwd(self) -> Path:
@@ -365,6 +383,8 @@ class Room:
       str(_BACKEND / "scripts"),
       "--ro",
       str(_BACKEND / "app"),
+      "--ro",
+      str(self.config),
     ]
     if self.data is not None:
       args += ["--rw" if self.role.spec.data == "write" else "--ro", str(self.data)]
@@ -419,8 +439,10 @@ class Room:
         continue
       if override.startswith("model_catalog_json="):
         # The provider's catalog lives outside the room; the room reads a copy.
-        copy = self.home / ".codex" / "catalog.json"
-        copy.write_bytes(Path(json.loads(override.split("=", 1)[1])).read_bytes())
+        copy = self.config / "catalog.json"
+        staged = self.config / "catalog.json.tmp"
+        staged.write_bytes(Path(json.loads(override.split("=", 1)[1])).read_bytes())
+        staged.replace(copy)
         override = f"model_catalog_json={json.dumps(str(copy))}"
       out.append(override)
     if named is None:

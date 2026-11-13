@@ -1461,7 +1461,8 @@ app's permission popup, and Möbius enforces it outside the agent:
   declare no role. Prefer the narrowest role that does the job; Owner is shown
   to the owner as a critical permission.
 - An update that adds reach (Viewer to Editor, a new tool) asks the owner
-  again; one that narrows asks nothing.
+  again; one that narrows asks nothing. Removing an accepted role counts as
+  asking for full access.
 
 ---
 

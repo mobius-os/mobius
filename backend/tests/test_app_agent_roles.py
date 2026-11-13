@@ -338,7 +338,7 @@ def test_the_rooms_walls_follow_the_role(tmp_path, role, flag):
   assert {wall for wall in walls if wall[1] == data} == (
     {(flag, data)} if flag else set()
   )
-  assert room.cwd == (Path(data) if flag else tmp_path / "scratch" / "room")
+  assert room.cwd == (Path(data) if flag else room.home)
   assert args[-1] == "--" and "--door" in args
 
 
@@ -362,7 +362,8 @@ def test_codex_reaches_its_model_through_the_gateway(tmp_path):
   assert 'web_search="live"' in web
   catalog = tmp_path / "catalog.json"
   catalog.write_text('{"models": []}')
-  mobius = _room(tmp_path, "viewer").codex_overrides(
+  viewer = _room(tmp_path, "viewer")
+  mobius = viewer.codex_overrides(
     [
       'model_provider="mobius_trial"',
       'model_providers.mobius_trial.base_url="http://127.0.0.1:8765/v1"',
@@ -376,9 +377,7 @@ def test_codex_reaches_its_model_through_the_gateway(tmp_path):
   )
   assert 'model_providers.mobius_trial.env_key="AGENT_TOKEN"' in mobius
   assert mobius[-1] == 'web_search="disabled"'
-  assert (
-    tmp_path / "scratch" / "room" / ".codex" / "catalog.json"
-  ).read_text() == '{"models": []}'
+  assert (viewer.config / "catalog.json").read_text() == '{"models": []}'
 
 
 def test_the_confined_prompt_states_the_rooms_reach(tmp_path):
@@ -544,3 +543,165 @@ def test_codex_searches_and_opened_pages_are_recorded_per_app(monkeypatch):
   assert (
     "linux kernel" in fields["commands"] and "https://kernel.org/" in fields["commands"]
   )
+
+
+# --- review findings: each is a boundary a confined agent must not cross -------
+
+
+def _fence(*args, env=None):
+  return subprocess.run(
+    [sys.executable, "-I", str(FENCE), *args],
+    capture_output=True,
+    text=True,
+    timeout=30,
+    env=env,
+  )
+
+
+@pytest.mark.skipif(
+  '"available": true' not in _room_available(), reason="host cannot build rooms"
+)
+def test_moebius_never_writes_where_the_agent_may_have_planted_a_link(tmp_path):
+  room = _room(tmp_path, "viewer")
+  victim = tmp_path / "outside.txt"
+  victim.write_text("FAKE-SECRET")
+  plant = "import os, sys; [os.symlink(sys.argv[1], p) for p in sys.argv[2:]]"
+  planted = _fence(
+    "--home",
+    str(room.home),
+    "--",
+    sys.executable,
+    "-I",
+    "-c",
+    plant,
+    str(victim),
+    str(room.home / ".codex" / "catalog.json"),
+    str(room.home / "catalog.json"),
+  )
+  assert planted.returncode == 0, planted.stderr
+  catalog = tmp_path / "catalog.json"
+  catalog.write_text('{"models": []}')
+  room.codex_overrides(
+    ['model_provider="mobius_trial"', f'model_catalog_json="{catalog}"']
+  )
+  assert victim.read_text() == "FAKE-SECRET"
+  assert room.config not in room.home.parents and room.config != room.home
+
+
+def test_a_narrower_role_never_finds_what_a_wider_one_left(tmp_path):
+  viewer = _room(tmp_path, "viewer", "web")
+  (viewer.home / "cache.txt").write_text("FAKE-SECRET")
+  explorer = _room(tmp_path, "explorer", "web")
+  assert explorer.home != viewer.home and not (explorer.home / "cache.txt").exists()
+
+
+def test_a_running_agents_key_follows_the_apps_current_role(client, owner_token, db):
+  app = _local_app(db, "notes", _role("editor"))
+  key, _run = _agent_key_for(db, app, role="editor")
+  bearer = {"Authorization": f"Bearer {key}"}
+  path = f"/api/storage/apps/{app.id}/notes.json"
+  assert client.put(path, json={"n": 1}, headers=bearer).status_code == 204
+  app.capability_contract = contract_from_manifest(
+    _manifest(agent_role=_role("viewer"))
+  )
+  db.commit()
+  assert client.put(path, json={"n": 2}, headers=bearer).status_code == 401
+  assert client.get(path, headers=bearer).status_code == 401
+
+
+def test_revoking_consent_stops_the_apps_running_agents(
+  client, owner_token, db, monkeypatch
+):
+  app = _local_app(db, "notes", _role("editor"))
+  app.manifest_url = "https://example.test/notes/mobius.json"
+  app.accepted_consent = app_consent.platform_acceptance(app.capability_contract)
+  db.commit()
+  _key, run = _agent_key_for(db, app, role="editor")
+  stopped = []
+
+  async def stop(chat_id, db=None):
+    stopped.append(chat_id)
+
+  from app import chat as chat_module
+  from app.runner_registry import registry
+
+  monkeypatch.setattr(chat_module, "stop_chat_for", stop)
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: {run.chat_id, "other"})
+  owner = {"Authorization": f"Bearer {owner_token}"}
+  assert client.delete(f"/api/apps/{app.id}/consent", headers=owner).status_code == 200
+  assert stopped == [run.chat_id]
+
+
+def test_dropping_an_accepted_role_asks_for_full_access(db):
+  app = _local_app(db, "notes", _role("viewer"))
+  app.manifest_url = "https://example.test/notes/mobius.json"
+  app.accepted_consent = app_consent.platform_acceptance(app.capability_contract)
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = contract_from_manifest(_manifest())
+  assert [row["id"] for row in app_consent.needed_rows(app)] == ["agent_start"]
+  assert app_consent.accept(
+    app, app_consent.request_digest(app_consent.current_rows(app))
+  )
+  assert app_consent.status(app) == "accepted"
+
+
+def test_owner_to_a_confined_role_is_a_narrowing():
+  assert _asks_again(_role("owner"), _role("viewer", "web")) == []
+  assert _asks_again(None, _role("viewer")) == ["agent_role"]
+
+
+def test_an_update_shows_only_the_reach_it_adds(db):
+  app = _local_app(db, "notes", _role("viewer", "notify"))
+  app.manifest_url = "https://example.test/notes/mobius.json"
+  app.accepted_consent = app_consent.platform_acceptance(app.capability_contract)
+  app.capability_contract = contract_from_manifest(
+    _manifest(agent_role=_role("editor", "notify", "web")),
+  )
+  [row] = app_consent.build_request(db, app)["rows"]
+  assert [tool["id"] for tool in row["tools"]] == ["web"]
+  assert row["note"] == "Previously Viewer."
+
+
+@pytest.mark.parametrize(
+  "tool",
+  [
+    {"type": "shell", "environment": {"type": "container_auto"}},
+    {"type": "shell"},
+    {"type": "function", "name": "run", "container": {"type": "auto"}},
+  ],
+)
+def test_tools_the_provider_would_run_in_its_own_container_are_dropped(tool):
+  body, removed = agent_gateway.prepare_body(_key("editor", "web"), _body(tools=[tool]))
+  assert "tools" not in json.loads(body) and removed
+  local = {"type": "shell", "environment": {"type": "local"}}
+  kept, _ = agent_gateway.prepare_body(_key("editor"), _body(tools=[local]))
+  assert json.loads(kept)["tools"] == [local]
+
+
+def test_forcing_a_removed_hosted_tool_by_type_fails_openly():
+  raw = _body(tools=[{"type": "web_search"}], tool_choice={"type": "web_search"})
+  with pytest.raises(agent_gateway.GatewayError) as refused:
+    agent_gateway.prepare_body(_key("viewer"), raw)
+  assert refused.value.status == 403
+  allowed, _ = agent_gateway.prepare_body(_key("viewer", "web"), raw)
+  assert json.loads(allowed)["tool_choice"] == {"type": "web_search"}
+
+
+@pytest.mark.parametrize(
+  "declaration",
+  [
+    {"role": [], "why": "x"},
+    {"role": "viewer", "tools": [{}], "why": "x"},
+  ],
+)
+def test_a_wrongly_typed_agent_role_is_a_manifest_error(declaration):
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(_manifest(agent_role=declaration))
+
+
+def test_a_room_needs_signal_scoping(monkeypatch):
+  spec = importlib.util.spec_from_file_location("fence_under_test", FENCE)
+  fence = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(fence)
+  monkeypatch.setattr(fence, "landlock_abi", lambda: 5)
+  assert fence.availability()["available"] is False

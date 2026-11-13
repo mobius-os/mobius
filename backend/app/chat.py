@@ -6631,7 +6631,8 @@ async def _run_chat_impl_with_db(
     and branch_first_turn(db, chat_row)
   )
   branch_fork = (
-    first_turn_fork(db, chat_row, provider_id, settings.data_dir) if first_branch_turn else None
+    first_turn_fork(db, chat_row, provider_id, settings.data_dir)
+    if first_branch_turn and app_room is None else None
   )
   resumed_context_fallback = (
     _build_resumed_context(chat_row, keep_task=run_policy is not None)
@@ -6639,6 +6640,10 @@ async def _run_chat_impl_with_db(
       (session_id or fresh_delegated_session or first_branch_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and run_policy is None
+      # An agent without data access never receives history it did not
+      # write: the transcript may hold app data a wider role read. It
+      # continues only its own session, which lives in its grant's room.
+      and not (app_room is not None and app_room.role.spec.data is None)
     )
     else None
   )

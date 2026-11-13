@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
-from app.agent_roles import AgentKey
+from app.agent_roles import AgentKey, confined_role_for_app
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -543,6 +543,11 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
   if not app_consent.session_valid(app, payload.get("consent")):
     raise HTTPException(status_code=401, detail="App has not been approved.")
+  key = AgentKey.from_claims(payload)
+  if key is not None and not key.matches(confined_role_for_app(app)):
+    # A narrower role (or none) applies from the next request of a run that
+    # started under a wider one, not from its next run.
+    raise HTTPException(status_code=401, detail="This app's agent role has changed.")
   return app_id
 
 

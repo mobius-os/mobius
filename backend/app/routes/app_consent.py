@@ -98,6 +98,24 @@ async def accept_consent(
   return {"status": "accepted", "app_id": app.id}
 
 
+async def _stop_app_agents(db: Session, app_id: int) -> None:
+  """End the app's running agent turns. Their keys already stop working, but
+  an agent's own tools keep running until its turn ends."""
+  from app.chat import stop_chat_for
+  from app.runner_registry import registry
+
+  alive = registry.all_alive_chat_ids()
+  if not alive:
+    return
+  chat_ids = [
+    chat_id for (chat_id,) in db.query(models.Chat.id).filter(
+      models.Chat.created_by_app_id == app_id, models.Chat.id.in_(alive),
+    )
+  ]
+  for chat_id in chat_ids:
+    await stop_chat_for(chat_id, db=db)
+
+
 @router.delete("/{app_id}/consent", dependencies=[Depends(reject_cross_site)])
 async def revoke_consent(
   app_id: int,
@@ -112,6 +130,7 @@ async def revoke_consent(
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")
   app_consent.revoke(app)
   db.commit()
+  await _stop_app_agents(db, app.id)
   await deactivate_app_skills(app.id)
   activity.log_event("app_consent", app_id=app.id, slug=app.slug, action="revoked")
   get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
