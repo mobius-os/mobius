@@ -89,7 +89,7 @@ test('a pointer-primary composer keeps browser spelling underlines', () => {
         inputRef: { current: null }, onInputChange() {},
       }),
     ))
-    const textarea = html.match(/<textarea\b[^>]*>/)?.[0]
+    const textarea = html.match(/<div\b[^>]*class="chat__input chat__markdown-input"[^>]*>/)?.[0]
     assert.ok(textarea)
     // Node has no touch-primary pointer; the touch case is the browser spec.
     assert.match(textarea, /spellCheck="true"/i)

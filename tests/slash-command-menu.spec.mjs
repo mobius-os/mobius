@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /** Rendered composer contracts for the slash-command picker. */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
@@ -28,7 +29,7 @@ test('the slash menu follows composer focus and accepts pointer selection', asyn
   // stays intact, and focusing the composer again may reopen the same matches.
   await paintedChat.locator('.chat__empty-wrap').click({ position: { x: 8, y: 8 } })
   await expect(menu).toBeHidden()
-  await expect(input).toHaveValue('/')
+  await expectComposerValue(input, '/')
 
   await input.focus()
   await expect(menu).toBeVisible()
@@ -38,7 +39,7 @@ test('the slash menu follows composer focus and accepts pointer selection', asyn
   // an ordinary pointer click can complete the command without submitting it.
   await input.fill('/go')
   await paintedChat.getByRole('option', { name: /^\/goal\b/ }).click()
-  await expect(input).toHaveValue('/goal ')
+  await expectComposerValue(input, '/goal ')
   await expect(input).toBeFocused()
   await expect(menu).toBeHidden()
 })

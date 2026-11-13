@@ -1,0 +1,46 @@
+/* Inline editor geometry stays inside the composer's existing room and theme. */
+.chat__input.chat__markdown-input {
+  padding: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+}
+.chat__markdown-input .cm-editor {
+  width: 100%;
+  min-width: 0;
+  max-height: inherit;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+}
+.chat__markdown-input .cm-editor.cm-focused { outline: none; }
+.chat__markdown-input .cm-scroller {
+  overflow: auto;
+  overscroll-behavior: contain;
+  font: inherit;
+  line-height: 1.45;
+}
+.chat__markdown-input .cm-content {
+  padding: 4px 0;
+  caret-color: var(--text);
+  min-height: 31px;
+  outline: none;
+  overflow-wrap: anywhere;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat__markdown-input .cm-line { padding: 0 8px 0 12px; }
+.chat__markdown-input .cm-placeholder { color: var(--muted); }
+.chat__markdown-input .cm-content ::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.chat__markdown-input .cm-md-strong { font-weight: 700; }
+.chat__markdown-input .cm-md-emphasis { font-style: italic; }
+.chat__markdown-input .cm-md-strike { text-decoration: line-through; }
+.chat__markdown-input .cm-md-heading { font-weight: 700; }
+.chat__markdown-input .cm-md-heading-1 { font-size: 1.3em; }
+.chat__markdown-input .cm-md-heading-2 { font-size: 1.15em; }
+.chat__markdown-input .cm-md-code,
+.chat__markdown-input .cm-md-code-line { font-family: var(--mono); background: color-mix(in srgb, var(--text) 7%, transparent); }
+.chat__markdown-input .cm-md-code { border-radius: 3px; }
+.chat__markdown-input .cm-md-quote { color: var(--muted); font-style: italic; }
+.chat__markdown-input .cm-md-link { color: var(--accent-text, var(--accent)); text-decoration: underline; text-underline-offset: 3px; }
+.chat__markdown-input .cm-md-syntax { color: var(--muted); }
+.chat__markdown-input .cm-md-task { font-family: var(--mono); color: var(--accent-text, var(--accent)); }

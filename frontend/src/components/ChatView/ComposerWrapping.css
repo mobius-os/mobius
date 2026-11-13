@@ -1,0 +1,48 @@
+/* The action slot shares the last visual row, never an entire text column. */
+.chat__input-line:has(.chat__markdown-input) {
+  --composer-actions-width: 40px;
+  --composer-actions-height: 40px;
+  position: relative;
+  display: block;
+  max-height: var(--composer-input-cap);
+}
+.chat__input-actions {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.chat__input-line > .chat__markdown-input {
+  width: 100%;
+  max-height: inherit;
+}
+.chat__markdown-input .cm-content { padding-block: 0; }
+.cm-composer-action-space {
+  display: inline-block;
+  width: calc(var(--composer-actions-width) + 4px);
+  height: var(--composer-actions-height);
+  vertical-align: middle;
+  pointer-events: none;
+}
+/* Empty drafts and a trailing newline retain a text-sized native caret. */
+.chat__markdown-input .cm-line.cm-composer-empty-tail {
+  padding-block: max(0px, calc((var(--composer-actions-height) - 1lh) / 2));
+}
+.cm-composer-empty-tail .cm-composer-action-space { height: 0; }
+
+.chat__input-line[data-composer-scrolls] {
+  padding-bottom: var(--composer-actions-height);
+}
+.chat__input-line[data-composer-scrolls] > .chat__markdown-input {
+  max-height: max(24px, calc(var(--composer-input-cap) - var(--composer-actions-height)));
+}
+
+/* In a short keyboard viewport, shrink attachment previews before taking
+   away the text row. A scrolling editor needs one 24px text row plus the
+   existing 40px action target, both inside the same half-viewport budget. */
+.chat__pill--with-attach:has(.chat__markdown-input) {
+  --composer-row-floor: 64px;
+  --composer-input-floor: var(--composer-row-floor);
+}

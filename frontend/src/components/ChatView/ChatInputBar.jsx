@@ -85,12 +85,12 @@
  */
 
 import { useRef, useState, useEffect, useLayoutEffect } from 'react'
+import MarkdownComposer from './MarkdownComposer.jsx'
+import { editorText, editorSelection, selectEditorRange, markdownEditorView } from './textEditor.js'
 import FileChips from './FileChips.jsx'
 import { ArrowUp, DoubleChevronRight, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import {
   composerHistoryDirection,
-  composerHistoryKeyPlan,
-  composerHistoryProbeReachedBoundary,
 } from './composerHistory.js'
 import useComposerHistory from './hooks/useComposerHistory.js'
 import ComposerHistoryStrip, { composerHistoryKeyHint } from './ComposerHistoryStrip.jsx'
@@ -129,11 +129,6 @@ import {
   insertClipboardText,
   queueClipboardTextUndoably,
 } from './markdownClipboard.js'
-import {
-  textareaUsesNativeSizing,
-  textareaHasWrappedLines,
-  syncComposerTallState,
-} from './composerTextareaSizing.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -387,7 +382,6 @@ export default function ChatInputBar({
 }) {
   const fileInputRef = useRef(null)
   const pendingComposerCaretRef = useRef(null)
-  const historyProbeVersionRef = useRef(0)
   const pasteAsPlainTextRef = useRef(false)
   // Captures whether the textarea was focused at the moment the file
   // picker opened. Read by `handleFileSelect` to decide whether to
@@ -491,7 +485,6 @@ export default function ChatInputBar({
   // Typing, dictation, paste, and the menus edit whatever the box holds — the
   // draft or a browsed message — without leaving history (contract 8).
   function noteComposerEdit() {
-    historyProbeVersionRef.current += 1
     pendingComposerCaretRef.current = null
     composerHistory.noteEdit()
   }
@@ -500,7 +493,6 @@ export default function ChatInputBar({
   // box through this one path, with the same voice rebase and controlled
   // caret handoff as other programmatic edits.
   function showComposerValue(value) {
-    historyProbeVersionRef.current += 1
     pendingComposerCaretRef.current = { value, caret: value.length }
     if (listeningRef?.current) {
       onManualVoiceEdit?.(value)
@@ -509,8 +501,8 @@ export default function ChatInputBar({
     // Moving between entries can resolve to the value already shown, so React
     // may not commit a render for the caret layout effect below.
     const textarea = inputRef?.current
-    if (textarea && textarea.value === value) {
-      try { textarea.setSelectionRange(value.length, value.length) } catch {}
+    if (textarea && editorText(textarea) === value) {
+      try { selectEditorRange(textarea, value.length, value.length) } catch {}
       pendingComposerCaretRef.current = null
     }
   }
@@ -558,31 +550,9 @@ export default function ChatInputBar({
     const pending = pendingComposerCaretRef.current
     const textarea = inputRef?.current
     if (!pending || pending.value !== input || !textarea) return
-    try { textarea.setSelectionRange(pending.anchor ?? pending.caret, pending.caret) } catch {}
+    try { selectEditorRange(textarea, pending.anchor ?? pending.caret, pending.caret) } catch {}
     pendingComposerCaretRef.current = null
   }, [input, inputRef])
-
-  // Modern browsers size the textarea from CSS (`field-sizing: content`).
-  // Observe the resulting box rather than measuring scrollHeight on every
-  // character; the pill alignment changes only when the textarea really
-  // crosses from one visual line to multiple lines.
-  useLayoutEffect(() => {
-    const textarea = inputRef?.current
-    if (
-      !textarea
-      || !textareaUsesNativeSizing()
-      || typeof ResizeObserver === 'undefined'
-    ) return undefined
-    const observer = new ResizeObserver(entries => {
-      const entry = entries[0]
-      const borderSize = Array.isArray(entry?.borderBoxSize)
-        ? entry.borderBoxSize[0]?.blockSize
-        : entry?.borderBoxSize?.blockSize
-      syncComposerTallState(textarea, borderSize ?? textarea.offsetHeight)
-    })
-    observer.observe(textarea)
-    return () => observer.disconnect()
-  }, [chatId, inputRef])
 
   // A completed attachment is a complete message in its own right. Feed that
   // through the same primary-action and keyboard-shortcut gate as typed text
@@ -608,12 +578,10 @@ export default function ChatInputBar({
     restoreFocusAfterFilePicker()
   }
 
-  function handleTextareaChange(e) {
-    const value = e.target.value
+  function handleComposerChange(value) {
     noteComposerEdit()
     if (listeningRef?.current) onManualVoiceEdit?.(value)
     onInputChange(value)
-    onInputIntent?.(e.nativeEvent)
   }
 
   function handlePaste(e) {
@@ -629,12 +597,11 @@ export default function ChatInputBar({
     }
 
     const textarea = e.currentTarget
-    const selectionStart = textarea.selectionStart
-    const selectionEnd = textarea.selectionEnd
+    const { start: selectionStart, end: selectionEnd } = editorSelection(textarea)
     // A web address pasted over selected text links that text; the plain-text
     // chord (Cmd/Ctrl+Shift+V) always pastes exactly what was copied.
     const linkText = preferPlainText ? null : linkPasteText(
-      textarea.value.slice(selectionStart, selectionEnd),
+      editorText(textarea).slice(selectionStart, selectionEnd),
       e.clipboardData?.getData?.('text/plain'),
     )
     const pastedText = linkText ?? assistantClipboardText(
@@ -644,7 +611,7 @@ export default function ChatInputBar({
     if (pastedText === null) return
 
     e.preventDefault()
-    const pasteEvent = e.nativeEvent
+    const pasteEvent = e.nativeEvent ?? e
     const applyControlledFallback = () => {
       // Some embedded browsers reject the native editing command. Keep the
       // controlled fallback so Markdown paste itself still works there.
@@ -669,13 +636,13 @@ export default function ChatInputBar({
   // paste, then select the wrapped text (or its placeholder) to type over.
   function applyComposerFormatting(textarea, marker) {
     const edit = wrapComposerSelection(
-      textarea.value,
-      textarea.selectionStart,
-      textarea.selectionEnd,
+      editorText(textarea),
+      editorSelection(textarea).start,
+      editorSelection(textarea).end,
       marker,
     )
     const selectWrappedText = () => {
-      try { textarea.setSelectionRange(edit.selectionStart, edit.selectionEnd) } catch {}
+      try { selectEditorRange(textarea, edit.selectionStart, edit.selectionEnd) } catch {}
     }
     const applyControlledFallback = () => {
       noteComposerEdit()
@@ -719,6 +686,8 @@ export default function ChatInputBar({
   const canSubmit = !submissionBlocked && !questionBlocked
 
   function handleKeyDown(e) {
+    // Confirmation keys belong to the input method, never Send or a menu.
+    if (e.isComposing || e.nativeEvent?.isComposing || e.keyCode === 229) return
     pasteAsPlainTextRef.current = isPlainTextPasteShortcut(e)
     // The menus claim Enter and the arrows while open — the same keys that
     // otherwise send and walk sent-message history — so they resolve BEFORE
@@ -774,35 +743,19 @@ export default function ChatInputBar({
     }
 
     const historyDirection = composerHistoryDirection(e)
-    const historyPlan = historyDirection && composerHistoryKeyPlan(e, {
-      direction: historyDirection,
-      value: input,
-      // Only ↑ uses it, and only a non-empty box needs the layout read.
-      linesWrap: historyDirection !== 'older' || !input
-        || textareaHasWrappedLines(e.target),
-    })
-    if (historyPlan?.when === 'now') {
-      if (composerHistory.move(historyDirection)) e.preventDefault()
+    const editor = markdownEditorView(inputRef?.current)
+    if (historyDirection && editor) {
+      const selection = editor.state.selection.main
+      const moved = editor.moveVertically(selection, historyDirection === 'newer')
+      const caretBox = historyDirection === 'older' && editor.coordsAtPos(selection.head)
+      const movedBox = caretBox && editor.coordsAtPos(moved.head)
+      const alreadyOnTopRow = caretBox && movedBox && Math.abs(caretBox.top - movedBox.top) < 1
+      if (selection.empty && (moved.head === selection.head || alreadyOnTopRow)
+          && composerHistory.move(historyDirection)) {
+        e.preventDefault()
+      }
       return
     }
-    const canMoveHistory = historyDirection === 'older'
-      ? composerHistory.hasEntries
-      : composerHistory.browsing
-    if (historyPlan?.when === 'after-native' && canMoveHistory) {
-      // Let the browser move the caret first; switch only if it was already
-      // on the edge line. A later edit or move invalidates this probe.
-      const probe = historyPlan.probe
-      const probeVersion = ++historyProbeVersionRef.current
-      requestAnimationFrame(() => {
-        if (
-          historyProbeVersionRef.current !== probeVersion
-          || !composerHistoryProbeReachedBoundary(probe, inputRef?.current)
-        ) return
-        composerHistory.move(historyDirection)
-      })
-      return
-    }
-
     const action = resolveComposerEnterAction(e, {
       hasInput,
       canSteer,
@@ -928,11 +881,12 @@ export default function ChatInputBar({
             />
           )}
           <div className="chat__input-line">
-            <textarea
-              ref={inputRef}
-              className="chat__input"
+            <MarkdownComposer
+              key={chatId}
+              inputRef={inputRef}
               value={input}
-              onChange={handleTextareaChange}
+              onChange={handleComposerChange}
+              onInputIntent={onInputIntent}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               onKeyUp={() => { pasteAsPlainTextRef.current = false }}
@@ -948,9 +902,8 @@ export default function ChatInputBar({
               // A touch keyboard corrects words itself; the browser's own
               // spelling popup only competes with it. Desktop keeps underlines.
               spellCheck={!touchPrimary}
-              rows={1}
               // Combobox semantics apply only while the menu is open. Left on
-              // permanently they would announce this plain prose textarea as a
+              // permanently they would announce this prose editor as a
               // picker in every ordinary message the user writes.
               {...(slashMatches.length > 0 || mentionMatches.length > 0 ? {
                 role: 'combobox',
@@ -963,23 +916,25 @@ export default function ChatInputBar({
             {historyKeyHint && (
               <span id={historyKeyHintId} className="chat__sr-only">{historyKeyHint}</span>
             )}
-            {rightButtons}
-            <PrimaryAction
-              sending={sending}
-              listening={listening}
-              hasInput={hasInput}
-              hasUploading={hasUploading}
-              showSteer={showSteer}
-              steerReady={steerReady}
-              submissionBlocked={submissionBlocked}
-              questionBlocked={questionBlocked}
-              savesQueued={composerHistory.position?.kind === 'queued'}
-              resendsHistory={composerHistory.browsing}
-              onSubmit={handleSubmit}
-              onStop={onStop}
-              onSteer={onSteer}
-              onToggleVoice={onToggleVoice}
-            />
+            <div className="chat__input-actions">
+              {rightButtons}
+              <PrimaryAction
+                sending={sending}
+                listening={listening}
+                hasInput={hasInput}
+                hasUploading={hasUploading}
+                showSteer={showSteer}
+                steerReady={steerReady}
+                submissionBlocked={submissionBlocked}
+                questionBlocked={questionBlocked}
+                savesQueued={composerHistory.position?.kind === 'queued'}
+                resendsHistory={composerHistory.browsing}
+                onSubmit={handleSubmit}
+                onStop={onStop}
+                onSteer={onSteer}
+                onToggleVoice={onToggleVoice}
+              />
+            </div>
           </div>
         </div>
       </div>

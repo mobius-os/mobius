@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * A mini-app crash reaches the owner with its real message.
  *
@@ -74,8 +75,7 @@ test('an app that crashes after mount shows and reports its real error', async (
       .toContainText('missingHelper is not a function')
 
     await frame.locator('#report-btn').press('Enter')
-    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toHaveValue(/crashed with this error[\s\S]*missingHelper is not a function/, {
+    await expectComposerValue(page.getByRole('textbox', { name: 'Message Möbius…' }), /crashed with this error[\s\S]*missingHelper is not a function/, {
         timeout: 8000,
       })
   } finally {

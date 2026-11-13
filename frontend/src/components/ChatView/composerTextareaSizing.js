@@ -1,3 +1,5 @@
+import { markdownEditorView } from './textEditor.js'
+
 export const COMPOSER_TEXTAREA_MAX_HEIGHT = 280
 export const COMPOSER_TEXTAREA_TALL_THRESHOLD = 45
 let nativeSizingSupport
@@ -73,6 +75,8 @@ export function syncComposerTallState(
  * prevents an empty textarea from retaining a previous multi-line height.
  */
 export function resizeComposerTextarea(textarea, value = textarea?.value) {
+  const editor = markdownEditorView(textarea)
+  if (editor) { editor.requestMeasure(); return 0 }
   if (!textarea?.style) return 0
   // Current browsers can own content sizing entirely in CSS. Avoid touching
   // height or reading scrollHeight on the keystroke path: that read forces a
@@ -128,6 +132,7 @@ export function autoGrowTextarea(textarea, maxHeight) {
 
 /** Collapse immediately while React is still committing an empty value. */
 export function resetComposerTextarea(textarea) {
+  if (markdownEditorView(textarea)) return
   if (!textarea?.style) return
   textarea.style.height = textareaUsesNativeSizing() ? '' : 'auto'
   composerPill(textarea)?.removeAttribute('data-composer-tall')
@@ -145,6 +150,18 @@ export function reconcileComposerTextarea(
   textarea,
   value = textarea?.value,
 ) {
+  const editor = markdownEditorView(textarea)
+  if (editor) {
+    // Foreground restoration must not retain stale empty-composer geometry.
+    // The content is editor-owned; the outer host owns the height constraint.
+    if (!editor.state.doc.length) {
+      const host = editor.dom.closest('.chat__markdown-input')
+      if (host) host.style.height = ''
+      composerPill(textarea)?.removeAttribute('data-composer-tall')
+    }
+    editor.requestMeasure()
+    return 0
+  }
   if (!value) {
     resetComposerTextarea(textarea)
     return 0

@@ -2695,14 +2695,7 @@
      open, which reads as "it just grows forever". 280px stays the ceiling on
      roomy screens; the floor keeps two lines legible on a cramped one. Growth
      past the cap scrolls inside the textarea (overflow-y below). */
-  max-height: clamp(
-    var(--composer-input-floor, 48px),
-    calc(
-      var(--composer-room, 100dvh) * 0.5
-      - var(--composer-reserve, calc(var(--pill-pad, 4px) * 2))
-    ),
-    280px
-  );
+  max-height: var(--composer-input-cap);
   padding: 4px 8px 4px 12px;
   overflow-y: auto;
   display: block;
@@ -3330,6 +3323,14 @@
    multi-line, `[data-composer-tall]` flips to flex-end so the buttons
    stay anchored at the bottom-right while the textarea expands up. */
 .chat__input-line {
+  --composer-input-cap: clamp(
+    var(--composer-input-floor, 48px),
+    calc(
+      var(--composer-room, 100dvh) * 0.5
+      - var(--composer-reserve, calc(var(--pill-pad, 4px) * 2))
+    ),
+    280px
+  );
   flex: 1;
   min-width: 0;
   display: flex;

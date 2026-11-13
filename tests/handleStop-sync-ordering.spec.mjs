@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Locks in the Stop-chat contract (ARCHITECTURE.md): Stop only interrupts.
  *
@@ -171,7 +172,7 @@ test.describe('handleStop keeps the queue for the owner', () => {
     const sendQueued = surface.getByRole('button', { name: 'Send queued messages' })
     await expect(sendQueued).toBeVisible()
     await expect(surface.locator('.queued__text')).toHaveText('queued message')
-    await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toHaveValue('')
+    await expectComposerValue(surface.getByRole('textbox', { name: 'Message Möbius…' }), '')
     // Stop resent nothing.
     expect(ordinaryMessageHits).toBe(2)
     expect(queueSends).toBe(0)

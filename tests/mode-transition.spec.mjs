@@ -377,14 +377,14 @@ for (const [name, viewport] of [
 test('phone one-pane Builder keeps the workspace and composer anchored across repeated toggles', async ({ page }) => {
   await bootSeededWorkspace(page, { width: 412, height: 915 }, onePaneStandardChat())
   const paintedComposer = page.locator(
-    '[data-chat-surface="painted"] textarea.chat__input',
+    '[data-chat-surface="painted"] .chat__editor-content',
   )
   await expect(paintedComposer).toBeVisible()
 
   const baseline = await page.evaluate(() => {
     const content = document.querySelector('.shell__content').getBoundingClientRect()
     const composer = document.querySelector(
-      '[data-chat-surface="painted"] textarea.chat__input',
+      '[data-chat-surface="painted"] .chat__input.chat__markdown-input',
     ).getBoundingClientRect()
     return {
       contentTop: content.top,
@@ -400,7 +400,7 @@ test('phone one-pane Builder keeps the workspace and composer anchored across re
         await new Promise(resolve => requestAnimationFrame(resolve))
         const content = document.querySelector('.shell__content')?.getBoundingClientRect()
         const composer = document.querySelector(
-          '[data-chat-surface="painted"] textarea.chat__input',
+          '[data-chat-surface="painted"] .chat__input.chat__markdown-input',
         )?.getBoundingClientRect()
         const strip = document.querySelector('.shell__tabstrip')?.getBoundingClientRect()
         samples.push({
@@ -436,7 +436,7 @@ test('phone one-pane Builder keeps the workspace and composer anchored across re
   const returned = await page.evaluate(() => {
     const content = document.querySelector('.shell__content').getBoundingClientRect()
     const composer = document.querySelector(
-      '[data-chat-surface="painted"] textarea.chat__input',
+      '[data-chat-surface="painted"] .chat__input.chat__markdown-input',
     ).getBoundingClientRect()
     return {
       contentTop: content.top,
@@ -593,7 +593,7 @@ test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a 
   await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
   // The automatic landing must NOT summon the mobile keyboard — the composer is not
   // auto-focused by a mode toggle.
-  const composerFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA')
+  const composerFocused = await page.evaluate(() => document.activeElement?.matches('.chat__editor-content') ?? false)
   expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
 })
 
