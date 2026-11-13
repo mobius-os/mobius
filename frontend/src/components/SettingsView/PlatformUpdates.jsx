@@ -6,6 +6,7 @@ import { rebuildIsActive, rebuildAwaitingHostHelper, rebuildStatusLine } from '.
 import { containerVersionIdentity, platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import usePlatformUpdates from './usePlatformUpdates.js'
+import useUpdateAgentChoice from './useUpdateAgentChoice.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import UpdateRepairAction from './UpdateRepairAction.jsx'
 import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
@@ -14,8 +15,9 @@ import './PlatformUpdates.css'
 const RESTART_CONFIRM_MIN_MS = 500
 
 export default function PlatformUpdates({ active, refreshToken, onOpenChat, inertBoundaryRef }) {
-  const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
-  return <PlatformUpdatesView update={update} onOpenChat={onOpenChat} inertBoundaryRef={inertBoundaryRef} />
+  const { chooseAgent, agentPicker } = useUpdateAgentChoice()
+  const update = usePlatformUpdates({ active, refreshToken, onOpenChat, chooseAgent })
+  return <><PlatformUpdatesView update={update} onOpenChat={onOpenChat} inertBoundaryRef={inertBoundaryRef} />{agentPicker}</>
 }
 
 // Rendered with the real controller hook in Settings; an injected snapshot lets
@@ -231,7 +233,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           restoreFocusRef={actionRef} inertBoundaryRef={inertBoundaryRef}
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
-          onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
+          onResolve={update.resolve} onChooseAgent={update.chooseAgent} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
           resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} onRefreshReview={update.clearError} applyProgress={update.progress} />
       )}
       </div>

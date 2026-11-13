@@ -60,7 +60,7 @@ export default function useAgentRepair({
     return () => window.removeEventListener('pageshow', onPageShow)
   }, [cancel, fingerprint, surfaceKey])
 
-  const repair = useCallback(async () => {
+  const repair = useCallback(async ({ agent, archiveOnGoalComplete = false } = {}) => {
     if (!fingerprint || controllerRef.current) return
     const controller = new AbortController()
     controllerRef.current = controller
@@ -87,6 +87,8 @@ export default function useAgentRepair({
           if (controllerRef.current === controller) setLive({ fingerprint, attempt: next })
         },
         prompt,
+        agent,
+        archiveOnGoalComplete,
       })
       if (controllerRef.current === controller && !controller.signal.aborted) {
         window.location.assign(result.href)

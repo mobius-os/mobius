@@ -85,7 +85,7 @@ for (const [name, query, path, body, expected] of [
   ['registry', modelQueries.registry, '/api/models',
     { providers: { codex: [{ id: 'test-model' }] } }, { codex: [{ id: 'test-model' }] }],
   ['preferences', modelQueries.prefs, '/api/owner/model-prefs',
-    { hidden_ids: ['test-model'] }, { hidden_ids: ['test-model'] }],
+    { hidden_ids: ['test-model'] }, { hidden_ids: ['test-model'], recent_ids: [], selected_agent: null }],
 ]) {
   test(`real ${name} read recovers from transient failures`, async () => {
     const originalFetch = globalThis.fetch
@@ -117,7 +117,7 @@ test('real preference query degrades to show-all, marked unavailable, only after
     return Response.json({ detail: 'unavailable' }, { status: 503 })
   }
   try {
-    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [], unavailable: true })
+    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [], recent_ids: [], unavailable: true })
     assert.equal(attempts, 4, 'query retry must not multiply the read budget')
   } finally {
     client.clear()

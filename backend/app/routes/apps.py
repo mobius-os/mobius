@@ -2048,10 +2048,10 @@ def _check_conflict_resolver_bindings(
 
 
 async def _create_conflict_resolver_chat(
-  db: Session, app_ids: list[int],
+  db: Session, app_ids: list[int], agent: schemas.UpdateAgentChoice | None = None,
 ) -> schemas.AppConflictResolverChatOut:
   """Prepare the exact selected batch, then open its owner-visible resolver."""
-  from app import background_agents
+  from app import update_chat
 
   prepared = []
   sources = []
@@ -2137,10 +2137,8 @@ async def _create_conflict_resolver_chat(
     if existing is not None:
       chat, created, provider = existing, False, existing.provider
     else:
-      # Walk the owner's background-agent choices to the first with quota.
-      choice = background_agents.resolve_background_chat_choice(
-        get_settings().data_dir, db,
-      )
+      # Freeze an explicit selection; only omission uses the background order.
+      choice = update_chat.resolve_update_chat_choice(db, agent)
       provider = choice["provider"]
       chat = chat_writer.create_chat(
         id=str(uuid.uuid4()),
@@ -2190,7 +2188,7 @@ async def create_conflict_resolver_batch_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create one owner-visible resolver turn for all selected app conflicts."""
-  return await _create_conflict_resolver_chat(db, body.app_ids)
+  return await _create_conflict_resolver_chat(db, body.app_ids, body.agent)
 
 
 @router.post(
@@ -2208,7 +2206,7 @@ async def create_conflict_resolver_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create or return the owner-visible resolver chat for an app conflict."""
-  return await _create_conflict_resolver_chat(db, [app_id])
+  return await _create_conflict_resolver_chat(db, [app_id], body.agent if body else None)
 
 
 @router.post(
@@ -2652,7 +2650,7 @@ async def resolve_app_update(
       ):
         # Already installed: a retry after a lost response, or a finish that
         # stopped after removing its receipt. Clear any leftover checkout.
-        await pending_update.clear_pending_conflict_update(db, app)
+        await pending_update.clear_pending_conflict_update(db, app, completed=True)
         get_system_broadcast().publish(
           {"type": "app_updated", "appId": str(app.id)}
         )

@@ -685,6 +685,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   markers = [m for m in list(transcript_rows.history(row)) if m.get("kind") == "compaction"]
   assert len(markers) == 1
   assert db.query(models.Owner).first().provider == "codex"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == ["gpt-5.4"]
 
   changed = _payload(switch_id="stable-retry")
   changed["agent_settings_json"]["model"] = "gpt-5.5"

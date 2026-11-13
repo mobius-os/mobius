@@ -644,10 +644,21 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   if status is not None:
     from app.activity_position import record_activity_position
     record_activity_position(db, goal.chat_id, "goal-outcome:" + goal.id)
-  db.commit()
+  archived_chat = None
+  if status == "completed":
+    from app import chat_archive, drawer_pins
+    with drawer_pins.serialized_write():
+      archived_chat = chat_archive.stage_archive_after_goal_completion(
+        db, goal.chat_id,
+      )
+      db.commit()
+  else:
+    db.commit()
   db.refresh(goal)
   from app.goal_plans import publish_goal_changed
   publish_goal_changed(goal.chat_id)
+  if archived_chat is not None:
+    chat_archive.publish_archive_changed(archived_chat)
   if consumed_waits:
     from app.chat_waits import _broadcast_changed
     _broadcast_changed(goal.chat_id)

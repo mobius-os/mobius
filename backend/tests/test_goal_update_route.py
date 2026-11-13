@@ -512,3 +512,92 @@ def test_goal_prose_and_claim_lists_have_no_guessed_budgets():
   ).finished_claims == keys
   assert GoalUpdateRequest(cancel="c" * 9000).cancel == "c" * 9000
   assert GoalUpdateRequest(defer="d" * 9000).defer == "d" * 9000
+
+
+def _opt_in_temporary_goal_chat(db, chat_id):
+  chat = db.get(models.Chat, chat_id)
+  chat.agent_settings_json = {
+    **(chat.agent_settings_json or {}), "archive_on_goal_complete": True,
+  }
+  db.commit()
+  return chat
+
+
+def test_temporary_goal_chat_archives_only_after_success_and_consumes_opt_in(
+  client, owner_token, db,
+):
+  _, chat_id = _active_goal(client, owner_token, db)
+  chat = _opt_in_temporary_goal_chat(db, chat_id)
+  chat.pinned_at = datetime.now(UTC)
+  db.commit()
+  checkpoint = _update(client, db, chat_id, {"next_action": "Verify the update"})
+  assert checkpoint.status_code == 200, checkpoint.text
+  db.refresh(chat)
+  assert chat.archived_at is None
+
+  completed = _update(client, db, chat_id, {"complete": True})
+  assert completed.status_code == 200, completed.text
+  db.refresh(chat)
+  assert chat.archived_at is not None
+  assert chat.pinned_at is None
+  assert chat.deleted_at is None
+  assert "archive_on_goal_complete" not in (chat.agent_settings_json or {})
+  archived_at = chat.archived_at
+  again = _update(client, db, chat_id, {"complete": True})
+  assert again.status_code == 200, again.text
+  db.refresh(chat)
+  assert chat.archived_at == archived_at
+  restored = client.post(
+    f"/api/chats/{chat_id}/unarchive",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert restored.status_code == 200
+  db.refresh(chat)
+  assert chat.archived_at is None
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "cannot_complete", "cancelled", "deferred"])
+def test_temporary_goal_chat_stays_visible_without_success(
+  client, owner_token, db, outcome,
+):
+  _, chat_id = _active_goal(client, owner_token, db)
+  chat = _opt_in_temporary_goal_chat(db, chat_id)
+  if outcome == "blocked":
+    response = _update(client, db, chat_id, {
+      "tasks": [{"id": "pending", "title": "Unfinished work"}],
+      "complete": True,
+    })
+    assert response.status_code == 422, response.text
+  elif outcome == "cannot_complete":
+    response = _update(client, db, chat_id, {"cannot_complete": {
+      "reason": "Blocked", "efforts": "Tried", "unmet_outcome": "Not updated",
+    }})
+    assert response.status_code == 200, response.text
+  elif outcome == "cancelled":
+    response = _update(client, db, chat_id, {"cancel": "Owner stopped the job"})
+    assert response.status_code == 200, response.text
+  else:
+    response = _update(client, db, chat_id, {"defer": "Waiting for owner"})
+    assert response.status_code == 200, response.text
+  db.refresh(chat)
+  assert chat.archived_at is None
+  assert chat.agent_settings_json["archive_on_goal_complete"] is True
+
+
+def test_ordinary_goal_completion_does_not_archive_chat(client, owner_token, db):
+  _, chat_id = _active_goal(client, owner_token, db)
+  completed = _update(client, db, chat_id, {"complete": True})
+  assert completed.status_code == 200, completed.text
+  db.expire_all()
+  assert db.get(models.Chat, chat_id).archived_at is None
+
+
+def test_failed_turn_does_not_archive_temporary_goal_chat(client, owner_token, db):
+  _, chat_id = _active_goal(client, owner_token, db)
+  chat = _opt_in_temporary_goal_chat(db, chat_id)
+  run = db.get(models.ChatRun, "goal-root")
+  run.status = "failed"
+  db.commit()
+  db.refresh(chat)
+  assert chat.archived_at is None
+  assert chat.agent_settings_json["archive_on_goal_complete"] is True

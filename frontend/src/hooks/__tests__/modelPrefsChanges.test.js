@@ -36,7 +36,23 @@ test('a switch sends only its own change and shows it before the server answers'
   answer(json({ hidden_ids: ['b', 'set-elsewhere'] }))
   assert.equal(await saving, true)
   // The server's whole list wins, including changes made on another page.
-  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: ['b', 'set-elsewhere'] })
+  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: ['b', 'set-elsewhere'], recent_ids: [] })
+})
+
+test('visibility reply cannot undo a model picked while the save was in flight', async t => {
+  const queryClient = client(['a'])
+  let answer
+  serve(t, () => new Promise(resolve => { answer = resolve }))
+  const saving = modelQueries.prefs.saveChanges(queryClient, { a: false })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  queryClient.setQueryData(modelQueries.prefs.key, previous => ({
+    ...previous, recent_ids: ['new-model'],
+  }))
+  answer(json({ hidden_ids: [], recent_ids: ['old-model'] }))
+  assert.equal(await saving, true)
+  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), {
+    hidden_ids: [], recent_ids: ['new-model'],
+  })
 })
 
 test('saves reach the server one at a time, in the order they were made', async t => {
@@ -82,7 +98,7 @@ test('a stuck save gives up after its deadline, so later saves still reach the s
   // (A timed-out request also asks the connectivity probe to check the server.)
   const saves = sent.filter(request => request.method === 'PATCH')
   assert.deepEqual(saves.map(request => request.body), [{ hidden: { a: true } }, { hidden: { a: false } }])
-  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: [] })
+  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: [], recent_ids: [] })
   // The timed-out save may still land after the later one: read the server's list again.
   assert.equal(queryClient.getQueryState(modelQueries.prefs.key).isInvalidated, true)
 })
@@ -92,4 +108,22 @@ test('a save the server answered needs no extra read', async t => {
   serve(t, () => json({ hidden_ids: [] }))
   assert.equal(await modelQueries.prefs.saveChanges(queryClient, { a: false }), true)
   assert.equal(queryClient.getQueryState(modelQueries.prefs.key).isInvalidated, false)
+})
+
+
+test('a new picker reads the latest agent even inside the shared cache freshness window', async t => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } })
+  queryClient.setQueryData(modelQueries.prefs.key, {
+    hidden_ids: [], recent_ids: ['old-model'],
+    selected_agent: { provider: 'codex', model: 'old-model', effort: 'low' },
+  })
+  const selected = { provider: 'claude', model: 'latest-model', effort: 'high' }
+  const sent = serve(t, () => json({ hidden_ids: [], recent_ids: ['latest-model'], selected_agent: selected }))
+  try {
+    const prefs = await queryClient.fetchQuery(modelQueries.prefs.options())
+    assert.equal(sent.length, 1)
+    assert.deepEqual(prefs.selected_agent, selected)
+  } finally {
+    queryClient.clear()
+  }
 })

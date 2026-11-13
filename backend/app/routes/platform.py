@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app import auth, deployment_control, models, platform_activation, platform_update
+from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
@@ -401,6 +402,7 @@ async def keep_settling_platform_update(
 class ConflictResolverChatIn(BaseModel):
   # Resume a stalled resolver: start its bound chat again, or open a new one.
   resume: bool = False
+  agent: UpdateAgentChoice | None = None
 
 
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])
@@ -412,7 +414,15 @@ async def create_platform_conflict_resolver_chat(
   """Create or return the resolver chat for a recorded platform update conflict."""
   try:
     if request is not None and request.resume:
+      if request.agent is not None:
+        return await platform_update.resume_platform_conflict_resolver(
+          db, agent=request.agent,
+        )
       return await platform_update.resume_platform_conflict_resolver(db)
+    if request is not None and request.agent is not None:
+      return await platform_update.create_platform_conflict_resolver_chat(
+        db, agent=request.agent,
+      )
     return await platform_update.create_platform_conflict_resolver_chat(db)
   except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
