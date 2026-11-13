@@ -19,6 +19,10 @@ reach has exactly one enforcement point, and anything not granted is refused:
                     declare (``agent_gateway``)
   declared tools .. the same key allow-list plus the gateway, per ``TOOLS``
 
+The AI program's own tools (shell, file edits, planning) are never filtered:
+they work inside the room, which limits them. ``tools`` adds Möbius tools
+that reach beyond the room.
+
 Private data or the internet, never both, unless the owner allows it: an
 Explorer starts with no data, and ``web`` beside Viewer or Editor data is
 shown to the owner as such. Owner apps declare no tools: their agents keep the
@@ -63,7 +67,9 @@ ROLES: dict[str, Role] = {
 
 @dataclass(frozen=True)
 class Tool:
-  """One agent tool an app may declare. Adding a tool is one entry here."""
+  """One Möbius tool beyond the room that an app may declare for its agents.
+
+  Adding a tool is one entry here."""
 
   label: str
   text: str
@@ -176,6 +182,7 @@ class AgentKey:
   role: str
   tools: frozenset[str]
   provider: str
+  chat: str = ""  # the chat whose run the key belongs to
 
   @classmethod
   def claims_for(cls, role: AgentRole, provider: str) -> dict[str, Any]:
@@ -198,6 +205,7 @@ class AgentKey:
       str(claims["agent_role"]),
       frozenset(map(str, claims.get("agent_tools") or ())),
       str(claims.get("agent_provider") or ""),
+      str(claims.get("agent_chat") or ""),
     )
 
   def matches(self, role: AgentRole | None) -> bool:
@@ -269,7 +277,11 @@ def _record_web(key: AgentKey, scope: dict) -> None:
     0
   ]
   activity.log_event(
-    "app_agent_web", app_id=key.app_id, kind="open_page", url=url[:2000]
+    "app_agent_web",
+    app_id=key.app_id,
+    chat_id=key.chat,
+    kind="open_page",
+    url=url[:2000],
   )
 
 

@@ -49,6 +49,7 @@ def _record_search(key: AgentKey, body: bytes) -> None:
   activity.log_event(
     "app_agent_web",
     app_id=key.app_id,
+    chat_id=key.chat,
     kind="search",
     commands=json.dumps(commands)[:2000] if commands else None,
   )

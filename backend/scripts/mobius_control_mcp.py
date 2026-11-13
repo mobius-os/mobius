@@ -466,7 +466,8 @@ def _initialize_result(params: Any) -> dict[str, Any]:
 
 
 def _app_agent_tools() -> tuple[str, ...] | None:
-  """A confined app agent's declared tools, or None for any other agent."""
+  """The Möbius tools a confined app agent's app declared, or None for any
+  other agent."""
   names = os.environ.get(_PLATFORM_TOOLS.APP_AGENT_TOOLS_ENV)
   if names is None:
     return None
@@ -532,7 +533,7 @@ def _app_tool_listings() -> list[dict[str, Any]]:
 
 def _tools_list_result() -> dict[str, Any]:
   try:
-    # A confined app agent is offered only its declared tools.
+    # A confined app agent is offered only the Möbius tools its app declared.
     app_tools = [] if _app_agent_tools() is not None else _app_tool_listings()
   except RuntimeError as exc:
     # A model may never read server stderr. Keep controls usable, but make

@@ -535,11 +535,11 @@ def test_codex_searches_and_opened_pages_are_recorded_per_app(monkeypatch):
       "open": [{"ref_id": "https://kernel.org/"}],
     }
   )
-  gateway_routes._record_search(_key("explorer", "web", provider="codex"), body)
+  key = AgentKey(7, "explorer", frozenset({"web"}), "codex", "chat-1")
+  gateway_routes._record_search(key, body)
   [(event, fields)] = events
-  assert (
-    event == "app_agent_web" and fields["app_id"] == 7 and fields["kind"] == "search"
-  )
+  assert event == "app_agent_web" and fields["kind"] == "search"
+  assert (fields["app_id"], fields["chat_id"]) == (7, "chat-1")
   assert (
     "linux kernel" in fields["commands"] and "https://kernel.org/" in fields["commands"]
   )
@@ -705,3 +705,12 @@ def test_a_room_needs_signal_scoping(monkeypatch):
   spec.loader.exec_module(fence)
   monkeypatch.setattr(fence, "landlock_abi", lambda: 5)
   assert fence.availability()["available"] is False
+
+
+def test_pages_open_only_through_moebius_where_each_is_recorded():
+  hosted_fetch = {"type": "web_fetch_20250910", "name": "web_fetch"}
+  search = {"type": "web_search_20250305", "name": "web_search"}
+  body, removed = agent_gateway.prepare_body(
+    _key("explorer", "web"), _body(tools=[hosted_fetch, search])
+  )
+  assert json.loads(body)["tools"] == [search] and removed == ["web_fetch_20250910"]

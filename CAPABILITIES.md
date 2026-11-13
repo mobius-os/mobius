@@ -811,11 +811,13 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   tools the app did not declare (including any tool the provider would run in
   its own container) and hosted MCP servers, refuses a request that forces a
   removed tool, and adds the owner's login outside the room.
-- **Tools.** `web` is provider-hosted search through the gateway plus
-  `open_page` through the guarded `/api/proxy`; each opened page is recorded as
-  an `app_agent_web` activity. `notify` is `notify_owner`. A new tool is one
-  `agent_roles.TOOLS` entry naming its control tools, key routes and gateway
-  types.
+- **Tools.** An agent's own tools (shell, file edits, planning) always work,
+  inside its room. `tools` adds Möbius tools that reach beyond it, from a
+  catalog with two entries today. `web` is provider-hosted search through the
+  gateway plus `open_page` through the guarded `/api/proxy`; each opened page
+  is recorded as an `app_agent_web` activity. `notify` is `notify_owner`. A new
+  tool is one `agent_roles.TOOLS` entry naming its control tools, key routes
+  and gateway types.
 - **Consent.** One `agent_role` row whose scope names what the role reaches
   (`data:read`, `data:write`, `tool:<name>`), so an update asks again only when
   it adds reach, and shows only what it adds. Owner and undeclared agent apps
@@ -825,8 +827,8 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   chat's earlier history when its own session is gone: that history may hold
   app data a wider role read.
 - **Not yet covered:** app jobs and services still run unconfined; searches
-  that run at Anthropic are not recorded one by one; owner questions,
-  screenshots, helpers and other apps' tools are not offered to confined agents.
+  that run at Anthropic are not recorded one by one; the catalog has no Möbius
+  tools yet for owner questions, screenshots, helpers or other apps' tools.
 
 ## Stable error codes
 

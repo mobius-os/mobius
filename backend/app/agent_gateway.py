@@ -47,8 +47,9 @@ _DROP_REQUEST_HEADERS = frozenset(
   }
 )
 REPLY_HEADERS = frozenset({"content-type", "request-id", "x-request-id", "retry-after"})
-# Tool types the provider runs itself and that ``web`` unlocks.
-_PROVIDER_WEB = ("web_search", "web_fetch")
+# Tool types the provider runs itself and that ``web`` unlocks. Search only:
+# pages open through Möbius (``open_page``), where each one is recorded.
+_PROVIDER_WEB = ("web_search",)
 # Tool types the agent runs itself, inside the room. Anything else is dropped.
 _AGENT_RUN = frozenset(
   {"", "custom", "function", "namespace", "local_shell", "apply_patch", "shell"}
