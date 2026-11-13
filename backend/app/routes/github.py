@@ -1282,6 +1282,10 @@ class AutopilotToggleBody(BaseModel):
   # request cannot point the grant at another pull request.
   repo: str | None = Field(default=None, max_length=256)
   number: int | None = Field(default=None, ge=1)
+  # The version (head) of that pull request the owner is confirming. A first
+  # grant needs it: the confirmation covers exactly this head, and the route
+  # refuses to start if the pull request is at another one by then.
+  head_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
 class ContributionStackLandRequest(BaseModel):
@@ -6699,9 +6703,9 @@ async def autopilot_follow_change(
   """The exact following change a toggle asks the owner to confirm.
 
   Read the same way by the owner's sheet and by the route that spends the
-  confirmation. ``grant`` holds the fields of a new grant, at the head the
-  pull request has on GitHub now, and is None for a mode change, whose target
-  is the existing grant's own.
+  confirmation. ``grant`` holds the fields of a new grant, at the head the owner
+  confirmed (which GitHub must still have), and is None for a mode change,
+  whose target is the existing grant's own.
   """
   from app import contribution_autopilot as autopilot
 
@@ -6724,21 +6728,27 @@ async def autopilot_follow_change(
       detail="This contribution does not belong to the pull request named.",
     )
   if grant is not None:
-    grant = await _autopilot_grant_at_live_head(grant)
+    grant = await _autopilot_grant_at_confirmed_head(grant, body.head_sha)
   return {
     "grant": grant, "repo": repo, "number": number,
     "branch": target["target_branch"], "push_mode": body.push_mode or "auto",
   }
 
 
-async def _autopilot_grant_at_live_head(grant: dict) -> dict:
-  """The new grant, at the head GitHub has now instead of the ledger's.
+async def _autopilot_grant_at_confirmed_head(grant: dict, confirmed: str | None) -> dict:
+  """The new grant, at the head the owner confirmed, once GitHub still has it.
 
-  The branch can move after Send, outside Möbius, and a grant at the ledger's
-  head would then refuse every follow-up as outside the grant. The owner's
-  sheet shows this head, and ``/update`` still accepts only a head this grant
-  or the round itself pushed.
+  The branch can move after Send, outside Möbius, so the ledger's head is not
+  the version to grant. The owner confirms a head, and the request that spends
+  the confirmation carries it, so a branch that moved again since is refused
+  here rather than granted unseen. ``/update`` still accepts only a head this
+  grant or the round itself pushed.
   """
+  if not confirmed:
+    raise HTTPException(
+      status_code=409,
+      detail="This request does not name the version of the pull request to follow.",
+    )
   live = await asyncio.to_thread(
     _autopilot_live_target,
     grant["target_repo"], grant["target_pr_number"],
@@ -6749,7 +6759,15 @@ async def _autopilot_grant_at_live_head(grant: dict) -> dict:
       status_code=409,
       detail=f"Following was not switched on: {live['error']}",
     )
-  return {**grant, "head_sha": live["head_sha"]}
+  if live["head_sha"] != confirmed:
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "The pull request moved to a new version after you looked at it, so "
+        "following was not switched on. Refresh it and try again."
+      ),
+    )
+  return {**grant, "head_sha": confirmed}
 
 
 def _autopilot_apply_follow_change(

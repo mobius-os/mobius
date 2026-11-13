@@ -25,7 +25,7 @@ _github_limiter.enabled = False
 HEAD = "a" * 40
 NEXT_HEAD = "c" * 40
 MOVED_HEAD = "d" * 40  # where the branch is after someone pushed to it outside Möbius
-FOLLOW = {"enabled": True, "repo": NAME, "number": NUMBER}
+FOLLOW = {"enabled": True, "repo": NAME, "number": NUMBER, "head_sha": HEAD}  # the version the owner confirmed
 
 
 @pytest.fixture(autouse=True)
@@ -394,9 +394,10 @@ def test_a_branch_that_moved_after_send_is_followed_from_where_it_is_now(desk, d
   # The branch was updated outside Möbius after Send: the ledger still holds the sent head.
   _write(desk.app_id, _sent_record())
   live_pull["head_sha"] = MOVED_HEAD
-  facts = {fact["label"]: fact["value"] for fact in _preview(desk, FOLLOW).json()["facts"]}
+  moved = {**FOLLOW, "head_sha": MOVED_HEAD}
+  facts = {fact["label"]: fact["value"] for fact in _preview(desk, moved).json()["facts"]}
   assert facts["Version"].startswith(MOVED_HEAD[:7])
-  assert _toggle(desk, FOLLOW).status_code == 200
+  assert _toggle(desk, moved).status_code == 200
   assert _row(db, desk.app_id).granted_head_sha == MOVED_HEAD
 
 
@@ -433,7 +434,7 @@ def _follow_up_update(desk, db, monkeypatch):
 def test_a_follow_up_can_push_to_a_branch_that_moved_before_following(desk, db, live_pull, monkeypatch):
   _write(desk.app_id, _sent_record())
   live_pull["head_sha"] = MOVED_HEAD
-  assert _toggle(desk, FOLLOW).status_code == 200
+  assert _toggle(desk, {**FOLLOW, "head_sha": MOVED_HEAD}).status_code == 200
   response, pushes = _follow_up_update(desk, db, monkeypatch)
   assert response.status_code == 200, response.text
   assert pushes == [MOVED_HEAD]  # the push replaces exactly the head the owner granted
@@ -455,7 +456,36 @@ def test_a_branch_that_moves_after_the_owner_looked_is_not_granted(desk, db, liv
   sheet = desk.client.post("/api/owner-grants/preview", json=ask, headers=desk.owner).json()
   live_pull["head_sha"] = MOVED_HEAD
   moved = desk.client.post("/api/owner-grants", json={**ask, "digest": sheet["digest"]}, headers=desk.owner)
-  assert moved.status_code == 409 and moved.json()["detail"]["code"] == "owner_grant_changed"
+  assert moved.status_code == 409 and "moved to a new version" in moved.json()["detail"]
+  assert db.query(models.OwnerGrant).count() == 0
+  assert _row(db, desk.app_id) is None
+
+
+def test_a_branch_that_moves_between_the_confirmation_and_the_request_is_not_granted(desk, db, live_pull, monkeypatch):
+  # Preview and mint at HEAD, then an outside push, then the app's own Follow request.
+  _write(desk.app_id, _sent_record())
+  declare_owner_confirm(db, "contribute")
+  assert confirm(desk, "follow", FOLLOW, record_id="rec1").status_code == 200
+  live_pull["head_sha"] = MOVED_HEAD
+  refused = _toggle(desk, FOLLOW, _app_headers(db))
+  assert refused.status_code == 409 and "moved to a new version" in refused.json()["detail"]
+  assert _row(db, desk.app_id) is None
+  # The confirmation covered one head: asking for the moved head needs a new one.
+  assert _toggle(desk, {**FOLLOW, "head_sha": MOVED_HEAD}, _app_headers(db)).status_code == 403
+  # Confirmed again at the head it is at now, it is granted exactly that head.
+  assert confirm(desk, "follow", {**FOLLOW, "head_sha": MOVED_HEAD}, record_id="rec1").status_code == 200
+  assert _toggle(desk, {**FOLLOW, "head_sha": MOVED_HEAD}, _app_headers(db)).status_code == 200
+  assert _row(db, desk.app_id).granted_head_sha == MOVED_HEAD
+  response, pushes = _follow_up_update(desk, db, monkeypatch)
+  assert response.status_code == 200 and pushes == [MOVED_HEAD]
+
+
+@pytest.mark.parametrize("head", [None, "A" * 40, "abc"])
+def test_a_first_grant_must_name_the_version_it_covers(desk, db, head):
+  _write(desk.app_id, _sent_record())
+  body = {key: value for key, value in FOLLOW.items() if key != "head_sha"}
+  refused = _toggle(desk, body if head is None else {**body, "head_sha": head})
+  assert refused.status_code == (409 if head is None else 422), refused.text
   assert _row(db, desk.app_id) is None
 
 
