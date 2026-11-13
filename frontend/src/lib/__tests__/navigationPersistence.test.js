@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolveInitialNav } from '../resolveInitialNav.js'
+import { settingsDeepLink } from '../settingsSections.js'
 
 import {
   consumeReturnView,
@@ -57,6 +58,25 @@ test('a /shell/?settings deep link opens Settings at a known section only', () =
     { view: 'settings' })
   assert.equal(parseShellDeepLink({ pathname: '/shell/', search: '?chat=c&settings=github' }).view,
     'chat')
+})
+
+test('a standalone app\'s Settings request opens that section, not the plain workspace', () => {
+  // A standalone page answers moebius:open-settings by loading this link; the
+  // workspace must read back the section the in-shell request would focus.
+  const opened = section => {
+    const href = settingsDeepLink(section)
+    return { href, target: parseShellDeepLink(new URL(href, 'https://mobius.test')) }
+  }
+  assert.deepEqual(opened('mobius-account'), {
+    href: '/shell/?settings=mobius-account',
+    target: { view: 'settings', section: 'mobius-account' },
+  })
+  for (const unknown of ['retired-section', undefined]) {
+    assert.deepEqual(opened(unknown), {
+      href: '/shell/?settings=ai-providers',
+      target: { view: 'settings', section: 'ai-providers' },
+    }, 'an unknown section opens AI providers, as the in-shell request does')
+  }
 })
 
 test('legacy path deep links translate /app, /chat, and /settings', () => {

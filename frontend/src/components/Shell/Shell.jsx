@@ -37,7 +37,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { subscribeShellLaunchTargets } from '../../lib/shellLaunchTargets.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
-import { settingsSectionOrNull } from '../../lib/settingsSections.js'
+import { requestedSettingsSection, settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -3072,7 +3072,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         await openAppWithIntent(request.appId, request.intent)
         return
       }
-      openSettingsSection(settingsSectionOrNull(request.section) ?? 'ai-providers')
+      openSettingsSection(requestedSettingsSection(request.section))
     })()
   }, [openAppWithIntent, openSettingsSection, queryClient, refreshChats, requestComposer])
 
