@@ -8,53 +8,23 @@ import {
   projectPendingDrawerPins,
 } from '../../Drawer/drawerInformationArchitecture.js'
 
-test('a never-opened project joins Recents at its creation, not its file edits', () => {
-  // An agent-created project the owner never opened must still be findable
-  // without pinning it; edits in its tree must not move it.
-  const unopened = {
-    id: 'p-unopened',
-    name: 'Agent-made project',
-    created_at: '2026-08-26T08:00:00',
-    updated_at: '2026-08-26T11:00:00',
-  }
+test('projects never join Recents; they open from the Projects screen', () => {
+  const unopened = { id: 'p-unopened', name: 'Unopened', updated_at: '2026-08-26T08:00:00' }
   const opened = {
     id: 'p-opened',
     name: 'Opened',
-    created_at: '2026-08-20T08:00:00',
     updated_at: '2026-08-25T08:00:00',
     last_opened_at: '2026-08-26T09:00:00',
   }
-  const chat = { id: 'chat', has_messages: true, activity_at: '2026-08-26T10:00:00Z' }
 
-  const result = buildDrawerSections([chat], [], [unopened, opened])
+  const result = buildDrawerSections([], [], [unopened, opened])
 
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'chat:chat',
-    'project:p-opened',
-    'project:p-unopened',
-  ])
+  assert.deepEqual(result.recents, [])
 })
 
-test('opening a project ranks it by that open rather than its creation', () => {
+test('built artifacts never join Recents; they live inside their project', () => {
   const project = {
-    id: 'p-1',
-    created_at: '2026-08-20T08:00:00',
-    last_opened_at: '2026-08-26T12:00:00+00:00',
-  }
-  const chat = { id: 'chat', has_messages: true, activity_at: '2026-08-26T10:00:00Z' }
-
-  const result = buildDrawerSections([chat], [], [project])
-
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'project:p-1',
-    'chat:chat',
-  ])
-})
-
-test('built artifacts join Recents only after they have been opened', () => {
-  const project = {
-    id: 'project-1', name: 'Album',
-    created_at: '2026-08-20T08:00:00', updated_at: '2026-08-26T08:00:00',
+    id: 'project-1', name: 'Album', updated_at: '2026-08-26T08:00:00',
     artifacts: [
       { id: 'unopened', name: 'Unopened', status: 'ok', has_output: true },
       {
@@ -66,13 +36,10 @@ test('built artifacts join Recents only after they have been opened', () => {
 
   const result = buildDrawerSections([], [], [project])
 
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'artifact:project-1:opened',
-    'project:project-1',
-  ])
+  assert.deepEqual(result.recents, [])
 })
 
-test('a pinned project shares the combined pinned order and leaves Recents', () => {
+test('a pinned project stays on the Projects screen, out of drawer Pinned and Recents', () => {
   const project = {
     id: 'pinned-project',
     name: 'Pinned project',
@@ -89,7 +56,6 @@ test('a pinned project shares the combined pinned order and leaves Recents', () 
 
   assert.deepEqual(result.pinned.map(row => `${row.kind}:${row.item.id}`), [
     'app:7',
-    'project:pinned-project',
   ])
   assert.equal(result.recents.some(row => row.item.id === project.id), false)
 })
@@ -143,9 +109,7 @@ test('a newer pending unpin wins over a stale pinned list snapshot', () => {
   )
 
   assert.equal(result.pinned.some(row => row.item.id === staleApp.id), false)
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'app:7',
-  ])
+  assert.deepEqual(result.recentApps.map(app => app.id), [7])
 })
 
 test('a pending pin appends even when the browser clock is behind', () => {
@@ -197,6 +161,23 @@ test('archived chats leave Pinned and Recents for Archived, newest archive first
   assert.deepEqual(result.pinned, [])
   assert.deepEqual(result.recents.map(row => row.item.id), ['active'])
   assert.deepEqual(result.archived.map(row => row.item.id), ['newer', 'older', 'stale-pin'])
+})
+
+test('project chats stay out of Recents but keep an explicit pin', () => {
+  const project = { id: 'p1', name: 'Thesis' }
+  const plain = { id: 'plain', has_messages: true, activity_at: '2026-11-05T09:00:00' }
+  const inProject = {
+    id: 'in-project', has_messages: true, activity_at: '2026-11-05T10:00:00', project,
+  }
+  const pinnedInProject = {
+    id: 'pinned-in-project', has_messages: true, project,
+    pinned_at: '2026-11-05T08:00:00',
+  }
+
+  const result = buildDrawerSections([plain, inProject, pinnedInProject], [], [])
+
+  assert.deepEqual(result.recents.map(row => row.item.id), ['plain'])
+  assert.deepEqual(result.pinned.map(row => row.item.id), ['pinned-in-project'])
 })
 
 test('an empty archive is an empty Archived section', () => {

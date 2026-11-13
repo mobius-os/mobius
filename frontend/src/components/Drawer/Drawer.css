@@ -284,39 +284,9 @@
   font-weight: 500;
 }
 
-.drawer__projects-nav {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px;
-  align-items: center;
-  gap: 0;
-}
-
 .drawer__item--projects {
   min-width: 0;
   font-weight: 500;
-}
-
-.drawer__projects-add {
-  width: 42px;
-}
-
-.drawer__projects-add .project-create-menu__trigger {
-  width: 40px;
-  height: 40px;
-  color: var(--muted);
-  background: transparent;
-}
-
-.drawer__projects-add .project-create-menu__trigger:hover,
-.drawer__projects-add .project-create-menu__trigger:focus-visible,
-.drawer__projects-add .project-create-menu__trigger[aria-expanded="true"] {
-  color: var(--text);
-  background: var(--surface);
-}
-
-.drawer__projects-add .project-create-menu__popover {
-  right: 0;
-  width: min(260px, calc(100vw - 24px));
 }
 
 .drawer__now-playing {
@@ -1125,3 +1095,208 @@
   justify-content: center;
   color: var(--muted);
 }
+
+/* Apps card under Pinned: one row of app icons that expands to all of them.
+   A plain sidebar section: no box, heading aligned with Pinned. */
+.drawer__apps-card {
+  position: relative;
+  margin: 12px 0 4px;
+  padding: 0;
+}
+
+.drawer__apps-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  margin-bottom: 4px;
+}
+
+.drawer__apps-card-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.drawer__apps-card-count {
+  margin-left: 6px;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.drawer__apps-card-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__apps-card-chevron { transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1); }
+.drawer__apps-card-chevron--open { transform: rotate(180deg); }
+
+.drawer__apps-card-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 48px);
+  grid-auto-rows: 48px;
+  /* Fixed grid: same spacing at every sidebar width. */
+  gap: 10px;
+  justify-content: start;
+  padding: 0 4px;
+}
+
+/* Collapsed: one sideways-scrolling row of every app. */
+.drawer__apps-card-grid--row {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  /* Sideways finger pans scroll this row natively. */
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  --apps-fade: 40px;
+}
+.drawer__apps-card-grid--row::-webkit-scrollbar { display: none; }
+.drawer__apps-card-grid--row > li {
+  flex: 0 0 auto;
+}
+.drawer__apps-card-grid--fade-end {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--apps-fade)), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--apps-fade)), transparent);
+}
+.drawer__apps-card-grid--fade-start {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - var(--apps-fade)), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - var(--apps-fade)), transparent);
+}
+.drawer__apps-card-grid--fade-start.drawer__apps-card-grid--fade-end {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--apps-fade), #000 calc(100% - var(--apps-fade)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--apps-fade), #000 calc(100% - var(--apps-fade)), transparent);
+}
+
+.drawer__apps-card-tile {
+  position: relative;
+  user-select: none;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 0.12s;
+}
+
+.drawer__apps-card-tile--active { background: var(--surface); }
+
+/* The image itself never receives the press, so a long hold opens the app
+   menu rather than the OS image callout. */
+.drawer__apps-card-tile .app-icon { pointer-events: none; }
+
+.drawer__apps-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 15px;
+}
+
+.drawer__apps-card-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  box-sizing: content-box;
+}
+.drawer__apps-card-dot--needs,
+.drawer__apps-card-dot--new { background: var(--accent); }
+.drawer__apps-card-dot--building { left: 2px; right: auto; background: var(--green, #3fb950); }
+
+/* App name label above the hovered / keyboard-focused icon. It lives in the
+   section, outside the scrolling row, so the row is never clipped around it
+   and every pixel of the row (gaps included) still scrolls. */
+.drawer__apps-tip {
+  position: absolute;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__apps-card-tile:hover { background: var(--surface); }
+  .drawer__apps-card-toggle:hover { color: var(--text); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer__apps-card-chevron { transition: none; }
+}
+
+.drawer__apps-card-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 8px 10px;
+}
+.drawer__apps-card-rename .drawer__rename-input { flex: 1; min-width: 0; }
+
+/* The Apps heading opens the full Apps screen. */
+.drawer__apps-card-open {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.drawer__apps-card-open--active { color: var(--accent-text, var(--accent)); }
+@media (hover: hover) and (pointer: fine) {
+  .drawer__apps-card-open:hover { text-decoration: underline; text-underline-offset: 3px; }
+}
+
+/* Section counts (Pinned) match the Apps heading's count. */
+.drawer__section-count {
+  margin-left: 6px;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Small leading icon on each sidebar section heading (Pinned, Apps, Recents, Archived). */
+.drawer__section-icon {
+  flex: none;
+  align-self: center;
+  margin-right: 6px;
+  color: var(--muted);
+}
+.drawer__tab .drawer__section-icon { margin-right: 0; }

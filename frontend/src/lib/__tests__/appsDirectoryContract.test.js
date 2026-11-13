@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const src = resolve(here, '../..')
 const drawer = readFileSync(resolve(src, 'components/Drawer/Drawer.jsx'), 'utf8')
+const appsStrip = readFileSync(resolve(src, 'components/Drawer/DrawerAppsStrip.jsx'), 'utf8')
 const directory = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.jsx'), 'utf8')
 const css = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.css'), 'utf8')
 const drawerCss = readFileSync(resolve(src, 'components/Drawer/Drawer.css'), 'utf8')
@@ -22,8 +23,9 @@ const tabModel = readFileSync(resolve(src, 'components/Shell/tabModel.js'), 'utf
 const navigationIcons = readFileSync(resolve(src, 'components/navigationIcons.js'), 'utf8')
 
 test('Apps is a single drawer destination and the old full app list is gone', () => {
-  assert.match(drawer, /className=\{`drawer__item drawer__item--apps/)
-  assert.match(drawer, /<span className="drawer__item-text">Apps<\/span>/)
+  // The Apps section heading is the sidebar's one entry to the Apps screen.
+  assert.match(drawer, /<DrawerAppsStrip[\s\S]*?onOpenAll=\{openApps\}/)
+  assert.match(appsStrip, /className=\{`drawer__apps-card-open[\s\S]*?onClick=\{onOpenAll\}/)
   assert.doesNotMatch(drawer, /drawer__group--apps/)
   assert.match(drawer, /pinnedItems\.map\(\(\{ kind, item \}\)/)
 })

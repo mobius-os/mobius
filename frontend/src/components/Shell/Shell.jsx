@@ -2056,6 +2056,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   async function setProjectColor(project, color) {
     return patchProject(project, { color })
   }
+  async function setProjectPinned(project, pinned) {
+    const updated = await api.projects.setPinned(project.id, pinned)
+    const pinnedAt = updated?.pinned_at ?? null
+    if (pinned && !pinnedAt) throw new Error('Could not pin this project.')
+    projectsRef.current = projectsRef.current.map(row => (
+      String(row.id) === String(project.id) ? { ...row, pinned_at: pinnedAt } : row
+    ))
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    return updated
+  }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
   const enterProjectRef = useRef(enterProject)
@@ -5057,7 +5067,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeProjectId={activeProjectId}
         activeProjectChatProjectId={activeProjectChatProjectId}
         activeArtifactRef={activeArtifactRef}
-        projectTemplates={projectTemplates}
         onProject={enterProject}
         onProjectRename={(project, name) => {
           if (typeof name === 'string') return renameProject(project, name)
@@ -5074,9 +5083,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           if (project) openArtifact(project, parsed.artifactId)
         }}
         onProjectsOpen={() => navTo('projects')}
-        onProjectCreate={createProjectFromTemplate}
-        onProjectImportGithub={importProjectFromGithub}
-        onProjectImportSource={importProjectSource}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -5541,6 +5547,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onImportSource={importProjectSource}
                     onRename={renameProject}
                     onColor={setProjectColor}
+                    onPin={setProjectPinned}
                     onDelete={deleteProject}
                   />
                 </LazySurface>
