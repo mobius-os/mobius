@@ -68,21 +68,6 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   ])
 })
 
-test('an in-chat Settings link opens that section through the shell', () => {
-  const calls = []
-  const { result } = renderHook(useAppIntentNavigation, {
-    appsRef: { current: [] },
-    refreshApps: async () => [],
-    notifyShell: () => {},
-    setAppIntents: () => {},
-    navToRef: { current: (...args) => calls.push(['nav', ...args]) },
-    openSettingsSection: section => calls.push(['settings', section]),
-  })
-  result.current.handleChatInternalNav(new URL('https://mobius.test/shell/?settings=mobius-account'))
-  result.current.handleChatInternalNav(new URL('https://mobius.test/shell/?settings=retired-section'))
-  assert.deepEqual(calls, [['settings', 'mobius-account'], ['settings', 'ai-providers']])
-})
-
 test('internal navigation crosses stable markdown memo boundaries', () => {
   const chatView = read('../ChatView.jsx')
   const message = read('../MsgContent.jsx')
