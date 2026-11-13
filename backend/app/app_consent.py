@@ -122,6 +122,42 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
   }
 
 
+def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
+  """The one "AI agents" row: the app's role, its own reason and agent tools.
+
+  An Owner role, and an app that declares no role but runs agents, keep full
+  access and use the critical ``agent_start`` row. A confined role's scope
+  names what it reaches, so an update asks again only when it adds reach
+  (Viewer to Editor, a new tool) and never when it narrows.
+  """
+  from app.agent_roles import TOOLS, role_from_contract
+
+  role = role_from_contract({"agent": agent})
+  if role is None and not agent.get("embeds_agent"):
+    return None
+  if role is None or not role.confined:
+    text = role.why if role is not None else (
+      "Can open agent chats on its own. Commands in those chats run on your "
+      "Möbius without asking you first."
+    )
+    row = _row("agent_start", "Run AI agents", text, level="Owner")
+    return {**row, "group": "agent", "tools": []}
+  data = role.spec.data
+  reach = {"read": ["data:read"], "write": ["data:read", "data:write"], None: []}[data]
+  return {
+    **_row("agent_role", "Run AI agents", role.why, level=role.spec.label,
+           scope=[*reach, *(f"tool:{name}" for name in role.tools)]),
+    "group": "agent",
+    # Web beside private data is the one combination that lets app data reach
+    # the internet; the popup marks it.
+    "tools": [
+      {"id": name, "title": TOOLS[name].label, "text": TOOLS[name].text,
+       "warning": bool(TOOLS[name].provider_web and data)}
+      for name in role.tools
+    ],
+  }
+
+
 def rows_from_contract(
   contract: dict[str, Any] | None,
   *,
@@ -193,12 +229,9 @@ def rows_from_contract(
       rank=2 if scheduled else 1,
       scope=["initialize_on_install"] if initialize else None,
     ))
-  if agent.get("embeds_agent"):
-    rows.append(_row(
-      "agent_start", "Start agent chats on its own",
-      "Can open agent chats on its own. Commands in those chats run on your "
-      "Möbius without asking you first.",
-    ))
+  agent_row = _agent_row(agent)
+  if agent_row is not None:
+    rows.append(agent_row)
   if agent.get("system_prompt"):
     rows.append(_row(
       "agent_prompt", "Add instructions to your agent chats",
@@ -548,7 +581,9 @@ def build_request(db: Session, app: models.App) -> dict[str, Any]:
     "app_description": app.description,
     "digest": request_digest(current_rows(app)),
     "is_update": accepted_rows(app) is not None,
-    "rows": [{**row, "note": _note(row, held)} for row in needed_rows(app)],
+    # The AI agents block speaks only in the app's own reason.
+    "rows": [{**row, "note": None if row.get("group") else _note(row, held)}
+             for row in needed_rows(app)],
     "baseline": BASELINE,
   }
 

@@ -88,6 +88,11 @@ DELEGATED_CONTROL_TOOL_NAMES = (
   *APP_BUILD_TOOL_NAMES,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
+# A confined app agent gets exactly the control tools its declared agent tools
+# name (agent_roles.TOOLS), through this setting; it is the menu, while the
+# agent key's allow-list is the enforcement.
+APP_AGENT_TOOLS_ENV = "MOBIUS_AGENT_TOOLS"
+OPEN_PAGE_TOOL_NAME = "open_page"
 # Bookkeeping whose successful call has nothing for the owner to act on. The
 # chat folds it into the surrounding activity (agent_activity.is_routine_tool);
 # apps declare the same for their own tools with `tools[].routine`.
@@ -106,6 +111,7 @@ CONTROL_ENV_VARS = (
   "MOBIUS_AGENT_MODEL",
   "MOBIUS_AGENT_EFFORT",
   "MOBIUS_DELEGATION_ID",
+  APP_AGENT_TOOLS_ENV,
   # The screenshot tool captures at the owner's viewport in this chat's
   # browser session. agent-browser relaunches that session's browser on a
   # blank page when a command's launch identity differs, so the capture must
@@ -130,9 +136,12 @@ def _control_script() -> str:
 
 def expected_control_tool_names(
   *, top_level: bool, coordination_enabled: bool = True,
+  app_agent_tools: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
   """Tools available at this authority level."""
-  if not top_level:
+  if app_agent_tools is not None:
+    names = app_agent_tools
+  elif not top_level:
     names = DELEGATED_CONTROL_TOOL_NAMES
   elif coordination_enabled:
     names = CONTROL_TOOL_NAMES
@@ -163,6 +172,7 @@ def codex_turn_mcp_config(
   top_level: bool = True,
   coordination_enabled: bool = True,
   app_tool_names: tuple[str, ...] = (),
+  app_agent_tools: tuple[str, ...] | None = None,
 ) -> dict[str, Any] | None:
   """Merge local control tools with one detached Codex connector snapshot.
 
@@ -180,6 +190,7 @@ def codex_turn_mcp_config(
     tool_names = expected_control_tool_names(
       top_level=top_level,
       coordination_enabled=coordination_enabled,
+      app_agent_tools=app_agent_tools,
     )
     servers[CONTROL_SERVER_NAME] = {
       "command": sys.executable,

@@ -706,6 +706,11 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
   if perms.get("check_credits_charges"):
     contract["data"]["check_credits_charges"] = sorted(perms["check_credits_charges"])
+  if manifest.get("agent_role") is not None:
+    # Present only when declared, so the contracts (and digests) of apps that
+    # declare no role are unchanged. See app.agent_roles.
+    from app.agent_roles import normalize_declaration
+    contract["agent"]["role"] = normalize_declaration(manifest["agent_role"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -807,6 +812,7 @@ def contract_from_app_state(
   service: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
   tools: list[dict[str, Any]] | None = None,
   model_provider: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
+  agent_role: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
@@ -901,6 +907,14 @@ def contract_from_app_state(
     model_provider = accepted.get("model_provider") if isinstance(accepted, dict) else None
   if isinstance(model_provider, dict):
     manifest["model_provider"] = model_provider
+  if agent_role is _PRESERVE_ACCEPTED:
+    accepted = getattr(app, "capability_contract", None)
+    accepted_agent = accepted.get("agent") if isinstance(accepted, dict) else None
+    agent_role = (
+      accepted_agent.get("role") if isinstance(accepted_agent, dict) else None
+    )
+  if isinstance(agent_role, dict):
+    manifest["agent_role"] = agent_role
   contract = contract_from_manifest(manifest)
   if accepted_transfer is not None:
     for key in _TRANSFER_LIMIT_FIELDS:

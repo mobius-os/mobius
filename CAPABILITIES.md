@@ -782,6 +782,43 @@ stages the app. Source: `backend/app/app_consent.py`.
   grants still apply before the owner answers; local and agent-built apps are
   not gated; there is no Settings screen for revoking.
 
+## App agent roles
+
+An app's `agent_role` decides what every agent it starts can reach (manifest
+shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
+`backend/app/agent_gateway.py` and `backend/scripts/mobius_fence.py`.
+
+- **Roles.** `viewer` reads the app's files and data, `editor` reads and changes
+  them, `explorer` starts in an empty folder, and `owner` has full access and
+  declares no tools. An app that declares no role keeps full access.
+- **The room.** A Viewer, Editor or Explorer agent runs whole in a room built
+  before it starts: Landlock walls (system folders read-only, the app's storage
+  directory read-only or writable by role with ordinary files only, nothing
+  else), a seccomp connect guard that admits only the Möbius API address, and
+  `no_new_privs`. A host that cannot build rooms (Linux 6.7 or later with
+  libseccomp) does not start the agent.
+- **The agent key.** The run's bearer is the app's own credential bound to the
+  live run (`auth.create_app_agent_token`), carrying its role, tools and
+  provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
+  app's own storage by role, and the routes of declared tools; route checks
+  still apply after it.
+- **The Agent Gateway.** `/api/agent-gateway/v1/...` serves only the run
+  provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
+  tools the app did not declare and hosted MCP servers, and adds the owner's
+  login outside the room.
+- **Tools.** `web` is provider-hosted search through the gateway plus
+  `open_page` through the guarded `/api/proxy`; each opened page is recorded as
+  an `app_agent_web` activity. `notify` is `notify_owner`. A new tool is one
+  `agent_roles.TOOLS` entry naming its control tools, key routes and gateway
+  types.
+- **Consent.** One `agent_role` row whose scope names what the role reaches
+  (`data:read`, `data:write`, `tool:<name>`), so an update asks again only when
+  it adds reach. Owner and undeclared agent apps use the critical `agent_start`
+  row.
+- **Not yet covered:** app jobs and services still run unconfined; searches
+  that run at Anthropic are not recorded one by one; owner questions,
+  screenshots, helpers and other apps' tools are not offered to confined agents.
+
 ## Stable error codes
 
 Providers may use DOM-style names for familiar browser handling, but app logic

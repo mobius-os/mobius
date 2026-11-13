@@ -1426,6 +1426,43 @@ useEffect(() => {
 - Keep the chat as the interaction surface; it gives the user a persistent
   transcript, normal agent tooling, and follow-up questions in one place.
 
+### What the app's agents can reach — `agent_role`
+
+Declare one role for every agent the app starts. The owner sees it in the
+app's permission popup, and Möbius enforces it outside the agent:
+
+```json
+"agent_role": {
+  "role": "editor",
+  "tools": ["web"],
+  "why": "Builds and edits the sites you make here."
+}
+```
+
+| Role | The app's files and data | Use it for |
+|---|---|---|
+| `viewer` | read | summaries, insights, answers |
+| `editor` | read and change | building and editing the app's own work |
+| `explorer` | none (an empty folder) | research that needs no private data |
+| `owner` | everything the owner can do | trusted apps that manage Möbius |
+
+- `tools` are what the agent may use beyond its folder: `web` (search the web
+  and open public pages) and `notify` (push notifications). `web` may be
+  declared for any role; beside Viewer or Editor data the popup tells the
+  owner that app data may reach the web.
+- `why` is the app's own reason, 1–80 characters, shown as the role's only
+  description.
+- Viewer, Editor and Explorer agents run in a room the kernel locks: their
+  folder is the app's storage directory (`APP_STORAGE_DIR`), the app's stored
+  data is reachable with `$AGENT_TOKEN` at `$API_BASE_URL/api/storage/apps/<id>/`,
+  and everything else (other apps, the owner's accounts, the internet) is
+  refused with a short reason. They run on Claude, Codex or Möbius models.
+- `owner` declares no tools: its agents keep full access, as do apps that
+  declare no role. Prefer the narrowest role that does the job; Owner is shown
+  to the owner as a critical permission.
+- An update that adds reach (Viewer to Editor, a new tool) asks the owner
+  again; one that narrows asks nothing.
+
 ---
 
 ## Pausing work while the app is hidden

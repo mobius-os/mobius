@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
+from app.agent_roles import AgentKey
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -121,6 +122,9 @@ class Principal:
   app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
+  # Set for the key of one confined app agent run: the role, tools and
+  # provider its room was built for (agent_roles.AgentKey).
+  app_agent: AgentKey | None = None
 
   @property
   def browser_grant_id(self) -> str | None:
@@ -766,6 +770,7 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
     app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
+    app_agent=AgentKey.from_claims(payload) if app_id is not None else None,
   )
 
 

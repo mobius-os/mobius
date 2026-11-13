@@ -801,6 +801,12 @@ def validate_manifest_contract(manifest) -> None:
   for field in ("offline_capable", "embeds_agent", "shell_shortcuts", "owner_confirm"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
+  if manifest.get("agent_role") is not None:
+    from app.agent_roles import normalize_declaration
+    try:
+      normalize_declaration(manifest["agent_role"])
+    except ValueError as exc:
+      _fail(str(exc))
 
   permissions = manifest.get("permissions", {})
   if not isinstance(permissions, Mapping):
