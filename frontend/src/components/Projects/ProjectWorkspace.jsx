@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
@@ -35,6 +35,7 @@ export default function ProjectWorkspace({
   startRenaming = false,
   onRename,
   onRenameEnd,
+  onBack,
 }) {
   const isAppProject = !!(linkedApp || linkedProjectAppId(project))
   const [error, setError] = useState('')
@@ -176,6 +177,11 @@ export default function ProjectWorkspace({
     <section className="project-workspace" aria-label={`${project.name} project`}>
       <div className="project-workspace__bar">
         <div className="project-workspace__identity">
+          {onBack && (
+            <button type="button" className="project-workspace__back" aria-label="Back to Projects" title="Back to Projects" onClick={onBack}>
+              <ArrowLeft width={18} height={18} aria-hidden="true" />
+            </button>
+          )}
           <ProjectIdentityIcon project={project} size={32} />
           {renaming ? (
             <form className="project-workspace__rename" onSubmit={event => { event.preventDefault(); renameInputRef.current?.blur() }}>

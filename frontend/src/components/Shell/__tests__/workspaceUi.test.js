@@ -1704,3 +1704,16 @@ test('Undo reverses a committed archive without creating another Undo', async ()
   assert.equal(h.row.archived_at, null)
   assert.equal(h.notices.length, 1)
 })
+
+// A project on screen hides the desktop navigation without touching the saved
+// sidebar preference; its Back control returns to the Projects list.
+test('a project on screen takes the whole desktop workspace until Back', () => {
+  const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+  assert.match(shell, /const projectFocus = persistentDrawer && contentVisibility\.projectVisible/)
+  assert.match(shell, /\$\{projectFocus \? ' shell--project-focus' : desktopSidebarReserved \? ' shell--drawer-docked' : ''\}/)
+  assert.doesNotMatch(shell, /projectFocus[^\n]*setDesktopSidebarOpen/, 'the saved preference is never rewritten')
+  assert.match(shell, /function backToProjects\(\) \{\s*navTo\('projects'\)/)
+  assert.match(shell, /onBack=\{backToProjects\}/)
+  assert.match(shellCss, /\.shell--project-focus::before,\s*\.shell--project-focus \.shell__bar,\s*\.shell--project-focus #navigation-drawer \{\s*display: none;/)
+  assert.match(shellCss, /\.shell--project-focus > \.shell__content \{\s*margin-left: 0;/)
+})

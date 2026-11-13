@@ -16,6 +16,9 @@
 // clearing it re-derives the ordinary multi-pane view with no remount.
 
 import * as paneModel from './paneModel.js'
+import { projectTab, tabKey } from './tabModel.js'
+
+const PROJECT_TAB_PREFIX = tabKey(projectTab(''))
 
 // The presentation key for a null single-screen slot (round 4 item 3). The persisted
 // slot stays `null` — adding a `{kind:'new-chat'}` variant would only invent migration
@@ -257,6 +260,15 @@ export function deriveContentVisibility({
   // paint; the renderer additionally gates each NON-focused single-mode chat pane
   // off via the `single` flag, the chat analogue of visibleAppIds.
   const chatPanesVisible = !settingsOverlay && !immersive
+  // A project on screen anywhere (full-bleed, or the active tab of any tiled
+  // pane, such as a project beside its own chat) owns the workspace: the shell
+  // hides its desktop navigation for as long as that lasts.
+  const paintedKeys = chromeActive
+    ? projection.visibleLeaves.map(paneId => workspace.panes[paneId]?.activeTabKey)
+    : [fullBleedKey]
+  const projectVisible = paintedKeys.some(key => (
+    typeof key === 'string' && key.startsWith(PROJECT_TAB_PREFIX)
+  ))
   return {
     // `settingsOverlay` is the EFFECTIVE-mode-gated takeover flag (finding F3): it
     // is the one honest "is the Settings takeover painting NOW" signal — false in
@@ -265,6 +277,6 @@ export function deriveContentVisibility({
     // world paints with the takeover suspended exactly as the flags above assume.
     multiPane, single, focusedActiveKey, chromeActive, fullBleedKey,
     visibleAppIds, visibleChatIds,
-    chatPanesVisible, settingsOverlay,
+    chatPanesVisible, settingsOverlay, projectVisible,
   }
 }

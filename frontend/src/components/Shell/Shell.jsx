@@ -576,6 +576,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     multiPane, single, focusedActiveKey, fullBleedKey,
     visibleAppIds, visibleChatIds,
   } = contentVisibility
+  // A project on screen takes the whole desktop workspace: the sidebar, its
+  // rail and header step aside (shell--project-focus) without changing the
+  // saved sidebar preference. Leaving the project brings them back.
+  const projectFocus = persistentDrawer && contentVisibility.projectVisible
   // Cached app frames stay mounted, and browsers keep keyboard focus in an
   // outgoing iframe even after its shell wrapper becomes hidden. Release only
   // that stale cross-document focus owner; visible companion panes and ordinary
@@ -1303,6 +1307,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     desktopSidebarReserved,
     desktopSidebarWidth,
     immersiveActive,
+    projectFocus,
     syncContentRect,
   ])
 
@@ -1705,6 +1710,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const target = projectEntryTarget(row)
     if (target?.kind === 'result') openArtifact(row, target.artifactId)
     else if (target?.kind === 'file') setProjectEntryFile({ projectId, path: target.path, key: Date.now() })
+  }
+
+  // A project's Back control: the Projects list takes the project's place, so
+  // the project leaves the screen and the desktop navigation returns.
+  function backToProjects() {
+    navTo('projects')
   }
 
   function openAppSource(app) {
@@ -4932,7 +4943,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
       data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      className={`shell${immersiveActive ? ` shell--barhidden ${immersiveMode === 'bar' ? 'shell--barcollapsed' : 'shell--immersive'}` : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
+      className={`shell${immersiveActive ? ` shell--barhidden ${immersiveMode === 'bar' ? 'shell--barcollapsed' : 'shell--immersive'}` : ''}${projectFocus ? ' shell--project-focus' : desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
       <a
         className="shell__skip-link"
         href="#main-content"
@@ -5656,6 +5667,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     startRenaming={String(projectRenameId) === String(project.id)}
                     onRename={name => renameProject(project, name)}
                     onRenameEnd={() => setProjectRenameId(null)}
+                    onBack={backToProjects}
                   />
                 )}
               </LazySurface>

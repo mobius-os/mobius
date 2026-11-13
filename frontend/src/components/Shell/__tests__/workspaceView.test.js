@@ -641,3 +641,32 @@ test('the share box is never held before the first measurement', () => {
   assert.equal(screenShareRect({ applied: true, rect: { w: 0, h: 0 } }, live), live)
   assert.equal(screenShareRect(null, live), live)
 })
+
+function visibility(ws) {
+  return deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+  })
+}
+
+test('a project on screen, alone or beside its chat, owns the workspace', () => {
+  const alone = paneModel.seedFromFlatTabs([tabModel.projectTab('p1')])
+  assert.equal(visibility(alone).projectVisible, true)
+
+  // Its chat opens in a pane beside it; focusing that chat keeps the project on screen.
+  const besideChat = paneModel.splitPaneWithTab(alone, makeTab('chat', '5'), {
+    paneId: alone.focusedPaneId, edge: 'right',
+  })
+  assert.equal(besideChat.panes[besideChat.focusedPaneId].activeTabKey, 'chat:5')
+  assert.equal(visibility(besideChat).projectVisible, true)
+})
+
+test('the Projects list, chats and apps leave the workspace to the navigation', () => {
+  assert.equal(visibility(paneModel.seedFromFlatTabs([tabModel.projectsTab()])).projectVisible, false)
+  assert.equal(visibility(twoPaneChatAndApp()).projectVisible, false)
+
+  // Back to Projects replaces the project in its pane, so it leaves the screen.
+  let ws = paneModel.seedFromFlatTabs([tabModel.projectTab('p1'), tabModel.projectsTab()])
+  ws = paneModel.setActiveTab(ws, ws.focusedPaneId, tabKey(tabModel.projectsTab()))
+  assert.equal(visibility(ws).projectVisible, false)
+})

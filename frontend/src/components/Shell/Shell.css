@@ -1044,4 +1044,18 @@
   .shell--barhidden::before {
     display: none;
   }
+
+  /* A project on screen owns the whole workspace: the rail, the docked
+     sidebar and its header step aside, as for an immersive app. The saved
+     sidebar preference is untouched and returns with the navigation. */
+  .shell--project-focus::before,
+  .shell--project-focus .shell__bar,
+  .shell--project-focus #navigation-drawer {
+    display: none;
+  }
+
+  .shell--project-focus > .shell__tabstrip,
+  .shell--project-focus > .shell__content {
+    margin-left: 0;
+  }
 }
