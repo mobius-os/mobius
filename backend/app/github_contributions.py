@@ -1306,9 +1306,36 @@ def _checkout_used_by_open_record(app_id: int, record: dict, repo: Path) -> str 
       other_repo = Path(raw_repo).resolve()
     except (OSError, RuntimeError):
       continue
-    if other_repo.is_relative_to(repo) or repo.is_relative_to(other_repo):
+    if (
+      other_repo.is_relative_to(repo) or repo.is_relative_to(other_repo)
+      or _linked_git_dir_within(other_repo, repo)
+    ):
       return str(other.get("id") or path.stem)
   return None
+
+
+def _linked_git_dir_within(checkout: Path, root: Path) -> bool:
+  """Whether linked worktree ``checkout`` keeps its Git data inside ``root``.
+
+  A worktree added from a clone stores its Git data in that clone, so
+  removing the clone breaks the worktree even though their folders differ.
+  """
+  marker = checkout / ".git"
+  try:
+    if not marker.is_file() or marker.is_symlink():
+      return False
+    value = marker.read_text().strip()
+  except OSError:
+    return False
+  if not value.startswith("gitdir:"):
+    return False
+  git_dir = Path(value.removeprefix("gitdir:").strip())
+  if not git_dir.is_absolute():
+    git_dir = checkout / git_dir
+  try:
+    return git_dir.resolve().is_relative_to(root)
+  except (OSError, RuntimeError):
+    return False
 
 
 def _cleanup_terminal_staging_checkout(record: dict, *, app_id: int) -> bool:

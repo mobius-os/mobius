@@ -1,6 +1,7 @@
 """Focused route tests for terminal contribution staging disposal."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -350,3 +351,34 @@ def test_an_open_contribution_using_an_enclosing_folder_keeps_the_checkout(clien
 
   assert _cleanup(client, auth, app["id"], "nested-finished") == {"cleaned": False}
   assert checkout.is_dir()
+
+
+def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
+  app = create_local_app(client, auth, name="Cleanup worktree of clone")
+  clone = _standalone_checkout("cleanup-worktree-clone")
+  subprocess.run(
+    ["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "base"],
+    check=True,
+    env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+  )
+  worktree = Path(get_settings().data_dir) / "contrib" / "cleanup-worktree-open" / "repo"
+  worktree.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(worktree)],
+    check=True,
+  )
+  _write_terminal_record(app["id"], "clone-finished", {
+    "id": "clone-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(clone)},
+  })
+  _write_terminal_record(app["id"], "worktree-open", {
+    "id": "worktree-open", "type": "pr", "status": "open",
+    "plan": {"repo_path": str(worktree)},
+  })
+
+  # The open worktree keeps its Git data inside the finished clone.
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": False}
+  assert clone.is_dir()
+  status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
+  assert status.returncode == 0
