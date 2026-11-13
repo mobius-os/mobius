@@ -5,8 +5,8 @@
   "default_model": "evolve",
   "models": [
     {
-      "id": "spark",
-      "label": "Spark (Qwen3.8 27B)",
+      "id": "flow",
+      "label": "GLM Flash",
       "effort_levels": [
         "minimal",
         "low",
@@ -14,15 +14,16 @@
         "high",
         "max"
       ],
-      "context_window": 235930,
+      "context_window": 943718,
       "input_modalities": [
         "text",
         "image"
-      ]
+      ],
+      "auto_compact_token_limit": 420000
     },
     {
       "id": "evolve",
-      "label": "Evolve (Qwen3.8 Max 0902)",
+      "label": "GLM Standard",
       "effort_levels": [
         "minimal",
         "low",
@@ -30,50 +31,15 @@
         "high",
         "max"
       ],
-      "context_window": 900000,
+      "context_window": 943718,
       "input_modalities": [
-        "text",
-        "image"
+        "text"
       ],
       "auto_compact_token_limit": 420000
     },
     {
       "id": "reflect",
-      "label": "Reflect (DeepSeek V4.1 Flash)",
-      "effort_levels": [
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "context_window": 943718,
-      "input_modalities": [
-        "text",
-        "image"
-      ],
-      "auto_compact_token_limit": 420000
-    },
-    {
-      "id": "flow",
-      "label": "Flow (GLM 5.3 Flash)",
-      "effort_levels": [
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "context_window": 943718,
-      "input_modalities": [
-        "text",
-        "image"
-      ],
-      "auto_compact_token_limit": 420000
-    },
-    {
-      "id": "prism",
-      "label": "Prism (Gemini 3.8 Flash)",
+      "label": "DeepSeek 4.1",
       "effort_levels": [
         "minimal",
         "low",
