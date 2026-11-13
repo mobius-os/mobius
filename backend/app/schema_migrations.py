@@ -7296,7 +7296,7 @@ def _add_autopilot_push_mode(eng) -> None:
 
 
 def _migrate_three_mobius_agent_selections(eng):
-  """Move retired Möbius selections to the three-agent catalogue without notices.
+  """Move retired Möbius selections to the vision-agent catalogue without notices.
 
   Historical execution attribution is deliberately outside this migration.
   Unknown IDs and malformed JSON remain byte-for-byte untouched so provider
@@ -7308,7 +7308,7 @@ def _migrate_three_mobius_agent_selections(eng):
   from pathlib import Path
   from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
 
-  replacements = {"spark": "flow", "prism": "flow", "inkling": "evolve"}
+  replacements = {"spark": "flow", "prism": "flow", "inkling": "flow", "evolve": "flow"}
 
   def replacement(value):
     return replacements.get(value, value) if isinstance(value, str) else value

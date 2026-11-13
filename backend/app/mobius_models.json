@@ -2,11 +2,11 @@
   "name": "Möbius",
   "transport": "identity_broker",
   "base_url": "http://127.0.0.1:8765/v1",
-  "default_model": "evolve",
+  "default_model": "flow",
   "models": [
     {
       "id": "flow",
-      "label": "GLM Flash",
+      "label": "GLM 5.3 Flash",
       "effort_levels": [
         "minimal",
         "low",
@@ -22,24 +22,8 @@
       "auto_compact_token_limit": 420000
     },
     {
-      "id": "evolve",
-      "label": "GLM Standard",
-      "effort_levels": [
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "context_window": 943718,
-      "input_modalities": [
-        "text"
-      ],
-      "auto_compact_token_limit": 420000
-    },
-    {
       "id": "reflect",
-      "label": "DeepSeek 4.1",
+      "label": "DeepSeek 4.1 Flash",
       "effort_levels": [
         "minimal",
         "low",

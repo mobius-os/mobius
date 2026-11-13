@@ -1,4 +1,4 @@
-"""The three-agent replacement changes selections, never past executions."""
+"""The vision-agent replacement changes selections, never past executions."""
 import json
 from pathlib import Path
 
@@ -44,7 +44,7 @@ def test_retired_selections_migrate_without_touching_history_or_other_providers(
   assert settings_path.stat().st_mode & 0o777 == 0o640
   with eng.connect() as conn:
     rows = {r.id: json.loads(r.agent_settings_json) for r in conn.execute(text("SELECT * FROM chats"))}
-    assert {k: v["model"] for k, v in rows.items()} == dict(zip("abcdefgh", ["flow", "flow", "evolve", "reflect", "evolve", "spark", "claude-test", "future"]))
+    assert {k: v["model"] for k, v in rows.items()} == dict(zip("abcdefgh", ["flow", "flow", "flow", "reflect", "flow", "spark", "claude-test", "future"]))
     assert all(v["effort"] == "high" for v in rows.values())
     assert set(conn.execute(text("SELECT messages FROM chats")).scalars()) == {'[{"text":"Spark and Prism","model":"spark"}]'}
     assert conn.execute(text("SELECT model FROM execution_history")).scalar_one() == "prism"
@@ -70,11 +70,10 @@ def test_invalid_settings_and_empty_database_are_preserved(tmp_path, monkeypatch
 
 def test_catalogue_has_only_new_visible_names_and_honest_modalities():
   catalogue = json.loads((Path(__file__).parents[1] / "app" / "mobius_models.json").read_text())
-  assert [r["label"] for r in catalogue["models"]] == ["GLM Flash", "GLM Standard", "DeepSeek 4.1"]
+  assert [r["label"] for r in catalogue["models"]] == ["GLM 5.3 Flash", "DeepSeek 4.1 Flash"]
   by_id = {r["id"]: r for r in catalogue["models"]}
-  assert set(by_id) == {"flow", "evolve", "reflect"}
-  assert catalogue["default_model"] in by_id
-  assert by_id["evolve"]["input_modalities"] == ["text"]
+  assert set(by_id) == {"flow", "reflect"}
+  assert catalogue["default_model"] == "flow"
   assert by_id["flow"]["input_modalities"] == ["text", "image"]
   assert by_id["reflect"]["input_modalities"] == ["text", "image"]
   assert all(r["auto_compact_token_limit"] < r["context_window"] <= 1048576 for r in by_id.values())
