@@ -66,11 +66,11 @@ from app.contribution_records import (
   now_iso as _now_iso,
   read_record as _read_record,
   record_paths as _record_paths,
+  records_dir as _contributions_dir,
   write_record as _write_record,
 )
 from app.database import SessionLocal, get_db
 from app.github_checks import (
-  _contributions_dir,
   _read_record_tolerant,
   _read_record_bytes,
   _record_from_bytes,
@@ -5310,7 +5310,7 @@ async def cleanup_contribution_staging(
           app_id, record_id, exc_info=True,
         )
     cleaned, kept_for = await settled.run_settled(
-      terminal_checkout_cleanup, settled_record, app_id=app_id,
+      terminal_checkout_cleanup, settled_record, app_id=app_id, record_id=record_id,
     )
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).

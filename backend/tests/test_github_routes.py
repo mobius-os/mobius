@@ -7191,7 +7191,7 @@ def test_contribution_lifecycle_persists_equivalence_in_standalone_source():
   assert app_git.primary_worktree_path(review) == source.resolve()
 
 
-def testterminal_checkout_cleanup_only_removes_disposable_clone():
+def test_terminal_checkout_cleanup_only_removes_disposable_clone():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7483,7 +7483,7 @@ def test_standalone_app_review_persists_equivalence_in_installed_repo():
 
 
 @pytest.mark.parametrize("owner_root", ["contrib", "worktrees"])
-def testterminal_checkout_cleanup_unlocks_and_unregisters_linked_worktree(owner_root):
+def test_terminal_checkout_cleanup_unlocks_and_unregisters_linked_worktree(owner_root):
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7528,7 +7528,7 @@ def testterminal_checkout_cleanup_unlocks_and_unregisters_linked_worktree(owner_
   assert str(checkout) not in listed
 
 
-def testterminal_checkout_cleanup_removes_stale_missing_admin():
+def test_terminal_checkout_cleanup_removes_stale_missing_admin():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7546,7 +7546,7 @@ def testterminal_checkout_cleanup_removes_stale_missing_admin():
   assert not checkout.exists()
 
 
-def testterminal_checkout_cleanup_preserves_recycled_worktree_slot():
+def test_terminal_checkout_cleanup_preserves_recycled_worktree_slot():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7596,7 +7596,7 @@ def testterminal_checkout_cleanup_preserves_recycled_worktree_slot():
   assert str(current) in listed
 
 
-def testterminal_checkout_cleanup_preserves_reciprocal_outside_owner():
+def test_terminal_checkout_cleanup_preserves_reciprocal_outside_owner():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7620,7 +7620,7 @@ def testterminal_checkout_cleanup_preserves_reciprocal_outside_owner():
   assert (outside_owner / "sentinel").read_text() == "keep\n"
 
 
-def testterminal_checkout_cleanup_rejects_repo_symlink_alias():
+def test_terminal_checkout_cleanup_rejects_repo_symlink_alias():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7639,7 +7639,7 @@ def testterminal_checkout_cleanup_rejects_repo_symlink_alias():
   assert (target / "sentinel").read_text() == "keep\n"
 
 
-def testterminal_checkout_cleanup_is_idempotent_after_removal():
+def test_terminal_checkout_cleanup_is_idempotent_after_removal():
   from app.routes.github import terminal_checkout_cleanup
 
   data_dir = Path(get_settings().data_dir)
@@ -7654,7 +7654,7 @@ def testterminal_checkout_cleanup_is_idempotent_after_removal():
   assert terminal_checkout_cleanup(record, app_id=1)[0] is True
 
 
-def testterminal_checkout_cleanup_retries_separate_git_dir_partial_failure(
+def test_terminal_checkout_cleanup_retries_separate_git_dir_partial_failure(
   monkeypatch,
 ):
   from app.routes.github import terminal_checkout_cleanup

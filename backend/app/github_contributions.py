@@ -1312,8 +1312,8 @@ def _staging_checkout(raw_repo: object) -> Path | None:
   return repo if any(repo != root and repo.is_relative_to(root) for root in roots) else None
 
 
-def checkout_kept_for(app_id: int, record: dict) -> str | None:
-  """Another unfinished contribution of this app that needs ``record``'s checkout.
+def checkout_kept_for(app_id: int, record_id: str, repo: Path) -> str | None:
+  """Another unfinished contribution of this app that needs the checkout ``repo``.
 
   Contributions can share a checkout: a follow-up PR prepared in the clone of
   the PR before it, a folder around it, or a worktree whose Git data lives in
@@ -1321,17 +1321,9 @@ def checkout_kept_for(app_id: int, record: dict) -> str | None:
   asks again about a kept checkout, so it goes once nothing needs it. Returns
   the id of the contribution it is kept for.
   """
-  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  raw_repo = plan.get("repo_path")
-  if not isinstance(raw_repo, str) or not raw_repo:
-    return None
-  try:
-    removed = _checkout_removal_paths(Path(raw_repo).resolve())
-  except (OSError, RuntimeError):
-    return None
-  own = str(record.get("id") or "")
+  removed = _checkout_removal_paths(repo)
   for path in sorted(_records_dir(app_id).glob("*.json")):
-    if path.stem == own:
+    if path.stem == record_id:
       continue
     try:
       other = _read_record(path)
@@ -1339,15 +1331,23 @@ def checkout_kept_for(app_id: int, record: dict) -> str | None:
       continue
     if other.get("status") in _TERMINAL_RECORD_STATUSES:
       continue
-    other_plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
-    # Only a real staging checkout counts: a stray path such as the data
-    # folder itself must not keep every checkout of the app.
-    other_repo = _staging_checkout(other_plan.get("repo_path"))
-    if other_repo is None:
+    plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
+    raw = plan.get("repo_path")
+    if not isinstance(raw, str) or not raw:
+      continue
+    try:
+      other_repo = Path(raw).resolve()
+    except (OSError, RuntimeError):
       continue
     other_git = git_checkout.linked_git_dir(other_repo)
-    if any(
-      other_repo.is_relative_to(gone) or gone.is_relative_to(other_repo)
+    # A checkout or its Git data inside what removal deletes is always kept.
+    # Only an enclosing folder must itself be a real staging checkout, so a
+    # stray path such as the data folder cannot keep every checkout.
+    encloses = _staging_checkout(raw) is not None and any(
+      gone.is_relative_to(other_repo) for gone in removed
+    )
+    if encloses or any(
+      other_repo.is_relative_to(gone)
       or (other_git is not None and other_git.is_relative_to(gone))
       for gone in removed
     ):
@@ -1355,7 +1355,9 @@ def checkout_kept_for(app_id: int, record: dict) -> str | None:
   return None
 
 
-def terminal_checkout_cleanup(record: dict, *, app_id: int) -> tuple[bool, str | None]:
+def terminal_checkout_cleanup(
+  record: dict, *, app_id: int, record_id: str | None = None,
+) -> tuple[bool, str | None]:
   """Remove a terminal contribution checkout; or say which open one keeps it.
 
   Returns whether the checkout is gone, and the id of the unfinished
@@ -1372,10 +1374,10 @@ def terminal_checkout_cleanup(record: dict, *, app_id: int) -> tuple[bool, str |
   if not recorded_repo.is_absolute() or recorded_repo != repo:
     return False, None
   data_dir = Path(get_settings().data_dir).resolve()
-  roots = (data_dir / "contrib", data_dir / "contributions")
+  roots = _staging_roots()
   if not any(repo.is_relative_to(root) for root in roots):
     return False, None
-  kept_for = checkout_kept_for(app_id, record)
+  kept_for = checkout_kept_for(app_id, record_id or str(record.get("id") or ""), repo)
   if kept_for is not None:
     return False, kept_for
   cleaned = not repo.exists() or _remove_staging_checkout(repo, data_dir)
