@@ -2,8 +2,8 @@
 
    Everything app-reported (state, acknowledgements) is bound to the exact
    document generation that negotiated support. A new document resets idle
-   controls; releasing an idle offscreen frame discards its state entirely, so
-   re-entry shows pending controls until the next document reports.
+   controls; releasing an idle offscreen frame discards its authority. Its last
+   idle presentation stays visible, locked until the new document reports.
 
    When Confirm may be pressed is decided by useConfirmArming. An unsupported
    negotiation belongs to one applied revision: a newer revision is tried
@@ -22,6 +22,12 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   listEndView = null, admitted = true, context = null, refresh = null, ask = false }) {
   const [sessionId] = useState(() => crypto.randomUUID())
   const [state, setState] = useState(null)
+  // Presentation is not session authority: never replay it into the app or
+  // use it for retention, confirmation, asks or dispatch. Scope it to this
+  // exact block, applied revision and host-attested chat position.
+  const presentationScope = JSON.stringify([block, revision, context?.chatId, context?.latest, admitted])
+  const [presentation, setPresentation] = useState(null)
+  const reportedRef = useRef(false)
   const [event, setEvent] = useState(null)
   const eventRef = useRef(null)
   const [negotiation, setNegotiation] = useState(UNNEGOTIATED)
@@ -61,11 +67,12 @@ export default function useAppBlockSession({ block, near, revision = null, confi
     setNegotiation(UNNEGOTIATED)
   }, [revision, retained])
 
-  // Idle sessions are released offscreen; nothing a supporting document
-  // negotiated survives. An unsupported revision stays a static block.
+  // Idle sessions are released offscreen; no negotiated authority survives.
+  // Only their read-only presentation can remain. An unsupported revision stays a static block.
   useEffect(() => {
     if (frameWanted || negotiationRef.current.supported === false) return
     disarm()
+    reportedRef.current = false
     negotiationRef.current = UNNEGOTIATED
     setNegotiation(UNNEGOTIATED)
     setState(null)
@@ -73,7 +80,10 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   }, [frameWanted, clearEvent, disarm])
 
   const onBlockCapability = useCallback((supported, { generation, reset }) => {
-    if (generation !== negotiationRef.current.generation || reset) disarm()
+    if (generation !== negotiationRef.current.generation || reset) {
+      disarm()
+      reportedRef.current = false
+    }
     if (reset) {
       // Capture before clearing: the updater may run after the ref changes.
       const previous = eventRef.current
@@ -90,22 +100,25 @@ export default function useAppBlockSession({ block, near, revision = null, confi
     if (current.supported !== true || generation !== current.generation) return
     const safe = sessionState(message, sessionId, keys, intents, block.app, { ask })
     if (!safe) return
+    reportedRef.current = true
+    setPresentation(sessionRetained(safe, null) ? null : { scope: presentationScope, state: { ...safe, ask: null } })
     noteReport(safe)
     setState(previous => sessionStateUpdate(previous, safe))
     if (!safe.checkpointInvalid && safe.ackNonce && safe.ackNonce === eventRef.current?.nonce) clearEvent()
-  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport])
+  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport, presentationScope])
 
   // Reserve synchronously: a second click before React commits, or before
   // the app acknowledges this exact nonce, cannot send another event.
   const dispatch = useCallback((key, kind) => {
     const current = negotiationRef.current
     // Withdrawn admission: the session keeps settling, but takes no new event.
-    if (!admittedRef.current || eventRef.current || current.supported !== true || !keys.has(key)) return false
+    if (!admittedRef.current || !reportedRef.current || eventRef.current || current.supported !== true || !keys.has(key)) return false
     if (kind === 'confirm' && !mayConfirm(key)) return false
     // Every owner event ends the showing, Confirm included: a press spends
     // it, so another confirm needs a new showing and a fresh visible delay.
     disarm()
     const message = { sessionId, generation: current.generation, key, event: kind, nonce: crypto.randomUUID() }
+    setPresentation(null)
     eventRef.current = message
     setEvent(message)
     return true
@@ -146,7 +159,8 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   }, [refreshSeq, refreshReason, sessionId])
 
   return {
-    sessionId, state, event, awaitingAck: event !== null, supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,
+    sessionId, state, displayState: state || (presentation?.scope === presentationScope ? presentation.state : null),
+    event, awaitingAck: event !== null, supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,
     generation: negotiation.generation, retained, frameMounted, blockSession, blockRefresh,
     onBlockCapability, onBlockState, dispatch,
   }

@@ -264,6 +264,10 @@ test('several confirming actions are ambiguous: no Confirm is enabled and no lis
 
 test('a static view the reader opened stays until the reader closes it, even when a slot frees', () => {
   const base = { supported: true, near: true, retained: false }
+  assert.equal(passiveBlockMode({ ...base, granted: false, staticOpen: false, hasPresentation: true }), 'passive',
+    'last idle display survives slot acquisition without owning a frame')
+  assert.equal(passiveBlockMode({ ...base, admitted: false, granted: false, hasPresentation: true }), 'static')
+  assert.equal(passiveBlockMode({ ...base, supported: false, granted: false, hasPresentation: true }), 'static')
   assert.equal(passiveBlockMode({ ...base, granted: false, staticOpen: false }), 'static')
   assert.equal(passiveBlockMode({ ...base, granted: true, staticOpen: true }), 'static', 'a freed slot keeps the open view')
   assert.equal(passiveBlockMode({ ...base, granted: true, staticOpen: false }), 'passive', 'closing it may go passive again')
@@ -295,7 +299,7 @@ test('a held session tells the reader to check the result and offers no control'
   const session = { state, awaitingAck: false }
   assert.equal(sessionLocked(session, false), true)
   assert.equal(sessionLocked({ state: null, awaitingAck: false }, false), true, 'locked even with no busy action')
-  assert.equal(sessionLocked({ state: null, awaitingAck: false }, true), false)
+  assert.equal(sessionLocked({ state: null, awaitingAck: false }, true), true)
   const html = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
     locked: sessionLocked(session, false), confirmArmed: false, notice: ADMISSION_WITHDRAWN('Example'), onEvent() {} }))
   assert.match(html, /Example can no longer run in this chat\. Open Example to check the result of the last action/)
@@ -492,6 +496,41 @@ test('no rows and no visible action fold the block to one line, with a jump only
   assert.match(appRowsView(fields), /md-app-block__open/, 'the newest folded block keeps its open link')
   assert.doesNotMatch(appRowsView({ ...fields, actions: [{ key: 'send-batch:sel-1', label: 'Send all' }] }), /md-app-block--folded/,
     'a visible action keeps the block open')
+})
+
+test('compact inline blocks keep their action lane while work runs and put results where controls were', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    interaction: 'inline', expand: false, action: { label: 'Send', intent: 'send:one' },
+    items: [{ title: 'Exact change', intent: 'open:one' }] }) })
+  const show = fields => {
+    const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+      rows: [{ title: 'Exact change', meta: 'owner/repo' }], ...fields }, 's', new Set(['send:one']), new Set(), 'example')
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+      locked: false, confirmArmed: true, onEvent() {} }))
+  }
+  const states = [
+    { actions: [{ key: 'send:one', label: 'Send' }] },
+    { title: 'Checking', titleBusy: true, actions: [{ key: 'send:one', hidden: true }] },
+    { actions: [{ key: 'send:one', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] },
+    { title: 'Sending', titleBusy: true, actions: [{ key: 'send:one', hidden: true, busy: true }] },
+  ]
+  for (const fields of states) {
+    const html = show(fields)
+    assert.match(html, /md-app-block--action-lane/)
+    assert.match(html, /<footer>/, 'hidden controls leave the lane in place')
+  }
+  const complete = show({ actions: [{ key: 'send:one', hidden: true }], rows: [
+    { title: 'Exact change', meta: 'owner/repo', links: [{ label: '#42', url: 'https://example.com/pull/42' }] },
+    { title: 'Another change', meta: 'owner/other', links: [{ label: '#43', url: 'https://example.com/pull/43' }] },
+  ] })
+  const [rows, footer] = complete.split('<footer>')
+  assert.doesNotMatch(rows, /href="https:\/\/example.com\/pull/)
+  assert.match(footer, /md-app-block__results/)
+  assert.match(footer, /aria-label="#42, Exact change, opens in a new tab"/)
+  assert.match(footer, /aria-label="#43, Another change, opens in a new tab"/)
+  assert.doesNotMatch(footer, /<button/, 'settled results cannot send again')
+  assert.doesNotMatch(show({ rows: [], actions: [{ key: 'send:one', hidden: true }] }), /<footer>/,
+    'a superseded, folded card still has no empty lane')
 })
 
 test('jumping to the newest block moves focus there, without animation for reduced motion', async () => {

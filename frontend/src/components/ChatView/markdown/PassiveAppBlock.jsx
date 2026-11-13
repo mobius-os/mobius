@@ -43,7 +43,7 @@ export function useOnScreen(showing) {
 /** No new owner event while one awaits acknowledgement, an action is busy,
  *  or admission was withdrawn under an unresolved session. */
 export function sessionLocked(session, admitted) {
-  return !admitted || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
+  return !admitted || !session.state || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
 }
 
 
@@ -206,11 +206,11 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   useEffect(() => setRetained(session.retained), [session.retained])
   const ask = blockAsk({ state: session.state, admitted, allowed: askAllowed, context: chat.context })
   const message = ask ? askMessage(block.app, ask) : ''
-  if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
+  if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
   }
-  return <PassiveBlockView block={block} app={app} state={session.state} locked={sessionLocked(session, admitted)}
+  return <PassiveBlockView block={block} app={app} state={session.displayState} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}

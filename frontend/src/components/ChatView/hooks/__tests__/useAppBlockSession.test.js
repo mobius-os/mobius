@@ -61,6 +61,7 @@ test('the session envelope names every block action and no state is shown before
   assert.equal(h.result.current.state, null)
   assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'no event before the document negotiates')
   capability(true, 1)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'negotiation alone grants no controls')
   report({})
   assert.equal(h.result.current.state.actions.length, 2)
 })
@@ -122,20 +123,56 @@ test('a reload during an unacknowledged Confirm holds ownership instead of offer
   assert.equal(h.result.current.retained, true)
 })
 
-test('releasing an idle frame offscreen discards its negotiation; re-entry waits for fresh state', () => {
+test('an idle return keeps its display but waits for fresh authority without retaining a frame', () => {
   const { h, capability, report } = mounted()
   capability(true, 1)
-  report({})
-  assert.ok(h.result.current.state)
+  report({ title: '1 pull request' })
+  const displayed = h.result.current.displayState
   h.rerender({ block, near: false })
   assert.equal(h.result.current.frameMounted, false)
+  assert.equal(h.result.current.retained, false)
   assert.equal(h.result.current.state, null)
   assert.equal(h.result.current.supported, null)
+  assert.equal(h.result.current.displayState.title, displayed.title)
   h.rerender({ block, near: true })
   assert.equal(h.result.current.frameMounted, true)
-  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'stale controls cannot act during renegotiation')
-  report({}, 1)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false)
+  report({ title: 'Old document' }, 1)
   assert.equal(h.result.current.state, null, 'the released document cannot report again')
+  assert.equal(h.result.current.displayState.title, displayed.title)
+  capability(true, 2)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'negotiation cannot unlock the old display')
+  assert.equal(h.result.current.displayState.title, displayed.title)
+  report({ title: 'Could not load' }, 2)
+  assert.equal(h.result.current.displayState.title, 'Could not load', 'a fresh failure replaces the observation honestly')
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), true)
+})
+
+for (const changed of [
+  { block: { ...block, title: 'Other block' } },
+  { revision: 'new' },
+  { context: { chatId: 'other', latest: true } },
+  { context: { latest: false } },
+  { admitted: false },
+]) test('idle presentation is scoped to block, revision, admission and chat: ' + JSON.stringify(changed), () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Known result' })
+  h.rerender({ block, near: false })
+  assert.equal(h.result.current.displayState.title, 'Known result')
+  h.rerender({ block, near: false, ...changed })
+  assert.equal(h.result.current.displayState, null)
+})
+
+test('a confirmation is never borrowed as an idle display on document reset', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Before action' })
+  report({ actions: [{ key: 'send:b', label: 'Confirm', confirming: true }] })
+  capability(true, 2)
+  assert.equal(h.result.current.state, null)
+  assert.equal(h.result.current.displayState, null)
+  assert.equal(h.result.current.confirmArmed, false)
 })
 
 test('an unresolved owner stays mounted offscreen', () => {
