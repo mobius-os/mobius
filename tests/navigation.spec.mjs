@@ -2580,7 +2580,8 @@ test.describe('Drawer state machine — extended invariants', () => {
     // Cmd+,/. invokes this same browser traversal outside the app. The route
     // restore must carry the outgoing chat's keyboard-forward intent back to
     // its real composer, rather than leaving focus on the document body.
-    await page.getByRole('button', { name: 'Apps', exact: true }).click()
+    // The sidebar's Apps heading opens the full Apps screen.
+    await page.getByRole('button', { name: /^Apps, \d+ installed\. Open all apps$/ }).click()
     await expect(page.getByRole('region', { name: 'Installed apps' })).toBeVisible()
 
     await goBack(page)
