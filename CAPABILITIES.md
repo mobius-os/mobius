@@ -814,12 +814,18 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   its own container) and hosted MCP servers, refuses a request that forces a
   removed tool, and adds the owner's login outside the room.
 - **Tools.** An agent's own tools (shell, file edits, planning) always work,
-  inside its room. `tools` adds Möbius tools that reach beyond it, from a
-  catalog with two entries today. `web` is provider-hosted search through the
-  gateway plus `open_page` through the guarded `/api/proxy`; each opened page
-  is recorded as an `app_agent_web` activity. `notify` is `notify_owner`. A new
-  tool is one `agent_roles.TOOLS` entry naming its control tools, key routes
-  and gateway types.
+  inside its room. `tools` adds Möbius tools that reach beyond it. `web` is
+  provider-hosted search through the gateway plus `open_page` through the
+  guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
+  activity. `notify` is `notify_owner`. `ask` is `request_question` and
+  `request_approval` for the run's own chat (a confined key is an agent run of
+  that chat; Codex ends the turn through the owner-card hook inside the room).
+  `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
+  page outside the room. `<app>.<tool>` (such as `memory.search`) offers that
+  one installed-app tool through `/api/agent/app-tools`, which serves a
+  confined key only what it declared. A new tool is one `agent_roles.TOOLS`
+  entry naming its control tools, key routes, gateway types and whether it
+  shows private data.
 - **Consent.** One `agent_role` row whose scope names what the role reaches
   (`data:read`, `data:write`, `tool:<name>`), so an update asks again only when
   it adds reach, and shows only what it adds. Owner and undeclared agent apps
@@ -829,8 +835,8 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   chat transcript is never reseeded into a room, because it may hold what a
   wider grant (or the owner era before roles) read.
 - **Not yet covered:** app jobs and services still run unconfined; searches
-  that run at Anthropic are not recorded one by one; the catalog has no Möbius
-  tools yet for owner questions, screenshots, helpers or other apps' tools.
+  that run at Anthropic are not recorded one by one; confined agents cannot
+  start helpers yet.
 
 ## Stable error codes
 

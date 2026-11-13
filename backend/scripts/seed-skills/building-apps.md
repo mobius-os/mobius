@@ -1448,10 +1448,19 @@ app's permission popup, and Möbius enforces it outside the agent:
 
 - Every agent keeps its AI program's own tools (shell, reading and editing
   files, planning), which work inside its room. `tools` adds Möbius tools
-  that reach beyond the room; today these are `web` (search the web and open
-  public pages) and `notify` (push notifications). `web` may be declared for
-  any role; beside Viewer or Editor data the popup tells the owner that app
-  data may reach the web.
+  that reach beyond the room:
+  - `web`: search the web and open public pages;
+  - `notify`: send the owner push notifications;
+  - `ask`: ask the owner a question or for approval before a key step (the
+    card ends the turn; the answer starts the next);
+  - `screenshot`: see this app's own screens, for example to check work
+    without internet;
+  - `<app>.<tool>`: one tool another installed app offers agents, such as
+    `memory.search`.
+
+  `web` may be declared for any role. Beside private data (the app's files,
+  its screens or another app's tool) the popup tells the owner that app data
+  may reach the web.
 - `why` is the app's own reason, 1–80 characters, shown as the role's only
   description.
 - Viewer, Editor and Explorer agents run in a room the kernel locks: their

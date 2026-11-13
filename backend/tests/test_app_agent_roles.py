@@ -2,6 +2,7 @@
 Gateway's filtering, and the room each confined agent runs in."""
 
 import asyncio
+import base64
 import importlib.util
 import json
 import os
@@ -26,6 +27,7 @@ from app import (
 )
 from app.agent_roles import AgentKey, AgentRole, Room
 from app.app_capabilities import contract_from_manifest
+from app.config import get_settings
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.runner_registry import RunnerKind, registry
 
@@ -962,3 +964,152 @@ async def test_a_confined_agent_never_inherits_history_from_another_grant(
     calls[0].get('resumed_context', '')
   )
   assert marker not in prompt
+
+
+# --- more tools: ask and other apps' tools -------------------------------------
+
+
+def test_ask_reaches_only_the_runs_own_chat_cards():
+  key = AgentKey(7, "viewer", frozenset({"ask"}), "claude", "chat-1", "run-1")
+  assert key.may_call("POST", "/api/chats/chat-1/question")
+  assert key.may_call("POST", "/api/chats/chat-1/approval")
+  assert key.may_call("POST", "/api/chats/chat-1/turn-end")
+  assert not key.may_call("POST", "/api/chats/chat-2/question")
+  assert not key.may_call("POST", "/api/chats/chat-1/restart-request")
+  assert not AgentKey(7, "viewer", frozenset(), "claude", "chat-1").may_call(
+    "POST", "/api/chats/chat-1/question"
+  )
+
+
+def test_a_confined_key_is_an_agent_run_of_its_own_chat(client, owner_token, db):
+  from app.deps import get_agent_run_principal
+
+  app = _local_app(db, "notes", _role("viewer", "ask"))
+  key, run = _agent_key_for(db, app, role="viewer", tools=("ask",))
+  principal = get_agent_run_principal(key, db)
+  assert (principal.app_id, principal.chat_id, principal.run_id) == (
+    app.id,
+    run.chat_id,
+    run.id,
+  )
+
+
+def test_ask_makes_the_room_end_its_turn_on_cards(tmp_path):
+  room = _room(tmp_path, "editor", "ask")
+  assert room.asks_owner and room.control_tools == (
+    "request_question",
+    "request_approval",
+  )
+  assert "MOBIUS_RUN_TOKEN" in agent_roles.ROOM_ENV
+  assert "request_approval" in agent_roles.system_prompt(
+    room.role, app_id=7, app_name="Notes", room=room, app_prompt=None
+  )
+
+
+@pytest.mark.parametrize(
+  "name, ok",
+  [
+    ("memory.search", True),
+    ("web-studio.build_site", True),
+    ("Memory.search", False),
+    ("memory.", False),
+    (".search", False),
+    ("memory search", False),
+  ],
+)
+def test_another_apps_tool_is_declared_as_app_dot_tool(name, ok):
+  manifest = _manifest(agent_role=_role("explorer", name))
+  if ok:
+    validate_manifest_contract(manifest)
+  else:
+    with pytest.raises(ManifestContractError):
+      validate_manifest_contract(manifest)
+
+
+def test_another_apps_tool_counts_as_private_data_beside_web():
+  row = _agent_row(_role("explorer", "memory.search", "web"))
+  tools = {tool["id"]: tool for tool in row["tools"]}
+  assert tools["web"]["warning"] is True and tools["memory.search"]["warning"] is False
+  assert "search tool of your memory app" in tools["memory.search"]["text"]
+  assert "tool:memory.search" in row["scope"]
+
+
+def test_another_apps_tool_routes_open_only_when_declared():
+  declared = AgentKey(7, "explorer", frozenset({"memory.search"}), "claude", "c", "r")
+  assert declared.app_tools == {"memory_search"}
+  assert declared.may_call("POST", "/api/agent/app-tools/call")
+  assert declared.may_call("GET", "/api/agent/app-tools/")
+  assert not _key("explorer", "web").may_call("POST", "/api/agent/app-tools/call")
+
+
+def test_the_app_tools_routes_serve_a_confined_agent_only_its_declared_tools(
+  client, owner_token, db, monkeypatch
+):
+  from app import app_tools
+
+  tools = [
+    app_tools.AppTool(
+      app_id=1,
+      exposed_name=name,
+      name=name,
+      description="d",
+      input_schema={"type": "object"},
+    )
+    for name in ("memory_search", "notes_delete")
+  ]
+  monkeypatch.setattr(app_tools, "live_app_tools", lambda db: tools)
+  app = _local_app(db, "reader", _role("explorer", "memory.search"))
+  key, _run = _agent_key_for(db, app, role="explorer", tools=("memory.search",))
+  bearer = {"Authorization": f"Bearer {key}"}
+  listed = client.get("/api/agent/app-tools/", headers=bearer)
+  assert [tool["name"] for tool in listed.json()["tools"]] == ["memory_search"]
+  refused = client.post(
+    "/api/agent/app-tools/call", json={"name": "notes_delete"}, headers=bearer
+  )
+  assert refused.status_code == 403
+
+
+def test_a_confined_agent_is_offered_only_its_declared_app_tools(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("MOBIUS_AGENT_TOOLS", "")
+  monkeypatch.setenv("MOBIUS_AGENT_APP_TOOLS", "memory_search")
+  listing = {
+    "tools": [
+      {"name": n, "description": "d", "inputSchema": {"type": "object"}}
+      for n in ("memory_search", "notes_delete")
+    ]
+  }
+  monkeypatch.setattr(control, "_agent_api_call", lambda *a, **k: listing)
+  assert [tool["name"] for tool in control._tools_list_result()["tools"]] == [
+    "memory_search"
+  ]
+  room = AgentRole("explorer", ("memory.search",), "why")
+  assert room.app_tools == ("memory_search",) and room.reads_private_data
+
+
+def test_screenshot_shows_only_the_apps_own_page_and_counts_as_private_data(
+  client, owner_token, db, tmp_path, monkeypatch
+):
+  from app.routes import agent_gateway as gateway_routes
+
+  fake = tmp_path / "capture.sh"
+  fake.write_text('printf "%s" "$2" > "$3.route"; printf "\\x89PNG fake" > "$3"\n')
+  monkeypatch.setattr(gateway_routes, "_SCREENSHOT_SCRIPT", fake)
+  monkeypatch.setattr(gateway_routes, "_capture_env", lambda *a: dict(os.environ))
+  app = _local_app(db, "notes", _role("viewer", "screenshot"))
+  key, _run = _agent_key_for(db, app, role="viewer", tools=("screenshot",))
+  shot = client.post(
+    "/api/app-agent/screenshot", json={}, headers={"Authorization": f"Bearer {key}"}
+  )
+  assert shot.status_code == 200, shot.text
+  assert base64.b64decode(shot.json()["image"]).startswith(b"\x89PNG")
+  [route] = list(Path(get_settings().data_dir).glob("chats/*/media/*.png.route"))
+  assert route.read_text() == "/apps/notes/"
+  plain, _ = _agent_key_for(db, app, role="viewer")
+  refused = client.post(
+    "/api/app-agent/screenshot", json={}, headers={"Authorization": f"Bearer {plain}"}
+  )
+  assert refused.status_code in (401, 403)
+  assert (
+    _agent_row(_role("explorer", "screenshot", "web"))["tools"][1]["warning"] is True
+  )

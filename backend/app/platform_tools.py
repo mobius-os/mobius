@@ -92,7 +92,10 @@ CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
 # name (agent_roles.TOOLS), through this setting; it is the menu, while the
 # agent key's allow-list is the enforcement.
 APP_AGENT_TOOLS_ENV = "MOBIUS_AGENT_TOOLS"
+# Other apps' tools it may call, by agent-facing name (app_tools).
+APP_AGENT_APP_TOOLS_ENV = "MOBIUS_AGENT_APP_TOOLS"
 OPEN_PAGE_TOOL_NAME = "open_page"
+APP_SCREENSHOT_TOOL_NAME = "app_screenshot"
 # Bookkeeping whose successful call has nothing for the owner to act on. The
 # chat folds it into the surrounding activity (agent_activity.is_routine_tool);
 # apps declare the same for their own tools with `tools[].routine`.
@@ -112,6 +115,7 @@ CONTROL_ENV_VARS = (
   "MOBIUS_AGENT_EFFORT",
   "MOBIUS_DELEGATION_ID",
   APP_AGENT_TOOLS_ENV,
+  APP_AGENT_APP_TOOLS_ENV,
   # The screenshot tool captures at the owner's viewport in this chat's
   # browser session. agent-browser relaunches that session's browser on a
   # blank page when a command's launch identity differs, so the capture must

@@ -1639,7 +1639,7 @@ async def run_claude_sdk_turn(
       if app_room is not None:
         # A room cannot open this server's file descriptors, and its control
         # tools carry no credential, so their configuration travels inline.
-        control_server_enabled = bool(app_room.control_tools)
+        control_server_enabled = app_room.offers_tools
         options_kwargs["mcp_servers"] = claude_control_servers(
           enabled=control_server_enabled,
         )
@@ -1700,8 +1700,11 @@ async def run_claude_sdk_turn(
             await asyncio.wait_for(client.connect(), timeout=30.0)
           active_client.mark_connected()
           with tracing.span("claude.control_mcp_ready"):
+            # A room waits only for its control tools; other apps' tools
+            # come and go with those apps.
             control_configured = control_server_enabled and (
-              connector_config_handle is not None or app_room is not None
+              connector_config_handle is not None
+              if app_room is None else bool(app_room.control_tools)
             )
             control_ready_error = await _await_control_mcp_ready(
               client,

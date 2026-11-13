@@ -946,8 +946,16 @@ def get_agent_run_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve the owner bearer minted for one exact physical agent run."""
+  """Resolve the bearer minted for one exact physical agent run.
+
+  A confined app agent's key is one too, bound to its app's own chat. The key
+  allow-list (agent_roles.AgentKeyScope) decides which of these run-bound
+  routes it reaches: the ones its app's declared tools name.
+  """
   principal = get_principal(token, db)
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   if (
     principal.scope != "owner"
     or principal.app_id is not None

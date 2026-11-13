@@ -1895,10 +1895,12 @@ async def _run_codex_sdk_turn(
     # A confined app agent: only its declared control tools, no platform
     # hooks, and the model reached through the gateway (agent_roles.Room).
     connector_thread_config = codex_turn_mcp_config(
-      None, control_enabled=bool(app_room.control_tools),
-      app_agent_tools=app_room.control_tools,
+      None, control_enabled=app_room.offers_tools,
+      app_agent_tools=app_room.control_tools, app_tool_names=app_room.app_tools,
     )
     config_overrides.extend(app_room.codex_overrides(provider_overrides))
+    if app_room.asks_owner:
+      config_overrides.append(_codex_owner_card_hook_override())
     if codex_bin is None:
       raise RuntimeError("Codex is not installed, so this app's agent cannot start.")
     launch_args = app_room.codex_launch_args(codex_bin, config_overrides)
@@ -2089,8 +2091,11 @@ async def _run_codex_sdk_turn(
       # keyed without per-turn facts); this thread trusts only the ones it
       # uses. Every turn needs its recorded-result end hook; a lazy Goal
       # refresher also covers coordinator promotion after provider entry.
-      # A room runs no platform hooks: it has no cards or Goals to end on.
-      required_hooks = [_codex_owner_card_hook_override()] if app_room is None else []
+      # A room has no Goals; it ends a turn on a card only when it may ask.
+      required_hooks = (
+        [_codex_owner_card_hook_override()]
+        if app_room is None or app_room.asks_owner else []
+      )
       brief_hooks = (
         [_codex_goal_brief_hook_override()]
         if goal_brief_refresh is not None and app_room is None else []

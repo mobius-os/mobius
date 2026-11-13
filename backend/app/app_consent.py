@@ -130,7 +130,7 @@ def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
   names what it reaches, so an update asks again only when it adds reach
   (Viewer to Editor, a new tool) and never when it narrows.
   """
-  from app.agent_roles import TOOLS, role_from_contract
+  from app.agent_roles import role_from_contract
 
   role = role_from_contract({"agent": agent})
   if role is None and not agent.get("embeds_agent"):
@@ -148,14 +148,22 @@ def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
     **_row("agent_role", "Run AI agents", role.why, level=role.spec.label,
            scope=[*reach, *(f"tool:{name}" for name in role.tools)]),
     "group": "agent",
-    # Web beside private data is the one combination that lets app data reach
-    # the internet; the popup marks it.
-    "tools": [
-      {"id": name, "title": TOOLS[name].label, "text": TOOLS[name].text,
-       "warning": bool(TOOLS[name].provider_web and data)}
-      for name in role.tools
-    ],
+    "tools": [_agent_tool(name, role.reads_private_data) for name in role.tools],
   }
+
+
+def _agent_tool(name: str, private_data: bool) -> dict[str, Any]:
+  """One declared tool as the popup lists it. Web beside private data is the
+  one combination that lets app data reach the internet; the popup marks it."""
+  from app.agent_roles import TOOLS
+
+  tool = TOOLS.get(name)
+  if tool is None:  # another app's tool, ``<app>.<tool>``
+    app, _, action = name.partition(".")
+    return {"id": name, "title": name, "warning": False,
+            "text": f"Use the {action} tool of your {app} app, with the data it reaches."}
+  return {"id": name, "title": tool.label, "text": tool.text,
+          "warning": bool(tool.provider_web and private_data)}
 
 
 def rows_from_contract(

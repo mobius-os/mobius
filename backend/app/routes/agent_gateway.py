@@ -7,19 +7,31 @@ and a Codex agent with a model provider whose base URL is
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
+import os
+import uuid
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app import activity, agent_gateway
+from app import activity, agent_gateway, auth, models
 from app.agent_roles import AgentKey
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal
+from app.deps import (
+  Principal,
+  get_agent_run_principal,
+  get_principal,
+  reject_cross_site,
+)
+from app.generated_files import chat_folder
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agent-gateway", tags=["agent-gateway"])
@@ -141,3 +153,114 @@ async def model_request(
   if target in agent_gateway.WEB_ENDPOINTS:
     _record_search(key, raw)
   return await _relay(upstream, body, key=key, path=target, removed=removed)
+
+
+# --- tools Möbius runs for a confined agent, outside its room -------------------
+
+app_agent_router = APIRouter(prefix="/api/app-agent", tags=["app-agent"])
+_SCREENSHOT_SCRIPT = (
+  Path(__file__).resolve().parents[2] / "scripts" / "agent-screenshot.sh"
+)
+_SCREENSHOT_SECONDS = 230
+
+
+class ScreenshotRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  width: int | None = Field(default=None, ge=320, le=3840)
+  height: int | None = Field(default=None, ge=320, le=2160)
+
+
+def _capture_env(
+  chat_id: str, token: str, request: ScreenshotRequest
+) -> dict[str, str]:
+  """The browser settings a chat run's own captures use (chat._run_chat_impl)."""
+  from app import browser_profiles
+  from app.agent_scratch import scratch_for_chat
+  from app.chat import (
+    agent_browser_runtime_env,
+    bounded_agent_browser_args,
+    desktop_pointer_browser_env,
+    viewport_env,
+  )
+
+  env = {
+    k: v
+    for k, v in os.environ.items()
+    if k in ("PATH", "LANG", "LC_ALL", "USER", "SHELL")
+  }
+  env.update(
+    {
+      "HOME": os.environ.get("HOME", "/tmp"),
+      "TMPDIR": str(scratch_for_chat(chat_id)),
+      "API_BASE_URL": get_settings().api_base_url,
+      "AGENT_TOKEN": token,
+      "CHAT_ID": chat_id,
+      "AGENT_BROWSER_SESSION": f"chat-{chat_id}",
+      "AGENT_BROWSER_PROFILE": str(browser_profiles.chat_browser_profile_path(chat_id)),
+      "AGENT_BROWSER_ARGS": bounded_agent_browser_args(
+        os.environ.get("AGENT_BROWSER_ARGS")
+      ),
+      "MOBIUS_SCREENSHOT_BUDGET_SECONDS": str(_SCREENSHOT_SECONDS - 10),
+    }
+  )
+  viewport = (
+    {"width": request.width, "height": request.height} if request.width else None
+  )
+  env.update(viewport_env(viewport))
+  env.update(agent_browser_runtime_env())
+  env.update(desktop_pointer_browser_env(env))
+  return env
+
+
+@app_agent_router.post("/screenshot", dependencies=[Depends(reject_cross_site)])
+async def app_screenshot(
+  body: ScreenshotRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """The ``screenshot`` tool: this app's own standalone page, captured by
+  Möbius with the owner's sign-in, which never enters the room."""
+  key = principal.app_agent
+  if key is None or "screenshot" not in key.tools:
+    raise HTTPException(
+      status_code=403, detail="Screenshots are not one of this app's agent tools."
+    )
+  app = db.get(models.App, key.app_id)
+  if app is None:
+    raise HTTPException(status_code=404, detail="App not found.")
+  owner = principal.owner
+  # Bound to this run, so it expires with it; only the capture browser holds it.
+  token = auth.create_agent_token(
+    key.chat, owner.username, owner.token_epoch, run_id=key.run
+  )
+  route = f"/apps/{app.slug}/"
+  db.close()
+  out = (
+    chat_folder(get_settings().data_dir, key.chat)
+    / "media"
+    / f"app-screenshot-{uuid.uuid4().hex}.png"
+  )
+  out.parent.mkdir(parents=True, exist_ok=True)
+  process = await asyncio.create_subprocess_exec(
+    "bash",
+    str(_SCREENSHOT_SCRIPT),
+    "--content-only",
+    route,
+    str(out),
+    env=_capture_env(key.chat, token, body),
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+  )
+  try:
+    _stdout, stderr = await asyncio.wait_for(process.communicate(), _SCREENSHOT_SECONDS)
+  except TimeoutError as exc:
+    process.kill()
+    await process.wait()
+    raise HTTPException(status_code=504, detail="The screenshot timed out.") from exc
+  if process.returncode != 0 or not out.is_file():
+    reason = " / ".join(stderr.decode("utf-8", "replace").strip().splitlines()[-2:])
+    raise HTTPException(status_code=502, detail=f"The screenshot failed: {reason}")
+  return {
+    "image": base64.b64encode(out.read_bytes()).decode("ascii"),
+    "note": f"This is {app.name} as the owner sees it.",
+  }

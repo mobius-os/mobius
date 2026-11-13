@@ -217,7 +217,7 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
     "MOBIUS_AGENT_PROVIDER", "MOBIUS_AGENT_MODEL", "MOBIUS_AGENT_EFFORT",
     "MOBIUS_DELEGATION_ID",
     # Non-secret menu of a confined app agent's declared tools.
-    "MOBIUS_AGENT_TOOLS",
+    "MOBIUS_AGENT_TOOLS", "MOBIUS_AGENT_APP_TOOLS",
     # Non-secret capture context for the screenshot tool.
     "VIEWPORT_WIDTH", "VIEWPORT_HEIGHT", "VIEWPORT_PIXEL_RATIO",
     "AGENT_BROWSER_SESSION", "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_ARGS",

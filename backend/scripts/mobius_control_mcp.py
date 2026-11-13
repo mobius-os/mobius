@@ -82,6 +82,7 @@ LIST_APPS_TOOL = "list_apps"
 APPLY_APP_TOOL = "apply_app"
 SCREENSHOT_TOOL = "screenshot"
 OPEN_PAGE_TOOL = "open_page"
+APP_SCREENSHOT_TOOL = "app_screenshot"
 # What one opened page may return to the model, after its markup is removed.
 OPEN_PAGE_MAX_CHARS = 60_000
 SPAWN_AGENT_TOOL = "spawn_agent"
@@ -474,6 +475,12 @@ def _app_agent_tools() -> tuple[str, ...] | None:
   return tuple(name for name in names.split(",") if name in _TOOL_DEFINITIONS)
 
 
+def _app_agent_app_tools() -> frozenset[str]:
+  """Other apps' tools a confined app agent's app declared."""
+  names = os.environ.get(_PLATFORM_TOOLS.APP_AGENT_APP_TOOLS_ENV) or ""
+  return frozenset(name for name in names.split(",") if name)
+
+
 def _available_tool_names() -> tuple[str, ...]:
   return _PLATFORM_TOOLS.expected_control_tool_names(
     top_level=bool(os.environ.get("MOBIUS_RUN_TOKEN")),
@@ -534,7 +541,12 @@ def _app_tool_listings() -> list[dict[str, Any]]:
 def _tools_list_result() -> dict[str, Any]:
   try:
     # A confined app agent is offered only the Möbius tools its app declared.
-    app_tools = [] if _app_agent_tools() is not None else _app_tool_listings()
+    if _app_agent_tools() is None:
+      app_tools = _app_tool_listings()
+    elif _app_agent_app_tools():
+      app_tools = [t for t in _app_tool_listings() if t["name"] in _app_agent_app_tools()]
+    else:
+      app_tools = []
   except RuntimeError as exc:
     # A model may never read server stderr. Keep controls usable, but make
     # failure visible in the catalogue it actually receives.
@@ -1553,6 +1565,23 @@ def _call_screenshot(arguments: dict[str, Any]) -> ToolContent:
   ])
 
 
+def _call_app_screenshot(arguments: dict[str, Any]) -> ToolContent:
+  """Möbius captures this app's own page outside the room (a confined agent)."""
+  _require_args(APP_SCREENSHOT_TOOL, arguments, set())
+  viewport = {
+    key: int(value)
+    for key, name in (("width", "VIEWPORT_WIDTH"), ("height", "VIEWPORT_HEIGHT"))
+    if (value := os.environ.get(name, "")).isdigit()
+  }
+  shot = _agent_api_call(
+    "POST", "/api/app-agent/screenshot", viewport, timeout=SCREENSHOT_TIMEOUT_SECONDS,
+  )
+  return ToolContent([
+    {"type": "image", "data": shot["image"], "mimeType": "image/png"},
+    {"type": "text", "text": shot.get("note") or "This is the app as the owner sees it."},
+  ])
+
+
 _TOOL_DEFINITIONS = {
   CHECKPOINT_CHAT_TOOL: {
     "name": CHECKPOINT_CHAT_TOOL,
@@ -1842,6 +1871,14 @@ _TOOL_DEFINITIONS = {
         "content_only": {"type": "boolean"},
       },
     },
+  },
+  APP_SCREENSHOT_TOOL: {
+    "name": APP_SCREENSHOT_TOOL,
+    "description": (
+      "See this app's own page as the owner sees it, at their screen size. "
+      "Möbius takes the picture for you; it shows only this app."
+    ),
+    "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
   },
   OPEN_PAGE_TOOL: {
     "name": OPEN_PAGE_TOOL,
@@ -2352,6 +2389,7 @@ _TOOL_HANDLERS = {
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
   NOTIFY_OWNER_TOOL: _call_notify_owner,
   OPEN_PAGE_TOOL: _call_open_page,
+  APP_SCREENSHOT_TOOL: _call_app_screenshot,
   OPEN_ITEM_TOOL: _call_open_item,
   REQUEST_SECRET_TOOL: _call_request_secret,
   LIST_APPS_TOOL: _call_list_apps,
@@ -2372,7 +2410,7 @@ def _call_tool(params: Any) -> dict[str, Any]:
       return _tool_result(APP_TOOLS_UNAVAILABLE_MESSAGE, is_error=True)
     if (
       isinstance(name, str) and name not in _TOOL_DEFINITIONS
-      and _app_agent_tools() is None
+      and (_app_agent_tools() is None or name in _app_agent_app_tools())
     ):
       try:
         # A discovery snapshot is not execution authority. Check the live

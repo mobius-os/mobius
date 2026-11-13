@@ -87,6 +87,7 @@ from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
   app_consent_router,
   agent_gateway_router,
+  app_agent_router,
   app_tools_router,
   auth_router, browser_access_router,
   app_chat_router,
@@ -1103,6 +1104,7 @@ app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
 app.include_router(agent_gateway_router)
+app.include_router(app_agent_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)
