@@ -1281,61 +1281,80 @@ _TERMINAL_RECORD_STATUSES = frozenset({
 })
 
 
-def _checkout_used_by_open_record(app_id: int, record: dict, repo: Path) -> str | None:
-  """Another unfinished contribution of this app staged from ``repo``, by id.
+def _linked_git_dir(checkout: Path) -> Path | None:
+  """The Git data a ``.git`` pointer file in ``checkout`` names, if any."""
+  marker = checkout / ".git"
+  try:
+    if not marker.is_file() or marker.is_symlink():
+      return None
+    value = marker.read_text().strip()
+  except OSError:
+    return None
+  if not value.startswith("gitdir:"):
+    return None
+  git_dir = Path(value.removeprefix("gitdir:").strip())
+  if not git_dir.is_absolute():
+    git_dir = checkout / git_dir
+  try:
+    return git_dir.resolve()
+  except (OSError, RuntimeError):
+    return None
 
-  Contributions can share one checkout, such as a follow-up PR prepared in the
-  clone of the PR before it. A finished one must not delete the checkout while
-  another still needs it; whichever finishes last removes it.
+
+def _checkout_removal_paths(repo: Path) -> tuple[Path, ...]:
+  """Everything removing ``repo`` deletes: the checkout and a separate Git dir.
+
+  Matches ``_remove_staging_checkout``, which also deletes a sibling ``git``
+  folder holding the checkout's Git data.
   """
+  git_dir = _linked_git_dir(repo)
+  if git_dir is not None and git_dir.name == "git" and git_dir.parent == repo.parent:
+    return repo, git_dir
+  return (repo,)
+
+
+def checkout_kept_for(app_id: int, record: dict) -> str | None:
+  """Another unfinished contribution of this app that needs ``record``'s checkout.
+
+  Contributions can share a checkout: a follow-up PR prepared in the clone of
+  the PR before it, a folder around it, or a worktree whose Git data lives in
+  it. A finished one must not delete what another still needs; whichever
+  finishes last removes it. Returns the id of the contribution it is kept for.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  raw_repo = plan.get("repo_path")
+  if not isinstance(raw_repo, str) or not raw_repo:
+    return None
+  try:
+    removed = _checkout_removal_paths(Path(raw_repo).resolve())
+  except (OSError, RuntimeError):
+    return None
   own = str(record.get("id") or "")
   for path in sorted(_records_dir(app_id).glob("*.json")):
     if path.stem == own:
       continue
     try:
       other = _read_record(path)
-    except Exception:
+    except HTTPException:
       continue
     if other.get("status") in _TERMINAL_RECORD_STATUSES:
       continue
-    plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
-    raw_repo = plan.get("repo_path")
-    if not isinstance(raw_repo, str) or not raw_repo:
+    other_plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
+    other_raw = other_plan.get("repo_path")
+    if not isinstance(other_raw, str) or not other_raw:
       continue
     try:
-      other_repo = Path(raw_repo).resolve()
+      other_repo = Path(other_raw).resolve()
     except (OSError, RuntimeError):
       continue
-    if (
-      other_repo.is_relative_to(repo) or repo.is_relative_to(other_repo)
-      or _linked_git_dir_within(other_repo, repo)
+    other_git = _linked_git_dir(other_repo)
+    if any(
+      other_repo.is_relative_to(gone) or gone.is_relative_to(other_repo)
+      or (other_git is not None and other_git.is_relative_to(gone))
+      for gone in removed
     ):
       return str(other.get("id") or path.stem)
   return None
-
-
-def _linked_git_dir_within(checkout: Path, root: Path) -> bool:
-  """Whether linked worktree ``checkout`` keeps its Git data inside ``root``.
-
-  A worktree added from a clone stores its Git data in that clone, so
-  removing the clone breaks the worktree even though their folders differ.
-  """
-  marker = checkout / ".git"
-  try:
-    if not marker.is_file() or marker.is_symlink():
-      return False
-    value = marker.read_text().strip()
-  except OSError:
-    return False
-  if not value.startswith("gitdir:"):
-    return False
-  git_dir = Path(value.removeprefix("gitdir:").strip())
-  if not git_dir.is_absolute():
-    git_dir = checkout / git_dir
-  try:
-    return git_dir.resolve().is_relative_to(root)
-  except (OSError, RuntimeError):
-    return False
 
 
 def _cleanup_terminal_staging_checkout(record: dict, *, app_id: int) -> bool:
@@ -1354,7 +1373,7 @@ def _cleanup_terminal_staging_checkout(record: dict, *, app_id: int) -> bool:
   roots = (data_dir / "contrib", data_dir / "contributions")
   if not any(repo.is_relative_to(root) for root in roots):
     return False
-  if _checkout_used_by_open_record(app_id, record, repo) is not None:
+  if checkout_kept_for(app_id, record) is not None:
     return False
   cleaned = not repo.exists() or _remove_staging_checkout(repo, data_dir)
   if cleaned and repo.parent.parent in roots:

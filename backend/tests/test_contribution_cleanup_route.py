@@ -324,7 +324,8 @@ def test_a_checkout_shared_with_an_open_contribution_outlives_the_finished_one(
     "plan": {"repo_path": str(checkout)},
   })
 
-  assert _cleanup(client, auth, app["id"], "shared-first") == {"cleaned": False}
+  assert _cleanup(client, auth, app["id"], "shared-first") == {
+    "cleaned": False, "kept_for": "shared-follow-up"}
   assert checkout.is_dir()
 
   # Whichever finishes last removes the checkout.
@@ -349,7 +350,8 @@ def test_an_open_contribution_using_an_enclosing_folder_keeps_the_checkout(clien
     "plan": {"repo_path": str(checkout.parent)},
   })
 
-  assert _cleanup(client, auth, app["id"], "nested-finished") == {"cleaned": False}
+  assert _cleanup(client, auth, app["id"], "nested-finished") == {
+    "cleaned": False, "kept_for": "enclosing-open"}
   assert checkout.is_dir()
 
 
@@ -378,7 +380,40 @@ def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
   })
 
   # The open worktree keeps its Git data inside the finished clone.
-  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": False}
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {
+    "cleaned": False, "kept_for": "worktree-open"}
   assert clone.is_dir()
   status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
   assert status.returncode == 0
+
+
+def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client, auth):
+  """A clone whose Git data sits in a sibling git folder, as the Möbius adapter
+  stages apps without a Git origin: removal deletes that folder too."""
+  app = create_local_app(client, auth, name="Cleanup separate git dir")
+  base = Path(get_settings().data_dir) / "contrib" / "cleanup-separate-git"
+  clone, git_dir = base / "worktree", base / "git"
+  clone.mkdir(parents=True)
+  env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+  subprocess.run(["git", "init", "-q", f"--separate-git-dir={git_dir}", str(clone)], check=True)
+  subprocess.run(["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "base"],
+                 check=True, env=env)
+  follow_up = Path(get_settings().data_dir) / "contrib" / "cleanup-separate-follow-up" / "repo"
+  follow_up.parent.mkdir(parents=True)
+  subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(follow_up)],
+                 check=True)
+  _write_terminal_record(app["id"], "separate-finished", {
+    "id": "separate-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(clone)},
+  })
+  _write_terminal_record(app["id"], "separate-follow-up", {
+    "id": "separate-follow-up", "type": "pr", "status": "draft",
+    "plan": {"repo_path": str(follow_up)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "separate-finished") == {
+    "cleaned": False, "kept_for": "separate-follow-up"}
+  assert git_dir.is_dir()
+  assert subprocess.run(["git", "-C", str(follow_up), "status", "--short"],
+                        check=False).returncode == 0

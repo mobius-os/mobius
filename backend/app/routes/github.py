@@ -156,6 +156,7 @@ from app.github_contributions import (
   publication_handoff_identity,
   publication_handoff_spec,
   _cleanup_terminal_staging_checkout,
+  checkout_kept_for,
   _claim_record,
   _assert_publication_approval,
   confirmed_publication_records,
@@ -5321,6 +5322,12 @@ async def cleanup_contribution_staging(
   except Exception:
     log.debug("autopilot close_out failed %s/%s", app_id, record_id,
               exc_info=True)
+  if not cleaned:
+    # Say why a kept checkout stays, so nobody removes it by hand: another
+    # unfinished contribution still needs it, and the last to finish cleans it.
+    kept_for = await asyncio.to_thread(checkout_kept_for, app_id, settled_record)
+    if kept_for:
+      return {"cleaned": False, "kept_for": kept_for}
   return {"cleaned": cleaned}
 
 
