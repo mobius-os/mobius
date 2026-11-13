@@ -78,6 +78,10 @@ SYSTEM_READ_PATHS = (
   "/opt",
   "/proc",
   "/sys",
+  # The Python Möbius runs on, wherever it is installed (a virtualenv in
+  # development or CI), so the platform's own tools also run inside.
+  sys.prefix,
+  sys.base_prefix,
 )
 BASE_ENV = (
   "PATH",
