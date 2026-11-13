@@ -106,6 +106,14 @@ def _submit_saved(args) -> int:
     values.clear()
 
 
+def _save_refusal(status: int, body: dict) -> str:
+  """Name the server's reason: the saved-card route returns static texts only."""
+  detail = _safe_error(body, "The server refused the request.")
+  message = f"Could not save secure input; no values were requested. {detail}"
+  # A refused request fails the same way again; only a server fault can pass.
+  return message + (" Retry the identical request." if status >= 500 else "")
+
+
 def _request_saved(
   spec: dict, command: list[str], action: str, cwd: str | None = None,
 ) -> dict:
@@ -122,7 +130,7 @@ def _request_saved(
     {**spec, "command": command, "cwd": cwd or os.getcwd(), "action": action}, token,
   )
   if status >= 300:
-    raise RuntimeError("Could not save secure input; no values were requested. Retry the identical request.")
+    raise RuntimeError(_save_refusal(status, receipt))
   if (receipt.get("state") not in {"waiting_for_owner", "answered"}
       or not receipt.get("question_id") or not receipt.get("next_action")):
     raise RuntimeError("Secure input save was not confirmed. Retry the identical request.")

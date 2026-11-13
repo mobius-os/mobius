@@ -21,6 +21,34 @@ export function readRestoredCanvas(storage = localStore()) {
   } catch { return null }
 }
 
+const PAGE_LIVE_KEY = 'mobius:page-live'
+
+/**
+ * Whether this tab's previous page died while on screen, and arm the same
+ * check for this page. A page that ends normally (reload, navigation, going to
+ * the background) clears the mark on pagehide/hidden/freeze; a page the browser
+ * kills (iOS Safari's out-of-memory crash, which then reloads the tab) leaves it,
+ * and sessionStorage survives into the reload.
+ */
+export function previousPageDied(
+  session = sessionStore(), win = globalThis.window, doc = globalThis.document,
+) {
+  let died = false
+  try { died = session?.getItem(PAGE_LIVE_KEY) === '1' } catch { /* storage disabled */ }
+  const mark = (live) => {
+    try {
+      if (live) session?.setItem(PAGE_LIVE_KEY, '1')
+      else session?.removeItem(PAGE_LIVE_KEY)
+    } catch { /* storage disabled: no crash detection */ }
+  }
+  mark(doc?.visibilityState !== 'hidden')
+  win?.addEventListener?.('pagehide', () => mark(false))
+  win?.addEventListener?.('pageshow', () => mark(true))
+  doc?.addEventListener?.('freeze', () => mark(false))
+  doc?.addEventListener?.('visibilitychange', () => mark(doc.visibilityState !== 'hidden'))
+  return died
+}
+
 export function consumeReturnView(storage = sessionStore()) {
   try {
     const view = storage?.getItem(RETURN_VIEW_KEY)

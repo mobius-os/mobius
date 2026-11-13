@@ -246,11 +246,11 @@ def test_settings_cannot_see_or_remove_another_owners_phone(client, auth, db, re
 
 
 def test_a_tap_link_too_large_once_encoded_falls_back_to_the_shell():
-  from app.push import _tap_url
+  from app.push import tap_url
 
-  assert _tap_url("/shell/?chat=c1").endswith("/shell/?chat=c1")
+  assert tap_url("/shell/?chat=c1").endswith("/shell/?chat=c1")
   # Under 2048 characters, but well over 2048 bytes once encoded.
-  assert _tap_url("/shell/?q=" + "ü" * 1500).endswith("/shell/")
+  assert tap_url("/shell/?q=" + "ü" * 1500).endswith("/shell/")
 
 
 def test_removing_a_phone_keeps_it_when_it_registered_again_meanwhile(client, auth, db, relay):

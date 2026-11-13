@@ -720,8 +720,8 @@ def _assistant_result_from_newest(messages, *, run_ids: set[str] | None = None) 
       return "\n\n".join([content.strip(), *later_error])
   return "\n\n".join(later_error)
 
-_SAME_ATTEMPT_RESUME_REASONS = frozenset({
-  "restart", "usage_limit", "memory", "storage", "model_capacity", "compaction",
+_SAME_ATTEMPT_RESUME_REASONS = models.RESOURCE_PARK_REASONS | frozenset({
+  "restart", "usage_limit", "model_capacity", "compaction",
 })
 
 
@@ -1930,8 +1930,8 @@ def delegation_execution_token(
   )
 
 
-def mark_cancelled(db: Session, row: models.Delegation) -> None:
-  """Latch cancellation and its Workflows terminal projection idempotently."""
+def latch_cancelled(db: Session, row: models.Delegation) -> None:
+  """Stage cancellation without committing, for a caller that commits it with other writes."""
   child = db.query(models.Chat).filter(
     models.Chat.id == row.child_chat_id,
   ).first()
@@ -1940,6 +1940,11 @@ def mark_cancelled(db: Session, row: models.Delegation) -> None:
     child.auto_resume_on_limit = False
   if row.cancelled_at is None:
     row.cancelled_at = now_naive_utc()
+
+
+def mark_cancelled(db: Session, row: models.Delegation) -> None:
+  """Latch cancellation and its Workflows terminal projection idempotently."""
+  latch_cancelled(db, row)
   # Stage cancellation before recording the terminal lifecycle fact.
   # ``record_event`` commits both when the event is new; the explicit commit
   # covers an idempotent replay where that deterministic event already exists.

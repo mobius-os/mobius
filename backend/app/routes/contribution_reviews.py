@@ -18,6 +18,7 @@ from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only
 
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
+from app import contribution_review_list as list_view
 from app import contribution_review_presets as presets
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
@@ -46,14 +47,18 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
+# request_review_now: Contribute's Request review button. Retire the key once the Store's minimum Möbius includes
+# the release that added it, because the app then no longer needs to ask whether this platform has the route.
 # owner_confirm: the shell can confirm an action for an app (window.mobius.ownerGrant). The older owner_grant
 # key is deliberately never advertised: released Contribute reads it as proof of the owner's tap and turns Post on.
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
-                       "owner_confirm": True}
+                       "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
+                       "pr_machine": True, "owner_confirm": True,
+                       # Following (the autopilot grant) can start on a sent PR, and can ask before each push.
+                       "follow_after_send": True, "follow_ask_mode": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -539,42 +544,35 @@ async def start_reviews(app_id: int | None, body: StartReviews,
 
 @router.get(APP_PREFIX + "/{app_id}/review-runs")
 def list_reviews(app_id: int | None, db: Session = Depends(get_db),
-                 principal: Principal = Depends(get_principal)):
+                 principal: Principal = Depends(get_principal),
+                 view: Literal["full", "summary"] = "full"):
+  """The owner's review runs, newest first.
+
+  `view=summary` is the cheap form for a client that polls: every run keeps what a row or badge
+  needs and loses its documents (see `contribution_review_list`); a run's full detail is `GET .../review-runs/{run_id}`.
+  An answer in that form says so with a top-level `"view": "summary"`; a Möbius older than the option
+  ignores it and answers in full, without the marker.
+  """
   _authorize_context(db, app_id, principal)
   rows = db.query(models.ContributionReviewRun).filter(
     models.ContributionReviewRun.owner_id == principal.owner.id,
     _read_context_filter(app_id),
   ).order_by(models.ContributionReviewRun.created_at.desc()).limit(100).all()
-  return {"runs": [_list_run_view(db, row, app_id) for row in rows],
-          "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  answer = {"runs": [_list_run_view(db, row, app_id, view) for row in rows],
+            "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  if view == "summary":
+    answer["view"] = view
+  return answer
 
 
-def _list_run_view(db, row, app_id):
-  """Keep owning clients compatible; bound only privacy-projected navigation."""
+def _list_run_view(db, row, app_id, view="full"):
+  """A run as the list shows it: one the asking app owns whole (or as its summary), a core run it reads through always minimized."""
   value = _run_view(db, row, context_app_id=app_id)
   if app_id is None or row.app_id == app_id:
-    return value
-  fields = ("repo", "number", "head_sha", "base_ref", "base_sha", "state", "url", "title",
-            "review_chat_id", "review_run_id", "merge_sha", "queue_entry_id",
-            "successor", "approved_head_sha", "approved_base_sha", "current_base_sha")
-  items = []
-  for item in value["items"]:
-    brief = {key: item[key] for key in fields if key in item}
-    if item.get("summary"):
-      summary = item["summary"]
-      if len(summary) > 240:
-        omission = "… open this run for the full findings"
-        brief.update(summary=summary[:240-len(omission)] + omission, summary_truncated=True)
-      else:
-        brief["summary"] = summary
-    if item.get("public_review"):
-      receipt = item["public_review"]
-      brief["public_review"] = {key: receipt[key] for key in ("state", "url", "id") if key in receipt}
-    items.append(brief)
-  value["items"] = items
+    return list_view.summary_run(value) if view == "summary" else value
+  value["items"] = [list_view.navigation_item(item) for item in value["items"]]
   if "options" in value:
-    value["options"] = {key: val for key, val in (value["options"] or {}).items()
-      if key in {"provider", "model", "reasoning_effort", "post_review", "confirmation_scope"}}
+    value["options"] = list_view.navigation_options(value["options"])
   return value
 
 
@@ -1359,6 +1357,14 @@ async def close_pull_now(app_id: int, body: PullStatusChange, db: Session = Depe
   return await _owner_status_change(app_id, "close", body, db, principal)
 
 
+@router.post(APP_PREFIX + "/{app_id}/pulls/request-review",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def request_review_now(app_id: int, body: ReviewerRequest, db: Session = Depends(get_db),
+                             principal: Principal = Depends(get_principal)):
+  """The owner's own Request review (request_review): GitHub's review request to people they pick, who need not have reviewed."""
+  return await _owner_status_change(app_id, "request-review", body, db, principal)
+
+
 @router.post(APP_PREFIX + "/{app_id}/pulls/request-reviewers",
              dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
 async def request_rereview_now(app_id: int, body: ReviewerRequest, db: Session = Depends(get_db),
@@ -1886,13 +1892,42 @@ async def core_publish_repair(run_id: str, body: RepairPublish, db: Session = De
   return await publish_repair(None, run_id, body, db, principal)
 
 
+# A head and base admit one reviewer; a replacement is only for one that failed
+# without reporting, and this bounds how many such failures it can absorb.
+MAX_REVIEWER_ATTEMPTS = 3
+
+
+def _reviewer_task_key(row, target, attempt):
+  """The first reviewer keeps the original key; a replacement adds its attempt."""
+  seed = f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}"
+  return "review-" + hashlib.sha256((f"{seed}:{attempt}" if attempt else seed).encode()).hexdigest()
+
+
+def _reviewer_failed_unreported(db, reviewer, previous, target) -> bool:
+  """Whether a registered reviewer ended in error and recorded no evidence.
+
+  Only that reviewer may be replaced. One that is live, armed, paused, stopped,
+  finished or waiting on a question keeps its seat, and any receipt for this
+  head and base is final: a verdict is never replaced by asking another reviewer.
+  """
+  from app.chat import is_chat_busy
+  from app.delegations import delegation_statuses
+  if any(r.get("head_sha") == target["head_sha"] and r.get("base_sha") == target["base_sha"]
+         for r in previous.get("independent_reviews", [])):
+    return False
+  child = db.get(models.Chat, reviewer.child_chat_id)
+  return (child is not None and not is_chat_busy(db, child)
+    and delegation_statuses(db, [reviewer])[reviewer.id] in {"failed", "needs_review"})
+
+
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/reviewers",
              dependencies=[Depends(reject_cross_site)])
 async def start_independent_reviewer(app_id: int | None, run_id: str, body: PullIdentity,
                                      db: Session = Depends(get_db),
                                      principal: Principal = Depends(get_agent_run_principal)):
   from app.delegations import (DelegationIntent, create_or_attach_delegation,
-    ensure_delegation_started, serialize_delegation, parent_root_run_id)
+    ensure_delegation_started, serialize_delegation, parent_root_run_id,
+    latch_cancelled, mark_cancelled)
   row = _row(db, app_id, run_id, principal)
   _parent(db, row, principal)
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -1915,16 +1950,22 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
       if not frozen.get("model"):
         raise HTTPException(409, "A fresh selection with run-frozen prompt/model is required.")
       prompt = reviews.independent_brief(row, target)
-      task_key = "review-" + hashlib.sha256(f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}".encode()).hexdigest()
+      attempts = sum(s.get("head_sha") == target["head_sha"] and s.get("base_sha") == target["base_sha"]
+                     for s in previous.get("reviewer_steps", []))
+      task_key = _reviewer_task_key(row, target, max(attempts - 1, 0))
       existing = db.query(models.Delegation).filter_by(parent_chat_id=row.chat_id, task_key=task_key).first()
+      superseded = None
       if existing:
         # Never revive a stopped child when observing a saved step, even across
         # parent turns with a fresh logical root id.
         _assert_independent_reviewer(row, existing, target)
-        if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
-          await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
-          _parent(db, row, principal)
-        return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
+        if attempts < MAX_REVIEWER_ATTEMPTS and _reviewer_failed_unreported(db, existing, previous, target):
+          superseded, task_key = existing, _reviewer_task_key(row, target, attempts)
+        else:
+          if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
+            await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
+            _parent(db, row, principal)
+          return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
       # Registration resets the item to reviewing. That would hide a live merge
       # from /observe and the cross-grant fence, or mask an unclear push.
       if _merge_attempted(previous) or any(a.get("state") in {"pushing", "push_unknown"}
@@ -1940,6 +1981,9 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
         provider=frozen["provider"], model=frozen["model"], effort=frozen.get("reasoning_effort"),
         cwd=str(Path(get_settings().data_dir)), notify_parent_on_complete=True)
       def register_reviewer(admitted):
+        if superseded:
+          # Committed with the replacement, so the old reviewer can never report late.
+          latch_cancelled(db, superseded)
         reviews.write_outcome(db, row, reviews.key(target), {**previous,
           "state": "reviewing", "head_sha": target["head_sha"],
           "reviewer_steps": [*previous.get("reviewer_steps", []), {
@@ -1947,6 +1991,8 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
             "prompt_sha256": admitted.prompt_sha256, "provider": admitted.provider, "model": admitted.model,
             "effort": admitted.effort}]})
       child, _ = create_or_attach_delegation(db, intent, admit_child=register_reviewer)
+      if superseded:
+        mark_cancelled(db, superseded)  # the cancelled lifecycle event; the latch above already committed
       db.refresh(row)
       _assert_independent_reviewer(row, child, target)
       _parent(db, row, principal)

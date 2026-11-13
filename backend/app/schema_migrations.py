@@ -7115,6 +7115,186 @@ def _add_shared_peer_note_bodies(eng) -> None:
     ))
 
 
+def _repair_claude_session_costs(eng) -> None:
+  """Repair only historical costs whose token snapshots prove their scope.
+
+  A row proves it when one model's counters advanced by exactly the turn's
+  usage while the rest stayed put. Later rows of a proven session follow it
+  when every counter and the total are non-decreasing and cover the turn.
+  No transcript changes or provider-file reads. Preserve original totals and
+  a labelled baseline in usage_json; ambiguous or old per-call data stays as is.
+  The marker makes retry after a crash before the ledger insert idempotent.
+  """
+  import json
+  from sqlalchemy import inspect as sa_inspect, text
+  import math
+
+  # Migration behavior is frozen here, not imported from mutable runtime code.
+  def amount(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+      return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+  def snapshot(usage, cost):
+    recorded = usage.get("provider_cost")
+    if isinstance(recorded, dict) and recorded.get("scope") == "session":
+      return amount(recorded.get("total_usd"))
+    models = usage.get("provider_model_usage")
+    if not isinstance(models, dict) or not models or amount(cost) is None:
+      return None
+    values = [amount(m.get("costUSD")) if isinstance(m, dict) else None
+              for m in models.values()]
+    if any(value is None for value in values):
+      return None
+    total = sum(values)
+    return total if math.isclose(total, cost, rel_tol=1e-9, abs_tol=1e-9) else None
+
+  fields = (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
+            ("cacheReadInputTokens", "cache_read_input_tokens"),
+            ("cacheCreationInputTokens", "cache_creation_input_tokens"))
+
+  def baseline_basis(usage, previous_usage):
+    models = usage.get("provider_model_usage") or {}
+    current = usage.get("provider_usage") or {}
+    previous = (previous_usage or {}).get("provider_model_usage") or {}
+    if not all(isinstance(v, dict) for v in (models, current, previous)):
+      return None
+    if not all(isinstance(current.get(raw), int) and not isinstance(current[raw], bool)
+               and current[raw] >= 0 for _, raw in fields):
+      return None
+    per_call = any(isinstance(model, dict) and all(
+      model.get(key) == current[raw] for key, raw in fields
+    ) for model in models.values())
+    evidence_keys = ("costUSD",) + tuple(key for key, _ in fields)
+    for name, model in models.items():
+      before = previous.get(name)
+      if isinstance(model, dict) and isinstance(before, dict) and all(
+        isinstance(model.get(key), int) and isinstance(before.get(key), int)
+        and model[key] - before[key] == current[raw] for key, raw in fields
+      ):
+        # A primary-model delta cannot justify subtracting other models' spend.
+        # Require the rest of the breakdown to be unchanged; when both per-call
+        # and cumulative interpretations fit, preserve the original record.
+        if per_call:
+          return None
+        model_cost, before_cost = amount(model.get("costUSD")), amount(before.get("costUSD"))
+        if models.keys() == previous.keys() and all(
+          isinstance(other, dict) and isinstance(previous[other_name], dict)
+          and all(other.get(key) == previous[other_name].get(key)
+                  for key in evidence_keys)
+          for other_name, other in models.items() if other_name != name
+        ) and model_cost is not None and before_cost is not None and model_cost >= before_cost:
+          return "previous"
+        return None
+    return "zero" if per_call else None
+
+  def count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+  def counters(usage):
+    models = (usage or {}).get("provider_model_usage")
+    if not isinstance(models, dict) or not models:
+      return None
+    result = {}
+    for name, model in models.items():
+      values = tuple(count(model.get(key)) if isinstance(model, dict) else None
+                     for key, _ in fields)
+      if None in values:
+        return None
+      result[name] = values
+    return result
+
+  def covers_turn(usage, previous_usage):
+    # Subagent requests and Claude Code's background calls add to model_usage
+    # but not to the turn's main-loop usage, so cumulative counters only need
+    # to cover it. Same rule as the live writer (app.claude_costs).
+    now, before = counters(usage), counters(previous_usage)
+    turn = usage.get("provider_usage")
+    if now is None or before is None or not isinstance(turn, dict):
+      return False
+    own = tuple(count(turn.get(raw)) for _, raw in fields)
+    if None in own or any(
+      name not in now or any(a < b for a, b in zip(now[name], values))
+      for name, values in before.items()
+    ):
+      return False
+    zero = (0,) * len(fields)
+    return any(
+      all(a - b >= spent for a, b, spent in zip(values, before.get(name, zero), own))
+      for name, values in now.items()
+    )
+
+  if "chat_runs" not in sa_inspect(eng).get_table_names():
+    return
+  columns = {column["name"] for column in sa_inspect(eng).get_columns("chat_runs")}
+  if not {"id", "chat_id", "provider", "provider_session_id", "started_at",
+          "cost_usd", "usage_json"}.issubset(columns):
+    # Pre-telemetry tables have no cost evidence to repair. Their historical
+    # migrations and the ordinary schema-readiness check still own upgrades.
+    return
+  previous_key = None
+  previous_usage = None
+  previous_total = None
+  # The CLI only upgrades forward, so a session proven cumulative never goes
+  # back to per-call totals. Later rows there need only consistent counters.
+  proven_cumulative = False
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, chat_id, provider_session_id, cost_usd, usage_json "
+      "FROM chat_runs WHERE provider = 'claude' "
+      "AND provider_session_id IS NOT NULL "
+      "ORDER BY chat_id, provider_session_id, started_at, id"
+    )).mappings()
+    for row in rows:
+      key = (row["chat_id"], row["provider_session_id"])
+      if key != previous_key:
+        previous_usage = previous_total = None
+        previous_key = key
+        proven_cumulative = False
+      try:
+        usage = json.loads(row["usage_json"] or "null")
+      except (TypeError, ValueError):
+        usage = None
+      if not isinstance(usage, dict):
+        previous_usage = previous_total = None
+        continue
+      total = snapshot(usage, row["cost_usd"])
+      basis = baseline_basis(usage, previous_usage)
+      if basis is None and proven_cumulative and covers_turn(usage, previous_usage):
+        basis = "previous"
+      if total is not None and "provider_cost" not in usage:
+        baseline = previous_total if basis == "previous" else 0.0
+        cost = (max(0.0, total - baseline) if basis is not None
+                and baseline is not None and total >= baseline else None)
+        if cost is not None:
+          usage["provider_cost"] = {
+            "scope": "session", "total_usd": total,
+            "baseline_usd": baseline, "historical_repair": True,
+          }
+          conn.execute(text(
+            "UPDATE chat_runs SET cost_usd = :cost, usage_json = :usage "
+            "WHERE id = :id"
+          ), {"id": row["id"], "cost": cost, "usage": json.dumps(usage)})
+          proven_cumulative = proven_cumulative or basis == "previous"
+      previous_usage, previous_total = usage, total
+
+
+def _add_autopilot_push_mode(eng) -> None:
+  """Every existing follow-up grant keeps pushing by itself ("auto")."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "contribution_autopilot" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("contribution_autopilot")}
+  if "push_mode" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE contribution_autopilot "
+        "ADD COLUMN push_mode VARCHAR(8) NOT NULL DEFAULT 'auto'"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7240,6 +7420,8 @@ _SCHEMA_MIGRATIONS = (
   ("0101_claim_revocation_outbox", _add_claim_revocation_outbox),
   ("0102_work_claim_text", _widen_work_claim_text),
   ("0103_shared_peer_note_bodies", _add_shared_peer_note_bodies),
+  ("0104_claude_session_costs", _repair_claude_session_costs),
+  ("0105_autopilot_push_mode", _add_autopilot_push_mode),
 )
 
 

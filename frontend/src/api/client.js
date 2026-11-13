@@ -1227,6 +1227,11 @@ export const api = {
     acceptConsent: (appId, digest) => apiFetch(`/apps/${appId}/consent`, {
       method: 'POST', body: JSON.stringify({ digest }),
     }),
+    // Every credits charge waits for the owner's Pay or Cancel.
+    waitingPayments: (appId) => apiFetch(`/apps/${appId}/credits-charges`),
+    answerPayment: (appId, paymentId, pay) => apiFetch(`/apps/${appId}/credits-charges/${encodeURIComponent(paymentId)}`, {
+      method: 'POST', body: JSON.stringify({ pay }),
+    }),
     markActivitySeen: (appId, activityVersion, appCreatedAt) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion, app_created_at: appCreatedAt }),
@@ -1838,6 +1843,21 @@ export const api = {
         // Sign-out reloads the page right after; let the request finish.
         keepalive: true,
       }),
+    },
+    // Outside channels (Slack, Discord, ntfy, webhooks) that get a copy of
+    // notifications. The link goes in once and is never read back.
+    channels: {
+      list: () => apiFetch('/push/channels'),
+      add: (payload) => apiFetch('/push/channels', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      update: (id, payload) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
+      remove: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+      test: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     },
   },
 }

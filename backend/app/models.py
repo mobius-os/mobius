@@ -37,8 +37,12 @@ from app.tool_output_storage import CompressedToolOutputText
 
 CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
 NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
-# Parks that wait for this installation's own memory or storage headroom.
-RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
+# Parks that wait for this installation's own memory, storage or process
+# headroom.
+RESOURCE_PARK_REASONS = frozenset({"memory", "storage", "processes"})
+# Waits the owner may lift for one warned run (Continue anyway). Never memory:
+# past that floor the kernel kills running work, not only the new turn.
+OWNER_OVERRIDABLE_RESOURCES = frozenset({"storage", "processes"})
 
 
 class Owner(Base):
@@ -2067,6 +2071,38 @@ class PushDevice(Base):
   registered_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class NotificationChannel(Base):
+  """An outside place owner notifications are copied to (Slack, Discord, …).
+
+  A channel receives a notification exactly when phones and browsers would
+  get a push: not while the owner is watching its source, never for quiet
+  maintenance notices. ``app_ids`` limits it to those apps' notifications;
+  null means every notification. The webhook URL is itself a credential, so it
+  is stored encrypted (``app.notification_channels``) and never returned;
+  ``url_hint`` names it in Settings. Delivery is best effort, like a push:
+  ``last_*`` records the latest outcome so Settings can show a broken link.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "notification_channels"
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  kind = Column(String(16), nullable=False)
+  label = Column(String(80), nullable=False)
+  url_encrypted = Column(Text, nullable=False)
+  url_hint = Column(String(200), nullable=False)
+  app_ids = Column(JSON, nullable=True)
+  include_body = Column(Boolean, nullable=False, default=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  last_sent_at = Column(DateTime, nullable=True)
+  last_error = Column(String(300), nullable=True)
+
+
 class Notification(Base):
   """Record of a sent push notification."""
 
@@ -2317,7 +2353,8 @@ class ContributionAutopilot(Base):
   is AGENT-WRITABLE, so nothing there can be trusted as consent or as claim
   truth. This table is the trust anchor: one row per (app_id, record_id), written
   ONLY by platform code — the submit endpoints stamp the grant when the owner
-  clicks Send, and the autopilot endpoints move the claim/round state. A forged
+  clicks Send, the owner-confirmed toggle stamps it for a PR that is already
+  open, and the autopilot endpoints move the claim/round state. A forged
   ``autopilot`` block in the ledger changes nothing; every enforcement path reads
   this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
 
@@ -2348,6 +2385,10 @@ class ContributionAutopilot(Base):
   target_head_repository = Column(String(256), nullable=True, default=None)
   target_branch = Column(String(256), nullable=True, default=None)
   target_repo_path = Column(String(1024), nullable=True, default=None)
+  # "auto": a round pushes its validated fix itself. "ask": a round only
+  # prepares the update and the owner's Update PR press publishes it. Held here
+  # because the agent-writable ledger must not be able to widen it.
+  push_mode = Column(String(8), nullable=False, default="auto", server_default="auto")
   # "idle" between rounds; "responding" while a round holds the claim;
   # "blocked" while an escalation awaits a reviewed repair. A blocker does
   # not revoke owner consent; only an explicit Pause disables that grant.

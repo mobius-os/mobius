@@ -183,13 +183,14 @@ def test_an_approval_of_an_older_commit_still_merges_when_the_prs_own_change_is_
   {SHA: {"files": [SAME_LINE]}},
   {},
 ], ids=["the work changed", "the approved version cannot be read", "neither can be read"])
-def test_an_approval_of_an_older_commit_does_not_merge_unless_the_work_is_proved_the_same(compares):
+def test_an_approval_of_an_older_commit_not_proved_the_same_no_longer_holds_back_the_owners_merge(compares):
+  # Only the owner's tap: the agent's own merge still refuses it (test_merge_refused_when_only_approval_is_on_an_older_commit).
   github = FakeGitHub()
+  github.checks.update(reviewDecision=None)  # a repository that requires no review
   github.reviews = [{**APPROVAL, "commit": {"oid": MOVED}}]
   github.compares = compares
-  refusal = refused(github)
-  assert (refusal.status_code, refusal.detail) == (409, "The approval is for an older version.")
-  assert github.writes == 0
+  assert press(github)["state"] == "merged"
+  assert github.merges == [{"sha": SHA, "merge_method": "squash"}]
 
 
 def test_an_approval_of_this_head_costs_no_comparison():
@@ -281,19 +282,6 @@ REFUSALS = {
   "a draft": (lambda g: g.pull.update(draft=True), "This pull request is still a draft."),
   "a head that moved between GitHub's two answers": (lambda g: g.checks.update(headRefOid=MOVED),
                                                       "The pull request changed during the merge check."),
-  "nobody but the author approved": (lambda g: setattr(g, "reviews", []), "Nobody but the author has approved it yet."),
-  "an approval only of an older version": (
-    lambda g: setattr(g, "reviews", [{**APPROVAL, "commit": {"oid": MOVED}}]), "The approval is for an older version."),
-  "only a bot approved": (lambda g: setattr(g, "reviews", [{**APPROVAL, "author": {"login": "ci", "__typename": "Bot"}}]),
-                          "Nobody but the author has approved it yet."),
-  "the author's own approval": (lambda g: (g.pull.update(user={"id": 7, "login": "sam"})),
-                                "Nobody but the author has approved it yet."),
-  "an older change request still standing": (
-    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": {"login": "bob", "__typename": "User"},
-                                "commit": {"oid": MOVED}}), "bob asked for changes and hasn’t approved since."),
-  "a change request whose commit GitHub no longer has": (
-    lambda g: g.reviews.append({"state": "CHANGES_REQUESTED", "author": None, "commit": None}),
-    "ghost asked for changes and hasn’t approved since."),
   "reviews that cannot be read": (lambda g: g.unreadable.add("reviews"), "This PR could not be read. Try again."),
   "failing checks": (lambda g: g.checks.update(_rollup("FAILURE")), CHECKS_FAILED),
   "pending checks": (lambda g: g.checks.update(_rollup("PENDING")), CHECKS_FAILED),
@@ -310,6 +298,30 @@ REFUSALS = {
   "an unconfirmed queue policy": (lambda g: g.checks.update(isMergeQueueEnabled=None),
                                   "GitHub did not confirm the merge queue policy."),
 }
+
+
+# Review standing the PR machine used to refuse the owner's own Merge for. In a repository that requires no review
+# GitHub reads it as no decision at all, so nothing but the owner's tap stands between this and the merge: the confirm
+# sheet names it, and the agent's unattended merge still refuses every one of these.
+UNREVIEWED = {
+  "nobody but the author approved": lambda g: setattr(g, "reviews", []),
+  "an approval only of an older version": lambda g: setattr(g, "reviews", [{**APPROVAL, "commit": {"oid": MOVED}}]),
+  "only a bot approved": lambda g: setattr(g, "reviews", [{**APPROVAL, "author": {"login": "ci", "__typename": "Bot"}}]),
+  "the author's own approval": lambda g: g.pull.update(user={"id": 7, "login": "sam"}),
+  "an older change request still standing": lambda g: g.reviews.append(
+    {"state": "CHANGES_REQUESTED", "author": {"login": "bob", "__typename": "User"}, "commit": {"oid": MOVED}}),
+  "a change request whose commit GitHub no longer has": lambda g: g.reviews.append(
+    {"state": "CHANGES_REQUESTED", "author": None, "commit": None}),
+}
+
+
+@pytest.mark.parametrize("what", UNREVIEWED)
+def test_review_standing_no_longer_holds_back_the_owners_merge_in_a_repository_that_requires_no_review(what):
+  github = FakeGitHub()
+  github.checks.update(reviewDecision=None)
+  UNREVIEWED[what](github)
+  assert press(github)["state"] == "merged"
+  assert github.merges == [{"sha": SHA, "merge_method": "squash"}]
 
 
 @pytest.mark.parametrize("what", REFUSALS)

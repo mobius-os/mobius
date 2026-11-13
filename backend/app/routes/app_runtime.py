@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app import activity, models, theme
+from app import activity, app_consent, models, theme
 from app.app_capabilities import passive_block_module_digest
 from app.config import get_settings
 from app.database import get_db
@@ -20,6 +20,7 @@ from app.deps import authorize_app_module_token, get_current_owner
 from app.http_caching import strip_range
 from app.net_utils import MAX_REDIRECTS, pinned_client, validate_url_safe
 from app.resource_access import live_app, live_app_or_404
+from app.response_policy import APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY
 
 
 router = APIRouter()
@@ -254,6 +255,7 @@ def _frame_etag(
   app: models.App,
   frame_path: Path,
   frame_rev: str | None = None,
+  direct_origins: tuple[str, ...] = (),
 ) -> str | None:
   """Validator for the `/frame` response, combining the app's
   `updated_at` with the shared runtime-frame file's content and the
@@ -290,6 +292,11 @@ def _frame_etag(
   passive = passive_block_module_digest(app)
   if passive:
     parts.append(f"p{passive[:16]}")
+  # The frame's policy names the app's direct origins, so a granted, widened
+  # or withdrawn grant must not revalidate as the cached frame.
+  if direct_origins:
+    digest = hashlib.sha256("\n".join(direct_origins).encode()).hexdigest()
+    parts.append(f"d{digest[:16]}")
   if frame_rev is None:
     try:
       parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
@@ -369,7 +376,12 @@ def get_frame(
   # don't change with the theme. Compute the frame content hash and key the
   # validator on it plus app.updated_at.
   frame_rev = theme.frame_content_rev(get_settings().data_dir)
-  etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
+  # An app still waiting for the owner's consent gets no outside sites.
+  direct_origins = app_consent.granted_direct_origins(app)
+  request.scope[APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY] = direct_origins
+  etag = _frame_etag(
+    app, frame_path, frame_rev=frame_rev, direct_origins=direct_origins,
+  )
   frame_cache_headers = {
     "Cache-Control": "no-cache",
   }

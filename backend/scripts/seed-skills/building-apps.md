@@ -58,6 +58,10 @@ contract instead of rebuilding or replacing it. Keep the same scope declared
 in `mobius.json`, then verify the returned `chat_log_access`. This is an owner
 permission action, not a substitute for applying the source revision.
 
+Other privileged grants (`github_access`, `manage_apps`, and the rest listed in
+`building-apps-quickstart.md`) have no such route: only a reviewed Store
+install can hold them, and a local app's manifest value is ignored.
+
 ---
 
 ## Packaging / wrapping a pre-built or third-party web app
@@ -194,6 +198,15 @@ of the app's source, so it is reviewed, versioned and published with the code:
   the same works for PNG and WebP without `quality`), or remove it if
   nothing uses it. A bare PNG `tIME` timestamp is allowed; any PNG text
   chunk is not, whatever its key (`Software`, `Author`, `Comment`, XMP...).
+- Publishing requires a free license: `license` in `mobius.json` must be
+  one the Store offers (`MIT`, `Apache-2.0` or `GPL-3.0-or-later`; the
+  preview's `license_options`), with its full text in a root license file
+  (normally `LICENSE`). An app the Store already lists under another
+  free license may keep publishing updates under that same license. The
+  choice is the owner's, made in the Store editor's license picker, so
+  don't pick one for them. Never overwrite or
+  delete license text that is already there: a remix must keep its
+  upstream copyright notices.
 - Screenshots must be truthful and private: capture the app's real UI in an
   empty, demo, or fixture state, never the owner's own records, names,
   accounts, chats, or machines. Build a small demo state if the app has none.
@@ -1061,8 +1074,8 @@ await publicWrite(...) // the same request as always
 ```
 
 The action ids are `merge`, `open_for_review`, `back_to_draft`, `close`,
-`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`), and
-`respond_post`. The shell draws its own sheet outside your frame, and the server
+`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`),
+`follow` (scope `{record_id}`) and `respond_post`. The shell draws its own sheet outside your frame, and the server
 writes its words from what it knows, so pass identifiers, never text for the
 owner to read. The promise resolves `true` once the owner tapped Confirm,
 `false` if they cancelled or the frame was hidden, and rejects with the
@@ -1141,11 +1154,13 @@ The owner, or an installed Store app with accepted `credits_manage` consent
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
 control is planned. Shared-browser guests and delegated helpers cannot pair.
 
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use `credits_manage`
-or `spend_credits`, even if their `mobius.json` declares them: account, price
-and charge requests receive 403. A delegated helper cannot spend credits,
-including through an otherwise approved app service.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. An owner-built local app never gets it, even if its `mobius.json`
+declares it: its account requests receive 403. A local app may still pay with
+`spend_credits` (below): it needs no standing grant, because every charge
+waits for the owner's Pay. It may also check a charge (below). A delegated
+helper cannot spend credits, including through an otherwise approved app
+service.
 
 An app can charge for one of its actions. The creator publishes the price
 once from their own Möbius with
@@ -1173,14 +1188,49 @@ the service may still have charged. Retry with the same key, never a new one;
 the client never retries automatically. Do the paid work only after a 200,
 and explain each refusal by its `detail.code`: `not_paired`
 (the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
-`price_not_found`, `key_spend_cap`, or `key_refused` / `invalid_api_key`
+`price_not_found`, `price_unreadable` (the creator's price could not be read;
+nothing was asked or charged), `key_spend_cap`, or `key_refused` / `invalid_api_key`
 (the credits service refused the key; the owner needs to pair again).
 The key is scoped to your app, so another app's identical key never replays
 your charge.
 
+Every charge waits for the owner. The first request answers 409
+`confirmation_required` while Möbius shows the owner who is paid, for what and
+the price; retry the same charge with the same key every few seconds. It
+answers 200 once they press Pay, or 403 `payment_declined` if they cancel.
+A cancel holds: every retry with that key keeps answering `payment_declined`,
+so stop retrying it; a new purchase in your app takes a new key. Payments come
+from credits only; a `method` other than `"credits"` answers 422
+`payment_method_unsupported`. At most five of your app's payments wait at
+once; another answers 429 `too_many_payments_waiting`. The `*` in a
+`"*/<app>"` grant means any creator of that app; it is never itself a seller.
+
+A 200 answer tells your app only about its own charge — the
+`charge_id`, the amount charged, and `replayed` when the service replayed an
+earlier identical call — never the owner's balance. A refusal keeps only its
+`code`, `message` and the figures about your call (`required_micro`,
+`price_micro`, `max_price_micro`), never the owner's balance or spend cap.
+
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
+
 Showing the owner's balance or history, buying credits, publishing prices or
 moving earnings is a separate critical grant, `"credits_manage": true`.
-`identity_manage` does not include it.
+`identity_manage` does not include it, and only a Store app can hold it. An
+app with it keeps seeing the balance in a charge answer.
 
 ## Managed-app update events
 
@@ -1257,6 +1307,22 @@ const preferences = await window.mobius.capabilities.invoke('device.storage', {
 The same capability works in the signed-in shell and in a hosted public app.
 It is device-local, best-effort, and partitioned by app installation; use
 `window.mobius.storage` for durable owner data or public server-side state.
+
+When a provider's terms require that requests and media loads come straight
+from the person's device (not through your service), declare the exact sites
+with `network.direct`. The frame may then load images from and `fetch` those
+origins; scripts never widen. Prefer a service proxy whenever terms allow it,
+since every listed site sees the viewer's device address:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
 
 ## Local zoom surfaces
 
@@ -1565,6 +1631,21 @@ last revision the platform acknowledged, and resend until it catches up. A
 failed report then repairs itself on a later request instead of leaving a
 stale count, and an installation that already has unread items reports them
 the first time it runs.
+
+### Refresh the moment something arrives
+
+Polling still leaves a gap after new data lands. When Möbius sees new activity
+for the app (an app-attributed notification, or a change to its sidebar unread
+badge), the open app hears it at the same instant as the sidebar:
+
+```jsx
+useEffect(() => window.mobius.onActivity?.(() => refresh()), [])
+```
+
+The nudge carries no content, so treat it as "check now". After a dropped
+connection Möbius nudges each open app once. Keep polling as the fallback for
+an older Möbius (`window.mobius.runtimeFeatures?.appActivity`) and the
+standalone app page.
 
 ### Shell shortcuts
 

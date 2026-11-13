@@ -1801,7 +1801,9 @@ _TOOL_DEFINITIONS = {
       "foreground and instead takes the owner to Settings, focused on section "
       "id ai-providers, "
       "background-agents, github, models, mobius-account (the Möbius account "
-      "page) or mobius-models (Möbius credit and models) (omit id for Settings "
+      "page), mobius-models (Möbius credit and models) or "
+      "notifications-elsewhere (Slack, Discord and webhook notifications) "
+      "(omit id for Settings "
       "itself); use "
       "it when they asked to see it or accepted your offer to open it. It only "
       "navigates: signing in, entering credentials and every other change "
@@ -1839,8 +1841,9 @@ _TOOL_DEFINITIONS = {
       "type": "object", "additionalProperties": False,
       "properties": {
         "preset": {"type": "string", "enum": ["owner_credentials"]},
-        "title": {"type": "string", "minLength": 1, "maxLength": 200},
-        "description": {"type": "string", "maxLength": 1000},
+        # Limits match secure_inputs.validate_request_spec, which rejects more.
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "description": {"type": "string", "maxLength": 240},
         "fields": {
           "type": "array", "minItems": 1, "maxItems": 8,
           "items": {
@@ -1849,7 +1852,7 @@ _TOOL_DEFINITIONS = {
             "properties": {
               "name": {"type": "string"},
               "type": {"type": "string", "enum": ["text", "password"]},
-              "label": {"type": "string"},
+              "label": {"type": "string", "maxLength": 80},
               "autocomplete": {"type": "string"},
             },
           },
@@ -2278,9 +2281,26 @@ def _call_tool(params: Any) -> dict[str, Any]:
     return _call_tool_as_caller(name, arguments)
 
 
+# The turn's tool set is fixed when the turn starts, so a parent that spawns
+# helpers mid-turn still has no peer tools; say so instead of leaving it to
+# discovery calls.
+_PEER_TOOLS_ABSENT_MESSAGE = (
+  "Peer tools are offered only while another agent is live, in a Project, or "
+  "as a delegated helper, and this turn started without one. No peer is "
+  "reachable now; use message_agent for a finished or asking helper, and "
+  "record hand-offs in the chat note."
+)
+
+
+def _unavailable_tool_message(name: Any) -> str:
+  if name in _PLATFORM_TOOLS.PEER_TOOL_NAMES:
+    return _PEER_TOOLS_ABSENT_MESSAGE
+  return "Tool is unavailable for this agent run."
+
+
 def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]:
   if name not in _available_tool_names():
-    return _tool_result("Tool is unavailable for this agent run.", is_error=True)
+    return _tool_result(_unavailable_tool_message(name), is_error=True)
   handler = _TOOL_HANDLERS.get(name) if isinstance(name, str) else None
   if handler is None:
     return _tool_result("Unknown tool.", is_error=True)
