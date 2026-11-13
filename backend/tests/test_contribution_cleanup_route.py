@@ -386,14 +386,14 @@ def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
   status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
   assert status.returncode == 0
 
-  # Once the worktree's contribution finishes too, Contribute's next cleanup
-  # of the clone removes it: nothing needs it any more.
+  # Once the worktree's contribution finishes too, its cleanup also removes
+  # the clone that was kept for it: Contribute does not ask about it again.
   _write_terminal_record(app["id"], "worktree-open", {
     "id": "worktree-open", "type": "pr", "status": "merged",
     "plan": {"repo_path": str(worktree)},
   })
-  assert _cleanup(client, auth, app["id"], "worktree-open") == {"cleaned": True}
-  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "worktree-open") == {
+    "cleaned": True, "also_cleaned": ["clone-finished"]}
   assert not clone.exists()
 
 
@@ -428,6 +428,14 @@ def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client,
   assert subprocess.run(["git", "-C", str(follow_up), "status", "--short"],
                         check=False).returncode == 0
 
+  _write_terminal_record(app["id"], "separate-follow-up", {
+    "id": "separate-follow-up", "type": "pr", "status": "closed",
+    "plan": {"repo_path": str(follow_up)},
+  })
+  assert _cleanup(client, auth, app["id"], "separate-follow-up") == {
+    "cleaned": True, "also_cleaned": ["separate-finished"]}
+  assert not clone.exists() and not git_dir.exists()
+
 
 def test_kept_for_is_reported_only_when_it_is_why_a_checkout_stays(client, auth):
   app = create_local_app(client, auth, name="Cleanup kept_for reason")
@@ -457,4 +465,20 @@ def test_an_unreadable_git_pointer_elsewhere_does_not_break_cleanup(client, auth
     "plan": {"repo_path": str(other)},
   })
   assert _cleanup(client, auth, app["id"], "unreadable-finished") == {"cleaned": True}
+  assert not checkout.exists()
+
+
+def test_a_stray_open_record_path_does_not_keep_every_checkout(client, auth):
+  app = create_local_app(client, auth, name="Cleanup stray path")
+  checkout = _standalone_checkout("cleanup-stray-path")
+  _write_terminal_record(app["id"], "stray-finished", {
+    "id": "stray-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  for record_id, path in (("stray-data", get_settings().data_dir),
+                          ("stray-root", Path(get_settings().data_dir) / "contrib")):
+    _write_terminal_record(app["id"], record_id, {
+      "id": record_id, "type": "pr", "status": "open", "plan": {"repo_path": str(path)},
+    })
+  assert _cleanup(client, auth, app["id"], "stray-finished") == {"cleaned": True}
   assert not checkout.exists()

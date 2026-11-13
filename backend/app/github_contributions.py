@@ -1294,15 +1294,56 @@ def _checkout_removal_paths(repo: Path) -> tuple[Path, ...]:
   return (repo,)
 
 
+def _staging_roots() -> tuple[Path, Path]:
+  """The folders terminal cleanup may remove checkouts from."""
+  data_dir = Path(get_settings().data_dir).resolve()
+  return data_dir / "contrib", data_dir / "contributions"
+
+
+def _staging_checkout(raw_repo: object) -> Path | None:
+  """A recorded checkout path inside a staging root (not the root itself)."""
+  if not isinstance(raw_repo, str) or not raw_repo:
+    return None
+  try:
+    repo = Path(raw_repo).resolve()
+  except (OSError, RuntimeError):
+    return None
+  roots = _staging_roots()
+  return repo if any(repo != root and repo.is_relative_to(root) for root in roots) else None
+
+
+def terminal_checkouts_on_disk(app_id: int, *, exclude: str) -> list[dict]:
+  """Finished contributions of this app whose staging checkout still exists.
+
+  A checkout kept for an unfinished contribution stays after its own cleanup;
+  once another cleanup succeeds, these are retried so a kept checkout goes as
+  soon as nothing needs it.
+  """
+  found = []
+  for path in sorted(_records_dir(app_id).glob("*.json")):
+    if path.stem == exclude:
+      continue
+    try:
+      other = _read_record(path)
+    except HTTPException:
+      continue
+    if other.get("status") not in _TERMINAL_RECORD_STATUSES:
+      continue
+    plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
+    repo = _staging_checkout(plan.get("repo_path"))
+    if repo is not None and repo.exists():
+      found.append(other)
+  return found
+
+
 def checkout_kept_for(app_id: int, record: dict) -> str | None:
   """Another unfinished contribution of this app that needs ``record``'s checkout.
 
   Contributions can share a checkout: a follow-up PR prepared in the clone of
   the PR before it, a folder around it, or a worktree whose Git data lives in
-  it. A finished one must not delete what another still needs. Contribute
-  asks again for every finished contribution whose checkout remains, so it is
-  removed by the first cleanup after nothing needs it. Returns the id of the
-  contribution it is kept for.
+  it. A finished one must not delete what another still needs; a later
+  successful cleanup retries it (``terminal_checkouts_on_disk``), so it goes
+  once nothing needs it. Returns the id of the contribution it is kept for.
   """
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
@@ -1323,12 +1364,10 @@ def checkout_kept_for(app_id: int, record: dict) -> str | None:
     if other.get("status") in _TERMINAL_RECORD_STATUSES:
       continue
     other_plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
-    other_raw = other_plan.get("repo_path")
-    if not isinstance(other_raw, str) or not other_raw:
-      continue
-    try:
-      other_repo = Path(other_raw).resolve()
-    except (OSError, RuntimeError):
+    # Only a real staging checkout counts: a stray path such as the data
+    # folder itself must not keep every checkout of the app.
+    other_repo = _staging_checkout(other_plan.get("repo_path"))
+    if other_repo is None:
       continue
     other_git = git_checkout.linked_git_dir(other_repo)
     if any(
