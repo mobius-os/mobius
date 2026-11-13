@@ -337,32 +337,44 @@ def _port(url: str) -> int:
 class Room:
   """One run's room: its folders and settings, derived from the role.
 
-  Each grant gets its own home, so a narrower role never finds what a wider
-  one left there. The room writes only its home; Möbius never writes into it,
-  because anything there may be a link the agent planted. What Möbius hands
-  the runtime goes in ``config`` beside it, which the room can only read.
+  Each grant (role and tools) has its own durable home under the chat's
+  folder, holding the provider's sessions. A session therefore only ever
+  continues under the grant that wrote it, and a narrower role never finds
+  what a wider one left. The room writes only its home and its temporary
+  folder; Möbius never writes into either, because anything there may be a
+  link the agent planted. What Möbius hands the runtime goes in ``config``,
+  which the room can only read.
   """
 
   role: AgentRole
-  home: Path  # run state: agent settings, sessions and temp files
+  home: Path  # durable run state: agent settings and sessions
+  tmp: Path  # disposable temporary files
   config: Path  # settings Möbius writes for the runtime; read-only inside
   data: Path | None  # the app's files, read-only or writable by role
   api_base_url: str
 
   @classmethod
   def for_run(
-    cls, role: AgentRole, *, scratch: Path, storage_dir: Path, api_base_url: str
+    cls,
+    role: AgentRole,
+    *,
+    chat_dir: Path,
+    scratch: Path,
+    storage_dir: Path,
+    api_base_url: str,
   ) -> "Room":
-    home = scratch / f"room-{role.grant}"
-    for sub in (".claude", ".codex", ".tmp"):
+    home = chat_dir / "agent-rooms" / role.grant
+    for sub in (".claude", ".codex"):
       (home / sub).mkdir(parents=True, exist_ok=True)
+    tmp = scratch / f"room-{role.grant}.tmp"
     config = scratch / f"room-{role.grant}.config"
-    config.mkdir(exist_ok=True)
+    for folder in (tmp, config):
+      folder.mkdir(parents=True, exist_ok=True)
     data = None
     if role.spec.data is not None:
       storage_dir.mkdir(parents=True, exist_ok=True)
       data = storage_dir
-    return cls(role, home, config, data, api_base_url.rstrip("/"))
+    return cls(role, home, tmp, config, data, api_base_url.rstrip("/"))
 
   @property
   def cwd(self) -> Path:
@@ -384,6 +396,8 @@ class Room:
       str(FENCE_SCRIPT),
       "--home",
       str(self.home),
+      "--tmp",
+      str(self.tmp),
       "--cwd",
       str(self.cwd),
       "--door",
@@ -523,3 +537,57 @@ def system_prompt(
   if app_prompt:
     prompt += "\n\nThe app's own instructions follow.\n\n" + app_prompt.strip()
   return prompt
+
+
+# --- running agents follow the app's current grant -----------------------------
+
+# The grant each app chat's current run started under, by chat id.
+_run_grants: dict[str, str | None] = {}
+
+
+def effective_grant(app: Any) -> str | None:
+  """What an app's agents may run with now: a confined grant or ``owner``,
+  under one consent acceptance, or None when they may not run at all."""
+  from app import app_consent
+
+  if app is None or getattr(app, "deleted_at", None) is not None:
+    return None
+  if app_consent.dormant(app):
+    return None
+  role = confined_role_for_app(app)
+  return f"{role.grant if role else 'owner'}@{app_consent.session_id(app) or ''}"
+
+
+def record_run_grant(chat_id: str, grant: str | None) -> None:
+  _run_grants[chat_id] = grant
+
+
+async def stop_runs_outside_grant(db: Any, app_id: int) -> bool:
+  """Stop the app's running agent turns that started under a grant it no
+  longer gives, through the ordinary chat Stop.
+
+  A running agent's tools keep the room they started in until the turn ends,
+  so any change of role, tools or consent ends the turn rather than leaving
+  it the reach it had. Returns False when a turn could not be stopped.
+  """
+  from app import models
+  from app.chat import stop_chat_for
+  from app.runner_registry import registry
+
+  alive = registry.all_alive_chat_ids()
+  if not alive:
+    return True
+  current = effective_grant(db.get(models.App, app_id))
+  chat_ids = [
+    chat_id
+    for (chat_id,) in db.query(models.Chat.id).filter(
+      models.Chat.created_by_app_id == app_id, models.Chat.id.in_(alive)
+    )
+  ]
+  stopped_all = True
+  for chat_id in chat_ids:
+    if current is not None and _run_grants.get(chat_id) == current:
+      continue
+    stopped, _receipt = await stop_chat_for(chat_id, db=db)
+    stopped_all = stopped_all and stopped
+  return stopped_all

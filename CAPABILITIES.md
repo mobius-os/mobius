@@ -796,16 +796,18 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   directory read-only or writable by role with ordinary files only, nothing
   else), a seccomp connect guard that admits only the Möbius API address, and
   `no_new_privs`, with signals scoped to the room. Each grant (role and tools)
-  has its own home, and Möbius never writes into it: what it hands the runtime
-  sits in a read-only folder beside it. A host that cannot build rooms (Linux
+  has its own durable home in the chat's folder, holding its sessions, and
+  Möbius never writes into it: what it hands the runtime sits in a read-only
+  folder beside it. A host that cannot build rooms (Linux
   6.12 or later with libseccomp) does not start the agent.
 - **The agent key.** The run's bearer is the app's own credential bound to the
   live run (`auth.create_app_agent_token`), carrying its role, tools and
   provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
   app's own storage by role, and the routes of declared tools; route checks
   still apply after it. The key stops working as soon as the app's role
-  differs from its grant, and revoking consent also stops the app's running
-  agents.
+  differs from its grant. Any change of role, tools or consent (apply, Store
+  update, revoke) also ends the app's running agent turns through the
+  ordinary chat Stop; a Stop that fails is reported.
 - **The Agent Gateway.** `/api/agent-gateway/v1/...` serves only the run
   provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
   tools the app did not declare (including any tool the provider would run in
@@ -823,9 +825,9 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   it adds reach, and shows only what it adds. Owner and undeclared agent apps
   use the critical `agent_start` row, which covers every confined role;
   dropping an accepted role asks for it.
-- **History.** An agent without data access (Explorer) never receives the
-  chat's earlier history when its own session is gone: that history may hold
-  app data a wider role read.
+- **History.** A confined agent continues only its own grant's session. The
+  chat transcript is never reseeded into a room, because it may hold what a
+  wider grant (or the owner era before roles) read.
 - **Not yet covered:** app jobs and services still run unconfined; searches
   that run at Anthropic are not recorded one by one; the catalog has no Möbius
   tools yet for owner questions, screenshots, helpers or other apps' tools.

@@ -54,11 +54,16 @@ MAX_RECORDED_ROWS_PER_CHAT = 500
 # deleting bytes that a late durable row may reference.
 PUBLICATION_UNCERTAIN = object()
 
-def _chat_root(data_dir: str, chat_id: str) -> Path:
+def chat_folder(data_dir: str, chat_id: str) -> Path:
+  """The chat's own durable folder, purged with the chat."""
   segment = quote(str(chat_id), safe="-_")
   if not segment or segment in {".", ".."}:
-    raise ValueError("invalid chat id for deliverable directory")
-  return Path(data_dir) / "chats" / segment / "deliverables"
+    raise ValueError("invalid chat id for a chat folder")
+  return Path(data_dir) / "chats" / segment
+
+
+def _chat_root(data_dir: str, chat_id: str) -> Path:
+  return chat_folder(data_dir, chat_id) / "deliverables"
 
 
 def _open_directory(directory: Path, *, create: bool) -> int:

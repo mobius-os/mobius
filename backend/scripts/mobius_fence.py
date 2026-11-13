@@ -2,7 +2,7 @@
 """Run one program, such as an app's AI agent, inside a Möbius room.
 
 Usage:
-  mobius_fence.py --home DIR [--rw PATH]... [--ro PATH]... [--cwd PATH]
+  mobius_fence.py --home DIR [--tmp DIR] [--rw PATH]... [--ro PATH]... [--cwd PATH]
                   [--door HOST:PORT]... [--keep-env NAME]... -- CMD...
   mobius_fence.py --check      # can this host build rooms? (JSON)
 
@@ -258,7 +258,9 @@ def _add_path(ruleset: int, path: str, access: int, handled: int) -> None:
     os.close(fd)
 
 
-def _apply_walls(*, home: str, rw: list[str], ro: list[str], ports: set[int]) -> None:
+def _apply_walls(
+  *, home: str, tmp: str, rw: list[str], ro: list[str], ports: set[int]
+) -> None:
   handled = ((1 << 13) - 1) | FS_REFER | FS_TRUNCATE | FS_IOCTL_DEV
   attr = _RulesetAttr(
     handled, NET_BIND_TCP | NET_CONNECT_TCP, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL
@@ -278,7 +280,8 @@ def _apply_walls(*, home: str, rw: list[str], ro: list[str], ports: set[int]) ->
       FS_READ_FILE | FS_WRITE_FILE | FS_READ_DIR | FS_IOCTL_DEV,
       handled,
     )
-    _add_path(ruleset, home, handled, handled)
+    for path in (home, tmp):
+      _add_path(ruleset, path, handled, handled)
     for path in rw:
       _add_path(ruleset, path, handled & ~FS_MAKE_SPECIAL, handled)
     for port in sorted(ports):
@@ -388,10 +391,10 @@ def _guard(listener: int, doors: set[tuple[str, int]]) -> None:
     _libc.ioctl(listener, _NOTIF_SEND, ctypes.byref(resp))
 
 
-def room_environment(home: str, keep: list[str]) -> dict[str, str]:
+def room_environment(home: str, tmp: str, keep: list[str]) -> dict[str, str]:
   names = set(BASE_ENV) | set(keep)
   env = {k: v for k, v in os.environ.items() if k in names}
-  scratch = os.path.join(home, ".tmp")
+  scratch = tmp
   env.update(
     {
       "TMPDIR": scratch,
@@ -411,19 +414,26 @@ def run_in_room(
   rw: list[str] = (),
   ro: list[str] = (),
   cwd: str | None = None,
+  tmp: str | None = None,
   doors: set[tuple[str, int]] = frozenset(),
   keep_env: list[str] = (),
 ) -> int:
-  """Start ``command`` in the room and supervise its doors until it exits."""
+  """Start ``command`` in the room and supervise its doors until it exits.
+
+  ``tmp`` is the room's temporary folder (default ``home/.tmp``); a caller
+  that keeps ``home`` durable passes a disposable one.
+  """
   state = availability()
-  paths = [os.path.realpath(p) for p in (home, *rw, *ro)]
+  if tmp is None:
+    tmp = os.path.join(home, ".tmp")
+    os.makedirs(tmp, exist_ok=True)
+  paths = [os.path.realpath(p) for p in (home, tmp, *rw, *ro)]
   missing = [p for p in paths if not os.path.isdir(p)]
   if not state["available"] or missing:
     reason = " ".join(state["reasons"]) or f"room folder {missing[0]} does not exist"
     print(f"mobius-fence: refused to run, room unavailable: {reason}", file=sys.stderr)
     return EXIT_ROOM_UNAVAILABLE
-  home = paths[0]
-  os.makedirs(os.path.join(home, ".tmp"), exist_ok=True)
+  home, tmp = paths[0], paths[1]
   doors = {(normal_host(h), int(p)) for h, p in doors}
   parent_end, child_end = socket.socketpair()
   pid = os.fork()
@@ -432,6 +442,7 @@ def run_in_room(
       parent_end.close()
       _apply_walls(
         home=home,
+        tmp=tmp,
         rw=list(map(os.path.realpath, rw)),
         ro=list(map(os.path.realpath, ro)),
         ports={p for _, p in doors},
@@ -440,7 +451,7 @@ def run_in_room(
       socket.send_fds(child_end, [b"x"], [listener])
       os.closerange(3, max(resource.getrlimit(resource.RLIMIT_NOFILE)[0], 4096))
       os.chdir(os.path.realpath(cwd) if cwd else home)
-      os.execvpe(command[0], command, room_environment(home, list(keep_env)))
+      os.execvpe(command[0], command, room_environment(home, tmp, list(keep_env)))
     except (RoomUnavailable, OSError) as exc:
       print(f"mobius-fence: refused to run, room unavailable: {exc}", file=sys.stderr)
     os._exit(EXIT_ROOM_UNAVAILABLE)
@@ -489,6 +500,7 @@ def main(argv: list[str]) -> int:
   parser.add_argument("--rw", action="append", default=[])
   parser.add_argument("--ro", action="append", default=[])
   parser.add_argument("--cwd")
+  parser.add_argument("--tmp")
   parser.add_argument("--door", action="append", default=[], type=_host_port)
   parser.add_argument("--keep-env", action="append", default=[])
   parser.add_argument("--check", action="store_true")
@@ -504,6 +516,7 @@ def main(argv: list[str]) -> int:
     rw=args.rw,
     ro=args.ro,
     cwd=args.cwd,
+    tmp=args.tmp,
     doors=set(args.door),
     keep_env=args.keep_env,
   )

@@ -1,20 +1,33 @@
 """App agent roles: the declaration, consent, the agent key's reach, the Agent
 Gateway's filtering, and the room each confined agent runs in."""
 
+import asyncio
 import importlib.util
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from app import agent_gateway, agent_roles, app_consent, auth, chat_writer, models
+from app import (
+  agent_gateway,
+  agent_roles,
+  app_consent,
+  auth,
+  chat_writer,
+  models,
+  schemas,
+)
 from app.agent_roles import AgentKey, AgentRole, Room
 from app.app_capabilities import contract_from_manifest
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
+from app.runner_registry import RunnerKind, registry
 
 FENCE = Path(agent_roles.FENCE_SCRIPT)
 
@@ -319,6 +332,7 @@ def test_the_gateway_serves_only_the_runs_own_model_endpoints(key, path, status)
 def _room(tmp_path, role, *tools):
   return Room.for_run(
     AgentRole(role, tools, "why"),
+    chat_dir=tmp_path / "chat",
     scratch=tmp_path / "scratch",
     storage_dir=tmp_path / "apps" / "7",
     api_base_url="http://localhost:8080",
@@ -585,7 +599,7 @@ def test_moebius_never_writes_where_the_agent_may_have_planted_a_link(tmp_path):
     ['model_provider="mobius_trial"', f'model_catalog_json="{catalog}"']
   )
   assert victim.read_text() == "FAKE-SECRET"
-  assert room.config not in room.home.parents and room.config != room.home
+  assert room.home not in room.config.parents and room.config != room.home
 
 
 def test_a_narrower_role_never_finds_what_a_wider_one_left(tmp_path):
@@ -621,6 +635,7 @@ def test_revoking_consent_stops_the_apps_running_agents(
 
   async def stop(chat_id, db=None):
     stopped.append(chat_id)
+    return chat_module.ChatStopOutcome(True)
 
   from app import chat as chat_module
   from app.runner_registry import registry
@@ -714,3 +729,236 @@ def test_pages_open_only_through_moebius_where_each_is_recorded():
     _key("explorer", "web"), _body(tools=[hosted_fetch, search])
   )
   assert json.loads(body)["tools"] == [search] and removed == ["web_fetch_20250910"]
+
+
+def test_a_grants_session_home_is_durable_and_its_own(tmp_path):
+  viewer, editor = _room(tmp_path, "viewer"), _room(tmp_path, "editor")
+  assert viewer.home.parent == editor.home.parent == tmp_path / "chat" / "agent-rooms"
+  assert viewer.home != editor.home
+  assert "--tmp" in viewer.fence_args() and viewer.tmp.parent == tmp_path / "scratch"
+
+
+def test_revoking_reports_agents_that_did_not_stop(
+  client, owner_token, db, monkeypatch
+):
+  from app import chat as chat_module
+  from app.runner_registry import registry
+
+  app = _local_app(db, "notes", _role("editor"))
+  app.manifest_url = "https://example.test/notes/mobius.json"
+  app.accepted_consent = app_consent.platform_acceptance(app.capability_contract)
+  db.commit()
+  _key, run = _agent_key_for(db, app, role="editor")
+
+  async def unable_to_stop(chat_id, db=None):
+    return chat_module.ChatStopOutcome(False)
+
+  monkeypatch.setattr(chat_module, "stop_chat_for", unable_to_stop)
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: {run.chat_id})
+  owner = {"Authorization": f"Bearer {owner_token}"}
+  refused = client.delete(f"/api/apps/{app.id}/consent", headers=owner)
+  assert refused.status_code == 503
+  db.refresh(app)
+  assert app_consent.status(app) == "required"
+
+
+@pytest.mark.asyncio
+async def test_only_runs_whose_grant_changed_are_stopped(owner_token, db, monkeypatch):
+  from app import chat as chat_module
+  from app.runner_registry import registry
+
+  app = _local_app(db, "notes", _role("viewer"))
+  keep, _ = _agent_key_for(db, app, role="viewer")
+  chats = [c.id for c in db.query(models.Chat).filter_by(created_by_app_id=app.id)]
+  agent_roles.record_run_grant(chats[0], agent_roles.effective_grant(app))
+  stopped = []
+
+  async def stop(chat_id, db=None):
+    stopped.append(chat_id)
+    return chat_module.ChatStopOutcome(True)
+
+  monkeypatch.setattr(chat_module, "stop_chat_for", stop)
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set(chats))
+  assert await agent_roles.stop_runs_outside_grant(db, app.id) and stopped == []
+  app.capability_contract = contract_from_manifest(
+    _manifest(agent_role=_role("explorer"))
+  )
+  db.commit()
+  assert await agent_roles.stop_runs_outside_grant(db, app.id) and stopped == chats
+
+
+# Lifecycle scenarios from the independent review, with real processes.
+
+
+@contextmanager
+def running_writer(chat_id, tmp_path, storage_dir=None):
+  home = tmp_path / 'home'
+  home.mkdir()
+  data = storage_dir or tmp_path / 'data'
+  data.mkdir(parents=True, exist_ok=True)
+  after = data / 'after-change.txt'
+  code = 'import sys,pathlib; print("ready",flush=True); sys.stdin.readline(); pathlib.Path(sys.argv[1]).write_text("write-after-change")'
+  proc = subprocess.Popen(
+    [
+      sys.executable,
+      '-I',
+      str(agent_roles.FENCE_SCRIPT),
+      '--home',
+      str(home),
+      '--rw',
+      str(data),
+      '--',
+      sys.executable,
+      '-I',
+      '-c',
+      code,
+      str(after),
+    ],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    start_new_session=True,
+  )
+
+  class Writer:
+    kind = RunnerKind.CODEX_SDK
+
+    async def stop(self, timeout=2):
+      if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGTERM)
+        await asyncio.to_thread(proc.wait, timeout=timeout)
+      return True
+
+    async def force_stop(self, timeout=5):
+      return await self.stop(timeout)
+
+  handle = Writer()
+  handle.chat_id = chat_id
+  registry.register(handle)
+  try:
+    assert proc.stdout.readline().strip() == 'ready'
+    yield proc, after
+  finally:
+    registry.unregister(chat_id, RunnerKind.CODEX_SDK)
+    if proc.poll() is None:
+      os.killpg(proc.pid, signal.SIGTERM)
+      proc.communicate(timeout=5)
+
+
+def test_applying_a_narrower_role_stops_a_running_agent(
+  client, owner_token, db, tmp_path
+):
+  from tests.test_app_apply import _source, _apply
+
+  source = _source('review-narrow-running')
+  manifest = json.loads((source / 'mobius.json').read_text())
+  manifest['agent_role'] = _role('editor')
+  (source / 'mobius.json').write_text(json.dumps(manifest))
+  owner = {'Authorization': f'Bearer {owner_token}'}
+  initial = _apply(client, owner, source)
+  assert initial.status_code == 200, initial.text
+  app = db.get(models.App, int(initial.json()['app']['id']))
+  _key, run = _agent_key_for(db, app, role='editor')
+  from app.config import get_settings
+
+  storage_dir = Path(get_settings().data_dir) / 'apps' / str(app.id)
+  with running_writer(run.chat_id, tmp_path, storage_dir) as (proc, after):
+    manifest['agent_role'] = _role('viewer')
+    (source / 'mobius.json').write_text(json.dumps(manifest))
+    changed = _apply(client, owner, source)
+    assert changed.status_code == 200, changed.text
+    if proc.poll() is None:
+      proc.communicate('continue\n', timeout=10)
+    assert not after.exists(), 'Editor process kept writing after the app became Viewer'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  'provider_id,provider_name', [('claude', 'Claude Code'), ('codex', 'Codex')]
+)
+@pytest.mark.parametrize('role', ['viewer', 'editor', 'explorer'])
+async def test_a_confined_agent_never_inherits_history_from_another_grant(
+  db, owner_token, monkeypatch, provider_id, provider_name, role
+):
+  from app import chat as chat_module, chat_queue
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_writer import StartTurn, get_writer
+  from tests.test_retired_provider_sessions import _Provider
+
+  app = _local_app(db, 'review-history', _role('owner'))
+  chat_id = f'review-history-{provider_id}-{role}'
+  marker = 'FAKE-SECRET-FROM-UNRELATED-APP'
+  chat = chat_writer.create_chat(
+    id=chat_id,
+    title='former owner chat',
+    created_by_app_id=app.id,
+    provider=provider_id,
+    session_id='old-owner-session',
+    messages=[
+      {'role': 'user', 'content': 'Read another app.', 'ts': 1},
+      {'role': 'assistant', 'content': marker, 'ts': 2},
+    ],
+  )
+  db.add(chat)
+  db.commit()
+  app.capability_contract = contract_from_manifest(_manifest(agent_role=_role(role)))
+  db.commit()
+  calls = []
+
+  async def fake_runner(**kwargs):
+    calls.append(kwargs)
+    return {'session_id': 'fresh-restricted-session', 'cost_usd': 0.0, 'error': None}
+
+  async def fake_complete(**kwargs):
+    kwargs['db'].close()
+    return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+
+  async def fake_metrics(**kwargs):
+    return None
+
+  monkeypatch.setattr(
+    chat_module, 'registered_provider', lambda _: _Provider(provider_name)
+  )
+  monkeypatch.setattr(chat_module, '_complete_turn', fake_complete)
+  monkeypatch.setattr(chat_module, '_record_run_metrics', fake_metrics)
+  if provider_id == 'claude':
+    from app import claude_sdk_runner
+
+    monkeypatch.setattr(claude_sdk_runner, 'run_claude_sdk_turn', fake_runner)
+    monkeypatch.setattr(claude_sdk_runner, '_resumable', lambda *a, **kw: False)
+  else:
+    from app import codex_sdk_runner
+
+    monkeypatch.setattr(codex_sdk_runner, 'run_codex_sdk_turn', fake_runner)
+  run_id = f'run-{chat_id}'
+  get_writer().submit(
+    StartTurn(
+      chat_id=chat_id,
+      run_token=run_id,
+      user_msg={
+        'role': 'user',
+        'content': 'Continue safely.',
+        'ts': 3,
+        'cid': f'm-{chat_id}',
+      },
+      title_source='Continue safely.',
+      default_provider=provider_id,
+    )
+  ).result(timeout=5)
+  create_broadcast(chat_id)
+  try:
+    await chat_module._run_chat_impl(
+      messages=[schemas.ChatMessage(role='user', content='Continue safely.')],
+      chat_id=chat_id,
+      session_id='old-owner-session',
+      provider_id=provider_id,
+      run_token=run_id,
+    )
+  finally:
+    remove_broadcast(chat_id)
+  assert len(calls) == 1
+  prompt = str(calls[0].get('user_message', '')) + str(
+    calls[0].get('resumed_context', '')
+  )
+  assert marker not in prompt

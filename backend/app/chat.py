@@ -6045,9 +6045,11 @@ async def _run_chat_impl_with_db(
     run_policy is None and chat_row is not None
     and chat_row.created_by_app_id is not None
   ):
-    from app.agent_roles import confined_role_for_app
+    from app.agent_roles import confined_role_for_app, effective_grant, record_run_grant
     room_app = db.get(models.App, chat_row.created_by_app_id)
     room_role = confined_role_for_app(room_app)
+    # A change of the app's grant stops this run (stop_runs_outside_grant).
+    record_run_grant(chat_id, effective_grant(room_app))
   # A retired session is not resumed: its own history would keep the model
   # following a withdrawn instruction. A top-level chat starts fresh and is
   # reseeded from its transcript, exactly as for a lost session. (A retired
@@ -6424,8 +6426,10 @@ async def _run_chat_impl_with_db(
   app_room = None
   if room_role is not None:
     from app.agent_roles import Room
+    from app.generated_files import chat_folder
     app_room = Room.for_run(
-      room_role, scratch=scratch, api_base_url=settings.api_base_url,
+      room_role, chat_dir=chat_folder(settings.data_dir, chat_id),
+      scratch=scratch, api_base_url=settings.api_base_url,
       storage_dir=Path(app_context_env.get("APP_STORAGE_DIR")
                        or Path(settings.data_dir) / "apps" / str(room_app.id)),
     )
@@ -6640,10 +6644,11 @@ async def _run_chat_impl_with_db(
       (session_id or fresh_delegated_session or first_branch_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and run_policy is None
-      # An agent without data access never receives history it did not
-      # write: the transcript may hold app data a wider role read. It
-      # continues only its own session, which lives in its grant's room.
-      and not (app_room is not None and app_room.role.spec.data is None)
+      # A confined agent continues only its own grant's session, which lives
+      # in that grant's durable room. The chat transcript may hold what a
+      # wider grant (or the owner era before roles) read, so it is never
+      # reseeded into a room.
+      and app_room is None
     )
     else None
   )

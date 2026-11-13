@@ -3913,17 +3913,23 @@ async def install_from_manifest(
   # under the caller's lifecycle lock. So each step settles before a cancelled
   # caller unwinds, and the cancellation then stops the install between steps.
   try:
-    return await settled.settle(
+    result = await settled.settle(
       install_candidate(python_check=None), abandoned=_abandon_install_step,
     )
   except _UncheckedPythonTree as unchecked:
-    pending = unchecked
-  python_check = await settled.settle(
-    _check_reconciled_python(pending), abandoned=_abandon_install_step,
-  )
-  return await settled.settle(
-    install_candidate(python_check=python_check), abandoned=_abandon_install_step,
-  )
+    python_check = await settled.settle(
+      _check_reconciled_python(unchecked), abandoned=_abandon_install_step,
+    )
+    result = await settled.settle(
+      install_candidate(python_check=python_check), abandoned=_abandon_install_step,
+    )
+  # An update that changes what the app's agents may reach ends their turns.
+  from app.agent_roles import stop_runs_outside_grant
+  if not await stop_runs_outside_grant(db, result.app.id):
+    result.warnings.append(
+      "Some of this app's running agents did not stop after its agent role changed."
+    )
+  return result
 
 
 def _abandon_install_step(step: asyncio.Future) -> None:
