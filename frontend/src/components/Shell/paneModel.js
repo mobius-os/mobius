@@ -529,6 +529,20 @@ export function setViewMode(ws, mode) {
   return { ...nextWs, viewMode: requested }
 }
 
+// The workspace to boot after the browser killed the previous page (iOS Safari
+// kills a page that runs out of memory and reloads it). Any app it would mount on
+// the first render, even hidden, could repeat the crash, so no app is mounted
+// until the owner opens one: a Standard app slot becomes the empty home, and a
+// Builder world showing an app falls back to Standard. Builder's tree is kept,
+// so switching back to Builder is the explicit way to reopen those panes.
+export function withoutBootApps(ws) {
+  let next = ws.singleScreen?.kind === 'app' ? setSingleScreen(ws, null) : ws
+  if (next.viewMode !== 'single' && visibleAppIds(next).size > 0) {
+    next = setViewMode(next, 'single')
+  }
+  return next
+}
+
 // Flip single <-> panes. An empty Standard workspace seeds its current screen.
 export function toggleViewMode(ws) {
   return setViewMode(ws, ws.viewMode === 'single' ? 'panes' : 'single')

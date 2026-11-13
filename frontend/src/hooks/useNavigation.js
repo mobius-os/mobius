@@ -102,8 +102,10 @@ if (deepLink?.view === 'chat' && deepLink.focusQuestion) {
   requestChatQuestionReveal(deepLink.chatId, deepLink.questionId)
 }
 
-// Read once per page load: the browser killed this tab's previous page.
-const pageDiedBeforeLoad = previousPageDied()
+// Read once per page load: the browser killed this tab's previous page. The
+// workspace boots without any app mounted (paneModel.withoutBootApps) and the
+// cold-restored app is not pre-mounted, so a crashing app cannot loop.
+export const recoveringFromCrash = previousPageDied()
 
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
@@ -123,7 +125,8 @@ const returnView = ownerWorkspace ? consumeReturnView() : null
 // live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
 // to chat. See ARCHITECTURE.md (Navigation back-stack + drawer model).
 export const coldRestoredCanvasAppId =
-  (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
+  (!recoveringFromCrash && !shellReload?.activeView && !deepLink?.view
+    && restored?.view === 'canvas')
     ? restored.appId
     : null
 
@@ -1516,8 +1519,11 @@ export default function useNavigation({
       // A page killed while showing an app (iOS Safari kills a page that runs out
       // of memory, then reloads it) must not reopen that app on its own: it would
       // crash again until Safari gives up with "A problem repeatedly occurred".
-      // Go home (the latest chat, or the empty chat home); the app stays one tap away.
-      if (pageDiedBeforeLoad && snapshotRoute().view === 'canvas') {
+      // The restored workspace already mounts no app (a restored app screen is
+      // the empty home); a reload or launch target that names an app is
+      // overridden here. Go home (the latest chat, or the empty chat home); the
+      // app stays one tap away.
+      if (recoveringFromCrash && snapshotRoute().view === 'canvas') {
         restoreRoute(navRoute('chat', null, null, bootPaneId, { homeSeed: true }))
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }

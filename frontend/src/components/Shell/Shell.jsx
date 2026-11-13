@@ -28,7 +28,7 @@ import {
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNativePush from '../../hooks/useNativePush.js'
-import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
+import useNavigation, { deepLink, recoveringFromCrash } from '../../hooks/useNavigation.js'
 import useLatch from '../../hooks/useLatch.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
@@ -330,6 +330,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   } = useWorkspaceSession({
     storage: workspaceStorage,
     legacyStorage: sharedBrowserAccess ? null : tabStorage,
+    recoveringFromCrash,
   })
   // Back/Forward can reserve a draft's mobile writing session before the
   // outgoing surface becomes inert. The callback is filled after the shared

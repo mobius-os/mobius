@@ -120,7 +120,7 @@ test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
   assert.match(shell, /const tabStorage = isSharedBrowserAccess \? sharedWorkspaceStorage : sessionStore\(\)/)
   assert.match(
     shell,
-    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*\}\)/,
+    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*recoveringFromCrash,\s*\}\)/,
     'owner durability and one-time migration remain canonical; guest storage is separate',
   )
   assert.doesNotMatch(
