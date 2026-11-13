@@ -3,7 +3,7 @@
  * on the Credits page. Buying opens under the balance from Add credits; the
  * history lives in ActivityWindow, last on the page.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowBottomLeftSm, ArrowTopRightSm } from '@openai/apps-sdk-ui/components/Icon'
 import { activityLabel, canReconnect, money } from '../../lib/creditsWallet.js'
 import './WalletSection.css'
@@ -16,6 +16,9 @@ export default function WalletSection({
   onBuy = () => {}, onReconnect = () => {},
 }) {
   const [buying, setBuying] = useState(false)
+  const addButton = useRef(null)
+  // A finished purchase closes the amounts again.
+  useEffect(() => { if (notice === 'paid') setBuying(false) }, [notice])
   const balance = summary?.balance
   const owed = typeof balance?.balance === 'string' && balance.balance.startsWith('-')
   const canBuy = Boolean(balance && terms?.amounts_cents?.length)
@@ -52,8 +55,15 @@ export default function WalletSection({
           </span>
           <span className="settings-item__trail">
             {owed && <span className="settings-badge settings-badge--warning">Owed</span>}
-            {canBuy && !buying && (
-              <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" aria-expanded="false" aria-controls="settings-credits-buy" onClick={() => setBuying(true)}>
+            {canBuy && (
+              <button
+                ref={addButton}
+                type="button"
+                className="settings__btn settings__btn--outline settings__btn--sm"
+                aria-expanded={buying}
+                aria-controls={buying ? 'settings-credits-buy' : undefined}
+                onClick={() => setBuying(open => !open)}
+              >
                 Add credits
               </button>
             )}
@@ -68,7 +78,7 @@ export default function WalletSection({
         )}
         {canBuy && buying ? (
           // A choice or waiver for one service never carries over to another.
-          <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} onCancel={() => setBuying(false)} />
+          <WalletBuyForm key={terms.pairing} terms={terms} busy={busy} onBuy={onBuy} onCancel={() => { setBuying(false); addButton.current?.focus() }} />
         ) : null}
       </div>
       {notices[notice] && <p className="settings-message" role="status">{notices[notice]}</p>}

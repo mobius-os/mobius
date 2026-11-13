@@ -624,7 +624,8 @@ function CreditsRow({ onOpen }) {
   const glance = walletGlance(summaryQuery.data)
   const label = glance?.kind === 'balance'
     ? `, ${glance.figure} credits available`
-    : glance?.kind === 'owed' ? `, ${glance.figure} credits owed` : ''
+    : glance?.kind === 'owed' ? `, ${glance.figure} credits owed`
+      : glance?.kind === 'unconnected' ? ', not connected' : ''
   return (
     <section className="settings-group" aria-labelledby="mobius-account-credits-link">
       <GroupHead id="mobius-account-credits-link" title="Credits" />

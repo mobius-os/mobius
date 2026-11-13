@@ -20,9 +20,10 @@ export default function AccountCredits({ active = true }) {
     return <WalletConnect busy={wallet.busy} refusal={wallet.refusal} onConnect={wallet.pairWithAccount} />
   }
   if (section !== 'wallet') {
-    return wallet.summary
-      ? <p className="settings-message">Credits are not available on this Möbius.</p>
-      : <p className="settings-message" role="status">Loading your credits…</p>
+    if (!wallet.summary) return <p className="settings-message" role="status">Loading your credits…</p>
+    return wallet.summary.mode === 'unknown'
+      ? <p className="settings-message" role="alert">Your credits could not be read just now. Try again in a moment.</p>
+      : <p className="settings-message">Credits are not available on this Möbius.</p>
   }
   return (
     <>

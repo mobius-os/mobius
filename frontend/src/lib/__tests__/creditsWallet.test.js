@@ -28,7 +28,7 @@ test('the wallet balance is the headline and names where it is kept', () => {
   assert.match(html, /2\.25/)
   assert.match(html, /Kept by www\.mobius\.you/)
   // Amounts open under the balance only once Add credits is pressed.
-  assert.match(html, /<button[^>]*aria-controls="settings-credits-buy"[^>]*>Add credits/)
+  assert.match(html, /<button[^>]*aria-expanded="false"[^>]*>Add credits/)
   assert.doesNotMatch(html, /\$5/)
 })
 
@@ -81,6 +81,27 @@ test('recent activity is a scrolling window of the whole history, grouped by day
   assert.doesNotMatch(render(), /Recent activity/)
 })
 
+test('a failed older page waits for Try again instead of retrying in a loop', () => {
+  const client = new QueryClient()
+  const query = client.getQueryCache().build(client, { queryKey: [ACTIVITY_KEY, 'p1'] })
+  query.setState({
+    status: 'error',
+    error: new Error('service unavailable'),
+    data: { pageParams: [null], pages: [{ next_cursor: 'c', transactions: [
+      { id: 'a', at: new Date(2026, 10, 10, 12).toISOString(), kind: 'topup', amount: '5.00', description: 'Bought credits' },
+    ] }] },
+    fetchStatus: 'idle',
+    fetchMeta: { fetchMore: { direction: 'forward' } },
+  })
+  const window = renderToStaticMarkup(createElement(QueryClientProvider, { client },
+    createElement(ActivityWindow, { pairing: 'p1' })))
+  // The lines already read stay; the end of the window is no longer watched.
+  assert.match(window, /Bought credits/)
+  assert.match(window, /More activity could not be loaded/)
+  assert.match(window, />Try again</)
+  assert.doesNotMatch(window, /wallet-activity__sentinel/)
+})
+
 test('the full history groups under day headings, newest first, one group per day across pages', () => {
   const now = new Date(2026, 10, 12, 13, 0)
   const at = (d, h) => new Date(2026, 10, d, h).toISOString()
@@ -106,7 +127,8 @@ test('the account page row shows the spendable balance, a debt, or that credits 
 })
 
 test('without the service terms no amounts are offered', () => {
-  assert.doesNotMatch(render({ terms: null }), /Buy /)
+  assert.doesNotMatch(render({ terms: null }), /Buy |Add credits/)
+  assert.match(render({}), /Add credits/)
 })
 
 test('settings offers one-tap connect only to an unpaired Möbius launched from mobius.you', () => {

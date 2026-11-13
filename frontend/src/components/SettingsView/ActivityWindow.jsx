@@ -23,10 +23,6 @@ async function readPage({ pageParam, signal }) {
   return jsonOrThrow(await apiFetch(`/identity/credits/transactions?limit=${PAGE}${before}`, { signal }))
 }
 
-/**
- * `refreshKey` changes when the balance does (a purchase, a paid run); the
- * window then reads its history again so the new line appears at the top.
- */
 /** The Recent activity group around the window, last on the Credits page. */
 export function RecentActivity({ children }) {
   return (
@@ -41,6 +37,10 @@ export function RecentActivity({ children }) {
   )
 }
 
+/**
+ * `refreshKey` changes when the balance does (a purchase, a paid run); the
+ * window then reads its history again so the new line appears at the top.
+ */
 export default function ActivityWindow({ pairing = null, refreshKey = null }) {
   const history = useInfiniteQuery({
     queryKey: [ACTIVITY_KEY, pairing],
@@ -51,26 +51,29 @@ export default function ActivityWindow({ pairing = null, refreshKey = null }) {
   })
   const frame = useRef(null)
   const sentinel = useRef(null)
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = history
-  const { refetch } = history
-  const seenKey = useRef(refreshKey)
+  const { hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage, refetch } = history
+  const seen = useRef({ pairing, refreshKey })
 
   useEffect(() => {
-    if (seenKey.current === refreshKey) return
-    seenKey.current = refreshKey
-    void refetch()
-  }, [refreshKey, refetch])
+    const last = seen.current
+    seen.current = { pairing, refreshKey }
+    // A new pairing is a new query that reads on its own; only a changed
+    // balance under the same pairing needs the history read again.
+    if (last.pairing === pairing && last.refreshKey !== refreshKey) void refetch()
+  }, [pairing, refreshKey, refetch])
 
   // Load the next page a little before the window is scrolled to its end.
+  // After a failed page the window waits for Try again: a fresh observer would
+  // report the still-visible end at once and retry in a loop.
   useEffect(() => {
     const node = sentinel.current
-    if (!node || !hasNextPage || typeof IntersectionObserver === 'undefined') return undefined
+    if (!node || !hasNextPage || isFetchNextPageError || typeof IntersectionObserver === 'undefined') return undefined
     const watcher = new IntersectionObserver(([seen]) => {
       if (seen.isIntersecting && !isFetchingNextPage) void fetchNextPage()
     }, { root: frame.current, rootMargin: '0px 0px 240px 0px' })
     watcher.observe(node)
     return () => watcher.disconnect()
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage])
+  }, [hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage])
 
   let body
   if (history.isPending) {
@@ -94,9 +97,9 @@ export default function ActivityWindow({ pairing = null, refreshKey = null }) {
             </ul>
           </div>
         ))}
-        <div ref={sentinel} className="wallet-activity__sentinel" aria-hidden="true" />
+        {!isFetchNextPageError && <div ref={sentinel} className="wallet-activity__sentinel" aria-hidden="true" />}
         {isFetchingNextPage && <p className="settings-item wallet-activity__status" role="status">Loading more…</p>}
-        {history.isFetchNextPageError && (
+        {isFetchNextPageError && (
           <div className="settings-item wallet-activity__status" role="alert">
             <span>More activity could not be loaded.</span>
             <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => fetchNextPage()}>Try again</button>
@@ -109,7 +112,7 @@ export default function ActivityWindow({ pairing = null, refreshKey = null }) {
   }
 
   return (
-    <div ref={frame} className="settings-list wallet-window" tabIndex={0} aria-label="Recent activity, newest first">
+    <div ref={frame} className="settings-list wallet-window" role="region" tabIndex={0} aria-label="Recent activity, newest first">
       {body}
     </div>
   )
