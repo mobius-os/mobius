@@ -30,7 +30,17 @@
 }
 .chat__markdown-input .cm-line { padding: 0 8px 0 12px; }
 .chat__markdown-input .cm-placeholder { color: var(--muted); }
-.chat__markdown-input .cm-content ::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+/* Pair both selection colors: the shell's accent foreground is too dim on
+   the composer's dark highlight. An opaque fill also avoids layered tints. */
+.chat__markdown-input .cm-content::selection,
+.chat__markdown-input .cm-content ::selection {
+  background: color-mix(in srgb, var(--accent) 40%, var(--surface));
+  color: var(--text);
+}
+[data-theme="light"] .chat__markdown-input .cm-content::selection,
+[data-theme="light"] .chat__markdown-input .cm-content ::selection {
+  background: color-mix(in srgb, var(--accent) 24%, var(--surface));
+}
 .chat__markdown-input .cm-md-strong { font-weight: 700; }
 .chat__markdown-input .cm-md-emphasis { font-style: italic; }
 .chat__markdown-input .cm-md-strike { text-decoration: line-through; }

@@ -57,6 +57,40 @@ const paste = (page, values) => page.evaluate(values => {
   document.querySelector('.cm-content').dispatchEvent(new ClipboardEvent('paste', { bubbles:true, cancelable:true, clipboardData:data }))
 }, values)
 
+test('selection keeps readable theme text instead of inheriting the shell accent foreground', async ({ page }) => {
+  const editor = await open(page)
+  // Reproduce the global shell highlight competing with composer styling.
+  await page.addStyleTag({ content: '::selection { background: #efebfe; color: #6c54c1; }' })
+  const source = 'Plain **bold** text\nsecond line'
+  await page.keyboard.insertText(source)
+  for (const [theme, foreground, surface, mix] of [
+    ['dark', '#ececec', '#171717', '40%'],
+    ['light', '#202126', '#ffffff', '24%'],
+  ]) {
+    await page.evaluate(({ theme, foreground, surface }) => {
+      document.documentElement.dataset.theme = theme
+      document.documentElement.style.setProperty('--text', foreground)
+      document.documentElement.style.setProperty('--surface', surface)
+    }, { theme, foreground, surface })
+    await select(page, 0, source.length)
+    const colors = await editor.evaluate((element, mix) => {
+      const expected = document.createElement('span')
+      expected.style.cssText = `color:var(--text);background:color-mix(in srgb,var(--accent) ${mix},var(--surface))`
+      element.append(expected)
+      const target = getComputedStyle(expected)
+      const want = { color: target.color, background: target.backgroundColor }
+      expected.remove()
+      return { want, actual: [element, ...element.querySelectorAll('.cm-line, .cm-md-strong, .cm-md-syntax')].map(node => {
+        const style = getComputedStyle(node, '::selection')
+        return { color: style.color, background: style.backgroundColor }
+      }) }
+    }, mix)
+    for (const actual of colors.actual) expect(actual).toEqual(colors.want)
+    expect(await text(page)).toBe(source)
+    expect(await page.evaluate(() => window.composerFixture.selection())).toEqual({ start: 0, end: source.length })
+  }
+})
+
 test('renders inline while preserving exact source, source selection and copy', async ({ page }) => {
   const editor = await open(page)
   const source = '# Heading\n**bold** _italic_ `code` [link](https://example.com)\n\nnext'
