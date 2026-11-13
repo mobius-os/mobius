@@ -75,30 +75,6 @@ test('app opens outrank bundle updates without changing catalogue order', () => 
   assert.deepEqual(sections.apps.map(app => app.id), [1, 2])
 })
 
-test('opened project artifacts stay out of Recents, even after a rebuild', () => {
-  const project = {
-    id: 12,
-    name: 'Portfolio',
-    artifacts: [
-      {
-        id: 'site', name: 'Website', status: 'ok', has_output: true,
-        updated_at: '2026-08-25T11:30:00Z',
-        last_opened_at: '2026-08-25T11:30:00Z',
-      },
-    ],
-  }
-  const chats = [{ id: 'chat', has_messages: true, activity_at: '2026-08-25T11:45:00Z' }]
-  assert.deepEqual(
-    buildDrawerSections(chats, [], [project]).recents.map(entry => [entry.kind, entry.item.id]),
-    [['chat', 'chat']],
-  )
-  project.artifacts[0].updated_at = '2026-08-25T12:10:00Z'
-  assert.deepEqual(
-    buildDrawerSections(chats, [], [project]).recents.map(entry => [entry.kind, entry.item.id]),
-    [['chat', 'chat']],
-  )
-})
-
 test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {
   // After a drag, optimistic chat stamps carry a trailing Z while a refetched
   // app carries the server's naive-UTC form. Same instants must still interleave

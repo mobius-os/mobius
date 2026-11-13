@@ -82,7 +82,6 @@ function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onPin, onDele
   const [value, setValue] = useState(project.name)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [unpinning, setUnpinning] = useState(false)
   const rowRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -159,11 +158,8 @@ function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onPin, onDele
           className="projects-collection__pin"
           aria-label={`Unpin ${project.name}`}
           title="Unpin"
-          disabled={unpinning || !onPin}
-          onClick={async () => {
-            setUnpinning(true)
-            try { await onPin?.(project, false) } catch { /* the row simply stays pinned */ } finally { setUnpinning(false) }
-          }}
+          disabled={!onPin}
+          onClick={() => onPin?.(project, false)}
         >
           <PinFilled className="projects-collection__pin-on" width={17} height={17} aria-hidden="true" />
           <PinOff className="projects-collection__pin-off" size={17} strokeWidth={2} aria-hidden="true" />

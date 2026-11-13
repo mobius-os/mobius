@@ -5057,26 +5057,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeView={activeView}
         activeAppId={activeAppId}
         projects={projects}
-        projectsStatus={projectsStatus}
-        onRetryProjects={() => projectsQuery.refetch()}
-        activeProjectId={activeProjectId}
         activeProjectChatProjectId={activeProjectChatProjectId}
-        activeArtifactRef={activeArtifactRef}
         onProject={enterProject}
-        onProjectRename={(project, name) => {
-          if (typeof name === 'string') return renameProject(project, name)
-          setProjectRenameId(String(project.id))
-          openProject(project)
-          return undefined
-        }}
-        onProjectColor={setProjectColor}
-        onProjectDelete={deleteProject}
-        onArtifact={(artifactRef) => {
-          const parsed = tabModel.parseArtifactTabId(artifactRef)
-          if (!parsed) return
-          const project = projectById.get(parsed.projectId)
-          if (project) openArtifact(project, parsed.artifactId)
-        }}
         onProjectsOpen={() => navTo('projects')}
         chats={chats}
         chatsStatus={chatsStatus}

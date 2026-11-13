@@ -19,7 +19,13 @@ function eventSurface() {
   }
 }
 
-function harness(t, { pinned = true, acceptReorder = true } = {}) {
+function harness(t, {
+  pinned = true,
+  acceptReorder = true,
+  dragKey = 'chat:pin',
+  drawerKey,
+  otherGestures = [],
+} = {}) {
   const restorers = []
   const window = eventSurface()
   const document = { ...eventSurface(), body: { style: {} } }
@@ -58,7 +64,7 @@ function harness(t, { pinned = true, acceptReorder = true } = {}) {
   }
   const source = {
     ...eventSurface(),
-    dataset: { dragKey: 'chat:pin' }, style: {}, blur() {},
+    dataset: drawerKey ? { dragKey, drawerKey } : { dragKey }, style: {}, blur() {},
     hasAttribute: name => name === 'data-pinned-key' && pinned,
     releasePointerCapture() {},
     closest(selector) {
@@ -71,10 +77,10 @@ function harness(t, { pinned = true, acceptReorder = true } = {}) {
   const actions = { reorders: [], menus: [] }
   const hook = renderHook(useWorkspaceDrag, {
     dragActiveRef: { current: false },
-    drawerRowGesturesRef: { current: new Map([['chat:pin', { current: {
+    drawerRowGesturesRef: { current: new Map([[drawerKey || dragKey, { current: {
       beginReorder: args => { actions.reorders.push(args); return acceptReorder },
       openMenu: point => actions.menus.push(point),
-    } }]]) },
+    } }], ...otherGestures]) },
   })
   t.after(() => {
     hook.unmount()
@@ -223,4 +229,21 @@ test('a quick pin press stays nonblocking before the shared hold threshold', t =
   assert.equal(h.source.listenerCount('touchmove'), 0, 'intentional motion retires the stationary hold')
   assert.equal(h.actions.reorders.length, 0)
   h.pointer('pointercancel')
+})
+
+// A pinned app is both a Pinned row and an Apps-row icon under the same drag
+// key; each element names its own gesture handler, so a held icon opens the
+// icon's menu rather than the row's.
+test('a long hold opens the menu of the element pressed, not another with its drag key', t => {
+  const rowMenus = []
+  const h = harness(t, {
+    pinned: false,
+    dragKey: 'app:7',
+    drawerKey: 'apps-strip:7',
+    otherGestures: [['app:7', { current: { openMenu: point => rowMenus.push(point) } }]],
+  })
+  h.pointer('pointerdown'); h.advance(700)
+  assert.equal(h.actions.menus.length, 1, 'the pressed icon opens its menu')
+  assert.equal(rowMenus.length, 0, 'the Pinned row with the same app stays closed')
+  h.pointer('pointerup')
 })

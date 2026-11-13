@@ -13,8 +13,9 @@ export function ComposerAction({ kind }) {
   </span>
 }
 
-/* The Möbius menu as it looks: logo and name with search, New chat, Apps, Projects and Settings. The
-   logo becomes a pumpkin when the Halloween theme is on. Nothing in it is clickable. */
+/* The Möbius menu as it looks: logo and name with search, New chat, Projects, the Apps heading over a
+   row of app icons, and Settings. The logo becomes a pumpkin when the Halloween theme is on, and the
+   icons take the theme's accent. Nothing in it is clickable. */
 export function MobiusMenu() {
   return <nav className="wt-menu" aria-hidden="true">
     <div className="wt-menu__brand">
@@ -24,8 +25,11 @@ export function MobiusMenu() {
       <span className="wt-menu__search"><SearchNavIcon width={20} height={20} /></span>
     </div>
     <div className="drawer__item drawer__item--new"><span className="drawer__item-icon"><NewChatNavIcon /></span><span className="drawer__item-text">New chat</span></div>
-    <div className="drawer__item drawer__item--apps"><span className="drawer__item-icon"><AppsNavIcon /></span><span className="drawer__item-text">Apps</span></div>
     <div className="drawer__item drawer__item--projects"><span className="drawer__item-icon"><ProjectsNavIcon /></span><span className="drawer__item-text">Projects</span></div>
+    <div className="wt-menu__apps">
+      <span className="drawer__apps-card-title wt-menu__apps-title"><AppsNavIcon width={16} height={16} />Apps</span>
+      <span className="wt-menu__apps-row"><i /><i /><i /><i /></span>
+    </div>
     <div className="wt-menu__foot drawer__item"><span className="drawer__item-icon"><SettingsNavIcon /></span><span className="drawer__item-text">Settings</span></div>
   </nav>
 }

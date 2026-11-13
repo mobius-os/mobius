@@ -3,14 +3,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { ChevronDown, Grid } from '@openai/apps-sdk-ui/components/Icon'
 import AppIcon from '../AppIcon.jsx'
 import InlineRenameInput from './InlineRenameInput.jsx'
+import useItemMenuGestures, { itemMenuPlacement } from './useItemMenuGestures.js'
 import { drawerNameMaxLength } from './drawerRename.js'
-import { reconcileStripOrder } from './drawerInformationArchitecture.js'
-import { createHeldClickGuard } from './heldClickGuard.js'
+import { appTileLabel, reconcileStripOrder, wheelRowScrollDelta } from './drawerInformationArchitecture.js'
+import { PRESS_DRAG_HOLD_MS } from '../Shell/dragController.js'
 
 const STORAGE_KEY = 'mobius.drawer.appsExpanded'
 const ORDER_KEY = 'mobius.drawer.appsOrder'
-const HOLD_MS = 500
-const HOLD_SLOP = 8
 const TILE = 48
 // Fixed spacing between icons; it never stretches with the sidebar width.
 const GAP = 10
@@ -28,6 +27,91 @@ function readExpanded() {
   try { return localStorage.getItem(STORAGE_KEY) === '1' } catch { return false }
 }
 
+// The gesture registry key for a strip tile. A pinned app also has a Pinned
+// row under `app:<id>`, so the tile registers its own key and carries it as
+// `data-drawer-key`; the drag key stays `app:<id>` so a drop opens the app.
+export function stripTileGestureKey(appId) {
+  return `apps-strip:${appId}`
+}
+
+// One app icon. Touch press-and-hold, mouse drag into the workspace, and the
+// held click all belong to the shell's shared drag controller (the same one
+// every sidebar row uses), found through `data-drag-key`. Right-click and the
+// keyboard menu keys come from the shared item-menu gestures.
+function DrawerAppTile({
+  app,
+  active,
+  needsYou,
+  building,
+  fresh,
+  actions,
+  drawerRowGesturesRef,
+  onOpen,
+  showTip,
+  hideTip,
+}) {
+  const name = app.name || 'App'
+  const buttonRef = useRef(null)
+  function openMenuAt(point, trigger = buttonRef.current, { focusFirstAction = false } = {}) {
+    actions?.openMenu({
+      kind: 'app',
+      id: app.id,
+      surface: 'strip',
+      placement: itemMenuPlacement(point, buttonRef.current),
+      focusFirstAction,
+      restoreFocusTarget: trigger,
+    })
+  }
+  const { openItemMenu, openMenuFromKey, recordItemMenuPointer, beginSecondaryMenuPress } = useItemMenuGestures(openMenuAt)
+
+  const gestureHandlerRef = useRef(null)
+  gestureHandlerRef.current = {
+    openMenu: point => openMenuAt(point, buttonRef.current),
+  }
+  const gestureKey = stripTileGestureKey(app.id)
+  useLayoutEffect(() => {
+    const registry = drawerRowGesturesRef?.current
+    if (!registry) return undefined
+    registry.set(gestureKey, gestureHandlerRef)
+    return () => {
+      if (registry.get(gestureKey) === gestureHandlerRef) registry.delete(gestureKey)
+    }
+  }, [drawerRowGesturesRef, gestureKey])
+
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className={`drawer__apps-card-tile${active ? ' drawer__apps-card-tile--active' : ''}`}
+      aria-label={appTileLabel(name, { needsYou, fresh, building })}
+      aria-current={active ? 'page' : undefined}
+      data-drag-key={`app:${app.id}`}
+      data-drawer-key={gestureKey}
+      onMouseEnter={(event) => showTip(event.currentTarget, name)}
+      onMouseLeave={hideTip}
+      onFocus={(event) => {
+        if (event.currentTarget.matches(':focus-visible')) showTip(event.currentTarget, name)
+      }}
+      onBlur={hideTip}
+      onPointerDown={(event) => {
+        recordItemMenuPointer(event)
+        beginSecondaryMenuPress(event)
+      }}
+      onClick={() => {
+        hideTip()
+        onOpen(app)
+      }}
+      onContextMenu={openItemMenu}
+      onKeyDown={openMenuFromKey}
+    >
+      <AppIcon item={app} label={name} className="drawer__apps-card-icon" />
+      {needsYou && <span className="drawer__apps-card-dot drawer__apps-card-dot--needs" aria-hidden="true" />}
+      {!needsYou && fresh && <span className="drawer__apps-card-dot drawer__apps-card-dot--new" aria-hidden="true" />}
+      {building && <span className="drawer__apps-card-dot drawer__apps-card-dot--building" aria-hidden="true" />}
+    </button>
+  )
+}
+
 export default function DrawerAppsStrip({
   apps: recentApps,
   activeAppId,
@@ -36,6 +120,8 @@ export default function DrawerAppsStrip({
   newAppSet,
   onApp,
   actions,
+  drawerRowGesturesRef,
+  suppressReleaseClick,
   titleRef,
   appsViewActive,
   onOpenAll,
@@ -51,7 +137,9 @@ export default function DrawerAppsStrip({
   const newestRef = useRef(recentIds[0] ?? null)
   useEffect(() => {
     const newest = recentIds[0] ?? null
-    // The first load is not an open: only a change of newest app promotes.
+    // The first load is not an open. An app opened elsewhere (another surface
+    // or device) becomes the newest and is promoted here; a tap on the row
+    // promotes directly in openApp.
     const promote = newestRef.current != null && newest !== newestRef.current ? newest : null
     newestRef.current = newest
     setOrder(current => {
@@ -108,35 +196,14 @@ export default function DrawerAppsStrip({
     el.style.left = `${Math.max(0, Math.min(max, tip.center - width / 2))}px`
     el.style.top = `${tip.top - el.offsetHeight}px`
   }, [tip])
-  const holdRef = useRef(null)
-  // Swallows only the click that follows a hold or drag on the row; any new
-  // pointer or key press on the row retires it (see the list's capture handlers).
-  const clickGuardRef = useRef(null)
-  if (clickGuardRef.current === null) clickGuardRef.current = createHeldClickGuard()
-  const clickGuard = clickGuardRef.current
 
-  // Same shared menu as every other sidebar row (Pin, Rename, Share, Delete…):
-  // right-click / context-menu key with a mouse or keyboard, press-and-hold on touch.
-  function openMenu(app, target, point) {
-    const rect = target.getBoundingClientRect()
-    const hasPoint = point && (point.x || point.y)
-    actions?.openMenu({
-      kind: 'app',
-      id: app.id,
-      surface: 'strip',
-      placement: {
-        clientX: hasPoint ? point.x : rect.left + rect.width / 2,
-        clientY: hasPoint ? point.y : rect.bottom,
-      },
-      focusFirstAction: !hasPoint,
-      restoreFocusTarget: target,
-    })
-  }
   // Finger drag for the collapsed row. iOS Safari will not natively pan a
   // sideways scroller inside the drawer (whose own touch handling reserves
   // horizontal swipes), so the row follows the finger itself and glides on
   // release. Where the browser does take over natively it sends
-  // pointercancel and this stands down.
+  // pointercancel and this stands down. A press held past the shared drag
+  // stage belongs to the drag controller (lift into the workspace, or the
+  // menu), so the row only pans for a swipe that starts before it.
   const dragRef = useRef(null)
   const glideRef = useRef(0)
   function stopGlide() {
@@ -152,6 +219,7 @@ export default function DrawerAppsStrip({
       id: event.pointerId,
       x: event.clientX,
       y: event.clientY,
+      downAt: performance.now(),
       left: row.scrollLeft,
       moving: false,
       lastX: event.clientX,
@@ -170,8 +238,11 @@ export default function DrawerAppsStrip({
         if (Math.abs(dy) > 10) dragRef.current = null
         return
       }
+      if (performance.now() - drag.downAt >= PRESS_DRAG_HOLD_MS) {
+        dragRef.current = null
+        return
+      }
       drag.moving = true
-      cancelHold()
     }
     const now = performance.now()
     const dt = Math.max(1, now - drag.lastT)
@@ -187,8 +258,10 @@ export default function DrawerAppsStrip({
     dragRef.current = null
     if (!drag.moving || !row) return
     if (event.type === 'pointercancel') return
-    // The lifted finger must not also open the app under it.
-    clickGuard.claim()
+    // The lifted finger must not also open the app under it. The drawer's
+    // one-shot suppressor swallows only that touch click; any new press or
+    // key retires it.
+    suppressReleaseClick?.()
     let velocity = -drag.velocity * 16 // px per frame
     const step = () => {
       velocity *= 0.94
@@ -203,10 +276,28 @@ export default function DrawerAppsStrip({
   }
   useEffect(() => stopGlide, [])
 
-  // Opening an app makes it the most recent, so it moves to the front. Scroll
-  // there on the click, again once the reordered list has rendered (a DOM
-  // reorder can cancel a smooth scroll mid-way, notably in Safari), and then
-  // settle exactly at the start.
+  // A mouse wheel scrolls the collapsed row sideways while the row can still
+  // move that way; at either end the wheel scrolls the sidebar as usual.
+  // Registered natively because React's wheel listener is passive.
+  useEffect(() => {
+    const row = rowRef.current
+    if (!row || expanded) return undefined
+    const onWheel = (event) => {
+      const delta = wheelRowScrollDelta(event, row)
+      if (!delta) return
+      event.preventDefault()
+      stopGlide()
+      row.scrollLeft += delta
+    }
+    row.addEventListener('wheel', onWheel, { passive: false })
+    return () => row.removeEventListener('wheel', onWheel)
+  }, [expanded, hasApps])
+
+  // Opening an app found by scrolling moves it to the front at once, and the
+  // row returns to its start to show it there. Scroll again once the reordered
+  // list has rendered (a DOM reorder can cancel a smooth scroll mid-way,
+  // notably in Safari), and then settle exactly at the start. An app already
+  // in view keeps its place.
   const openedAppRef = useRef(null)
   const settleRef = useRef(0)
   function scrollRowToStart() {
@@ -227,29 +318,13 @@ export default function DrawerAppsStrip({
     scrollRowToStart()
   })
   useEffect(() => () => clearTimeout(settleRef.current), [])
-
-  function cancelHold() {
-    if (holdRef.current) clearTimeout(holdRef.current.timer)
-    holdRef.current = null
-  }
-  function onPointerDown(event, app) {
-    if (event.pointerType === 'mouse') return
-    const target = event.currentTarget
-    const start = { x: event.clientX, y: event.clientY }
-    cancelHold()
-    holdRef.current = {
-      start,
-      timer: setTimeout(() => {
-        holdRef.current = null
-        clickGuard.claim()
-        openMenu(app, target, start)
-      }, HOLD_MS),
+  function openApp(app, index) {
+    if (!expanded && index >= visibleCount) {
+      const id = String(app.id)
+      openedAppRef.current = id
+      setOrder(current => reconcileStripOrder(current, recentIds, id, visibleCount))
     }
-  }
-  function onPointerMove(event) {
-    const hold = holdRef.current
-    if (!hold) return
-    if (Math.hypot(event.clientX - hold.start.x, event.clientY - hold.start.y) > HOLD_SLOP) cancelHold()
+    onApp?.(app.id)
   }
 
   useEffect(() => {
@@ -282,8 +357,23 @@ export default function DrawerAppsStrip({
     return () => observer.disconnect()
   }, [hasApps, updateEdges])
 
-  // Rows above the windowed Recents list moved; let the drawer re-measure.
-  useEffect(() => { onLayoutChange?.() }, [expanded, hasApps, onLayoutChange])
+  // Any change to this card's height (expanding, the rename field, wrapping
+  // to more grid rows on resize) moves the windowed Recents list below it, so
+  // the drawer re-measures whenever the card's height actually changes.
+  useLayoutEffect(() => {
+    const section = sectionRef.current
+    if (!section || !onLayoutChange) return undefined
+    let height = section.offsetHeight
+    onLayoutChange()
+    const observer = new ResizeObserver(() => {
+      const next = section.offsetHeight
+      if (next === height) return
+      height = next
+      onLayoutChange()
+    })
+    observer.observe(section)
+    return () => observer.disconnect()
+  }, [onLayoutChange])
   useLayoutEffect(() => { updateEdges() }, [expanded, apps.length, perRow, updateEdges])
 
   const renamingApp = renamingId != null
@@ -349,63 +439,27 @@ export default function DrawerAppsStrip({
         style={!expanded && rowWidth ? { width: `${rowWidth}px` } : undefined}
         onScroll={expanded ? undefined : () => { hideTip(); updateEdges() }}
         data-drawer-hscroll={expanded ? undefined : ''}
-        onPointerDownCapture={clickGuard.retire}
-        onKeyDownCapture={clickGuard.retire}
         onPointerDown={onRowPointerDown}
         onPointerMove={onRowPointerMove}
         onPointerUp={onRowPointerEnd}
         onPointerCancel={onRowPointerEnd}
       >
-        {apps.map((app, index) => {
-          const name = app.name || 'App'
-          const active = activeAppId != null && Number(activeAppId) === Number(app.id)
-          const needsYou = !!(app.chat_id && ownerInputSet.has(app.chat_id))
-          const building = !!(app.chat_id && streamingSet.has(app.chat_id))
-          const fresh = newAppSet.has(Number(app.id))
-          return (
-            <li key={app.id}>
-              <button
-                type="button"
-                className={`drawer__apps-card-tile${active ? ' drawer__apps-card-tile--active' : ''}`}
-                aria-label={name}
-                aria-current={active ? 'page' : undefined}
-                onMouseEnter={(event) => showTip(event.currentTarget, name)}
-                onMouseLeave={hideTip}
-                onFocus={(event) => {
-                  if (event.currentTarget.matches(':focus-visible')) showTip(event.currentTarget, name)
-                }}
-                onBlur={hideTip}
-                onClick={() => {
-                  hideTip()
-                  if (clickGuard.consume()) return
-                  // Only an app found by scrolling moves to the front (and the
-                  // row returns to the start to show it); one already in view
-                  // keeps its place.
-                  if (!expanded && index >= visibleCount) {
-                    openedAppRef.current = app.id
-                    scrollRowToStart()
-                  }
-                  onApp?.(app.id)
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault()
-                  if (event.nativeEvent?.pointerType === 'touch' || event.nativeEvent?.pointerType === 'pen') return
-                  openMenu(app, event.currentTarget, { x: event.clientX, y: event.clientY })
-                }}
-                onPointerDown={(event) => onPointerDown(event, app)}
-                onPointerMove={onPointerMove}
-                onPointerUp={cancelHold}
-                onPointerCancel={cancelHold}
-                onPointerLeave={cancelHold}
-              >
-                <AppIcon item={app} label={name} className="drawer__apps-card-icon" />
-                {needsYou && <span className="drawer__apps-card-dot drawer__apps-card-dot--needs" aria-label="Needs you" role="img" />}
-                {!needsYou && fresh && <span className="drawer__apps-card-dot drawer__apps-card-dot--new" aria-label="New" role="img" />}
-                {building && <span className="drawer__apps-card-dot drawer__apps-card-dot--building" aria-label="Building" role="img" />}
-              </button>
-            </li>
-          )
-        })}
+        {apps.map((app, index) => (
+          <li key={app.id}>
+            <DrawerAppTile
+              app={app}
+              active={activeAppId != null && Number(activeAppId) === Number(app.id)}
+              needsYou={!!(app.chat_id && ownerInputSet.has(app.chat_id))}
+              building={!!(app.chat_id && streamingSet.has(app.chat_id))}
+              fresh={newAppSet.has(Number(app.id))}
+              actions={actions}
+              drawerRowGesturesRef={drawerRowGesturesRef}
+              onOpen={target => openApp(target, index)}
+              showTip={showTip}
+              hideTip={hideTip}
+            />
+          </li>
+        ))}
       </ul>}
       {tip && (
         <div ref={tipRef} className="drawer__apps-tip" role="tooltip">{tip.name}</div>

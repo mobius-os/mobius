@@ -106,20 +106,6 @@ export default function ProjectActions({
     }
   }
 
-  async function togglePin() {
-    if (busy) return
-    setBusy(true)
-    setError('')
-    try {
-      await onPin?.(project, !project.pinned_at)
-      setOpen(false)
-    } catch (cause) {
-      setError(cause?.message || `Could not ${project.pinned_at ? 'unpin' : 'pin'} this project.`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   async function changeColor(color) {
     if (busy) return
     if ((project.color || null) === color) {
@@ -203,7 +189,7 @@ export default function ProjectActions({
                 )}
                 {error && <p className="project-actions__error" role="alert">{error}</p>}
                 {onPin && (
-                  <button type="button" role="menuitem" disabled={busy} onClick={() => void togglePin()}>
+                  <button type="button" role="menuitem" disabled={busy} onClick={() => { close(); onPin(project, !project.pinned_at) }}>
                     {project.pinned_at ? <><PinOff size={16} /> Unpin</> : <><Pin size={16} /> Pin</>}
                   </button>
                 )}

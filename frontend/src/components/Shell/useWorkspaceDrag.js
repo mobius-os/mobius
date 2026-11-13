@@ -91,7 +91,7 @@ export default function useWorkspaceDrag({
   labelForTabRef, // ref → (tab) => string
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
-  drawerRowGesturesRef, // key -> ref({ openMenu, beginReorder }) registered by Drawer rows
+  drawerRowGesturesRef, // data-drawer-key -> ref({ openMenu, beginReorder }) from Drawer rows and Apps-row icons
   closeDrawer,
   openDrawer,
   openTabMenuAtRef, // ref -> (clientX, clientY, tab, paneId) => void
@@ -328,7 +328,11 @@ export default function useWorkspaceDrag({
           ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
           : 0,
       })
-      const drawerGesture = () => drawerRowGesturesRef?.current?.get(key)?.current
+      // One item can appear twice in the drawer (a pinned app is also an Apps
+      // row icon), so the pressed element names its own gesture handler with
+      // `data-drawer-key`; the drag key still says what a drop opens.
+      const gestureKey = srcEl.dataset.drawerKey || key
+      const drawerGesture = () => drawerRowGesturesRef?.current?.get(gestureKey)?.current
 
       // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
       // source, for the WHOLE hold window — not at arm, when the magnifier has

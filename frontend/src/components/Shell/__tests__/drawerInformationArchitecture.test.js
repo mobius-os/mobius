@@ -2,71 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  appTileLabel,
   buildDrawerSections,
   findDrawerMenuItem,
   nextPendingPinnedAt,
   projectPendingDrawerPins,
+  wheelRowScrollDelta,
 } from '../../Drawer/drawerInformationArchitecture.js'
-
-test('projects never join Recents; they open from the Projects screen', () => {
-  const unopened = { id: 'p-unopened', name: 'Unopened', updated_at: '2026-08-26T08:00:00' }
-  const opened = {
-    id: 'p-opened',
-    name: 'Opened',
-    updated_at: '2026-08-25T08:00:00',
-    last_opened_at: '2026-08-26T09:00:00',
-  }
-
-  const result = buildDrawerSections([], [], [unopened, opened])
-
-  assert.deepEqual(result.recents, [])
-})
-
-test('built artifacts never join Recents; they live inside their project', () => {
-  const project = {
-    id: 'project-1', name: 'Album', updated_at: '2026-08-26T08:00:00',
-    artifacts: [
-      { id: 'unopened', name: 'Unopened', status: 'ok', has_output: true },
-      {
-        id: 'opened', name: 'Opened', status: 'ok', has_output: true,
-        last_opened_at: '2026-08-26T10:00:00',
-      },
-    ],
-  }
-
-  const result = buildDrawerSections([], [], [project])
-
-  assert.deepEqual(result.recents, [])
-})
-
-test('a pinned project stays on the Projects screen, out of drawer Pinned and Recents', () => {
-  const project = {
-    id: 'pinned-project',
-    name: 'Pinned project',
-    last_opened_at: '2026-08-26T09:00:00',
-    pinned_at: '2026-08-26T10:00:00',
-  }
-  const app = {
-    id: 7,
-    name: 'Pinned app',
-    pinned_at: '2026-08-26T09:00:00',
-  }
-
-  const result = buildDrawerSections([], [app], [project])
-
-  assert.deepEqual(result.pinned.map(row => `${row.kind}:${row.item.id}`), [
-    'app:7',
-  ])
-  assert.equal(result.recents.some(row => row.item.id === project.id), false)
-})
-
-test('the shared row menu resolves project identities', () => {
-  const project = { id: 'project-1', name: 'Project one' }
-  assert.equal(
-    findDrawerMenuItem({ kind: 'project', id: project.id }, [], [], [project]),
-    project,
-  )
-})
 
 test('a pending chat pin stays in Pinned across an older list snapshot', () => {
   const staleChat = {
@@ -201,4 +143,29 @@ test('project chats stay out of Recents but keep an explicit pin', () => {
 test('an empty archive is an empty Archived section', () => {
   const result = buildDrawerSections([{ id: 'a', has_messages: true }], [], [])
   assert.deepEqual(result.archived, [])
+})
+
+// Screen readers hear the same status the Apps-row dot shows.
+test('an Apps-row icon is announced with the status its dot shows', () => {
+  assert.equal(appTileLabel('Notes'), 'Notes')
+  assert.equal(appTileLabel('Notes', { needsYou: true, fresh: true }), 'Notes, needs you')
+  assert.equal(appTileLabel('Notes', { fresh: true }), 'Notes, new')
+  assert.equal(appTileLabel('Notes', { needsYou: true, building: true }), 'Notes, needs you, building')
+  assert.equal(appTileLabel(''), 'App')
+})
+
+// A plain mouse wheel scrolls the collapsed Apps row sideways, but never traps
+// the wheel: at either end, and for sideways or zoom input, the browser keeps it.
+test('a mouse wheel scrolls the Apps row sideways until it reaches an end', () => {
+  const row = { clientWidth: 200, scrollWidth: 500, scrollLeft: 100 }
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, row), 40)
+  assert.equal(wheelRowScrollDelta({ deltaY: -40 }, row), -40)
+  assert.equal(wheelRowScrollDelta({ deltaY: 3, deltaMode: 1 }, row), 48, 'line steps become pixels')
+
+  assert.equal(wheelRowScrollDelta({ deltaY: -40 }, { ...row, scrollLeft: 0 }), 0, 'start: the sidebar scrolls')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, { ...row, scrollLeft: 300 }), 0, 'end: the sidebar scrolls')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, { ...row, scrollWidth: 200 }), 0, 'nothing to scroll')
+  assert.equal(wheelRowScrollDelta({ deltaX: 30, deltaY: 10 }, row), 0, 'trackpad sideways stays native')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40, shiftKey: true }, row), 0, 'Shift+wheel stays native')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40, ctrlKey: true }, row), 0, 'pinch zoom stays native')
 })

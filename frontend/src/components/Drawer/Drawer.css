@@ -280,10 +280,6 @@
   padding-top: 0;
 }
 
-.drawer__item--apps {
-  font-weight: 500;
-}
-
 .drawer__item--projects {
   min-width: 0;
   font-weight: 500;
@@ -536,20 +532,6 @@
   height: 28px;
   border-radius: 8px;
   font-size: 9px;
-}
-
-.drawer__project-icon {
-  filter: saturate(.92);
-}
-
-.drawer__item--active .drawer__project-icon {
-  filter: saturate(1.08);
-}
-
-.drawer__artifact-icon {
-  width: 20px;
-  height: 20px;
-  opacity: 1;
 }
 
 /* ── Context-menu row ──────────────────────────────── */

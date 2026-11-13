@@ -30,14 +30,18 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
   assert.match(drawer, /pinnedItems\.map\(\(\{ kind, item \}\)/)
 })
 
-// The guard's behaviour is covered in heldClickGuard.test.js; this pins the
-// strip to it: any new pointer or key press on the row retires an old hold or
-// drag claim before that press's own click is judged.
-test('Apps strip tiles swallow only the click of the hold or drag that acted', () => {
-  assert.match(appsStrip, /onPointerDownCapture=\{clickGuard\.retire\}/)
-  assert.match(appsStrip, /onKeyDownCapture=\{clickGuard\.retire\}/)
-  assert.match(appsStrip, /if \(clickGuard\.consume\(\)\) return/)
-  assert.doesNotMatch(appsStrip, /suppressClickRef/)
+// Apps-row icons use the shell's one press-and-hold owner, like every sidebar
+// row: the drag controller finds them by data-drag-key (hold for the menu,
+// lift into the workspace) under their own gesture key, and a finger pan of
+// the row hands its release click to the drawer's one-shot suppressor.
+test('Apps-row icons share the sidebar press-and-hold and drag owner', () => {
+  assert.match(appsStrip, /data-drag-key=\{`app:\$\{app\.id\}`\}/)
+  assert.match(appsStrip, /data-drawer-key=\{gestureKey\}/)
+  assert.match(appsStrip, /registry\.set\(gestureKey, gestureHandlerRef\)/)
+  assert.match(appsStrip, /useItemMenuGestures\(openMenuAt\)/)
+  assert.match(appsStrip, /suppressReleaseClick\?\.\(\)/)
+  assert.doesNotMatch(appsStrip, /HOLD_MS = |suppressClickRef|clickGuard/)
+  assert.match(drawer, /<DrawerAppsStrip[\s\S]*?drawerRowGesturesRef=\{drawerRowGesturesRef\}[\s\S]*?suppressReleaseClick=\{suppressReleaseClick\}/)
 })
 
 test('directory cards preserve app management through shared row actions', () => {
@@ -77,12 +81,11 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(shell, /id="main-content"[\s\S]*?inert=\{modalDrawerOpen\}/)
 })
 
-test('chat, app, and project rows share one placed action menu contract', () => {
+test('chat and app rows share one placed action menu contract', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}[\s\S]*?itemName=\{label\}/)
   assert.doesNotMatch(drawer, /@openai\/apps-sdk-ui\/components\/Menu/)
   assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.match(itemActionMenu, /itemKind === 'project'[\s\S]*?'projects'/)
-  assert.match(itemActionMenu, /:\s*'apps'/)
+  assert.match(itemActionMenu, /itemKind === 'chat' \? 'chats' : 'apps'/)
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')

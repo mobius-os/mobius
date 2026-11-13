@@ -1009,8 +1009,9 @@ test('large drawer lists memoize ordering and row actions without changing row o
 
 test('built artifacts open from their project, never as Recents rows', () => {
   assert.doesNotMatch(drawer, /DrawerArtifactRow/, 'artifacts are not Recents rows')
-  assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
-  assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
+  // The sidebar has no artifact or project rows, so it takes no inputs to
+  // open, rename, recolour, or delete them.
+  assert.doesNotMatch(drawer, /kind === 'artifact'|kind === 'project'|onArtifact|activeArtifactRef|onProjectRename|onProjectDelete/)
 })
 
 // Projects are not sidebar rows, so pinning a project happens on the Projects
@@ -1026,7 +1027,9 @@ test('projects are pinned and unpinned from the Projects list', () => {
   assert.doesNotMatch(shell, /api\.projects\.setPinned/)
   assert.match(directory, /\.sort\(\(a, b\) => Boolean\(b\.pinned_at\) - Boolean\(a\.pinned_at\)\)/)
   assert.match(directory, /aria-label=\{`Unpin \$\{project\.name\}`\}/)
-  assert.match(actions, /onPin\?\.\(project, !project\.pinned_at\)/)
+  // The pin owner projects the change and reports failures itself, so the
+  // menu closes at once instead of waiting on the server.
+  assert.match(actions, /onClick=\{\(\) => \{ close\(\); onPin\(project, !project\.pinned_at\) \}\}/)
 })
 
 test('artifact previews keep recovery actions visible without a build-log drawer', () => {
@@ -1054,11 +1057,6 @@ test('a selected project-owned chat Recent includes its project chip in one row 
   assert.match(
     drawerCss,
     /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
-  )
-  assert.doesNotMatch(
-    drawerCss.match(/\.drawer__item--apps\s*\{[\s\S]*?\}/)?.[0] || '',
-    /margin-(?:top|bottom)/,
-    'Apps must not insert drift before the Projects glyph shared with the closed rail',
   )
 })
 

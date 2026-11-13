@@ -112,7 +112,7 @@ export function projectPendingDrawerPins(
  * explicit opens, falling back to bundle update/creation time until the first
  * open. The searchable apps grid keeps its own stable ordering.
  */
-export function buildDrawerSections(chats = [], apps = [], projects = []) {
+export function buildDrawerSections(chats = [], apps = []) {
   const conversationRows = chats.filter(chat => chat.has_messages)
   // Archived chats leave Pinned and Recents for their own section, most
   // recently archived first. The server clears a pin when it archives.
@@ -212,12 +212,36 @@ export function filterInstalledApps(apps = [], query = '') {
 // The shared menu names a row by identity, so it must survive that row
 // disappearing mid-render (deleted, filtered, or refreshed away) as ordinary
 // absence rather than a crash.
-export function findDrawerMenuItem(menu, chats = [], apps = [], projects = []) {
+export function findDrawerMenuItem(menu, chats = [], apps = []) {
   if (!menu) return null
-  const items = menu.kind === 'chat'
-    ? (chats || [])
-    : menu.kind === 'project'
-      ? (projects || [])
-      : (apps || [])
+  const items = menu.kind === 'chat' ? (chats || []) : (apps || [])
   return items.find(item => item?.id === menu.id) || null
+}
+
+// What a screen reader hears for an Apps-row icon: its name plus the same
+// status its dot shows ("Needs you" outranks "New", as on screen).
+export function appTileLabel(name, { needsYou = false, fresh = false, building = false } = {}) {
+  const parts = [name || 'App']
+  if (needsYou) parts.push('needs you')
+  else if (fresh) parts.push('new')
+  if (building) parts.push('building')
+  return parts.join(', ')
+}
+
+// How far a mouse wheel turn should scroll the collapsed Apps row sideways,
+// or 0 to leave the event to the browser. Sideways input (trackpads,
+// Shift+wheel) and pinch-zoom stay native, and so does a turn the row can no
+// longer follow, so the wheel scrolls the sidebar again at either end.
+const WHEEL_LINE_PX = 16
+export function wheelRowScrollDelta(event, row) {
+  if (!event || !row || event.ctrlKey || event.shiftKey) return 0
+  const { deltaX = 0, deltaY = 0, deltaMode = 0 } = event
+  if (!deltaY || Math.abs(deltaX) >= Math.abs(deltaY)) return 0
+  const unit = deltaMode === 1 ? WHEEL_LINE_PX : deltaMode === 2 ? row.clientWidth : 1
+  const delta = deltaY * unit
+  const max = row.scrollWidth - row.clientWidth
+  if (max <= 0) return 0
+  if (delta < 0 && row.scrollLeft <= 0) return 0
+  if (delta > 0 && row.scrollLeft >= max - 1) return 0
+  return delta
 }
