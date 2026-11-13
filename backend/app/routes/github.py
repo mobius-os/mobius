@@ -156,7 +156,7 @@ from app.github_contributions import (
   publication_handoff_identity,
   publication_handoff_spec,
   _cleanup_terminal_staging_checkout,
-  checkout_kept_for,
+  terminal_checkout_cleanup,
   _claim_record,
   _assert_publication_approval,
   confirmed_publication_records,
@@ -5310,8 +5310,8 @@ async def cleanup_contribution_staging(
           "terminal contribution equivalence settlement failed %s/%s",
           app_id, record_id, exc_info=True,
         )
-    cleaned = await settled.run_settled(
-      _cleanup_terminal_staging_checkout, settled_record, app_id=app_id,
+    cleaned, kept_for = await settled.run_settled(
+      terminal_checkout_cleanup, settled_record, app_id=app_id,
     )
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).
@@ -5322,12 +5322,10 @@ async def cleanup_contribution_staging(
   except Exception:
     log.debug("autopilot close_out failed %s/%s", app_id, record_id,
               exc_info=True)
-  if not cleaned:
-    # Say why a kept checkout stays, so nobody removes it by hand: another
-    # unfinished contribution still needs it, and the last to finish cleans it.
-    kept_for = await asyncio.to_thread(checkout_kept_for, app_id, settled_record)
-    if kept_for:
-      return {"cleaned": False, "kept_for": kept_for}
+  if kept_for:
+    # Another unfinished contribution still needs this checkout. Say so, so
+    # nobody removes it by hand; a later cleanup removes it once nothing does.
+    return {"cleaned": False, "kept_for": kept_for}
   return {"cleaned": cleaned}
 
 

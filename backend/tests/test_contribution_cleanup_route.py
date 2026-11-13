@@ -386,6 +386,16 @@ def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
   status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
   assert status.returncode == 0
 
+  # Once the worktree's contribution finishes too, Contribute's next cleanup
+  # of the clone removes it: nothing needs it any more.
+  _write_terminal_record(app["id"], "worktree-open", {
+    "id": "worktree-open", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(worktree)},
+  })
+  assert _cleanup(client, auth, app["id"], "worktree-open") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": True}
+  assert not clone.exists()
+
 
 def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client, auth):
   """A clone whose Git data sits in a sibling git folder, as the Möbius adapter
@@ -417,3 +427,34 @@ def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client,
   assert git_dir.is_dir()
   assert subprocess.run(["git", "-C", str(follow_up), "status", "--short"],
                         check=False).returncode == 0
+
+
+def test_kept_for_is_reported_only_when_it_is_why_a_checkout_stays(client, auth):
+  app = create_local_app(client, auth, name="Cleanup kept_for reason")
+  checkout = _standalone_checkout("cleanup-kept-for-reason")
+  for record_id in ("reason-a", "reason-b"):
+    _write_terminal_record(app["id"], record_id, {
+      "id": record_id, "type": "pr", "status": "open",
+      "plan": {"repo_path": str(checkout)},
+    })
+  # An unfinished contribution is never cleaned, whoever else uses its checkout.
+  assert _cleanup(client, auth, app["id"], "reason-a") == {"cleaned": False}
+  assert checkout.is_dir()
+
+
+def test_an_unreadable_git_pointer_elsewhere_does_not_break_cleanup(client, auth):
+  app = create_local_app(client, auth, name="Cleanup unreadable pointer")
+  checkout = _standalone_checkout("cleanup-unreadable-finished")
+  other = Path(get_settings().data_dir) / "contrib" / "cleanup-unreadable-open" / "repo"
+  other.mkdir(parents=True)
+  (other / ".git").write_bytes(b"gitdir: \xff\xfe not utf-8\n")
+  _write_terminal_record(app["id"], "unreadable-finished", {
+    "id": "unreadable-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  _write_terminal_record(app["id"], "unreadable-open", {
+    "id": "unreadable-open", "type": "pr", "status": "open",
+    "plan": {"repo_path": str(other)},
+  })
+  assert _cleanup(client, auth, app["id"], "unreadable-finished") == {"cleaned": True}
+  assert not checkout.exists()
