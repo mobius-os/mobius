@@ -1018,8 +1018,12 @@ test('built artifacts open from their project, never as Recents rows', () => {
 test('projects are pinned and unpinned from the Projects list', () => {
   const directory = readFileSync(new URL('../../Projects/ProjectsDirectory.jsx', import.meta.url), 'utf8')
   const actions = readFileSync(new URL('../../Projects/ProjectActions.jsx', import.meta.url), 'utf8')
-  assert.match(shell, /onPin=\{setProjectPinned\}/)
-  assert.match(shell, /api\.projects\.setPinned\(project\.id, pinned\)/)
+  // One pin owner: the list shows pending pins and writes through pins.pin,
+  // never a second writer that a stale list read could undo.
+  assert.match(shell, /<ProjectsDirectory\s+projects=\{pins\.projectedItems\.projects\}/)
+  assert.match(shell, /onPin=\{pinProject\}/)
+  assert.match(shell, /function pinProject\(project, pinned\) \{\s+return pins\.pin\('project', project\.id, pinned\)/)
+  assert.doesNotMatch(shell, /api\.projects\.setPinned/)
   assert.match(directory, /\.sort\(\(a, b\) => Boolean\(b\.pinned_at\) - Boolean\(a\.pinned_at\)\)/)
   assert.match(directory, /aria-label=\{`Unpin \$\{project\.name\}`\}/)
   assert.match(actions, /onPin\?\.\(project, !project\.pinned_at\)/)

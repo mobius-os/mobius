@@ -5,6 +5,7 @@ import AppIcon from '../AppIcon.jsx'
 import InlineRenameInput from './InlineRenameInput.jsx'
 import { drawerNameMaxLength } from './drawerRename.js'
 import { reconcileStripOrder } from './drawerInformationArchitecture.js'
+import { createHeldClickGuard } from './heldClickGuard.js'
 
 const STORAGE_KEY = 'mobius.drawer.appsExpanded'
 const ORDER_KEY = 'mobius.drawer.appsOrder'
@@ -108,7 +109,11 @@ export default function DrawerAppsStrip({
     el.style.top = `${tip.top - el.offsetHeight}px`
   }, [tip])
   const holdRef = useRef(null)
-  const suppressClickRef = useRef(false)
+  // Swallows only the click that follows a hold or drag on the row; any new
+  // pointer or key press on the row retires it (see the list's capture handlers).
+  const clickGuardRef = useRef(null)
+  if (clickGuardRef.current === null) clickGuardRef.current = createHeldClickGuard()
+  const clickGuard = clickGuardRef.current
 
   // Same shared menu as every other sidebar row (Pin, Rename, Share, Delete…):
   // right-click / context-menu key with a mouse or keyboard, press-and-hold on touch.
@@ -183,8 +188,7 @@ export default function DrawerAppsStrip({
     if (!drag.moving || !row) return
     if (event.type === 'pointercancel') return
     // The lifted finger must not also open the app under it.
-    suppressClickRef.current = true
-    setTimeout(() => { suppressClickRef.current = false }, 350)
+    clickGuard.claim()
     let velocity = -drag.velocity * 16 // px per frame
     const step = () => {
       velocity *= 0.94
@@ -237,7 +241,7 @@ export default function DrawerAppsStrip({
       start,
       timer: setTimeout(() => {
         holdRef.current = null
-        suppressClickRef.current = true
+        clickGuard.claim()
         openMenu(app, target, start)
       }, HOLD_MS),
     }
@@ -345,6 +349,8 @@ export default function DrawerAppsStrip({
         style={!expanded && rowWidth ? { width: `${rowWidth}px` } : undefined}
         onScroll={expanded ? undefined : () => { hideTip(); updateEdges() }}
         data-drawer-hscroll={expanded ? undefined : ''}
+        onPointerDownCapture={clickGuard.retire}
+        onKeyDownCapture={clickGuard.retire}
         onPointerDown={onRowPointerDown}
         onPointerMove={onRowPointerMove}
         onPointerUp={onRowPointerEnd}
@@ -371,10 +377,7 @@ export default function DrawerAppsStrip({
                 onBlur={hideTip}
                 onClick={() => {
                   hideTip()
-                  if (suppressClickRef.current) {
-                    suppressClickRef.current = false
-                    return
-                  }
+                  if (clickGuard.consume()) return
                   // Only an app found by scrolling moves to the front (and the
                   // row returns to the start to show it); one already in view
                   // keeps its place.

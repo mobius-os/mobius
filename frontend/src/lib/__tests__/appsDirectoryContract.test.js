@@ -30,6 +30,16 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
   assert.match(drawer, /pinnedItems\.map\(\(\{ kind, item \}\)/)
 })
 
+// The guard's behaviour is covered in heldClickGuard.test.js; this pins the
+// strip to it: any new pointer or key press on the row retires an old hold or
+// drag claim before that press's own click is judged.
+test('Apps strip tiles swallow only the click of the hold or drag that acted', () => {
+  assert.match(appsStrip, /onPointerDownCapture=\{clickGuard\.retire\}/)
+  assert.match(appsStrip, /onKeyDownCapture=\{clickGuard\.retire\}/)
+  assert.match(appsStrip, /if \(clickGuard\.consume\(\)\) return/)
+  assert.doesNotMatch(appsStrip, /suppressClickRef/)
+})
+
 test('directory cards preserve app management through shared row actions', () => {
   assert.match(drawer, /variant="card"[\s\S]*?actions=\{rowActions\}/,
     'app cards must keep the shared row action surface')

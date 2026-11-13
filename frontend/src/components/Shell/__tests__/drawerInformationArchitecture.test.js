@@ -112,6 +112,24 @@ test('a newer pending unpin wins over a stale pinned list snapshot', () => {
   assert.deepEqual(result.recentApps.map(app => app.id), [7])
 })
 
+// The Projects list renders this projection, so a project pin or unpin still
+// in flight is what the list shows, whatever an older list read says.
+test('a pending project pin or unpin overrides an older project list', () => {
+  const stalePinned = { id: 'p-1', name: 'Was pinned', pinned_at: '2026-09-12T12:01:00' }
+  const staleUnpinned = { id: 'p-2', name: 'Was unpinned', pinned_at: null }
+  const pending = new Map([
+    ['project:p-1', { pinned: false, pinnedAt: null }],
+    ['project:p-2', { pinned: true, pinnedAt: '2026-09-12T12:02:00.000Z' }],
+  ])
+
+  const { projects } = projectPendingDrawerPins([], [], [stalePinned, staleUnpinned], pending)
+
+  assert.deepEqual(projects.map(row => [row.id, row.pinned_at]), [
+    ['p-1', null],
+    ['p-2', '2026-09-12T12:02:00.000Z'],
+  ])
+})
+
 test('a pending pin appends even when the browser clock is behind', () => {
   const chats = [{
     id: 'chat-1', title: 'Existing pin', has_messages: true,

@@ -2056,15 +2056,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   async function setProjectColor(project, color) {
     return patchProject(project, { color })
   }
-  async function setProjectPinned(project, pinned) {
-    const updated = await api.projects.setPinned(project.id, pinned)
-    const pinnedAt = updated?.pinned_at ?? null
-    if (pinned && !pinnedAt) throw new Error('Could not pin this project.')
-    projectsRef.current = projectsRef.current.map(row => (
-      String(row.id) === String(project.id) ? { ...row, pinned_at: pinnedAt } : row
-    ))
-    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
-    return updated
+  // The Projects list pins through the shell's one pin owner, so its queue,
+  // stale-read cancellation and failure recovery cover projects too.
+  function pinProject(project, pinned) {
+    return pins.pin('project', project.id, pinned)
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
@@ -5534,7 +5529,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   onPending={surfaceVisible ? holdLaunchCover : undefined}
                 >
                   <ProjectsDirectory
-                    projects={projects}
+                    projects={pins.projectedItems.projects}
                     templates={projectTemplates}
                     status={projectsStatus}
                     onRetry={() => Promise.all([
@@ -5547,7 +5542,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onImportSource={importProjectSource}
                     onRename={renameProject}
                     onColor={setProjectColor}
-                    onPin={setProjectPinned}
+                    onPin={pinProject}
                     onDelete={deleteProject}
                   />
                 </LazySurface>
