@@ -34,7 +34,6 @@ function watchPopup(popup, signal) {
 export function useWallet({ active }) {
   const [summary, setSummary] = useState(null)
   const [readTerms, setReadTerms] = useState(null)
-  const [activity, setActivity] = useState(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState(null)
   const [refusal, setRefusal] = useState(null)
@@ -63,19 +62,9 @@ export function useWallet({ active }) {
     }
     if (!mounted.current || mine !== generation.current) return
     const nextPairing = next?.mode === 'customer' ? next.pairing ?? null : null
-    if (nextPairing !== pairing.current) {
-      // Another service's history must not sit under this one's balance.
-      pairing.current = nextPairing
-      setActivity(null)
-    }
+    // History is keyed by pairing (ActivityWindow), so another service's never sits under this balance.
+    pairing.current = nextPairing
     setSummary(next)
-    if (next?.mode !== 'customer') return
-    try {
-      const body = await read('/identity/credits/transactions?limit=8')
-      if (mounted.current && mine === generation.current) setActivity(body?.transactions || [])
-    } catch {
-      if (mounted.current && mine === generation.current) setActivity(null)
-    }
   }, [])
 
   useEffect(() => {
@@ -202,5 +191,5 @@ export function useWallet({ active }) {
     }
   }, [load])
 
-  return { summary, terms, activity, busy, notice, refusal, buy, pairWithAccount }
+  return { summary, terms, busy, notice, refusal, buy, pairWithAccount }
 }

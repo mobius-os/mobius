@@ -126,6 +126,58 @@ export function canReconnect(summary) {
 }
 
 /**
+ * What the account page's Credits row shows at a glance: the spendable
+ * balance, a debt, or that credits are not connected yet. Null when there is
+ * nothing trustworthy to show (still loading or unreadable).
+ */
+export function walletGlance(summary) {
+  if (creditsSection(summary) === 'connect') return { kind: 'unconnected' }
+  const balance = summary?.mode === 'customer' ? summary.balance : null
+  if (!balance) return null
+  if (typeof balance.balance === 'string' && balance.balance.startsWith('-')) {
+    return { kind: 'owed', figure: balance.balance.slice(1) }
+  }
+  return typeof balance.available === 'string' ? { kind: 'balance', figure: balance.available } : null
+}
+
+/** The time of day a line of activity happened, for rows under a day heading. */
+export function activityTime(at, locale = undefined) {
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * Wallet history grouped under day headings, newest first: "Today",
+ * "Yesterday", then "9 November" (with the year once it is not this year).
+ * Entries keep their order; a day that continues across pages stays one group.
+ */
+export function activityDays(entries, now = new Date(), locale = undefined) {
+  const startOf = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const today = startOf(now)
+  const days = []
+  for (const entry of entries) {
+    const date = new Date(entry.at)
+    const key = Number.isNaN(date.getTime()) ? 'unknown' : String(startOf(date))
+    let day = days[days.length - 1]
+    if (!day || day.key !== key) {
+      const gap = key === 'unknown' ? null : Math.round((today - Number(key)) / 86_400_000)
+      const label = gap === null ? 'Earlier'
+        : gap === 0 ? 'Today'
+          : gap === 1 ? 'Yesterday'
+            : date.toLocaleDateString(locale, {
+              day: 'numeric', month: 'long',
+              ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+            })
+      day = { key, label, entries: [] }
+      days.push(day)
+    }
+    day.entries.push(entry)
+  }
+  return days
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the

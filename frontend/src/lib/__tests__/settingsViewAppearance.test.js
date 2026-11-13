@@ -197,10 +197,21 @@ test('provider usage is read for connected providers on the overview and only th
 })
 
 test('the Möbius account lives in Settings, with no hand-off to an app', () => {
-  assert.match(view, /<MobiusAccountPage active=\{active\} onOpenModels=\{\(\) => openDetailPage\('mobius'\)\} \/>/)
+  assert.match(view, /<MobiusAccountPage\s+active=\{active\}\s+onOpenCredits=\{showOwnerAccounts \? \(\) => openDetailPage\(CREDITS_PAGE\) : null\}\s+onOpenModels=\{\(\) => openDetailPage\('mobius'\)\}\s+\/>/)
   assert.match(view, /onClick=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}/)
   assert.match(view, /useMobiusAccountSummary\(\)/)
   assert.doesNotMatch(view, /onOpenApp\?\.\('identity'\)|openMobiusYou|Möbius · You|Möbius account<\/strong>/)
+})
+
+test('credits open as their own page from a row between Profile and Möbius models', () => {
+  const accountPage = readFileSync(new URL('../../components/SettingsView/MobiusAccountPage.jsx', import.meta.url), 'utf8')
+  const credits = readFileSync(new URL('../../components/SettingsView/AccountCredits.jsx', import.meta.url), 'utf8')
+  // The Settings overview no longer carries the wallet itself.
+  assert.doesNotMatch(view, /<WalletSection|<WalletConnect|useWallet\(/)
+  assert.match(accountPage, /\{editable && <ProfileSection identity=\{identity\} \/>\}\s*<CreditsLink onOpenCredits=\{onOpenCredits\} \/>\s*<ModelsLink/)
+  assert.match(view, /creditsOpen\) \{[\s\S]*?title="Credits"[\s\S]*?onBack=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}[\s\S]*?detailBody = <AccountCredits active=\{active\} \/>/)
+  // Recent activity can run long, so it comes last on the Credits page.
+  assert.match(credits, /<WalletSection[\s\S]*\/>[\s\S]*<RecentActivity>[\s\S]*<ActivityWindow[\s\S]*<\/RecentActivity>/)
 })
 
 test('provider-dependent model controls stay unavailable until connected', () => {

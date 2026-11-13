@@ -1,12 +1,13 @@
 /* Settings › Accounts › Möbius: sign in, @handle and photo, every deployment on the account, and disconnect; model credit and visibility (MobiusModelAccess) render on the Möbius provider page. */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import {
   ArrowRotateCw,
   ArrowUpRight,
   Camera,
   ChevronDown,
+  Credits,
   ExternalLink,
   Lock,
   Pencil,
@@ -40,6 +41,8 @@ import {
   resourceSummary,
 } from '../../lib/mobiusAccount.js'
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
+import { apiFetch, jsonOrThrow } from '../../api/client.js'
+import { creditsSection, walletGlance } from '../../lib/creditsWallet.js'
 import { closeAuthWindow, navigateAuthWindow } from '../../utils/authWindow.js'
 import './SettingsPage.css'
 import './MobiusAccountPage.css'
@@ -601,6 +604,52 @@ export function MobiusModelAccess({ onSignIn = null }) {
   return <ModelAccessSection account={account} onSignIn={onSignIn} />
 }
 
+/* The account page points to its own Credits page, with the balance on the row. */
+function CreditsLink({ onOpenCredits }) {
+  if (!onOpenCredits) return null
+  return <CreditsRow onOpen={onOpenCredits} />
+}
+
+function CreditsRow({ onOpen }) {
+  // The same wallet summary the Credits page reads; read again on every visit
+  // so a purchase or a paid app run shows when the owner comes back.
+  const summaryQuery = useQuery({
+    queryKey: ['credits-wallet-glance'],
+    queryFn: async () => jsonOrThrow(await apiFetch('/identity/credits')),
+    staleTime: 0,
+    retry: false,
+  })
+  // A Möbius without credits shows no row, as Settings showed no wallet before.
+  if (!creditsSection(summaryQuery.data)) return null
+  const glance = walletGlance(summaryQuery.data)
+  const label = glance?.kind === 'balance'
+    ? `, ${glance.figure} credits available`
+    : glance?.kind === 'owed' ? `, ${glance.figure} credits owed` : ''
+  return (
+    <section className="settings-group" aria-labelledby="mobius-account-credits-link">
+      <GroupHead id="mobius-account-credits-link" title="Credits" />
+      <div className="settings-list">
+        <button type="button" className="settings-item" onClick={onOpen} aria-label={`Credits wallet${label}`}>
+          <span className="settings-item__icon"><Credits width={18} height={18} aria-hidden="true" /></span>
+          <span className="settings-item__body">
+            <span className="settings-item__title">Credits wallet</span>
+            <span className="settings-item__sub">Buy credits and see your activity</span>
+          </span>
+          {(glance?.kind === 'balance' || glance?.kind === 'owed') && (
+            <span className={`mobius-account__balance${glance.kind === 'owed' ? ' mobius-account__balance--owed' : ''}`} aria-hidden="true">
+              <span className="mobius-account__balance-figure">{glance.figure}</span>
+              <span className="mobius-account__balance-unit">{glance.kind === 'owed' ? 'credits owed' : 'credits'}</span>
+            </span>
+          )}
+          {glance?.kind === 'unconnected' && (
+            <span className="settings-item__trail"><span className="settings-badge">Not connected</span></span>
+          )}
+        </button>
+      </div>
+    </section>
+  )
+}
+
 /* The account page points to model credit on the Möbius provider page rather than repeating it. */
 function ModelsLink({ onOpenModels }) {
   if (!onOpenModels) return null
@@ -1144,8 +1193,10 @@ function AccountSection({ identity, intent, onIntent, onDisconnected, dashboard 
  * The Möbius account page inside Settings. `active` is true while the page is
  * visible; it refreshes the account on return and pauses live polling when
  * hidden. The parent owns the page header (see useMobiusAccountSummary).
+ * `onOpenCredits` opens the owner's Credits page; its row sits between Profile
+ * and Möbius models and does not depend on the account, so it shows in every state.
  */
-export default function MobiusAccountPage({ active = true, onOpenModels = null }) {
+export default function MobiusAccountPage({ active = true, onOpenCredits = null, onOpenModels = null }) {
   const queryClient = useQueryClient()
   const identityQuery = mobiusAccountQueries.identity.useQuery()
   const identity = identityQuery.data
@@ -1181,6 +1232,7 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
         <div className="mobius-account" aria-busy="true">
           <span className="mobius-account__sr-only" role="status">Loading your Möbius account…</span>
           <section className="settings-group"><SkeletonList rows={3} /></section>
+          <CreditsLink onOpenCredits={onOpenCredits} />
         </div>
       )
     }
@@ -1190,6 +1242,7 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
           <GroupHead id="mobius-account-error" title="We couldn’t check your account" desc="This Möbius is still working. Your account details will appear once it can reach the account service." />
           <ErrorMessage error={identityQuery.error} onRetry={() => identityQuery.refetch()} />
         </section>
+        <CreditsLink onOpenCredits={onOpenCredits} />
         <ModelsLink onOpenModels={onOpenModels} />
       </div>
     )
@@ -1221,6 +1274,7 @@ export default function MobiusAccountPage({ active = true, onOpenModels = null }
 
       {mode === 'signed_out' && <SignInSection onSignedIn={signedIn} reconnecting={intent === 'signin-again'} />}
       {editable && <ProfileSection identity={identity} />}
+      <CreditsLink onOpenCredits={onOpenCredits} />
       <ModelsLink onOpenModels={onOpenModels} />
       <DeploymentsSection
         identity={identity}
