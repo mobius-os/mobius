@@ -72,7 +72,7 @@ import { consumeProjectCopyRequest, clearProjectCopyRequest } from '../../lib/pr
 import { waitingPaymentNotice } from '../../lib/creditsPayment.js'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { buildEventProjectId, isArtifactBuildEvent, projectEntryTarget, resultDisplayName } from '../../lib/projectArtifacts.js'
-import { projectChatTabLabel } from '../../lib/projectChats.js'
+import { liveProjectChat, projectChatTabLabel } from '../../lib/projectChats.js'
 import {
   appSourceProjectId,
   linkedProjectAppId,
@@ -134,10 +134,14 @@ import {
   resolveNewChatIntentId,
   resumedNewChatPresentation,
   reusableChatDetailVerdict,
+  reusableProjectChatDetailVerdict,
+  reusableProjectEmptyChat,
   shouldRetryNewChatAllocation,
   stageVerifiedNewChatHandoff,
   writeNewChatIntent,
 } from './newChatPolicy.js'
+import { saveDrawerRename } from '../Drawer/drawerRename.js'
+import usePinnedItemMutations from '../Drawer/usePinnedItemMutations.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -836,6 +840,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const notifyShell = useCallback((message, options) => {
     notificationCenterActionsRef.current?.addNotice(message, options)
   }, [])
+  const pins = usePinnedItemMutations({ chats, apps, projects, onNotice: notifyShell })
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -1850,6 +1855,43 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     return chat
   }
 
+  // A project page's New chat reopens that project's untouched chat rather
+  // than piling up another blank, unless the owner kept that blank by pinning
+  // or renaming it. The project list, with the shell's live facts overlaid as
+  // the page shows them, only nominates it: a fresh detail read must prove it
+  // is still empty and still not kept, since another browser may have started
+  // using it.
+  async function newProjectChat(project) {
+    const projectRows = queryClient.getQueryData(projectQueries.keys.chats(project.id)) ?? project.chats
+    const candidate = reusableProjectEmptyChat(
+      (projectRows || []).map(row => liveProjectChat(row, chatById.get(String(row?.id)))),
+      {
+        recoveredChatIds: recoveredChatIdsRef.current,
+        streamingChatIds: streamingChatIdsRef.current,
+        pinnedChatIds,
+      },
+    )
+    if (candidate && online) {
+      let verdict = 'uncertain'
+      try {
+        const res = await apiFetch(
+          `/chats/${encodeURIComponent(candidate.id)}?limit=1`,
+          { timeoutMs: 5000 },
+        )
+        verdict = reusableProjectChatDetailVerdict({
+          ok: res.ok,
+          status: res.status,
+          detail: res.ok ? await res.json() : null,
+        })
+      } catch {}
+      if (verdict === 'empty') {
+        openProjectChat(project, candidate)
+        return candidate
+      }
+    }
+    return createProjectChat(project)
+  }
+
   // `/new` and `/clear` (newChatCommand.js): the dependencies its two steps
   // use, read from this render.
   function newChatCommandDeps() {
@@ -2776,18 +2818,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // The final scoped read settles the row from server truth in every case.
   const setChatArchived = useCallback(async (chatId, archived, { undoable = true } = {}) => {
     const sid = String(chatId)
+    // A chat this list has not read yet (one just created on a project page)
+    // is filed the same way; the scoped read after the write brings its row in.
     const previous = chatsRef.current.find(row => String(row?.id) === sid)
-    if (!previous) return false
+    const intent = {
+      archivedAt: archived ? (previous?.archived_at || new Date().toISOString()) : null,
+      pinnedAt: archived ? null : (previous?.pinned_at ?? null),
+    }
     const token = Symbol(sid)
-    archiveActionsRef.current.set(sid, {
-      token,
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    })
-    projectChatList(rows => withChatArchive(rows, sid, {
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    }))
+    archiveActionsRef.current.set(sid, { token, ...intent })
+    projectChatList(rows => withChatArchive(rows, sid, intent))
     const prior = archiveRequestsRef.current.get(sid) || Promise.resolve()
     const request = prior.catch(() => {}).then(() => (
       archived ? api.chats.archive(sid) : api.chats.unarchive(sid)
@@ -2842,6 +2882,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const archivedChatIds = useMemo(() => new Set(
     chats.filter(row => row?.archived_at).map(row => String(row.id)),
   ), [chats])
+  const pinnedChatIds = useMemo(() => new Set(
+    pins.projectedItems.chats.filter(row => row?.pinned_at).map(row => String(row.id)),
+  ), [pins.projectedItems])
 
   const confirmAppDeleted = useCallback((id) => {
     const sid = String(id)
@@ -4593,6 +4636,35 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     await refreshChats()
   }
 
+  async function renameChat(chatId, title) {
+    const saved = await saveDrawerRename(
+      () => api.chats.update(chatId, { title }),
+      notifyShell,
+    )
+    if (saved) void chatQueries.list.invalidate(queryClient)
+  }
+
+  // The sidebar's chat actions, offered on a project page. Each goes through
+  // the same Shell owner as the drawer, then rereads the project's own Chats
+  // list, a separate projection with its own rows and filing state.
+  function projectChatActions(project) {
+    const thenRefreshProjectChats = action => async (chatId, ...args) => {
+      try {
+        return await action(chatId, ...args)
+      } finally {
+        void queryClient.invalidateQueries({
+          queryKey: projectQueries.keys.chats(project.id), exact: true,
+        })
+      }
+    }
+    return {
+      onPin: thenRefreshProjectChats((chatId, pinned) => pins.pin('chat', chatId, pinned)),
+      onSetArchived: thenRefreshProjectChats(setChatArchived),
+      onRename: thenRefreshProjectChats(renameChat),
+      onDelete: thenRefreshProjectChats(deleteChat),
+    }
+  }
+
   async function deleteProject(project) {
     const projectId = String(project.id)
     let projectChats = queryClient.getQueryData(projectQueries.keys.chats(projectId))
@@ -5015,6 +5087,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onSetChatArchived={setChatArchived}
+        onRenameChat={renameChat}
+        pins={pins}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
         onNotice={notifyShell}
@@ -5530,7 +5604,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
                     onOpenChat={chat => openProjectChat(project, chat)}
                     liveChatById={chatById}
-                    onCreateChat={options => createProjectChat(project, options)}
+                    onCreateChat={options => (options
+                      ? createProjectChat(project, options)
+                      : newProjectChat(project))}
+                    pinnedChatIds={pinnedChatIds}
+                    chatActions={projectChatActions(project)}
                     onOpenArtifact={artifactId => openArtifact(project, artifactId)}
                     entryFile={projectEntryFile?.projectId === String(project.id) ? projectEntryFile : null}
                     onEntryFileHandled={() => setProjectEntryFile(current => (current?.projectId === String(project.id) ? null : current))}

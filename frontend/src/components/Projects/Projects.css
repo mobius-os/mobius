@@ -552,8 +552,25 @@
   background: transparent;
   text-align: left;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  /* A held row opens its actions menu, not the platform callout. */
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 .project-chats__row:hover { background: var(--surface); }
+.project-chats__row--editing { cursor: default; }
+.project-chats__row--editing:hover { background: transparent; }
+.project-chats__rename {
+  min-width: 0;
+  flex: 1;
+  padding: 4px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font: 600 12px var(--font);
+  outline: none;
+}
 .project-chats__row > svg { flex: 0 0 auto; color: var(--muted); }
 .project-chats__row > span { min-width: 0; display: grid; gap: 1px; }
 .project-chats__row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }

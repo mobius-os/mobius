@@ -10,6 +10,9 @@ const drawer = readFileSync(resolve(src, 'components/Drawer/Drawer.jsx'), 'utf8'
 const directory = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.jsx'), 'utf8')
 const css = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.css'), 'utf8')
 const drawerCss = readFileSync(resolve(src, 'components/Drawer/Drawer.css'), 'utf8')
+const itemMenuGestures = readFileSync(
+  resolve(src, 'components/Drawer/useItemMenuGestures.js'), 'utf8',
+)
 const itemActionMenu = readFileSync(
   resolve(src, 'components/Drawer/DrawerItemActionMenu.jsx'),
   'utf8',
@@ -40,14 +43,16 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(tabModel, /APPS_TAB_KEY = 'apps:apps'/)
   assert.match(shell, /const APPS_KEY = tabModel\.APPS_TAB_KEY/)
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-template-columns: repeat\(4/)
-  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+  assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(drawer, /\{\.\.\.cardMenuTriggerProps\}/)
+  assert.match(itemMenuGestures, /onContextMenu: openItemMenu,/,
     'launcher cards and drawer rows must enter the same context-menu path')
-  const dragImports = drawer.match(
+  const dragImports = itemMenuGestures.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
   assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?openItemMenuAt[\s\S]*?PRESS_MENU_HOLD_MS\)/)
+  assert.match(itemMenuGestures, /setTimeout\(\(\) => \{[\s\S]*?openMenuAtRef\.current[\s\S]*?PRESS_MENU_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
   assert.match(drawer, /placement=\{menu\?\.placement\}/)
   assert.match(itemActionMenu, /placeContextMenu/)

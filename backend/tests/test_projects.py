@@ -713,6 +713,43 @@ def test_each_project_chat_gets_context_and_can_be_deleted_independently(
   ).json() == []
 
 
+def test_project_chat_rows_and_detail_say_when_an_empty_chat_is_kept(
+  client, auth,
+):
+  """A project's New chat reopens an untouched blank only when the owner has
+  not kept it: an owner rename locks the title and a pin files it away, and
+  both reads it relies on must report that."""
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Notes", "template_id": "blank"},
+  ).json()
+  chat = _create_project_chat(client, auth, project, "New chat")
+
+  def project_row():
+    rows = client.get(f"/api/projects/{project['id']}/chats", headers=auth).json()
+    return next(row for row in rows if row["id"] == chat["id"])
+
+  def detail():
+    return client.get(f"/api/chats/{chat['id']}?limit=1", headers=auth).json()
+
+  assert project_row()["title_locked"] is False
+  assert detail()["title_locked"] is False
+  assert detail()["pinned_at"] is None
+
+  renamed = client.patch(
+    f"/api/chats/{chat['id']}", headers=auth, json={"title": "Release notes"},
+  )
+  assert renamed.status_code == 200, renamed.text
+  assert project_row()["title_locked"] is True
+  assert detail()["title_locked"] is True
+
+  pinned = client.patch(
+    f"/api/chats/{chat['id']}", headers=auth, json={"pinned": True},
+  )
+  assert pinned.status_code == 200, pinned.text
+  assert detail()["pinned_at"] is not None
+
+
 def test_individually_deleted_project_chat_and_coordination_rows_expire(
   client, auth, db,
 ):
