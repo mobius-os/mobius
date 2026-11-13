@@ -386,14 +386,14 @@ def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
   status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
   assert status.returncode == 0
 
-  # Once the worktree's contribution finishes too, its cleanup also removes
-  # the clone that was kept for it: Contribute does not ask about it again.
+  # Once the worktree's contribution finishes too, Contribute asks again
+  # about the kept clone, and nothing needs it any more.
   _write_terminal_record(app["id"], "worktree-open", {
     "id": "worktree-open", "type": "pr", "status": "merged",
     "plan": {"repo_path": str(worktree)},
   })
-  assert _cleanup(client, auth, app["id"], "worktree-open") == {
-    "cleaned": True, "also_cleaned": ["clone-finished"]}
+  assert _cleanup(client, auth, app["id"], "worktree-open") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": True}
   assert not clone.exists()
 
 
@@ -432,8 +432,8 @@ def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client,
     "id": "separate-follow-up", "type": "pr", "status": "closed",
     "plan": {"repo_path": str(follow_up)},
   })
-  assert _cleanup(client, auth, app["id"], "separate-follow-up") == {
-    "cleaned": True, "also_cleaned": ["separate-finished"]}
+  assert _cleanup(client, auth, app["id"], "separate-follow-up") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "separate-finished") == {"cleaned": True}
   assert not clone.exists() and not git_dir.exists()
 
 

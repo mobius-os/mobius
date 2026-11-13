@@ -155,9 +155,7 @@ from app.github_contributions import (
   PublicationHandoffSpec,
   publication_handoff_identity,
   publication_handoff_spec,
-  _cleanup_terminal_staging_checkout,
   terminal_checkout_cleanup,
-  terminal_checkouts_on_disk,
   _claim_record,
   _assert_publication_approval,
   confirmed_publication_records,
@@ -5325,41 +5323,10 @@ async def cleanup_contribution_staging(
               exc_info=True)
   if kept_for:
     # Another unfinished contribution still needs this checkout. Say so, so
-    # nobody removes it by hand; a later cleanup removes it once nothing does.
+    # nobody removes it by hand and Contribute asks again later instead of
+    # treating it as a refusal; a later cleanup removes it once nothing needs it.
     return {"cleaned": False, "kept_for": kept_for}
-  if cleaned:
-    also = await _retry_kept_terminal_checkouts(app_id, record_id)
-    if also:
-      return {"cleaned": True, "also_cleaned": also}
   return {"cleaned": cleaned}
-
-
-async def _retry_kept_terminal_checkouts(app_id: int, record_id: str) -> list[str]:
-  """Clean finished contributions' checkouts kept until now; return their ids.
-
-  A checkout kept for an unfinished contribution is not asked about again by
-  Contribute, so the cleanup that may have freed it retries it here, each
-  under its own checkout lock.
-  """
-  cleaned_ids = []
-  candidates = await asyncio.to_thread(terminal_checkouts_on_disk, app_id, exclude=record_id)
-  for other in candidates:
-    repo = Path(other["plan"]["repo_path"]).resolve()
-    try:
-      owner = await asyncio.to_thread(app_git.primary_worktree_path, repo)
-    except Exception:
-      owner = None
-    try:
-      async with fs_locks.source_dir_lock(str(owner or repo)):
-        done, _kept = await settled.run_settled(
-          terminal_checkout_cleanup, other, app_id=app_id,
-        )
-    except Exception:
-      log.warning("kept checkout retry failed %s/%s", app_id, other.get("id"), exc_info=True)
-      continue
-    if done:
-      cleaned_ids.append(str(other.get("id") or ""))
-  return cleaned_ids
 
 
 def _reread_unchanged_record(
