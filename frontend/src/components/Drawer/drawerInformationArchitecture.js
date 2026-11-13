@@ -53,11 +53,6 @@ function recentAt({ kind, item }) {
   if (kind === 'chat') {
     return item?.activity_at || item?.updated_at || item?.created_at || ''
   }
-  if (kind === 'artifact') return item?.last_opened_at || ''
-  // A project the agent created but the owner never opened is still new to
-  // them: rank it by creation, never by file edits (updated_at), so work in
-  // its tree cannot manufacture recency.
-  if (kind === 'project') return item?.last_opened_at || item?.created_at || ''
   return item?.last_opened_at || item?.updated_at || item?.created_at || ''
 }
 

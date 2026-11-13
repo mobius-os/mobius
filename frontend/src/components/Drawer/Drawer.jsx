@@ -371,8 +371,8 @@ export default function Drawer({
 
     const chatId = String(activeChatId)
     if (revealedActiveChatRef.current === chatId) return
-    // A project chat is the same conversation that also sits in Recents; it is
-    // reached from its project folder, so never scroll the drawer down to it.
+    // A project chat is reached from its project folder, not Recents, so never
+    // scroll the drawer down looking for it.
     if (activeProjectChatProjectId) {
       revealedActiveChatRef.current = chatId
       return

@@ -398,7 +398,11 @@ export default function useWorkspaceDrag({
           held = true
           // Install the cancelable touch gate only after a stationary hold.
           // Quick drawer pans keep the browser's compositor-owned fast path.
-          if (sourceKind === 'drawer' && srcEl.hasAttribute('data-pinned-key')) {
+          // A pinned row needs it for vertical reorder; an Apps-row icon sits
+          // in a sideways-panning row, where the browser would otherwise take
+          // the post-hold drag into a pane as a scroll and cancel it.
+          if (sourceKind === 'drawer'
+            && (srcEl.hasAttribute('data-pinned-key') || srcEl.closest('[data-drawer-hscroll]'))) {
             releaseHeldTouchPan = reserveHeldTouchPan(srcEl)
           }
           if (navigator.vibrate) { try { navigator.vibrate(DRAG_HOLD_HAPTIC_MS) } catch { /* unsupported */ } }

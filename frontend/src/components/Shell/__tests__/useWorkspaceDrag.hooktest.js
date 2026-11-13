@@ -25,6 +25,7 @@ function harness(t, {
   dragKey = 'chat:pin',
   drawerKey,
   otherGestures = [],
+  inSidewaysRow = false,
 } = {}) {
   const restorers = []
   const window = eventSurface()
@@ -71,6 +72,7 @@ function harness(t, {
       if (selector === '[data-drag-key]') return source
       if (selector === '#navigation-drawer') return {}
       if (selector === '.drawer__scroll') return scroller
+      if (selector === '[data-drawer-hscroll]') return inSidewaysRow ? {} : null
       return null
     },
   }
@@ -246,4 +248,22 @@ test('a long hold opens the menu of the element pressed, not another with its dr
   assert.equal(h.actions.menus.length, 1, 'the pressed icon opens its menu')
   assert.equal(rowMenus.length, 0, 'the Pinned row with the same app stays closed')
   h.pointer('pointerup')
+})
+
+// An Apps-row icon sits in a sideways-panning row. After a stationary hold it
+// reserves one-finger movement like a pinned row, so the browser cannot take
+// the drag into a pane as a scroll; a quick swipe keeps native panning.
+test('an Apps-row icon reserves the finger only after a stationary hold', t => {
+  const quick = harness(t, { pinned: false, dragKey: 'app:7', drawerKey: 'apps-strip:7', inSidewaysRow: true })
+  quick.pointer('pointerdown'); quick.advance(100)
+  assert.equal(quick.source.listenerCount('touchmove'), 0, 'a quick swipe stays native')
+  quick.pointer('pointercancel')
+})
+
+test('a held Apps-row icon blocks native panning until the gesture ends', t => {
+  const h = harness(t, { pinned: false, dragKey: 'app:7', drawerKey: 'apps-strip:7', inSidewaysRow: true })
+  h.pointer('pointerdown'); h.advance(190)
+  assert.equal(h.source.listenerCount('touchmove'), 1, 'the hold reserves one-finger movement')
+  h.pointer('pointerup')
+  assert.equal(h.source.listenerCount('touchmove'), 0, 'release hands panning back')
 })
