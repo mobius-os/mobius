@@ -198,6 +198,15 @@ of the app's source, so it is reviewed, versioned and published with the code:
   the same works for PNG and WebP without `quality`), or remove it if
   nothing uses it. A bare PNG `tIME` timestamp is allowed; any PNG text
   chunk is not, whatever its key (`Software`, `Author`, `Comment`, XMP...).
+- Publishing requires a free license: `license` in `mobius.json` must be
+  one the Store offers (`MIT`, `Apache-2.0` or `GPL-3.0-or-later`; the
+  preview's `license_options`), with its full text in a root license file
+  (normally `LICENSE`). An app the Store already lists under another
+  free license may keep publishing updates under that same license. The
+  choice is the owner's, made in the Store editor's license picker, so
+  don't pick one for them. Never overwrite or
+  delete license text that is already there: a remix must keep its
+  upstream copyright notices.
 - Screenshots must be truthful and private: capture the app's real UI in an
   empty, demo, or fixture state, never the owner's own records, names,
   accounts, chats, or machines. Build a small demo state if the app has none.
