@@ -122,7 +122,11 @@ def test_model_only_patch_selects_its_provider_not_a_two_provider_flip(
   if target == "mobius":
     monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
     monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", {
-      "models": [{"id": "spark", "label": "Spark"}],
+      "models": [{
+        "id": "spark", "label": "Spark",
+        "effort_levels": ["low", "medium", "high"],
+        "default_effort": "medium",
+      }],
     })
   chat.session_id = "original-session"
   db.commit()
