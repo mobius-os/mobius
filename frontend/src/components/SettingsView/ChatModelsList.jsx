@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { modelQueries } from '../../hooks/queries.js'
+import { catalogProviders } from '../../lib/modelCatalog.js'
 
 /**
  * Picker visibility is one owner-wide list of hidden model ids. Each switch
@@ -17,7 +18,8 @@ export default function ChatModelsList({ provider }) {
   const registryQuery = modelQueries.registry.useQuery()
   const prefsQuery = modelQueries.prefs.useQuery()
   const [error, setError] = useState('')
-  const models = Array.isArray(registryQuery.data?.[provider]) ? registryQuery.data[provider] : []
+  const rows = catalogProviders(registryQuery.data)?.[provider]
+  const models = Array.isArray(rows) ? rows : []
   const hidden = new Set(prefsQuery.data?.hidden_ids || [])
   const unavailable = !!prefsQuery.data?.unavailable
 
