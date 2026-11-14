@@ -36,7 +36,6 @@ import stat
 import tempfile
 import threading
 import time
-from types import SimpleNamespace
 import uuid
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -1438,9 +1437,11 @@ class AppModelProvider(BaseProvider):
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
-    return self.read_relay_key(data_dir).unavailable
+    # Availability only: the registry already omits apps whose consent is
+    # inactive, and the relay re-checks consent on every request.
+    return self.read_relay_key(data_dir, authorize=False).unavailable
 
-  def read_relay_key(self, data_dir: str) -> RelayKeyRead:
+  def read_relay_key(self, data_dir: str, *, authorize: bool = True) -> RelayKeyRead:
     """Resolve current authorization and the saved key in one blocking read.
 
     The relay runs this in a worker; a stale registry object or failed consent
@@ -1448,7 +1449,7 @@ class AppModelProvider(BaseProvider):
     """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
-    if not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
+    if authorize and not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
       return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
     path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
     if not path.is_file():
@@ -1480,20 +1481,25 @@ class AppModelProvider(BaseProvider):
     return None, (usage if counted else None)
 
   def _relay_base_url(self) -> str:
-    # entrypoint.sh binds uvicorn to ${PORT:-8000}. API_BASE_URL may name a
-    # public proxy (even on localhost); its port is not the backend listener.
-    # Keep the capability on a direct loopback connection for both engines.
-    try:
-      port = int(os.environ.get("PORT") or "8000")
-    except ValueError as exc:
-      raise ValueError("The configured Möbius API port is invalid.") from exc
-    if not 1 <= port <= 65535:
-      raise ValueError("The configured Möbius API port is invalid.")
-    return f"http://127.0.0.1:{port}/api/model-relay/app-{self.app_id}"
+    # Direct loopback to the listener: the relay refuses proxied requests.
+    from app.config import loopback_listener_url
+    return loopback_listener_url(f"/api/model-relay/app-{self.app_id}")
+
+  def _runtime_home(self, data_dir: str) -> Path:
+    # Platform-owned, like the owner's engine homes: never under the app's
+    # own storage, where the app could read transcripts or plant engine
+    # config (Codex config.toml, Claude settings.json hooks).
+    return Path(data_dir) / "cli-auth" / self.auth_dir
+
+  @property
+  def _relay_token_env(self) -> str:
+    # Outside the per-turn MOBIUS_APP_* namespace (helper_hosts): a shared
+    # helper host holds it, as it does any other inference credential.
+    return f"MOBIUS_MODEL_RELAY_TOKEN_{self.app_id}"
 
   def codex_config_overrides(self) -> list[str]:
     provider_id = f"app_{self.app_id}"
-    key_name = f"MOBIUS_APP_MODEL_KEY_{self.app_id}"
+    key_name = self._relay_token_env
     return [
       f'model_provider={json.dumps(provider_id)}',
       f'model_providers.{provider_id}.name={json.dumps(self.name)}',
@@ -1511,7 +1517,7 @@ class AppModelProvider(BaseProvider):
 
   def _catalog_path(self) -> Path:
     from app.config import get_settings
-    return Path(get_settings().data_dir) / "apps" / str(self.app_id) / "model-runtime" / "catalog.json"
+    return self._runtime_home(get_settings().data_dir) / "catalog.json"
 
   def build_env(self, base_env, data_dir, chat_id=None):
     env = dict(base_env)
@@ -1534,9 +1540,9 @@ class AppModelProvider(BaseProvider):
     env["no_proxy"] = no_proxy
     if self.protocol == "anthropic_messages":
       return self._claude_relay_env(env, data_dir, chat_id)
-    env[f"MOBIUS_APP_MODEL_KEY_{self.app_id}"] = self.relay_token()
+    env[self._relay_token_env] = self.relay_token()
     # Isolate custom-provider threads and auth from the owner's Codex login.
-    home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime"
+    home = self._runtime_home(data_dir)
     home.mkdir(parents=True, exist_ok=True)
     _write_responses_catalog(home / "catalog.json", self.declaration)
     env["CODEX_HOME"] = str(home)
@@ -1548,8 +1554,12 @@ class AppModelProvider(BaseProvider):
     """Point the Claude engine at the loopback relay with a relay-only token."""
     # Own config dir: sessions and settings never mix with the owner's Claude
     # sign-in, which must not be used for another company's models.
-    home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime" / "claude"
+    home = self._runtime_home(data_dir) / "claude"
     home.mkdir(parents=True, exist_ok=True)
+    # The same Möbius defaults as the owner's Claude home: Claude's own
+    # transcript retention and no Claude co-author trailer on commits.
+    from app.provider_session_retention import ensure_claude_settings_defaults
+    ensure_claude_settings_defaults(data_dir, config_dir=home)
     env["CLAUDE_CONFIG_DIR"] = str(home)
     # The SDK merges os.environ underneath options.env. Omitting a key here
     # would restore ambient owner auth or select a different inference route.
@@ -1642,49 +1652,47 @@ async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> 
       _apply_app_model_declarations(declarations)
 
 
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str | None]]:
+  """``(app_id, declaration, relay scope)`` for each app whose consent is active.
+
+  Loads only the contract and consent columns, never app source or icon blobs:
+  the registry refresh runs about once a second and the relay on every request.
+  """
+  from sqlalchemy.orm import load_only
+  from app import app_consent, models
+  query = db.query(models.App).options(load_only(
+    models.App.id, models.App.capability_contract, models.App.manifest_url,
+    models.App.accepted_consent, models.App.project_templates_json,
+  )).filter(models.App.deleted_at.is_(None))
+  if app_id is not None:
+    query = query.filter(models.App.id == app_id)
+  return [
+    (app.id, app.capability_contract["model_provider"], _app_model_relay_scope(app))
+    for app in query.all()
+    if isinstance(app.capability_contract, dict)
+    and isinstance(app.capability_contract.get("model_provider"), dict)
+    and not app_consent.dormant(app)
+  ]
+
+
 def _read_app_model_declarations() -> list[tuple[Any, dict, str | None]] | None:
   """Accepted app model declarations as plain data; safe in a worker."""
   try:
-    from app import models
     from app.database import SessionLocal
     with SessionLocal() as db:
-      # Project only consent fields and the contract, never app source/icon
-      # blobs; this refresh runs about once a second.
-      rows = db.query(
-        models.App.id, models.App.capability_contract, models.App.manifest_url,
-        models.App.accepted_consent, models.App.project_templates_json,
-      ).filter(
-        models.App.deleted_at.is_(None)
-      ).all()
-      return [
-        (app_id, contract["model_provider"],
-         _app_model_relay_scope(contract, manifest_url, accepted_consent))
-        for app_id, contract, manifest_url, accepted_consent, project_templates in rows
-        if isinstance(contract, dict)
-        and isinstance(contract.get("model_provider"), dict)
-        and not _app_model_consent_dormant(
-          contract, manifest_url, accepted_consent, project_templates,
-        )
-      ]
+      return _usable_app_model_declarations(db)
   except Exception as exc:
     _model_registry_log.warning("app model registry read failed: %s", exc)
     return None
 
 
-def _app_model_consent_dormant(contract, manifest_url, accepted_consent, project_templates) -> bool:
-  from app import app_consent
-  return app_consent.dormant(SimpleNamespace(
-    capability_contract=contract, manifest_url=manifest_url,
-    accepted_consent=accepted_consent, project_templates_json=project_templates,
-  ))
-
-
-def _app_model_relay_scope(contract, manifest_url, accepted_consent) -> str | None:
+def _app_model_relay_scope(app) -> str | None:
   """Bind Store credentials to both the acceptance and reviewed endpoint."""
-  if manifest_url is None:
+  if app.manifest_url is None:
     return None  # Local apps retain their existing provider-id-only token.
-  accepted_id = accepted_consent.get("id") if isinstance(accepted_consent, dict) else None
-  declaration = contract.get("model_provider") if isinstance(contract, dict) else None
+  accepted = app.accepted_consent
+  accepted_id = accepted.get("id") if isinstance(accepted, dict) else None
+  declaration = app.capability_contract.get("model_provider")
   fingerprint = hashlib.sha256(json.dumps(declaration, sort_keys=True).encode()).hexdigest()
   return f"{accepted_id or ''}:{fingerprint}"
 
@@ -1698,24 +1706,9 @@ def _app_model_declaration_usable(
   relay request after revocation or contract replacement.
   """
   try:
-    from app import models
     from app.database import SessionLocal
     with SessionLocal() as db:
-      row = db.query(
-        models.App.capability_contract, models.App.manifest_url,
-        models.App.accepted_consent, models.App.project_templates_json,
-      ).filter(models.App.id == app_id, models.App.deleted_at.is_(None)).one_or_none()
-    if row is None:
-      return False
-    contract, manifest_url, accepted_consent, project_templates = row
-    return (
-      isinstance(contract, dict)
-      and contract.get("model_provider") == declaration
-      and not _app_model_consent_dormant(
-        contract, manifest_url, accepted_consent, project_templates,
-      )
-      and _app_model_relay_scope(contract, manifest_url, accepted_consent) == consent_scope
-    )
+      return (app_id, declaration, consent_scope) in _usable_app_model_declarations(db, app_id)
   except Exception as exc:
     _model_registry_log.warning("app model authorization read failed: %s", exc)
     return False
@@ -2873,7 +2866,8 @@ async def model_supports_effort(
   """
   if not model:
     return True
-  provider = PROVIDERS[provider_id]
+  # A provider removed since admission fails as "not installed".
+  provider = registered_provider(provider_id)
   if isinstance(provider, AppModelProvider):
     entries = provider.declaration["models"]
   else:

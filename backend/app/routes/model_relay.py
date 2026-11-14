@@ -179,6 +179,24 @@ def _has_null_reasoning_content(item: Any) -> bool:
   )
 
 
+def _repaired_body(
+  body: bytes, normalize: Callable[[dict[str, Any]], dict[str, Any]],
+) -> bytes | None:
+  """The re-encoded body when a repair changed it; None forwards it as sent.
+
+  A body that is not JSON (for example, compressed) is forwarded untouched
+  with its content-encoding.
+  """
+  try:
+    payload = json.loads(body)
+  except (UnicodeDecodeError, json.JSONDecodeError):
+    return None
+  if not isinstance(payload, dict):
+    return None
+  normalized = normalize(payload)
+  return None if normalized is payload else json.dumps(normalized).encode()
+
+
 @dataclass(frozen=True)
 class _Protocol:
   """How one wire protocol crosses the relay."""
@@ -259,16 +277,14 @@ async def _relay(provider_id: str, request: Request, protocol_name: str):
   key = credential.key
 
   body = await request.body()
-  try:
-    payload = json.loads(body)
-  except (UnicodeDecodeError, json.JSONDecodeError):
-    payload = None  # forwarded untouched, with its content-encoding
   headers = {
     name: request.headers[name]
     for name in protocol.forwarded_headers if name in request.headers
   }
-  if isinstance(payload, dict):
-    body = json.dumps(protocol.normalize(payload)).encode()
+  # Large conversations take tens of milliseconds to parse; keep it off-loop.
+  repaired = await anyio.to_thread.run_sync(_repaired_body, body, protocol.normalize)
+  if repaired is not None:
+    body = repaired
     headers.pop("content-encoding", None)
   headers.update(protocol.key_headers(key))
   url = f"{provider.declaration['base_url'].rstrip('/')}{protocol.upstream_path}"

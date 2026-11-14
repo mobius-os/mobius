@@ -71,11 +71,57 @@ def test_messages_provider_runs_on_claude_engine_without_the_real_key(tmp_path):
   assert env["ANTHROPIC_API_KEY"] == providers.model_relay_token("app-4242")
   assert REAL_KEY not in "\n".join(env.values())
   assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
-  assert env["CLAUDE_CONFIG_DIR"] == str(
-    Path(data_dir) / "apps" / "4242" / "model-runtime" / "claude"
-  )
+  assert env["CLAUDE_CONFIG_DIR"] == str(Path(data_dir) / "cli-auth" / "app-4242" / "claude")
   assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "example/flash"
   assert providers.model_relay_token("app-4242") != providers.model_relay_token("app-4243")
+
+
+@pytest.mark.parametrize("protocol", ["anthropic_messages", "responses"])
+def test_engine_home_is_platform_owned_outside_app_storage(tmp_path, protocol):
+  adapter = providers.AppModelProvider(4242, _manifest(protocol=protocol)["model_provider"])
+  env = adapter.build_env({}, str(tmp_path))
+  home = Path(env["CLAUDE_CONFIG_DIR"] if protocol == "anthropic_messages" else env["CODEX_HOME"])
+  # The storage API serves anything under apps/<id>/; transcripts and engine
+  # config (hooks, settings, config.toml) must not be there.
+  assert not home.is_relative_to(tmp_path / "apps")
+  assert home.is_relative_to(tmp_path / "cli-auth" / "app-4242")
+  if protocol == "anthropic_messages":
+    settings = json.loads((home / "settings.json").read_text())
+    assert settings["includeCoAuthoredBy"] is False
+    assert settings["cleanupPeriodDays"] == 14
+
+
+def test_codex_helper_host_keeps_the_relay_token_out_of_helper_shells(tmp_path):
+  from app import helper_hosts
+  adapter = providers.AppModelProvider(4242, _manifest(protocol="responses")["model_provider"])
+  env = adapter.build_env({"MOBIUS_APP_ID": "7"}, str(tmp_path), "chat-1")
+  host_env, turn_env = helper_hosts.split_env(env)
+  token_env = "MOBIUS_MODEL_RELAY_TOKEN_4242"
+  # The shared Codex process authenticates with the token; the per-turn env
+  # file every helper shell loads through BASH_ENV never carries it.
+  assert host_env[token_env] == adapter.relay_token()
+  assert token_env not in turn_env and turn_env["MOBIUS_APP_ID"] == "7"
+  env_file = helper_hosts.TurnEnvFile(tmp_path / "turn", "run", turn_env)
+  assert adapter.relay_token() not in env_file.path.read_text()
+  assert f"shell_environment_policy.exclude=[\"{token_env}\"]" in adapter.codex_config_overrides()
+  assert f'model_providers.app_4242.env_key="{token_env}"' in adapter.codex_config_overrides()
+
+
+def test_unchanged_request_bodies_are_forwarded_as_sent():
+  raw = b'{"model": "m",   "messages": [{"role": "user", "content": "hi"}]}'
+  assert model_relay._repaired_body(raw, model_relay.normalize_messages_request) is None
+  assert model_relay._repaired_body(b"\x1f\x8b", model_relay.normalize_messages_request) is None
+  folded = model_relay._repaired_body(
+    b'{"messages": [{"role": "user", "content": "a"}, {"role": "system", "content": "b"}]}',
+    model_relay.normalize_messages_request,
+  )
+  assert [m["role"] for m in json.loads(folded)["messages"]] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_effort_lookup_for_a_removed_provider_says_it_is_not_installed():
+  with pytest.raises(ValueError, match="not installed"):
+    await providers.model_supports_effort("/data", "example/flash", provider_id="app-999999")
 
 
 def test_normalize_folds_system_turns_into_leading_tool_results():
@@ -215,7 +261,7 @@ def test_store_model_relay_refuses_dormant_and_stale_access_before_using_saved_k
     with monkeypatch.context() as patch:
       patch.setattr(app_secret_crypto, "decrypt_app_secret",
                     lambda _path: decrypted.append(_path) or REAL_KEY)
-      assert stale_provider.check_auth(data_dir) is not None
+      assert stale_provider.read_relay_key(data_dir).unavailable is not None
       assert relay().status_code == 403
     assert decrypted == []
     assert len(seen) == 1
@@ -257,7 +303,7 @@ def test_store_model_relay_refuses_dormant_and_stale_access_before_using_saved_k
 
 @pytest.mark.parametrize("protocol,path,key_name", [
   ("anthropic_messages", "messages", "ANTHROPIC_API_KEY"),
-  ("responses", "responses", "MOBIUS_APP_MODEL_KEY"),
+  ("responses", "responses", "MOBIUS_MODEL_RELAY_TOKEN"),
 ])
 @pytest.mark.parametrize("manifest_url", ["https://store.example/app.json", ""])
 def test_store_reacceptance_never_revives_old_relay_token(
@@ -302,7 +348,7 @@ def test_store_reacceptance_never_revives_old_relay_token(
     assert relay(old_token).status_code == 403
     assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
     db.commit()
-    assert old_provider.check_auth(data_dir) is not None
+    assert old_provider.read_relay_key(data_dir).unavailable is not None
     assert relay(old_token).status_code == 403  # stale object before registry refresh
     providers.sync_app_model_providers(data_dir, force=True)
     new_provider = providers.PROVIDERS[provider_id]
@@ -316,7 +362,7 @@ def test_store_reacceptance_never_revives_old_relay_token(
       "base_url": "https://replacement.example.com",
     }}
     db.commit()
-    assert new_provider.check_auth(data_dir) is not None
+    assert new_provider.read_relay_key(data_dir).unavailable is not None
     assert relay(new_token).status_code == 403
     providers.sync_app_model_providers(data_dir, force=True)
     replacement_token = token(providers.PROVIDERS[provider_id])
@@ -400,7 +446,7 @@ def test_responses_provider_gets_relay_token_not_the_real_key():
   overrides = "\n".join(adapter.codex_config_overrides())
 
   assert providers.provider_runtime_kind(adapter) == "codex_sdk"
-  assert env["MOBIUS_APP_MODEL_KEY_4343"] == providers.model_relay_token("app-4343")
+  assert env["MOBIUS_MODEL_RELAY_TOKEN_4343"] == providers.model_relay_token("app-4343")
   assert REAL_KEY not in "\n".join(env.values())
   assert '/api/model-relay/app-4343/v1"' in overrides
   assert "models.example.com" not in overrides
@@ -811,14 +857,24 @@ async def test_messages_turn_reads_its_own_effort_catalog_without_claude_discove
   "http://[::1]:8126",
   "http://localhost",
 ])
-@pytest.mark.parametrize("env_port,port", [(None, 8000), ("", 8000), ("8123", 8123)])
+@pytest.mark.parametrize("env_port", [None, "", "8123"])
 def test_relay_uses_backend_listener_not_api_origin(
-  monkeypatch, tmp_path, api_url, env_port, port,
+  monkeypatch, tmp_path, api_url, env_port,
 ):
   import os
+  from urllib.parse import urlparse
 
   monkeypatch.setattr(os, "environ", {} if env_port is None else {"PORT": env_port})
   monkeypatch.setattr(get_settings(), "api_base_url", api_url)
+  # PORT is the listener; without it a loopback API origin names it, and a
+  # public origin is a proxy, never the listener.
+  parsed = urlparse(api_url)
+  if env_port:
+    port = int(env_port)
+  elif parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+    port = parsed.port or 80
+  else:
+    port = 8000
   expected = f"http://127.0.0.1:{port}/api/model-relay/app-4242"
   messages = providers.AppModelProvider(4242, _manifest()["model_provider"])
   responses = providers.AppModelProvider(4242, _manifest(protocol="responses")["model_provider"])
@@ -887,7 +943,7 @@ def test_responses_sdk_child_scrubs_inherited_credentials_but_preserves_control_
     client.start()
   for name in ("OPENAI_API_KEY", "OTHER_API_TOKEN", "OTHER_AUTH_TOKEN", "BASE_API_KEY"):
     assert captured[name] == ""
-  assert captured["MOBIUS_APP_MODEL_KEY_4242"] == providers.model_relay_token("app-4242")
+  assert captured["MOBIUS_MODEL_RELAY_TOKEN_4242"] == providers.model_relay_token("app-4242")
   assert captured["AGENT_TOKEN"] == "synthetic-control-token"
   assert captured["API_BASE_URL"] == "http://127.0.0.1:9"
   assert captured["MOBIUS_RUN_TOKEN"] == "synthetic-run"

@@ -238,6 +238,29 @@ def get_settings() -> Settings:
   return Settings()
 
 
+def loopback_listener_url(path: str) -> str:
+  """``path`` on this backend's own listener, reached over direct loopback.
+
+  Agents use this for platform capabilities that must not cross a proxy.
+  uvicorn binds ``${PORT:-8000}``; a loopback ``API_BASE_URL`` names the
+  listener when PORT is unset. A public API_BASE_URL is a proxy, never the
+  listener.
+  """
+  env_port = os.environ.get("PORT")
+  try:
+    if env_port:
+      port = int(env_port)
+    else:
+      parsed = urlparse(get_settings().api_base_url)
+      loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+      port = (parsed.port or (443 if parsed.scheme == "https" else 80)) if loopback else 8000
+  except ValueError as exc:
+    raise ValueError("The configured Möbius API port is invalid.") from exc
+  if not 1 <= port <= 65535:
+    raise ValueError("The configured Möbius API port is invalid.")
+  return f"http://127.0.0.1:{port}{path}"
+
+
 # Server-only secrets the process needs exactly once, at settings load. Every
 # child the server starts (agents, their commands, tools) inherits the
 # server's environment — the provider SDKs merge it underneath whatever env

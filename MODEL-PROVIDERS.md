@@ -23,7 +23,13 @@ An app-secret declaration names its wire protocol with optional `protocol`:
 - `anthropic_messages` — **Anthropic Messages-compatible HTTPS**, driven by
   the Claude agent runtime. `base_url` is the API root the Anthropic SDKs use
   (`/v1/messages` is appended). Each such provider gets its own Claude config
-  directory, and every Claude model alias resolves to its `default_model`.
+  directory with Möbius's Claude settings defaults, and every Claude model
+  alias resolves to its `default_model`.
+
+Each provider's engine home (Codex threads, Claude config and transcripts)
+lives with the other engine homes under `cli-auth/app-<id>/`, outside the
+app's own storage, so the app cannot read its transcripts or plant engine
+configuration.
 
 Both runtimes talk to the loopback model relay
 (`backend/app/routes/model_relay.py`), never to the provider. The agent
@@ -138,10 +144,12 @@ removes a provider from pickers and blocks new turns without deleting chats.
   OAuth, provider-specific headers, multiple endpoints per app, and further
   protocols (such as Chat Completions, which Codex no longer speaks) need
   separate reviewed contracts, not ad-hoc fields.
-- The raw key stays outside the agent process for both protocols (only the
-  relay token is there, and Codex shell tools exclude it). The token still lets
-  code the agent runs spend on that provider through the local relay, so it
-  bounds disclosure of the key, not spending.
+- The raw key stays outside the agent process for both protocols; only the
+  relay token is there. Codex shell tools, including helpers in a shared
+  host, do not receive it; the Claude engine reads it from
+  `ANTHROPIC_API_KEY`, which its shell tools inherit. The token lets code the
+  agent runs spend on that provider through the local relay, so it bounds
+  disclosure of the key, not spending.
 - The relay repairs request shapes only. It does not rewrite streamed
   responses: a provider whose stream is malformed (for example, reused content
   block indices) is incompatible until the provider fixes it.

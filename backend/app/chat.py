@@ -146,6 +146,7 @@ from app.events import (
 )
 from app.providers import (
   DEFAULT_PROVIDER,
+  AppModelProvider,
   BaseProvider,
   authenticated_provider_ids,
   effective_agent_settings,
@@ -5778,13 +5779,18 @@ def _helper_host_key(db, run_policy, *, provider_id: str, connector_plan):
   # Claude fixes a helper's model on the host's helper definitions, so its
   # hosts are also per model; a Codex thread chooses its model per turn.
   # The turn refreshed the registry at its start; this lookup reads no storage.
-  claude = provider_runtime_kind(registered_provider(provider_id)) == "claude_sdk"
+  provider = registered_provider(provider_id)
+  claude = provider_runtime_kind(provider) == "claude_sdk"
   model = run_policy.model if claude else None
+  setup = [connectors, model]
+  if isinstance(provider, AppModelProvider):
+    # A host holds the app's relay token, which a new acceptance replaces.
+    setup.append(provider.consent_scope)
   return helper_hosts.HostKey(
     parent_chat_id=row[0],
     provider_id=provider_id,
     cwd=run_policy.cwd,
-    setup=helper_hosts.setup_digest(connectors, model),
+    setup=helper_hosts.setup_digest(*setup),
   )
 
 
