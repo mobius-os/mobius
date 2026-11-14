@@ -274,6 +274,7 @@ test('attachments preserve the text column and height budget in a short viewport
   await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '360px'))
   for (const source of ['', 'A short draft', 'A longer draft with wrapped text. '.repeat(100)]) {
     await page.evaluate(value => window.composerFixture.replace(value), source)
+    await expect.poll(() => text(page)).toBe(source)
     const width = await editor.evaluate(element => element.getBoundingClientRect().width)
     await page.evaluate(() => window.composerFixture.attachments([{ id: 'sample', name: 'sample.txt', status: 'ready', mime_type: 'text/plain' }]))
     await expect(page.getByRole('button', { name: 'Remove sample.txt' })).toBeVisible()
