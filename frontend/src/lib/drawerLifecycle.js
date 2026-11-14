@@ -59,7 +59,7 @@ export function suspendDrawerComposer({
   if (!touchPrimary || !activeElement) return null
   const chatId = activeElement === leaseElement
     ? leaseChatId
-    : activeElement.matches?.('textarea.chat__input')
+    : activeElement.matches?.('.chat__editor-content')
       ? activeElement.closest('[data-chat-id]')?.getAttribute('data-chat-id')
       : null
   if (chatId == null) return null

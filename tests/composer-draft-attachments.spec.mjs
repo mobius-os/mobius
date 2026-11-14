@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { mockAcceptedMessages, releaseMockRoutesAfterEach } from './_mockAcceptedMessages.mjs'
@@ -53,7 +54,7 @@ test('an uploaded attachment survives a chat switch and remains sendable', async
     waitUntil: 'domcontentloaded',
   })
 
-  await expect(composer).toHaveValue('Keep this file with my unfinished message')
+  await expectComposerValue(composer, 'Keep this file with my unfinished message')
   await expect(paintedChat.getByRole('button', { name: 'Remove draft-note.txt' })).toBeVisible()
 
   let sentBody = null

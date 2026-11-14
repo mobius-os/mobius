@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Behavior contracts for the platform update result dialog.
  *
@@ -200,7 +201,7 @@ test('review backdrop is owned by its tiled Settings pane', async ({ page }) => 
   expect(inertDescendants).toBeGreaterThan(0)
   const siblingComposer = siblingPane.getByRole('textbox', { name: 'Message Möbius…' })
   await siblingComposer.fill('The other pane remains interactive')
-  await expect(siblingComposer).toHaveValue('The other pane remains interactive')
+  await expectComposerValue(siblingComposer, 'The other pane remains interactive')
 })
 
 test('an incomplete activation preview offers no update action', async ({ page }) => {

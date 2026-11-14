@@ -237,8 +237,10 @@ export function readerScrollEscapeDirection(
 export function composerTailIntentRequestsFollow(event, scrollEl) {
   const primaryPress = event?.type === 'pointerdown' && event?.button === 0
   const directEdit = event?.type === 'input'
+  const inComposer = event?.target?.matches?.('textarea.chat__input, .chat__editor-content')
+    || event?.target?.closest?.('.chat__editor-content')
   if ((!primaryPress && !directEdit)
-      || !event?.target?.matches?.('textarea.chat__input')
+      || !inComposer
       || !scrollEl) return false
   return isNearPhysicalBottom(scrollEl)
 }

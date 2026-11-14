@@ -3,9 +3,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 const inputBarSrc = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+const editorSrc = readFileSync(new URL('../MarkdownComposer.jsx', import.meta.url), 'utf8')
 const chatViewSrc = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const changeHandler = inputBarSrc.match(
-  /function handleTextareaChange\(e\) \{[\s\S]*?\n  \}/,
+  /function handleComposerChange\(value\) \{[\s\S]*?\n  \}/,
 )?.[0] || ''
 const historyValueHandler = inputBarSrc.match(
   /function showComposerValue\(value\) \{[\s\S]*?\n  \}/,
@@ -14,7 +15,7 @@ const slashCommandHandler = inputBarSrc.match(
   /function acceptSlashCommand\(command\) \{[\s\S]*?\n  \}/,
 )?.[0] || ''
 
-test('manual textarea changes remain enabled while voice input is active', () => {
+test('manual composer changes remain enabled while voice input is active', () => {
   assert.doesNotMatch(changeHandler, /listeningRef\?\.current\) return/,
     'listening must not discard owner edits')
   assert.match(changeHandler,
@@ -23,9 +24,9 @@ test('manual textarea changes remain enabled while voice input is active', () =>
   assert.match(changeHandler, /onInputChange\(value\)/,
     'the controlled composer must still receive the owner edit')
   assert.ok(
-    changeHandler.indexOf('onInputChange(value)')
-      < changeHandler.indexOf('onInputIntent?.(e.nativeEvent)'),
-    'scroll ownership may change only after React accepts the controlled draft',
+    editorSrc.indexOf('props.current.onChange?.(transactions.at(-1).state.doc.toString())')
+      < editorSrc.indexOf("props.current.onInputIntent?.({ type: 'input'"),
+    'scroll ownership changes only after the controlled draft and voice baseline accept the edit',
   )
 })
 

@@ -121,7 +121,7 @@ test('attachment class changes preserve measured multiline alignment', () => {
 
 test('ChatView reconciles textarea geometry on value commits and foreground return', () => {
   const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const inputBarSource = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+  const inputBarSource = readFileSync(new URL('../MarkdownComposer.jsx', import.meta.url), 'utf8')
   const voiceSource = readFileSync(new URL('../useVoiceInput.js', import.meta.url), 'utf8')
   assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*reconcileComposerTextarea\(el, input\)[\s\S]*\}, \[chatId, hidden, input\]\)/)
   assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*reconcileComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*publishComposerRoom\(\)/)

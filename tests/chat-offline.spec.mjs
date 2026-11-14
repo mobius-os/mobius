@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 // Durable offline delivery belongs to the client outbox. Every chat request is
 // intercepted: this spec needs no persisted chat, provider turn, or cleanup job.
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
@@ -91,7 +92,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
   await send.click()
   const queued = surface.locator('.queued__row').filter({ hasText: message })
   await expect(queued).toBeVisible()
-  await expect(input).toHaveValue('')
+  await expectComposerValue(input, '')
   await expect(surface.locator('.chat__msg--user')).toHaveCount(0)
   expect(attemptedBodies).toHaveLength(0)
 
@@ -113,7 +114,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
   await context.setOffline(false)
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(queued).toBeVisible()
-  await expect(input).toHaveValue('')
+  await expectComposerValue(input, '')
   await expect.poll(() => readChatOutbox(page), { timeout: 5000 }).toHaveLength(1)
 
   networkUp = true
@@ -128,7 +129,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
 
   await expect(surface.locator('.chat__msg--user')).toHaveCount(1)
   await expect(surface.locator('.chat__msg--user')).toContainText(message)
-  await expect(input).toHaveValue('')
+  await expectComposerValue(input, '')
   await expect(queued).toHaveCount(0)
 
   // Focus and online recovery are both valid drain triggers. Once the exact cid

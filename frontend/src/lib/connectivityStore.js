@@ -106,6 +106,11 @@ export function createConnectivityStore({
   let restartPending = false
   let restartSourceBootId = null
   let restartFromLegacyServer = false
+  // Recovery is an edge for work that delivery refused: it needs evidence that
+  // delivery was lost or denied. A cold page's first ready verdict only ends
+  // the unknown startup state, during which every read already reached the
+  // server; announcing it as recovery re-read every mounted chat at boot.
+  let deliveryLost = state.phase !== ReachabilityPhase.ONLINE
 
   function getSnapshot() { return publicOnline(state) }
   function getPhaseSnapshot() { return state.phase }
@@ -121,6 +126,16 @@ export function createConnectivityStore({
     ready = value
     notify()
   }
+  function noteDeliveryLost() { deliveryLost = true }
+  // The readiness gate for work that the recovery edge retries. Refusing it
+  // (including during the unknown startup window) records the loss in the same
+  // call, so the next ready verdict announces recovery and no caller has to
+  // remember a separate note.
+  function requireDeliveryReady() {
+    if (getDeliveryReadySnapshot()) return true
+    noteDeliveryLost()
+    return false
+  }
   function setRestartPending(sourceBootId) {
     evidenceRevision += 1
     readinessRevision += 1
@@ -133,6 +148,7 @@ export function createConnectivityStore({
     const changed = !restartPending
     restartPending = true
     ready = false
+    noteDeliveryLost()
     if (changed) notify()
     void verify()
   }
@@ -141,6 +157,9 @@ export function createConnectivityStore({
     // Recovery consumers may deliver work: transport alone is not that edge.
     next = { ...next, recoveryGeneration: state.recoveryGeneration }
     if (sameState(state, next)) return false
+    if (getDeliveryReadySnapshot() && next.phase !== ReachabilityPhase.ONLINE) {
+      deliveryLost = true
+    }
     const previousPhase = state.phase
     const previousRecovery = state.recoveryGeneration
     state = next
@@ -189,7 +208,9 @@ export function createConnectivityStore({
       type: 'reachable', strong: true, navigatorOnline: true,
     }))
     if (getDeliveryReadySnapshot()) monitor?.settleRecovery()
-    else if (wasUncertain) monitor?.check()
+    // A probe already in flight answers readiness for this evidence as well;
+    // queueing a second one doubled the startup probe on every page load.
+    else if (wasUncertain) monitor?.check({ join: true })
   }
 
   function applyEvidence(result, startedRevision) {
@@ -215,11 +236,16 @@ export function createConnectivityStore({
         notify()
       }
       setReady(result.ready === true)
-      if (!wasReady && getDeliveryReadySnapshot()) {
-        state = { ...state, recoveryGeneration: state.recoveryGeneration + 1 }
-        notify()
+      if (!getDeliveryReadySnapshot()) noteDeliveryLost()
+      else {
+        if (!wasReady && deliveryLost) {
+          state = { ...state, recoveryGeneration: state.recoveryGeneration + 1 }
+          notify()
+        }
+        deliveryLost = false
       }
     } else {
+      noteDeliveryLost()
       publish(reduceReachability(state, { type: 'failed' }))
     }
     return result.reachable
@@ -233,6 +259,8 @@ export function createConnectivityStore({
     let activeCheck = null
     let checkGeneration = 0
     let rerun = false
+    // Transport evidence joined the probe in flight instead of queueing one.
+    let joined = false
     let failureTimer = null
     let retryTimer = null
     let retryAttempt = 0
@@ -300,11 +328,13 @@ export function createConnectivityStore({
       checkGeneration += 1
       activeCheck = null
       rerun = false
+      joined = false
     }
-    function check({ fresh = false } = {}) {
+    function check({ fresh = false, join = false } = {}) {
       if (fresh && activeCheck) abandonActiveCheck()
       if (activeCheck) {
-        rerun = true
+        if (join) joined = true
+        else rerun = true
         return activeCheck
       }
       const startedRevision = evidenceRevision
@@ -316,10 +346,13 @@ export function createConnectivityStore({
         .finally(() => {
           if (activeCheck !== current) return
           activeCheck = null
-          if (rerun && !cancelled) {
-            rerun = false
-            void check()
-          }
+          // A joined probe that did not end ready (it failed, or newer
+          // evidence made its failure stale) must not leave readiness to the
+          // backed-off retry timer: re-probe now, as the queued rerun did.
+          const again = rerun || (joined && !getDeliveryReadySnapshot())
+          rerun = false
+          joined = false
+          if (again && !cancelled) void check()
         })
       activeCheck = current
       return current
@@ -340,6 +373,7 @@ export function createConnectivityStore({
         clearRetry()
         readinessRevision += 1
         setReady(false)
+        noteDeliveryLost()
         abandonActiveCheck()
         return
       }
@@ -416,6 +450,7 @@ export function createConnectivityStore({
     getDeliveryReadySnapshot,
     getRestartPendingSnapshot,
     setRestartPending,
+    requireDeliveryReady,
     subscribe,
     verify,
     reportReachable,
@@ -437,3 +472,4 @@ export const subscribeDeliveryReady = connectivityStore.subscribe
 export const getRestartPendingSnapshot = connectivityStore.getRestartPendingSnapshot
 export const subscribeRestart = connectivityStore.subscribe
 export const setRestartPending = connectivityStore.setRestartPending
+export const requireDeliveryReady = connectivityStore.requireDeliveryReady
