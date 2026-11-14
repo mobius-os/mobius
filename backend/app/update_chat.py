@@ -17,6 +17,48 @@ class UpdateAgentChoice(BaseModel):
   effort: str | None = Field(default=None, max_length=32)
 
 
+_BATCH_KEY = "_app_update_resolver_batch"
+
+
+def resolver_batch_settings(settings: dict, apps: list[models.App]) -> dict:
+  """Freeze the exact members of this resolver, not just its live bindings."""
+  return {**settings, _BATCH_KEY: {
+    str(app.id): {"upstream_commit": app.upstream_commit, "completed": None}
+    for app in apps
+  }}
+
+
+def record_resolver_member_outcome(
+  db: Session, chat_id: str | None, app_id: int,
+  upstream_commit: str | None, *, completed: bool,
+) -> bool:
+  """Persist a member's outcome with binding removal, under the drawer lock.
+
+  A missing/older batch identity cannot certify an all-success batch. Failed
+  members remain in the frozen manifest even after their binding disappears.
+  """
+  if not chat_id:
+    return False
+  chat = db.get(models.Chat, chat_id)
+  if chat is None:
+    return False
+  settings = chat.agent_settings_json or {}
+  batch = settings.get(_BATCH_KEY) if isinstance(settings, dict) else None
+  if not isinstance(batch, dict):
+    return False
+  member = batch.get(str(app_id))
+  if not isinstance(member, dict) or member.get("upstream_commit") != upstream_commit:
+    return False
+  outcome = False if member.get("completed") is False else completed
+  if member.get("completed") is not outcome:
+    batch = {**batch, str(app_id): {**member, "completed": outcome}}
+    chat.agent_settings_json = {**settings, _BATCH_KEY: batch}
+  return outcome and bool(batch) and all(
+    isinstance(entry, dict) and entry.get("completed") is True
+    for entry in batch.values()
+  )
+
+
 def resolve_update_chat_choice(db: Session, requested: UpdateAgentChoice | None) -> dict:
   """A requested choice is exact; omission retains the background default."""
   data_dir = get_settings().data_dir

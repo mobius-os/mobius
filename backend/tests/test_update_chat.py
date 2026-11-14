@@ -57,9 +57,11 @@ async def test_pending_update_filing_commits_binding_and_archive_together(
   app = models.App(
     name="Update target", slug="update-target", source_dir=str(repo),
     conflict_resolver_chat_id=chat.id,
-    conflict_resolver_upstream_commit="target",
+    conflict_resolver_upstream_commit="target", upstream_commit="target",
   )
   db.add(app)
+  db.commit()
+  chat.agent_settings_json = update_chat.resolver_batch_settings({}, [app])
   db.commit()
   monkeypatch.setattr(pending_update, "_drop_pending_update_worktree", lambda _: None)
 
@@ -70,6 +72,65 @@ async def test_pending_update_filing_commits_binding_and_archive_together(
   filed = db.get(models.Chat, chat.id)
   assert filed.archived_at is not None
   assert filed.deleted_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcomes", [(False, True), (True, False), (True, True)])
+async def test_resolver_batch_archives_only_after_every_member_succeeds(
+  db, chat, tmp_path, monkeypatch, outcomes,
+):
+  from app import pending_update
+  apps = []
+  for index in range(2):
+    repo = tmp_path / f"app-{index}"
+    (repo / ".git").mkdir(parents=True)
+    app = models.App(
+      name=f"Update target {index}", slug=f"update-target-{index}",
+      source_dir=str(repo), conflict_resolver_chat_id=chat.id,
+      conflict_resolver_upstream_commit=f"target-{index}",
+      upstream_commit=f"target-{index}",
+    )
+    db.add(app)
+    apps.append(app)
+  db.flush()
+  chat.agent_settings_json = update_chat.resolver_batch_settings({}, apps)
+  db.commit()
+  monkeypatch.setattr(pending_update, "_drop_pending_update_worktree", lambda _: None)
+
+  for app, completed in zip(apps, outcomes):
+    await pending_update.clear_pending_conflict_update(db, app, completed=completed)
+    # Simulate a fresh ORM read/retry between member completions.
+    db.expire_all()
+    if app is apps[0]:
+      assert db.get(models.Chat, chat.id).archived_at is None
+
+  assert (db.get(models.Chat, chat.id).archived_at is not None) == all(outcomes)
+  batch = db.get(models.Chat, chat.id).agent_settings_json[update_chat._BATCH_KEY]
+  assert [batch[str(app.id)]["completed"] for app in apps] == list(outcomes)
+
+
+@pytest.mark.asyncio
+async def test_stale_or_unrecorded_resolver_binding_cannot_certify_completion(
+  db, chat, tmp_path, monkeypatch,
+):
+  from app import pending_update
+  repo = tmp_path / "stale"
+  (repo / ".git").mkdir(parents=True)
+  app = models.App(
+    name="Stale", slug="stale", source_dir=str(repo),
+    conflict_resolver_chat_id=chat.id,
+    conflict_resolver_upstream_commit="older", upstream_commit="newer",
+  )
+  db.add(app)
+  db.flush()
+  chat.agent_settings_json = update_chat.resolver_batch_settings({}, [app])
+  db.commit()
+  monkeypatch.setattr(pending_update, "_drop_pending_update_worktree", lambda _: None)
+  await pending_update.clear_pending_conflict_update(db, app, completed=True)
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).archived_at is None
+  assert db.get(models.Chat, chat.id).agent_settings_json[
+    update_chat._BATCH_KEY][str(app.id)]["completed"] is None
 
 
 def test_platform_resolver_archives_only_exact_confirmed_target(

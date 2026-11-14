@@ -255,18 +255,26 @@ async def clear_pending_conflict_update(
 ) -> None:
   """Remove the receipt and binding; file a resolver only on proven completion."""
   source_dir = app.source_dir
-  resolver_chat_id = app.conflict_resolver_chat_id if completed else None
+  resolver_chat_id = app.conflict_resolver_chat_id
+  resolver_commit = app.conflict_resolver_upstream_commit
   # The receipt is the durable "not installed yet" marker, so it goes first. A
   # crash afterwards leaves only a stray checkout, which the next conflict or
   # resolver replaces.
   pending_update_receipt_file(source_dir).unlink(missing_ok=True)
   from app import chat_archive, drawer_pins
-  from app.update_chat import archive_completed_app_resolver
+  from app.update_chat import (
+    archive_completed_app_resolver, record_resolver_member_outcome,
+  )
   with drawer_pins.serialized_write():
+    all_completed = record_resolver_member_outcome(
+      db, resolver_chat_id, app.id, resolver_commit, completed=completed,
+    )
     app.conflict_resolver_chat_id = None
     app.conflict_resolver_upstream_commit = None
     db.flush()
-    archived = archive_completed_app_resolver(db, resolver_chat_id)
+    archived = archive_completed_app_resolver(
+      db, resolver_chat_id if all_completed else None,
+    )
     db.commit()
   if archived:
     chat = db.get(models.Chat, resolver_chat_id)

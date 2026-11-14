@@ -2146,7 +2146,9 @@ async def _create_conflict_resolver_chat(
         messages=[],
         pending_messages=[],
         provider=provider,
-        agent_settings_json=choice["agent_settings"],
+        agent_settings_json=update_chat.resolver_batch_settings(
+          choice["agent_settings"], [app for app, *_ in prepared],
+        ),
         created_by_app_id=None,
       )
       db.add(chat)
