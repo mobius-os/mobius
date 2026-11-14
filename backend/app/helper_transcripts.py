@@ -105,6 +105,7 @@ def _delegation_conversation(db: Session, delegation: models.Delegation) -> dict
   its conversation. A running turn's live steps are included.
   """
   from app.chat_transcript import materialized_messages
+  from app.delegations import derived_status
 
   child = db.query(models.Chat).filter(
     models.Chat.id == delegation.child_chat_id,
@@ -135,8 +136,11 @@ def _delegation_conversation(db: Session, delegation: models.Delegation) -> dict
         blocks.append(block)
       elif block.get("type") == "text" and str(block.get("content") or "").strip():
         blocks.append({"role": "assistant", "content": block["content"]})
+  # Failed attempts can require review based on a saved result marker. Use
+  # the result-aware projection, but never expose that result as conversation.
   return {
     "provider": delegation.provider,
+    "status": derived_status(db, delegation)[0],
     "child_chat_id": delegation.child_chat_id,
     "blocks": blocks[-MAX_BLOCKS:],
     "truncated": len(blocks) > MAX_BLOCKS,
