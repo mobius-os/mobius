@@ -1,7 +1,7 @@
 // A Q&A answer typed at the bottom of the chat grows upward, through the real
-// scroll owner: the edit's pre-edit position is captured at beforeinput, the
-// field's growth is measured against the previous observer pass, and both are
-// dropped when they no longer describe the edit being laid out.
+// scroll owner: the field's pre-edit bottom edge is captured at beforeinput,
+// returned to its place by the observer pass that lays the edit out, and
+// dropped when it no longer describes the edit being laid out.
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from './react-hook-shim.mjs'
@@ -113,10 +113,15 @@ function setup() {
     field.height += 20
     answer.offsetHeight += 20
   }
+  // Content above the conversation's rows grew (a late renderer).
+  const shiftAbove = (px) => {
+    user.offsetTop += px
+    answer.offsetTop += px
+  }
   fire('focusin')
-  observeEditor() // the observer's first report is the height baseline
-  assert.equal(scroll.scrollTop, 0, 'the baseline observation moves nothing')
-  return { scroll, cardBottom, fire, observeEditor, flushFrames, growLine }
+  observeEditor() // the observer's first report of the focused field
+  assert.equal(scroll.scrollTop, 0, 'an observation with no edit behind it moves nothing')
+  return { scroll, cardBottom, fire, observeEditor, flushFrames, growLine, shiftAbove }
 }
 
 test('an edit at the chat bottom holds the card edge and moves the conversation up', () => {
@@ -130,6 +135,17 @@ test('an edit at the chat bottom holds the card edge and moves the conversation 
   assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
   flushFrames()
   assert.equal(scroll.scrollTop, 20, 'the caret check accepts the held position')
+})
+
+test('an anchor repair in the same pass is kept, and only the growth is added', () => {
+  const { scroll, cardBottom, fire, observeEditor, growLine, shiftAbove } = setup()
+  fire('beforeinput')
+  growLine()
+  fire('input')
+  shiftAbove(50)
+  observeEditor()
+  assert.equal(scroll.scrollTop, 70, 'the 50px repair plus the 20px line')
+  assert.equal(cardBottom(), 604, 'the card kept its place above the composer')
 })
 
 test('an edit that did not resize the field lends no position to a later resize', () => {
@@ -152,5 +168,5 @@ test('growth laid out under the reader\'s gesture is never held afterwards', () 
   assert.equal(scroll.scrollTop, 0, 'the reader owns the viewport')
   hook.result.current.gestureWindowUntilRef.current = 0
   observeEditor()
-  assert.equal(scroll.scrollTop, 0, 'the deferred growth starts a fresh baseline')
+  assert.equal(scroll.scrollTop, 0, 'the deferred growth is not replayed')
 })

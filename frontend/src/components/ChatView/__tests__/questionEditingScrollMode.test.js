@@ -32,8 +32,8 @@ test('question editing rebases only an ordinary held viewport to native caret mo
 
 // A minimal laid-out transcript: one keyed row holding a question card whose
 // answer field is the editor. The rects are the ones observed after the edit
-// was laid out (including any scroll the browser applied during it); the
-// scroller's own top is client 0.
+// was laid out (including any scroll the browser or an anchor repair applied
+// during it); the scroller's own top is client 0.
 function bottomCardTranscript({
   scrollTop, cardBottom, editorBottom, editorHeight = 40, scrollHeight = 4000,
 }) {
@@ -67,10 +67,10 @@ const bottomViewport = { visibleTop: 0, visibleBottom: 740, bottomBand: 70 }
 
 test('an answer typed at the bottom of the chat grows upward, like the composer', () => {
   // The card rests just above the composer (usable bottom 740); the field has
-  // just grown by one 20px line, so its lower edge was at 660 before.
+  // just grown by one 20px line, so its lower edge moved from 660 to 680.
   const { scrollEl, editor } = bottomCardTranscript({ scrollTop: 1500, cardBottom: 706, editorBottom: 680 })
   const hold = modeForInlineEditorGrowth({
-    scrollEl, editor, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+    scrollEl, editor, editorBottomBefore: 660, ...bottomViewport,
   })
   // The hold scrolls by exactly the growth: the field's lower edge, and the
   // Submit row under it, stay where they were while content above moves up.
@@ -80,19 +80,25 @@ test('an answer typed at the bottom of the chat grows upward, like the composer'
   // the field itself is visible: still the bottom, still upward growth.
   const keyboard = bottomCardTranscript({ scrollTop: 1500, cardBottom: 790, editorBottom: 730 })
   assert.ok(modeForInlineEditorGrowth({
-    ...keyboard, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+    ...keyboard, editorBottomBefore: 710, ...bottomViewport,
   }))
 })
 
-test('growth the browser already scrolled for is not applied a second time', () => {
-  // The native caret reveal scrolled 10px while the field grew 20px, so the
-  // lower edge observed at 670 was at 660 before the edit. The hold lands at
-  // the pre-edit position plus the growth, not the revealed position plus it.
+test('only the displacement still owed is held, whatever else moved the view', () => {
+  // The native caret reveal scrolled 10px while the field grew 20px: the
+  // edge sits 10px below where it was, so the hold adds only those 10px.
   const revealed = bottomCardTranscript({ scrollTop: 1510, cardBottom: 696, editorBottom: 670 })
-  const hold = modeForInlineEditorGrowth({
-    ...revealed, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
-  })
-  assert.equal(hold.offset, 2000 - 1520)
+  assert.equal(modeForInlineEditorGrowth({
+    ...revealed, editorBottomBefore: 660, ...bottomViewport,
+  }).offset, 2000 - 1520)
+
+  // An anchor repair for content above moved scrollTop 1500 -> 1550 in the
+  // same pass, keeping the field in place, and the field grew 20px. The hold
+  // keeps the repair and adds the growth: 1570, not 1520 (a 50px jump).
+  const repaired = bottomCardTranscript({ scrollTop: 1550, cardBottom: 706, editorBottom: 680 })
+  assert.equal(modeForInlineEditorGrowth({
+    ...repaired, editorBottomBefore: 660, ...bottomViewport,
+  }).offset, 2000 - 1570)
 })
 
 test('a shrinking answer moves the conversation back down by its own height', () => {
@@ -100,7 +106,7 @@ test('a shrinking answer moves the conversation back down by its own height', ()
   // so the hold moves the conversation down by the line.
   const spare = bottomCardTranscript({ scrollTop: 1000, cardBottom: 720, editorBottom: 694 })
   const hold = modeForInlineEditorGrowth({
-    ...spare, growth: -20, scrollTopBefore: 1000, ...bottomViewport,
+    ...spare, editorBottomBefore: 714, ...bottomViewport,
   })
   assert.equal(hold.offset, 2000 - 980)
 })
@@ -108,13 +114,12 @@ test('a shrinking answer moves the conversation back down by its own height', ()
 test('a deletion at the physical tail keeps the clamp the browser already applied', () => {
   // scrollTop sat at its maximum 1500; the content shrank by 20px and the
   // browser clamped scrollTop to the new maximum 1480 during layout, which
-  // already kept the card's bottom at 740. Adding the shrink again would
-  // write 1460 and slide the card 20px under the composer.
+  // already kept the field's edge at 714. Nothing is owed.
   const tail = bottomCardTranscript({
     scrollTop: 1480, scrollHeight: 2280, cardBottom: 740, editorBottom: 714,
   })
   assert.equal(modeForInlineEditorGrowth({
-    ...tail, growth: -20, scrollTopBefore: 1500, ...bottomViewport,
+    ...tail, editorBottomBefore: 714, ...bottomViewport,
   }), null, 'the clamp already holds the field: no second move')
 
   // Part of the shrink was absorbed by the clamp (scrollTop 1490 -> 1480) and
@@ -123,8 +128,7 @@ test('a deletion at the physical tail keeps the clamp the browser already applie
     scrollTop: 1480, scrollHeight: 2280, cardBottom: 730, editorBottom: 704,
   })
   const hold = modeForInlineEditorGrowth({
-    ...partial, scrollEl: Object.assign(partial.scrollEl, { scrollHeight: 2270 }),
-    growth: -20, scrollTopBefore: 1490, ...bottomViewport,
+    ...partial, editorBottomBefore: 714, ...bottomViewport,
   })
   assert.equal(hold.offset, 2000 - 1470)
 })
@@ -133,25 +137,25 @@ test('an answer card higher up grows down, and a held-away reader is not moved',
   // Room below the card: the field grows into it with no scroll.
   const roomy = bottomCardTranscript({ scrollTop: 1500, cardBottom: 420, editorBottom: 394 })
   assert.equal(modeForInlineEditorGrowth({
-    ...roomy, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+    ...roomy, editorBottomBefore: 374, ...bottomViewport,
   }), null)
 
   // The reader scrolled the field out of view under the composer: their
   // reading hold wins and the ordinary caret reveal decides instead.
   const hidden = bottomCardTranscript({ scrollTop: 1500, cardBottom: 900, editorBottom: 870 })
   assert.equal(modeForInlineEditorGrowth({
-    ...hidden, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+    ...hidden, editorBottomBefore: 850, ...bottomViewport,
   }), null)
 
-  // No size change (a width-only observation, the first observation) is no hold.
+  // An edge that did not move (a width-only observation) is no hold.
   const still = bottomCardTranscript({ scrollTop: 1500, cardBottom: 706, editorBottom: 680 })
   assert.equal(modeForInlineEditorGrowth({
-    ...still, growth: 0, scrollTopBefore: 1500, ...bottomViewport,
+    ...still, editorBottomBefore: 680, ...bottomViewport,
   }), null)
 
-  // A resize no edit drove has no pre-edit position to hold against.
+  // A resize no edit drove has no pre-edit edge to hold.
   assert.equal(modeForInlineEditorGrowth({
-    ...still, growth: 20, scrollTopBefore: null, ...bottomViewport,
+    ...still, editorBottomBefore: null, ...bottomViewport,
   }), null)
 })
 
@@ -161,6 +165,6 @@ test('a card taller than the view grows down when answered from its top', () => 
   // the chat bottom, so the field grows down and keeps the caret reveal.
   const tall = bottomCardTranscript({ scrollTop: 1500, cardBottom: 1800, editorBottom: 120 })
   assert.equal(modeForInlineEditorGrowth({
-    ...tall, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+    ...tall, editorBottomBefore: 100, ...bottomViewport,
   }), null)
 })

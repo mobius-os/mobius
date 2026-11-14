@@ -1378,15 +1378,14 @@ export default function useScrollMode({
     /** Keep the focused answer fully visible above the overlaid composer, then
      * record that exact position as the ordinary reading hold. Keyboard resize,
      * native caret movement, and field growth all use this one operation.
-     * `growth` (client px) is the field's own size change in this layout pass
-     * and `scrollTopBefore` the scroll position before the edit that caused
-     * it: at the bottom of the chat the field grows upward, like the composer. */
+     * `editorBottomBefore` is the field's client bottom edge before the edit
+     * that resized it: at the bottom of the chat the field grows upward, like
+     * the composer. */
     function revealFocusedQuestionEditor(event, {
       editor = focusedQuestionEditor(),
       nativePositionAlreadyApplied = false,
       authorityVersion = currentAuthority(),
-      growth = 0,
-      scrollTopBefore = null,
+      editorBottomBefore = null,
     } = {}) {
       if (!editor
           || focusedQuestionEditor() !== editor
@@ -1401,8 +1400,7 @@ export default function useScrollMode({
       const growthHold = modeForInlineEditorGrowth({
         scrollEl,
         editor,
-        growth,
-        scrollTopBefore,
+        editorBottomBefore,
         visibleTop,
         visibleBottom,
         bottomBand: FOLLOW_STICK_BAND_PX,
@@ -1618,46 +1616,31 @@ export default function useScrollMode({
     // The observer tells us when the field actually changed size; ordinary
     // characters read only scrollTop and therefore do not force layout.
     // The first edit since the field's last layout pass: its editor, the
-    // scrollTop read before it, and the reader-intent version it was read
-    // under. The browser can scroll during the edit's own layout (a deletion
-    // at the physical tail clamps scrollTop, a caret reveal scrolls a growing
-    // field), so both the caret check and the growth hold compare against
-    // this pre-edit position, never the current one.
+    // scrollTop and the field's client bottom edge read before it, and the
+    // reader-intent version they were read under. The caret check compares
+    // the scrollTop; the growth hold returns the edge to where it was.
     let pendingInlineEditorInput = null
     let inlineEditorRaf = 0
     let observedQuestionEditor = null
-    // Client height at the previous observer pass, so a resize knows how much
-    // the field itself grew. Null until the first observation of this editor.
-    let observedQuestionEditorHeight = null
 
     const questionEditorResized = entries => entries.some(
       entry => entry.target === observedQuestionEditor,
     )
-    // Read inside the observer callback, where layout is already current.
-    // Consumes the pending edit with the height baseline; an edit read under
-    // older reader intent has no pre-edit position to hold against.
-    const measureQuestionEditorEdit = (authorityVersion) => {
+    // Consumes the pending edit; an edit read under older reader intent has
+    // no pre-edit edge to hold.
+    const questionEditorBottomBeforeEdit = (authorityVersion) => {
       const edit = pendingInlineEditorInput
       pendingInlineEditorInput = null
-      const scrollTopBefore = edit?.editor === observedQuestionEditor
+      return edit?.editor === observedQuestionEditor
         && edit.authorityVersion === authorityVersion
-        ? edit.scrollTop
+        ? edit.editorBottom
         : null
-      const height = observedQuestionEditor?.getBoundingClientRect?.().height
-      if (!Number.isFinite(height)) return { growth: 0, scrollTopBefore }
-      const previous = observedQuestionEditorHeight
-      observedQuestionEditorHeight = height
-      return {
-        growth: Number.isFinite(previous) ? height - previous : 0,
-        scrollTopBefore,
-      }
     }
 
     const observeQuestionEditor = (editor) => {
       if (!isQuestionEditor(editor) || observedQuestionEditor === editor) return
       if (observedQuestionEditor) ro.unobserve?.(observedQuestionEditor)
       observedQuestionEditor = editor
-      observedQuestionEditorHeight = null
       ro.observe(editor, { box: 'border-box' })
     }
 
@@ -1665,24 +1648,23 @@ export default function useScrollMode({
       if (observedQuestionEditor !== editor) return
       ro.unobserve?.(editor)
       observedQuestionEditor = null
-      observedQuestionEditorHeight = null
     }
 
     const captureInlineEditorInput = (event) => {
       if (!isQuestionEditor(event.target)) return
       observeQuestionEditor(event.target)
       // Typing supersedes an unfinished gesture settlement, but is not itself
-      // reader scroll intent. Keep only the cheap pre-input scroll coordinate;
-      // geometry is consulted later only if the browser actually moved.
+      // reader scroll intent. Several edits can land before one layout pass;
+      // only the first reads the pre-edit coordinates, while layout is still
+      // clean from the last frame. Newer reader intent starts afresh.
       supersedePendingReaderGesture()
-      // Several edits can land before one layout pass; the first one's
-      // position is the pre-edit one. Newer reader intent starts afresh.
       const authorityVersion = currentAuthority()
       if (pendingInlineEditorInput?.editor === event.target
           && pendingInlineEditorInput.authorityVersion === authorityVersion) return
       pendingInlineEditorInput = {
         editor: event.target,
         scrollTop: scrollEl.scrollTop,
+        editorBottom: event.target.getBoundingClientRect?.().bottom,
         authorityVersion,
       }
     }
@@ -1739,18 +1721,14 @@ export default function useScrollMode({
       // performs one authoritative spacer + mode pass after reader ownership
       // ends.
       if (!layoutOwnsScroll(authorityVersion)) {
-        // Growth painted under the reader's gesture is not held later: the
-        // next observation starts a fresh baseline instead of replaying it.
-        if (editorResized) {
-          observedQuestionEditorHeight = null
-          pendingInlineEditorInput = null
-        }
+        // Growth painted under the reader's gesture is not held later.
+        if (editorResized) pendingInlineEditorInput = null
         deferLayoutUntilReaderYields(authorityVersion)
         requestRevealOnQuiet()
         return
       }
-      const editorEdit = editorResized
-        ? measureQuestionEditorEdit(authorityVersion)
+      const editorBottomBefore = editorResized
+        ? questionEditorBottomBeforeEdit(authorityVersion)
         : null
       const previousViewportH = observedScrollViewportRef.current.height
       const previousViewportW = observedScrollViewportRef.current.width
@@ -1820,7 +1798,7 @@ export default function useScrollMode({
       }
       if (editorResized) revealFocusedQuestionEditor(
         'layout:question-edit-resize',
-        { nativePositionAlreadyApplied: true, authorityVersion, ...editorEdit },
+        { nativePositionAlreadyApplied: true, authorityVersion, editorBottomBefore },
       )
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
