@@ -85,6 +85,12 @@ function AssistantReply({
   // A stretch lists its References once, after its last reply.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
+  const references = !isStreaming && referenceRows && <MessageSources
+      chatId={chatId}
+      groups={referenceRows.map(message => message.blocks)}
+      refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
+      disclosureKey={`${rows[lastVisibleRow].key}:references`}
+    />
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.
@@ -141,12 +147,6 @@ function AssistantReply({
         </Fragment>
       })}
     </ul>
-    {!isStreaming && referenceRows && <MessageSources
-      chatId={chatId}
-      groups={referenceRows.map(message => message.blocks)}
-      refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
-      disclosureKey={`${rows[lastVisibleRow].key}:references`}
-    />}
     {/* Only the chat's last reply has a footer; replies above it leave no
         gap. It is mounted while the agent works too, empty: settling fills
         the reserved line instead of adding one under a followed transcript. */}
@@ -163,7 +163,10 @@ function AssistantReply({
         ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
       visible={metaVisible}
-    />}
+    >
+      {references}
+    </MessageMetaRow>}
+    {!footer && references}
   </li></PeerTimelineContext.Provider>
 }
 

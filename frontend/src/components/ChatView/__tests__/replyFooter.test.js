@@ -106,6 +106,28 @@ test('a stretch lists its References once, after its last reply', () => {
     'only once the reply has settled')
 })
 
+test('References sit after time, Copy and Branch inside the same autohiding footer', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  const row = actionRow(renderReply([sourced], { onBranch: () => {} }))
+  assert.ok(row.indexOf('chat__sources-label') > row.indexOf('aria-label="Branch in new chat"'))
+  assert.match(row, /chat__sources-body[\s\S]*<\/section><\/div>/,
+    'the disclosure body belongs to the same footer, so expanding holds all its controls')
+})
+
+test('without sources the footer does not add a disclosure or change its row', () => {
+  const row = actionRow(renderReply([turn], { onBranch: () => {} }))
+  assert.doesNotMatch(row, /chat__sources/)
+  assert.match(row, /aria-label="Copy message"/)
+  assert.match(row, /aria-label="Branch in new chat"/)
+})
+
+test('historical sources remain available without creating another action footer', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  const html = renderReply([sourced], { footer: null })
+  assert.equal(metaRows(html).length, 0)
+  assert.match(html, /References/)
+})
+
 test('while the agent works the footer line is reserved but empty', () => {
   // Settling must fill the line, not add one: a followed transcript would
   // grow and jump at the end of every turn (streaming-cursor.spec).
