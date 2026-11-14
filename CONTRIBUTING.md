@@ -16,7 +16,8 @@ guide gets a fresh clone to a running dev/test loop.
 | `backend/scripts/seed-skills/` | Per-topic agent skills (building-apps, theming, cron, …), seeded into `/data/shared/skills/` create-if-absent on first boot. |
 | `backend/app/bootstrap.py` | First-boot installation of the Store, Memory, and Reflection from their catalog repositories. Installed apps remain locally editable and updatable like every other catalog app. |
 | `tests/` | Playwright end-to-end suite (repo root). |
-| `backend/tests/` | pytest backend suite. |
+| `backend/tests/` | Stateful pytest suite with application isolation fixtures. |
+| `backend/contract_tests/` | Pure contracts that do not require the application runtime. |
 
 `Dockerfile` builds the single image (frontend build + backend + pinned CLI
 tools). `ARCHITECTURE.md` is the deep architecture reference — read it before
@@ -143,6 +144,12 @@ against the real image — Rolldown, Node, all deps):
 docker compose -p mobius-test -f docker-compose.test.yml build   # image must exist first
 docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 ```
+
+Pure contracts live in `backend/contract_tests/`, outside the application-wide
+fixtures in `backend/tests/conftest.py`. Run one with
+`scripts/wt-pytest.sh backend/contract_tests/test_recovery_boundary.py -q`.
+The default full suite discovers both roots from `backend/pyproject.toml`;
+stateful tests keep their existing database, file and process isolation.
 
 ### Database changes
 

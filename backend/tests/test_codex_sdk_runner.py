@@ -3603,7 +3603,7 @@ def test_skill_names_in_command_extracts_and_dedupes():
     "sed -n 1,40p /data/shared/skills/building-apps.md; "
     "cat /data/shared/skills/memory.md"
   )
-  names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
+  names = codex_events._skill_names_in_command(cmd, "/data")
   assert names == ["memory", "building-apps"]
 
 
@@ -3615,12 +3615,12 @@ def test_skill_names_in_command_counts_entry_documents_not_resources():
     "cat /data/.codex/skills/impeccable/reference/optimize.md && "
     "cat .codex/skills/impeccable/reference/craft-floor.md"
   )
-  names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
+  names = codex_events._skill_names_in_command(cmd, "/data")
   assert names == ["theming"]
 
 
 def test_skill_names_in_command_ignores_other_paths():
-  fn = codex_sdk_runner._skill_names_in_command
+  fn = codex_events._skill_names_in_command
   assert fn("cat /data/shared/memory/index.md", "/data") == []
   assert fn("cat /elsewhere/shared/skills/memory.md", "/data") == []
   assert fn("cat /elsewhere/.codex/skills/theming/SKILL.md", "/data") == []

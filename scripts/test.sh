@@ -128,7 +128,7 @@ run_backend() {
   if [ "${mode}" = "fast" ]; then
     summary="hermetic host contract suite (${#FAST_TESTS[@]} files)"
   else
-    summary="pytest (full backend suite, currently ~2,450 tests)"
+    summary="pytest (full backend suite)"
   fi
 
   log "backend: ${summary}"
@@ -146,7 +146,7 @@ run_backend() {
   check_backend_prereqs
   if (cd "${PROJECT_DIR}" && docker compose -p "${TEST_PROJECT}" \
       -f docker-compose.test.yml run --rm --no-deps \
-      --entrypoint python pytest -m pytest "${pytest_args[@]}" tests/); then
+      --entrypoint python pytest -m pytest "${pytest_args[@]}"); then
     BACKEND_STATUS="PASS"
     log "backend: PASS"
   else

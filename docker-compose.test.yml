@@ -136,7 +136,7 @@ services:
       # this so ensure_bootstrap_apps_installed() returns immediately.
       - MOEBIUS_SKIP_BOOTSTRAP=1
     working_dir: /workspace/backend
-    entrypoint: ["python", "-m", "pytest", "tests/", "-v"]
+    entrypoint: ["python", "-m", "pytest", "-v"]
 
 volumes:
   test_data:

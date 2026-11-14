@@ -1,4 +1,5 @@
 {
+  "contract_tests/test_recovery_boundary.py": 0.1,
   "tests/test_accept_local_runtime_capabilities.py": 9.7,
   "tests/test_activity.py": 8.8,
   "tests/test_activity_position.py": 0.2,
@@ -292,7 +293,6 @@
   "tests/test_rebuild_topology.py": 0.1,
   "tests/test_recents_project_chip.py": 1.7,
   "tests/test_recover.py": 0.8,
-  "tests/test_recovery_boundary.py": 0.1,
   "tests/test_recovery_owner_controls.py": 0.6,
   "tests/test_recovery_receipts.py": 9.9,
   "tests/test_reflection_brief_template.py": 0.0,

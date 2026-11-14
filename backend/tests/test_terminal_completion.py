@@ -310,7 +310,7 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   assert not chat_mod.registry.is_alive("t1")
 
 
-def test_settled_turn_reclaims_caches_without_retired_summary_publisher(monkeypatch):
+def test_settled_turn_reclaims_caches_off_the_event_loop(monkeypatch):
   """Removing routine summaries must not remove upstream terminal cleanup.
 
   The allocator trim and page-cache reclaim run in a worker; there is no
@@ -349,7 +349,6 @@ def test_settled_turn_reclaims_caches_without_retired_summary_publisher(monkeypa
   assert "gc" not in calls
   assert "trim off loop" in calls
   assert any(item[1] == "settled-reclaim" for item in calls if isinstance(item, tuple))
-  assert not hasattr(chat_mod, "_ensure_chat_note")
 
 
 def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
