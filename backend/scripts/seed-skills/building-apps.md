@@ -58,6 +58,10 @@ contract instead of rebuilding or replacing it. Keep the same scope declared
 in `mobius.json`, then verify the returned `chat_log_access`. This is an owner
 permission action, not a substitute for applying the source revision.
 
+Other privileged grants (`github_access`, `manage_apps`, and the rest listed in
+`building-apps-quickstart.md`) have no such route: only a reviewed Store
+install can hold them, and a local app's manifest value is ignored.
+
 ---
 
 ## Packaging / wrapping a pre-built or third-party web app
@@ -194,6 +198,15 @@ of the app's source, so it is reviewed, versioned and published with the code:
   the same works for PNG and WebP without `quality`), or remove it if
   nothing uses it. A bare PNG `tIME` timestamp is allowed; any PNG text
   chunk is not, whatever its key (`Software`, `Author`, `Comment`, XMP...).
+- Publishing requires a free license: `license` in `mobius.json` must be
+  one the Store offers (`MIT`, `Apache-2.0` or `GPL-3.0-or-later`; the
+  preview's `license_options`), with its full text in a root license file
+  (normally `LICENSE`). An app the Store already lists under another
+  free license may keep publishing updates under that same license. The
+  choice is the owner's, made in the Store editor's license picker, so
+  don't pick one for them. Never overwrite or
+  delete license text that is already there: a remix must keep its
+  upstream copyright notices.
 - Screenshots must be truthful and private: capture the app's real UI in an
   empty, demo, or fixture state, never the owner's own records, names,
   accounts, chats, or machines. Build a small demo state if the app has none.
@@ -325,7 +338,10 @@ manifest, layered by how always-on they are:
 - **Agent tools (callable by every agent run, while installed).** `"tools"`:
   up to 16 entries requiring `name` (`^[a-z][a-z0-9_]{0,39}$`),
   `description`, and `input_schema` (a JSON Schema `object`). Optional boolean
-  `always_load` controls eager tool discovery. Requires a
+  `always_load` controls eager tool discovery. Optional boolean `routine`
+  marks bookkeeping whose successful result the owner never needs to act on
+  (a save or a log): the chat folds such a call into the surrounding activity
+  instead of giving it its own row, and a failed call still shows. Requires a
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
   app's own authority (`backend/app/app_tools.py`). Only the platform reaches
@@ -443,7 +459,7 @@ most 16384.
   `kind:payload`: `kind` is 1-32 of `a-z`, `0-9`, `-` starting with a letter;
   `payload` is 1-256 printable ASCII characters with no whitespace. Invalid
   JSON or a bad required field leaves an ordinary code block.
-- Optional: up to 8 `facts` `{label (80), value (240), href?}`; up to 3
+- Optional: up to 8 `facts` `{label (80), value (240), href?, lines?}`; up to 3
   `badges` `{label (40), tone}` with tone `success|attention|danger|accent|neutral`;
   up to 12 `items` `{title, intent, facts? (up to 4), badges?, action?}`;
   `action` `{label (40), intent}`; `inline` (default `true`; `false` is a
@@ -462,6 +478,22 @@ most 16384.
   reply.
   Every intent field has the same bound. A repeated item intent or badge
   label keeps only its first entry.
+- A fact that is a change size may add `lines: {added, removed}` (whole
+  numbers, 0 to 1e9): the host then draws its value as "+added −removed",
+  the added count in the theme's green text colour and the removed count in
+  its danger text colour, with the signs kept so colour is never the only cue
+  and a spoken name ("64 lines added, 12 removed"). Keep the same text in
+  `value` (for example "+64 −12"): an older host shows it instead, and a fact
+  with invalid `lines` shows `value` too. Nothing else is coloured this way.
+- An item is drawn as its title over one quiet metadata line, its facts
+  joined by a dot, each with its visible label. `"item_facts": "values"` opts
+  the block in to value-only rows (labels kept for assistive technology); use
+  it only when every value reads on its own ("owner/repo", "3 files · +88
+  −21"). An app's confirmation rows keep visible labels unless the block
+  also sets `"confirm_facts": "values"`, which draws them value-only too
+  (labels kept for assistive technology). Set it only when each confirmation
+  value still reads on its own at approval time. Older hosts ignore it and
+  keep the labels.
 - Every block links to `/shell/?app=<slug>&intent=<intent>`, and each item to
   its own intent. Nothing app-owned runs until the reader clicks the expand
   control or an action; the app's ordinary view then opens in the transcript
@@ -469,7 +501,8 @@ most 16384.
   else, and never restores or overwrites the app's saved place in the shell.
   If the app is not installed, the block keeps its snapshot and says so.
 - Every block is captioned "From this conversation": its title, facts and
-  badges are the agent's words, not status the app verified.
+  badges are the agent's words, not status the app verified. The caption is
+  hidden only while a passive session shows the app's own confirmation rows.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -507,20 +540,45 @@ display. Never act, publish, or change state because of an intent at startup
 or on `app-block-init`; act only on an owner `confirm`, and check that
 request against your own data first.
 
-`props.blockSession` is `{sessionId, generation, actions, items, checkpoint,
-retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+`props.blockSession` is `{sessionId, generation, actions, items, features,
+context, checkpoint, retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
 `[{key, intent, label}]` and `key` is the action's intent, and `items` is
 `[{intent}]`: the block's item intents in card order, after the host's
 validation and deduplication (an empty array when the block lists no items).
 Like `actions[].intent`, `items` is agent-printed and untrusted: it tells a
 single block-level action which records the card shows, but re-verify every
 intent against your own data before you build a confirmation, and build that
-confirmation list from your data, never from the block. The host also posts
+confirmation list from your data, never from the block.
+
+`context` is attested by the chat host, never read from the block:
+`{chatId, latest, intent}` when the block is in a chat transcript, otherwise
+`null`. `chatId` is the chat the block is rendered in, `intent` the block's own
+parsed intent, and `latest` is whether it is that chat's newest block with the
+same app and that `intent` (check `intent` before relying on `latest` as
+"newest of my kind": a block printed with another intent is its own group); it changes to
+`false` (in a new `app-block-init`) as soon as a newer one appears. Use
+`chatId` to scope what the block shows to that chat's own data, so a block
+printed in one chat can never act on another chat's records; use `latest` to
+let only the newest block of a kind stay live. The host also posts
 window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
 - `{type:'moebius:app-block-init', sessionId, generation, actions, items,
-  checkpoint, retain, recoveryError}` when the session envelope changes.
+  features, checkpoint, retain, recoveryError}` when the session envelope
+  changes. `features` lists what this host draws beyond the original report
+  fields: `"row-state"` means `title`, `items`, `itemFacts`, `open` and the
+  `accent` tone below. Without it the host ignores them (and draws an `open`
+  action as an ordinary button), so keep your older presentation there.
+  `"rows-v2"` means `rows`, `titleTone`, `titleBusy`, `context` and
+  `app-block-refresh` below; a host without it sends no `context` and ignores
+  those fields. `"lines-v1"` means a row's `lines` below; without it put the
+  change size in `meta` as text. `"ask-v1"` means `ask` below; it is listed
+  only when the owner has also granted your app `chat.blocks.ask`.
+- `{type:'moebius:app-block-refresh', sessionId, generation, reason}`, a hint
+  to re-read your own state: `reason` is `turn` (a turn in this chat
+  settled) or `visible` (the tab became visible again). It is sent only to a
+  mounted document of a visible chat, carries no data and grants nothing.
+  Read cheaply (local storage); leave network checks to an owner action.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -546,13 +604,98 @@ the frame's window, so the host cannot tell documents apart by sender: it drops
 any report with a missing, older or newer generation, acknowledgements
 included.
 
-- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, confirming?,
-  confirmation?, note?, tone?, status?, statusTone?, links?, badges?}`, one
-  per key from `actions` (a key you do not report stays "Loading…"; use
-  `hidden: true` to remove its control). Unknown keys are dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
+- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, open?,
+  confirming?, confirmation?, note?, tone?, status?, statusTone?, links?,
+  badges?}`, one per key from `actions` (a key you do not report stays
+  "Loading…"; use `hidden: true` to remove its control). Unknown keys are
+  dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
   `links` are up to 12 `{label, url}` with uncredentialed `https:` URLs; tones
-  are `neutral|success|attention|danger`; `badges` replaces the block's saved
-  badges for that action (omit to keep them, `[]` to clear them).
+  are `neutral|success|attention|danger|accent`; `badges` replaces the block's saved
+  badges for that action (omit to keep them, `[]` to clear them). `status` is
+  drawn as a small pill in its tone and `note` as one plain line beside the
+  control, never in a warning colour. `busy` adds a spinner to the disabled
+  control. `open: true` turns the control into a link that opens the block in
+  your app (the block's own intent) with `label` as its text; it sends no
+  event, so use it when nothing can be done from the chat. It is ignored while
+  the action is confirming.
+- `title` (120): plain text that replaces the block's saved title while your
+  document reports, for a header that says what happened ("3 pull requests
+  opened"). It is your app's framing, not something the host verified, and it
+  stays while a confirmation is open. Outside a confirmation, and unless you
+  report `rows`, the caption then reads "Rows from this conversation",
+  because the rows are still the block's. Omit it or send `''`
+  to keep the saved title.
+- `titleTone` and `titleBusy` (`rows-v2`): a small mark before your live
+  `title`: a spinner while busy, a check for `success` or `accent`, an
+  exclamation mark for `attention` or `danger`, nothing for `neutral`. The
+  title's words must say the state; the mark only reinforces it.
+- `rows` (`rows-v2`): your own list for the block, up to 12 `{title (120),
+  meta? (160), lines?, pill? (40), tone?, busy?, links?, intent?}`. They replace the
+  block's saved items and root facts for display, and the "From this
+  conversation" caption goes, because nothing saved is shown. `meta` is one
+  quiet line under the title (for example "owner/repo · +12 −4"); with
+  `lines-v1`, `lines: {added, removed}` is drawn at the end of that line as a
+  coloured change size, as for a fact, so leave it out of `meta`; `pill` a
+  status pill in `tone` with a spinner when `busy`, `links` up to 2 `{label
+  (40), url}` with uncredentialed `https:` URLs, and `intent` an app intent
+  the row's title opens in your app. Rows carry no controls: while you report
+  rows, item actions are not drawn, only the block's own action. A complete
+  confirmation still owns the block while it is open, and while an action is
+  confirming without a complete list the saved card is shown, exactly as
+  without rows. Omit `rows` to keep the saved items; `[]` shows none. With no
+  rows, no visible action and no `summary`, the block folds to one quiet line
+  (your `title`, for example "Continued below"); when it is not the chat's
+  newest block of its kind, that line offers "Jump to latest" (which moves
+  focus to the newest block) in place of its open link.
+- `itemFacts: "values"`: the same value-only row facts as the block's
+  `item_facts`, for rows whose values read on their own. Confirmation rows
+  keep their labels.
+- `items`: up to 12 `{intent, status?, statusTone?, busy?, note?, links?}`,
+  live state for the block's listed rows, matched by the row's `intent` (the
+  intents in `blockSession.items`); unknown intents are dropped and the first
+  report for an intent wins. `status` (40) is a pill with `statusTone`, `busy`
+  adds a spinner to it, `note` (200) is one short plain line under the row,
+  and `links` are up to 2 `{label (40), url}` with uncredentialed `https:`
+  URLs, opened outside Möbius. Row state is decoration only: it adds no
+  control, is hidden while a confirmation owns the block, and is dropped while
+  the block is held for recovery.
+- `ask` (`ask-v1`): `{refs: [{id, code, rev}]}`, 1 to 12 references to things
+  in your app that the chat's agent should fix ("Fix in chat"). Each `id` is
+  1-128 of `A-Za-z0-9._-` starting with a letter or digit, each `code` a
+  lower-case `snake_case` word of 2 to 48 characters (`^[a-z][a-z0-9_]{1,47}$`),
+  and each `rev` a lower-case hex token of 7 to 64 characters naming the state
+  you report (for example the item's current version hash, or a digest of its
+  last failure). Any other ref drops the whole ask. You supply no words: the
+  host draws its own **Fix in chat** button as the block's one action, in
+  place of yours (while it is shown none of your controls are drawn), and on
+  the owner's tap it sends this owner message in the chat, which starts (or
+  queues behind) a turn:
+
+  ```
+  Please fix what the <app slug> card in this chat flagged:
+
+  `<app slug> · <id> · <code>`
+  ```
+
+  with one line per ref (`rev` is not shown). Your document gets no event, and
+  the ask causes no effect in your app: only `confirm` can. Document what your
+  codes mean in your app's skill, so the agent knows what to do. The host
+  ignores `ask` while any action is confirming or busy, during recovery,
+  without admission, outside a chat transcript and on any block that is not
+  that chat's newest of its app and intent. The message's client id is a hash
+  of the chat, the block's saved content (app, intent, title and the intents
+  it lists and acts on) and the refs with their `rev`, so the server posts one
+  ask about one state once, however often it is tapped, retried or reloaded,
+  on any device; after a duplicate the button says "Requested in chat". Change
+  `rev` when the state changes (the agent restaged, a new failure) and the
+  owner can ask again. The block identity is its content, not its position:
+  two identical blocks in one chat share their asks, by design. After a tap
+  the button reads "Requested in chat" (announced politely) until a turn in
+  the chat settles. Omit `ask` (or
+  report `null`) when nothing needs the agent. An ask needs
+  `"chat.blocks.ask": {"version": 1}` in `mobius.json` beside
+  `chat.blocks.passive`, accepted by the owner and applied; without it the host
+  neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
@@ -574,31 +717,37 @@ included.
 
 **Confirmation contract.** To ask for Confirm, report the action with
 `confirming: true` and `confirmation`: the complete, current list of what
-Confirm will do, `[{title, facts: [{label, value}]}]` with 1-256 items, at most
-8 facts each and every text 1-512 characters. Only one action may be
+Confirm will do, `[{title, facts: [{label, value, lines?}]}]` with 1-256 items,
+at most 8 facts each and every text 1-512 characters (`lines` is a change
+size, as for a block fact; `value` stays required). Only one action may be
 confirming at a time, and a `hidden` action never is: if two or more report
 `confirming: true`, the host enables no Confirm, shows no list, and asks the
-reader to open the app. Describe the exact targets and
-versions your app will act on now, from your own data, not the block's saved
-snapshot. The host shows every item, hides the block's saved badges unless you
-supply `badges`, and says the saved title and details come from the
-conversation. It never shortens the list: a missing, empty, oversized or
-malformed `confirmation` keeps Confirm disabled and shows "Open the app to
-review this action. Its full current identity is unavailable here." Confirm
-replaces the action's button in place, with "Not now" beside it. It stays
-disabled until, during this showing of that exact confirmation (the action
-and its list), the end of the list has been on screen at least once (as
-observed after this showing's own layout; a position under an earlier list
-never counts), and
-then Confirm itself has been on screen in a visible page for about 500 ms
-without interruption. The list is drawn below Confirm, so its end having been
-on screen means the whole list has passed through the viewport; a long list
-just needs scrolling to its end and back. A showing ends, and the next one
-starts from nothing, when the list changes or disappears, when Confirm or "Not
-now" is pressed, or on reload; Confirm leaving the screen or the page being
-hidden restarts the delay. So a double-click on the action, a list swapped
-just before a click, or a list that was never on screen never sends
-`confirm`. Treat
+reader to open the app. Describe the exact targets your app will act on now,
+from your own data, not the block's saved snapshot. While it is open, your
+list owns the block: its items are the block's only rows, in the same layout
+(title, then facts, linking nowhere), and the saved facts, rows, other
+controls and "From this conversation" caption are hidden. The confirming
+action is drawn once, in the block's footer, as "Not now" and Confirm, even
+when it is an item's action or several placements share its key. No heading
+or explanation is added: give each item the facts the card's own rows show,
+and the rows look the same before and after the press unless something
+changed. "Not now" brings the saved card back. The block's saved badges are
+hidden unless you supply `badges`. Facts of up to 512 characters wrap inside
+the block. The host never shortens the list: a missing, empty, oversized or
+malformed `confirmation` keeps the saved card and Confirm disabled, and shows
+"Open the app to review this action. Its full current identity is unavailable
+here." Confirm stays disabled until, during this showing of that exact
+confirmation (the action and its list), both the first and the last of your
+rows have been on screen at least once (as observed after this showing's own
+layout; a position under an earlier list never counts), and then Confirm
+itself has been on screen in a visible page for about 500 ms without
+interruption. The rows are drawn above Confirm, so reaching the first row
+means scrolling up through the list; a jump past the middle is not detected.
+A showing ends, and the next one starts from nothing, when the list changes or
+disappears, when Confirm or "Not now" is pressed, or on reload; Confirm
+leaving the screen or the page being hidden restarts the delay. So a
+double-click on the action, a list swapped just before a click, or a list
+whose first row was never on screen never sends `confirm`. Treat
 `confirm` as a request: check it again in the app before acting, and report
 `busy` and then the result.
 
@@ -906,6 +1055,56 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Owner confirmation — `window.mobius.ownerGrant.request`
+
+A few actions must be the owner's own decision, not just something the app's
+token is allowed to do (merging or reviewing a pull request on GitHub). Ask the
+shell to confirm it first, then repeat your normal request unchanged:
+
+```js
+// Feature-detect: older shells do not have it.
+if (typeof window.mobius.ownerGrant?.request === 'function') {
+  // The platform's action id, the route's path parameters (besides your app
+  // id) as a flat object of strings, and the exact JSON body you will send.
+  const confirmed = await window.mobius.ownerGrant.request(
+    'merge', {}, { repo: 'owner/name', number: 123, head_sha: sha, method: 'squash' })
+  if (!confirmed) return // the owner cancelled
+}
+await publicWrite(...) // the same request as always
+```
+
+The action ids are `merge`, `open_for_review`, `back_to_draft`, `close`,
+`ask_rereview`, `ask_approval`, `verdict` and `repair` (scope `{run_id}`),
+`follow` (scope `{record_id}`) and `respond_post`. The shell draws its own sheet outside your frame, and the server
+writes its words from what it knows, so pass identifiers, never text for the
+owner to read. The promise resolves `true` once the owner tapped Confirm,
+`false` if they cancelled or the frame was hidden, and rejects with the
+platform's own sentence in `error.message` (and `error.code`) when the action
+cannot go ahead, or when this tab's shell is too old to answer (it never
+acknowledges the request, and the promise rejects after a few seconds): show
+that sentence rather than your own. The server does not check the action's own
+rules when it describes it, so the route may still refuse after the owner
+confirmed.
+
+You never receive a grant. It lives briefly on the server (120 seconds), bound
+to your app and that exact request, and one request spends it: send the request
+as you normally would. A request the route then refuses has already spent it,
+so the owner confirms again.
+
+Enforcement is your choice, per app. An app that declares
+`"owner_confirm": true` in `mobius.json` (a top-level boolean, beside
+`embeds_agent`) is refused `403 owner_grant_required` at the guarded routes
+unless a matching grant exists: Merge, the five status changes, a verdict
+decision and a repair decision. An app without it is not refused. The platform
+reads the declaration from the installed manifest, so it changes only when the
+owner installs or updates a version of your app that carries it. Declaring it
+adds no permission row to the owner's first-open consent and cannot make an
+installed app wait for approval when it updates. Declare it only in a version
+that asks the shell before every one of those taps. No manifest permission is
+needed to ask. For GitHub review and merge flows the platform advertises
+support as `owner_confirm: true` in the `capabilities` of the review-presets
+response; use the sheet when both that key and the function above are present.
+
 ## Phone location tracking
 
 The Möbius phone app can record the device's location, including in the
@@ -947,6 +1146,91 @@ stopped, `stop` rejects with code `stop_failed` and tracking stays on; say so
 rather than showing it off. Tracking keeps running after the owner
 leaves your app, until it is stopped, the phone app is closed, or the owner
 signs out; signing out also erases positions the phone had not uploaded yet.
+
+## Priced calls paid with credits
+
+The owner, or an installed Store app with accepted `credits_manage` consent
+(including frames), pairs this Möbius with a credits service using
+`POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
+control is planned. Shared-browser guests and delegated helpers cannot pair.
+
+`credits_manage` works only for installed Store apps with accepted owner
+consent. An owner-built local app never gets it, even if its `mobius.json`
+declares it: its account requests receive 403. A local app may still pay with
+`spend_credits` (below): it needs no standing grant, because every charge
+waits for the owner's Pay. It may also check a charge (below). A delegated
+helper cannot spend credits, including through an otherwise approved app
+service.
+
+An app can charge for one of its actions. The creator publishes the price
+once from their own Möbius with
+`PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
+1,000,000 micro. Another owner's copy pays for each call from its **own
+service**, never its frame. Its manifest lists every `"<seller>/<app>"` it pays
+for, which the owner sees at install, and a charge to anything else is refused
+with `seller_not_allowed`: `"permissions": { "spend_credits": ["ana/prompts"] }`.
+
+```js
+const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charges`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${process.env.APP_TOKEN}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ seller: 'ana', app: 'prompts', action: 'run',
+    idempotency_key: runId, max_price_micro: shownPrice }),
+})
+```
+
+Read the price first (`GET /api/identity/credits/prices/<seller>?app_slug=<app>`;
+`spend_credits` covers this read), show it to the owner, and send it as
+`max_price_micro`; a higher current price refuses with `price_changed`. Reuse
+one `idempotency_key` per call so a retry never pays twice. An upstream 5xx,
+transport failure or unreadable receipt answers 503 `charge_outcome_unknown`:
+the service may still have charged. Retry with the same key, never a new one;
+the client never retries automatically. Do the paid work only after a 200,
+and explain each refusal by its `detail.code`: `not_paired`
+(the owner has not connected credits yet), `insufficient_credits`, `price_changed`,
+`price_not_found`, `price_unreadable` (the creator's price could not be read;
+nothing was asked or charged), `key_spend_cap`, or `key_refused` / `invalid_api_key`
+(the credits service refused the key; the owner needs to pair again).
+The key is scoped to your app, so another app's identical key never replays
+your charge.
+
+Every charge waits for the owner. The first request answers 409
+`confirmation_required` while Möbius shows the owner who is paid, for what and
+the price; retry the same charge with the same key every few seconds. It
+answers 200 once they press Pay, or 403 `payment_declined` if they cancel.
+A cancel holds: every retry with that key keeps answering `payment_declined`,
+so stop retrying it; a new purchase in your app takes a new key. Payments come
+from credits only; a `method` other than `"credits"` answers 422
+`payment_method_unsupported`. At most five of your app's payments wait at
+once; another answers 429 `too_many_payments_waiting`. The `*` in a
+`"*/<app>"` grant means any creator of that app; it is never itself a seller.
+
+A 200 answer tells your app only about its own charge — the
+`charge_id`, the amount charged, and `replayed` when the service replayed an
+earlier identical call — never the owner's balance. A refusal keeps only its
+`code`, `message` and the figures about your call (`required_micro`,
+`price_micro`, `max_price_micro`), never the owner's balance or spend cap.
+
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
+
+Showing the owner's balance or history, buying credits, publishing prices or
+moving earnings is a separate critical grant, `"credits_manage": true`.
+`identity_manage` does not include it, and only a Store app can hold it. An
+app with it keeps seeing the balance in a charge answer.
 
 ## Managed-app update events
 
@@ -1023,6 +1307,22 @@ const preferences = await window.mobius.capabilities.invoke('device.storage', {
 The same capability works in the signed-in shell and in a hosted public app.
 It is device-local, best-effort, and partitioned by app installation; use
 `window.mobius.storage` for durable owner data or public server-side state.
+
+When a provider's terms require that requests and media loads come straight
+from the person's device (not through your service), declare the exact sites
+with `network.direct`. The frame may then load images from and `fetch` those
+origins; scripts never widen. Prefer a service proxy whenever terms allow it,
+since every listed site sees the viewer's device address:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
 
 ## Local zoom surfaces
 
@@ -1256,17 +1556,17 @@ more, or `'started'` with the existing `chatId`. After a cancellation,
 treat it as final. A new attempt needs a new scope.
 
 To cancel work that already started, `await window.mobius.chat.stop(chatId)`.
-When Stop ended the chat's run and cleared its queue, the result carries
+Stop ends the running turn. Messages your app queued in that chat go with the
+Stop; messages the owner typed stay queued until the owner sends. When Stop
+ended the chat's run and settled its queue, the result carries
 `stop_receipt: { chat_id, run_id }`: the run Stop ended, or the chat's latest
 idle run (`run_id: null` if it never ran). It certifies only that run. Later
-work in the chat, such as an owner resume, a Wait firing, or a helper result,
+work in the chat, such as an owner send, a Wait firing, or a helper result,
 runs under a different `run_id`. Bind the cancellation to the receipt's
 `run_id`, never to a later `chat.status(chatId)`: a status with another
 `run_id`, or with `running: true`, is newer work and is not cancelled. Without
 a receipt (`stop_receipt: null`) nothing was certified, even with
-`stopped: true`: during a Möbius restart, for example, Stop keeps queued turns
-so they survive it, and they run afterwards. Keep any reservation and call
-Stop again later.
+`stopped: true`. Keep any reservation and call Stop again later.
 
 `moebius:open-chat` with a `draft` adds that text after the owner's unsent
 draft in that chat, keeping their attachments; it never replaces or sends it.
@@ -1331,6 +1631,21 @@ last revision the platform acknowledged, and resend until it catches up. A
 failed report then repairs itself on a later request instead of leaving a
 stale count, and an installation that already has unread items reports them
 the first time it runs.
+
+### Refresh the moment something arrives
+
+Polling still leaves a gap after new data lands. When Möbius sees new activity
+for the app (an app-attributed notification, or a change to its sidebar unread
+badge), the open app hears it at the same instant as the sidebar:
+
+```jsx
+useEffect(() => window.mobius.onActivity?.(() => refresh()), [])
+```
+
+The nudge carries no content, so treat it as "check now". After a dropped
+connection Möbius nudges each open app once. Keep polling as the fallback for
+an older Möbius (`window.mobius.runtimeFeatures?.appActivity`) and the
+standalone app page.
 
 ### Shell shortcuts
 

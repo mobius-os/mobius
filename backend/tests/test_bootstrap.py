@@ -16,7 +16,6 @@ from fastapi import HTTPException
 
 from app import app_git, install, models
 from app.bootstrap import (
-  BOOTSTRAP_IDENTITY_MANIFEST_URL,
   BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
   BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL,
   BOOTSTRAP_MEMORY_MANIFEST_URL,
@@ -59,7 +58,6 @@ def _bootstrap_urls():
     BOOTSTRAP_MEMORY_MANIFEST_URL,
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
     BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
-    BOOTSTRAP_IDENTITY_MANIFEST_URL,
     BOOTSTRAP_SOCIAL_MANIFEST_URL,
   ]
 
@@ -74,7 +72,6 @@ def _installed_default_rows(created_at, *, deleted=()):
     ("memory", "Memory", BOOTSTRAP_MEMORY_MANIFEST_URL),
     ("reflection", "Reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL),
     ("integrations", "Integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL),
-    ("identity", "Möbius · You", BOOTSTRAP_IDENTITY_MANIFEST_URL),
     ("social", "Social", BOOTSTRAP_SOCIAL_MANIFEST_URL),
   )
   deleted_at = datetime.now(timezone.utc)
@@ -276,10 +273,10 @@ async def test_failed_store_pin_retries_and_pins_next_boot(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_deployment_bootstraps_identity_without_linking(
+async def test_new_deployment_does_not_install_mobius_you(
   db, monkeypatch,
 ):
-  """Möbius · You is present without SSO; account linking remains optional."""
+  """The Möbius account and models live in Settings, so no app is installed."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(return_value=_install_result())
 
@@ -288,7 +285,7 @@ async def test_local_deployment_bootstraps_identity_without_linking(
 
   urls = [call.kwargs["manifest_url"] for call in install_mock.await_args_list]
   assert urls == _bootstrap_urls()
-  assert BOOTSTRAP_IDENTITY_MANIFEST_URL in urls
+  assert not any("app-mobius-you" in url for url in urls)
   assert db.query(models.IdentityAccountLink).count() == 0
 
 
@@ -374,17 +371,6 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
-      source_dir="/tmp/mobius-tests/identity",
-      name="Möbius · You",
-      description="owner uninstalled",
-      jsx_source="export default function App() {}",
-      slug="identity",
-      manifest_url=_canonical_identity_key(
-        BOOTSTRAP_IDENTITY_MANIFEST_URL, "identity",
-      ),
-      deleted_at=deleted_at,
-    ),
-    models.App(
       source_dir="/tmp/mobius-tests/social",
       name="Social",
       description="owner uninstalled",
@@ -403,7 +389,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
 
   # Only the Store (the recovery surface) returns after an owner uninstall;
-  # Skills, Memory, Integrations, and Möbius · You (policy False) stay gone;
+  # Skills, Memory, and Integrations (policy False) stay gone;
   # live Reflection is skipped.
   assert install_mock.await_count == 1
   assert [
@@ -464,16 +450,6 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       slug="integrations-custom",
       manifest_url=_canonical_identity_key(
         BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, "integrations",
-      ),
-    ),
-    models.App(
-      source_dir="/tmp/mobius-tests/identity-custom",
-      name="Möbius · You",
-      description="already here",
-      jsx_source="export default function App() {}",
-      slug="identity-custom",
-      manifest_url=_canonical_identity_key(
-        BOOTSTRAP_IDENTITY_MANIFEST_URL, "identity",
       ),
     ),
     models.App(
@@ -613,7 +589,7 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
     _install_result("Integrations", "integrations", app_id=5),
-    _install_result("Möbius · You", "identity", app_id=6),
+    _install_result("Social", "social", app_id=6),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)

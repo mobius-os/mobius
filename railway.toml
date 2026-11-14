@@ -9,8 +9,9 @@ healthcheckTimeout = 300
 numReplicas = 1
 requiredMountPath = "/data"
 drainingSeconds = 15
-# A planned restart drains and the container exits 0; ON_FAILURE would
-# never revive a clean stop, leaving the instance 502ing until manual
-# recovery. ALWAYS restarts every stop; the retained 3-retry cap bounds crash loops.
+# An in-app Restart reruns the boot inside the running container (the image's
+# container supervisor), so it never depends on this policy. ALWAYS still
+# revives every other stop, including a clean one; the retained 3-retry cap
+# bounds crash loops.
 restartPolicyType = "ALWAYS"
 restartPolicyMaxRetries = 3

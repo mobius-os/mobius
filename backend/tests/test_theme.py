@@ -7,35 +7,12 @@ os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")
 
 from app.theme import (
   theme_data,
-  extract_imports,
   _ensure_core_vars,
   get_theme_css,
   snapshot_theme_if_present,
   reset_theme_override,
   EffectiveTheme,
 )
-
-
-def test_extract_imports_splits_imports_from_css():
-  css = (
-    "@import url('https://fonts.googleapis.com/css2?family=Poppins');\n"
-    "@import url(\"https://fonts.googleapis.com/css2?family=Fira+Code\");\n"
-    ":root { --font: 'Poppins', sans-serif; }\n"
-  )
-  imports, remaining = extract_imports(css)
-  assert imports == [
-    "https://fonts.googleapis.com/css2?family=Poppins",
-    "https://fonts.googleapis.com/css2?family=Fira+Code",
-  ]
-  assert "@import" not in remaining
-  assert "--font" in remaining
-
-
-def test_extract_imports_no_imports():
-  css = ":root { --bg: #fff; }"
-  imports, remaining = extract_imports(css)
-  assert imports == []
-  assert remaining == css
 
 
 def test_ensure_core_vars_injects_missing():

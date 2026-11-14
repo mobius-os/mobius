@@ -480,6 +480,17 @@ def ref_file(source_dir: str | Path, ref: str, path: str) -> bytes | None:
   return _ref_blob(Path(source_dir), ref, path, read_only=True)
 
 
+def ref_root_files(source_dir: str | Path, ref: str) -> set[str]:
+  """Names of the files directly at the root of ``ref``, not its folders."""
+  proc = _run(Path(source_dir), "ls-tree", "-z", ref, read_only=True)
+  names = set()
+  for line in proc.stdout.split("\0"):
+    meta, _, name = line.partition("\t")
+    if name and meta.split(" ")[1:2] == ["blob"]:
+      names.add(name)
+  return names
+
+
 def _run(
   repo: Path,
   *args: str,

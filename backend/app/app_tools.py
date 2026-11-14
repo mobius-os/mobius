@@ -3,9 +3,11 @@
 An app declares tools in its manifest (`tools`: name, description,
 input_schema). Install review freezes them in the accepted capability contract
 (`agent.tools`), and that contract, never editable source, is what agent runs
-see. The Möbius control server lists the live apps' tools beside its own and
-forwards each call here; the platform then calls the app's own reviewed
-service at ``POST /tools/<name>``. There is no second way to run app code.
+see. The Möbius control server lists those tools beside its own (a shared
+Claude host discovers a metadata-only snapshot taken at host startup, before
+any child identity is available). Every call checks the live catalogue with
+its exact run identity and is forwarded here; the platform then calls the
+app's own reviewed service at ``POST /tools/<name>``. There is no second way to run app code.
 
 Every call carries the exact moment it happened: the chat, the physical run,
 the provider, and the provider's own id for the model's tool call. A later
@@ -57,6 +59,9 @@ class AppTool:
   # A tool the app's prompt fragment tells every agent to use is loaded up front
   # like the platform's own controls; other app tools stay deferrable.
   always_load: bool = False
+  # Owner-declared routine bookkeeping: the chat folds a successful call into
+  # the surrounding activity (agent_activity.is_routine_tool).
+  routine: bool = False
 
   def listing(self) -> dict[str, Any]:
     listing = {
@@ -108,6 +113,7 @@ def live_app_tools(db: Session) -> list[AppTool]:
         description=declaration["description"],
         input_schema=declaration["input_schema"],
         always_load=declaration.get("always_load") is True,
+        routine=declaration.get("routine") is True,
       ))
   return tools
 

@@ -62,16 +62,22 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('a mouse hover reveals a reply’s row; only the latest reply keeps its row in view', () => {
+test('older reply actions reveal only on tap; only the latest reply keeps its row in view', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  const hover = css.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply:hover > \.chat__msg-meta \{[^}]*visibility: visible;/)
-  assert.ok(hover, 'hover reveal is limited to fine pointers so touch keeps tap-to-reveal')
+  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
+    'hovering an earlier reply must not reveal another Copy above the current reply')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /metaVisible=\{last \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
-    'the latest reply keeps its actions in view; owner rows never pin their timestamp')
+  assert.match(chatView, /metaVisible=\{\(!turnActive && last\) \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'only the idle latest reply pins its actions; a new turn hides the previous footer')
+  assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
+    'a new turn or assistant message clears an old tap reveal before paint')
+})
+
+test('ChatView passes each reply whether it ends the agent’s stretch', () => {
+  assert.match(chatView, /endsStretch=\{endsAgentStretch\(peerTimeline\.messages, replyGroups, group\)\}/)
 })
 
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {
@@ -84,7 +90,9 @@ test('copy follows the timestamp inside one tap-revealed metadata row', () => {
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.match(css, /\.chat__msg-meta \{[\s\S]*visibility: hidden;/)
-  assert.match(css, /\.chat__msg-meta--visible \{[\s\S]*visibility: visible;/)
+  const revealRule = css.match(/\.chat__msg-meta--visible \{([^}]*)\}/)[1]
+  assert.match(revealRule, /visibility: inherit;/,
+    'a revealed row follows its view: forcing visible paints it over the app when the shell hides a mounted chat')
   const metaRule = css.match(/\.chat__msg-meta \{([^}]*)\}/)[1]
   const boxHeight = metaRule.match(/(?:^|\s)height: (\d+)px;/)?.[1]
   assert.ok(boxHeight, 'the row must use the message gap instead of centering controls in zero height')

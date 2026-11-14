@@ -1,0 +1,256 @@
+/* Möbius account page pieces the shared Settings primitives don't cover: avatar, handle field, dialog, deployment metrics and skeletons. */
+
+.mobius-account__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Buttons that carry an icon next to their label. */
+.mobius-account__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mobius-account a.settings__btn:not(.settings__btn--outline):not(.settings__btn--danger) { color: var(--accent-fg); }
+.mobius-account__btn svg { flex: none; }
+
+.mobius-account__text-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text, var(--accent));
+  font: inherit;
+  cursor: pointer;
+}
+.mobius-account__text-btn:hover { text-decoration: underline; }
+
+.mobius-account__message {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.mobius-account__icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .mobius-account__icon-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+}
+.mobius-account__icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.mobius-account__spin { animation: mobius-account-spin 0.9s linear infinite; }
+@keyframes mobius-account-spin { to { transform: rotate(360deg); } }
+
+/* ── Sign in ─────────────────────────────────────────────────────────── */
+.mobius-account__provider-mark {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+/* ── Profile ─────────────────────────────────────────────────────────── */
+.mobius-account__avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.mobius-account__field {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, var(--surface));
+  color: var(--muted);
+  font-size: 14px;
+}
+.mobius-account__field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.mobius-account__field.is-invalid { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); }
+.mobius-account__field input,
+.mobius-account__input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.mobius-account__input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, var(--surface));
+  font-size: 14px;
+}
+.mobius-account__input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+
+.mobius-account__hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mobius-account__hint.is-error { color: var(--danger-text, var(--danger)); }
+
+.mobius-account__claim { display: grid; gap: 10px; }
+.mobius-account__claim .mobius-account__hint { margin: 0; }
+.mobius-account__claim-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.mobius-account__claim-row .mobius-account__field { flex: 1; max-width: 320px; }
+
+/* ── Handle dialog ───────────────────────────────────────────────────── */
+/* Anchored to the Settings view like the update review, not the viewport. */
+.mobius-account__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 16px;
+  background: rgb(0 0 0 / 45%);
+}
+.mobius-account__dialog {
+  box-sizing: border-box;
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 22%);
+}
+.mobius-account__dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px -6px 6px 0;
+}
+.mobius-account__dialog h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.mobius-account__dialog-text { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.mobius-account__dialog-actions { justify-content: flex-end; margin-top: 18px; }
+
+/* ── Model access ────────────────────────────────────────────────────── */
+.mobius-account__credit { font-variant-numeric: tabular-nums; font-weight: 500; }
+.mobius-account__rates {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mobius-account__rates li { display: grid; gap: 2px; font-size: 13px; }
+.mobius-account__rates strong { font-weight: 500; }
+.mobius-account__rates span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.mobius-account__rates-unit { margin: 12px 0 0; font-size: 12px; }
+
+/* ── Deployments ─────────────────────────────────────────────────────── */
+.mobius-account__deploy-mark { background: var(--surface-2); padding: 6px; }
+.mobius-account__deploy-mark img { object-fit: contain; }
+.mobius-account__here { color: var(--accent-text, var(--accent)); font-weight: 500; }
+.mobius-account__live { display: inline-flex; align-items: center; gap: 6px; }
+.mobius-account__deploy-panel { display: grid; gap: 14px; padding-left: 62px; }
+.mobius-account__deploy-panel > .settings-item-panel__text { margin: 0; }
+.mobius-account__danger-text { color: var(--danger-text, var(--danger)) !important; }
+.mobius-account__metrics { display: grid; gap: 10px; }
+.mobius-account__runtime {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.mobius-account__meters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+.mobius-account__meter-limit { color: var(--muted); }
+.mobius-account__cost { display: grid; gap: 4px; }
+.mobius-account__cost .settings-item-panel__text { margin: 0; font-size: 12px; }
+.mobius-account__resources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.mobius-account__resources strong { color: var(--text); font-weight: 500; }
+.mobius-account__rename { display: grid; gap: 10px; max-width: 420px; }
+.mobius-account__handoff {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+.mobius-account__handoff > span { flex: 1 1 260px; }
+.mobius-account__handoff a.settings__btn--outline { color: var(--text); text-decoration: none; }
+.mobius-account__warning-icon { color: var(--warning-text, var(--warning)); }
+
+/* ── Loading ─────────────────────────────────────────────────────────── */
+.mobius-account__skeleton {
+  display: block;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  animation: mobius-account-pulse 1.4s ease-in-out infinite;
+}
+.mobius-account__skeleton--line { width: 46%; height: 12px; }
+.mobius-account__skeleton--short { width: 28%; height: 10px; margin-top: 4px; }
+@keyframes mobius-account-pulse { 50% { opacity: 0.55; } }
+
+@container settings (max-width: 400px) {
+  .mobius-account__deploy-panel { padding-left: 14px; }
+  .mobius-account__meters { grid-template-columns: minmax(0, 1fr); }
+  .mobius-account__claim-row { flex-direction: column; align-items: stretch; }
+  .mobius-account__claim-row .mobius-account__field { flex: none; max-width: none; }
+  .mobius-account__overlay { align-items: flex-end; padding: 0; }
+  .mobius-account__dialog {
+    width: 100%;
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
+    padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobius-account__spin,
+  .mobius-account__skeleton { animation: none; }
+}

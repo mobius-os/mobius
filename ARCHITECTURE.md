@@ -243,7 +243,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `pending_questions.py` | Shared `PendingQuestion` dataclass for AskUserQuestion interception (split out to break the `questions`↔runner import cycle; the registry itself lives in `questions.py`) |
 | `tool_summaries.py` | Tool-input summary strings (shared by SDK + subprocess paths) |
 | `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into bounded `{title, url, snippet}` metadata stored on WebSearch blocks and rendered once in the message-level Sources row; an iterative count/depth budget and HTTP(S)-only URL gate keep provider payload cost fixed before SSE or persistence |
-| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, then SIGTERMs its own pid; shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
+| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, drains, then publishes the restart request the root-owned poller accepts (an unpublishable request ends the boot with SIGKILL instead); shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
 
 ### Mini-apps, storage, files
 
@@ -387,7 +387,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `notify.py` | System-event notifications to active broadcasts |
 | `notifications.py` | Push notification sending + history |
 | `push.py` | Web Push subscriptions and native push devices |
-| `theme.py` | `GET /api/theme` — effective theme CSS + bg with default fallback |
+| `theme.py` | `GET /api/theme` — effective theme CSS + bg with default fallback, plus the light/dark switch preview; `POST /api/theme/mode` — the switch |
 | `settings.py` | Owner-level configuration |
 | `github.py` | GitHub connect status + read-only REST/GraphQL passthrough for in-product upstream contributions (pairs with `github_auth.py` + the `contributing.md` skill) |
 | `self_reminders.py` | Agent self-scheduling endpoints |
@@ -521,9 +521,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `CompactionCard.jsx` | Compaction summary affordance |
 | `Attachments.jsx` | File/image attachment previews |
 | `ConnectionStatus.jsx` | SSE reconnection indicator |
-| `ManageModelsModal.jsx` | Model management modal |
 | `streamReducers.js` | Stream-event reducers |
-| `resolveStopResend.js` | Stop → collapse-queue → re-send logic |
 | `chatRuntimeState.js` | Pure queue/stream branch helpers (`canFastForwardQueue`, referenced by the steer contract below) |
 | `streamPromotion.js` | Pure helpers sealing live stream items into the exact identity-owned durable assistant row on promote/steer (`promoteAssistantStream`, `streamItemsHaveRenderableContent`) — ChatView owns *when* promotion happens, this owns *how* |
 | `streamSnapshotCache.js` | Versioned `sessionStorage` cache of the visible streaming items plus their assistant-message identity (the R4 leave-and-return restore) |
@@ -533,7 +531,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `usePaginationLifecycle.js` | Commit-boundary fence for asynchronous older-history requests and delayed follow-up frames |
 | `useVoiceInput.js` | Web Speech API with Android-Chrome workarounds |
 | `useFileUpload.js` | File-upload state + API calls |
-| `hooks/usePendingQueue.js` | Owns the pending-queue state + all its mutations (optimistic vs server-confirmed `serverTs` rows); its `pendingMessagesRef` is what `handleStop` snapshots and the steer/fast-forward gate reads |
+| `hooks/usePendingQueue.js` | Owns the pending-queue state + all its mutations (optimistic vs server-confirmed `serverTs` rows); its `pendingMessagesRef` is what doSend and the steer/fast-forward gate read |
 | `hooks/useBridgePartial.js` | One-shot mount-time decision: REPLACE the kept partial of an in-flight turn on first promote vs APPEND a new assistant message (ts-keyed, not role-keyed) |
 | `markdown/` | `BlockRenderer.jsx`, `blocks.jsx`, `InlineContent.jsx`, `ImageLightbox.jsx`, `highlight.js` (lazy highlight.js), `math.js` (KaTeX) |
 
@@ -581,7 +579,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
 | Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); platform skills live in `backend/scripts/seed-skills/` and advance at server start from their recorded `.seed-skills.json` baseline, while local changes stay in place for review; the index (`skills-index.md`) is generated — never hand-edit it |
-| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Möbius · You) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
+| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Social) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -676,9 +674,11 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Möbius ·
-You)** install from their canonical catalog manifests through
-`backend/app/bootstrap.py` on first boot. These are recovery or management
+**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Social)**
+install from their canonical catalog manifests through
+`backend/app/bootstrap.py` on first boot. New deployments no longer install
+Möbius · You: the Möbius account and models live in Settings and the platform's
+own catalogue, and an existing copy is an ordinary app. These are recovery or management
 surfaces; domain apps are installed explicitly rather than named in platform
 boot policy. Each becomes an ordinary owner-editable app under
 `/data/apps/<slug>` and follows the same update and divergence rules as any
@@ -1179,9 +1179,16 @@ recovery. The platform process then publishes an intent and restart request; it
 does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
-records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
-pid 1. At the very start of the next entrypoint invocation, the ledger binds
-that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
+records its one-shot nonce in `/data/.restart-ledger`, and only then asks the
+image's container supervisor (`backend/runtime/container_supervisor.py`) to end
+the boot and rerun the entrypoint inside the same container. If the worker
+cannot publish its request at all, it ends its boot as a failure (SIGKILL, exit
+137), so the host's restart policy replaces the container. Because an in-app
+Restart keeps the container, root-made changes outside `/data` (for example
+under `/etc`, `/usr` or `/app`) survive it on every host, as they already did
+under Docker's own restart; only a container replacement (a redeploy or image
+update) resets them. At the very start of the next entrypoint invocation, the
+ledger binds that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
 latest exact DB run and the restart policy is on. At startup, the same
 authorization converts matching stranded `running` rows into due restart parks
@@ -1293,6 +1300,22 @@ Goals in that chat remain subscribed. A valid round-trip transfer can restore
 its pending follow after quota and cycle checks. Withdrawn or settled rows never
 revive this way. Same-chat Goal ownership rebinds use this same transition,
 so changing physical executors cannot strand a previously suppressed Goal.
+Attaching a Goal to a Goal-less physical attempt atomically adopts only its
+open Goal-less acquisitions, under the same graph fence and cycle checks,
+whether the Goal is new or an existing intent being explicitly resumed.
+The same transaction adopts this attempt's unowned helpers and live ordinary
+Waits, so execution, liveness and result admission share one ownership truth.
+Wait declaration fences and refreshes its exact creating run's snapshot, so
+concurrent attachment cannot miss a newly committed handoff.
+Older attempts, disposed Wait results and card-owned activation keep their
+saved identities. Source diagnostics stay in the stored dependency outcome;
+follower notices and summaries exclude that operator-only evidence.
+Earlier attempts' claims do not become Goal-owned merely by sharing a chat or
+causal root; an explicit refresh of the exact work key can adopt them.
+Replacing a completed Goal in the same physical turn also requires explicit
+claim refresh. A stamped source stall retains bounded structured evidence of
+the claim, owner run/Goal/root, latest chat attempt and native handoffs observed,
+never transcript content or an inferred "newest Goal" owner.
 
 `goal_dependency_sources` owns registration and immutable source outcomes. Finish,
 release, Goal hold/end and chat deletion stamp subscribed outcomes in the same
@@ -1446,8 +1469,9 @@ that is data compatibility, not a second delivery mechanism.
 (ignoring whitespace) is unmet, and other unsuccessful results or a 120-second
 timeout fail the check. At the deadline, the final check still runs: met wins,
 broken reports failed, and only still-unmet expires. Timer due means met.
-Cancellation applies to armed waits and creates no wake. Every committed check
-outcome emits `chat_wait_changed`, independently of continuation admission.
+Cancellation disarms an armed monitor or withdraws future delivery of an owed result;
+neither creates a wake. Every committed check outcome emits `chat_wait_changed`,
+independently of continuation admission.
 
 The sweep bounds concurrent checks, delivers existing terminal receipts first,
 then admits newly terminal results as their checks finish. It serializes wake
@@ -1465,9 +1489,9 @@ check the receiving run's Goal; admission freezes the carried IDs in
 `ChatRun.admitted_wait_results_json`, and `received_run_id` records the successful
 carrier. Success cannot receipt a result that fired after its prompt snapshot.
 The activation exception retains its earlier scheduling receipt (`scheduled`).
-New ordinary dispositions distinguish `delivered`, `retired_by_goal_outcome`
-and `withdrawn`; old ambiguous timestamps become `legacy_consumed`, with no
-fabricated receiving run and no historical wake storm. A Goal-owned carrier
+New ordinary dispositions distinguish `delivered`, `retired_by_goal_outcome`,
+`withdrawn` and `withdrawn_after_attempt`; old ambiguous timestamps become
+`legacy_consumed`, with no fabricated receiving run and no historical wake storm. A Goal-owned carrier
 superseded before proven provider entry uses the existing single retry identity
 only with writer-stamped `owner_superseded_by_run_id` evidence;
 an unrelated turn cannot adopt its result. Stop/hold still blocks that wake.
@@ -1490,8 +1514,21 @@ restore a stopped/dismissed Goal. The wait itself is independent: chat Stop ends
 a turn/questions/consumer but does not cancel armed monitors. Deletion cancels
 armed monitors. For Goal-less waits, the existing undelivered row can still
 requeue a notice cleared by Stop; Goal-owned results remain blocked by their
-Goal's hold. The wait cancel action continues to accept only armed rows.
-Do not broaden Stop silently while cleaning up the implementation.
+Goal's hold. The ordinary Wait cancel action withdraws armed monitors and
+fired-but-unreceived follow-ups through the chat writer, ordered with provider
+admission and success receipts. It returns `withdrawn` before any attempt, or
+`withdrawn_after_attempt` when every admitting attempt has ended without a
+successful receipt, including resolved provider-limit pauses (`parked_notified`).
+The latter stops future delivery; it never retracts earlier
+provider input or tool effects. A live or unresolved admitting run returns
+`not_withdrawable`; an existing receipt returns `already_delivered`. The read-side
+`can_withdraw` projection shares this eligibility check, but the writer rechecks
+it at mutation. Withdrawal also removes its queued result notices, interrupts
+exact never-admitted Wait carriers, and clears their live-message pointers in
+the same transaction, without stopping unrelated turns. Delivered history stays
+unchanged and Restart-activation Waits
+remain card-owned. Do not broaden Stop silently while cleaning up the
+implementation.
 
 The ordinary Wait lifecycle remains:
 
@@ -1500,7 +1537,7 @@ The ordinary Wait lifecycle remains:
 | Stop / owner hold | Keeps observing | Kept owed; no automatic Goal reopening |
 | Later owner continuation of that Goal | Unchanged | Eligible for that exact Goal's successful receipt |
 | Explicit Goal outcome | Keeps observing | Retired, not delivered |
-| Stop waiting | Withdrawn without a wake | Existing armed-only action does not apply |
+| Stop waiting / Stop follow-up | Withdrawn without a wake | Future delivery withdrawn before admission or after all attempts end; live/unknown attempts must settle first |
 | Chat deletion | Withdrawn in lifecycle transaction | Existing supervisor cancels on observing deletion |
 
 Deletion/restore timing for ordinary results is unchanged: restore before the
@@ -1615,13 +1652,15 @@ updating a matching tracked test in the same change.
 
 ## Stop-chat contract
 
-Stop is a two-layer contract: the backend interrupts and clears, while `frontend/src/components/ChatView/ChatView.jsx:handleStop` owns the user-visible collapse-and-resend behavior. On entry, `handleStop` synchronously guards against double clicks, snapshots `pendingQueue.pendingMessagesRef.current`, joins queued text with a single `\n`, dedupes attachments by `name`, bumps `fetchGenRef`, and clears the pending queue before awaiting `/api/chat/stop`. The endpoint `backend/app/routes/chat.py:chat_stop` returns `{"stopped": bool, "cleared_pending_cids": [...]}` from `chat.py:stop_chat` (cleared-set identity is the stable `cid`; `ts` is display metadata), and the frontend runs that through `resolveStopResend()` for both clean-stop and timeout branches: `null`/missing `cleared_pending_cids` falls back to the whole snapshot, `[]` resends nothing, exact matches resend only those queued rows, and an unmatched cleared cid falls back to the whole snapshot rather than dropping work.
+Stop only interrupts the running turn. It never resends or starts the owner's queue: the messages the owner typed stay queued and visible, the composer keeps the owner's draft, and those messages wait for the owner's next send. Two sends release them. An empty Send (`POST /messages` with `continuation: "queue"`, offered as "Send queued messages" on the queue tray, and by Enter in an empty composer, while no turn runs) releases them as owner input of that moment, so they take exactly a typed message's admission: they start now as the same combined turn the queue would drain into, released in the commit that starts it (`PromotePending.owner_send`), so a refused start leaves them held; or, while a turn, restart drain, activation or auto-resuming provider-limit park owns the chat (the rule the typed send shares, `chats_stream._input_must_queue`; the empty Send always waits for such a park, since it only releases the owner's own rows), they rejoin the ordinary queue (`ReleaseHeld`) and drain after that work. When nothing is held any more (another device already sent or cancelled the rows) the empty Send answers `duplicate` rather than an error. Released rows keep their queue order, so a hidden machine row queued ahead of them runs first. A typed message runs alone first, and the held messages drain after that turn, whether the chat was idle or another turn (for example a Wait or helper result) was running. A shared browser guest cannot send the owner's queue (403): it would run as the owner's work, outside the guest's revocable grant, and a guest's typed message never releases the owner's holds.
 
-`backend/app/chat.py:stop_chat_for` is an interrupt primitive, not a queue-drain primitive. It snapshots the generation, calls `bump_run_generation(chat_id)` before killing handles, registers `_clear_after_terminal_generation` when handles exist, clears pending under `chat_queue.get_lock()`, cancels any live `app.questions` pending question, then calls each runner handle's `stop(timeout=2.0)`. If every handle stops it unregisters them and finalizes the broadcast (discarding `_starting`); the stuck run-marker is cleared via the actor only on the no-handles path — active handles hand that clear to `run_chat`'s finally block. If any handle times out it leaves the registry entry and broadcast intact for runner-side teardown and returns `stopped=False` — in that branch the frontend must NOT disconnect or start a second run. Instead, if `resolveStopResend()` returns text, `handleStop` calls `doSend(..., { pin:false })` while `isStreamingRef` is still true, so the message follows the queue path and is re-persisted as pending.
+`backend/app/chat.py:stop_chat_for` snapshots the generation, calls `bump_run_generation(chat_id)` before killing handles, registers `_clear_after_terminal_generation` when handles exist, then settles the queue under `chat_queue.get_lock()` through the writer's `HoldPending`. The owner's rows (`continuations.is_owner_typed`: visible rows not positively marked as another sender's, so rows queued before owner input was stamped count) survive, marked `held`. `AppendPending` marks a visible row the owner, an app or a guest did not send (an agent token's) with `_agent_input`. Stop drops a row an app, a browser guest or an agent queued, a queued helper result (its Delegation row still owes the result) and a retired Goal control; a helper's queued answer and other hidden machine carriers stay queued, unheld, with their own delivery semantics. It then cancels any live `app.questions` pending question and calls each runner handle's `stop(timeout=2.0)`. If every handle stops it unregisters them and finalizes the broadcast (discarding `_starting`); the stuck run-marker is cleared via the actor only on the no-handles path — active handles hand that clear to `run_chat`'s finally block. If any handle times out it leaves the registry entry and broadcast intact for runner-side teardown and returns `stopped=False`, and the frontend keeps the stream attached. The terminal setup-error cleanup (no owner, auth error, unsupported provider) settles the queue the same way.
 
-The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_cids` is the only guard against duplicate follow-up work.
+A held row is never promoted by itself and is not runnable work: `continuations.has_runnable_pending` (any row not held) replaces "the queue is non-empty" wherever that meant work waiting to run (busy and compaction checks, a compaction pause continuing, machine continuations, quiet card closes, the idle-queue sweep's head). `PromotePending` promotes only unheld rows. Holds are released in one way (`continuations.release_holds`, which also stamps the release time as the rows' owner input, so a Goal the Stop paused may resume) from three places, one per owner action: the empty Send that starts now (`PromotePending.owner_send`, atomic with its start), the empty Send that queues behind other work (`ReleaseHeld`), and `PromotePending` starting a row with positive owner proof (`continuations.releases_holds`: an owner-typed row carrying the `_owner_input_at` only the owner's send stamps; a legacy unstamped row is held but never releases), so the held rows drain after that message. Machine continuations (`StartContinuation`, which delivers Wait and Goal-dependency results) and peer steering skip held rows rather than wait behind them; automatic steering of a new owner message does not, so that message queues and releases the holds at its turn. A held row that reaches the transcript (a steer, a promotion) loses its `held` mark. An empty Send restores an archived chat like a typed one. The generation bump remains the key invariant: a dying `_run_chat_impl` rechecks ownership in its terminal path and after Stop resolves to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promoting pending or scheduling a continuation. By construction no client-side copy of the queue exists to lose or send twice.
 
-A per-chat Stop also returns `stop_receipt: {chat_id, run_id}` when it ended run `run_id` (every handle stopped, or with no process the run was durably closed) and cleared the queued turns it reports; with no running run, `run_id` is the chat's latest idle run (`null` if it never ran). That is all it certifies. Work that runs afterwards, such as a Wait outside a Goal firing, a helper result, or an owner resume, starts a different run, so app cancellation binds to `run_id` and treats any later run as newer work. The receipt is `null` for an unconfirmed Stop, the global sweep, a Stop that kept the queue (a restart drain, whose queued turns run after the restart, or a failed clear), or a Stop whose run close did not persist. `run_id` is the chat's latest `ChatRun` as read by the writer's `PrepareChatStop` (`ChatStopPrepared`) inside the transition lock, carried out through `chat.py:ChatStopOutcome.receipt`; it is never re-read after the interrupt, since a status read after Stop releases the lock may already name a successor. `ChatStopOutcome` still unpacks as the `(stopped, cleared_pending_cids)` pair internal callers use.
+`frontend/src/components/ChatView/ChatView.jsx:handleStop` guards against double clicks, bumps `fetchGenRef` (the stream-end refetch is skipped while Stop runs, so older server state cannot overwrite the partial it promotes), posts `/api/chat/stop` and confirms idle through the runtime read, whose `pending_messages` (now `held`) it hydrates. It hydrates the server's queue after a failed Stop too, since the server settles the queue before it interrupts the turn. The tray then says the held rows wait for the owner (true after Stop and after a setup error; with rows queued since, it counts the held ones and says the rest send after the turn), and while no turn runs (`queueAwaitsOwnerSend`) it offers "Send queued messages" (not to a shared-browser guest, whom the server refuses; the guest's tray says the rows wait for the owner); the composer keeps its mic for the owner and guest alike. A held row never stays reserved for a steer a Stop ended: it shows in the tray again. A refused empty Send shows the server's reason and leaves the queue as it was. When a message with owner proof starts (the server's stamp, or a row this device just typed), the client releases its local holds as the server does (`usePendingQueue.promoteManyByCid`), and an accepted empty Send clears them all (`releaseHolds`). The endpoint `backend/app/routes/chat.py:chat_stop` still answers `cleared_pending_cids: []`: an older cached client resends only what that lists, so it never sends the kept queue a second time.
+
+A per-chat Stop also returns `stop_receipt: {chat_id, run_id}` when it ended run `run_id` (every handle stopped, or with no process the run was durably closed) and settled the queue behind it (owner rows held, others dropped); with no running run, `run_id` is the chat's latest idle run (`null` if it never ran). That is all it certifies. Work that runs afterwards, such as a Wait outside a Goal firing, a helper result, or an owner send, starts a different run, so app cancellation binds to `run_id` and treats any later run as newer work. The receipt is `null` for an unconfirmed Stop, the global sweep, a Stop that left the queue runnable (a preserving caller or a failed hold), or a Stop whose run close did not persist. `run_id` is the chat's latest `ChatRun` as read by the writer's `PrepareChatStop` (`ChatStopPrepared`) inside the transition lock, carried out through `chat.py:ChatStopOutcome.receipt`; it is never re-read after the interrupt, since a status read after Stop releases the lock may already name a successor. `ChatStopOutcome` unpacks as `(stopped, receipt)`.
 
 ## Owner questions
 
@@ -1978,9 +2017,12 @@ is network-first; a warm document that missed a transient event discovers the wa
 generation on a later foreground boundary and advertises it without interrupting work.
 
 Before the explicit navigation, `flushPersistedQueryCache()` writes the current
-allowlisted cache directly; this normally guarantees the reloaded ChatView hydrates
-the latest assistant row rather than a previous partial while its authoritative GET
-revalidates. The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be
+allowlisted cache directly, so the reloaded ChatView hydrates the latest assistant
+row rather than a previous partial while its authoritative GET revalidates, unless
+the write misses the deadline below. Both this write and the throttled one use
+`shouldPersistQuery`, which skips a query still on its first fetch: TanStack would
+dehydrate its in-flight Promise, IndexedDB cannot clone that, and one such entry
+would fail the whole write. The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be
 blocked by another browser lifecycle transaction, and a best-effort cache write must
 never strand an owner-requested refresh. The write may still finish after the deadline.
 
@@ -1992,7 +2034,7 @@ Published apps should generate one random UUID once and declare it as `package_i
 
 **Update discovery.** `GET /api/apps/{id}/update-check` and `GET /api/apps/{id}/update-candidate-preview` fetch the candidate Git commit (optionally from a catalog `manifest_url`) and resolve it to an installed row with the installer's own rule, `install.resolve_package_row`: permanent `package_id`, then the stored or ref-independent address, then a `previous_manifest_url` whose resolved GitHub repository id equals the candidate's (an unresolved identity, as on a legacy row, proves nothing), then a `previous_id` rename. The install preview uses the same rule. A candidate is offered only when that rule names this app, so discovery never offers an update that install would refuse or apply to a different row. When it doesn't, `update-check` returns `update_available: null` with `candidate_rejected: {code, message}`, and the preview answers 409 with the same object as `detail`. Discovery reads a candidate only from the app's own Git origin: a catalog `manifest_url` in another repository (a moved or renamed repository, or another owner's) is not fetched and is reported as `repository_moved`. Reinstalling from the Store follows such a move when the new repository proves it is the same app (a same-owner `previous_id` rename, or matching GitHub repository ids for a permanent package); otherwise it adds a separate app. A candidate in the app's own repository that the rule does not name as this app is `identity_mismatch`. Clients should treat unknown codes the same way. Every other unknown (no Git source, a failed fetch, an unreadable package) keeps `candidate_rejected: null`.
 
-Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, `agent_activities`, and `shell_shortcuts` (`false` stops the app frame capturing the shell's keyboard shortcuts, for apps such as editors that need those chords). `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. Logical `static_assets` destination `x` is materialized at source path `static/x`. One 64 MiB `PACKAGE_MAX_BYTES` bounds every file a package declares (entry, icon, job, source files, static assets and file seeds), summed per declaration because each is written separately (`manifest_contract.package_bytes`): HTTP and Git installs charge that sum, local apply and `validate-app.py` check it from file sizes, and Store publication bounds both it and its whole tree, so every published app is installable. Beyond the 64 KiB manifest cap and the skill and system-prompt caps that bound agent context, no declared file or file kind has its own size or count cap; Store publication also limits a release to 250 files. The compile contract refuses a compiled module larger than the 8 MiB the shell loads, so large data belongs in `static_assets`, fetched at runtime.
+Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, `agent_activities`, and `shell_shortcuts` (`false` stops the app frame capturing the shell's keyboard shortcuts, for apps such as editors that need those chords). `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author` and `homepage` are not validated or stored. `license` is not stored either, but Store publication requires it to be one of the free licenses the Store offers (`store_licenses.OFFERED_LICENSES`), with its text in a root license file (normally `LICENSE`). An app the Store already lists may instead keep another free license it declares (`store_licenses.LISTED_FREE_SPDX`); the Host admits that update only when the listed revision declares the same one. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. Logical `static_assets` destination `x` is materialized at source path `static/x`. One 64 MiB `PACKAGE_MAX_BYTES` bounds every file a package declares (entry, icon, job, source files, static assets and file seeds), summed per declaration because each is written separately (`manifest_contract.package_bytes`): HTTP and Git installs charge that sum, local apply and `validate-app.py` check it from file sizes, and Store publication bounds both it and its whole tree, so every published app is installable. Beyond the 64 KiB manifest cap and the skill and system-prompt caps that bound agent context, no declared file or file kind has its own size or count cap; Store publication also limits a release to 250 files. The compile contract refuses a compiled module larger than the 8 MiB the shell loads, so large data belongs in `static_assets`, fetched at runtime.
 
 `agent_activities` is the app-neutral presentation contract for scripts an app
 asks the chat agent to run. Each activity declares an id, a repo-relative
@@ -2084,7 +2126,18 @@ and busy ones cost no query per event. Bytes already
 forwarded to a remote service cannot be recalled.
 Installation identity, credential, access administration and lifecycle controls
 remain separately gated; ordinary readable owner-input cards retain their
-existing participant-answer contract.
+existing participant-answer contract. The owner's Möbius account (profile,
+sign-in email, deployments and credit), management of the owner's GitHub
+connection, and publishing or changing anything on GitHub or the Community
+Store under the owner's identity (Contribute's sends, updates, assignments,
+merges and replies, project pushes, Reviewer posts, Store listings, reviews
+and install receipts) are refused to any bearer carrying a guest's lineage:
+the guest's session and the apps, services, agents and helpers it starts,
+whatever access the guest holds (`deps.require_account_owner`,
+`require_account_owner_control`). The apps a guest uses may still read GitHub
+through the owner's connection, as part of the shared workspace, and resolve
+handles in the public directory. This is an API boundary, not a sandbox
+around what a guest-started agent or a guest-edited app can later do.
 
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input

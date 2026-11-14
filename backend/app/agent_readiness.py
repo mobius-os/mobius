@@ -32,9 +32,11 @@ CODE_DATA_DISK_CRITICAL = "data_disk_critical"
 CODE_DATA_DISK_CONSTRAINED = "data_disk_constrained"
 CODE_DATA_DIR_UNWRITABLE = "data_dir_unwritable"
 CODE_MEMORY_CRITICAL = "memory_critical"
+CODE_PROCESSES_CRITICAL = "processes_critical"
 
 CODE_DATA_DISK_UNKNOWN = "data_disk_unknown"
 CODE_MEMORY_CONSTRAINED = "memory_constrained"
+CODE_PROCESSES_CONSTRAINED = "processes_constrained"
 CODE_NO_AUTHENTICATED_PROVIDER = "no_authenticated_provider"
 CODE_PROVIDER_UNAVAILABLE = "provider_unavailable"
 CODE_PROTECTED_RUNTIME_STALE = "protected_runtime_stale"
@@ -174,6 +176,15 @@ def agent_readiness(
     reasons.append(CODE_MEMORY_CRITICAL)
   elif memory_state == "constrained":
     warnings.append(CODE_MEMORY_CONSTRAINED)
+
+  # Uncapped hosts report unknown, like unreadable memory telemetry: no code.
+  processes_state = str(
+    _mapping(pressure.get("processes")).get("state") or "unknown"
+  )
+  if processes_state == "critical":
+    reasons.append(CODE_PROCESSES_CRITICAL)
+  elif processes_state == "constrained":
+    warnings.append(CODE_PROCESSES_CONSTRAINED)
 
   if writable_probe(data_dir) is not None:
     reasons.append(CODE_DATA_DIR_UNWRITABLE)

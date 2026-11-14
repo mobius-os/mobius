@@ -48,6 +48,7 @@ from typing import Any, Callable
 from PIL import Image
 
 from app import generated_files, settled, viewed_images
+from app.chat_branches import with_resumed_context
 from app.codex_sdk_contract import (
   app_server_exit_code,
   app_server_pid,
@@ -98,7 +99,7 @@ from app.question_bridge import (
   QuestionPersistenceError,
   park_question,
 )
-from app.runtime_types import RunnerResult
+from app.runtime_types import RunnerResult, prompt_not_sent_result
 from app.usage_metrics import (
   codex_call_input_tokens,
   codex_cost_usd,
@@ -947,20 +948,19 @@ class ActiveCodexTurn:
       raise
 
   async def interrupt(self) -> None:
-    """Signals the live turn and waits for runner-side drain."""
+    """Signals the live turn and waits for runner-side drain.
+
+    The `_finished` wait has no bound of its own: ``stop(timeout)`` is the
+    only budget, so a wedged runner makes ``stop`` time out and report the
+    turn as not stopped.
+    """
     self._interrupt_requested = True
     self._reject_pending_steer()
     try:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      log.warning(
-        "codex active_turn._finished never resolved within 5s; runner is wedged"
-      )
-      return
+    await asyncio.shield(self._finished)
 
   async def clear_goal(self) -> None:
     """Stop this attempt; the platform writer owns Goal dismissal."""
@@ -1206,6 +1206,46 @@ async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
     response_model=sdk["ThreadGoalGetResponse"],
   )
   return response.goal
+
+
+async def _fork_codex_thread(codex, sdk, fork_from: dict, thread_options: dict):
+  """A new thread holding ``fork_from["session_id"]`` through its turn ``fork_from["at"]``.
+
+  The SDK's ``thread_fork`` cannot name a last turn yet, so this sends the
+  app-server request itself, as backend/scripts/fork_session.py does, with the
+  wire forms of the same ``thread_options`` a new thread starts with. The
+  SDK's own option-to-wire mapping (``_approval_mode``, ``_sandbox``) is
+  private, so the few modes an owner thread uses are spelled out here; an
+  option without a wire form raises, and the caller starts fresh instead.
+  Personality is inherited from the source thread; a native goal the source
+  thread saved is the source's, so it is cleared before any turn can start it,
+  as the resume path clears a retired one.
+  """
+  from openai_codex import AsyncThread
+
+  client = control_client(codex)
+
+  approval = {
+    sdk["ApprovalMode"].auto_review: {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
+    sdk["ApprovalMode"].deny_all: {"approvalPolicy": "never"},
+  }[thread_options["approval_mode"]]
+  sandbox = {sdk["Sandbox"].full_access: "danger-full-access"}[thread_options["sandbox"]]
+  params = {
+    "lastTurnId": fork_from["at"],
+    **approval,
+    "sandbox": sandbox,
+    "baseInstructions": thread_options.get("base_instructions"),
+    "developerInstructions": thread_options.get("developer_instructions"),
+    "config": thread_options.get("config"),
+    "cwd": thread_options.get("cwd"),
+    "model": thread_options.get("model"),
+  }
+  forked = await client.thread_fork(
+    fork_from["session_id"], {k: v for k, v in params.items() if v is not None},
+  )
+  if await _codex_thread_goal(client, sdk, forked.thread.id) is not None:
+    await client.thread_goal_clear(forked.thread.id)
+  return AsyncThread(codex, forked.thread.id)
 
 
 def _sdk_imports() -> dict[str, Any]:
@@ -1697,6 +1737,7 @@ async def _run_codex_sdk_turn(
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
   resumed_context: str | None = None,
+  fork_from: dict | None = None,
   should_abort: Callable[[], bool] | None = None,
   retire_native_goal: bool = False,
   run_policy=None,
@@ -2137,6 +2178,17 @@ async def _run_codex_sdk_turn(
             "Codex session %s has no rollout for chat %s; starting a fresh "
             "thread", session_id, chat_id,
           )
+      if session_id is None and fork_from is not None:
+        # A branch's first turn: continue from an exact copy of the source
+        # thread through the chosen reply's turn (chat_branches.codex_fork_point).
+        try:
+          thread = await _fork_codex_thread(codex, sdk, fork_from, thread_options)
+        except Exception as exc:
+          log.warning(
+            "Codex branch fork of %s failed for chat %s (%s); starting fresh "
+            "with the copied history", fork_from["session_id"], chat_id, exc,
+          )
+          user_message = with_resumed_context(user_message, resumed_context)
       if thread is None:
         thread = await codex.thread_start(**thread_options)
       record_memory_checkpoint_once(
@@ -2150,7 +2202,7 @@ async def _run_codex_sdk_turn(
       current_session_id = thread.id
       if abort_requested():
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
-        return {**aborted_result(), "prompt_sent": False}
+        return prompt_not_sent_result(current_session_id)
       if session_id is not None and current_session_id != session_id:
         # The requested Codex session is gone (rollout cleaned up, or a phantom
         # id) — Codex returned a fresh thread instead of resuming. Rather than
@@ -2195,8 +2247,7 @@ async def _run_codex_sdk_turn(
             "codex session reseed activity log failed chat_id=%s",
             chat_id, exc_info=True,
           )
-        if resumed_context:
-          user_message = f"{resumed_context}\n\n{user_message}"
+        user_message = with_resumed_context(user_message, resumed_context)
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,
@@ -2834,6 +2885,7 @@ async def run_codex_sdk_turn(
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
   resumed_context: str | None = None,
+  fork_from: dict | None = None,
   should_abort: Callable[[], bool] | None = None,
   retire_native_goal: bool = False,
   run_policy=None,
@@ -2871,6 +2923,7 @@ async def run_codex_sdk_turn(
       agent_settings=agent_settings,
       system_prompt=system_prompt,
       resumed_context=resumed_context,
+      fork_from=fork_from,
       should_abort=should_abort,
       retire_native_goal=retire_native_goal,
       run_policy=run_policy,

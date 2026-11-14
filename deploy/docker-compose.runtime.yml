@@ -25,7 +25,9 @@
 # platform runs the image directly and owns networking, TLS, and restarts.
 # Nothing here is required for the image to boot; it is purely the self-hosted
 # wrapper. Docker's native `restart: unless-stopped` (here) and the platform's
-# own restart (there) are the only restart mechanism — no bespoke supervisor.
+# own restart (there) are the only crash and reboot recovery — no bespoke crash
+# supervisor. An in-app Restart reruns the boot inside the running container
+# (the image's container supervisor) and never reaches either policy.
 
 services:
   app:

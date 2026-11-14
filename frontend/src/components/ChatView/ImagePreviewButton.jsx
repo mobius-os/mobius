@@ -13,6 +13,7 @@ export default function ImagePreviewButton({
   intrinsicHeight,
   imageLoading = 'lazy',
   onPointerDown,
+  onLoad,
   onError,
 }) {
   const [open, setOpen] = useState(false)
@@ -42,6 +43,7 @@ export default function ImagePreviewButton({
           height={intrinsicHeight || undefined}
           loading={imageLoading}
           draggable={false}
+          onLoad={onLoad}
           onError={onError}
         />
       </button>

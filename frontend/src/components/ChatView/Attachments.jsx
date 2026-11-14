@@ -4,6 +4,7 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 import DocumentAttachment from './DocumentAttachment.jsx'
+import { markAttachmentThumbFit } from './attachmentThumbFit.js'
 import { ExpandableImage } from './markdown/InlineContent.jsx'
 
 export function generatedFileCanPreview(file) {
@@ -152,6 +153,7 @@ function AttachImage({ src, alt }) {
           alt={alt || 'attached image'}
           buttonClassName="chat__attach-thumb-button"
           imageClassName="chat__attach-thumb"
+          onLoad={markAttachmentThumbFit}
         />
       )}
     </span>

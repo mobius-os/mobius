@@ -23,8 +23,9 @@ sudo -n true
 Use `sudo` deliberately when the task needs it. If that check fails, stop: the
 operator disabled root with `MOBIUS_AGENT_SUDO=0`, and bypassing that choice is
 not part of the agent's authority. Package changes made only in a running
-container are lost when the container is replaced; see the dependency steps
-below for making them durable.
+container survive an in-app Restart, which reruns the boot in the same
+container, but are lost when the container is replaced; see the dependency
+steps below for making them durable.
 
 ---
 
@@ -45,7 +46,8 @@ Review the exact changed paths and use the smallest matching action:
 | `backend/runtime/identity_broker.py` | The one served privileged runtime file: one server restart activates a valid edit; an invalid one falls back to the baked platform for that boot. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | `backend/scripts/seed-skills/` | One server restart applies the served templates to installed skills; untouched copies advance and edited ones stay for review. No image rebuild once the container runs an image that hands this job to the server. To use an edit immediately, write identical bytes to `/data/shared/skills/<name>.md`. |
-| Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
+| A skill an installed app ships (listed under `skills` in its `mobius.json`) | Edit the app's own file, `/data/apps/<slug>/<skill>.md`, then call `apply_app`. The copy in `/data/shared/skills/` is replaced from that file on the app's next apply or update; an edit made only there is overwritten (a "pre-install snapshot" commit in `/data` keeps the old bytes). |
+| Other `backend/scripts/`, tests, docs, and platform-owned shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations do not activate a live install and do not require an immediate rebuild. They survive container replacement only through the release that contains them; see Dependencies below. |
 
@@ -150,6 +152,24 @@ raw stdout is not stored anywhere an agent can read.
 When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and
 stacks. It occupies one worker for the window, and one profile runs at a time.
+
+Slowness is often bursty and gone before a profile starts. For that, turn on
+the stall log: add `"stall_log": true` to `/data/tracing.json` (the opt-in
+tracing file; it needs no collector or extra packages and works without
+`"enabled"`) and restart. It then writes `/data/logs/stalls.jsonl` (one
+rotation to `.jsonl.1`): requests slower to start responding than a long
+database hold (`DB_CHECKOUT_WARN_SECONDS`, 2 s by default, counted from
+arrival so a slow upload counts), event-loop stalls past asyncio's
+slow-callback threshold (0.1 s), and long database holds. Routes that wait on
+purpose (long-polls, waits) also appear as slow requests. An event that caught
+busy threads links by `snapshot` to a line showing what they were doing at
+that moment. `no_busy_threads: true` marks a late request while no thread was
+busy: it was waiting, on an upstream, the client, or a lock, queue or future
+inside the server, not on CPU or a blocked event loop. `false` only means some
+thread was not in a known wait; it is not proof of CPU work. Records name route templates and
+code locations, never concrete paths or query strings; `<unmatched>` means no
+API route matched or routing had not run yet. Read it before reproducing a
+reported slowdown.
 
 Exercising owner-input cards programmatically (for a test, never to answer for
 the owner): while a card is open, posting a chat message returns 409

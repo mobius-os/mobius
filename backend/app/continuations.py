@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import hashlib
 from typing import Any
 
@@ -123,6 +123,54 @@ def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
   if not isinstance(cid, str) or not cid.startswith(HELPER_ANSWER_CID_PREFIX):
     return None
   return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
+
+def is_owner_typed(message: object) -> bool:
+  """Whether Stop keeps a queued row for the owner's next send: a visible row
+  not positively marked as another sender's (an app's request, a browser
+  guest's message, an agent's message, a helper's answer). Rows queued before
+  owner input was stamped count, so Stop never drops the owner's text; they
+  just cannot release holds (`releases_holds`)."""
+  return bool(
+    isinstance(message, Mapping)
+    and not message.get("hidden")
+    and message.get("_initiated_by_app_id") is None
+    and message.get("_browser_grant_id") is None
+    and not message.get("_agent_input")
+    and helper_answer_question_id(message) is None
+  )
+
+
+def releases_holds(message: object) -> bool:
+  """Whether starting this row releases the rows a Stop held, so they follow
+  it: the owner's own message, with positive proof (`_owner_input_at`, which
+  only the owner's send stamps). Releasing stamps the held rows as owner
+  input, so nothing less than that proof may do it."""
+  return is_owner_typed(message) and bool(message.get("_owner_input_at"))
+
+
+def release_holds(rows: list[Any], released_at: str) -> list[Any]:
+  """Return the queue with every hold released. The owner's send is owner
+  input now, so each released row is stamped with that time: a Goal a Stop
+  paused resumes for it like for a freshly typed message."""
+  return [
+    {**{k: v for k, v in row.items() if k != "held"}, "_owner_input_at": released_at}
+    if isinstance(row, Mapping) and row.get("held") else row
+    for row in rows
+  ]
+
+
+def runnable_pending(pending: Iterable[Any] | None) -> list[Mapping[str, Any]]:
+  """The queued rows that can run without the owner: every row a Stop did
+  not hold."""
+  return [row for row in pending or () if isinstance(row, Mapping) and not row.get("held")]
+
+
+def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
+  """Whether the queue holds work that can run without the owner. Held rows
+  are not runnable work, so checks that mean "something is queued to run"
+  use this rather than a non-empty queue."""
+  return bool(runnable_pending(pending))
+
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""
@@ -284,6 +332,16 @@ LOW_STORAGE_NOTICE = (
   " avoid large writes. Delete only files this chat created; ask the"
   " owner before deleting anything else."
 )
+PROCESS_LIMIT_NOTICE = (
+  "The owner let this turn start near the shared process and thread limit;"
+  " avoid starting browsers, servers or parallel tools. Stop only processes"
+  " this chat started; ask the owner before stopping anything else."
+)
+# What a Continue anyway turn is told about each floor it was admitted past.
+CONTINUE_ANYWAY_NOTICES = {
+  "storage": LOW_STORAGE_NOTICE,
+  "processes": PROCESS_LIMIT_NOTICE,
+}
 
 
 def continuation_protocol_source(
@@ -303,6 +361,7 @@ def continuation_protocol_source(
     "usage_limit": "Resume the interrupted owner work after a provider-limit check. Provider availability is not yet confirmed.",
     "memory": "Resume the interrupted owner work now that memory pressure has cleared.",
     "storage": "Resume the interrupted owner work now that storage pressure has cleared.",
+    "processes": "Resume the interrupted owner work now that process and thread pressure has cleared.",
     "compaction": (
       "The oversized provider session was replaced using the saved detailed handoff "
       "and uncovered conversation. Continue the interrupted work from that briefing, "

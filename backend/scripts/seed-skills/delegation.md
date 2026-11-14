@@ -55,7 +55,10 @@ combined outcome, and state which provider did what.
 
 Use `message_agent` for a finished helper's follow-up, `stop_agent` to cancel,
 and `list_agents` to inspect an existing result. For a decision-changing note
-to a still-working helper, use the peer coordination tools instead.
+to a still-working helper, use the peer coordination tools instead. A top-level
+turn that started with no other agent live and no Project has no peer tools
+even after it spawns helpers: put what the helper needs in its task, wait for its
+result, and use `message_agent` for a follow-up.
 
 A helper's `ask_parent` question is addressed to its parent agent, and the
 owner sees it only as internal activity. When it is genuinely the owner's

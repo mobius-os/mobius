@@ -28,7 +28,7 @@ import {
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNativePush from '../../hooks/useNativePush.js'
-import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
+import useNavigation, { deepLink, recoveringFromCrash } from '../../hooks/useNavigation.js'
 import useLatch from '../../hooks/useLatch.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
@@ -37,7 +37,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { subscribeShellLaunchTargets } from '../../lib/shellLaunchTargets.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
-import { settingsSectionOrNull } from '../../lib/settingsSections.js'
+import { requestedSettingsSection, settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -66,11 +66,13 @@ import {
   ownerQueries,
   projectQueries,
   settingsQueries,
+  WaitingPaymentsPushedContext,
 } from '../../hooks/queries.js'
 import { consumeProjectCopyRequest, clearProjectCopyRequest } from '../../lib/projectCopies.js'
+import { waitingPaymentNotice } from '../../lib/creditsPayment.js'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { buildEventProjectId, isArtifactBuildEvent, projectEntryTarget, resultDisplayName } from '../../lib/projectArtifacts.js'
-import { projectChatTabLabel } from '../../lib/projectChats.js'
+import { liveProjectChat, projectChatTabLabel } from '../../lib/projectChats.js'
 import {
   appSourceProjectId,
   linkedProjectAppId,
@@ -132,10 +134,14 @@ import {
   resolveNewChatIntentId,
   resumedNewChatPresentation,
   reusableChatDetailVerdict,
+  reusableProjectChatDetailVerdict,
+  reusableProjectEmptyChat,
   shouldRetryNewChatAllocation,
   stageVerifiedNewChatHandoff,
   writeNewChatIntent,
 } from './newChatPolicy.js'
+import { saveDrawerRename } from '../Drawer/drawerRename.js'
+import usePinnedItemMutations from '../Drawer/usePinnedItemMutations.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -197,7 +203,7 @@ import {
 import LazySurface, { SurfaceLoading, createLaunchCoverHold } from '../ErrorBoundary/LazySurface.jsx'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan,
-  MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
+  MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY, panesShareScreen, screenShareRect,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
 import {
@@ -328,16 +334,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   } = useWorkspaceSession({
     storage: workspaceStorage,
     legacyStorage: sharedBrowserAccess ? null : tabStorage,
+    recoveringFromCrash,
   })
   // Back/Forward can reserve a draft's mobile writing session before the
   // outgoing surface becomes inert. The callback is filled after the shared
   // composer handoff exists below.
   const beforeRestoreRouteRef = useRef(null)
   const beforeDrawerOpenRef = useRef(null)
-  const walkthroughHandoffRef = useRef(false)
-  const onWalkthroughHandoffChange = useCallback((suspended) => {
-    walkthroughHandoffRef.current = suspended
-  }, [])
 
   const {
     initialNav,
@@ -392,6 +395,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
   const desktopSidebarReserved = persistentDrawer && desktopSidebarOpen
+  // Live mirrors for async project cleanup (closeRemovedProject).
+  const activeProjectIdRef = useRef(activeProjectId)
+  activeProjectIdRef.current = activeProjectId
+  const activeArtifactRefRef = useRef(activeArtifactRef)
+  activeArtifactRefRef.current = activeArtifactRef
   const primeDesktopSidebarContentRect = useCallback((nextReserved) => {
     const el = contentElRef.current
     if (!el) return
@@ -516,12 +524,28 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [])
   // Immersive is a temporary overlay lease, independent of the durable builder /
   // single worlds. A verified request from the focused app may therefore solo
-  // that app over EITHER world; clearing the lease reveals the exact world below
+  // that app over EITHER world once it has the screen to itself (never while
+  // side-by-side panes share it); clearing the lease reveals the exact world below
   // without changing its workspace mode, pane tree, tabs, or single-screen slot.
   // Settings keeps its builder invariant because isImmersiveActive additionally
   // requires the active shell view to be the requesting canvas, and AppCanvas
   // forwards live requests only from its focused active frame.
-  const immersiveActive = isImmersiveActive(immersiveRequest, activeView, activeAppId)
+  // The share decision reads its layout mode from a box immersive cannot grow
+  // (screenShareRect); the live workspaceMode would loop at a phone split.
+  const immersiveShareLatchRef = useRef({ applied: false, rect: contentRect })
+  const shareRect = screenShareRect(immersiveShareLatchRef.current, contentRect)
+  const immersiveActive = isImmersiveActive(
+    immersiveRequest, activeView, activeAppId,
+    {
+      sharesScreen: panesShareScreen({
+        viewMode: effectiveViewMode, projection,
+        layoutMode: paneModel.modeForRect(shareRect),
+      }),
+    },
+  )
+  useLayoutEffect(() => {
+    immersiveShareLatchRef.current = { applied: immersiveActive, rect: shareRect }
+  }, [immersiveActive, shareRect])
   useLayoutEffect(() => {
     if (!immersiveActive) return
     const drawer = document.getElementById('navigation-drawer')
@@ -822,6 +846,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const notifyShell = useCallback((message, options) => {
     notificationCenterActionsRef.current?.addNotice(message, options)
   }, [])
+  const pins = usePinnedItemMutations({ chats, apps, projects, onNotice: notifyShell })
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -991,9 +1016,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // only for a saved draft; on desktop it restores keyboard focus.
   beforeRestoreRouteRef.current = (route) => {
     if (route?.view !== 'chat' || route.chatId == null) return
-    // The guide owns focus when Back returns from an app it handed the owner
-    // to. A chat restore still restores the chat; only its composer-focus request yields.
-    if (walkthroughHandoffRef.current) return
     // Dismissing navigation restores the prior keyboard state, not merely a
     // saved draft. A draft whose keyboard was down must stay down.
     if (drawerOpenRef.current && isTouchPrimary()) {
@@ -1096,6 +1118,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const startChatFromCommandRef = useRef(null)
   const handleNewChatCommand = useCallback(
     options => startChatFromCommandRef.current?.(options) ?? Promise.resolve(false),
+    [],
+  )
+  const branchChatRef = useRef(null)
+  const handleBranchChat = useCallback(
+    (chatId, throughId) => branchChatRef.current?.(chatId, throughId) ?? Promise.resolve(false),
     [],
   )
   // Latest-materialize ref so the deferred-New-Chat watcher (stable deps) runs this
@@ -1376,6 +1403,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // visibility:false).
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
+  const visibleAppIdsRef = useRef(visibleAppIds)
+  useEffect(() => { visibleAppIdsRef.current = visibleAppIds }, [visibleAppIds])
   // Retained chat surfaces for BOTH layout worlds. A chat selected in Standard's
   // slot and a Builder pane has two physical layout owners: Standard remains
   // full-bleed and Builder remains pane-sized, so neither world's ResizeObserver /
@@ -1782,21 +1811,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     })
   }
 
-  async function createProjectChat(project, {
-    title = 'New chat', prompt = null, autoSend = false, settings = null,
-  } = {}) {
-    if (!project?.id) return null
-    const response = await api.projects.createChat(project.id, {
-      title,
-      recovery_request_id: crypto.randomUUID(),
-    })
-    const created = await jsonOrThrow(response, 'Project chat creation failed:')
-    // The copy lands before the chat opens, so an auto-sent first message
-    // already runs on the copied model, and every cache below holds the chat
-    // as the copy saved it rather than the pre-copy creation record.
-    const copy = await copyChatSettings(created.id, settings)
-    const chat = withCopiedSettings(created, copy.saved)
-    const sendsPrompt = !!prompt && autoSend && copy.ok
+  // One created project chat joins the project's caches before it opens.
+  function publishProjectChat(project, chat) {
     knownExistingOffListChatIdsRef.current.add(String(chat.id))
     queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
       chat,
@@ -1817,6 +1833,24 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           : row)
         : current
     ))
+  }
+
+  async function createProjectChat(project, {
+    title = 'New chat', prompt = null, autoSend = false, settings = null,
+  } = {}) {
+    if (!project?.id) return null
+    const response = await api.projects.createChat(project.id, {
+      title,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const created = await jsonOrThrow(response, 'Project chat creation failed:')
+    // The copy lands before the chat opens, so an auto-sent first message
+    // already runs on the copied model, and every cache below holds the chat
+    // as the copy saved it rather than the pre-copy creation record.
+    const copy = await copyChatSettings(created.id, settings)
+    const chat = withCopiedSettings(created, copy.saved)
+    const sendsPrompt = !!prompt && autoSend && copy.ok
+    publishProjectChat(project, chat)
     // A staged auto-send is read by the chat as it opens, so stage it first.
     if (sendsPrompt) stageComposerHandoff(chat.id, prompt, { autoSend: true })
     openProjectChat(project, chat)
@@ -1825,6 +1859,43 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       requestComposer(chat.id, { draft: prompt })
     }
     return chat
+  }
+
+  // A project page's New chat reopens that project's untouched chat rather
+  // than piling up another blank, unless the owner kept that blank by pinning
+  // or renaming it. The project list, with the shell's live facts overlaid as
+  // the page shows them, only nominates it: a fresh detail read must prove it
+  // is still empty and still not kept, since another browser may have started
+  // using it.
+  async function newProjectChat(project) {
+    const projectRows = queryClient.getQueryData(projectQueries.keys.chats(project.id)) ?? project.chats
+    const candidate = reusableProjectEmptyChat(
+      (projectRows || []).map(row => liveProjectChat(row, chatById.get(String(row?.id)))),
+      {
+        recoveredChatIds: recoveredChatIdsRef.current,
+        streamingChatIds: streamingChatIdsRef.current,
+        pinnedChatIds,
+      },
+    )
+    if (candidate && online) {
+      let verdict = 'uncertain'
+      try {
+        const res = await apiFetch(
+          `/chats/${encodeURIComponent(candidate.id)}?limit=1`,
+          { timeoutMs: 5000 },
+        )
+        verdict = reusableProjectChatDetailVerdict({
+          ok: res.ok,
+          status: res.status,
+          detail: res.ok ? await res.json() : null,
+        })
+      } catch {}
+      if (verdict === 'empty') {
+        openProjectChat(project, candidate)
+        return candidate
+      }
+    }
+    return createProjectChat(project)
   }
 
   // `/new` and `/clear` (newChatCommand.js): the dependencies its two steps
@@ -1856,6 +1927,36 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   function startChatFromCommand(options) {
     return startNewChatFromCommand(newChatCommandDeps(), options)
+  }
+
+  // A reply's Branch action: the server copies the conversation through that
+  // reply into a new chat (same project and model), which then opens with
+  // history, so Back returns to the source. Resolves false when it failed.
+  async function branchChat(sourceChatId, throughId) {
+    try {
+      const chat = await jsonOrThrow(
+        await api.chats.branch(sourceChatId, throughId), 'Branching failed:',
+      )
+      const project = chat.project?.id != null
+        ? projectsRef.current.find(row => String(row.id) === String(chat.project.id))
+        : null
+      if (project) {
+        publishProjectChat(project, chat)
+        openProjectChat(project, chat)
+      } else {
+        publishCreatedChat(chat)
+        navTo('chat', { chatId: chat.id })
+      }
+      focusSelectedChatComposer(chat.id)
+      return true
+    } catch (error) {
+      recordClientError({ where: 'branch-chat', error })
+      // A refusal (409) says why, such as a reply still being written.
+      notifyShell(error?.status === 409 && typeof error.detail === 'string'
+        ? error.detail
+        : "Couldn't branch this chat — please try again.", { variant: 'error' })
+      return false
+    }
   }
 
   async function createProjectFromTemplate(template) {
@@ -2723,18 +2824,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // The final scoped read settles the row from server truth in every case.
   const setChatArchived = useCallback(async (chatId, archived, { undoable = true } = {}) => {
     const sid = String(chatId)
+    // A chat this list has not read yet (one just created on a project page)
+    // is filed the same way; the scoped read after the write brings its row in.
     const previous = chatsRef.current.find(row => String(row?.id) === sid)
-    if (!previous) return false
+    const intent = {
+      archivedAt: archived ? (previous?.archived_at || new Date().toISOString()) : null,
+      pinnedAt: archived ? null : (previous?.pinned_at ?? null),
+    }
     const token = Symbol(sid)
-    archiveActionsRef.current.set(sid, {
-      token,
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    })
-    projectChatList(rows => withChatArchive(rows, sid, {
-      archivedAt: archived ? (previous.archived_at || new Date().toISOString()) : null,
-      pinnedAt: archived ? null : previous.pinned_at,
-    }))
+    archiveActionsRef.current.set(sid, { token, ...intent })
+    projectChatList(rows => withChatArchive(rows, sid, intent))
     const prior = archiveRequestsRef.current.get(sid) || Promise.resolve()
     const request = prior.catch(() => {}).then(() => (
       archived ? api.chats.archive(sid) : api.chats.unarchive(sid)
@@ -2789,6 +2888,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const archivedChatIds = useMemo(() => new Set(
     chats.filter(row => row?.archived_at).map(row => String(row.id)),
   ), [chats])
+  const pinnedChatIds = useMemo(() => new Set(
+    pins.projectedItems.chats.filter(row => row?.pinned_at).map(row => String(row.id)),
+  ), [pins.projectedItems])
 
   const confirmAppDeleted = useCallback((id) => {
     const sid = String(id)
@@ -2841,6 +2943,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     [...deletedChatIdsRef.current].map(confirmChatIdentityIsLive),
   ), [confirmChatIdentityIsLive])
 
+  // The one way the shell opens Settings for someone else (a mini-app, the
+  // agent's open_item, a notification tap, a chat link): navigate there and
+  // focus a known section. Navigation only; every action inside Settings stays
+  // the owner's.
+  const openSettingsSection = useCallback((section) => {
+    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+    if (activeViewRef.current !== 'settings') navToRef.current('settings')
+  }, [activeViewRef])
+
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
     refreshApps,
@@ -2848,15 +2959,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     setAppIntents,
     navToRef,
     requestComposer,
+    openSettingsSection,
   })
-
-  // The one way the shell opens Settings for someone else (a mini-app, the
-  // agent's open_item, a notification tap): navigate there and focus a known
-  // section. Navigation only; every action inside Settings stays the owner's.
-  const openSettingsSection = useCallback((section) => {
-    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
-    if (activeViewRef.current !== 'settings') navToRef.current('settings')
-  }, [activeViewRef])
 
   const openShellTarget = useCallback((target) => {
     if (target?.view === 'settings') {
@@ -3019,7 +3123,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         await openAppWithIntent(request.appId, request.intent)
         return
       }
-      openSettingsSection(settingsSectionOrNull(request.section) ?? 'ai-providers')
+      openSettingsSection(requestedSettingsSection(request.section))
     })()
   }, [openAppWithIntent, openSettingsSection, queryClient, refreshChats, requestComposer])
 
@@ -3174,7 +3278,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
-  const [subscribeManagedAppEvents, observeManagedAppEvent] = useManagedAppEvents()
+  const [
+    subscribeManagedAppEvents, observeManagedAppEvent, observeSystemStreamReopened,
+  ] = useManagedAppEvents()
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
@@ -3318,6 +3424,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       void chatAppArtifactQueries.invalidateAll(queryClient)
       void invalidateShellListCache('apps')
       void refreshUninstalledForSystemEvent(queryClient, ev)
+    } else if (ev.type === 'credits_charge_requested' || ev.type === 'credits_charge_answered') {
+      // An app asked to charge the owner's credits, or a device answered it.
+      if (ev.appId) void appQueries.creditsPayments.invalidate(queryClient, ev.appId)
+      // The Pay sheet shows over the paying app only: tell the owner about a
+      // payment from an app they are not looking at. A shared-browser guest
+      // can never answer one, so it is not told.
+      const notice = ev.type === 'credits_charge_requested' && !isSharedBrowserAccess && waitingPaymentNotice({
+        appId: ev.appId, visibleAppIds: visibleAppIdsRef.current, apps: appsRef.current,
+      })
+      if (notice) notifyShell(notice.message, { noticeKey: notice.noticeKey })
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void chatAppArtifactQueries.invalidateAll(queryClient)
@@ -3547,10 +3663,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [
     applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
-    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
+    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered, isSharedBrowserAccess,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
-    markStreamingAcknowledged, markStreamingEnd, observeManagedAppEvent,
+    markStreamingAcknowledged, markStreamingEnd, notifyShell, observeManagedAppEvent,
     onNotificationCreated, openSettingsSection, placeInWorkspace, projectChatLookup,
     queryClient, refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
@@ -3569,6 +3685,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const listTimeoutMs = reconnectListTimeoutMs(failedAttempts)
     // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
+    // App activity nudges do not replay, so each mounted app checks once now.
+    observeSystemStreamReopened()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
@@ -3599,6 +3717,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [
     fetchFreshChats,
     markChatRunReconcile,
+    observeSystemStreamReopened,
     reconcileLocalChatRuns,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
@@ -4395,6 +4514,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
   startChatFromCommandRef.current = startChatFromCommand
+  branchChatRef.current = branchChat
   // Keep the latest-materialize ref current so the watcher effect (stable deps) always
   // runs this render's live closure without depending on the function's identity.
   materializeNewChatHomeRef.current = materializeNewChatHome
@@ -4522,6 +4642,35 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     await refreshChats()
   }
 
+  async function renameChat(chatId, title) {
+    const saved = await saveDrawerRename(
+      () => api.chats.update(chatId, { title }),
+      notifyShell,
+    )
+    if (saved) void chatQueries.list.invalidate(queryClient)
+  }
+
+  // The sidebar's chat actions, offered on a project page. Each goes through
+  // the same Shell owner as the drawer, then rereads the project's own Chats
+  // list, a separate projection with its own rows and filing state.
+  function projectChatActions(project) {
+    const thenRefreshProjectChats = action => async (chatId, ...args) => {
+      try {
+        return await action(chatId, ...args)
+      } finally {
+        void queryClient.invalidateQueries({
+          queryKey: projectQueries.keys.chats(project.id), exact: true,
+        })
+      }
+    }
+    return {
+      onPin: thenRefreshProjectChats((chatId, pinned) => pins.pin('chat', chatId, pinned)),
+      onSetArchived: thenRefreshProjectChats(setChatArchived),
+      onRename: thenRefreshProjectChats(renameChat),
+      onDelete: thenRefreshProjectChats(deleteChat),
+    }
+  }
+
   async function deleteProject(project) {
     const projectId = String(project.id)
     let projectChats = queryClient.getQueryData(projectQueries.keys.chats(projectId))
@@ -4555,24 +4704,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       clearComposerDraft(chatId)
       chatQueries.messages.remove(queryClient, chatId)
     }
-    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(projectId), exact: true })
-    queryClient.setQueryData(projectQueries.keys.all, current => (
-      Array.isArray(current)
-        ? current.filter(candidate => String(candidate.id) !== projectId)
-        : current
-    ))
-    navStackRef.current = navStackRef.current.filter(entry => (
-      String(entry.projectId ?? '') !== projectId
-      && !chatIds.includes(String(entry.chatId ?? ''))
-    ))
-    tombstoneRoute('project', projectId)
+    navStackRef.current = navStackRef.current.filter(entry => !chatIds.includes(String(entry.chatId ?? '')))
     for (const chatId of chatIds) tombstoneRoute('chat', chatId)
-    navTo('projects')
-    dispatchWorkspace({
-      type: 'CLOSE_TAB',
-      tabKey: tabModel.tabKey(tabModel.projectTab(projectId)),
-      reason: 'deleted',
-    })
+    closeRemovedProject(projectId, { showProjects: true })
     for (const chatId of chatIds) {
       dispatchWorkspace({
         type: 'CLOSE_TAB',
@@ -4586,6 +4720,56 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ])
     return true
   }
+
+  // Forget a project that no longer exists: its cached rows, history entries,
+  // route, and every place showing it (the project and its results, in builder
+  // panes and the Standard single-screen slot alike). A project tab whose
+  // project is gone renders nothing, so if it is on screen, show the Projects
+  // list instead of a blank page.
+  function closeRemovedProject(projectId, { showProjects = false } = {}) {
+    const id = String(projectId)
+    const ownsArtifact = ref => String(tabModel.parseArtifactTabId(ref)?.projectId ?? '') === id
+    const showing = (activeViewRef.current === 'project' && String(activeProjectIdRef.current ?? '') === id)
+      || (activeViewRef.current === 'artifact' && ownsArtifact(activeArtifactRefRef.current))
+    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(id), exact: true })
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current) ? current.filter(candidate => String(candidate.id) !== id) : current
+    ))
+    navStackRef.current = navStackRef.current.filter(entry => String(entry.projectId ?? '') !== id)
+    tombstoneRoute('project', id)
+    if (showProjects || showing) navTo('projects')
+    dispatchWorkspace({ type: 'CLOSE_PROJECT_TABS', projectId: id })
+  }
+
+  // A project can be deleted while its tab is open elsewhere (another device),
+  // and saved tabs can restore it later. Same deletion-evidence contract as
+  // chat and app restores: absence from the live list only prompts a direct
+  // probe of that project, and only a 404 closes its tabs.
+  const projectsLiveFetched = projectsQuery.isSuccess && projectsQuery.isFetchedAfterMount
+  const probedMissingProjectsRef = useRef(new Set())
+  useEffect(() => {
+    if (!projectsLiveFetched) return
+    const missing = new Set(renderedProjectIds.map(String))
+    for (const ref of renderedArtifactIds) {
+      const parsed = tabModel.parseArtifactTabId(ref)
+      if (parsed) missing.add(String(parsed.projectId))
+    }
+    for (const id of [...missing]) {
+      if (projectById.has(id) || parseAppSourceProjectId(id)) missing.delete(id)
+    }
+    const probed = probedMissingProjectsRef.current
+    for (const id of [...probed]) if (!missing.has(id)) probed.delete(id)
+    for (const projectId of missing) {
+      if (probed.has(projectId)) continue
+      probed.add(projectId)
+      void probeDeletion(`/projects/${encodeURIComponent(projectId)}`).then(verdict => {
+        const reappeared = projectsRef.current.some(row => String(row.id) === projectId)
+        if (verdict === 'deleted' && !reappeared) closeRemovedProject(projectId)
+      })
+    }
+  // closeRemovedProject reads live refs; listing it would re-run on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectsLiveFetched, renderedProjectIds, renderedArtifactIds, projectById])
 
   // App delete lives here (not in Drawer) so we have access to notifyShell.
   // The Drawer's local deleteApp swallowed all errors silently — 409 means
@@ -4729,6 +4913,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
+    <WaitingPaymentsPushedContext.Provider value>
     <HistoryDismissProvider
       openHistoryDismiss={openHistoryDismiss}
       closeHistoryDismiss={closeHistoryDismiss}
@@ -4943,6 +5128,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onSetChatArchived={setChatArchived}
+        onRenameChat={renameChat}
+        pins={pins}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
         onNotice={notifyShell}
@@ -4968,12 +5155,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
       {showWalkthrough && (
         <Suspense fallback={null}>
-          <WalkthroughOverlay
-            apps={apps}
-            activeAppId={activeView === 'canvas' ? activeAppId : null}
-            onOpenApp={openAppWithIntent}
-            onHandoffChange={onWalkthroughHandoffChange}
-          />
+          <WalkthroughOverlay apps={apps} />
         </Suspense>
       )}
 
@@ -5269,6 +5451,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onNewChatSubmit={queueDraftFirstNewChat}
                 onNewChatRetry={retryDraftFirstNewChat}
                 onNewChatCommand={handleNewChatCommand}
+                onBranchChat={handleBranchChat}
                 artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
@@ -5462,7 +5645,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
                     onOpenChat={chat => openProjectChat(project, chat)}
                     liveChatById={chatById}
-                    onCreateChat={options => createProjectChat(project, options)}
+                    onCreateChat={options => (options
+                      ? createProjectChat(project, options)
+                      : newProjectChat(project))}
+                    pinnedChatIds={pinnedChatIds}
+                    chatActions={projectChatActions(project)}
                     onOpenArtifact={artifactId => openArtifact(project, artifactId)}
                     entryFile={projectEntryFile?.projectId === String(project.id) ? projectEntryFile : null}
                     onEntryFileHandled={() => setProjectEntryFile(current => (current?.projectId === String(project.id) ? null : current))}
@@ -5582,7 +5769,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               <SettingsView
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
-                onOpenApp={openAppWithIntent}
                 focusTarget={settingsFocusTarget}
                 active={settingsFullBleed || !!settingsPaned}
                 refreshToken={settingsRefreshToken}
@@ -5748,5 +5934,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       })()}
     </div>
     </HistoryDismissProvider>
+    </WaitingPaymentsPushedContext.Provider>
   )
 }

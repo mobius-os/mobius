@@ -12,11 +12,42 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'background-agents',
   'github',
   'models',
+  // Whole sub-pages: Accounts › Möbius, and AI providers › Möbius (credit,
+  // trial and Möbius models).
+  'mobius-account',
+  'mobius-models',
+  // Settings › Notifications elsewhere (Slack, Discord, ntfy, webhooks).
+  'notifications-elsewhere',
 ])
+
+/** The sub-page a section id opens, or null for a section on the overview. */
+export function settingsSectionPage(section) {
+  if (section === 'mobius-account') return 'mobius-account'
+  if (section === 'mobius-models') return 'mobius'
+  if (section === 'notifications-elsewhere') return 'notifications-elsewhere'
+  return null
+}
 
 const KNOWN = new Set(SETTINGS_SECTIONS)
 
 /** A known section id, or null for Settings without a focused section. */
 export function settingsSectionOrNull(value) {
   return typeof value === 'string' && KNOWN.has(value) ? value : null
+}
+
+/**
+ * The section a mini-app's `moebius:open-settings` request focuses: the one it
+ * names when known, otherwise AI providers.
+ */
+export function requestedSettingsSection(value) {
+  return settingsSectionOrNull(value) ?? 'ai-providers'
+}
+
+/**
+ * The `/shell/?settings=<id>` link that answers the same request from a host
+ * that hands navigation to the workspace (a standalone app page, a chat
+ * transcript), focusing the same section.
+ */
+export function settingsDeepLink(value) {
+  return `/shell/?${new URLSearchParams({ settings: requestedSettingsSection(value) })}`
 }

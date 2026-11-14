@@ -4,9 +4,8 @@
  * Run with:
  *   cd frontend && node --test src/lib/__tests__/themeService.test.js
  *
- * Covers applyThemeToDom (Commit 2) and persistTheme (Commit 2).
- * toggleTheme + cache-invalidation contract lives in Commit 3a and
- * is asserted in a separate test file added with that commit.
+ * Covers applyThemeToDom and getEffectiveTheme. toggleTheme and its
+ * cache-invalidation contract are in themeService.toggleTheme.test.js.
  *
  * We provide a tiny DOM stub instead of pulling in jsdom — the
  * surface applyThemeToDom touches is small enough that the stub
@@ -287,55 +286,6 @@ test('applyThemeToDom can make a post-boot theme change atomically', () => {
   assert.equal(called, false)
   assert.equal(dom.documentElement.classList.contains('theme-transitioning'), false)
   assert.equal(dom.meta.content, '#f0eeeb')
-})
-
-test('persistTheme writes CSS + mode + sends notify in parallel', async () => {
-  const calls = []
-  const api = {
-    storage: { shared: {
-      putThemeCss: (content) => { calls.push(['putThemeCss', content]); return Promise.resolve() },
-      putThemeMode: (mode) => { calls.push(['putThemeMode', mode]); return Promise.resolve() },
-    }},
-    notify: { send: (payload) => { calls.push(['notify', payload]); return Promise.resolve() } },
-  }
-  await themeService.persistTheme(':root {}', 'dark', api)
-  // Both PUTs must happen.
-  assert.ok(calls.some(c => c[0] === 'putThemeCss' && c[1] === ':root {}'))
-  assert.ok(calls.some(c => c[0] === 'putThemeMode' && c[1] === 'dark'))
-  assert.ok(calls.some(c => c[0] === 'notify'
-    && c[1].type === 'theme_updated'))
-})
-
-test('persistTheme throws when a PUT fails (caller does rollback)', async () => {
-  // SettingsView's catch block hinges on this throw. Swallowing
-  // the rejection would let the optimistic UI persist while
-  // server-side state lagged behind.
-  const api = {
-    storage: { shared: {
-      putThemeCss: () => Promise.reject(new Error('500')),
-      putThemeMode: () => Promise.resolve(),
-    }},
-    notify: { send: () => Promise.resolve() },
-  }
-  await assert.rejects(
-    themeService.persistTheme(':root {}', 'dark', api),
-    /500/,
-  )
-})
-
-test('persistTheme swallows notify.send failures (best-effort)', async () => {
-  // /notify is a best-effort SSE side-channel. A failing notify
-  // must not roll back the user's theme — they already see the
-  // persisted state.
-  const api = {
-    storage: { shared: {
-      putThemeCss: () => Promise.resolve(),
-      putThemeMode: () => Promise.resolve(),
-    }},
-    notify: { send: () => Promise.reject(new Error('network')) },
-  }
-  // Should not throw.
-  await themeService.persistTheme(':root {}', 'light', api)
 })
 
 test('getEffectiveTheme reads back the applied LIGHT theme (offline-safe iframe source)', () => {
