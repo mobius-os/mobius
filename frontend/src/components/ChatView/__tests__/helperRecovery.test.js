@@ -66,3 +66,16 @@ test('ambiguous network failure never falls back to an ordinary send', async () 
   }, 'helper', 'park'), /offline/)
   assert.equal(count, 1)
 })
+
+for (const status of ['accepted', 'retrying', 'starting']) {
+  test(`a no-op ${status} response needs a physical replacement before showing running`, async () => {
+    for (const physical_run_id of [null, 'park']) {
+      const h = fixture({ retry_started: false, status, physical_run_id })
+      await assert.rejects(retryHelperRecovery(h.request, 'helper', 'park'), {
+        code: 'helper_recovery_unavailable',
+      })
+    }
+    const replacement = fixture({ retry_started: false, status, physical_run_id: 'replacement' })
+    assert.equal((await retryHelperRecovery(replacement.request, 'helper', 'park')).running, true)
+  })
+}

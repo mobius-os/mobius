@@ -13,7 +13,9 @@ export async function retryHelperRecovery(request, delegationId, runId) {
       || `Could not retry this helper (${response.status}). Open its parent chat to continue.`,
     ), { status: response.status, code: 'helper_recovery_unavailable' })
   }
-  const running = ['accepted', 'retrying', 'starting', 'running', 'resuming'].includes(body.status)
+  const running = ['running', 'resuming'].includes(body.status)
+    || (['accepted', 'retrying', 'starting'].includes(body.status)
+      && !!body.physical_run_id && body.physical_run_id !== runId)
   if (body.retry_started || running) {
     // A replacement may already have finished or parked again before the
     // acknowledgement. Never leave the composer busy on that settled result.
