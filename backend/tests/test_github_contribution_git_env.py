@@ -174,6 +174,43 @@ def test_a_gate_that_cannot_start_is_refused_not_ambiguous(checkout, tmp_path):
   assert branch_at(remote) is None
 
 
+def test_a_checkout_hooks_path_runs_that_hook_as_git_would(checkout, tmp_path):
+  hooks = tmp_path / "elsewhere"
+  hooks.mkdir()
+  (hooks / "pre-push").write_text("#!/bin/sh\necho '[pre-push] verdict=blocked cause=checks checks=x' >&2\nexit 1\n")
+  (hooks / "pre-push").chmod(0o755)
+  plain_git(checkout, "config", "--local", "core.hooksPath", str(hooks), check=True)
+  remote = bare_remote(tmp_path)
+  assert plain_git(checkout, "push", str(remote), "HEAD:refs/heads/probe").returncode != 0
+
+  with pytest.raises(git_ops.PushGateRefused):
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
+  assert branch_at(remote) is None
+
+
+def test_a_relative_hooks_path_starts_at_the_worktree_root(checkout, tmp_path):
+  marker = tmp_path / "ran"
+  (checkout / "hooks").mkdir()
+  (checkout / "hooks" / "pre-push").write_text(f"#!/bin/sh\ntouch {marker}\n")
+  (checkout / "hooks" / "pre-push").chmod(0o755)
+  plain_git(checkout, "config", "--local", "core.hooksPath", "hooks", check=True)
+
+  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic", lease="")
+  assert marker.exists()
+
+
+def test_a_hooks_path_that_skips_the_common_gate_is_refused(checkout, tmp_path):
+  install_hook(checkout, "#!/bin/sh\nexit 0\n")
+  (tmp_path / "empty-hooks").mkdir()
+  plain_git(checkout, "config", "--local", "core.hooksPath", str(tmp_path / "empty-hooks"), check=True)
+  remote = bare_remote(tmp_path)
+
+  with pytest.raises(git_ops.PushGateRefused) as refused:
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
+  assert "hooks away" in refused.value.detail
+  assert branch_at(remote) is None
+
+
 def test_the_gate_cannot_find_gh_credentials_in_the_home(checkout, tmp_path, monkeypatch):
   home = tmp_path / "home"
   (home / ".config" / "gh").mkdir(parents=True)
@@ -300,6 +337,17 @@ def test_other_program_naming_settings_are_refused_before_any_network_command(
             check=True)
   message = refused_names(checkout)
   assert key.split(".")[0] in message or "unreadable" in message
+
+
+def test_an_inherited_git_config_file_cannot_hide_the_checkouts_settings(
+  checkout, tmp_path, monkeypatch,
+):
+  empty = tmp_path / "empty-config"
+  empty.write_text("")
+  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", "true", check=True)
+  monkeypatch.setenv("GIT_CONFIG", str(empty))
+
+  assert "core.alternaterefscommand" in refused_names(checkout)
 
 
 def test_gh_in_a_checkout_follows_the_same_config_rule(checkout, tmp_path):

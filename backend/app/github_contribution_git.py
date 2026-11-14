@@ -98,6 +98,9 @@ _INHERITED_GIT_ENV = frozenset({
   "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
   "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
   "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE",
+  # A plain GIT_CONFIG replaces every config file Git reads, which would hide
+  # the checkout's own settings from the allowlist.
+  "GIT_CONFIG",
 })
 _GITHUB_AUTH_ENV = frozenset({
   "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
@@ -153,10 +156,9 @@ def _git_env(repo: Path, *, network: bool = False) -> dict:
   inert. ``_git`` and ``_gh`` also refuse a network command when the
   checkout's own config sets anything outside an allowlist. GitHub
   credentials are present only for ``network`` commands (fetch, push,
-  ls-remote and gh); a local command never carries them. The checkout's
-  config still shapes https transport (proxy and TLS settings among them),
-  and a local command can still run a program it names, such as a filter,
-  without credentials. ``_run_cmd`` also gives every command an empty home.
+  ls-remote and gh); a local command never carries them, though it can
+  still run a program the checkout names, such as a filter, without
+  credentials. ``_run_cmd`` also gives every command an empty home.
   """
   env = {
     key: value for key, value in os.environ.items()
@@ -327,29 +329,65 @@ def _send_push(
   )
 
 
+def _executable(path: Path) -> bool:
+  return path.is_file() and os.access(path, os.X_OK)
+
+
+def _pre_push_hook(repo: Path) -> Path | None:
+  """The pre-push hook Git would run in ``repo``, or None when there is none."""
+  common = Path(_git(
+    repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
+  ).stdout.strip())
+  default = common / "hooks" / "pre-push"
+  # Only the checkout's own scopes: command scope carries the inert override.
+  listed = _git(repo, "config", "--show-scope", "--get-all", "core.hooksPath", check=False)
+  if listed.returncode not in (0, 1):
+    raise PushGateRefused("Git could not read where this checkout keeps its hooks.")
+  configured = [
+    value for scope, _, value in
+    (line.partition("\t") for line in listed.stdout.splitlines())
+    if scope in ("local", "worktree")
+  ]
+  if not configured:
+    return default if _executable(default) else None
+  # Git runs hooks from the worktree root, so a relative path starts there.
+  top = _git(repo, "rev-parse", "--show-toplevel", check=False).stdout.strip()
+  hooks = Path(configured[-1])
+  hook = (hooks if hooks.is_absolute() else Path(top or common) / hooks) / "pre-push"
+  if _executable(hook):
+    return hook
+  if _executable(default):
+    raise PushGateRefused(
+      "This checkout points its hooks away from the repository's pre-push "
+      "checks, so they could not run."
+    )
+  return None
+
+
 def _pre_push_gate(
   repo: Path, remote: str, commit: str, ref: str, lease: str,
 ) -> None:
   """Run the pre-push hook Git would run, as a pre-push hook, without credentials.
 
-  It is the hook in the repository's common hooks directory, where Git looks
-  when the checkout does not redirect hooks and where the platform installs
-  its gate. Like Git, it passes the pushed commit on stdin; checks the hook
+  The hook is found as Git finds it: under the checkout's own core.hooksPath
+  when set, otherwise in the common hooks directory, where the platform
+  installs its gate. A hooksPath without a pre-push hook while the common
+  one exists is refused rather than skipping the gate. Like Git, it passes
+  the pushed commit on stdin; checks the hook
   makes of HEAD or the working tree see the checkout as it is, as they did
   inside a push. It runs in its own process group, which is killed when it
   ends; a child that starts its own session leaves that group and can
   outlive it, though it never had credentials in its environment.
   """
   try:
-    common = _git(
-      repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
-    ).stdout.strip()
-    hook = Path(common) / "hooks" / "pre-push"
-    if not (hook.is_file() and os.access(hook, os.X_OK)):
+    hook = _pre_push_hook(repo)
+    if hook is None:
       return
     named = _git(repo, "remote", "get-url", remote, check=False)
-  except (subprocess.TimeoutExpired, OSError) as exc:
+  except (subprocess.TimeoutExpired, OSError, ContributionSubmitError) as exc:
     # Still local: nothing was sent, so this is a refusal, never ambiguous.
+    if isinstance(exc, PushGateRefused):
+      raise
     raise PushGateRefused(f"Git could not prepare the pre-push checks: {exc}") from exc
   url = named.stdout.strip() if named.returncode == 0 else remote
   line = f"{_exact_commit(commit)} {commit} {ref} {lease or '0' * 40}\n"
