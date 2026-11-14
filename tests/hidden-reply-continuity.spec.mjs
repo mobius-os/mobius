@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /** Replies preserve continuous prose and own one safe, draft-independent footer. */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
@@ -43,7 +44,7 @@ test.describe('reply footer', () => {
       'Result\n\nIt costs $5 — see the docs.\n\nPlan\tPrice\nPro\t$5\n\nnpm test')
     expect(decodeURIComponent(copied['text/html'].match(/data-mobius-markdown="([^"]*)"/)[1]))
       .toBe(latestAnswer)
-    await expect(f.composer).toHaveValue('Keep my unfinished message')
+    await expectComposerValue(f.composer, 'Keep my unfinished message')
   })
 
   for (const state of ['settled', 'running', 'pendingQuestion']) {

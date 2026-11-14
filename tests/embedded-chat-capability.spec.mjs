@@ -221,7 +221,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     // the child turn deterministic so a coding model does not infer a file
     // edit from the injected app context and turn a transport assertion into
     // a model-behavior benchmark.
-    await chatFrame.locator('textarea').fill(
+    await chatFrame.locator('.chat__editor-content').fill(
       'This is a transport test. Reply exactly `capability-ok`; do not call tools or edit files.',
     )
     const send = chatFrame.getByRole('button', { name: 'Send', exact: true })

@@ -1,3 +1,5 @@
+import { editorText, selectEditorRange } from './textEditor.js'
+
 export function shouldApplyComposerFocusRequest({
   focusRequest,
   chatId,
@@ -10,14 +12,7 @@ export function shouldApplyComposerFocusRequest({
 }
 
 export function placeCaretAtTextEnd(el) {
-  if (!el || typeof el.setSelectionRange !== 'function') return false
-  const end = String(el.value ?? '').length
-  try {
-    el.setSelectionRange(end, end)
-  } catch {
-    return false
-  }
-  return true
+  return selectEditorRange(el, editorText(el).length)
 }
 
 export function focusComposerElement(el) {

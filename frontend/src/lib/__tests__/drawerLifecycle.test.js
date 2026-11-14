@@ -284,7 +284,7 @@ test('opening the drawer suspends an active touch composer without changing its 
   let blurred = 0
   const composer = {
     value: 'unfinished message',
-    matches: selector => selector === 'textarea.chat__input',
+    matches: selector => selector === '.chat__editor-content',
     closest: () => ({ getAttribute: () => 'chat-42' }),
     blur: () => { blurred += 1 },
   }

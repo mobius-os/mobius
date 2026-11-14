@@ -1,3 +1,4 @@
+import { expectComposerValue, setComposerSelection, composerSelection } from './_composer.mjs'
 /* Native word correction preserves selection and focus without browser spelling popups. */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
@@ -23,14 +24,12 @@ test('returning to a selected word permits correction without moving to the draf
 
   // Exercise native focus directly: a later synthetic click can mask an
   // onFocus selection rewrite by choosing a different position afterward.
-  const selected = await composer.evaluate(textarea => {
-    textarea.blur()
-    textarea.setSelectionRange(7, 15)
-    textarea.focus({ preventScroll: true })
-    return { start: textarea.selectionStart, end: textarea.selectionEnd }
-  })
+  await composer.evaluate(editor => editor.blur())
+  await setComposerSelection(composer, 7, 15)
+  await composer.evaluate(editor => editor.focus({ preventScroll: true }))
+  const selected = await composerSelection(composer)
   expect(selected).toEqual({ start: 7, end: 15 })
   await page.keyboard.insertText('lessons')
-  await expect(composer).toHaveValue('Review lessons carefully')
+  await expectComposerValue(composer, 'Review lessons carefully')
   await expect(composer).toBeFocused()
 })
