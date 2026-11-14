@@ -1,8 +1,7 @@
 import { useMemo } from 'react'
-import { Marked } from 'marked'
 import { MemoBlock, MathBlock } from './blocks.jsx'
 import InlineContent from './InlineContent.jsx'
-import { mathTokens } from './mathTokens.js'
+import { inlineTokens, tokenize } from './markdownParser.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
@@ -11,75 +10,14 @@ import { markdownRangeTokens } from './steerMarkdownRange.js'
 import '../markdown.css'
 
 /**
- * Configured marked instances with math token support. Tokenization stays tiny
- * and synchronous; the renderer loads KaTeX only when a math token is present.
- *
- * Owner messages and replies share this one formatter. Owner-written text
- * differs in exactly two ways, both so the bubble shows what was typed:
- *   - a typed single line break stays a line break (marked's `breaks`), where
- *     replies keep CommonMark's soft-break joining;
- *   - tag-like text stays literal text. The renderer drops raw HTML tokens,
- *     which is right for replies but would silently hide pasted `Promise<void>`
- *     or a stack trace's `<anonymous>`. A tokenizer returning undefined (not
- *     false, which falls back to the default) leaves that text to the
- *     paragraph and text tokenizers; autolinks such as `<https://…>` still work.
- * Agent text shown outside a reply, such as a question card, also keeps
- * tag-like text literal (`literalTags`): a choice like `Return Promise<void>`
- * must read the same as the answer it submits.
- * These are separate instances rather than per-call options because
- * `Marked#lexer(src, options)` replaces the instance defaults, extensions
- * included.
- */
-function configuredMarked(options = {}) {
-  const instance = new Marked(options)
-  instance.use(mathTokens())
-  return instance
-}
-
-const literalTagTokenizer = { html: () => undefined, tag: () => undefined }
-const md = configuredMarked()
-const mdOwnerText = configuredMarked({ breaks: true, tokenizer: literalTagTokenizer })
-const mdLiteralTags = configuredMarked({ tokenizer: literalTagTokenizer })
-// Agent-written chat notes are plain Markdown: a `$` there is a shell variable
-// or a price, never TeX, so they lex without math tokens.
-const plainMd = new Marked()
-
-
-export function markdownImageHrefs(text) {
-  const hrefs = []
-  md.walkTokens(tokenize(text), token => {
-    if (token.type === 'image') hrefs.push(token.href)
-  })
-  return hrefs
-}
-
-function tokenize(text, { writtenByOwner = false, literalTags = false, math = true } = {}) {
-  if (!math) return plainMd.lexer(text || '')
-  if (writtenByOwner) return mdOwnerText.lexer(text || '')
-  return (literalTags ? mdLiteralTags : md).lexer(text || '')
-}
-
-
-/**
  * InlineMarkdown — one-line agent text such as a choice label: emphasis, code
  * and math only. `1. Fast` or `# Plan` stay text rather than becoming a list or
  * heading, tag-like text stays literal, and a link or image shows as its text,
  * so the result never holds a control and can sit inside one (a radio).
  */
 export function InlineMarkdown({ text }) {
-  const tokens = useMemo(
-    () => textOnly(mdLiteralTags.Lexer.lexInline(text || '', mdLiteralTags.defaults)),
-    [text],
-  )
+  const tokens = useMemo(() => inlineTokens(text), [text])
   return <InlineContent tokens={tokens} />
-}
-
-function textOnly(tokens) {
-  return tokens.flatMap(token => {
-    if (token.type === 'link') return textOnly(token.tokens || [])
-    if (token.type === 'image') return token.text ? [{ type: 'text', text: token.text }] : []
-    return token.tokens ? [{ ...token, tokens: textOnly(token.tokens) }] : [token]
-  })
 }
 
 
@@ -158,8 +96,8 @@ export function ProgressiveMarkdown({
  * Settled blocks normally render once. A pathological cold transcript can
  * prepare one long block over several hidden frames; `renderFraction` reveals
  * token prefixes while one memoized token tree keeps already-prepared DOM.
- * `writtenByOwner` and `literalTags` select the rules described at
- * `configuredMarked`.
+ * `writtenByOwner` and `literalTags` select the rules described in
+ * markdownParser.js.
  * `math={false}` renders plain Markdown with no TeX (agent-written notes).
  */
 export function StandardMarkdown({

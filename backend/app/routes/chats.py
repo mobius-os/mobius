@@ -43,6 +43,8 @@ from app.chat_visibility import (
   visible_in_owner_drawer,
 )
 from app.chat_event_sink import active_sink_assistant_message_id
+from app.chat_message_identity import assistant_message_run_id
+from app.run_end_times import run_ended_ts
 from app.chat_activity import chat_activity_page
 from app.chat_waits import (
   outstanding_wait_chat_ids,
@@ -759,6 +761,19 @@ def _branch_origin_ref(db: Session, chat: models.Chat) -> dict | None:
   }
 
 
+def _project_run_ended_times(db: Session, chat_id: str, page: list) -> list:
+  """Give each assistant row of an ended run that run's end, `run_ended_ts`
+  (see app.run_end_times), without touching the stored row."""
+  def run_of(message):
+    return (assistant_message_run_id(message.get("id"))
+            if isinstance(message, dict) and message.get("role") == "assistant" else None)
+  ended = run_ended_ts(db, chat_id, {run_of(message) for message in page})
+  if not ended:
+    return page
+  return [{**message, "run_ended_ts": ended[run_of(message)]}
+          if run_of(message) in ended else message for message in page]
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -930,6 +945,8 @@ def _chat_detail_response(
         continue
       next_page[relative_index] = {**message, "continuation_reason": reason}
     page = next_page
+
+  page = _project_run_ended_times(db, chat.id, page)
 
   from app.platform_restart import project_restart_observations
   page = project_restart_observations(db, chat.id, page)
