@@ -17,7 +17,7 @@ from app.deps import (
   get_principal_or_public_service,
   reject_cross_site,
   require_nondelegated_owner_control,
-  require_nondelegated_owner_or_app_control,
+  require_owner_or_full_access_control,
 )
 from app.push import notify_owner
 from app.schemas import NotificationOut, NotificationSendRequest
@@ -170,7 +170,7 @@ def new_count(
   "/seen-all",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 def seen_all(
@@ -190,7 +190,7 @@ def seen_all(
   "/read-all",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 def read_all(
@@ -222,7 +222,7 @@ def read_all(
   "/{notification_id}/read",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 def read_notification(
@@ -253,7 +253,7 @@ def read_notification(
   "",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 def clear_notifications(
@@ -303,7 +303,7 @@ def clear_notifications(
   "/{notification_id}",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 def dismiss_notification(
