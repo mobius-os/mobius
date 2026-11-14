@@ -1971,3 +1971,16 @@ def test_read_work_claim_pages_one_claim_text(monkeypatch):
     refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
     assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
   assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES
+
+
+def test_helper_uses_service_retirement_mapping_only_for_its_provider(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv('MOBIUS_AGENT_PROVIDER', 'mobius')
+  monkeypatch.setenv('MOBIUS_AGENT_MODEL', 'retired')
+  monkeypatch.setenv('MOBIUS_AGENT_EFFORT', 'low')
+  monkeypatch.setattr(control, '_agent_api_call', lambda *args: {
+    'connections': {'mobius': {'configured': True}},
+    'models': {'mobius': [{'id': 'active', 'name': 'Active'}]},
+    'replacements': {'mobius': {'retired': 'active'}},
+  })
+  assert control._helper_selection({}) == ('mobius', 'active', 'low')

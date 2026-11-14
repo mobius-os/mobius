@@ -36,6 +36,18 @@ test('providerSwitchPayload carries the incoming model and stable request id', (
   })
 })
 
+test('providerSwitchPayload clears unsupported effort without erasing another provider memory', () => {
+  assert.deepEqual(providerSwitchPayload({
+    provider: 'mobius', model: 'no-effort', effort: null,
+    effortByProvider: { claude: 'high' }, switchId: 'switch-no-effort',
+  }), {
+    provider: 'mobius', switch_id: 'switch-no-effort',
+    agent_settings_json: {
+      model: 'no-effort', effort: null, effort_by_provider: { claude: 'high' },
+    },
+  })
+})
+
 test('createProviderSwitchId returns a non-empty retry identity', () => {
   assert.match(createProviderSwitchId(), /\S+/)
 })

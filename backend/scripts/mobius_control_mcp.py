@@ -1033,7 +1033,10 @@ def _helper_selection(arguments: dict[str, Any]) -> tuple[str, str | None, str |
     or (capability.get("defaults") or {}).get(provider)
   )
   if isinstance(wanted, str):
-    wanted = _RETIRED_MODELS.get(wanted, wanted)
+    replacements = (capability.get("replacements") or {}).get(provider) or {}
+    wanted = replacements.get(wanted, wanted)
+    if provider == "claude":
+      wanted = _RETIRED_MODELS.get(wanted, wanted)
   models = (capability.get("models") or {}).get(provider) or []
   aliases = (capability.get("aliases") or {}).get(provider) or {}
   if wanted:
