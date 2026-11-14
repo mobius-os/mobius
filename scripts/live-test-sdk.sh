@@ -70,10 +70,12 @@ done
 [ "$hc" = "200" ] && ok "health=200" || fail "health=$hc after 30s"
 
 setup_body="$LOG_DIR/setup-response.json"
+curl -s -o /dev/null "$BASE/api/auth/setup/status"
+setup_code=$(docker exec -u mobius mobius-test cat /data/setup-code 2>/dev/null | tr -d '[:space:]')
 setup_status=$(curl -s -o "$setup_body" -w '%{http_code}' \
   -X POST "$BASE/api/auth/setup" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}')
+  -d "{\"username\":\"admin\",\"password\":\"admin\",\"setup_code\":\"$setup_code\"}")
 if [ "$setup_status" = "200" ] || [ "$setup_status" = "400" ]; then
   ok "owner setup status=$setup_status"
 else

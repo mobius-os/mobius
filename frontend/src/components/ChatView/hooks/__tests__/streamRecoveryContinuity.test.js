@@ -180,6 +180,20 @@ test('manual Resume does not clear the answer while acknowledgement or catchup i
   catchup.resolve(new Response(null, { status: 204 }))
 })
 
+test('an empty Send that the server queues behind other work starts no stream', async () => {
+  await setup()
+  let posted
+  globalThis.fetch = async (_url, options) => {
+    posted = JSON.parse(options.body)
+    return Response.json({ status: 'queued', running: false }, { status: 202 })
+  }
+  const result = await hook.result.current.sendMessage('', undefined, { continuation: 'queue' })
+  assert.equal(posted.continuation, 'queue')
+  assert.equal(result.status, 'queued')
+  assert.equal(hook.result.current.isStreaming, false, 'nothing runs until the queue drains')
+  assert.equal(visibleAnswer(), 'The answer before interruption')
+})
+
 for (const [action, options] of [
   ['manual Resume', { continuation: 'manual' }],
   ['answer', { answers: { question: 'Yes' } }],
@@ -329,6 +343,7 @@ test('unmount during Resume acknowledgement does not reconnect a dead view', asy
 
 for (const [targetName, target, wireTarget] of [
   ['Run', { resumeRunId: 'interrupted-a' }, { resume_run_id: 'interrupted-a' }],
+  ['Storage override', { resumeRunId: 'interrupted-a', allowLowStorage: true }, { resume_run_id: 'interrupted-a', allow_low_storage: true }],
   ['Goal', { resumeGoalId: 'held-goal', resumeGoalRevision: 7 }, { resume_goal_id: 'held-goal', resume_goal_revision: 7 }],
 ]) {
   test(`${targetName} chat switches during durable intent registration keep POST and retirement bound to the original chat`, async () => {

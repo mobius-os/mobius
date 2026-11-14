@@ -5,6 +5,7 @@ import initXnRuntime, {
   model_from_allocated_weights as modelFromAllocatedWeights,
 } from './pocketTtsXnRuntime.js'
 import { completePostEosFrames } from './pocketTtsGenerationPolicy.js'
+import { endVoicePromptOnPause } from './pocketTtsClonePrompt.js'
 
 // XN's Q8 Pocket TTS runtime, isolated in a dedicated worker. The XN runtime is
 // bundled into this script at build time and its Wasm binary is fetched from
@@ -217,7 +218,7 @@ async function finishLoad() {
   )
   modelAllocation = null
   voiceIndex = clonedVoiceSamples
-    ? model.clone_voice(clonedVoiceSamples)
+    ? model.clone_voice(endVoicePromptOnPause(clonedVoiceSamples, model.sample_rate()))
     : model.add_voice(completedAssets.get('voice'))
   clonedVoiceSamples = null
   sampleRate = model.sample_rate()

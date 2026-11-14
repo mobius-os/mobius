@@ -17,7 +17,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from app import app_git
+from app import app_git, git_checkout
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_records import now_iso
@@ -26,9 +26,12 @@ REVIEW_SCOPE = (
   "correctness", "maintainability", "simplicity", "tests",
   "security_privacy", "technical_debt",
 )
-# Reviewed public inputs besides the diff. A verdict survives a restage only
-# while all of them, and the canonical diff bytes, are unchanged.
-_REVIEWED_TEXT_FIELDS = ("title", "body_draft", "labels", "coauthor_trailer")
+# Reviewed public inputs besides the diff, including published screenshots.
+# A verdict survives a restage only while all of them, and the canonical diff
+# bytes, are unchanged.
+_REVIEWED_TEXT_FIELDS = (
+  "title", "body_draft", "labels", "coauthor_trailer", "screenshots",
+)
 
 
 @dataclass(frozen=True)
@@ -54,8 +57,20 @@ def _git(repo: Path, *args: str) -> str:
   return proc.stdout.strip()
 
 
+def require_checkout_ownership(repo: Path) -> None:
+  """Refuse stale linked state before reading or mutating a review candidate."""
+  problem = git_checkout.checkout_ownership_error(repo)
+  if problem:
+    raise ContributionSubmitError(
+      "This review folder no longer owns its Git state. Preserve it and "
+      "prepare a fresh review checkout before continuing. Nothing was published.",
+      code="checkout_ownership_mismatch", detail=problem,
+    )
+
+
 def checkout_branch(repo: Path) -> str:
   """The branch a review checkout has checked out; a detached HEAD is refused."""
+  require_checkout_ownership(repo)
   proc = app_git._run(
     repo, "symbolic-ref", "-q", "--short", "HEAD", check=False, read_only=True,
   )
@@ -76,6 +91,7 @@ def derive_candidate(repo: Path, branch: str, base_ref: str) -> StagedCandidate:
   merge base with upstream, so a branch that merged upstream in (to clear a
   merge-queue conflict) still shows only its own change.
   """
+  require_checkout_ownership(repo)
   if app_git.worktree_dirty(repo):
     raise ContributionSubmitError(
       "The review checkout has uncommitted changes. Commit or discard them "

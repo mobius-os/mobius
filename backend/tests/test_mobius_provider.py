@@ -1,25 +1,36 @@
 from __future__ import annotations
 
 import json
+import copy
 import threading
 import tomllib
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from app import providers
+from app import models, providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
+
+
+def _no_effort_catalogue(monkeypatch):
+  declaration = copy.deepcopy(_catalogue())
+  declaration["models"].append({
+    "id": "no-effort", "label": "No effort", "effort_levels": [],
+  })
+  monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", declaration)
+  monkeypatch.setattr(providers.MobiusProvider, "check_auth", lambda _self, _dir: None)
 
 
 def _provider():
   provider = providers.MobiusProvider()
-  provider.set_declaration(6, {
-    "name": "Möbius", "transport": "identity_broker",
-    "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-    "models": [
-      {"id": "spark", "label": "Spark", "effort_levels": ["minimal", "low", "medium", "high", "max"], "context_window": 235930},
-      {"id": "inkling", "label": "Evolve", "effort_levels": ["minimal", "low", "medium", "high", "max"], "context_window": 900000},
-    ],
-  })
+  provider._publish_catalogue(_catalogue())
   return provider
+
+
+def _catalogue():
+  from app.mobius_catalogue import parse_catalogue
+  return parse_catalogue(json.loads(
+    (Path(__file__).parent / "fixtures" / "mobius_catalogue.json").read_text()
+  ))
 
 
 def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
@@ -67,7 +78,9 @@ def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
 def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):
   provider = _provider()
   monkeypatch.setattr(provider, "_identity", lambda: {"linked": False})
-  assert "Möbius · You" in provider.check_auth(str(tmp_path))
+  assert provider.check_auth(str(tmp_path)) == (
+    "Sign in to your Möbius account in Settings to use Möbius models."
+  )
   monkeypatch.setattr(provider, "_identity", lambda: {"linked": True})
   assert provider.check_auth(str(tmp_path)) is None
 
@@ -88,7 +101,7 @@ def test_trial_provider_config_uses_only_local_broker_marker(tmp_path):
   assert env["PRIVATE_PROVIDER_API_KEY"] == ""
   assert env["MOBIUS_LOCAL_BROKER_KEY"] == "local-broker"
   assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "mobius")
-  assert 'model="inkling"' in config
+  assert f'model="{_catalogue()["default_model"]}"' in config
   assert "http://127.0.0.1:8765/v1" in config
   assert "MOBIUS_LOCAL_BROKER_KEY" in config
   assert "PRIVATE_PROVIDER" not in config
@@ -127,19 +140,33 @@ def test_subscription_search_uses_codex_native_provider_endpoint():
   assert 'web_search="disabled"' not in overrides
 
 
-def test_subscription_catalog_comes_from_app_declaration(tmp_path, monkeypatch):
+def test_subscription_catalog_comes_from_discovered_snapshot(tmp_path, monkeypatch):
   provider = _provider()
   monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  catalogue = _catalogue()
+  ids = [model["id"] for model in catalogue["models"]]
+  labels = [model["label"] for model in catalogue["models"]]
   env = provider.build_env({}, str(tmp_path))
   payload = json.loads((tmp_path / "cli-auth" / "mobius" / "catalog.json").read_text())
-  assert [row["slug"] for row in payload["models"]] == ["spark", "inkling"]
-  assert [row["display_name"] for row in payload["models"]] == ["Spark", "Evolve"]
+  assert [row["slug"] for row in payload["models"]] == ids
+  assert [row["display_name"] for row in payload["models"]] == labels
   assert all(row["supports_parallel_tool_calls"] is False for row in payload["models"])
   assert all(row["support_verbosity"] is False for row in payload["models"])
-  assert providers.known_model_ids("mobius") == ["spark", "inkling"]
+  assert providers.known_model_ids("mobius") == ids
   assert providers.provider_runtime_kind("mobius") == "codex_sdk"
-  assert [row["label"] for row in providers._fallback_models("mobius")] == ["Spark", "Evolve"]
+  assert [row["label"] for row in providers._fallback_models("mobius")] == labels
   assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "mobius")
+
+
+def test_discovered_catalogue_updates_both_runtime_defaults():
+  assert providers.DEFAULT_MODELS["mobius"] == _catalogue()["default_model"]
+  assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == _catalogue()["default_model"]
+
+
+def test_turned_off_subscription_points_to_settings(monkeypatch, tmp_path):
+  provider = _provider()
+  monkeypatch.setattr(providers, "provider_enabled", lambda _d, _p: False)
+  assert provider.check_auth(str(tmp_path)) == "Möbius models are turned off in Settings."
 
 
 def test_saved_evolve_selection_keeps_inkling_id_for_atomic_provider_handoff():
@@ -149,6 +176,59 @@ def test_saved_evolve_selection_keeps_inkling_id_for_atomic_provider_handoff():
     switch_id="switch-to-evolve",
   )
   assert switch.provider == "mobius"
+
+
+def test_no_effort_model_patch_clears_old_effort_and_rejects_new_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  _no_effort_catalogue(monkeypatch)
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "spark", "effort": "high"}
+  db.commit()
+  invalid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": "none"},
+  })
+  assert invalid.status_code == 422, invalid.text
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).agent_settings_json["model"] == "spark"
+  valid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": None},
+  })
+  assert valid.status_code == 200, valid.text
+  assert valid.json()["effective"]["effort"] is None
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.agent_settings_json["model"] == "no-effort"
+  assert "effort" not in row.agent_settings_json
+
+
+def test_no_effort_model_provider_switch_omits_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import compaction
+  _no_effort_catalogue(monkeypatch)
+  chat.agent_settings_json = {"model": "claude-opus-4-8", "effort": "high"}
+  db.commit()
+  async def summary(_messages, **kwargs):
+    assert kwargs["effort"] is None
+    return "Handoff"
+  monkeypatch.setattr(compaction, "summarize_chat", summary)
+  rejected = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "bad-effort",
+    "agent_settings_json": {"model": "no-effort", "effort": "medium"},
+  })
+  assert rejected.status_code == 422, rejected.text
+  accepted = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "no-effort-switch",
+    "agent_settings_json": {"model": "no-effort", "effort": None,
+                            "effort_by_provider": {"claude": "high"}},
+  })
+  assert accepted.status_code == 200, accepted.text
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.provider == "mobius"
+  assert "effort" not in row.agent_settings_json
+  assert row.agent_settings_json["effort_by_provider"] == {"claude": "high"}
 
 
 def test_subscription_never_becomes_an_implicit_connected_default(monkeypatch):
@@ -278,49 +358,3 @@ def test_held_balance_cannot_be_mutated_by_a_caller(monkeypatch):
   _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
   provider.trial_status()["spendable_units"] = 0
   assert provider.trial_status() == {"spendable_units": 3}
-
-
-def test_unchanged_declaration_preserves_identity_and_balance_holds(monkeypatch):
-  provider = _provider()
-  broker = _broker(monkeypatch, {
-    "/identity": {"linked": True}, "/v1/balance": {"spendable_units": 3},
-  })
-  provider._identity()
-  provider.trial_status()
-  generation = provider._held_generation
-
-  # App synchronization reloads equal JSON into a distinct object.
-  provider.set_declaration(provider.app_id, json.loads(json.dumps(provider.declaration)))
-
-  assert provider._held_generation == generation
-  assert provider._identity() == {"linked": True}
-  assert provider.trial_status() == {"spendable_units": 3}
-  assert broker.calls == ["/identity", "/v1/balance"]
-
-
-def test_unchanged_declaration_preserves_in_flight_account_read(monkeypatch):
-  provider = _provider()
-  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
-  broker.during_call = lambda: provider.set_declaration(
-    provider.app_id, json.loads(json.dumps(provider.declaration)),
-  )
-
-  assert provider.trial_status() == {"spendable_units": 3}
-  assert provider.trial_status() == {"spendable_units": 3}
-  assert broker.calls == ["/v1/balance"]
-
-
-def test_changed_declaration_or_app_discards_account_holds(monkeypatch):
-  provider = _provider()
-  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
-  provider.trial_status()
-  declaration = json.loads(json.dumps(provider.declaration))
-  declaration["name"] = "Updated provider"
-  provider.set_declaration(provider.app_id, declaration)
-  provider.trial_status()
-  provider.set_declaration(provider.app_id + 1, declaration)
-  provider.trial_status()
-  provider.set_declaration(None, None)
-
-  assert broker.calls == ["/v1/balance"] * 3
-  assert provider._held_reads == {}

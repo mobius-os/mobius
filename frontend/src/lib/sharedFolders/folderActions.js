@@ -38,7 +38,7 @@ async function findSameFolder(handle) {
  * Must run straight from the click: the picker needs the tap's activation.
  */
 export function addRememberedFolder(mode) {
-  if (hostStore().state.canPickNative) return addNativeFolder()
+  if (hostStore().state.canPickNative) return addNativeFolder(mode)
   return pickRememberedFolder(mode, () => mode)
 }
 
@@ -48,35 +48,45 @@ export function addRememberedFolder(mode) {
  * quietly take away rights the owner gave in Settings.
  */
 export function shareUploadFolder() {
-  if (hostStore().state.canPickNative) return addNativeFolder()
+  if (hostStore().state.canPickNative) return addNativeFolder('read')
   return pickRememberedFolder('read', existing => existing?.mode || 'read')
 }
 
-/** The phone app's own folder picker: { ok, folder: { id, name } }, cancelled, or a message. */
-async function pickNativeFolder() {
+/**
+ * The phone app's own folder picker: { ok, folder: { id, name }, mode }, cancelled, or a message.
+ * mode is "edit" only if asked for and the app may change the folder: its
+ * provider may not allow it, and older app builds only read.
+ */
+async function pickNativeFolder(mode) {
   let picked
   try {
-    picked = await nativeFolderBridge().pickFolder()
+    picked = await nativeFolderBridge().pickFolder({ mode })
   } catch {
     return failed('The Möbius app could not open the folder picker. Try again.')
   }
   if (!picked) return { ok: false, cancelled: true }
   if (picked.error || !picked.id) return failed(picked.error?.message || 'The Möbius app could not share that folder.')
-  return { ok: true, folder: picked }
+  return { ok: true, folder: picked, mode: mode === 'edit' && picked.mode === 'edit' ? 'edit' : 'read' }
+}
+
+/** Said when Read & edit was asked for but the folder is shared Read only. */
+function readOnlyNotice(asked, given) {
+  if (asked !== 'edit' || given === 'edit') return {}
+  return { notice: 'The phone only lets Möbius read this folder, so it is shared as Read only.' }
 }
 
 /**
  * Inside the Möbius phone app: the app keeps the folder under an opaque id,
- * read only (the bridge has no writes). There is no isSameEntry for these, so
- * picking a folder again adds another entry rather than silently merging.
+ * with the rights it could get. There is no isSameEntry for these, so picking
+ * a folder again adds another entry rather than silently merging.
  */
-async function addNativeFolder() {
-  const picked = await pickNativeFolder()
+async function addNativeFolder(mode) {
+  const picked = await pickNativeFolder(mode)
   if (!picked.ok) return picked
   const record = {
     id: newFolderId(),
     name: picked.folder.name || 'Folder',
-    mode: 'read',
+    mode: picked.mode,
     access: 'remembered',
     source: 'native',
     nativeId: picked.folder.id,
@@ -87,21 +97,23 @@ async function addNativeFolder() {
   store.permissions.set(record.id, 'granted')
   store.access.set(record.id, createNativeFolder(nativeFolderBridge(), record.nativeId))
   await commit(record)
-  return { ...done, name: record.name, updated: false }
+  return { ...done, name: record.name, updated: false, ...readOnlyNotice(mode, record.mode) }
 }
 
 /** The app lost the folder: pick it again and keep the same shared folder, under the new native id. */
 async function repickNativeFolder(record) {
   if (!nativeFolderBridge()) return failed('Update the Möbius app to share folders from it again.')
-  const picked = await pickNativeFolder()
+  const picked = await pickNativeFolder(record.mode)
   if (!picked.ok) return picked
   const store = hostStore()
-  const updated = { ...record, name: picked.folder.name || record.name, nativeId: picked.folder.id, paused: false }
+  const updated = {
+    ...record, name: picked.folder.name || record.name, mode: picked.mode, nativeId: picked.folder.id, paused: false,
+  }
   store.permissions.set(record.id, 'granted')
   store.access.set(record.id, createNativeFolder(nativeFolderBridge(), updated.nativeId))
   await commit(updated)
   if (record.nativeId && record.nativeId !== updated.nativeId) await forgetNativeFolder(record.nativeId)
-  return done
+  return { ...done, ...readOnlyNotice(record.mode, updated.mode) }
 }
 
 async function forgetNativeFolder(nativeId) {

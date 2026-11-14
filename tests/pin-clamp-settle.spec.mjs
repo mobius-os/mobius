@@ -32,6 +32,7 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+import { paintedScrollGeometry } from './_paintedGeometry.mjs'
 
 attachCleanup()
 
@@ -180,6 +181,8 @@ async function measureStreamingGeometry(page) {
     const spacerH = spacer.offsetHeight
     return {
       scrollTop: Math.round(scroll.scrollTop),
+      scrollH: scroll.scrollHeight,
+      mode: scroll.dataset.scrollMode || null,
       userVisualTop: Math.round(ur.top - sr.top),
       spacerH,
       realContentGap: Math.round(
@@ -329,7 +332,9 @@ test('A live pin holds while spacer remains, then follows only after it is fille
     const gap = s.scrollHeight - spacerH - s.scrollTop - s.clientHeight
     return Math.abs(gap) <= 4
   }, undefined, { timeout: 10000 })
-  const following = await measureStreamingGeometry(page)
+  // Output may still be revealing: measure the painted frame, not geometry read
+  // between a commit and the follow that precedes the next paint.
+  const following = await paintedScrollGeometry(page)
   expect(following.spacerH).toBeLessThanOrEqual(1)
   expect(following.scrollTop).toBeGreaterThan(early.scrollTop)
   expect(Math.abs(following.realContentGap)).toBeLessThanOrEqual(4)
@@ -340,8 +345,9 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
     [0, { type: 'catch_up_done' }],
     [80, { type: 'text', content: 'Opening line.' }],
     [300, { type: 'text', content: ' Fill the reservation.'.repeat(120) }],
-    [900, { type: 'text', content: ' A later streamed layout change.'.repeat(12) }],
-    [1700, { type: 'done' }],
+    // Arrives well after the reservation fills, while the finger is down.
+    [1400, { type: 'text', content: ' A later streamed layout change.'.repeat(12) }],
+    [2400, { type: 'done' }],
   ]])
   await setup(page, { width: 426, height: 860 })
   await createChat(page, 'pin-clamp-settle')
@@ -354,27 +360,42 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
   const before = await measureStreamingGeometry(page)
   expect(before.spacerH).toBeLessThanOrEqual(1)
 
-  // Start a touch gesture just before the next stream-driven ResizeObserver
-  // pass. Both explicit scrollTop writes and indirect spacer shrink must yield
-  // until the gesture window closes. This locks the pre-scroll race where the
-  // stream used to throw the reader back to the pin before `scroll` landed.
-  await page.evaluate(() => {
+  // Put a finger on the transcript and drag upward just before the next
+  // stream-driven ResizeObserver pass. Touch pointerdown opens the reader
+  // gesture and touch contact (`touches.length`) holds it until the lift, so
+  // both explicit scrollTop writes and indirect spacer shrink must yield. Bare
+  // touchstart/touchmove Events carry no contact and own nothing.
+  const gestureStart = await page.evaluate(() => {
     const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-    if (!s) return
-    s.dispatchEvent(new Event('touchstart', { bubbles: true }))
-    s.dispatchEvent(new Event('touchmove', { bubbles: true }))
+    const touch = new Touch({ identifier: 1, target: s, clientX: 200, clientY: 400 })
+    window.__readerTouch = touch
+    s.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, pointerType: 'touch', clientX: 200, clientY: 400,
+    }))
+    s.dispatchEvent(new TouchEvent('touchstart', {
+      bubbles: true, touches: [touch], targetTouches: [touch], changedTouches: [touch],
+    }))
     s.scrollTop = Math.max(0, s.scrollTop - 120)
+    return { scrollTop: Math.round(s.scrollTop), scrollH: s.scrollHeight }
   })
-  const gestureTop = await page.evaluate(
-    () => Math.round(document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop || 0),
-  )
   await page.waitForFunction(() => document.body.textContent.includes('later streamed'))
   const during = await measureStreamingGeometry(page)
-  expect(Math.abs(during.scrollTop - gestureTop)).toBeLessThanOrEqual(4)
+  // The reply must really have grown under the finger, or this proves nothing.
+  expect(during.scrollH).toBeGreaterThan(gestureStart.scrollH)
+  expect(Math.abs(during.scrollTop - gestureStart.scrollTop)).toBeLessThanOrEqual(4)
 
-  // Deferred geometry catches up after ownership returns; it must not revive
-  // the old PIN/FOLLOW mode or undo the gesture-owned anchor.
+  // Lift. Deferred geometry catches up after ownership returns; it must not
+  // revive the old PIN/FOLLOW mode or undo the gesture-owned anchor.
+  await page.evaluate(() => {
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const touch = window.__readerTouch
+    s.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }))
+    s.dispatchEvent(new TouchEvent('touchend', {
+      bubbles: true, touches: [], targetTouches: [], changedTouches: [touch],
+    }))
+  })
   await page.waitForTimeout(350)
   const after = await measureStreamingGeometry(page)
-  expect(Math.abs(after.scrollTop - gestureTop)).toBeLessThanOrEqual(4)
+  expect(after.mode).toBe('ANCHOR_AT')
+  expect(Math.abs(after.scrollTop - gestureStart.scrollTop)).toBeLessThanOrEqual(4)
 })

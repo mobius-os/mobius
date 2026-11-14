@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  HOLD_MS, decidePointerMove, isSwipeRight, swipeAllowed, movedBeyondSlop, holdComplete,
-  runHoldCompletion,
+  HOLD_MS, chargeAfterFrame, decidePointerMove, isSwipeRight, swipeAllowed, movedBeyondSlop,
+  holdComplete, runHoldCompletion,
 } from './logoHoldMachine.js'
 
 // How long a touch/pen pointerdown's provenance justifies suppressing a native
@@ -62,7 +62,7 @@ export function useLogoModeGesture({
   // no animated enter/exit descriptor remains — never merely because the epoch
   // changed. ShellBrand reads it to emit the is-beat-held classes.
   const [holdOwnsBeat, setHoldOwnsBeat] = useState(false)
-  // { t, x, y, pointerId, pointerType } while a press is active; null between
+  // { pressStamp, frameAt, charged, x, y, pointerId, pointerType } while a press is active; null between
   // presses. pointerType is retained so onContextMenu can suppress the native
   // long-press menu for touch/pen even after the press ended (see below).
   const pressRef = useRef(null)
@@ -173,7 +173,10 @@ export function useLogoModeGesture({
   const tick = useCallback(() => {
     const press = pressRef.current
     if (!press) return
-    const p = (performance.now() - press.t) / HOLD_MS
+    const now = performance.now()
+    press.charged = chargeAfterFrame(press.charged, now - press.frameAt)
+    press.frameAt = now
+    const p = press.charged / HOLD_MS
     if (p >= 1) { completeHold(); return }
     writeProgress(p)
     rafRef.current = requestAnimationFrame(tick)
@@ -189,7 +192,8 @@ export function useLogoModeGesture({
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
-    pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId, pointerType: e.pointerType }
+    const pressedAt = performance.now()
+    pressRef.current = { pressStamp: e.timeStamp, frameAt: pressedAt, charged: 0, x: e.clientX, y: e.clientY, pointerId: e.pointerId, pointerType: e.pointerType }
     setHolding(true)
     writeProgress(0)
     stopRaf()
@@ -225,10 +229,12 @@ export function useLogoModeGesture({
     // Classify the release by ELAPSED TIME + DISPLACEMENT, never by liveness
     // (review §4): a delayed final rAF must not let a ≥450ms release fall through
     // as a tap, and a fast flick whose only movement lands on this event is still
-    // a swipe.
+    // a swipe. Elapsed comes from the input timestamps, which record when the
+    // finger really pressed and lifted: a busy device can deliver a quick tap's
+    // release most of a second late, and that delay is not a hold.
     const dx = e.clientX - press.x
     const dy = e.clientY - press.y
-    const elapsed = performance.now() - press.t
+    const elapsed = e.timeStamp - press.pressStamp
     // Swipe-right flips ONLY for touch/pen (finding F12); a mouse drag past the slop
     // hits the movedBeyondSlop cancel just below, so a mouse never toggles the mode.
     if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.('swipe'); endPress({ suppressClick: true }); return }

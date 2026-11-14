@@ -64,7 +64,7 @@ export default function ProviderRow({
       {statusNode !== undefined ? (
         statusNode
       ) : (
-        <StatusDot color={connected ? '--green' : '--muted'}>
+        <StatusDot color={connected ? '--green-text' : '--muted'}>
           {connected ? 'Connected' : 'Not connected'}
         </StatusDot>
       )}

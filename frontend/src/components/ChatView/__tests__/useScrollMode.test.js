@@ -46,7 +46,6 @@ import {
   readerScrollEscapeDirection,
   settledPinMode,
   shouldPinSend,
-  resizeReappliesMode,
 } from '../scroll/policy.js'
 import { _scrollModeForDiagnostics } from '../useScrollMode.js'
 import {
@@ -82,6 +81,35 @@ test('shouldPinSend trusts actual scroll position over stale FOLLOW_BOTTOM mode'
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'FOLLOW_BOTTOM' },
     isFirstUserMsg: false,
+  }), false)
+})
+
+test('shouldPinSend keeps a live follower at the autoscroll tail before layout follows new output', () => {
+  // FOLLOW_BOTTOM last wrote scrollTop 1500. A fast reveal then committed
+  // three more lines; the next layout observation has not followed them yet,
+  // so the raw physical gap is 75px although the reader never moved.
+  assert.equal(shouldPinSend({
+    scrollEl: makeScrollEl({ scrollHeight: 2075, scrollTop: 1500, clientHeight: 500 }),
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
+  }), true)
+})
+
+test('shouldPinSend does not treat a moved reader as the autoscroll tail', () => {
+  const scrollEl = makeScrollEl({ scrollHeight: 2075, scrollTop: 1380, clientHeight: 500 })
+  assert.equal(shouldPinSend({
+    scrollEl,
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
+  }), false)
+  // A remembered follow position never turns another mode into autoscroll.
+  assert.equal(shouldPinSend({
+    scrollEl: makeScrollEl({ scrollHeight: 2075, scrollTop: 1500, clientHeight: 500 }),
+    mode: { kind: 'ANCHOR_AT', key: 'reader-row', offset: 0 },
+    isFirstUserMsg: false,
+    followTailTop: 1500,
   }), false)
 })
 
@@ -240,7 +268,8 @@ test('nested controls keep their own keys and available scroll range', () => {
 })
 
 test('a composer press or direct edit requests follow only at the physical tail', () => {
-  const composer = { matches: selector => selector === 'textarea.chat__input' }
+  const composer = { matches: selector => selector.split(', ').includes('textarea.chat__input') }
+  const markdownComposer = { matches: selector => selector.split(', ').includes('.chat__editor-content') }
   const otherControl = { matches: () => false }
   const atTail = makeScrollEl({
     scrollHeight: 2000,
@@ -267,6 +296,11 @@ test('a composer press or direct edit requests follow only at the physical tail'
     type: 'pointerdown', button: 1, target: composer,
   }, atTail), false,
     'non-primary presses do not express writing intent')
+  const formattedWord = { closest: selector => selector === '.chat__editor-content' ? markdownComposer : null }
+  assert.equal(composerTailIntentRequestsFollow({ type: 'pointerdown', button: 0, target: formattedWord }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'pointerdown', button: 0, target: formattedWord }, aboveTail), false)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'input', target: markdownComposer }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'input', target: markdownComposer }, aboveTail), false)
   assert.equal(composerTailIntentRequestsFollow({
     type: 'input', target: otherControl,
   }, atTail), false)
@@ -2568,14 +2602,6 @@ test('durable queue anchors lose submission authority and cannot restore off-con
   const offContent = _validateSavedMode({ ...captured, offset: -500 }, [], scrollEl)
   assert.notEqual(offContent.offset, -500)
   assert.equal(offContent.submissionLayoutHold, undefined)
-})
-
-test('a resize driven by the inline answer editor never follows the live tail', () => {
-  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: true }), false)
-  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: false }), true)
-  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM'), true)
-  // A hidden anchor restore is not reader typing; it re-applies regardless.
-  assert.equal(resizeReappliesMode('ANCHOR_AT', { editorResized: true }), true)
 })
 
 // Reading-position handoff: a settled anchor must not outlive a viewport the

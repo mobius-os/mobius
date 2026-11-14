@@ -102,16 +102,23 @@ test('an app may name its expand control, bounded and optional', () => {
   assert.equal(appBlockFromToken(token({ ...base, expand_label: 7 })).expandLabel, '')
 })
 
-test('an embedded transcript view may only open a conversation or an app', () => {
+test('an embedded transcript view may only open a conversation, an app, or Settings', () => {
   const seen = []
   const navigate = target => seen.push(target)
   transcriptHostRequest({ type: 'moebius:open-chat', chatId: 'c1' }, { navigate })
   transcriptHostRequest({ type: 'moebius:open-app', appId: 3, intent: 'x:1' }, { navigate })
-  assert.deepEqual(seen, ['/shell/?chat=c1', '/shell/?app=3&intent=x%3A1'])
-  for (const request of [{ type: 'moebius:new-chat' }, { type: 'moebius:open-settings' }, { type: 'moebius:open-chat' }]) {
-    assert.throws(() => transcriptHostRequest(request, { navigate }), /only open conversations and apps/)
+  transcriptHostRequest({ type: 'moebius:open-settings', section: 'mobius-account' }, { navigate })
+  transcriptHostRequest({ type: 'moebius:open-settings', section: 'retired-section' }, { navigate })
+  assert.deepEqual(seen, [
+    '/shell/?chat=c1',
+    '/shell/?app=3&intent=x%3A1',
+    '/shell/?settings=mobius-account',
+    '/shell/?settings=ai-providers',
+  ])
+  for (const request of [{ type: 'moebius:new-chat' }, { type: 'moebius:chat-control' }, { type: 'moebius:open-chat' }]) {
+    assert.throws(() => transcriptHostRequest(request, { navigate }), /only open conversations, apps and Settings/)
   }
-  assert.equal(seen.length, 2)
+  assert.equal(seen.length, 4)
 })
 
 test('inline sessions are opt-in and never apply to link-only blocks', () => {
@@ -169,4 +176,15 @@ test('a malformed block never throws; wrong-typed fields fall back to a code blo
   }
   assert.equal(appBlockFromToken(token({ ...base, app: ['example'] })), null, 'an array app is not a slug')
   assert.equal(appBlockFromToken(token({ ...base, height: 300 })).height, 300)
+})
+
+test('only a JSON false for expand turns the inline view off; sessions are unaffected', () => {
+  assert.equal(appBlockFromToken(token(base)).expand, true)
+  assert.equal(appBlockFromToken(token({ ...base, expand: false })).expand, false)
+  for (const value of ['false', 0, null, {}, [], 'no']) {
+    assert.equal(appBlockFromToken(token({ ...base, expand: value })).expand, true, JSON.stringify(value))
+  }
+  const session = appBlockFromToken(token({ ...base, expand: false, interaction: 'inline', action: { label: 'Publish', intent: 'send:all' } }))
+  assert.equal(session.session, true)
+  assert.deepEqual(session.action, { label: 'Publish', intent: 'send:all' })
 })

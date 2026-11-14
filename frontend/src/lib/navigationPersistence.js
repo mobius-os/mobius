@@ -21,6 +21,34 @@ export function readRestoredCanvas(storage = localStore()) {
   } catch { return null }
 }
 
+const PAGE_LIVE_KEY = 'mobius:page-live'
+
+/**
+ * Whether this tab's previous page died while on screen, and arm the same
+ * check for this page. A page that ends normally (reload, navigation, going to
+ * the background) clears the mark on pagehide/hidden/freeze; a page the browser
+ * kills (iOS Safari's out-of-memory crash, which then reloads the tab) leaves it,
+ * and sessionStorage survives into the reload.
+ */
+export function previousPageDied(
+  session = sessionStore(), win = globalThis.window, doc = globalThis.document,
+) {
+  let died = false
+  try { died = session?.getItem(PAGE_LIVE_KEY) === '1' } catch { /* storage disabled */ }
+  const mark = (live) => {
+    try {
+      if (live) session?.setItem(PAGE_LIVE_KEY, '1')
+      else session?.removeItem(PAGE_LIVE_KEY)
+    } catch { /* storage disabled: no crash detection */ }
+  }
+  mark(doc?.visibilityState !== 'hidden')
+  win?.addEventListener?.('pagehide', () => mark(false))
+  win?.addEventListener?.('pageshow', () => mark(true))
+  doc?.addEventListener?.('freeze', () => mark(false))
+  doc?.addEventListener?.('visibilitychange', () => mark(doc.visibilityState !== 'hidden'))
+  return died
+}
+
 export function consumeReturnView(storage = sessionStore()) {
   try {
     const view = storage?.getItem(RETURN_VIEW_KEY)
@@ -38,6 +66,7 @@ export function parseShellDeepLink(location = globalThis.location) {
       const chat = params.get('chat')
       const project = params.get('project')
       const projects = params.get('projects')
+      const result = params.get('result')
       const intent = params.get('intent')
       const focusQuestion = params.get('focus') === 'question'
       if (app) {
@@ -46,6 +75,10 @@ export function parseShellDeepLink(location = globalThis.location) {
       }
       if (chat) return { view: 'chat', chatId: chat, intent, focusQuestion,
         ...(focusQuestion && params.get('question') ? { questionId: params.get('question') } : {}) }
+      if (project && result && /^[A-Za-z0-9_-]{1,128}$/.test(project)
+        && /^[A-Za-z0-9_-]{1,64}$/.test(result)) {
+        return { view: 'artifact', projectId: project, artifactId: result }
+      }
       if (project) return { view: 'project', projectId: project }
       if (projects === '1') return { view: 'projects' }
       if (params.has('settings')) {

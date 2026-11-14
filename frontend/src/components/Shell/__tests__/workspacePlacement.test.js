@@ -808,8 +808,12 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
   )
   assert.match(shellSource, /const reconcileSystemStateOnOpen = useCallback/)
   assert.match(shellSource, /const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000/)
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\{ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal \}\)/)
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\{ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal \}\)/)
+  assert.match(shellSource, /const SYSTEM_RECONNECT_LIST_MAX_TIMEOUT_MS = 20_000/,
+    'retry bounds stay below the system stream connect deadline')
+  assert.match(shellSource, /reconcileSystemStateOnOpen = useCallback\(async \(\{ signal, failedAttempts = 0 \} = \{\}\) => \{\s*const listTimeoutMs = reconnectListTimeoutMs\(failedAttempts\)/,
+    'a first reconnect keeps the short bound; only retries widen it')
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\{ timeoutMs: listTimeoutMs, signal \}\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\{ timeoutMs: listTimeoutMs, signal \}\)/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*reconcileLocalChatRuns\([\s\S]*?refreshedChats,[\s\S]*?visibleChatIdsRef\.current/,
     'fresh reconnect truth retires a local active-work marker whose finish event was missed')
   assert.match(chatLifecycleSource, /withoutSettledLocalChatRuns\(localIds, rows,[\s\S]*?acknowledgedIds: acknowledgedLocalChatRunIdsRef\.current[\s\S]*?protectedIds/,

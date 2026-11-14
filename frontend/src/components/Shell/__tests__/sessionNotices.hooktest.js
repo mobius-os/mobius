@@ -1,6 +1,7 @@
 /* Shell feedback behaves as notification history for the current session. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
 import useSessionNotices from '../../NotificationBell/useSessionNotices.js'
 import { mergeNotificationRows } from '../../NotificationsView/notificationsModel.js'
@@ -74,7 +75,7 @@ test('failed Undo is visible and retryable rather than being reported as complet
   assert.equal(result.current.rows[0].actionStatus, 'Undone')
 })
 
-test('a newer archive action disables only the earlier Undo for the same chat', async () => {
+test('a newer archive action replaces only the earlier notice for the same chat', async () => {
   const { result } = renderHook(useSessionNotices)
   let calls = 0
   const options = noticeKey => ({ noticeKey, action: { label: 'Undo', onAction: () => { calls += 1 } } })
@@ -82,12 +83,75 @@ test('a newer archive action disables only the earlier Undo for the same chat', 
   const firstId = result.current.rows[0].id
   result.current.addNotice('Chat archived', options('archive:b'))
   result.current.addNotice('Chat restored', options('archive:a'))
-  const old = result.current.rows.find(row => row.id === firstId)
-  assert.equal(old.sessionAction, null)
-  assert.equal(old.actionStatus, 'Superseded by a newer action')
-  assert.ok(result.current.rows[1].sessionAction, 'another chat keeps its Undo')
+  assert.deepEqual(result.current.rows.map(row => [row.title, row.noticeKey]), [
+    ['Chat restored', 'archive:a'], ['Chat archived', 'archive:b'],
+  ])
+  assert.ok(result.current.rows.every(row => row.sessionAction), 'another chat keeps its Undo')
   await result.current.runAction(firstId)
   assert.equal(calls, 0)
+})
+
+// Run the Shell's real archive callback against the real session feed, so the
+// owner-visible rows (not just the notice options) are what the tests check.
+const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const archiveStart = shellSource.indexOf('  const setChatArchived = useCallback(')
+const archiveEnd = shellSource.indexOf('  const archivedChatIds =', archiveStart)
+assert.ok(archiveStart > 0 && archiveEnd > archiveStart)
+const makeSetChatArchived = new Function('deps',
+  `with (deps) { ${shellSource.slice(archiveStart, archiveEnd)} return setChatArchived }`)
+
+function archiveFeed() {
+  const { result } = renderHook(useSessionNotices)
+  let server = { id: 'a', archived_at: null, pinned_at: null }
+  const chatsRef = { current: [server] }
+  const responses = []
+  const write = archived => {
+    const next = responses.shift()
+    if (next === 'unreachable') return Promise.reject(new TypeError('Load failed'))
+    if (next === 'ok') server = { ...server, archived_at: archived ? 'archived' : null }
+    return Promise.resolve({ ok: next === 'ok' })
+  }
+  const setChatArchived = makeSetChatArchived({
+    useCallback: fn => fn, chatsRef,
+    archiveActionsRef: { current: new Map() }, archiveRequestsRef: { current: new Map() },
+    withChatArchive: rows => rows,
+    projectChatList() {},
+    refreshChatRows() { chatsRef.current = [{ ...server }] },
+    api: { chats: { archive: () => write(true), unarchive: () => write(false) } },
+    notifyShell: (message, options) => result.current.addNotice(message, options),
+  })
+  const feed = () => result.current.rows.map(row => [
+    row.title, row.sessionAction?.label ?? null, row.actionStatus ?? row.actionError ?? null,
+  ])
+  const press = () => result.current.runAction(result.current.rows[0].id)
+  return { setChatArchived, responses, feed, press }
+}
+
+test('a successful archive Try again leaves one notice: the success with its Undo', async () => {
+  const f = archiveFeed()
+  f.responses.push('unreachable', 'ok')
+  await f.setChatArchived('a', true)
+  assert.deepEqual(f.feed(), [['Couldn’t archive that chat: Möbius couldn’t be reached.', 'Try again', null]])
+  await f.press()
+  assert.deepEqual(f.feed(), [['Chat archived', 'Undo', null]])
+})
+
+test('a failed Try again leaves one current error notice that can be retried again', async () => {
+  const f = archiveFeed()
+  f.responses.push('unreachable', 'error')
+  await f.setChatArchived('a', true)
+  await f.press()
+  assert.deepEqual(f.feed(), [['Couldn’t archive that chat: Möbius hit an error.', 'Try again', null]])
+})
+
+test('retrying a failed Undo ends as the restored notice, never as an Undone error', async () => {
+  const f = archiveFeed()
+  f.responses.push('ok', 'error', 'ok')
+  await f.setChatArchived('a', true)
+  await f.press()
+  assert.deepEqual(f.feed(), [['Couldn’t restore that chat: Möbius hit an error.', 'Try again', null]])
+  await f.press()
+  assert.deepEqual(f.feed(), [['Chat restored', 'Undo', null]])
 })
 
 test('offline feedback can be dismissed without a request; history merges chronologically without mutation', () => {

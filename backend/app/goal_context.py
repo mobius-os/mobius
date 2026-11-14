@@ -1,6 +1,10 @@
 """Deterministic hierarchical Goal views. No summaries, caches or extra state."""
 from collections import Counter
 
+from app.context_budget import (
+  DEPENDENCY_IDS, LIST_ITEMS, NEXT_ACTION_CHARS, TEXT_CHARS, TITLE_CHARS, excerpt,
+)
+
 ROLES = ("coordinator", "helper")
 # The coordinator owns the Goal outcome. A helper works one assigned branch
 # and must not receive the owner's next step or outcome contract.
@@ -15,14 +19,13 @@ COORDINATOR_ONLY_FIELDS = ("outcome_contract", "next_action", "checkpoint")
 def project_goal(goal, task_id=None, *, role="coordinator"):
   """Focus on the common ancestor of running work, or the root overview.
 
-  Shrunk by structure, never by clipping. Full detail belongs only to the
-  focus, its ancestors' constraints, the results and notes of its
-  prerequisites, and blocker reasons. Immediate children, siblings along its
-  ancestor path, and
+  Shrunk by structure first. Full detail belongs only to the focus, its
+  ancestors' constraints, the results and notes of its prerequisites, and
+  blocker reasons. Immediate children, siblings along its ancestor path, and
   blockers elsewhere are summaries: id, title, status, dependency ids, and
-  has_result/has_note flags naming what focusing that task returns. Lists
-  are whole. The saved plan is untouched; read_goal
-  uses the identical projection.
+  has_result/has_note flags naming what focusing that task returns. The
+  saved plan is untouched. read_goal returns this projection whole; the
+  per-turn brief repeats in every turn, so ``fit_brief`` bounds it.
   """
   if role not in ROLES:
     raise ValueError(f"Unknown Goal view role: {role}")
@@ -41,24 +44,11 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
 
   if task_id is not None and task_id not in by_id:
     raise ValueError("Task not found in this Goal")
-  if task_id is None:
-    running = [path(t["id"]) for t in tasks if t["status"] == "running"]
-    # A running coordinator plus running descendants should focus on those
-    # descendants, not force a full coordinator view.
-    leaves = [p for p in running if not any(
-      len(other) > len(p) and other[:len(p)] == p for other in running
-    )]
-    if leaves:
-      common = []
-      for level in zip(*leaves):
-        if len(set(level)) != 1:
-          break
-        common.append(level[0])
-      task_id = common[-1] if common else None
 
   counts = {}
-
-  # Count bottom-up without a Python recursion depth limit for deep plans.
+  # Running tasks with no running descendant, per subtree; one bottom-up pass
+  # without a Python recursion depth limit for deep plans.
+  running_leaves = {}
   stack = [(None, False)]
   while stack:
     key, leaving = stack.pop()
@@ -67,10 +57,24 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
       stack.extend((child, False) for child in children.get(key, []))
       continue
     count = Counter()
+    below = 0
     for child in children.get(key, []):
       count[by_id[child]["status"]] += 1
       count.update(counts[child])
+      below += running_leaves[child]
     counts[key] = dict(sorted(count.items()))
+    running_leaves[key] = below or int(key is not None and by_id[key]["status"] == "running")
+
+  if task_id is None and running_leaves[None]:
+    # A running coordinator plus running descendants should focus on those
+    # descendants: the deepest task whose subtree holds every running leaf.
+    total = running_leaves[None]
+    while True:
+      deeper = next((child for child in children.get(task_id, [])
+                     if running_leaves[child] == total), None)
+      if deeper is None:
+        break
+      task_id = deeper
 
   def summary(key, *, parent=True):
     t = by_id[key]
@@ -132,9 +136,10 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   ))
   if task_id and role == "coordinator":
     # A sibling that is also a prerequisite appears once, in full, below.
+    prerequisite = set(dependencies)
     siblings = [sibling for key in path(task_id)
                 for sibling in children.get(by_id[key].get("parent_id"), [])
-                if sibling != key and sibling not in dependencies]
+                if sibling != key and sibling not in prerequisite]
     if siblings:
       shown.update(siblings)
       payload["siblings"] = [summary(key) for key in siblings]
@@ -149,7 +154,8 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
     # A helper sees what can hold up its own work: blockers in its subtree and
     # along its prerequisite chain (a prerequisite, anything it in turn needs,
     # and their subtrees). Unrelated branches' blockers are the coordinator's.
-    blockers = [key for key in blockers if key in _work_reach(task_id, ancestors, by_id, children)]
+    reach = _work_reach(task_id, ancestors, by_id, children)
+    blockers = [key for key in blockers if key in reach]
   if blockers:
     payload["open_blockers"] = [summary(key) for key in blockers]
   if role == "coordinator":
@@ -157,6 +163,86 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   if role == "helper":
     for key in COORDINATOR_ONLY_FIELDS:
       payload.pop(key, None)
+  return payload
+
+
+# A task text and its display limit in the brief.
+_TASK_TEXT_LIMITS = (("completion_condition", TEXT_CHARS), ("note", TEXT_CHARS),
+                     ("result", TEXT_CHARS))
+# Lists that share LIST_ITEMS entries, in priority order: what constrains the
+# focus, what feeds it, what it contains, what surrounds it. A plan of at most
+# LIST_ITEMS tasks never fills them past that, so this is base's worst case.
+_BRIEF_LISTS = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
+# A shortened title ends in this alone; the brief says once how to read it.
+_TITLE_MARKER = "…"
+
+
+def fit_brief(payload, task_id, *, role="coordinator"):
+  """Show the per-turn brief's plan texts within their old input caps.
+
+  Each task text and the next action over its limit becomes a marked excerpt
+  naming the paged read that returns it whole (a title ends in a bare "…",
+  explained once); the lists share at most LIST_ITEMS entries and each task at most
+  DEPENDENCY_IDS dependency ids. The objective and other open Goals were never
+  capped and stay whole. A plan valid under the old caps is shown exactly as
+  before. The saved Goal and plan are untouched.
+  """
+  goal_read = "update_goal with no arguments" if role == "coordinator" else "read_goal"
+  overview = f"read_goal(task={task_id})" if task_id else goal_read
+
+  def clip(holder, key, limit, read_full):
+    if isinstance(holder.get(key), str):
+      holder[key] = excerpt(holder[key], limit, read_full)
+
+  shortened_titles = []
+
+  def clip_task(entry):
+    title = entry.get("title")
+    if isinstance(title, str) and len(title) > TITLE_CHARS:
+      entry["title"] = title[:TITLE_CHARS - len(_TITLE_MARKER)].rstrip() + _TITLE_MARKER
+      shortened_titles.append(entry["id"])
+    for field, limit in _TASK_TEXT_LIMITS:
+      clip(entry, field, limit, f"read_goal(task={entry['id']}, field={field}) reads it whole")
+    ids = entry.get("depends_on") or []
+    if len(ids) > DEPENDENCY_IDS:
+      entry["depends_on"] = ids[:DEPENDENCY_IDS]
+      entry["depends_on_omitted"] = (
+        f"{len(ids) - DEPENDENCY_IDS} more; read_goal(task={entry['id']}) lists them all")
+
+  clip(payload, "next_action", NEXT_ACTION_CHARS, "read_goal(field=next_action) reads it whole")
+  if isinstance(payload.get("hold"), dict):
+    payload["hold"] = dict(payload["hold"])
+    clip(payload["hold"], "reason", NEXT_ACTION_CHARS, f"{goal_read} shows it whole")
+  if "task" in payload:
+    clip_task(payload["task"])
+  # The budget counts distinct tasks: one listed both as a child and as a
+  # prerequisite (any step-after-step chain) costs one entry, not two.
+  room = LIST_ITEMS
+  counted = set()
+  for key in _BRIEF_LISTS:
+    entries = payload.get(key)
+    if not entries:
+      continue
+    # The nearest ancestors constrain the focus most, so they are kept first.
+    kept = []
+    for entry in (reversed(entries) if key == "ancestors" else entries):
+      if entry["id"] not in counted:
+        if not room:
+          continue
+        counted.add(entry["id"])
+        room -= 1
+      kept.append(dict(entry))
+    if key == "ancestors":
+      kept.reverse()
+    for entry in kept:
+      clip_task(entry)
+    payload[key] = kept
+    if len(kept) < len(entries):
+      payload[f"{key}_omitted"] = f"{len(entries) - len(kept)} more; {overview} lists them all"
+  if shortened_titles:
+    payload["titles_shortened"] = (
+      f"Titles ending in {_TITLE_MARKER} are shortened; "
+      "read_goal(task=<id>, field=title) reads one whole.")
   return payload
 
 

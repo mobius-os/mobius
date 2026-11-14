@@ -8,7 +8,7 @@ import {
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
   recoveryPhaseForAttempt,
-  repairChatPath,
+  repairChatHref,
   opensDegradedRepairChat,
   runAgentRepair,
   writeErrorRecoveryAttempt,
@@ -153,7 +153,7 @@ test('repair flow owns persisted transitions and reuses request identity', async
   ])
   assert.deepEqual(result, {
     chatId: 'repair-chat',
-    path: '/mobius/shell/?chat=repair-chat&repair=1',
+    href: '/mobius/shell/?chat=repair-chat&repair=1',
   })
   assert.deepEqual(snapshots.map(attempt => [attempt.phase, attempt.chatId]), [
     ['agent-starting', null],
@@ -207,6 +207,74 @@ test('repair flow persists a failed send with the created chat identity', async 
     readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint }).phase,
     'agent-failed',
   )
+})
+
+test('retrying after the owner deleted the repair chat opens a new one', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'chat:deleted-repair'
+  const fingerprint = errorRecoveryFingerprint(surfaceKey, 'render failed')
+  const created = []
+  const sent = []
+  const client = {
+    chats: {
+      create: async ({ recovery_request_id: id }) => {
+        created.push(id)
+        if (id === 'deleted-request') return { ok: false, status: 409 }
+        return { ok: true, json: async () => ({ id: `chat-for-${id}` }) }
+      },
+      send: async (chatId, { cid }) => { sent.push([chatId, cid]); return { ok: true } },
+    },
+  }
+
+  const result = await runAgentRepair({
+    prompt: 'diagnostic prompt',
+    client,
+    surfaceKey,
+    fingerprint,
+    storage,
+    previousAttempt: {
+      phase: 'agent-failed',
+      chatId: 'deleted-chat',
+      repairRequestId: 'deleted-request',
+      messageCid: 'deleted-message',
+    },
+  })
+
+  assert.equal(created.length, 2)
+  const freshRequest = created[1]
+  assert.notEqual(freshRequest, 'deleted-request')
+  assert.equal(result.chatId, `chat-for-${freshRequest}`)
+  assert.equal(sent.length, 1, 'the prompt goes only to the new chat')
+  assert.equal(sent[0][0], result.chatId)
+  assert.notEqual(sent[0][1], 'deleted-message', 'the deleted chat\'s message id is not reused')
+  const persisted = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint })
+  assert.equal(persisted.phase, 'agent-directed')
+  assert.equal(persisted.chatId, result.chatId)
+  assert.equal(persisted.repairRequestId, freshRequest)
+})
+
+test('a deleted repair chat is replaced only once per request', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'chat:always-deleted'
+  const fingerprint = errorRecoveryFingerprint(surfaceKey, 'render failed')
+  let creates = 0
+  await assert.rejects(runAgentRepair({
+    prompt: 'diagnostic prompt',
+    client: {
+      chats: {
+        create: async () => { creates += 1; return { ok: false, status: 409 } },
+        send: async () => { throw new Error('must not send') },
+      },
+    },
+    surfaceKey,
+    fingerprint,
+    storage,
+    previousAttempt: { repairRequestId: 'deleted-request', messageCid: 'deleted-message' },
+  }))
+  assert.equal(creates, 2)
+  const persisted = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint })
+  assert.equal(persisted.phase, 'agent-failed')
+  assert.notEqual(persisted.repairRequestId, 'deleted-request')
 })
 
 test('an aborted repair remains resumable instead of becoming a failure', async () => {
@@ -293,8 +361,16 @@ test('repair prompt bounds and indents untrusted diagnostics', () => {
   assert.match(prompt, /Preserve user data/)
 })
 
-test('repair chat paths encode chat identity', () => {
-  assert.equal(repairChatPath('chat id'), '/shell/?chat=chat%20id&repair=1')
+test('repair chat links encode chat identity', () => {
+  assert.equal(repairChatHref('chat id'), '/shell/?chat=chat%20id&repair=1')
+  assert.equal(
+    repairChatHref('guest chat', '', {
+      pathname: '/shell/shared',
+      href: 'https://mobius.test/shell/shared?chat=other',
+    }),
+    'https://mobius.test/shell/shared?chat=guest%20chat&repair=1',
+    'a shared-browser guest stays in their own workspace',
+  )
   assert.equal(opensDegradedRepairChat('?chat=chat%20id&repair=1'), true)
   assert.equal(opensDegradedRepairChat('?chat=chat%20id'), false)
 })

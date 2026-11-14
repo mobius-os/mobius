@@ -1,141 +1,102 @@
 /**
- * Unit tests for the KaTeX DOMPurify sanitize wrapping (P1).
+ * Render the real inline/display math sinks and inspect the config they pass
+ * to DOMPurify. The sanitizer double returns deliberately different HTML, so
+ * bypassing it (or ignoring its return value) cannot pass. This is wiring and
+ * policy coverage, NOT DOMPurify's browser parsing/XSS behavior.
  *
- * These tests verify the sanitize config allows MathML elements and
- * that the sanitize function is called on both inline and block math.
- * Full DOM-level XSS proofs require a browser; here we verify the
- * config shape is correct and the call site is wired.
- *
- * Run with:
- *   cd frontend && node --loader=./src/lib/__tests__/vite-env-loader.mjs \
- *     --test src/components/ChatView/__tests__/katexSanitize.test.js
+ * cd frontend && node --loader=./src/lib/__tests__/vite-env-loader.mjs \
+ *   --test src/components/ChatView/__tests__/katexSanitize.test.js
  */
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 
-// ---------------------------------------------------------------------------
-// Config shape — the KATEX_PURIFY_CONFIG objects in InlineContent.jsx and
-// blocks.jsx must include all standard MathML container elements so KaTeX
-// output survives sanitization intact.
-// ---------------------------------------------------------------------------
+const purifierId = '\0katex-purifier-spy'
+const mathId = '\0katex-html-fixture'
+const vite = await createSsrRenderServer({
+  configFile: false,
+  noExternal: ['dompurify'],
+  plugins: [{
+    name: 'katex-sanitize-boundaries',
+    enforce: 'pre',
+    resolveId(id, importer) {
+      if (id === 'dompurify') return purifierId
+      if (id === './math.js' && /\/markdown\/(InlineContent|blocks)\.jsx$/.test(importer || '')) return mathId
+    },
+    load(id) {
+      if (id === purifierId) return `
+        export const calls = [];
+        export default { sanitize(html, config) {
+          const clean = '<math data-sanitized="' + (calls.length + 1) + '"><mi>safe</mi></math>';
+          calls.push({ html, config, clean });
+          return clean;
+        } };
+      `
+      if (id === mathId) return `
+        export const calls = [];
+        export let output = '';
+        export function setOutput(value) { output = value; }
+        export function useMathHtml(tex, displayMode) {
+          calls.push({ tex, displayMode });
+          return output;
+        }
+      `
+    },
+  }],
+})
+after(() => vite.close())
+const { default: InlineContent } = await vite.ssrLoadModule('/src/components/ChatView/markdown/InlineContent.jsx')
+const { MathBlock } = await vite.ssrLoadModule('/src/components/ChatView/markdown/blocks.jsx')
+const purifier = await vite.ssrLoadModule(purifierId)
+const math = await vite.ssrLoadModule(mathId)
 
-// Replicate the config that both files declare (they must be kept in sync).
-const KATEX_PURIFY_CONFIG = {
-  ADD_TAGS: ['math', 'mrow', 'mn', 'mo', 'mi', 'mspace', 'msup', 'msub',
-             'msubsup', 'mfrac', 'msqrt', 'mroot', 'mtext', 'mstyle',
-             'mover', 'munder', 'munderover', 'mtable', 'mtr', 'mtd',
-             'menclose', 'mpadded', 'mphantom', 'semantics', 'annotation',
-             'annotation-xml'],
-  ADD_ATTR: ['xmlns', 'display', 'encoding', 'columnalign', 'mathvariant',
-             'mathsize', 'stretchy', 'symmetric', 'lspace', 'rspace',
-             'rowalign', 'columnspacing', 'rowspacing', 'width', 'height',
-             'depth', 'voffset'],
-  FORCE_BODY: true,
+const sites = [
+  { name: 'inline token', tag: 'span', className: 'md-math-inline', displayMode: false,
+    element: tex => createElement(InlineContent, { tokens: [{ type: 'inlineKatex', text: tex, displayMode: false }] }) },
+  { name: 'display-mode inline token', tag: 'div', className: 'md-math-block', displayMode: true,
+    element: tex => createElement(InlineContent, { tokens: [{ type: 'inlineKatex', text: tex, displayMode: true }] }) },
+  { name: 'block math', tag: 'div', className: 'md-math-block', displayMode: true,
+    element: tex => createElement(MathBlock, { tex }) },
+]
+
+function assertMathPolicy(config) {
+  assert.ok(config, 'the sink must supply its production MathML policy')
+  for (const tag of ['math', 'mrow', 'mn', 'mo', 'mi', 'mfrac', 'msqrt', 'msup', 'msub']) {
+    assert.ok(config.ADD_TAGS.includes(tag), `MathML <${tag}> must remain supported`)
+  }
+  for (const attr of ['display', 'xmlns']) {
+    assert.ok(config.ADD_ATTR.includes(attr), `${attr} must remain supported`)
+  }
+  assert.equal(config.FORCE_BODY, true)
+  assert.ok(!config.ADD_TAGS.includes('script'), 'script must not be added to the policy')
+  assert.ok(!config.ADD_ATTR.some(attr => /^on/i.test(attr)), 'event-handler attrs must not be added')
 }
 
-test('KATEX_PURIFY_CONFIG includes the root <math> element', () => {
-  assert.ok(KATEX_PURIFY_CONFIG.ADD_TAGS.includes('math'),
-    '<math> must be in ADD_TAGS or KaTeX output is stripped')
-})
+for (const site of sites) {
+  test(`${site.name} sends raw math through the actual sanitizer policy and renders only its result`, () => {
+    purifier.calls.length = 0
+    math.calls.length = 0
+    const raw = '<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math>'
+      + '<script>unsafe()</script><img src=x onerror="unsafe()">'
+    math.setOutput(raw)
+    const html = renderToStaticMarkup(site.element('x + 1'))
+    assert.equal(math.calls.length, 1)
+    assert.deepEqual(math.calls[0], { tex: 'x + 1', displayMode: site.displayMode })
+    assert.equal(purifier.calls.length, 1, 'every HTML sink must invoke DOMPurify exactly once')
+    const call = purifier.calls[0]
+    assert.equal(call.html, raw, 'raw useMathHtml output must reach the actual sanitizer')
+    assertMathPolicy(call.config)
+    assert.equal(html, `<${site.tag} class="${site.className}">${call.clean}</${site.tag}>`)
+    assert.ok(!html.includes('unsafe'), 'raw HTML must never reach the sink')
+  })
 
-test('KATEX_PURIFY_CONFIG includes common MathML container elements', () => {
-  const required = ['mrow', 'mn', 'mo', 'mi', 'mfrac', 'msqrt', 'msup', 'msub']
-  for (const tag of required) {
-    assert.ok(KATEX_PURIFY_CONFIG.ADD_TAGS.includes(tag),
-      `MathML element <${tag}> must be in ADD_TAGS`)
-  }
-})
-
-test('KATEX_PURIFY_CONFIG includes display attribute (needed for block math)', () => {
-  assert.ok(KATEX_PURIFY_CONFIG.ADD_ATTR.includes('display'),
-    'display attribute must be allowed — block math uses display="block"')
-})
-
-test('KATEX_PURIFY_CONFIG has FORCE_BODY:true so fragment parse works correctly', () => {
-  assert.strictEqual(KATEX_PURIFY_CONFIG.FORCE_BODY, true)
-})
-
-test('KATEX_PURIFY_CONFIG includes xmlns (MathML namespace declaration)', () => {
-  assert.ok(KATEX_PURIFY_CONFIG.ADD_ATTR.includes('xmlns'),
-    'xmlns attr must be allowed for MathML namespace declarations')
-})
-
-// ---------------------------------------------------------------------------
-// Sanitize-is-called gate — simulate the sanitize wrapper to verify it
-// actually wraps the raw KaTeX output rather than passing it through.
-// ---------------------------------------------------------------------------
-
-test('sanitizeKatex calls DOMPurify.sanitize with the config', () => {
-  let capturedHtml = null
-  let capturedConfig = null
-
-  // Minimal DOMPurify mock
-  const mockDOMPurify = {
-    sanitize(html, config) {
-      capturedHtml = html
-      capturedConfig = config
-      return html // passthrough for the mock
-    }
-  }
-
-  // Replicate the sanitizeKatex wrapper from InlineContent.jsx
-  function sanitizeKatex(html) {
-    return mockDOMPurify.sanitize(html, KATEX_PURIFY_CONFIG)
-  }
-
-  const rawKatexOutput = '<math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn></mrow></math>'
-  const result = sanitizeKatex(rawKatexOutput)
-
-  assert.strictEqual(capturedHtml, rawKatexOutput, 'raw KaTeX HTML must be passed to sanitize')
-  assert.ok(capturedConfig === KATEX_PURIFY_CONFIG, 'KATEX_PURIFY_CONFIG must be passed to sanitize')
-  assert.strictEqual(result, rawKatexOutput, 'passthrough mock returns the input unchanged')
-})
-
-test('sanitizeKatex is called before dangerouslySetInnerHTML for both inline and block', () => {
-  // This test documents the invariant: if sanitizeKatex is called and its
-  // output is used in dangerouslySetInnerHTML, the raw HTML never reaches the DOM.
-  // We verify by confirming the return value of sanitize is what gets used.
-
-  const intercepted = []
-  const mockDOMPurify = {
-    sanitize(html, _cfg) {
-      intercepted.push(html)
-      return `SANITIZED:${html}`
-    }
-  }
-
-  function sanitizeKatex(html) {
-    return mockDOMPurify.sanitize(html, KATEX_PURIFY_CONFIG)
-  }
-
-  // Block math
-  const blockHtml = '<math><mrow><mn>42</mn></mrow></math>'
-  const blockResult = sanitizeKatex(blockHtml)
-  assert.strictEqual(blockResult, `SANITIZED:${blockHtml}`)
-
-  // Inline math
-  const inlineHtml = '<math><mi>x</mi></math>'
-  const inlineResult = sanitizeKatex(inlineHtml)
-  assert.strictEqual(inlineResult, `SANITIZED:${inlineHtml}`)
-
-  assert.strictEqual(intercepted.length, 2, 'sanitize called once per render site')
-})
-
-// ---------------------------------------------------------------------------
-// Regression: a script tag in KaTeX output must NOT survive (config sanity).
-// We simulate what DOMPurify would do — just verify our config doesn't
-// ADD_TAGS <script> (it must stay on the implicit deny-list).
-// ---------------------------------------------------------------------------
-
-test('KATEX_PURIFY_CONFIG does not add <script> to the allow-list', () => {
-  assert.ok(!KATEX_PURIFY_CONFIG.ADD_TAGS.includes('script'),
-    '<script> must never appear in ADD_TAGS')
-})
-
-test('KATEX_PURIFY_CONFIG does not add event-handler attrs', () => {
-  const dangerous = ['onerror', 'onload', 'onclick', 'onfocus']
-  for (const attr of dangerous) {
-    assert.ok(!KATEX_PURIFY_CONFIG.ADD_ATTR.includes(attr),
-      `Event-handler attribute ${attr} must not be in ADD_ATTR`)
-  }
-})
+  test(`${site.name} escapes TeX while math HTML is unavailable`, () => {
+    purifier.calls.length = 0
+    math.setOutput(null)
+    const html = renderToStaticMarkup(site.element('<img src=x onerror=unsafe()>'))
+    assert.equal(purifier.calls.length, 0)
+    assert.equal(html, `<${site.tag} class="${site.className}">&lt;img src=x onerror=unsafe()&gt;</${site.tag}>`)
+  })
+}

@@ -171,6 +171,25 @@ test('move falls back to copy then remove when the browser cannot move local fil
   assert.equal(root.children.has('big.mov'), false)
 })
 
+test('replacing leaves alone a file that changed while it was backed up', async () => {
+  const root = new FakeDirectoryHandle('Notes')
+  const source = root.addFile('todo.txt', 'milk')
+  const readFile = source.getFile.bind(source)
+  let reads = 0
+  // Another app saves the file after the backup copy has read it.
+  source.getFile = async () => {
+    reads += 1
+    if (reads === 2) source.modified += 1
+    return readFile()
+  }
+  await failsWith(
+    createHandleFolder(root).run({ op: 'write', path: 'todo.txt', content: 'eggs', overwrite: true }),
+    'changed_during_write',
+  )
+  assert.equal(await fileText(root, 'todo.txt'), 'milk')
+  assert.equal(await fileText(root, BIN_FOLDER_NAME, 'todo.txt'), 'milk')
+})
+
 test('a copy-and-remove move keeps an original that changed during the copy', async () => {
   const root = new FakeDirectoryHandle('Downloads', { withMove: false })
   const source = root.addFile('notes.txt', 'version one')

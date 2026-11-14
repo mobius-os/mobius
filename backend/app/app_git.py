@@ -182,8 +182,8 @@ class ReconciliationReceipt:
   kept_local_paths: tuple[str, ...] = ()
   # Local copies of merged pull requests the release replaced (see
   # ``without_retired_units``). The Review preview API returns them as
-  # ``retired_paths`` before the owner applies; the Settings update review
-  # does not list them yet.
+  # ``retired_paths`` before the owner applies, and the Settings update review
+  # lists them.
   retired_paths: tuple["RetiredPath", ...] = ()
 
   def as_dict(self) -> dict[str, list]:
@@ -478,6 +478,17 @@ def ref_file_size(source_dir: str | Path, ref: str, path: str) -> int | None:
 def ref_file(source_dir: str | Path, ref: str, path: str) -> bytes | None:
   """One file's bytes at ``ref``, or None when ``ref`` has no file there."""
   return _ref_blob(Path(source_dir), ref, path, read_only=True)
+
+
+def ref_root_files(source_dir: str | Path, ref: str) -> set[str]:
+  """Names of the files directly at the root of ``ref``, not its folders."""
+  proc = _run(Path(source_dir), "ls-tree", "-z", ref, read_only=True)
+  names = set()
+  for line in proc.stdout.split("\0"):
+    meta, _, name = line.partition("\t")
+    if name and meta.split(" ")[1:2] == ["blob"]:
+      names.add(name)
+  return names
 
 
 def _run(
@@ -845,11 +856,31 @@ def ref_is_ancestor(
   refs, timeout, or another execution error). Callers must not turn an unknown
   repository state into a positive conflict/resolution claim.
   """
+  return _merge_base_is_ancestor(source_dir, ancestor, descendant)
+
+
+def object_ancestry(
+  source_dir: str | Path, ancestor: str, descendant: str,
+) -> bool | None:
+  """``ref_is_ancestor`` from commit objects alone, ignoring the commit-graph.
+
+  For a verdict persisted from a negative answer: a stale or corrupt cached
+  parent can make Git answer "not an ancestor" for a commit the real objects
+  reach. Slower than the cached query, so only for that kind of proof.
+  """
+  return _merge_base_is_ancestor(
+    source_dir, ancestor, descendant, "-c", "core.commitGraph=false",
+  )
+
+
+def _merge_base_is_ancestor(
+  source_dir: str | Path, ancestor: str, descendant: str, *config: str,
+) -> bool | None:
   if not is_repo(source_dir):
     return None
   try:
     proc = _run(
-      Path(source_dir), "merge-base", "--is-ancestor",
+      Path(source_dir), *config, "merge-base", "--is-ancestor",
       ancestor, descendant, check=False,
     )
   except (OSError, subprocess.SubprocessError):
@@ -900,7 +931,8 @@ def preview_merge_refs(
     )
     if left_oid is None or right_oid is None or common.returncode != 0:
       return None
-    object_dir = (Path(common.stdout.strip()) / "objects").resolve()
+    common_dir = Path(common.stdout.strip()).resolve()
+    object_dir = (common_dir / "objects").resolve()
     if not object_dir.is_dir() or "\n" in str(object_dir):
       return None
     with tempfile.TemporaryDirectory(prefix="mobius-merge-preview-") as tmp:
@@ -909,10 +941,19 @@ def preview_merge_refs(
       alternates = proof_repo / ".git" / "objects" / "info" / "alternates"
       alternates.parent.mkdir(parents=True, exist_ok=True)
       alternates.write_text(f"{object_dir}\n", encoding="utf-8")
+      # A shallow source hides grafted-away parents behind its boundary file,
+      # which alternates do not carry; without the copy, merge-tree fails on
+      # the missing parent and every shallow repo's preview reads as broken.
+      shallow = common_dir / "shallow"
+      if shallow.is_file():
+        shutil.copyfile(shallow, proof_repo / ".git" / "shallow")
       return merge_refs(
         proof_repo, left_oid, right_oid, read_only=True,
       )
-  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+    # Callers render None as a generic "review unavailable"; keep the real
+    # reason reachable through the server log.
+    log.warning("merge preview failed for %s (%s..%s): %s", repo, left, right, exc)
     return None
 
 
@@ -2991,6 +3032,49 @@ def import_staged(source_dir: str | Path, staged: Staged) -> str:
     raise RuntimeError("staged commit did not import")
   _record_origin_branch(repo, staged)
   return staged.sha
+
+
+def history_is_complete(source_dir: str | Path, tip: str) -> bool:
+  """Whether every commit reachable from ``tip`` is present and readable.
+
+  Proves a negative ancestry answer trustworthy: across a shallow boundary or
+  a missing object Git can say "not an ancestor" without seeing the history
+  that would contain it. Walks all of ``tip``'s commits with no output, so
+  memory stays constant; time is linear in history and the walk keeps
+  ``_run``'s timeout. Any failure, including a timeout, is ``False``.
+  """
+  repo = Path(source_dir)
+  if not is_repo(repo):
+    return False
+  try:
+    if _is_shallow(repo):
+      return False
+    # The commit-graph cache can answer parents without reading objects, so a
+    # deleted commit would still "walk". Disable it to verify real objects.
+    proc = _run(
+      repo, "-c", "core.commitGraph=false",
+      "rev-list", "--quiet", "--end-of-options", tip,
+      check=False, read_only=True,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return False
+  return proc.returncode == 0
+
+
+def commit_object_absent(source_dir: str | Path, commit: str) -> bool:
+  """Whether Git cannot read ``commit`` as a commit object.
+
+  Meaningful only beside ``history_is_complete``: a commit absent from a
+  complete history is not in it. A failure to run Git is not absence.
+  """
+  try:
+    proc = _run(
+      Path(source_dir), "cat-file", "-e", f"{commit}^{{commit}}",
+      check=False, read_only=True,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return False
+  return proc.returncode != 0
 
 
 def present_commit(source_dir: str | Path, ref: str) -> str | None:

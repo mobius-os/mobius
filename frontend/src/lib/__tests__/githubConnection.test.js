@@ -1,12 +1,15 @@
 /* Settings GitHub connection: status normalization and the server-paced sign-in wait. */
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { QueryClient } from '@tanstack/react-query'
 
 import {
   fetchGithubStatus,
+  githubStatus,
   hasFullPrAccess,
   hasPrivateRepoAccess,
   startGithubSignIn,
+  unknownGithubStatus,
   waitForGithubSignIn,
 } from '../githubConnection.js'
 
@@ -52,11 +55,21 @@ test('status carries the account and a resumable sign-in', async () => {
   assert.equal(connected.login, 'octo')
 })
 
-test('an unreachable or failing status is reported, never guessed', async () => {
+test('a read caches only the account, and a failed read leaves the last confirmed one untouched', async () => {
+  const queryClient = new QueryClient()
+  stubFetch(json({
+    connected: true, login: 'octo', scopes: ['repo', 'workflow'], device_flow_available: true,
+    active_attempt: { attempt_id: 'a1', user_code: 'WXYZ-1234', verification_uri: 'https://github.com/login/device' },
+  }))
+  assert.equal((await githubStatus.refresh(queryClient)).attempt.userCode, 'WXYZ-1234')
+  const account = { state: 'connected', login: 'octo', scopes: ['repo', 'workflow'], signInAvailable: true }
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), account)
   stubFetch(new TypeError('offline'))
-  assert.equal((await fetchGithubStatus()).state, 'unknown')
+  await assert.rejects(githubStatus.refresh(queryClient))
   stubFetch(json({ detail: 'Backend restarting' }, 503))
-  assert.deepEqual(await fetchGithubStatus(), { state: 'unknown', message: 'Backend restarting' })
+  await assert.rejects(githubStatus.refresh(queryClient), /Backend restarting/)
+  assert.deepEqual(queryClient.getQueryData(githubStatus.key), account)
+  assert.deepEqual(unknownGithubStatus(new Error('Backend restarting')), { state: 'unknown', message: 'Backend restarting' })
 })
 
 test('sign-in sends the private-repo choice and polls the exact attempt until complete', async () => {
@@ -103,4 +116,24 @@ test('each completed polling delay releases its abort listener', async () => {
   stubFetch(json({ status: 'complete' }))
   await waitForGithubSignIn('a1', { signal: controller.signal })
   assert.equal(count, 0)
+})
+
+test('only the newest status read publishes, and an older one answers with it; a change leaves an older read nothing', async () => {
+  const queryClient = new QueryClient()
+  const answers = []
+  globalThis.fetch = () => new Promise(resolve => { answers.push(resolve) })
+  const older = githubStatus.refresh(queryClient)
+  const newer = githubStatus.refresh(queryClient)
+  answers[1](json({ connected: true, login: 'octo', scopes: ['repo'], device_flow_available: true }))
+  assert.equal((await newer).login, 'octo')
+  answers[0](json({ connected: false, device_flow_available: true }))
+  assert.equal((await older).login, 'octo')
+  assert.equal(queryClient.getQueryData(githubStatus.key).login, 'octo')
+
+  // An account change makes a read already under way obsolete too.
+  const before = githubStatus.refresh(queryClient)
+  await githubStatus.change(queryClient, async () => {})
+  answers[2](json({ connected: false, device_flow_available: true }))
+  assert.equal(await before, null)
+  assert.equal(queryClient.getQueryData(githubStatus.key).state, 'connected')
 })

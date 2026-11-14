@@ -1,3 +1,5 @@
+import { RESOURCE_PAUSE_KINDS } from './waitingPresentation.js'
+
 function samePendingMessages(current, next) {
   if (current === next) return true
   if (!Array.isArray(current) || !Array.isArray(next)) return false
@@ -47,7 +49,7 @@ export function classifyChatHandoff({
     ].includes(wait.resume_blocker),
   )
   const kind = resourcePause?.pause?.kind
-  const eligibleResource = ['memory', 'storage'].includes(kind)
+  const eligibleResource = RESOURCE_PAUSE_KINDS.has(kind)
     || (['rate_limit', 'usage_limit', 'limit'].includes(kind) && autoResumeEnabled)
   if (eligibleWait || eligibleResource) {
     return 'automatic'

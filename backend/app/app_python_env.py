@@ -32,7 +32,7 @@ Lifecycle:
   checks the exact runtime tree it reconciles (local edits merged in, or every
   module of a Git origin) between two passes of its transaction, holding no
   lock, and publishes it only if the second pass reconciles the same source
-  tree. A local edit to the lock itself is refused.
+  tree, including a lock that local edits changed.
 - Restore (``rebuild_accepted_env``): after an image replacement, rebuild a
   missing env from the frozen accepted runtime tree, never editable source.
   Restoration uses the same validation and atomic publication as Apply. A

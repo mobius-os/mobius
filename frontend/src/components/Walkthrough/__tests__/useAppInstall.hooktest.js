@@ -6,141 +6,65 @@ import { useAppInstall } from '../useAppInstall.js'
 const realFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = realFetch })
 
-const CATALOG = new Map([['maps', { id: 'maps', manifest_url: 'https://example.test/maps/mobius.json' }]])
+const CATALOG = new Map([
+  ['maps', { id: 'maps', manifest_url: 'https://example.test/maps/mobius.json' }],
+  ['notes', { id: 'notes', manifest_url: 'https://example.test/notes/mobius.json' }],
+])
 
-// Answers /apps/preview and /apps/install in turn and records what was asked of each.
-function stubServer({ preview, install = { status: 200, body: {} } }) {
+// Answers /apps/install and records every request.
+function stubServer({ status = 200, body = {}, hold } = {}) {
   const calls = []
   globalThis.fetch = async (url, init) => {
-    const path = String(url).replace(/^.*\/api/, '')
-    calls.push({ path, body: init?.body ? JSON.parse(init.body) : null })
-    const reply = path === '/apps/preview' ? preview : install
-    return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: { 'Content-Type': 'application/json' } })
+    calls.push({ path: String(url).replace(/^.*\/api/, ''), body: init?.body ? JSON.parse(init.body) : null })
+    if (hold) await hold
+    return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
   }
   return calls
 }
 
-const CONTRACT = { agent: { skills: ['maps-app.md'] }, data: {} }
-const ROWS = [{ id: 'agent_extend', title: 'Add skills and tools to your agents', text: 'Installs the skills it ships.', critical: false }]
-const PREVIEW = { body: { capability_contract: CONTRACT, capability_digest: 'd1', access_rows: ROWS } }
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 
-test('tapping_install_opens_the_access_review_without_installing_anything', async () => {
-  const calls = stubServer({ preview: PREVIEW })
+test('one_tap_installs_with_no_check_first', async () => {
+  const calls = stubServer({ body: { warnings: ['cron: later'] } })
   const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('maps')
-  assert.deepEqual(calls.map(call => call.path), ['/apps/preview'])
-  assert.equal(result.current.confirmation.id, 'maps')
-  assert.deepEqual(result.current.confirmation.rows.map(row => row.title), ['Add skills and tools to your agents'])
-  assert.equal(result.current.statusOf('maps'), null)
+  await result.current.install('maps')
+  assert.deepEqual(calls, [{ path: '/apps/install', body: { manifest_url: CATALOG.get('maps').manifest_url } }])
+  assert.deepEqual(result.current.statusOf('maps'), { state: 'installed', warnings: ['cron: later'] })
 })
 
-test('confirming_installs_the_reviewed_access_and_marks_the_app_installed', async () => {
-  const calls = stubServer({ preview: PREVIEW })
+test('a_refused_install_leaves_the_app_retryable', async () => {
+  stubServer({ status: 422, body: { detail: 'Manifest is invalid.' } })
   const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('maps')
-  result.current.approve()
-  await new Promise(resolve => setTimeout(resolve, 0))
-  assert.deepEqual(calls.at(-1), { path: '/apps/install', body: { manifest_url: CATALOG.get('maps').manifest_url, reviewed_capability_digest: 'd1' } })
-  assert.equal(result.current.confirmation, null)
+  await result.current.install('maps')
+  assert.equal(result.current.statusOf('maps').state, 'error')
+  assert.match(result.current.statusOf('maps').error, /invalid/i)
+  const calls = stubServer()
+  await result.current.install('maps')
+  assert.equal(calls.length, 1)
   assert.equal(result.current.statusOf('maps').state, 'installed')
 })
 
-test('cancelling_the_review_installs_nothing', async () => {
-  const calls = stubServer({ preview: PREVIEW })
-  const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('maps')
-  result.current.dismiss()
-  assert.equal(result.current.confirmation, null)
-  assert.deepEqual(calls.map(call => call.path), ['/apps/preview'])
-})
-
-test('access_that_changed_since_the_review_reopens_it_with_a_notice', async () => {
-  stubServer({
-    preview: PREVIEW,
-    install: { status: 409, body: { detail: { code: 'capability_changed', capability_contract: { data: { manage_apps: true } }, capability_digest: 'd2', access_rows: [{ id: 'manage_apps', title: 'Install and remove apps' }] } } },
-  })
-  const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('maps')
-  result.current.approve()
-  await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(result.current.confirmation.digest, 'd2')
-  assert.match(result.current.confirmation.notice, /changed/)
-  assert.equal(result.current.statusOf('maps'), null)
-})
-
-test('an_access_check_that_fails_leaves_the_app_retryable', async () => {
-  stubServer({ preview: { status: 502, body: { detail: 'The store is unreachable.' } } })
-  const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('maps')
-  assert.equal(result.current.confirmation, null)
-  assert.equal(result.current.statusOf('maps').state, 'error')
-  assert.match(result.current.statusOf('maps').error, /unreachable/)
-})
-
 test('an_app_missing_from_the_catalog_does_nothing', async () => {
-  const calls = stubServer({ preview: PREVIEW })
+  const calls = stubServer()
   const { result } = renderHook(useAppInstall, CATALOG)
-  await result.current.begin('unknown')
-  assert.equal(calls.length, 0)
-  assert.equal(result.current.confirmation, null)
+  await result.current.install('unknown')
+  assert.deepEqual(calls, [])
+  assert.equal(result.current.statusOf('unknown'), null)
 })
 
-
-test('an_access_check_resolving_after_unmount_does_not_reopen_the_review', async () => {
-  let resolveFetch
-  globalThis.fetch = () => new Promise(resolve => { resolveFetch = resolve })
-  const { result, unmount } = renderHook(useAppInstall, CATALOG)
-  const checking = result.current.begin('maps')
-  unmount()
-  resolveFetch(new Response(JSON.stringify(PREVIEW.body), { status: 200 }))
-  await checking
-  assert.equal(result.current.confirmation, null)
-})
-
-const TWO_APPS = new Map([
-  ['maps', { id: 'maps', manifest_url: 'https://example.test/maps/mobius.json' }],
-  ['pages', { id: 'pages', manifest_url: 'https://example.test/pages/mobius.json' }],
-])
-
-test('a_second_app_cannot_start_while_the_first_is_being_checked', async () => {
-  const calls = []
-  let resolveFirst
-  globalThis.fetch = (url, init) => {
-    calls.push(JSON.parse(init.body).manifest_url)
-    return new Promise(resolve => { resolveFirst = resolve })
-  }
-  const { result } = renderHook(useAppInstall, TWO_APPS)
-  const first = result.current.begin('maps')
-  await result.current.begin('pages')
-  assert.deepEqual(calls, ['https://example.test/maps/mobius.json'])
-  assert.equal(result.current.busy, true)
-  resolveFirst(new Response(JSON.stringify(PREVIEW.body), { status: 200 }))
-  await first
-  assert.equal(result.current.confirmation.id, 'maps')
-  assert.equal(result.current.busy, true)
-  await result.current.begin('pages')
-  assert.equal(result.current.confirmation.id, 'maps')
-})
-
-test('an_access_check_that_returns_after_the_review_was_dismissed_is_dropped', async () => {
-  let resolveFetch
-  globalThis.fetch = () => new Promise(resolve => { resolveFetch = resolve })
-  const { result } = renderHook(useAppInstall, TWO_APPS)
-  const checking = result.current.begin('maps')
-  result.current.dismiss()
-  assert.equal(result.current.busy, false)
-  resolveFetch(new Response(JSON.stringify(PREVIEW.body), { status: 200 }))
-  await checking
-  assert.equal(result.current.confirmation, null)
-  assert.equal(result.current.statusOf('maps'), null)
-})
-
-test('closing_a_review_frees_the_next_app_to_start', async () => {
-  const calls = stubServer({ preview: PREVIEW })
-  const { result } = renderHook(useAppInstall, TWO_APPS)
-  await result.current.begin('maps')
-  result.current.dismiss()
-  await result.current.begin('pages')
-  assert.equal(calls.length, 2)
-  assert.equal(result.current.confirmation.id, 'pages')
+test('apps_install_independently_and_a_repeat_tap_is_ignored', async () => {
+  let release
+  const calls = stubServer({ hold: new Promise(resolve => { release = resolve }) })
+  const { result } = renderHook(useAppInstall, CATALOG)
+  const first = result.current.install('maps')
+  const repeat = result.current.install('maps')
+  const second = result.current.install('notes')
+  await tick()
+  assert.equal(result.current.statusOf('maps').state, 'installing')
+  assert.equal(result.current.statusOf('notes').state, 'installing')
+  release()
+  await Promise.all([first, repeat, second])
+  assert.deepEqual(calls.map(call => call.body.manifest_url).sort(), [CATALOG.get('maps').manifest_url, CATALOG.get('notes').manifest_url].sort())
+  assert.equal(result.current.statusOf('maps').state, 'installed')
+  assert.equal(result.current.statusOf('notes').state, 'installed')
 })

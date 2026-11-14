@@ -4,6 +4,8 @@ import { formatDateTime } from './dateTimeFormat.js'
 // preview and global search so recency reads the same everywhere.
 
 const NAIVE_API_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/
+const PROJECT_DATE_FORMAT = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+const PROJECT_RELATIVE_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'always' })
 
 // Möbius persists UTC as SQLite-compatible naive datetimes, so API timestamps
 // can arrive without a zone suffix. Browsers otherwise interpret that shape as
@@ -32,4 +34,17 @@ export function formatRelativeTime(isoString, now = Date.now()) {
   } catch {
     return ''
   }
+}
+
+// Projects use a date-only label after the first week, rather than a timestamp.
+export function formatProjectDate(isoString, now = Date.now()) {
+  const timestamp = parseApiTimestamp(isoString)
+  if (!Number.isFinite(timestamp)) return ''
+  const elapsed = now - timestamp
+  const distance = Math.abs(elapsed)
+  if (distance >= 7 * 24 * 60 * 60 * 1000) return PROJECT_DATE_FORMAT.format(new Date(timestamp))
+  if (distance < 60_000) return 'Just now'
+  const [unit, length] = distance < 3_600_000 ? ['minute', 60_000]
+    : distance < 86_400_000 ? ['hour', 3_600_000] : ['day', 86_400_000]
+  return PROJECT_RELATIVE_FORMAT.format(-Math.sign(elapsed) * Math.floor(distance / length), unit)
 }

@@ -937,13 +937,12 @@ _MOBIUS_MAX_REQUEST_COST_RE = re.compile(
 )
 MOBIUS_MAX_REQUEST_COST_MESSAGE = (
   "M\u00f6bius declined this request: not enough credits for the maximum "
-  "request cost. [Open M\u00f6bius \u00b7 You](/shell/?app=identity) to review "
-  "your credit options."
+  "request cost. [Open Settings](/shell/?settings=mobius-models) to review your credit "
+  "options."
 )
 MOBIUS_INSUFFICIENT_CREDITS_MESSAGE = (
   "M\u00f6bius declined this request (insufficient_credits). "
-  "[Open M\u00f6bius \u00b7 You](/shell/?app=identity) to review your credit "
-  "options."
+  "[Open Settings](/shell/?settings=mobius-models) to review your credit options."
 )
 
 _CHATGPT_MODEL_UNAVAILABLE_RE = re.compile(

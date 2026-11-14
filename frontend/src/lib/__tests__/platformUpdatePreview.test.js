@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  retiredLocalCopies,
   shortSha,
   summarizePreview,
   isTrivialUpdate,
@@ -66,4 +67,24 @@ test('hasReviewableChanges: files OR commits make it reviewable', () => {
   assert.equal(hasReviewableChanges({ files: [{ path: 'a' }], commits: [] }), true)
   // A version bump with commits but no tree delta is still worth listing.
   assert.equal(hasReviewableChanges({ files: [], commits: [{ sha: 'a' }] }), true)
+})
+
+test('retiredLocalCopies links each replaced local copy to its merged platform PR', () => {
+  const preview = { retired_paths: [
+    { path: 'backend/app/a.py', pr: 1895, unit: 'overlay-units', proof: 'merged-contribution' },
+    { path: 'frontend/src/b.js', pr: 1901, unit: null, proof: 'pending-pr' },
+  ] }
+  assert.deepEqual(retiredLocalCopies(preview), [
+    { path: 'backend/app/a.py', pr: 1895, url: 'https://github.com/mobius-os/mobius/pull/1895' },
+    { path: 'frontend/src/b.js', pr: 1901, url: 'https://github.com/mobius-os/mobius/pull/1901' },
+  ])
+})
+
+test('retiredLocalCopies is empty for older servers and drops entries it cannot link', () => {
+  assert.deepEqual(retiredLocalCopies(null), [])
+  assert.deepEqual(retiredLocalCopies({}), [])
+  assert.deepEqual(retiredLocalCopies({ retired_paths: [] }), [])
+  assert.deepEqual(retiredLocalCopies({ retired_paths: [
+    { path: '', pr: 1 }, { path: 'a.py', pr: '12' }, { path: 'b.py', pr: 0 }, null,
+  ] }), [])
 })

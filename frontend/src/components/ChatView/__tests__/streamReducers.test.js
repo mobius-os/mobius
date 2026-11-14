@@ -110,6 +110,13 @@ test('Codex tool start preserves provider-neutral Memory recall metadata', () =>
   assert.equal(items[0].tool_use_id, 'cmd-1')
 })
 
+test('a tool start keeps the routine mark its owner declared', () => {
+  const [marked] = startToolLifecycle([], { tool: 'mobius_control:checkpoint_chat', routine: true })
+  const [plain] = startToolLifecycle([], { tool: 'Bash' })
+  assert.equal(marked.routine, true)
+  assert.equal('routine' in plain, false)
+})
+
 test('app-owned activity survives start and completion on the same tool', () => {
   const running = startToolLifecycle([], {
     tool: 'Bash', input: 'python3 /apps/brain/find.py q c', tool_use_id: 'app-1',

@@ -1006,33 +1006,67 @@ def test_store_update_rejects_changed_service_with_reused_lock(
   assert _keyed(_data_dir(), app_id, "a==1\n").exists()
 
 
-def test_store_update_whose_merged_lock_diverges_is_refused_and_leaves_no_build(
-  client, auth, db, monkeypatch, store,
-):
-  builds = _fake_builds(monkeypatch)
-  padding = "".join(f"# {index}\n" for index in range(8))
-  first = store(client, auth, lock=f"a==1\n{padding}b==1\n", version="1.0.0")
+_PADDING = "".join(f"# {index}\n" for index in range(8))
+
+
+def _store_app_with_locally_edited_lock(client, auth, db, store) -> tuple[int, str]:
+  """A Store app whose applied local lock changes a different line than the next update."""
+  first = store(client, auth, lock=f"a==1\n{_PADDING}b==1\n", version="1.0.0")
   assert first.status_code == 201, first.text
   app_id = first.json()["id"]
   source = Path(db.get(models.App, app_id).source_dir)
-  (source / "requirements.lock").write_text(f"a==9\n{padding}b==1\n")
+  (source / "requirements.lock").write_text(f"a==9\n{_PADDING}b==1\n")
   applied = _apply(client, auth, source)
   assert applied.status_code == 200, applied.text
   db.expire_all()
-  live = db.get(models.App, app_id).runtime_revision
-  built = list(builds)
+  return app_id, db.get(models.App, app_id).runtime_revision
 
-  diverged = store(client, auth, lock=f"a==1\n{padding}b==2\n", version="1.1.0")
 
-  assert diverged.status_code == 409, diverged.text
-  assert diverged.json()["detail"]["code"] == "python_lock_diverged"
-  assert builds == built
+def test_store_update_builds_the_lock_merged_with_local_edits(
+  client, auth, db, monkeypatch, store,
+):
+  builds = _fake_builds(monkeypatch)
+  app_id, _ = _store_app_with_locally_edited_lock(client, auth, db, store)
+  merged = f"a==9\n{_PADDING}b==2\n"
+
+  updated = store(client, auth, lock=f"a==1\n{_PADDING}b==2\n", version="1.1.0")
+
+  assert updated.status_code == 201, updated.text
+  assert builds[-1] == merged
   db.expire_all()
-  assert db.get(models.App, app_id).runtime_revision == live
-  linked = {
-    link.resolve() for link in app_python_env.envs_parent(_data_dir(), app_id).iterdir()
-  }
-  assert {path.resolve() for path in (_data_dir() / "app-envs" / "builds").iterdir()} == linked
+  root = applied_app_runtime.runtime_root(db.get(models.App, app_id))
+  assert (root / "requirements.lock").read_text() == merged
+  assert app_python_env.resolve_env(_data_dir(), app_id, root) == _keyed(_data_dir(), app_id, merged)
+  _assert_no_unlinked_env_or_runtime(app_id)
+
+
+def test_store_update_whose_merged_lock_fails_to_build_keeps_the_old_revision(
+  client, auth, db, monkeypatch, store,
+):
+  builds = _fake_builds(monkeypatch)
+  app_id, live = _store_app_with_locally_edited_lock(client, auth, db, store)
+  fake = app_python_env._build
+
+  def merged_lock_fails(build, runtime_root, manifest, lock, relative):
+    if lock.read_text() == f"a==9\n{_PADDING}b==2\n":
+      raise app_python_env.PythonEnvBuildError("pip check failed: a 9 conflicts with b 2")
+    fake(build, runtime_root, manifest, lock, relative)
+
+  monkeypatch.setattr(app_python_env, "_build", merged_lock_fails)
+  failed = store(client, auth, lock=f"a==1\n{_PADDING}b==2\n", version="1.1.0")
+
+  assert failed.status_code == 422, failed.text
+  assert failed.json()["detail"]["code"] == "python_env_failed"
+  assert "conflicts with b 2" in failed.json()["detail"]["message"]
+  db.expire_all()
+  row = db.get(models.App, app_id)
+  assert row.runtime_revision == live
+  root = applied_app_runtime.runtime_root(row)
+  assert app_python_env.resolve_env(_data_dir(), app_id, root) == _keyed(
+    _data_dir(), app_id, f"a==9\n{_PADDING}b==1\n",
+  )
+  assert len(builds) == 2
+  _assert_no_unlinked_env_or_runtime(app_id)
 
 
 def test_cancelled_install_discards_its_unchecked_python_runtime(

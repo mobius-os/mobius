@@ -115,6 +115,28 @@ def test_recovery_scans_later_page_and_keeps_legacy_uncertainty():
   assert legacy['state'] == 'unknown'
 
 
+def test_find_review_still_matches_a_review_dismissed_after_it_was_sent():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  sent = {'id': 5, 'user': {'id': 42}, 'commit_id': ITEM['head_sha'], 'state': 'DISMISSED', 'body': receipt['marker']}
+  gh = lambda *a: SimpleNamespace(stdout=json.dumps([sent]))
+  for event in ('APPROVE', 'REQUEST_CHANGES'):
+    review, complete = public.find_review(gh, None, ITEM, receipt, '42', event)
+    assert (review['id'], review['state'], complete) == (5, 'DISMISSED', True)
+  other = {**sent, 'user': {'id': 99}}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout=json.dumps([other])), None, ITEM, receipt, '42', 'APPROVE') == (None, True)
+
+
+def test_find_review_proves_absence_only_when_the_whole_list_was_read():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='[]'), None, ITEM, receipt, '42') == (None, True)
+  full = lambda *a: SimpleNamespace(stdout=json.dumps([{}] * 100))
+  assert public.find_review(full, None, ITEM, receipt, '42') == (None, False), 'ten full pages cap the scan: absence is unproven'
+  broken = lambda *a: (_ for _ in ()).throw(OSError('network'))
+  assert public.find_review(broken, None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='{}'), None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: pytest.fail('no marker, nothing to look for'), None, ITEM, {'state': 'unknown'}, '42') == (None, False)
+
+
 def test_marker_is_within_unicode_body_limit():
   marker = '<!-- mobius-review:unique -->'
   body = public.review_comment_body({'head_sha': ITEM['head_sha'], 'summary': '😀'*200_000, 'tests': '😀'*200_000}, marker=marker)

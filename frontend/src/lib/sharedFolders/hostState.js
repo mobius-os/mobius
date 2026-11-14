@@ -10,6 +10,8 @@ function initialState() {
     // loading | ready | restart (server lacks the feature) | unavailable (guest or no support)
     status: 'loading',
     canPickNative,
+    // Older app builds only read folders.
+    canEditNative: canPickNative && typeof globalThis.MobiusNative?.writeFolderFile === 'function',
     canRemember: canPickNative
       || (typeof globalThis.showDirectoryPicker === 'function' && globalThis.isSecureContext !== false),
     canPickForVisit: typeof document !== 'undefined'

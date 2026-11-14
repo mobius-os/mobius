@@ -44,6 +44,19 @@ def test_messages_protocol_is_a_declared_contract_value():
     validate_manifest_contract(broker)
 
 
+def test_omitted_protocol_reviews_as_the_responses_default():
+  from app.app_capabilities import diff_contracts
+  explicit = contract_from_manifest(_manifest(protocol="responses"))
+  omitted_manifest = _manifest()
+  omitted_manifest["model_provider"].pop("protocol")
+  omitted = contract_from_manifest(omitted_manifest)
+  assert diff_contracts(omitted, explicit) == diff_contracts(explicit, omitted) == {
+    "unknown_previous": False, "widens": False, "added": [], "removed": [], "changed": [],
+  }
+  messages = contract_from_manifest(_manifest())
+  assert diff_contracts(omitted, messages)["changed"] == ["model_provider.protocol"]
+
+
 def test_messages_provider_runs_on_claude_engine_without_the_real_key(tmp_path):
   data_dir = get_settings().data_dir
   adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])

@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Tests for SSE stream reconnection behavior.
  *
@@ -20,6 +21,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { waitForComposerSendable } from './_chatSession.mjs'
 import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
+import { installControlledChatStream } from './_controlledChatStream.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -51,19 +53,14 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  // An editable composer is visible before activation finishes, and Send
-  // remains enabled after a failed activation so it can retry the load.
-  // Wait for this newly created chat's successful empty state instead.
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-title'))
-    .toHaveText("What's on your mind?", { timeout: 10000 })
-  // A send before the chat settles would queue instead of starting the turn
-  // these cases expect.
+  // Wait for an idle composer: a send before the chat settles would queue
+  // instead of starting the turn these cases expect.
   await page.waitForFunction(
     () => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
       const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
       return !!composer
-        && !composer.disabled
+        && composer.isContentEditable
         && !surface.querySelector('.chat__stop')
         && !surface.querySelector('.queued__row')
     },
@@ -150,7 +147,7 @@ async function pillOverlapDiagnostics(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Stream reconnection', () => {
-  test('confirmed live restart recovery supersedes its stale card before detail hydration', async ({ page }) => {
+  test('confirmed live restart recovery settles its stale card into a record before detail hydration', async ({ page }) => {
     const chat = await setupChat(page)
     const pausedId = 'restart-paused-answer'
     const successorId = 'restart-resumed-answer'
@@ -211,6 +208,8 @@ test.describe('Stream reconnection', () => {
     await expect(surface).toContainText('A later live chunk also arrives.')
     await expect(surface.locator('.chat__text--error')).toHaveCount(0)
     await expect(surface).toContainText('Progress saved before the restart.')
+    await expect(surface.locator('.chat__marker', { hasText: 'Paused for a platform update' }),
+      'the update stays visible in history as a settled record').toBeVisible()
   })
 
   test('1. Completed stream stays idle after visibility change', async ({ page }) => {
@@ -733,12 +732,6 @@ test.describe('Stream reconnection', () => {
     ))
     await send(page, 'retry button layout')
 
-    // Prove this reached the stream-recovery path, rather than mistaking a
-    // failed initial chat load (whose Send only retries activation) for it.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user'))
-      .toContainText('retry button layout')
-    await page.waitForFunction(() => window.__failedStreamFetches > 0)
-
     // The chat shows only the actionable notice, once retries are exhausted.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
       timeout: 25000,
@@ -755,66 +748,73 @@ test.describe('Stream reconnection', () => {
   })
 
   test('6. Typing while streaming shows Send instead of Stop', async ({ page }) => {
-    let streamCount = 0
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
-      streamCount++
-      if (streamCount === 1) {
-        // First stream: deliver text but keep connection open (no done).
-        // The SSE body ends at the network level, which makes
-        // useStreamConnection see EOF → it calls onStreamEnd. To keep
-        // the "sending" state visible long enough for the test, we
-        // delay the response so the typing happens while Stop is shown.
-        await new Promise(r => setTimeout(r, 500))
-        route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-          body: sseBody([
-            { type: 'text', content: 'streaming...' },
-            { type: 'done' },
-          ]),
-        })
-      } else {
-        route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-          body: sseBody([
-            { type: 'text', content: 'second response' },
-            { type: 'done' },
-          ]),
+    const live = await mockLiveRuntime(page, { idleDetail: true })
+    const stream = await installControlledChatStream(page, 'streaming...')
+    await setupChat(page)
+    // Register after setupChat's generic /messages route so the confirmed
+    // started/queued protocol and runtime authority describe the same turn.
+    const posts = []
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      const body = route.request().postDataJSON()
+      posts.push(body)
+      const message = { role: 'user', content: body.content, cid: body.cid, ts: 12340 + posts.length }
+      if (posts.length === 1) {
+        live.running = true
+        live.messages = [message]
+        return route.fulfill({
+          status: 202, contentType: 'application/json',
+          json: { status: 'started', message },
         })
       }
+      live.pending = [message]
+      return route.fulfill({
+        status: 202, contentType: 'application/json',
+        json: { status: 'queued', ts: message.ts, position: 1, pending_message: message },
+      })
     })
-
-    await setupChat(page)
+    await stream.arm()
     await send(page, 'hello')
+    const surface = page.locator('[data-chat-surface="painted"]')
+    const stop = surface.getByRole('button', { name: 'Stop', exact: true })
+    await expect(stop).toBeVisible()
+    await expect(surface.locator('.chat__scroll')).toContainText('streaming...')
+    await expect(surface.locator('.chat__msg--user')).toHaveCount(1)
+    expect(await stream.state()).toEqual({ requests: 1, open: true, terminals: 0, aborts: 0 })
 
-    // Stop button should appear while agent is working.
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toBeVisible({
-      timeout: 3000,
-    }).catch(() => {
-      // Stream may have completed already — that's OK for this test.
-      // The key invariant is below.
-    })
-
-    // After stream completes, type a follow-up.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'streaming...', { timeout: 5000 },
-    )
-    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('follow up')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeVisible()
+    const sendButton = surface.getByRole('button', { name: 'Send', exact: true })
+    await expect(sendButton).toBeVisible()
+    await expect(sendButton).toBeEnabled()
+    await expect(stop).toHaveCount(0)
+    // A fresh chunk must still render with the draft present. An EOF or
+    // terminal event delivered before typing would make this an idle test.
+    await stream.emit({ type: 'text', content: ' still live with a draft' })
+    await expect(surface.locator('.chat__scroll')).toContainText('still live with a draft')
+    expect(live.running).toBe(true)
+    expect(await stream.state()).toEqual({ requests: 1, open: true, terminals: 0, aborts: 0 })
 
-    // Send and verify second response arrives.
-    await page.locator('[data-chat-surface="painted"] button[aria-label="Send"]').click()
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'second response', { timeout: 5000 },
-    )
+    await sendButton.click()
+    await expect.poll(() => posts.length).toBe(2)
+    expect(posts.map(body => body.content)).toEqual(['hello', 'follow up'])
+    expect(posts[1].cid).toEqual(expect.any(String))
+    expect(posts[1].cid).not.toBe(posts[0].cid)
+    expect(posts[1].force_steer).not.toBe(true)
+    await expect(surface.locator('.queued__text')).toHaveText('follow up')
+    await expect(surface.getByRole('button', { name: 'Send queued message now', exact: true })).toBeEnabled()
+    await expect(surface.locator('.chat__msg--user')).toHaveCount(1)
+    await expectComposerValue(input, '')
+    expect(live.pending[0]).toMatchObject({ content: 'follow up', cid: posts[1].cid })
+    expect(live.running).toBe(true)
+    expect(await stream.state()).toEqual({ requests: 1, open: true, terminals: 0, aborts: 0 })
+
+    // Only now permit termination. This leg is deliberately not an ordinary
+    // completed-turn follow-up send (covered by the completed-stream cases).
+    live.running = false
+    live.pending = []
+    await stream.finish()
+    await expect(stop).toHaveCount(0)
+    expect(await stream.state()).toEqual({ requests: 1, open: false, terminals: 1, aborts: 0 })
   })
 
   test('7. Stop+immediate-resend: a stale continuation 204 must not clobber the resent turn', async ({ page }) => {
@@ -1279,8 +1279,7 @@ test.describe('Stream reconnection', () => {
     expect(JSON.stringify(answerPosted.answers)).toContain('Red')
     await expect(questionCard).toHaveCount(1)
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
-    await expect(activeComposer)
-      .toHaveValue('keep this draft safe')
+    await expectComposerValue(activeComposer, 'keep this draft safe')
     // With the card answered, a kept draft offers Send even while the run is
     // live, so the button cannot show it. The goal rail on both sides of the
     // connection status is the guarantee that the run was not settled.

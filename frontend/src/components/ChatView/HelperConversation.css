@@ -37,7 +37,7 @@
 .helper-convo__open {
   flex: none;
   align-self: center;
-  color: var(--accent); /* CONTRACT: link-coloured action in the dialog head */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: link-coloured action in the dialog head */
   font-size: 13px;
   text-underline-offset: 3px;
 }

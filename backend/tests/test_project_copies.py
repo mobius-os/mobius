@@ -198,6 +198,29 @@ def test_source_copy_rejects_control_characters_and_nested_secrets(path):
   assert not copies.eligible(path)
 
 
+# The names copies always skipped stay skipped, at any depth, now that the
+# credential-file part comes from the rule Store publication shares.
+@pytest.mark.parametrize('path', [
+  '.env', '.env.local', 'tls.key', 'cert.pem', 'client.p12', 'app.sqlite',
+  'app.sqlite3', 'state.db', 'credentials/notes.md', 'credentials.json',
+  'secrets.json', '.npmrc', '.pypirc', 'service-token.txt', 'cli-auth/x',
+  'app-secrets/x', 'node_modules/x.js', 'src/.SSH/id', 'src/Secrets.JSON',
+  # Shared with publication and newly skipped here too.
+  'prod.env', 'release.jks', 'vault.kdbx', 'deploy.ppk', '.netrc', 'id_rsa',
+  'service-account.json',
+  # Env folders, such as a virtualenv named .env, are private as a whole.
+  '.env/production', 'src/.env/dev', '.env.local/x', '.env/lib/python3.12/site-packages/x.py',
+  'credentials', '.credentials.json',
+])
+def test_source_copy_skips_private_data_and_credential_files(path):
+  assert not copies.eligible(path)
+
+
+@pytest.mark.parametrize('path', ['src/App.jsx', 'secrets/Panel.jsx', 'docs/keys.md', 'environment.txt'])
+def test_source_copy_keeps_ordinary_source(path):
+  assert copies.eligible(path)
+
+
 def test_committed_import_survives_response_failure_and_retry_keeps_files(client, db, monkeypatch):
   import asyncio
   package = {'format':'mobius-project-copy-v1', 'name':'Copy', 'project_type':'blank', 'files':[{'path':'x.txt', 'content':'YQ=='}]}
@@ -219,6 +242,26 @@ def test_committed_import_survives_response_failure_and_retry_keeps_files(client
   assert retried['id'] == project.id
   assert (root / 'x.txt').read_bytes() == b'a'
   assert db.query(models.Project).filter_by(name='Copy').count() == 1
+
+
+def test_import_retry_succeeds_after_a_crash_mid_copy(client, auth, monkeypatch):
+  import uuid
+  package = {'format':'mobius-project-copy-v1', 'name':'Copy', 'project_type':'blank', 'files':[{'path':'x.txt', 'content':'YQ=='}]}
+  async def fetch(url): return package
+  monkeypatch.setattr(copies, 'fetch_package', fetch)
+  body = {'url':'https://example.com/project-copy#test', 'digest':copies.digest(package), 'recovery_request_id':'crashed-copy'}
+  new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'mobius:source-copy:crashed-copy'))
+  root = Path(get_settings().data_dir) / 'projects' / new_id
+  staging = root.with_name('.creating-' + new_id)
+  # A process killed during Save runs no cleanup and leaves its half-written copy.
+  staging.mkdir(parents=True)
+  (staging / 'partial.txt').write_text('half-written')
+  retried = client.post('/api/project-copies/import', headers=auth, json=body)
+  assert retried.status_code == 200, retried.text
+  assert retried.json()['id'] == new_id
+  assert (root / 'x.txt').read_bytes() == b'a'
+  assert not (root / 'partial.txt').exists()
+  assert not staging.exists()
 
 
 @pytest.mark.parametrize('failure', ['write', 'commit'])
@@ -243,6 +286,7 @@ def test_failed_import_removes_only_its_new_root(client, auth, db, monkeypatch, 
   with pytest.raises((OSError, RuntimeError), match='test .* failure'):
     asyncio.run(copies.import_copy(body, None, db))
   assert not (Path(get_settings().data_dir) / 'projects' / new_id).exists()
+  assert not (Path(get_settings().data_dir) / 'projects' / ('.creating-' + new_id)).exists()
   assert db.get(models.Project, new_id) is None
   assert db.get(models.Project, original['id']) is not None
   assert (original_root / 'index.html').read_text() == '<h1>Original</h1>'

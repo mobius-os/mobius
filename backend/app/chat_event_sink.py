@@ -59,6 +59,7 @@ from app.agent_activity import (
   activity_from_command,
   app_tool_result_text,
   is_app_tool_call,
+  is_routine_tool,
   activity_from_result,
   activity_from_task_output,
   activity_without_receipt,
@@ -610,9 +611,14 @@ class ChatEventSink:
   def _stamp_app_activity(
     self, event: ChatEvent, *, result_content: object = None,
   ) -> None:
-    """Attach one generic app-owned activity across the tool lifecycle."""
+    """Attach one generic app-owned activity across the tool lifecycle.
+
+    A call whose owner declared the tool routine is marked once, at its start.
+    """
     if event.get("type") in ("tool_start", "tool_input"):
       if event.get("type") == "tool_start":
+        if is_routine_tool(event.get("tool"), self._agent_activity_binding):
+          event["routine"] = True
         activity = activity_from_app_tool(
           event.get("tool"), self._agent_activity_binding,
         )

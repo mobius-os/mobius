@@ -155,7 +155,7 @@ def test_completed_goal_can_promote_successor_and_reuse_helper_name_without_old_
 
 def test_promotion_adopts_only_this_runs_unowned_helpers_and_nested_descendants(db, chat):
   from app.delegations import DelegationIntent, create_or_attach_delegation, own_helper_statuses
-  from app.goal_plans import _delegation_tree, active_goal_helpers
+  from app.goal_plans import _delegation_tree, active_goal_helpers, goal_helper_tree
 
   started = datetime.now(UTC).replace(tzinfo=None)
   previous = models.ChatRun(id="previous", root_run_id="previous", chat_id=chat.id,
@@ -187,6 +187,6 @@ def test_promotion_adopts_only_this_runs_unowned_helpers_and_nested_descendants(
   assert scout.goal_id == nested.goal_id == goal.id
   assert [item["id"] for item in own_helper_statuses(db, chat.id, run.id)] == [scout.id]
   assert [item["id"] for item in _delegation_tree(db, run, goal)] == [scout.id]
-  assert active_goal_helpers(db, run, goal)
+  assert active_goal_helpers(goal_helper_tree(db, run, goal))
   with pytest.raises(GoalPlanError, match=r"active delegations.*: scout"):
     update_goal_record(db, run, goal, goal.revision, complete=True)

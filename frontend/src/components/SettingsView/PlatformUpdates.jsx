@@ -39,7 +39,10 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
   const settling = platform?.unfinished_update?.stage === 'settling'
   const stall = platformUpdateStall(platform, rebuild)
   const packageWarning = platformPackageWarning(platform, rebuild)
-  const available = platform?.available || platform?.newer_updates_available
+  const available = platform?.available
+  // A newer release waits behind the update in flight. Only a suggestion:
+  // finishing this update stays the primary action.
+  const newerBehind = platform?.newer_updates_available ? platform.unfinished_update : null
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
   const recoveryRequired = rebuild?.state === 'needs_recovery'
@@ -73,7 +76,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
     setReview(intent)
   }
   function closeReview() { restoreFocus.current = true; setReview(null) }
-  // Retry drops the stalled update, then reviews the release again from scratch.
+  // Drops the in-flight update, then reviews the latest release from scratch.
   async function retry() {
     if (await update.cancel()) openReview()
   }
@@ -113,13 +116,18 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           : { label: phase === 'checking' ? 'Checking…' : 'Check for updates', act: check }
   const status = recoveryRequired || activeRebuild ? rebuildStatusLine(rebuild)
     : settling ? 'Confirming the new container…'
-    : update.reconnecting ? (update.observingKind === 'apply' ? 'Checking the update…' : 'Restarting Möbius…')
+    : update.reconnecting ? 'Restarting Möbius…'
       : !platform ? 'Checking update status…' : platformUpdateStatusLabel(platform)
 
   return (
-    <section className="settings__section platform-updates" aria-labelledby="platform-updates-title">
+    <section className="settings-group" aria-labelledby="platform-updates-title">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 id="platform-updates-title" className="settings-group__title">Updates</h2>
+        </div>
+      </div>
+      <div className="settings-card platform-updates">
       <div className="platform-updates__heading">
-        <h2 id="platform-updates-title" className="platform-updates__title">Updates</h2>
         <p className="platform-updates__status" role="status">{status}</p>
       </div>
       <div className="platform-updates__actions">
@@ -141,6 +149,16 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={update.cancel}>Cancel update</button>
         )}
       </div>
+      {newerBehind && !stall && !repairReason && !busy && !recoveryRequired && (
+        <div className="platform-updates__description">
+          <p role="status">A version newer than the update in progress is available.{newerBehind.cancellable
+            ? ' You can finish this one, or cancel it and update straight to the latest instead.'
+            : ' It will be offered once this update finishes.'}</p>
+          {newerBehind.cancellable && (
+            <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={retry}>Cancel and update to latest</button>
+          )}
+        </div>
+      )}
       {stall && !repairReason && !busy && (
         <div className="platform-updates__description">
           <p role="status">{stall.message}</p>
@@ -171,6 +189,13 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
         </button>
       </div>
       {confirmRestart && <p className="platform-updates__description" role="status">Restarting briefly pauses active chats. This page will reconnect automatically. Confirm within 4 seconds, or let this prompt expire.</p>}
+      {!busy && !conflict && !settling && !unfinished && !recoveryRequired && level === 'live' && platform?.image_build_applied === false && (
+        <p className="platform-updates__description">{available && platform.update_contains_image_release
+          ? 'The container is updated, but the code update is still required. Review the update to bring them together while keeping your local changes.'
+          : !platform.served_sha
+            ? 'The running code could not be identified, so it cannot be confirmed against this container.'
+            : 'The running code does not include this container\'s own revision. Check for updates: if none is offered, the container was built outside the official releases (such as a fork or test build) and nothing needs doing.'}</p>
+      )}
       {settling && !busy && !activeRebuild && !recoveryRequired && (
         <div className="platform-updates__description">
           <p>The new container is running this update. Möbius keeps the previous version ready until the replacement is confirmed; other updates wait until then.</p>
@@ -179,7 +204,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           )}
         </div>
       )}
-      {!busy && !unavailable && !conflict && !recoveryRequired && restartNeeded && (
+      {!busy && !unavailable && !conflict && !recoveryRequired && restartNeeded && !platform?.unfinished_update && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
       {activeRebuild && rebuild.status_unavailable && (
@@ -209,6 +234,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
           resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} onRefreshReview={update.clearError} applyProgress={update.progress} />
       )}
+      </div>
     </section>
   )
 }

@@ -1,10 +1,14 @@
+import json
+
 from app.chat import (
   DEFAULT_AGENT_BROWSER_CONFIG,
   DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS,
   DEFAULT_VIEWPORT_HEIGHT,
   DEFAULT_VIEWPORT_PIXEL_RATIO,
   DEFAULT_VIEWPORT_WIDTH,
+  DESKTOP_POINTER_WRAPPER,
   agent_browser_runtime_env,
+  desktop_pointer_browser_env,
   bounded_agent_browser_args,
   viewport_env,
 )
@@ -192,3 +196,41 @@ def test_claude_processes_run_without_claude_code_auto_memory(tmp_path):
   )
   assert claude_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
   assert codex_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+
+# agent-browser relaunches a session's browser on a blank page when a command's
+# executable differs, so a desktop turn must use the capture helper's wrapper.
+
+
+def _browser_config(tmp_path, executable):
+  config = tmp_path / "agent-browser.json"
+  config.write_text(json.dumps({"executablePath": str(executable)}))
+  return str(config)
+
+
+def test_desktop_turn_uses_the_capture_helpers_pointer_wrapper(tmp_path):
+  browser = tmp_path / "chrome"
+  browser.write_text("#!/bin/sh\n")
+  browser.chmod(0o755)
+  env = desktop_pointer_browser_env({
+    "VIEWPORT_WIDTH": "1600",
+    "AGENT_BROWSER_CONFIG": _browser_config(tmp_path, browser),
+  })
+  assert env == {
+    "AGENT_BROWSER_EXECUTABLE_PATH": str(DESKTOP_POINTER_WRAPPER),
+    "MOBIUS_SCREENSHOT_REAL_BROWSER": str(browser),
+  }
+
+
+def test_phone_turn_and_missing_browser_keep_the_configured_executable(tmp_path):
+  browser = tmp_path / "chrome"
+  browser.write_text("#!/bin/sh\n")
+  browser.chmod(0o755)
+  config = _browser_config(tmp_path, browser)
+  assert desktop_pointer_browser_env({
+    "VIEWPORT_WIDTH": "412", "AGENT_BROWSER_CONFIG": config,
+  }) == {}
+  assert desktop_pointer_browser_env({
+    "VIEWPORT_WIDTH": "1600",
+    "AGENT_BROWSER_CONFIG": _browser_config(tmp_path, tmp_path / "missing"),
+  }) == {}

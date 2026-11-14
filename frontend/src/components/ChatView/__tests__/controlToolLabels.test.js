@@ -36,6 +36,8 @@ test('other controls read as their activity, not their identifier', () => {
     ['declare_wait', 'description=CI passes, condition_owner=GitHub', 'Set a wait: CI passes'],
     ['request_question', "questions=[{'question': 'x'}]", 'Asked you'],
     ['send_agent_message', "recipients=['a'], kind=note, body=Heads up", 'Messaged another chat: Heads up'],
+    ['read_agent_message', 'message_id=note-1', 'Read a peer note in full'],
+    ['read_work_claim', 'work_key=pr:1, field=outcome', 'Read a claim in full'],
   ]
   for (const [bare, input, label] of cases) {
     const row = tool(`mcp__mobius_control__${bare}`, input)

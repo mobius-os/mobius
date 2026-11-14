@@ -30,14 +30,14 @@ def _record_clear(sink: list):
   empty-queue case (clear-before-forget) and never for a promoted
   continuation, so the recorded list pins which disposition fired.
   """
-  async def _clear(chat_id, run_token="", terminal_status="completed"):
+  async def _clear(chat_id, run_token="", terminal_status="completed", end_reason=None):
     sink.append(chat_id)
 
   return _clear
 
 
 async def _noop_clear(
-  _chat_id, _run_token="", _terminal_status="completed",
+  _chat_id, _run_token="", _terminal_status="completed", end_reason=None,
 ):
   """An async clear stub that records nothing (for paths that don't clear)."""
   return None
@@ -161,8 +161,8 @@ def test_drain_parks_queued_work_behind_owner_question(db):
   forgotten = []
   finished = []
 
-  async def finish(chat_id, run_token, status):
-    finished.append((chat_id, run_token, status))
+  async def finish(chat_id, run_token, status, end_reason=None):
+    finished.append((chat_id, run_token, status, end_reason))
 
   async def go():
     return await chat_queue.drain_and_release(
@@ -184,7 +184,7 @@ def test_drain_parks_queued_work_behind_owner_question(db):
   assert sid is None
   assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
   assert finished == [(
-    "cq-question-barrier", "rt-question", "interrupted",
+    "cq-question-barrier", "rt-question", "interrupted", "owner_input",
   )]
   assert discarded == ["cq-question-barrier"]
   assert forgotten == ["cq-question-barrier"]

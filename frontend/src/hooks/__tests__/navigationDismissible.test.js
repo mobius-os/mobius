@@ -317,6 +317,7 @@ test('an app-origin drawer waits through one painted frame before history opens'
 
   result.current.openDrawer()
   assert.equal(result.current.drawerOpen, false)
+  assert.equal(result.current.drawerOpening, true, 'an app below stops competing from the opening tap')
   assert.equal(engine.currentKind, historyKindBeforeOpen, 'preparation does not mutate history')
 
   frames.advance()
@@ -325,6 +326,7 @@ test('an app-origin drawer waits through one painted frame before history opens'
 
   frames.advance()
   assert.equal(result.current.drawerOpen, true)
+  assert.equal(result.current.drawerOpening, false)
   assert.equal(engine.currentKind, 'drawer', 'the original history sentinel opens afterwards')
 })
 
@@ -341,6 +343,7 @@ test('navTo supersedes an app-origin drawer between its queued frames', async ()
   assert.equal(result.current.drawerOpen, false)
 
   result.current.navTo('chat', { chatId: 'c2' })
+  assert.equal(result.current.drawerOpening, false, 'a cancelled opening never leaves the app held')
   const destination = engine.currentState
   const depth = engine.depth
   assert.equal(destination.kind, 'nav')

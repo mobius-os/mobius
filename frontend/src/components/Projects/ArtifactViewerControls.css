@@ -1,0 +1,16 @@
+/* Controls and responsive surfaces for built Project artifact previews. */
+.artifact-viewer__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--border-light); background: var(--surface); }
+.artifact-workspace__header .artifact-viewer__actions { flex: 0 0 auto; padding: 0; border: 0; background: transparent; }
+.artifact-viewer__actions button, .artifact-viewer__actions a { min-height: 32px; padding: 0 10px; border: 1px solid var(--border-light); border-radius: 7px; color: var(--text); background: var(--bg); font: inherit; font-size: 12px; cursor: pointer; }
+.artifact-viewer__actions a { display: inline-flex; align-items: center; text-decoration: none; }
+.artifact-viewer__actions button:hover:not(:disabled), .artifact-viewer__actions a:hover, .artifact-viewer__actions button[aria-pressed="true"] { background: var(--surface-hover, var(--surface)); }
+.artifact-viewer__actions button:focus-visible, .artifact-viewer__actions a:focus-visible, .project-pdf__toolbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.artifact-viewer__actions button:disabled { opacity: .5; cursor: default; }
+.artifact-viewer__website { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.artifact-preview--phone { align-self: center; width: min(100%, 390px); }
+.project-pdf__toolbar { flex-wrap: wrap; padding: 4px 8px; }
+.project-pdf__toolbar .project-pdf__text-control { width: auto; padding: 0 8px; }
+.project-pdf__toolbar button[aria-pressed="true"] { background: rgba(255, 255, 255, .16); }
+.project-pdf__toolbar button:disabled { opacity: .45; }
+.artifact-workspace .project-pdf__viewport { justify-content: flex-start; }
+.artifact-workspace .project-pdf__viewport canvas { max-width: none; margin: 0 auto; }

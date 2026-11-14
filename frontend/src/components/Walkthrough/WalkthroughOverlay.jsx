@@ -1,7 +1,7 @@
 /* First-run guide: a dismissible modal dialog over the shell that introduces Möbius, sets up the
    owner's profile and agent, and tours the apps. It borrows mobius.you's look: flat dark surfaces,
    big tight headlines with a lavender second phrase, and quiet bordered cards. */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
@@ -14,7 +14,6 @@ import WalkthroughAppGroup from './WalkthroughAppGroup.jsx'
 import WalkthroughInstall from './WalkthroughInstall.jsx'
 import { Reveal, Typewriter, WordReveal } from './WalkthroughMotion.jsx'
 import WalkthroughProfile, { useAccountProfile } from './WalkthroughProfile.jsx'
-import WalkthroughAccessConfirm from './WalkthroughAccessConfirm.jsx'
 import WalkthroughStore, { STORE_WINDOW_APPS, useStoreCatalog } from './WalkthroughStore.jsx'
 import { useAppInstall } from './useAppInstall.js'
 import { APP_GROUPS } from './walkthroughGroups.js'
@@ -74,7 +73,7 @@ function Title({ kind, plain, accent }) {
   </>
 }
 
-export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp, onHandoffChange }) {
+export default function WalkthroughOverlay({ apps }) {
   const queryClient = useQueryClient()
   const cardRef = useRef(null)
   const titleRef = useRef(null)
@@ -83,44 +82,19 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
   const previousStepRef = useRef(0)
   const barFrom = previousStepRef.current
   useEffect(() => { previousStepRef.current = stepIndex }, [stepIndex])
-  const [handoffAppId, setHandoffAppId] = useState(null)
   const [direction, setDirection] = useState(1)
   const screen = SCREENS[stepIndex]
   const [plainTitle, accentTitle] = screen.title
-  // The guide steps aside while the owner works in the app it handed them to.
-  const suspended = handoffAppId != null && activeAppId != null && String(activeAppId) === String(handoffAppId)
   const wantedIconIds = screen.group ? screen.group.apps.map(app => app.id) : screen.content === 'store' ? STORE_WINDOW_APPS.map(app => app.id) : []
   const store = useStoreCatalog(apps, wantedIconIds)
   const installer = useAppInstall(store.catalog)
-  const confirming = installer.confirmation
-  const confirmingApp = confirming ? APP_GROUPS.flatMap(group => group.apps).find(app => app.id === confirming.id) : null
-  const identityApp = apps.find(app => app.slug === 'identity') || null
   // One profile for the whole guide, so Back to the welcome screen never refetches it or loses who claimed what.
-  const account = useAccountProfile(() => { if (identityApp) openApp(identityApp.id) })
-  const reloadAccount = account.reload
-
-  // The shell's history restore must not queue chat-composer focus while this
-  // guide is handing back from another app. Publish the lease at the same commit
-  // that hides the guide, and release it on return or unmount.
-  useLayoutEffect(() => {
-    onHandoffChange?.(suspended)
-    return () => { if (suspended) onHandoffChange?.(false) }
-  }, [onHandoffChange, suspended])
-
-  // Back from the hand-off, the guide opens again where the owner left it.
-  const wasSuspendedRef = useRef(false)
-  useEffect(() => {
-    if (wasSuspendedRef.current && !suspended) {
-      setHandoffAppId(null)
-      reloadAccount()
-    }
-    wasSuspendedRef.current = suspended
-  }, [suspended, reloadAccount])
+  const account = useAccountProfile()
 
   // A modal dialog: focus starts on the title, Tab stays inside the card, the page behind is inert,
   // and focus returns to where it was when the guide goes away. Escape dismisses it exactly like the
-  // close button, except while typing in a field. (While an access confirmation is open, Escape belongs to that popup and only cancels it.)
-  useDialogFocus({ open: !suspended, containerRef: cardRef, initialFocusRef: titleRef, onClose: finish, shouldCloseOnEscape: escapeShouldDismissGuide })
+  // close button, except while typing in a field.
+  useDialogFocus({ containerRef: cardRef, initialFocusRef: titleRef, onClose: finish, shouldCloseOnEscape: escapeShouldDismissGuide })
   // Each screen announces itself by moving focus to its title.
   useEffect(() => { titleRef.current?.focus({ preventScroll: true }) }, [stepIndex])
 
@@ -135,16 +109,8 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
   function goTo(index) {
     const next = Math.max(0, Math.min(LAST, index))
     setDirection(next >= stepIndex ? 1 : -1)
-    installer.dismiss()
     setStepIndex(next)
   }
-
-  function openApp(appId, intent) {
-    setHandoffAppId(appId)
-    void onOpenApp(appId, intent)
-  }
-
-  if (suspended) return null
 
   return <>
     <div className="wt__backdrop" aria-hidden="true" />
@@ -160,12 +126,12 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
       <div className={`wt__slide ${direction < 0 ? 'is-back' : 'is-forward'}`} role="region" aria-labelledby="wt-title" tabIndex={0} key={screen.id}>
         <h2 id="wt-title" ref={titleRef} tabIndex={-1}><Title kind={(MOTION[screen.id] || MOTION.agent).title} plain={plainTitle} accent={accentTitle} /></h2>
         <p className="wt__lead"><LeadText kind={(MOTION[screen.id] || MOTION.agent).lead} text={screen.lead} /></p>
-        {screen.content === 'profile' && <WalkthroughProfile identityApp={identityApp} controller={account} />}
+        {screen.content === 'profile' && <WalkthroughProfile controller={account} />}
         {screen.content === 'chat' && <AgentChatDemo />}
         {screen.content === 'theme' && <ThemeChangeDemo />}
         {screen.content === 'brain' && <AgentBrainFlow />}
         {screen.content === 'store' && <WalkthroughStore store={store} />}
-        {screen.content === 'group' && <WalkthroughAppGroup group={screen.group} store={store} statusOf={installer.statusOf} locked={installer.busy} onInstall={installer.begin} />}
+        {screen.content === 'group' && <WalkthroughAppGroup group={screen.group} store={store} statusOf={installer.statusOf} onInstall={installer.install} />}
         {screen.content === 'connect' && <WalkthroughSetup />}
         {screen.content === 'finish' && <>
           <WalkthroughInstall />
@@ -176,7 +142,6 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
           </ul>
         </>}
       </div>
-      {confirming && confirmingApp && <WalkthroughAccessConfirm confirmation={confirming} app={confirmingApp} icon={store.icons[confirmingApp.id]} onApprove={installer.approve} onCancel={installer.dismiss} />}
       <div className="wt__footer">
         {stepIndex > 0 && <button type="button" className="wt__back" onClick={() => goTo(stepIndex - 1)}>Back</button>}
         {screen.content === 'profile' && account.returning && <button type="button" className="wt__back" onClick={() => goTo(CONNECT_INDEX)}>Skip to agent setup</button>}

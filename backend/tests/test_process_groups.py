@@ -278,3 +278,208 @@ def test_run_marker_is_a_stable_one_way_digest():
   assert marker == process_groups.run_marker("secret-run-token")
   assert "secret-run-token" not in marker and len(marker) == 32
   assert process_groups.run_marker(None) == ""
+
+
+# --- storage guard: stopping what fills the volume ---------------------------
+#
+# The real scan and real signals run against a small process tree shaped like
+# a live turn: this test process stands in for the server, which launches the
+# runtime as the leader of its own session; the runtime starts an MCP server
+# in that session and each tool command in a session of its own.
+
+
+def _scoped_to(monkeypatch, *pids):
+  """Let stop_agent_commands see only these test processes.
+
+  A live instance's own agent commands (this test run may share the
+  container) are never in view.
+  """
+  ours = set(pids)
+  real = process_groups._marked_processes
+  monkeypatch.setattr(
+    process_groups, "_marked_processes",
+    lambda: {pid: row for pid, row in real().items() if pid in ours},
+  )
+
+
+# Runs the Python interpreter under each argv[0] rather than a renamed
+# ``sleep``: multi-call coreutils builds refuse to run under a name they do
+# not recognise.
+_SLEEP = "import time; time.sleep(60)"
+# The interpreter path is passed in: under a borrowed argv[0] such as
+# ``node``, the runtime's own ``sys.executable`` resolves to that program.
+_RUNTIME = f"""
+import subprocess, sys, time
+command_name, python = sys.argv[1:]
+mcp = subprocess.Popen(["python3.12", "-c", {_SLEEP!r}], executable=python)
+command = subprocess.Popen(
+  [command_name, "-c", {_SLEEP!r}], executable=python, start_new_session=True,
+)
+print(mcp.pid, command.pid, flush=True)
+time.sleep(60)
+"""
+
+
+class _Turn:
+  """A runtime launched as ``runtime_name`` plus its MCP server and command."""
+
+  def __init__(
+    self, marker, *, runtime_name="node", command_name="npm", own_session=True,
+  ):
+    import os
+    import subprocess
+    import sys
+    self.marker = marker
+    env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: marker})
+    # The Codex app-server is the npm ``#!/usr/bin/env node`` wrapper, so its
+    # argv[0] is ``node``, not ``codex``.
+    self.runtime = subprocess.Popen(
+      [runtime_name, "-c", _RUNTIME, command_name, sys.executable],
+      executable=sys.executable, env=env, start_new_session=own_session,
+      stdout=subprocess.PIPE, text=True,
+    )
+    self.mcp, self.command = map(int, self.runtime.stdout.readline().split())
+
+  @property
+  def pids(self):
+    return (self.runtime.pid, self.mcp, self.command)
+
+  def close(self):
+    import os
+    # An orphan may already be reaped and its pid reused: signal it only
+    # while it still carries this turn's marker.
+    needle = f"{process_groups.RUN_MARKER_ENV}={self.marker}".encode()
+    for pid in (self.command, self.mcp):
+      try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
+          if needle in handle.read().split(b"\0"):
+            os.kill(pid, signal.SIGKILL)
+      except (OSError, ProcessLookupError):
+        pass
+    self.runtime.kill()
+    self.runtime.wait()
+    self.runtime.stdout.close()
+
+
+def _ended(pid, timeout=2.0):
+  """Whether ``pid`` exited (gone, or a zombie its parent has not reaped)."""
+  import time
+  deadline = time.monotonic() + timeout
+  while True:
+    try:
+      with open(f"/proc/{pid}/stat", "rb") as handle:
+        if handle.read().rsplit(b") ", 1)[1].split()[0] == b"Z":
+          return True
+    except (FileNotFoundError, ProcessLookupError):
+      return True
+    if time.monotonic() >= deadline:
+      return False
+    time.sleep(0.02)
+
+
+def _alive(pid):
+  return not _ended(pid, timeout=0)
+
+
+def test_storage_stop_kills_tool_commands_but_keeps_a_node_wrapped_runtime(
+  monkeypatch,
+):
+  turn = _Turn(f"filling-{uuid4().hex}", runtime_name="node")
+  try:
+    _scoped_to(monkeypatch, *turn.pids)
+
+    assert process_groups.stop_agent_commands() == 1
+    assert _ended(turn.command)
+    # The runtime keeps running whatever its executable is called, so its
+    # turn can still be paused and resumed.
+    assert turn.runtime.poll() is None
+  finally:
+    turn.close()
+
+
+def test_storage_stop_keeps_the_runtimes_mcp_servers(monkeypatch):
+  """A continued cleanup turn must not lose its Möbius tools."""
+  turn = _Turn(f"mcp-{uuid4().hex}", runtime_name="claude")
+  try:
+    _scoped_to(monkeypatch, *turn.pids)
+
+    process_groups.stop_agent_commands()
+    assert _ended(turn.command)
+    assert _alive(turn.mcp)
+  finally:
+    turn.close()
+
+
+def test_storage_stop_keeps_mcp_servers_of_a_runtime_launched_without_setsid(
+  monkeypatch,
+):
+  """Without ``setsid`` (a development host) the runtime shares the server's
+  session; what stayed in it is still the runtime's, and its commands still
+  leave it."""
+  turn = _Turn(f"no-setsid-{uuid4().hex}", runtime_name="claude", own_session=False)
+  try:
+    _scoped_to(monkeypatch, *turn.pids)
+
+    assert process_groups.stop_agent_commands() == 1
+    assert _ended(turn.command)
+    assert _alive(turn.mcp)
+    assert turn.runtime.poll() is None
+  finally:
+    turn.close()
+
+
+def test_storage_stop_kills_a_command_its_runtime_left_behind(monkeypatch):
+  """Re-parented away from its runtime, an orphan cannot pass for one."""
+  turn = _Turn(f"orphan-{uuid4().hex}")
+  try:
+    turn.runtime.kill()
+    turn.runtime.wait()
+    _scoped_to(monkeypatch, *turn.pids)
+
+    process_groups.stop_agent_commands()
+    assert _ended(turn.command)
+  finally:
+    turn.close()
+
+
+def test_storage_stop_spares_a_run_the_owner_continued(monkeypatch):
+  continued = _Turn(f"continued-{uuid4().hex}", command_name="du")
+  other = _Turn(f"other-{uuid4().hex}", command_name="curl")
+  try:
+    _scoped_to(monkeypatch, *continued.pids, *other.pids)
+
+    assert process_groups.stop_agent_commands(
+      spare_markers=frozenset({continued.marker}),
+    ) == 1
+    assert _ended(other.command)
+    assert _alive(continued.command)
+  finally:
+    continued.close()
+    other.close()
+
+
+def test_storage_stop_never_leaves_a_process_frozen(monkeypatch):
+  """A stopped process still dies: SIGKILL ends it without a SIGCONT."""
+  turn = _Turn(f"frozen-{uuid4().hex}", command_name="tar")
+  try:
+    _scoped_to(monkeypatch, *turn.pids)
+    process_groups.stop_agent_commands()
+    # A process left frozen would read T (stopped), never Z or gone.
+    assert _ended(turn.command)
+  finally:
+    turn.close()
+
+
+def test_unmarked_processes_are_never_scanned_as_agent_commands(tmp_path):
+  import os
+  import shutil
+  import subprocess
+  env = {k: v for k, v in os.environ.items() if k != process_groups.RUN_MARKER_ENV}
+  plain = subprocess.Popen(
+    [shutil.which("sleep"), "60"], env=env, start_new_session=True,
+  )
+  try:
+    assert plain.pid not in process_groups._marked_processes()
+  finally:
+    plain.kill()
+    plain.wait()

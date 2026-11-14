@@ -395,11 +395,18 @@ test('grouped replies carry authoritative manual recovery to their existing acti
     const props = {
       replyGroup: assistantReplyGroups([msg]).get(0),
       activeMirrorMsg: msg, useDbActivePayload: true, onResume() {}, isLastMsg: true,
+      canContinueAnyway: true,
     }
     const manual = render(Active, { ...props, handoff: { kind: 'recovery' } })
     assert.match(manual, /class="chat__resume chat__recovery-action"/)
     const automatic = render(Active, { ...props, handoff: { kind: 'automatic' } })
-    assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    if (kind === 'storage') {
+      assert.match(automatic, />Continue anyway<\/button>/)
+      assert.match(manual, />Continue anyway<\/button>/)
+      assert.match(automatic, /If the disk fills completely, saving may fail\./)
+    } else {
+      assert.doesNotMatch(automatic, /class="chat__resume chat__recovery-action"/)
+    }
     assert.doesNotMatch(manual, /will continue automatically|Trying again shortly/)
   }
 })
@@ -427,4 +434,35 @@ test('live tools joined into an earlier row stay inside the marked current respo
   const settled = render(Active, { ...props, activeRowIndex: -1, useDbActivePayload: true, hasLivePayload: false, isStreaming: false },
     { tools: new Map(), positions: new Map() })
   assert.doesNotMatch(settled, /data-current-response/)
+})
+
+test('a settled reply folds its trailing routine save into the earlier activity line', () => {
+  const msg = { id: 'saved-answer', role: 'assistant', blocks: [
+    { type: 'tool', tool: 'Bash', tool_use_id: 'work', status: 'done', output_exit_code: 0 },
+    { type: 'text', content: 'The answer' },
+    { type: 'tool', tool: 'mcp__mobius_control__checkpoint_chat', tool_use_id: 'save', status: 'done', routine: true },
+  ] }
+  const settled = render(Message, { msg, chatId: 'chat', messageKey: 'saved-answer' })
+  assert.equal(settled.split('class="chat__tools"').length, 2)
+  assert.ok(settled.indexOf('Ran a command') < settled.indexOf('The answer'))
+  assert.doesNotMatch(settled, /Saved notes/)
+  // A live turn keeps stream order, and a failed save always keeps its row.
+  const live = render(Message, { msg, chatId: 'chat', messageKey: 'saved-answer', isStreaming: true })
+  const failed = { ...msg, blocks: [...msg.blocks.slice(0, 2), { ...msg.blocks[2], output_exit_code: 1 }] }
+  for (const html of [live, render(Message, { msg: failed, chatId: 'chat', messageKey: 'saved-answer' })]) {
+    assert.equal(html.split('class="chat__tools"').length, 3)
+    assert.ok(html.indexOf('The answer') < html.lastIndexOf('class="chat__tools"'))
+  }
+})
+
+test('reasoning that a routine save joined keeps its reasoning line', () => {
+  const msg = { id: 'thought-answer', role: 'assistant', blocks: [
+    { type: 'thinking', content: 'Considering', duration_ms: 3000 },
+    { type: 'text', content: 'The answer' },
+    { type: 'tool', tool: 'mobius_control:checkpoint_chat', tool_use_id: 'save', status: 'done', routine: true },
+  ] }
+  const html = render(Message, { msg, chatId: 'chat', messageKey: 'thought-answer' })
+  assert.equal(html.split('class="chat__tools"').length, 2)
+  assert.match(html, /data-activity-kind="reasoning"/)
+  assert.match(html, /Thought for 3 seconds/)
 })

@@ -129,6 +129,25 @@ def test_cannot_complete_settles_reasoned_unmet_tasks_without_shrinking_objectiv
   assert "Unmet outcome:" in saved.result
 
 
+def test_cannot_complete_keeps_long_explanations_whole(client, owner_token, db):
+  _, chat_id = _active_goal(client, owner_token, db)
+  _seed_plan(client, db, chat_id)
+  outcome = {
+    "reason": "R" * 6000, "efforts": "E" * 6000, "unmet_outcome": "U" * 6000,
+  }
+  response = _update(client, db, chat_id, {
+    "tasks": [
+      {"id": "inspect", "status": "failed", "note": "Unavailable"},
+      {"id": "build", "status": "blocked", "note": "Needs inspect"},
+    ],
+    "cannot_complete": outcome,
+  })
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  saved = db.get(models.ChatGoal, "goal-1").result
+  assert all(value in saved for value in outcome.values())
+
+
 def test_cannot_complete_refuses_unexplained_or_pending_tasks_atomically(
   client, owner_token, db,
 ):
@@ -241,6 +260,69 @@ def test_goal_returns_exact_held_work_keys_and_completion_settles_only_named_wor
   assert claims["test:another-goal"].released_at is None
 
 
+def test_completion_keys_match_settlement_scope_without_claiming_goal_less_work(
+  client, owner_token, db,
+):
+  from app.agent_work_claims import completable_claim_keys
+  from app.chat_writer import create_chat
+
+  _, chat_id = _active_goal(client, owner_token, db)
+  owner_id = db.query(models.Owner.id).scalar()
+  db.add(create_chat(id="peer-chat", title="Peer", messages=[]))
+  now = datetime.now(UTC)
+  cases = [
+    ("goal", chat_id, "goal-1", None, None),
+    ("goal-less", chat_id, None, None, None),
+    ("unnamed-goal-less", chat_id, None, None, None),
+    ("other-goal", chat_id, "retained-goal", None, None),
+    ("peer-goal-less", "peer-chat", None, None, None),
+    ("peer-goal", "peer-chat", "goal-1", None, None),
+    ("completed-goal", chat_id, "goal-1", now, None),
+    ("released-goal", chat_id, "goal-1", None, now),
+    ("completed-goal-less", chat_id, None, now, None),
+    ("released-goal-less", chat_id, None, None, now),
+  ]
+  for name, owner_chat_id, goal_id, completed_at, released_at in cases:
+    db.add(models.AgentWorkClaim(
+      id="claim-" + name, owner_id=owner_id, work_key="test:" + name, summary=name,
+      owner_chat_id=owner_chat_id, owner_goal_id=goal_id,
+      owner_run_id="goal-root", completed_at=completed_at, released_at=released_at,
+    ))
+  db.commit()
+
+  read = _update(client, db, chat_id, {})
+  assert read.status_code == 200, read.text
+  summary = read.json()["goal"]
+  eligible = {"test:goal", "test:goal-less", "test:unnamed-goal-less"}
+  assert summary["held_work_keys"] == ["test:goal"]
+  assert summary["completable_work_keys"] == sorted(eligible)
+  assert set(summary["completable_work_keys"]) == completable_claim_keys(
+    db, chat_id=chat_id, goal_id="goal-1",
+  )
+  for key in {"test:" + case[0] for case in cases} - eligible:
+    refused = _update(client, db, chat_id, {
+      "complete": True, "finished_claims": [key],
+    })
+    assert refused.status_code == 422, refused.text
+    assert "Not an open work claim" in refused.json()["detail"]["message"]
+
+  finished = _update(client, db, chat_id, {
+    "complete": True, "finished_claims": ["test:goal", "test:goal-less"],
+  })
+  assert finished.status_code == 200, finished.text
+  assert finished.json()["goal"]["held_work_keys"] == []
+  assert finished.json()["goal"]["completable_work_keys"] == ["test:unnamed-goal-less"]
+  db.expire_all()
+  claims = {row.work_key: row for row in db.query(models.AgentWorkClaim).all()}
+  for key in ("test:goal", "test:goal-less"):
+    assert claims[key].completed_at is not None
+    assert claims[key].released_at is None
+  for key in ("test:unnamed-goal-less", "test:other-goal", "test:peer-goal-less", "test:peer-goal"):
+    assert claims[key].completed_at is None
+    assert claims[key].released_at is None
+  assert claims["test:goal-less"].owner_goal_id is None
+
+
 
 
 def test_the_final_task_edit_and_completion_can_share_one_call(
@@ -261,7 +343,7 @@ def test_the_final_task_edit_and_completion_can_share_one_call(
   assert completed.json()["plan"]["tasks"][0]["result"] == "Shipped"
 
 
-@pytest.mark.parametrize("value", [False, 0, 1, "", " ", [], {}, "x" * 4001])
+@pytest.mark.parametrize("value", [False, 0, 1, "", " ", [], {}])
 def test_completion_flag_rejects_accidental_coercion(client, owner_token, db, value):
   _, chat_id = _active_goal(client, owner_token, db)
   response = _update(client, db, chat_id, {"complete": value})
@@ -403,13 +485,30 @@ def test_a_chat_without_a_goal_is_told_to_promote_first(client, owner_token, db)
   assert "Promote one first" in written.json()["detail"]["message"]
 
 
-def test_a_task_note_may_run_to_a_thousand_characters(client, owner_token, db):
+def test_long_task_notes_and_next_action_are_kept_whole(client, owner_token, db):
   _, chat_id = _active_goal(client, owner_token, db)
   _seed_plan(client, db, chat_id)
 
-  kept = _update(client, db, chat_id, {"tasks": [{"id": "inspect", "note": "n" * 1000}]})
-  extended = _update(client, db, chat_id, {"tasks": [{"id": "inspect", "note": "n" * 1001}]})
+  note, next_action = "n" * 20_000, "a" * 10_000
+  extended = _update(client, db, chat_id, {
+    "tasks": [{"id": "inspect", "note": note}], "next_action": next_action,
+  })
 
-  assert kept.status_code == 200, kept.text
-  assert extended.status_code == 422, extended.text
-  assert "at most 1000 characters" in extended.json()["detail"]["message"]
+  assert extended.status_code == 200, extended.text
+  task = next(t for t in extended.json()["plan"]["tasks"] if t["id"] == "inspect")
+  assert task["note"] == note
+  db.expire_all()
+  assert db.get(models.ChatGoal, "goal-1").next_action == next_action
+
+
+def test_goal_prose_and_claim_lists_have_no_guessed_budgets():
+  from app.routes.goal_plans import GoalPromotionRequest, GoalUpdateRequest
+
+  objective = "Deliver the outcome " * 500
+  assert GoalPromotionRequest(objective=objective).objective == objective.strip()
+  keys = [f"test:work-{index}" for index in range(80)]
+  assert GoalUpdateRequest(
+    complete="done " * 2000, finished_claims=keys,
+  ).finished_claims == keys
+  assert GoalUpdateRequest(cancel="c" * 9000).cancel == "c" * 9000
+  assert GoalUpdateRequest(defer="d" * 9000).defer == "d" * 9000

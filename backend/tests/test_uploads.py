@@ -445,7 +445,7 @@ def test_discard_removes_only_unclaimed_drafts(client, db, auth, chat):
 
 def test_admitted_messages_claim_their_uploads(client, db, auth, chat):
   from pathlib import Path
-  from app.chat_writer import get_writer, AppendPending, ClearPending, StartTurn
+  from app.chat_writer import get_writer, AppendPending, HoldPending, StartTurn
 
   started = _upload(client, auth, chat, "started.txt")
   queued = _upload(client, auth, chat, "queued.txt")
@@ -461,7 +461,7 @@ def test_admitted_messages_claim_their_uploads(client, db, auth, chat):
     chat_id=chat.id, user_msg={"role": "user", "content": "and this",
                                "attachments": [{"name": queued["name"]}]},
   )).result(timeout=5)
-  writer.submit(ClearPending(chat_id=chat.id)).result(timeout=5)
+  writer.submit(HoldPending(chat_id=chat.id)).result(timeout=5)
 
   db.refresh(chat)
   claimed = {u["name"]: u["claimed"] for u in chat.uploads}

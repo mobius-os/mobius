@@ -1,12 +1,10 @@
 /* Session feedback joins the notification feed without timers or remote pushes. */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+// Notices sharing a key are one evolving notice: the newest replaces the
+// earlier row, so a retry's outcome or a later archive takes its place.
 function addSessionNotice(rows, notice) {
-  return [notice, ...rows.map(row => (
-    notice.noticeKey && row.noticeKey === notice.noticeKey && row.sessionAction
-      ? { ...row, sessionAction: null, actionStatus: 'Superseded by a newer action' }
-      : row
-  ))]
+  return [notice, ...rows.filter(row => !notice.noticeKey || row.noticeKey !== notice.noticeKey)]
 }
 
 function sessionNoticeCounts(rows) {

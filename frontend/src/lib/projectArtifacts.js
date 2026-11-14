@@ -73,7 +73,46 @@ export function artifactTypeName(artifact) {
   if (typeof artifact?.type_name === 'string' && artifact.type_name) {
     return artifact.type_name
   }
-  return artifact?.builder === 'app' ? 'App' : 'Artifact'
+  return artifact?.builder === 'app' ? 'App' : 'Result'
+}
+
+// Where a result stands alone (a tab, a Recents row) it is named for its
+// project, so two "Document" results from different projects stay distinct.
+// A project's only result reads by its type ("Thesis · PDF"); several results
+// keep their own names ("Thesis · Part 1"), since the type no longer tells them apart.
+export function resultDisplayName(project, artifact) {
+  const resultCount = Array.isArray(project?.artifacts) ? project.artifacts.length : 0
+  const result = resultCount > 1
+    ? artifact?.name || artifact?.id || artifactTypeName(artifact)
+    : artifactTypeName(artifact)
+  return project?.name ? `${project.name} · ${result}` : (artifact?.name || result)
+}
+
+// What a freshly opened project shows first: its main result when one has been
+// built, otherwise that result's source file. The main result is the first
+// declared preview that is registered, in declaration order, else the first
+// result. A project with no results opens on its overview.
+export function projectEntryTarget(project) {
+  const artifacts = Array.isArray(project?.artifacts) ? project.artifacts : []
+  if (!artifacts.length) return null
+  const byId = new Map(artifacts.map(row => [row?.id, row]))
+  const main = (project?.template?.previews || [])
+    .map(preview => byId.get(preview?.id))
+    .find(Boolean) || artifacts[0]
+  if (main?.has_output) return { kind: 'result', artifactId: main.id }
+  if (typeof main?.source === 'string' && main.source && !main.source_missing) {
+    return { kind: 'file', path: main.source }
+  }
+  return null
+}
+
+// Any source change can leave a built result out of date, whichever surface
+// (owner or collaborator) saw it, so results refresh beside the source's views.
+export function refreshSourceViews(client, source, artifactsKey) {
+  return Promise.all([
+    source.invalidate(client),
+    client.invalidateQueries({ queryKey: artifactsKey, exact: true }),
+  ])
 }
 
 export function artifactPreviewKind(artifact) {
@@ -92,10 +131,19 @@ export function artifactVisualKind(artifact) {
 // Human label + a semantic variant for the status pill. Variants are stable
 // class suffixes (`.artifact-pill--<variant>`), not colors, so the stylesheet
 // owns the palette.
-export function artifactStatusPill(artifact) {
-  switch (artifactStatus(artifact)) {
+//
+// `building` covers the moment between pressing Build and the server's first
+// status. `justBuilt` marks a build this view watched finish, which earns a
+// direct "PDF ready · Open" until the result is opened. A result whose source
+// changed after its build is out of date, whatever its last build did.
+export function artifactStatusPill(artifact, { building = false, justBuilt = false } = {}) {
+  const status = building ? 'building' : artifactStatus(artifact)
+  switch (status) {
     case 'building': return { label: 'Building…', variant: 'building' }
-    case 'ok': return { label: 'Built', variant: 'ok' }
+    case 'ok':
+      if (artifact?.out_of_date) return { label: 'Out of date', variant: 'stale' }
+      if (justBuilt) return { label: `${artifactTypeName(artifact)} ready · Open`, variant: 'ready' }
+      return { label: 'Built', variant: 'ok' }
     case 'error': return { label: 'Build failed', variant: 'error' }
     default: return { label: 'Not built', variant: 'idle' }
   }

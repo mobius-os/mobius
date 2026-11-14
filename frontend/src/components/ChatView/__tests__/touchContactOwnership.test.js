@@ -137,7 +137,9 @@ test('the last lift restarts the quiet edge so one contact episode settles once'
 
 test('every commit-authority check inside the controller carries touch contact', () => {
   const calls = ownerSource.split('scrollAuthorityAllowsCommit({').slice(1)
-  assert.ok(calls.length >= 4,
+  // Count is not the contract: transcript commits now reuse the guarded
+  // layout pass instead of adding another authority check of their own.
+  assert.ok(calls.length >= 3,
     'the controller\'s authority funnel went missing; this guard is vacuous')
   for (const call of calls) {
     const argsBlock = call.slice(0, call.indexOf('})'))

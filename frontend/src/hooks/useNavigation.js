@@ -20,6 +20,7 @@ import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  previousPageDied,
   readRestoredCanvas,
   readStoredChatId,
 } from '../lib/navigationPersistence.js'
@@ -101,6 +102,11 @@ if (deepLink?.view === 'chat' && deepLink.focusQuestion) {
   requestChatQuestionReveal(deepLink.chatId, deepLink.questionId)
 }
 
+// Read once per page load: the browser killed this tab's previous page. The
+// workspace boots without any app mounted (paneModel.withoutBootApps) and the
+// cold-restored app is not pre-mounted, so a crashing app cannot loop.
+export const recoveringFromCrash = previousPageDied()
+
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
 // instead of defaulting to a chat. Only the canvas needs an explicit
@@ -119,7 +125,8 @@ const returnView = ownerWorkspace ? consumeReturnView() : null
 // live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
 // to chat. See ARCHITECTURE.md (Navigation back-stack + drawer model).
 export const coldRestoredCanvasAppId =
-  (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
+  (!recoveringFromCrash && !shellReload?.activeView && !deepLink?.view
+    && restored?.view === 'canvas')
     ? restored.appId
     : null
 
@@ -151,6 +158,7 @@ export const coldRestoredCanvasAppId =
  *   replaceImplicitBootTab
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
+ *   beforeDrawerOpenRef   captures focus before the modal makes content inert.
  *   beforeRestoreRouteRef optional synchronous Back/Forward destination hook,
  *                       run after validation but before workspace mutation.
  *
@@ -169,6 +177,7 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
   beforeRestoreRouteRef,
+  beforeDrawerOpenRef,
   navigationStorage = localStore(),
   routePath = '/shell/',
 }) {
@@ -207,6 +216,9 @@ export default function useNavigation({
   // An explicit tap/swipe close can start the panel transition immediately
   // while drawerOpenRef remains true until Back consumes the drawer sentinel.
   const [drawerVisible, setDrawerVisible] = useState(false)
+  // Set from the opening tap until the drawer commits. An app under the opening
+  // drawer stops competing for the device at once, not two painted frames later.
+  const [drawerOpening, setDrawerOpening] = useState(false)
   // Android's embedded-surface hit-test map can lag the input that opens the
   // drawer. When opening over an app, wait through one painted frame before
   // exposing the scrim so that input/compositor ownership settles first. The
@@ -241,6 +253,11 @@ export default function useNavigation({
   // remount (pushNavEntry is not idempotent). See the mount effect below.
   const seededHomeRef = useRef(false)
   const historyInitializedRef = useRef(false)
+  // The first commit renders the restored workspace; the mount effect below
+  // then applies an explicit boot destination (deep link, reload claim). Shell
+  // mounts content surfaces only after that decision, so a restored chat that
+  // the launch replaces never starts its own transcript reads.
+  const [bootRouteApplied, setBootRouteApplied] = useState(false)
 
   const navStackRef = useRef([])
   // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
@@ -538,7 +555,10 @@ export default function useNavigation({
       content.chatId,
       content.appId,
       content.paneId,
-      content.projectId ? { projectId: content.projectId } : null,
+      content.projectId ? {
+        projectId: content.projectId,
+        ...(content.artifactRef ? { artifactRef: content.artifactRef } : {}),
+      } : null,
     )
   }, [workspaceStateRef, overlayShowingForWs])
 
@@ -654,10 +674,12 @@ export default function useNavigation({
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
+      setDrawerOpening(true)
       drawerPrepareRafRef.current = requestAnimationFrame(() => {
         drawerPrepareRafRef.current = requestAnimationFrame(() => {
           drawerPrepareRafRef.current = 0
           drawerPreparingRef.current = false
+          setDrawerOpening(false)
           commitDrawerOpen()
         })
       })
@@ -673,6 +695,7 @@ export default function useNavigation({
       drawerPrepareRafRef.current = 0
     }
     drawerPreparingRef.current = false
+    setDrawerOpening(false)
     return true
   }
 
@@ -714,6 +737,7 @@ export default function useNavigation({
           closeTraversal.recovered = true
         }
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
         return
       }
@@ -745,6 +769,7 @@ export default function useNavigation({
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
     drawerOpenRef.current = true
+    beforeDrawerOpenRef?.current?.()
     setDrawerVisible(true)
   }
 
@@ -1400,9 +1425,9 @@ export default function useNavigation({
         }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      // A marked provider return, not an ordinary Settings link, may replace
-      // the stale destination claimed by a prior shell reload.
+      // A provider return or explicit result launch replaces a stale claimed reload.
       const claimedReloadDestination = shellReload?.destinationClaimed && !deepLink?.providerReturn
+        && deepLink?.view !== 'artifact'
         ? {
             view: shellReload.activeView,
             appId: shellReload.activeAppId ?? null,
@@ -1468,6 +1493,12 @@ export default function useNavigation({
           { view: 'projects', chatId: null, appId: null, paneId: bootPaneId },
           tabModel.projectsTab(),
         )
+      } else if (deepLink?.view === 'artifact' && deepLink.projectId && deepLink.artifactId) {
+        const artifactRef = tabModel.artifactTabId(deepLink.projectId, deepLink.artifactId)
+        bootDeepLink(
+          { view: 'artifact', projectId: deepLink.projectId, artifactRef, chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.artifactTab(deepLink.projectId, deepLink.artifactId),
+        )
       } else if (deepLink?.view === 'project' && deepLink.projectId) {
         bootDeepLink(
           { view: 'project', projectId: deepLink.projectId, chatId: null, appId: null, paneId: bootPaneId },
@@ -1488,6 +1519,18 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('app', initialNav.appId))
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
+      }
+
+      // A page killed while showing an app (iOS Safari kills a page that runs out
+      // of memory, then reloads it) must not reopen that app on its own: it would
+      // crash again until Safari gives up with "A problem repeatedly occurred".
+      // The restored workspace already mounts no app (a restored app screen is
+      // the empty home); a reload or launch target that names an app is
+      // overridden here. Go home (the latest chat, or the empty chat home); the
+      // app stays one tap away.
+      if (recoveringFromCrash && snapshotRoute().view === 'canvas') {
+        restoreRoute(navRoute('chat', null, null, bootPaneId, { homeSeed: true }))
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
 
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
@@ -1544,6 +1587,7 @@ export default function useNavigation({
       // destination with another base entry.
       currentNavStateRef.current = history.state
     }
+    setBootRouteApplied(true)
 
     function handleForward(destination, sourceRoute) {
       // A forward traversal abandons any in-flight drawer close: clear the LOGICAL
@@ -1648,6 +1692,7 @@ export default function useNavigation({
       if (destination?.kind === 'drawer') {
         drawerPushedRef.current = true
         drawerOpenRef.current = true
+        beforeDrawerOpenRef?.current?.()
         setDrawerVisible(true)
       } else {
         drawerPushedRef.current = false
@@ -2017,7 +2062,9 @@ export default function useNavigation({
           const consumeRecoveredClose = () => {
             settleRecoveredDrawerClose(destination, recoveredSource)
           }
-          if (e.canIntercept) e.intercept({ handler: consumeRecoveredClose })
+          if (e.canIntercept) {
+            e.intercept({ handler: consumeRecoveredClose, focusReset: 'manual' })
+          }
           else setTimeout(consumeRecoveredClose, 0)
           return
         }
@@ -2064,7 +2111,11 @@ export default function useNavigation({
           // slide); otherwise let the traversal commit and consume right
           // after — the drawer branch of handleBack keys on our own refs,
           // not on the destination.
-          if (e.canIntercept) e.intercept({ handler: consume })
+          // A tap, toggle, or swipe close has already handed focus back (to
+          // the restored composer or Drawer's previous target) before this
+          // traversal starts. The Navigation API's default focus reset would
+          // then move focus to <body> and drop a restored touch keyboard.
+          if (e.canIntercept) e.intercept({ handler: consume, focusReset: 'manual' })
           else setTimeout(consume, 0)
           return
         }
@@ -2310,12 +2361,14 @@ export default function useNavigation({
 
   return {
     initialNav,
+    bootRouteApplied,
     activeView,
     activeAppId,
     activeChatId,
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
+    drawerOpening,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings

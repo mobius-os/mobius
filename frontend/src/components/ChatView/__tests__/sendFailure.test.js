@@ -2,9 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  detachedSendFailureMessage,
   isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
+  queueSendFailureMessage,
   sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from '../sendFailure.js'
@@ -172,4 +174,55 @@ test('a missing model is a distinct recoverable send conflict', () => {
   assert.equal(isModelSelectionRequiredFailure(new ChatHttpError(409, {
     code: 'another_conflict',
   })), false)
+})
+
+test('a send that never took the composer draft never says its message is in the composer', () => {
+  const failures = [
+    new ChatTransportError(new TypeError('Failed to fetch')),
+    Object.assign(new Error('aborted'), { name: 'AbortError' }),
+    { status: 400 }, { status: 401 }, { status: 429 }, { status: 503 },
+    { status: 409, code: 'pending_question_open' },
+  ]
+  for (const failure of failures) {
+    for (const online of [true, false]) {
+      assert.doesNotMatch(detachedSendFailureMessage(failure, { online }), /composer/)
+    }
+  }
+  assert.equal(detachedSendFailureMessage({ status: 400 }, { online: false }),
+    'You’re offline. Try again when you reconnect.')
+  assert.equal(detachedSendFailureMessage(failures[0]),
+    'Möbius couldn’t confirm the send. It’s safe to try again.')
+  assert.equal(detachedSendFailureMessage({ status: 400 }),
+    'Möbius couldn’t send the message. Try again in a moment.')
+  // A durable outbox write owns the replay either way, so it says so.
+  const retained = Object.assign(new ChatTransportError(new TypeError('Failed to fetch')), {
+    outboxRetained: true,
+  })
+  assert.equal(detachedSendFailureMessage(retained), sendFailureMessage(retained))
+})
+
+test('a refused empty Send says the queue is unchanged, never that a draft came back', () => {
+  for (const error of [
+    new ChatHttpError(409, { code: 'pending_question_open' }),
+    new ChatHttpError(409, { code: 'model_selection_required' }),
+    new ChatTransportError(new Error('offline')),
+  ]) {
+    const message = queueSendFailureMessage(error)
+    assert.match(message, /queued messages are unchanged|still queued/)
+    assert.doesNotMatch(message, /composer/)
+  }
+  assert.match(
+    queueSendFailureMessage(new ChatHttpError(409, { code: 'pending_question_open' })),
+    /pending question/,
+  )
+})
+
+test('a refused empty Send shows the server\'s reason instead of inviting a retry', () => {
+  const message = queueSendFailureMessage(new ChatHttpError(409, {
+    code: 'delegation_managed',
+    detail: 'This evaluator chat is managed by its parent workflow.',
+  }))
+  assert.match(message, /managed by its parent workflow/)
+  assert.match(message, /unchanged/)
+  assert.doesNotMatch(message, /try again/i)
 })

@@ -75,7 +75,7 @@
 }
 
 .setup__subtitle a {
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -131,8 +131,8 @@
 }
 
 .setup__btn {
-  background: var(--accent, #a78bfa);
-  color: #fff;
+  background: var(--accent-fill, var(--accent, #7c5ce6));
+  color: var(--accent-fg, #fff);
   border: none;
   border-radius: 10px;
   padding: 10px;
@@ -156,7 +156,7 @@
 }
 
 .setup__btn:hover:not(:disabled) {
-  background: var(--accent-hover, #c4b5fd);
+  background: var(--accent-fill-hover, var(--accent-hover, #7053cf));
 }
 
 .setup__btn:disabled {
@@ -184,7 +184,7 @@
 }
 
 .setup__auth-msg a {
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   text-decoration: underline;
 }
 
@@ -220,8 +220,8 @@
 
 .setup__badge {
   display: inline-block;
-  background: var(--accent, #a78bfa);
-  color: #fff;
+  background: var(--accent-fill, var(--accent, #7c5ce6));
+  color: var(--accent-fg, #fff);
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
@@ -258,7 +258,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   font: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -296,7 +296,7 @@
 .setup__skip-warn {
   margin-top: 16px;
   font-size: 12px;
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   text-align: center;
 }
 

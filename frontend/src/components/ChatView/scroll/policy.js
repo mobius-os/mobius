@@ -13,6 +13,8 @@ import {
 
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 const NESTED_SCROLL_EPSILON_PX = 0.5
+// Sub-pixel scrollTop rounding only; any real movement exceeds it.
+const AUTOSCROLL_POSITION_EPSILON_PX = 0.5
 const NESTED_SCROLL_SELECTOR = '[data-chat-scroll-region], .chat__scroll'
 export const FOLLOW_STICK_BAND_PX = 70
 export const HISTORY_PREFETCH_MIN_PX = 240
@@ -60,16 +62,29 @@ export function paginationViewportCompensationAllowed({
  *  autoscroll. Subtracting it made a message sitting mid-screen look like a
  *  bottom send and yanked the reader back to the top. Exact physical geometry
  *  remains synchronous even while ScrollMode settlement trails by a frame;
- *  ScrollMode is a DOM-less fallback only.
+ *  ScrollMode alone is a DOM-less fallback only.
+ *
+ *  Live output is the one exception to reading the raw gap. A reply commits
+ *  between frames and FOLLOW_BOTTOM reaches the new tail only at the next
+ *  layout observation, so for that interval the physical gap includes output
+ *  the follower has not been moved past yet (several lines when a backlog is
+ *  revealed quickly). `followTailTop` is the scrollTop FOLLOW_BOTTOM itself
+ *  last wrote; a viewport still exactly there is at the autoscroll tail. Any
+ *  reader movement or clamp changes scrollTop, so a stale FOLLOW_BOTTOM still
+ *  falls back to the physical geometry.
  */
 export function shouldPinSend({
   scrollEl,
   mode,
   isFirstUserMsg,
+  followTailTop = null,
 }) {
   if (isFirstUserMsg) return true
-  if (scrollEl) return isNearPhysicalBottom(scrollEl)
-  return mode?.kind === 'FOLLOW_BOTTOM'
+  if (!scrollEl) return mode?.kind === 'FOLLOW_BOTTOM'
+  return isNearPhysicalBottom(scrollEl)
+    || (mode?.kind === 'FOLLOW_BOTTOM'
+      && Number.isFinite(followTailTop)
+      && Math.abs(scrollEl.scrollTop - followTailTop) <= AUTOSCROLL_POSITION_EPSILON_PX)
 }
 
 
@@ -108,15 +123,6 @@ export function modeAfterSpacerResize(mode, spacerH) {
   return spacerH <= 1 ? { kind: 'FOLLOW_BOTTOM' } : mode
 }
 
-
-/** Whether a content resize re-applies a tracking mode. A FOLLOW_BOTTOM resize
- * driven by the focused inline answer editor is the reader typing, not the live
- * tail advancing: following it scrolls the card being written in by a line per
- * Shift+Enter. Tail growth in the same batch is followed on the next firing the
- * editor does not drive. */
-export function resizeReappliesMode(kind, { editorResized = false } = {}) {
-  return !(kind === 'FOLLOW_BOTTOM' && editorResized)
-}
 
 /** A short stream ended before filling its reservation: retain the pin
  * identity but retire its live-only automatic-follow handoff. */
@@ -222,8 +228,10 @@ export function readerScrollEscapeDirection(
 export function composerTailIntentRequestsFollow(event, scrollEl) {
   const primaryPress = event?.type === 'pointerdown' && event?.button === 0
   const directEdit = event?.type === 'input'
+  const inComposer = event?.target?.matches?.('textarea.chat__input, .chat__editor-content')
+    || event?.target?.closest?.('.chat__editor-content')
   if ((!primaryPress && !directEdit)
-      || !event?.target?.matches?.('textarea.chat__input')
+      || !inComposer
       || !scrollEl) return false
   return isNearPhysicalBottom(scrollEl)
 }

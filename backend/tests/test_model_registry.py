@@ -126,13 +126,6 @@ async def test_mobius_switch_filters_picker_and_default_without_hiding_other_mod
     return None
 
   monkeypatch.setattr(providers, "refresh_app_model_providers", no_registry_refresh)
-  declaration = {
-    "name": "Möbius", "base_url": "http://127.0.0.1:8765/v1",
-    "default_model": "inkling", "transport": "identity_broker",
-    "models": [{"id": "spark", "label": "Spark", "effort_levels": ["minimal", "low", "medium", "high", "max"]},
-               {"id": "inkling", "label": "Evolve"}],
-  }
-  providers.PROVIDERS["mobius"].set_declaration(6, declaration)
   providers.invalidate_model_cache()
   try:
     for provider_id in providers.PROVIDERS:
@@ -150,11 +143,10 @@ async def test_mobius_switch_filters_picker_and_default_without_hiding_other_mod
     assert "mobius" not in after
     assert "claude" in after and "codex" in after
     assert providers.PROVIDERS["mobius"].check_auth(data_dir) == (
-      "This model provider is turned off in its app."
+      "Möbius models are turned off in Settings."
     )
     assert providers.resolve_default_provider(data_dir, "mobius") != "mobius"
   finally:
-    providers.PROVIDERS["mobius"].set_declaration(None, None)
     providers.invalidate_model_cache()
 
 
@@ -425,26 +417,18 @@ def test_mobius_effort_scale_uses_the_public_product_model():
 
 
 @pytest.mark.asyncio
-async def test_mobius_registry_uses_accepted_app_catalog_without_broker_request(
-  tmp_path, monkeypatch,
-):
-  """The accepted declaration owns stable picker IDs, even if the broker differs."""
-  monkeypatch.setattr(
-    providers.MobiusProvider,
-    "check_auth",
-    lambda self, _data_dir: None,
-  )
-
-  class ForbiddenClient:
-    def __init__(self, *args, **kwargs):
-      raise AssertionError("accepted app model discovery must not call the broker")
-
-  monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
-
-  provider = providers.MobiusProvider()
-  provider.set_declaration(6, {"name": "Möbius", "base_url": "http://127.0.0.1:8765/v1", "models": [{"id": "inkling", "label": "Evolve"}]})
-  rows = await provider.fetch_models(str(tmp_path))
-  assert rows == [{"id": "inkling", "label": "Evolve"}]
+async def test_mobius_discovery_runs_broker_work_off_the_event_loop(tmp_path, monkeypatch):
+  import threading
+  provider = providers.PROVIDERS["mobius"]
+  event_thread = threading.get_ident()
+  calls = []
+  def refresh(data_dir):
+    assert threading.get_ident() != event_thread
+    calls.append(data_dir)
+    return provider.declaration["models"]
+  monkeypatch.setattr(provider, "_refresh_catalogue", refresh)
+  assert await provider.fetch_models(str(tmp_path)) == provider.declaration["models"]
+  assert calls == [str(tmp_path)]
 
 
 # --- Expired-token refresh (the 401 root cause) -----------------------

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appFileExportIsCurrent, appFileExportUrl, beginAppFileExport, finishAppFileExport,
+  appFileExportIsCurrent, appFileExportUrl, beginAppFileExport, fileExportInk, finishAppFileExport,
   MAX_APP_EXPORT_BYTES, parseAppFileExport, readAppFileExport,
 } from '../appFileExport.js'
 import {
@@ -216,4 +216,28 @@ test('busy export can be cancelled without waiting for a stalled read', async ()
   resolveRead(new Blob(['late']))
   await confirmation
   assert.deepEqual(saves, [])
+})
+
+test('file export ink is white on a dark app colour and a dark ink on a light one', () => {
+  assert.equal(fileExportInk('#7c5ce6'), '#ffffff')
+  assert.equal(fileExportInk('#0D0D0D'), '#ffffff')
+  assert.equal(fileExportInk('#ffffff'), '#172008')
+  assert.equal(fileExportInk('#f6e05e'), '#172008')
+  for (const color of [undefined, '', '#fff', 'red', '#12345g', 'rgb(0, 0, 0)']) {
+    assert.equal(fileExportInk(color), undefined, String(color))
+  }
+  // Every grey keeps the label legible: white only while it holds 3:1, and
+  // the dark ink well past it wherever white would not.
+  const luminance = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+    .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0)
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  for (let v = 0; v < 256; v++) {
+    const grey = `#${v.toString(16).padStart(2, '0').repeat(3)}`
+    const ink = fileExportInk(grey)
+    assert.ok(contrast(ink, grey) >= (ink === '#ffffff' ? 3 : 4.5), `${grey} -> ${ink}`)
+  }
 })

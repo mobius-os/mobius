@@ -62,6 +62,20 @@ def test_brief_opener_and_outcome_template_explain_optional_public_verdict(setup
     assert '"publish": false' not in text
 
 
+def test_a_verdict_run_tells_the_agent_to_propose_findings_not_keep_them_private(setup):
+  """A proposal posts nothing until the owner submits it, so a verdict result must be proposed."""
+  _, row, _ = setup
+  row.mode = 'review'
+  row.options_json = {'post_review': True, 'propose_verdict': True}
+  text = domain.brief(row)
+  assert 'set publish:true in /outcomes' in text and 'REQUEST_CHANGES proposal, never only a private note' in text
+  assert 'nothing reaches GitHub until they submit it in Contribute' in text
+  assert 'only for a deliberate public verdict' not in text
+  assert 'report privately unless you publish a verdict' in text and '"publish": false' in text
+  row.options_json = {'post_review': True}
+  assert 'only for a deliberate public verdict' in domain.brief(row), 'a comment-only grant keeps its stricter rule'
+
+
 def test_foreign_list_options_exclude_unused_round_limit(setup, monkeypatch):
   db, row, _ = setup
   row.app_id = None

@@ -61,3 +61,39 @@ def test_profile_endpoint_is_owner_only_bounded_and_single_flight(client, auth):
     assert client.get("/api/debug/profile?seconds=1", headers=auth).status_code == 409
   finally:
     stack_sampler._profile_lock.release()
+
+
+def _parked_in_app_code(event: threading.Event) -> None:
+  event.wait()
+
+
+def test_thread_snapshot_keeps_busy_stacks_and_parked_app_frames(monkeypatch):
+  # Count this test module as app code so its parked frame is kept.
+  monkeypatch.setattr(stack_sampler, "_APP_ROOT", __file__.rsplit("/", 1)[0] + "/")
+  spinning = [False]
+  release = threading.Event()
+  idle = threading.Event()
+  threads = [
+    threading.Thread(target=_spin_in_named_hot_loop, args=(spinning,), name="busy-worker"),
+    threading.Thread(target=_parked_in_app_code, args=(release,), name="app-parked"),
+    threading.Thread(target=idle.wait, name="idle-worker"),
+  ]
+  for thread in threads:
+    thread.start()
+  try:
+    snapshot = stack_sampler.thread_snapshot(
+      exclude=frozenset({threading.get_ident()}),
+    )
+  finally:
+    spinning[0] = True
+    release.set()
+    idle.set()
+    for thread in threads:
+      thread.join()
+
+  busy = {t["thread"]: t["stack"] for t in snapshot["busy"]}
+  waiting = {t["thread"]: t["at"] for t in snapshot["waiting"]}
+  assert "_spin_in_named_hot_loop" in busy["busy-worker"][-1]
+  assert "_parked_in_app_code" in waiting["app-parked"]
+  assert "idle-worker" not in busy and "idle-worker" not in waiting
+  assert threading.current_thread().name not in busy

@@ -618,3 +618,51 @@ test.describe('Logout cache wipe', () => {
     expect(afterKeys).toContain('unrelated-cache-keep-me')
   })
 })
+
+test.describe('Static boot notice', () => {
+  // index.html tells a slow download from a failed boot using Resource Timing
+  // entries for the entry modules and whether #root has children. Exercise
+  // both assumptions against the real built shell; the vm tests in
+  // routeSplitting.test.js cover the timing rules themselves.
+  const ENTRY_MODULE = /\/assets\/index-[\w-]+\.js$/
+
+  // Boot notices are appended straight to <body>; React's own alerts render
+  // inside #root. Record every boot notice, including one that later leaves.
+  async function recordBootNotices(page) {
+    await page.addInitScript(() => {
+      window.__bootNotices = []
+      new MutationObserver(() => {
+        for (const notice of document.querySelectorAll('body > [role="alert"]')) {
+          if (!window.__bootNotices.includes(notice.textContent)) {
+            window.__bootNotices.push(notice.textContent)
+          }
+        }
+      }).observe(document, { childList: true, subtree: true })
+    })
+  }
+
+  test('a slow entry module download is not reported as a failed boot', async ({ page }) => {
+    await recordBootNotices(page)
+    await page.route(ENTRY_MODULE, async route => {
+      await new Promise(resolve => setTimeout(resolve, 15_000))
+      await route.continue()
+    })
+    await page.goto(BASE, { waitUntil: 'commit' })
+
+    await expect.poll(
+      () => page.evaluate(() => Boolean(document.getElementById('root')?.hasChildNodes())),
+      { timeout: 40_000 },
+    ).toBe(true)
+    expect(await page.evaluate(() => window.__bootNotices)).toEqual([])
+  })
+
+  test('a failed entry module fetch shows the reload notice at once', async ({ page }) => {
+    await page.route(ENTRY_MODULE, route => route.abort())
+    await page.goto(BASE, { waitUntil: 'commit' })
+
+    const notice = page.locator('body > [role="alert"]')
+    await expect(notice).toContainText('Möbius failed to load.', { timeout: 2_000 })
+    await expect(notice.getByRole('link', { name: 'Try again' })).toBeVisible()
+    await expect(page.locator('#splash')).toHaveCount(0)
+  })
+})

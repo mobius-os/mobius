@@ -10,6 +10,21 @@ export function shortSha(sha) {
   return s ? s.slice(0, 8) : ''
 }
 
+// Retired copies come only from merged platform pull requests (the backend's
+// app_git.PLATFORM_RELEASE_REPO), so every PR number links here.
+const PLATFORM_PULL_URL = 'https://github.com/mobius-os/mobius/pull/'
+
+// Unchanged local copies of merged pull requests that this update replaces
+// with the release's version (`retired_paths`). The server pins a snapshot of
+// the old copies (the newest three are kept), so the sheet only names each path
+// and its PR.
+export function retiredLocalCopies(preview) {
+  const items = Array.isArray(preview?.retired_paths) ? preview.retired_paths : []
+  return items
+    .filter(item => typeof item?.path === 'string' && item.path && Number.isInteger(item.pr) && item.pr > 0)
+    .map(({ path, pr }) => ({ path, pr, url: `${PLATFORM_PULL_URL}${pr}` }))
+}
+
 // The compact totals the sheet header shows. Insertions/deletions skip binary
 // files (backend sends null counts for those) so the numbers stay meaningful.
 export function summarizePreview(preview) {

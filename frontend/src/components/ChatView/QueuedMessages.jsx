@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import {
   ArrowRotateCw,
+  ArrowUp,
   ChevronDown,
   DoubleChevronRight,
   Paperclip,
@@ -37,7 +38,7 @@ import {
 export default function QueuedMessages({
   items, onCancel, onEditInComposer, inComposerCid = null, onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
-  restarting = false,
+  restarting = false, onSendHeld, sharedGuest = false,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -47,7 +48,10 @@ export default function QueuedMessages({
 
   // The caption states the real reason these are waiting (see queuedHint).
   const rejectedCount = items.filter(msg => msg.recoveryAvailable).length
-  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({ turnActive, online, restarting })
+  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({
+    turnActive, online, restarting, sharedGuest,
+    held: items.filter(msg => msg.held).length, total: items.length,
+  })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
   // derivation for pre-cid rows). cid is minted once at compose time and
@@ -85,6 +89,7 @@ export default function QueuedMessages({
       role="list"
       aria-label="Queued messages"
     >
+      <div className="queued__bar">
       <div
         className="queued__hdr"
         role="button"
@@ -110,6 +115,21 @@ export default function QueuedMessages({
           height={10}
           aria-hidden="true"
         />
+      </div>
+      {onSendHeld && (
+        // A Stop held the queue and nothing runs: send it as one turn. The
+        // composer keeps its mic; an empty Enter sends the queue too.
+        <button
+          type="button"
+          className="queued__action queued__send-held"
+          onPointerDown={event => event.preventDefault()}
+          onClick={onSendHeld}
+          aria-label="Send queued messages"
+          title="Send queued messages"
+        >
+          <ArrowUp width={16} height={16} aria-hidden="true" />
+        </button>
+      )}
       </div>
       {!collapsed && (
         <div id={itemsId} className="queued__items">

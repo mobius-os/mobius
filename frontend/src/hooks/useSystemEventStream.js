@@ -35,6 +35,11 @@ export const SYSTEM_QUICK_WAKE_MS = 10_000
  * in-chat catch-up coherence. Handlers should be idempotent (theme
  * reload, refreshApps, version bump) so duplicates are harmless.
  *
+ * `onOpen({ signal, failedAttempts })` is the reconnect barrier: it settles
+ * durable state before buffered events apply. `failedAttempts` counts the
+ * attempts retired since the last healthy read, so the barrier can widen its
+ * own read bounds on retry rather than repeating a read that cannot finish.
+ *
  * `onSubscription(id)` receives the live connection's server subscription id
  * from its opening event, and `null` once that connection is retired. State
  * reported against the id (useVisibleAppPresence) lives exactly as long as
@@ -60,6 +65,8 @@ export default function useSystemEventStream(
     let active = null
     let retryTimer = null
     let backoffMs = 1000
+    // Attempts retired since the last healthy read; passed to onOpen.
+    let failedAttempts = 0
     let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : null
 
     const visible = () => document.visibilityState !== 'hidden'
@@ -86,6 +93,7 @@ export default function useSystemEventStream(
         void connect()
       }, backoffMs)
       backoffMs = Math.min(backoffMs * 2, 30_000)
+      failedAttempts += 1
     }
 
     // The server emits bytes at least every 30s, including keepalive comments.
@@ -113,7 +121,10 @@ export default function useSystemEventStream(
         signal.addEventListener('abort', onAbort, { once: true })
       })
       try {
-        await Promise.race([onOpenRef.current?.({ signal }), aborted])
+        await Promise.race([
+          onOpenRef.current?.({ signal, failedAttempts }),
+          aborted,
+        ])
       } finally {
         signal.removeEventListener('abort', onAbort)
       }
@@ -171,6 +182,7 @@ export default function useSystemEventStream(
           if (!owns(attempt) || done) break
           attempt.lastReadAt = Date.now()
           backoffMs = 1000
+          failedAttempts = 0
           armDeadline(attempt)
           buffer += decoder.decode(value, { stream: true })
           let nl

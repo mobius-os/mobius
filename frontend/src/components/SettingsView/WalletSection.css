@@ -1,0 +1,27 @@
+/* Wallet-specific amount choices, cancellation waiver and activity figures.
+   Group, row, notice and button presentation comes from shared Settings CSS. */
+.settings__btn.credits__amount-choice { border-radius: 999px; font-variant-numeric: tabular-nums; }
+.settings__btn.credits__amount-choice--on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.credits__waiver {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+/* The preflight reset strips checkboxes to an invisible 0x0 box. */
+.credits__waiver input[type="checkbox"] {
+  appearance: auto;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.credits__activity-amount { font-variant-numeric: tabular-nums; color: var(--text); }
+.credits__activity-amount--in { color: var(--green-text, var(--green)); }

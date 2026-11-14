@@ -1766,7 +1766,7 @@ def test_cancelling_wait_kills_its_running_check(client, owner_token, db):
     else:
       raise AssertionError("check process did not start")
 
-    cancel_wait(db, row)
+    await asyncio.to_thread(cancel_wait, db, row)
     exit_code, output = await asyncio.wait_for(task, timeout=2)
     assert exit_code != 0
     assert output == ""

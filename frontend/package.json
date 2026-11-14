@@ -19,18 +19,20 @@
     "pretest:lib": "npm run -s runtime:check && npm run -s speech-runtime:check && npm run -s speech-worker:check && npm run -s speech-pitch:check && npm run -s test:structure",
     "test": "npm run -s test:lib && npm run -s test:hooks",
     "test:lib": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --loader=./src/lib/__tests__/vite-env-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/lib src/utils src/hooks src/components/DiffView src/components/GlobalSearch src/components/ProviderAuth src/components/NotificationsView src/components/ChatView/__tests__ src/components/Shell/__tests__ src/components/Walkthrough -name '*.test.js')",
-    "test:hooks": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ src/components/Walkthrough -name '*.hooktest.js')",
+    "test:hooks": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ src/components/Walkthrough src/components/SettingsView -name '*.hooktest.js')",
+    "test:lib:file": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --loader=./src/lib/__tests__/vite-env-loader.mjs --test",
+    "test:hooks:file": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test",
     "test:coverage": "npm run -s test:lib:coverage && npm run -s test:hooks:coverage",
     "pretest:lib:coverage": "npm run -s runtime:check && npm run -s speech-runtime:check && npm run -s speech-worker:check && npm run -s speech-pitch:check && npm run -s test:structure",
     "test:lib:coverage": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --loader=./src/lib/__tests__/vite-env-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/lib src/utils src/hooks src/components/DiffView src/components/GlobalSearch src/components/ProviderAuth src/components/NotificationsView src/components/ChatView/__tests__ src/components/Shell/__tests__ src/components/Walkthrough -name '*.test.js')",
-    "test:hooks:coverage": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --test-coverage-include='src/components/ChatView/hooks/**/*.js' --test-coverage-include='src/components/Shell/**/*.js' --test-coverage-include='src/hooks/**/*.js' --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ src/components/Walkthrough -name '*.hooktest.js')"
+    "test:hooks:coverage": "node --disable-warning=ExperimentalWarning --test-reporter=./scripts/compact-test-reporter.mjs --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --test-coverage-include='src/components/ChatView/hooks/**/*.js' --test-coverage-include='src/components/Shell/**/*.js' --test-coverage-include='src/hooks/**/*.js' --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test --test-concurrency=${MOBIUS_TEST_CONCURRENCY:-1} $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ src/components/Walkthrough src/components/SettingsView -name '*.hooktest.js')"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.1",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.13.1",
     "@codemirror/state": "6.7.6",
-    "@codemirror/view": "6.43.14",
+    "@codemirror/view": "6.43.15",
     "@lezer/highlight": "1.2.5",
     "@openai/apps-sdk-ui": "0.2.2",
     "@tanstack/query-async-storage-persister": "^5.101.2",
@@ -42,7 +44,7 @@
     "dompurify": "^3.4.17",
     "highlight.js": "^11.11.1",
     "idb-keyval": "^6.2.6",
-    "katex": "0.19.0",
+    "katex": "0.19.1",
     "lucide-react": "^1.23.0",
     "marked": "^18.0.9",
     "marked-highlight": "2.2.4",
@@ -51,7 +53,7 @@
     "react-dom": "^19.2.7",
     "recharts": "3.10.1",
     "rolldown": "~1.2.6",
-    "three": "0.186.1"
+    "three": "0.187.0"
   },
   "overrides": {
     "lodash": "4.18.1",

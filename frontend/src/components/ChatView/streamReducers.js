@@ -48,6 +48,7 @@ export function startToolLifecycle(prev, event) {
     input: event?.input || '',
     output: '',
     status: 'running',
+    ...(event?.routine === true ? { routine: true } : {}),
     ...(event?.recall ? { recall: event.recall } : {}),
     ...(event?.app_activity ? { app_activity: event.app_activity } : {}),
     ...(event?.peer_message ? { peer_message: event.peer_message } : {}),
@@ -442,6 +443,48 @@ export function suppressedQuestionToolIndices(blocks) {
   return suppressed
 }
 
+// One stable text block per card, so memoized Markdown and cached image
+// lookups see the same object across renders.
+const cardMessageBlocks = new WeakMap()
+
+/**
+ * The closing message a saved owner card carries, as the ordinary assistant
+ * text block it renders as, directly above its card. Null when it has none
+ * (every card saved before the field existed).
+ */
+export function cardMessageBlock(block) {
+  if (block?.type !== 'question') return null
+  if (typeof block.message !== 'string' || !block.message.trim()) return null
+  let text = cardMessageBlocks.get(block)
+  if (!text) {
+    text = { type: 'text', content: block.message, ownerCard: block }
+    cardMessageBlocks.set(block, text)
+  }
+  return text
+}
+
+/**
+ * The blocks MsgContent renders in place, each with its rendered position
+ * `idx` — the number its text carries as `data-markdown-block`. Deliverables
+ * (`generated_files`) are positioned separately, so they do not change the
+ * visible tail used by Resume/Try-now ownership, and the persisted transcript
+ * keeps the raw AskUserQuestion tool block AND its question card (backend
+ * events.process_event appends both) while the live stream absorbs that twin
+ * into the card; skipping it here makes a reopened chat match the live view
+ * and cleans up already-persisted chats with no backend migration. Anything
+ * that locates a rendered block (a reply's Copy) must number blocks this way.
+ */
+export function renderedBlockEntries(blocks) {
+  const skipToolIdx = suppressedQuestionToolIndices(blocks)
+  return blocks
+    .flatMap((item, rawIdx) => {
+      if (item?.type === 'generated_files' || skipToolIdx.has(rawIdx)) return []
+      const message = cardMessageBlock(item)
+      return message ? [message, item] : [item]
+    })
+    .map((item, idx) => ({ item, idx }))
+}
+
 /**
  * Applies a `question` event to the stream items.
  *
@@ -480,6 +523,7 @@ export function upsertQuestionItem(prev, incoming) {
     if (existing.platform_action && !merged.platform_action) {
       merged.platform_action = existing.platform_action
     }
+    if (existing.message && !merged.message) merged.message = existing.message
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {

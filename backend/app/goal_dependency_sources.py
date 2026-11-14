@@ -5,6 +5,7 @@ immutable record of the acquisition that a Goal actually followed.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from uuid import uuid4
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -188,11 +189,38 @@ def stage_stamp_claim_outcome(db: Session, row: models.AgentWorkClaim,
             models.GoalDependency.resolved_at: now}, synchronize_session=False)
 
 
-def dependency_source_blocker(db: Session, row: models.GoalDependency, *, _seen=None) -> str | None:
+def _run_diagnostics(run: models.ChatRun | None) -> dict | None:
+  return ({key: getattr(run, key) for key in (
+    'id', 'goal_id', 'root_run_id', 'status', 'provider_execution_admitted',
+  )} if run is not None else None)
+
+
+def _native_handoff_diagnostics(handoffs):
+  # Diagnostic samples, not limits on eligible work. Keep persisted recovery
+  # facts bounded even when a Goal has many helpers or accepted queue entries.
+  sample_size = 8
+  def sample(rows):
+    return {'count': len(rows), 'sample': [
+      item if isinstance(item, str) else asdict(item) for item in rows[:sample_size]
+    ]}
+  return {
+    'running': handoffs.running, 'failed_attempt': handoffs.failed_attempt,
+    'progress_owned': handoffs.progress_owned,
+    'card': asdict(handoffs.card) if handoffs.card else None,
+    'park': asdict(handoffs.park) if handoffs.park else None,
+    'waits': sample(handoffs.waits), 'helpers': sample(handoffs.helpers),
+    'queued': sample(handoffs.queued),
+  }
+
+
+def dependency_source_blocker(db: Session, row: models.GoalDependency, *,
+                              _seen=None, diagnostics: dict | None = None) -> str | None:
   """Report why a pending claim source cannot be trusted to progress.
 
   This is observational, not a polling or takeover operation. Resolved and
   withdrawn rows already have their own authoritative outcome/disposition.
+  A caller stamping recovery may collect bounded exact-owner evidence from
+  this same observation, without reading transcripts or borrowing a newer Goal.
   """
   if (row.resolved_at is not None or row.withdrawn_at is not None
       or row.result_disposition is not None or row.owner_suppressed_at is not None):
@@ -205,8 +233,22 @@ def dependency_source_blocker(db: Session, row: models.GoalDependency, *, _seen=
     return 'owner_not_progressing'
   seen.add(row.id)
   claim = db.get(models.AgentWorkClaim, row.target_claim_id) if row.target_claim_id else None
+  if diagnostics is not None:
+    diagnostics['claim'] = ({key: getattr(claim, key) for key in (
+      'id', 'acquisition_id', 'revision', 'owner_chat_id', 'owner_run_id', 'owner_goal_id',
+    )} if claim is not None else None)
   if claim is None:
     return 'source_missing'
+  run = (db.get(models.ChatRun, claim.owner_run_id)
+    if diagnostics is not None or claim.owner_goal_id is None else None)
+  goal = db.get(models.ChatGoal, claim.owner_goal_id) if claim.owner_goal_id else None
+  if diagnostics is not None:
+    diagnostics['owner_run'] = _run_diagnostics(run)
+    diagnostics['owner_goal'] = {'id': goal.id, 'status': goal.status} if goal else None
+    latest = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == claim.owner_chat_id,
+    ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+    diagnostics['latest_chat_run'] = _run_diagnostics(latest)
   if claim.acquisition_id != row.target_acquisition_id:
     return 'source_missing'
   if claim.completed_at is not None or claim.released_at is not None:
@@ -214,12 +256,18 @@ def dependency_source_blocker(db: Session, row: models.GoalDependency, *, _seen=
   chat = db.get(models.Chat, claim.owner_chat_id) if claim.owner_chat_id else None
   if chat is None or chat.deleted_at is not None:
     return 'owner_deleted'
+  from app.chat_handoffs import native_goal_handoffs, native_handoffs
+  handoffs = None
+  if goal is not None and (goal.status == 'open' or diagnostics is not None):
+    handoffs = native_goal_handoffs(db, goal)
+  elif claim.owner_goal_id is None and run is not None:
+    handoffs = native_handoffs(db, chat.id, goal_id=None, root_run_id=run.root_run_id or run.id)
+  if diagnostics is not None:
+    diagnostics['native_handoffs'] = _native_handoff_diagnostics(handoffs) if handoffs else None
   if claim.owner_goal_id:
-    goal = db.get(models.ChatGoal, claim.owner_goal_id)
     if goal is None or goal.status != 'open':
       return 'source_held' if goal is not None and goal.status == 'stopped' else 'source_failed'
-    from app.chat_handoffs import native_goal_handoffs
-    if native_goal_handoffs(db, goal).progress_owned:
+    if handoffs.progress_owned:
       return None
     # FinishRun commits before PromotePending admits the one bounded clean
     # settlement. A reconciler in that gap must not declare the source dead.
@@ -256,12 +304,9 @@ def dependency_source_blocker(db: Session, row: models.GoalDependency, *, _seen=
     return 'owner_not_progressing'
 
   else:
-    run = db.get(models.ChatRun, claim.owner_run_id)
     if run is None:
       return 'owner_not_progressing'
-    from app.chat_handoffs import native_handoffs
-    if native_handoffs(db, chat.id, goal_id=None,
-        root_run_id=run.root_run_id or run.id).progress_owned:
+    if handoffs.progress_owned:
       return None
     return 'owner_not_progressing'
 
@@ -285,6 +330,7 @@ def stage_reconcile_claim_sources(db: Session) -> int:
     if blocker is None:
       continue
     claim = db.get(models.AgentWorkClaim, row.target_claim_id) if row.target_claim_id else None
+    diagnostics = {}
     if claim is not None:
       # Only a stalled candidate needs a source write lock. Re-read after the
       # lock so a simultaneous finish/transfer wins over stale observation.
@@ -297,15 +343,16 @@ def stage_reconcile_claim_sources(db: Session) -> int:
         continue
       db.expire(claim)
       db.refresh(claim)
-      blocker = dependency_source_blocker(db, row)
-      if blocker is None:
-        continue
+    blocker = dependency_source_blocker(db, row, diagnostics=diagnostics)
+    if blocker is None:
+      continue
     settled += db.query(models.GoalDependency).filter(
       models.GoalDependency.id == row.id,
       pending_follow_predicate(),
     ).update({models.GoalDependency.outcome_json: {
         'kind': 'owner_not_progressing', 'reason': blocker,
         'target_acquisition_id': row.target_acquisition_id,
+        'source_diagnostics': diagnostics,
         'source_chat_id': claim.owner_chat_id if claim else row.target_chat_id,
         'source_chat_title': (db.query(models.Chat.title).filter(
           models.Chat.id == claim.owner_chat_id).scalar() if claim else None),

@@ -836,7 +836,8 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
 
     def delegated_principal(session=Depends(get_db)):
       return Principal(owner=session.query(models.Owner).one(), app_id=None,
-                       delegation_id='fixture-delegation')
+                       delegation_id='fixture-delegation', chat_id='fixture-child',
+                       delegation_chat='fixture-child')
 
     server.dependency_overrides[get_principal] = delegated_principal
     # No delegation row stands behind this bearer, so it may only read.
@@ -852,10 +853,327 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
       server.dependency_overrides.pop(get_principal, None)
 
 
+@pytest.mark.asyncio
+async def test_service_serialization_hides_lineage_without_mutating_the_actor():
+  actor = {
+    "scope": "owner", "delegated": True, "access": "read",
+    "delegation_id": "original-delegation", "delegation_chat": "original-child",
+  }
+  envelope = {"actor": actor, "body": {"delegation_id": "app-data"}}
+  serialized = json.loads(await app_services._serialize_request(envelope, 4096))
+  assert serialized == {
+    "actor": {"scope": "owner", "delegated": True, "access": "read"},
+    "body": {"delegation_id": "app-data"},
+  }
+  assert envelope["actor"] is actor
+  assert actor["delegation_id"] == "original-delegation"
+  assert actor["delegation_chat"] == "original-child"
+
+
+@pytest.mark.parametrize("scope", ["owner", "app"])
+@pytest.mark.parametrize("missing", ["delegation_id", "delegation_chat"])
+def test_service_refuses_incomplete_lineage_before_token_mint(
+  client, auth, db, scope, missing,
+):
+  target = _service_app(db)
+  owner = db.query(models.Owner).one()
+  claims = {
+    "sub": owner.username, "delegation_id": "original-delegation",
+    "delegation_chat": "original-child",
+  }
+  if scope == "app":
+    claims.update(scope="app", app_id=target.id, app_nonce=target.token_nonce)
+  claims.pop(missing)
+  token = auth_tokens.create_access_token(claims, token_epoch=owner.token_epoch)
+  response = client.get(
+    f"/api/apps/{target.id}/service/token",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert response.status_code == 401, response.text
+  assert response.json() == {"detail": "Incomplete delegation lineage."}
+
+
 SERVICE_TOKEN = b'''import json, os, sys
-json.load(sys.stdin)
+request = json.load(sys.stdin)
+assert not {"delegation_id", "delegation_chat"}.intersection(request.get("actor", {}))
 print(json.dumps({"status": 200, "body": {"token": os.environ["APP_TOKEN"]}}))
 '''
+
+
+def _service_agent_token(db, *, delegated, browser=None):
+  from app.chat_writer import create_chat
+
+  db.add(create_chat(id="service-agent", title="Service caller"))
+  db.add(models.ChatRun(id="service-run", chat_id="service-agent", provider="claude"))
+  if delegated:
+    db.add(create_chat(id="service-parent", title="Parent"))
+    db.add(models.Delegation(
+      id="service-helper", parent_chat_id="service-parent",
+      parent_root_run_id="parent-run", task_key="service-helper",
+      child_chat_id="service-agent", provider="claude", scope="write",
+      cwd="/tmp", prompt_sha256="0" * 64,
+    ))
+  db.commit()
+  owner = db.query(models.Owner).one()
+  return auth_tokens.create_agent_token(
+    "service-agent", owner.username, owner.token_epoch, run_id="service-run",
+    delegation_id="service-helper" if delegated else None,
+    delegation_chat="service-agent" if delegated else None,
+    browser=browser,
+  )
+
+
+def _assert_service_lineage(db, token, *, delegated):
+  from app.deps import get_principal, require_account_owner_control
+
+  claims = auth_tokens.decode_access_token(token)
+  assert claims["service"] is True
+  assert claims.get("delegation_id") == ("service-helper" if delegated else None)
+  assert claims.get("delegation_chat") == ("service-agent" if delegated else None)
+  principal = get_principal(token, db)
+  assert principal.delegation_id == claims.get("delegation_id")
+  assert principal.delegation_chat == claims.get("delegation_chat")
+  assert principal.chat_id is None
+  assert principal.run_id is None
+  if delegated or principal.browser is not None:
+    with pytest.raises(HTTPException) as denied:
+      require_account_owner_control(principal)
+    assert denied.value.status_code == 403
+  else:
+    require_account_owner_control(principal)
+
+
+@pytest.mark.parametrize("route", ["numeric", "named", "frame", "tool"])
+@pytest.mark.parametrize("delegated", [False, True])
+def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
+  client, auth, db, monkeypatch, route, delegated,
+):
+  from app import app_jobs
+
+  target = _service_app(db, service_bytes=SERVICE_TOKEN)
+  (runtime_parent(target.id) / target.runtime_revision / "job.sh").write_text("#!/bin/sh\nexit 0\n")
+  launches = []
+  monkeypatch.setattr(app_jobs, "launch_app_job", lambda app_id, *_: launches.append(app_id))
+  token = _service_agent_token(db, delegated=delegated)
+  headers = {"Authorization": f"Bearer {token}"}
+  path = f"/api/apps/{target.id}/service/token"
+  if route == "named":
+    path = f"/api/services/{target.slug}/token"
+  elif route == "frame":
+    frame = client.post("/api/auth/app-token", headers=headers, json={"app_id": target.id})
+    assert frame.status_code == 200, frame.text
+    headers = {"Authorization": f"Bearer {frame.json()['token']}"}
+  elif route == "tool":
+    target.capability_contract = {
+      **target.capability_contract,
+      "agent": {"tools": [{
+        "name": "token", "description": "Return the invocation token for this test.",
+        "input_schema": {"type": "object"},
+      }]},
+    }
+    db.commit()
+    path = "/api/agent/app-tools/call"
+  # Body fields must neither clear a helper's lineage nor taint an owner call.
+  body = {"actor": {"delegation_id": "forged", "delegation_chat": "forged"}}
+  if route == "tool":
+    body = {"name": "service_test_token", "arguments": body}
+  response = client.post(path, headers=headers, json=body)
+  assert response.status_code == 200, response.text
+  result = response.json()["result"] if route == "tool" else response.json()
+  token = result["token"]
+  service_headers = {"Authorization": f"Bearer {token}"}
+
+  # This real route reaches require_installation_owner_control through
+  # require_nondelegated_owner_or_app_control, without needing external I/O.
+  write = client.put(
+    f"/api/apps/{target.id}/secrets/test-key", headers=service_headers,
+    json={"value": "synthetic-test-value"},
+  )
+  assert write.status_code == (403 if delegated else 204), write.text
+  _assert_service_lineage(db, token, delegated=delegated)
+  # Exercise a direct installation-control gate too, without starting a job.
+  job = client.post(f"/api/apps/{target.id}/run-job", headers=service_headers)
+  assert job.status_code == (403 if delegated else 202), job.text
+  assert launches == ([] if delegated else [target.id])
+  if delegated:
+    assert client.post(
+      "/api/auth/app-job-token", headers=service_headers, json={"app_id": target.id},
+    ).status_code == 403
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_nested_service_tokens_keep_the_original_delegation_even_without_its_row(
+  client, auth, db, delegated,
+):
+  first = _service_app(db, slug="first-hop", service_bytes=SERVICE_TOKEN)
+  second = _service_app(db, slug="second-hop", access="apps", service_bytes=SERVICE_TOKEN)
+  token = _service_agent_token(db, delegated=delegated)
+  if delegated:
+    # Retiring the helper changes its actor's access, not its provenance.
+    db.query(models.Delegation).filter_by(id="service-helper").delete()
+    db.commit()
+  for path in (
+    f"/api/apps/{first.id}/service/token",
+    f"/api/services/{second.slug}/token",
+    f"/api/apps/{second.id}/service/token",
+  ):
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    token = response.json()["token"]
+    _assert_service_lineage(db, token, delegated=delegated)
+
+
+@pytest.mark.parametrize("token_kind", ["service", "frame"])
+def test_delegation_lineage_restricts_app_tokens_without_granting_helper_identity(
+  client, auth, db, monkeypatch, token_kind,
+):
+  from app.deps import get_principal, require_account_owner_control
+
+  target = _service_app(db, service_bytes=SERVICE_TOKEN)
+  helper_token = _service_agent_token(db, delegated=True)
+  helper_headers = {"Authorization": f"Bearer {helper_token}"}
+
+  async def start(**_kwargs):
+    return True
+
+  monkeypatch.setattr("app.routes.delegations.start_programmatic_chat_turn", start)
+  body = {
+    "parent_chat_id": "service-agent", "task_key": "nested",
+    "prompt": "Review one bounded task.", "provider": "claude",
+  }
+  nested = client.post("/api/delegations", headers=helper_headers, json=body)
+  assert nested.status_code == 201, nested.text
+  child_id = nested.json()["id"]
+  child_chat = nested.json()["child_chat_id"]
+  # A settled child supports result-read and follow-up, without a provider.
+  db.add(models.ChatRun(id="nested-run", root_run_id="nested-run",
+                        chat_id=child_chat, provider="claude", status="completed"))
+  db.commit()
+
+  if token_kind == "service":
+    response = client.get(f"/api/apps/{target.id}/service/token", headers=helper_headers)
+  else:
+    response = client.post("/api/auth/app-token", headers=helper_headers, json={"app_id": target.id})
+  assert response.status_code == 200, response.text
+  token = response.json()["token"]
+  app_headers = {"Authorization": f"Bearer {token}"}
+  principal = get_principal(token, db)
+  assert principal.chat_id is None and principal.run_id is None
+  assert principal.delegation_id == "service-helper"
+  assert principal.delegation_chat == "service-agent"
+  with pytest.raises(HTTPException) as denied:
+    require_account_owner_control(principal)
+  assert denied.value.status_code == 403
+
+  for method, path, payload, helper_status in (
+    ("POST", "/api/delegations", {**body, "task_key": "another"}, 201),
+    ("GET", "/api/delegations", None, 200),
+    ("GET", f"/api/delegations/{child_id}", None, 200),
+    ("GET", f"/api/delegations/{child_id}?include_history=true", None, 200),
+    ("POST", f"/api/delegations/{child_id}/result-read", None, 200),
+    ("POST", f"/api/delegations/{child_id}/messages", {"message": "Review again."}, 202),
+    ("POST", "/api/delegations/service-helper/questions", {"question": "Which option?"}, 200),
+    ("POST", f"/api/delegations/{child_id}/cancel", None, 200),
+  ):
+    response = client.request(method, path, headers=app_headers, json=payload)
+    assert response.status_code == 403, (method, path, response.text)
+    response = client.request(method, path, headers=helper_headers, json=payload)
+    assert response.status_code == helper_status, (method, path, response.text)
+    if method == "GET" and path == "/api/delegations":
+      assert child_id in {item["id"] for item in response.json()["items"]}
+
+
+@pytest.mark.asyncio
+async def test_preloaded_service_children_do_not_share_delegation_lineage(db, auth, monkeypatch):
+  from app import service_preload
+  from app.deps import get_principal
+
+  source = b'''import json, os, sys
+MOBIUS_PRELOAD = True
+if __name__ == "__main__":
+  json.load(sys.stdin)
+  print(json.dumps({"body": {"token": os.environ["APP_TOKEN"]}}))
+'''
+  target = _service_app(db, service_bytes=source)
+  owner = db.query(models.Owner).one()
+  caller = _service_agent_token(db, delegated=True)
+  service = app_services.service_contract(target, access="self")
+  host = await service_preload.start(
+    (target.id, target.runtime_revision), target.slug, sys.executable,
+    app_services.service_entry(target, service),
+    app_services.service_environment(target, owner, service, public=False),
+  )
+  assert host is not None
+  monkeypatch.setattr(service_preload, "ready_host", lambda *_: host)
+  try:
+    for delegated in (True, False, True):
+      token = caller if delegated else auth["Authorization"].removeprefix("Bearer ")
+      actor = app_services.request_actor(db, get_principal(token, db))
+      status, body, _, _ = await app_services.invoke_service(target, owner, {"actor": actor})
+      assert status == 200
+      _assert_service_lineage(db, body["token"], delegated=delegated)
+  finally:
+    await service_preload.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.parametrize("browser_guest", [False, True])
+async def test_reviewer_comment_policy_service_inherits_only_the_callers_lineage(
+  db, auth, monkeypatch, delegated, browser_guest,
+):
+  from app.browser_access import BrowserLineage
+  from app.deps import get_principal
+  from app.routes.reviewer import _reviewer_validate_comment
+  from tests.browser_access_fixtures import link_grant
+
+  browser = None
+  expected_actor = {"scope": "platform"}
+  if browser_guest:
+    grant, _ = link_grant(db, db.query(models.Owner).one(), "Policy guest")
+    browser = BrowserLineage(grant.id)
+    expected_actor.update(browser_grant_id=grant.id, browser_session_id=None)
+  target = _service_app(db, service_bytes=('''import json, sys
+request = json.load(sys.stdin)
+assert request["actor"] == %r, request["actor"]
+print(json.dumps({"body": request["body"]}))
+''' % expected_actor).encode())
+  token = _service_agent_token(db, delegated=delegated, browser=browser)
+  tokens = []
+  original_environment = app_services.service_environment
+
+  def capture_environment(*args, **kwargs):
+    environment = original_environment(*args, **kwargs)
+    tokens.append(environment["APP_TOKEN"])
+    return environment
+
+  monkeypatch.setattr(app_services, "service_environment", capture_environment)
+  result = await _reviewer_validate_comment(
+    db, target.id, "test comment", "a" * 40, principal=get_principal(token, db),
+  )
+  assert result == "test comment"
+  assert len(tokens) == 1
+  _assert_service_lineage(db, tokens[0], delegated=delegated)
+  assert auth_tokens.decode_access_token(tokens[0]).get("browser_grant") == (
+    browser.grant_id if browser is not None else None
+  )
+
+
+def test_service_token_preserves_browser_and_delegation_provenance_together(client, auth, db):
+  from app.browser_access import BrowserLineage
+  from tests.browser_access_fixtures import link_grant
+
+  owner = db.query(models.Owner).one()
+  grant, _ = link_grant(db, owner, "Service guest")
+  target = _service_app(db, service_bytes=SERVICE_TOKEN)
+  token = _service_agent_token(db, delegated=True, browser=BrowserLineage(grant.id))
+  response = client.get(
+    f"/api/apps/{target.id}/service/token", headers={"Authorization": f"Bearer {token}"},
+  )
+  assert response.status_code == 200, response.text
+  token = response.json()["token"]
+  _assert_service_lineage(db, token, delegated=True)
+  assert auth_tokens.decode_access_token(token)["browser_grant"] == grant.id
 
 
 def test_public_invocation_cannot_spend_on_the_owners_providers(client, auth, db):

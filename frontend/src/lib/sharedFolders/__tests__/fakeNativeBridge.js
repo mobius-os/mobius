@@ -16,7 +16,8 @@ function toBase64(bytes) {
 
 /**
  * Folders are nested plain objects; a file is { bytes, type?, modified? }.
- * `revoke(id)` makes the app lose a folder, as when the owner moves it away.
+ * `revoke(id)` makes the app lose a folder, as when the owner moves it away;
+ * `deleteFolder(id)` removes the folder itself, so the app finds nothing there.
  */
 export class FakeNativeBridge {
   constructor() {
@@ -28,12 +29,14 @@ export class FakeNativeBridge {
     this.count = 0
     // Most bytes one read returns, to act like a provider that answers in smaller pieces.
     this.chunkLimit = MAX_CHUNK
+    // Whether a folder's provider lets the app change it, as the app reports on picking.
+    this.writable = true
   }
 
-  addFolder(name, tree) {
+  addFolder(name, tree, mode = 'edit') {
     this.count += 1
     const id = `native-${this.count}`
-    this.folders.set(id, { name, tree })
+    this.folders.set(id, { name, tree, mode })
     return id
   }
 
@@ -46,17 +49,22 @@ export class FakeNativeBridge {
     this.revoked.add(id)
   }
 
-  async pickFolder() {
+  async pickFolder({ mode } = {}) {
     if (!this.nextPick) return null
     const { name, tree } = this.nextPick
     this.nextPick = null
-    return { id: this.addFolder(name, tree), name }
+    const given = mode === 'edit' && this.writable ? 'edit' : 'read'
+    return { id: this.addFolder(name, tree, given), name, mode: given }
   }
 
   async forgetFolder(id) {
     this.forgotten.push(id)
     this.folders.delete(id)
     return null
+  }
+
+  deleteFolder(id) {
+    this.folders.delete(id)
   }
 
   resolve(id, path) {
@@ -86,6 +94,62 @@ export class FakeNativeBridge {
   async folderEntry(id, path) {
     const found = this.resolve(id, path)
     return found.error ? found : describe(found.name, found.node)
+  }
+
+  /** The folder `path` is in, and its name, for a change; or the failure. */
+  changeAt(id, path) {
+    if (this.folders.get(id)?.mode !== 'edit') return failure('read_only')
+    const slash = path.lastIndexOf('/')
+    const parent = this.resolve(id, slash < 0 ? '' : path.slice(0, slash))
+    if (parent.error) return parent
+    if (isFile(parent.node)) return failure('wrong_kind')
+    return { folder: parent.node, name: path.slice(slash + 1) }
+  }
+
+  async writeFolderFile(id, path, data, { overwrite, expected } = {}) {
+    const at = this.changeAt(id, path)
+    if (at.error) return at
+    const old = at.folder[at.name]
+    if (old && !isFile(old)) return failure('wrong_kind')
+    if (old && !overwrite) return failure('exists')
+    if (old && expected) {
+      const now = describe(at.name, old)
+      if (now.size !== expected.size || now.modified !== expected.modified) return failure('changed_during_write')
+    }
+    const bytes = Uint8Array.from(atob(data), char => char.charCodeAt(0))
+    at.folder[at.name] = { bytes }
+    return { size: bytes.length, created: !old }
+  }
+
+  async makeFolder(id, path) {
+    const at = this.changeAt(id, path)
+    if (at.error) return at
+    const old = at.folder[at.name]
+    if (old && isFile(old)) return failure('wrong_kind')
+    if (!old) at.folder[at.name] = {}
+    return { created: !old }
+  }
+
+  async copyFolderFile(id, path, to) {
+    return this.transfer(id, path, to, false)
+  }
+
+  async moveFolderFile(id, path, to) {
+    return this.transfer(id, path, to, true)
+  }
+
+  transfer(id, path, to, move) {
+    const from = this.changeAt(id, path)
+    if (from.error) return from
+    const file = from.folder[from.name]
+    if (!file) return failure('not_found')
+    if (!isFile(file)) return failure('wrong_kind')
+    const into = this.changeAt(id, to)
+    if (into.error) return into
+    if (into.folder[into.name]) return failure('exists')
+    into.folder[into.name] = { ...file, bytes: file.bytes.slice() }
+    if (move) delete from.folder[from.name]
+    return null
   }
 
   async readFolderFile(id, path, offset, length) {

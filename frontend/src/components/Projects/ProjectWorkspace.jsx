@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
+import { ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import { liveProjectChat } from '../../lib/projectChats.js'
 import ProjectThemeResource, { ProjectThemeSourceView } from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
+import ProjectChatList from './ProjectChatList.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectCollaborationPanel from './ProjectCollaborationPanel.jsx'
@@ -23,8 +25,13 @@ export default function ProjectWorkspace({
   linkedApp,
   onOpenApp,
   onOpenChat,
+  liveChatById,
   onCreateChat,
+  pinnedChatIds,
+  chatActions,
   onOpenArtifact,
+  entryFile,
+  onEntryFileHandled,
   startRenaming = false,
   onRename,
   onRenameEnd,
@@ -223,13 +230,15 @@ export default function ProjectWorkspace({
           sourceDescription={isAppProject ? 'Open app to use the running version. Save edits here, then Build & update app when ready.' : undefined}
           onSourceChanged={isAppProject ? undefined : rebuildRegisteredArtifacts}
           requestedFile={requestedFile}
+          entryFile={entryFile}
+          onEntryFileHandled={onEntryFileHandled}
           onOpenGit={() => setGitOpen(true)}
           resources={<ProjectThemeResource onOpen={() => { themeHistory.open(); setThemeOpen(true) }} />}
           overview={(
             <div className="project-overview" aria-label="Project overview">
               <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
                 <header className="project-overview__heading">
-                  <h2 id={`project-artifacts-heading-${project.id}`}>Artifacts</h2>
+                  <h2 id={`project-artifacts-heading-${project.id}`}>Results</h2>
                 </header>
                 <ProjectArtifacts
                   projectId={project.id}
@@ -264,14 +273,13 @@ export default function ProjectWorkspace({
                 ) : chats.length === 0 ? (
                   <p className="projects-empty">Describe what you want to make in a new chat. It can work with all the files in this project.</p>
                 ) : (
-                  <div className="project-chats__list">
-                    {chats.map(chat => (
-                      <button key={chat.id} type="button" className="project-chats__row" onClick={() => onOpenChat?.(chat)}>
-                        <MessageSquare width={16} height={16} aria-hidden="true" />
-                        <span><strong>{chat.title || 'New chat'}</strong>{!chat.has_messages && <small>Empty</small>}{chat.archived_at && <small>Archived</small>}</span>
-                      </button>
-                    ))}
-                  </div>
+                  <ProjectChatList
+                    chats={chats.map(row => liveProjectChat(row, liveChatById?.get(String(row.id))))}
+                    pinnedChatIds={pinnedChatIds}
+                    chatActions={chatActions}
+                    onOpenChat={chat => onOpenChat?.(chat)}
+                    onError={setError}
+                  />
                 )}
               </section>
             </div>

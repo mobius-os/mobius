@@ -43,7 +43,8 @@ const ALLOWED_GLOBALS = new Set([
 
   // Window, DOM, and worker globals used by the shell and its dependencies.
   'AbortController', 'AbortSignal', 'atob', 'Blob', 'BroadcastChannel', 'btoa',
-  'caches', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'console',
+  'caches', 'cancelAnimationFrame', 'cancelIdleCallback', 'clearInterval', 'clearTimeout', 'ClipboardItem',
+  'console',
   'CompressionStream', 'createImageBitmap', 'crypto', 'CSS', 'CustomEvent',
   'DecompressionStream', 'devicePixelRatio', 'document', 'DOMException',
   'DOMMatrix', 'DOMMatrixReadOnly', 'DOMParser', 'DOMRect',
@@ -51,7 +52,7 @@ const ALLOWED_GLOBALS = new Set([
   'FontFace', 'getComputedStyle', 'GPUBufferUsage', 'Headers', 'history',
   'HTMLAnchorElement', 'HTMLButtonElement', 'HTMLCanvasElement', 'HTMLElement',
   'HTMLFormElement', 'HTMLInputElement', 'Image', 'ImageData', 'ImageDecoder',
-  'indexedDB', 'IntersectionObserver', 'localStorage', 'location', 'matchMedia',
+  'indexedDB', 'IntersectionObserver', 'KeyboardEvent', 'localStorage', 'location', 'matchMedia',
   'MessageChannel', 'MessageEvent', 'MutationObserver', 'navigation',
   'navigator', 'Node', 'NodeFilter', 'Notification', 'OffscreenCanvas', 'Path2D',
   'performance',
@@ -63,7 +64,7 @@ const ALLOWED_GLOBALS = new Set([
   'screen', 'sessionStorage', 'setImmediate', 'setInterval', 'setTimeout',
   'Range', 'Sanitizer', 'ShadowRoot', 'TextDecoder', 'TextEncoder', 'URL',
   'URLSearchParams',
-  'WebSocket', 'window', 'Worker', 'XMLHttpRequest',
+  'WebSocket', 'Window', 'window', 'Worker', 'XMLHttpRequest',
 
   // Service-worker globals and names emitted by Workbox's generated wrapper.
   'clients', 'ExtendableEvent', 'FetchEvent', 'registration', 'self', '_',

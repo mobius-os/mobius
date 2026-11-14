@@ -4100,9 +4100,11 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
       db.get(models.Chat, chat_id).pending_question_id = "resolver-owner-question"
     db.commit()
   if running_check == "queued_owner":
-    from app.chat_writer import AppendPending, ClearPending, get_writer
+    from app.chat_writer import AppendPending, CancelPending, get_writer
     get_writer().submit(AppendPending(
-      chat_id=chat_id, user_msg={"role": "user", "content": "Please continue", "ts": 1},
+      chat_id=chat_id, user_msg={
+        "role": "user", "content": "Please continue", "ts": 1, "cid": "queued-owner",
+      },
     )).result(timeout=5)
   monkeypatch.setattr(
     "app.questions.is_waiting",
@@ -4163,7 +4165,7 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
 
   running = False
   if running_check == "queued_owner":
-    get_writer().submit(ClearPending(chat_id=chat_id)).result(timeout=5)
+    get_writer().submit(CancelPending(chat_id=chat_id, cid="queued-owner")).result(timeout=5)
   with SessionLocal() as db:
     db.query(models.ChatRun).filter_by(chat_id=chat_id).one().status = "completed"
     db.get(models.Chat, chat_id).pending_question_id = None
@@ -10600,7 +10602,7 @@ async def test_ancillary_bundle_comparison_uses_same_root_and_upstream_deletions
   tree = {"index.jsx": JSX.encode(), "README.md": b"owner", "bundle.js": b"source"}
   entries = []
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     entries.append(source_path)
     assert (source_path.parent / "bundle.js").read_bytes() == b"source"
     assert (source_path.parent / "README.md").exists() is (len(entries) == 1)
@@ -10938,7 +10940,7 @@ async def test_ancillary_source_check_and_tree_writes_leave_event_loop(monkeypat
       writes.append(threading.get_ident())
     return write_bytes(path, data)
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     assert threading.get_ident() == event_loop_thread
     entries.append(source_path)
     expected = b"owner" if len(entries) == 1 else b"upstream"

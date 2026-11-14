@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * AppCanvas iframe-mount contract.
  *
@@ -769,7 +770,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await frame.locator('#ask').click()
 
     const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(composer).toHaveValue('Act on my answers', { timeout: 8000 })
+    await expectComposerValue(composer, 'Act on my answers', { timeout: 8000 })
     await page.waitForTimeout(800)
     expect(sends).toBe(0)
 
@@ -779,7 +780,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     const reloaded = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await reloaded.evaluate(() => setTimeout(() => window.parent.postMessage(
       { type: 'moebius:new-chat', draft: 'Delayed request', autoSend: true }, '*'), 300))
-    await expect(composer).toHaveValue('Delayed request', { timeout: 8000 })
+    await expectComposerValue(composer, 'Delayed request', { timeout: 8000 })
     await page.waitForTimeout(800)
     expect(sends).toBe(0)
   })
@@ -966,8 +967,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
         window.location.origin,
       )
     }, appId)
-    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toHaveValue(/crashed with this error/, { timeout: 8000 })
+    await expectComposerValue(page.getByRole('textbox', { name: 'Message Möbius…' }), /crashed with this error/, { timeout: 8000 })
     expect(chatsCreated).toBe(1)
   })
 
@@ -1058,8 +1058,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       type: 'moebius:app-error', appId: String(id), chatId: staleChatId,
       error: 'stale-frame crash',
     }, window.location.origin), [appId, formerChatId])
-    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toHaveValue(/ClearedToy.*crashed with this error/, { timeout: 8000 })
+    await expectComposerValue(page.getByRole('textbox', { name: 'Message Möbius…' }), /ClearedToy.*crashed with this error/, { timeout: 8000 })
     expect(chatsCreated).toBe(1)
     expect(framesFetched).toBe(initialFramesFetched)
   })
@@ -1462,5 +1461,120 @@ test.describe('AppCanvas location lifecycle', () => {
     await expect(page.locator('iframe[data-app-id="81"]')).toHaveCount(1)
     await page.evaluate(() => history.back())
     await frame.waitForFunction(() => !window.detail)
+  })
+})
+
+// Shell surfaces whose code is a separate chunk, downloaded on first render
+// (React.lazy inside LazySurface). These cases live in this spec for its
+// fully mocked shell. Vite names a lazily imported module's chunk after the
+// module, so matching only that name keeps them independent of the hash;
+// frontend/src/lib/__tests__/routeSplitting.test.js pins the modules as lazy.
+const lazyChunk = (name, ext = 'js') => new RegExp(`/${name}-[\\w-]+\\.${ext}(?:\\?.*)?$`)
+
+// Holds one chunk's download until released, so a test can observe the shell
+// while that code is still on its way.
+async function gateChunk(page, pattern) {
+  const gate = { requested: false }
+  const released = new Promise(resolve => { gate.release = resolve })
+  await page.route(pattern, async route => {
+    gate.requested = true
+    await released
+    return route.continue()
+  })
+  return gate
+}
+
+async function expectLaunchCoverHeldWhileDownloading(page, gate) {
+  await expect.poll(() => gate.requested, { timeout: 10000 }).toBe(true)
+  // The shell itself has rendered and is waiting only on the surface's code.
+  // Give it several frames to (wrongly) report itself ready.
+  await expect(page.locator('.shell__content')).toBeAttached()
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 300)))
+  }))
+  const splash = page.locator('#splash')
+  await expect(splash).toHaveCount(1)
+  expect(await splash.evaluate(node => node.style.opacity)).not.toBe('0')
+}
+
+test.describe('Shell surfaces: on-demand code', () => {
+  test('an app-first launch keeps the launch cover until the app pane can render', async ({ page }) => {
+    const appId = 97
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    const gate = await gateChunk(page, lazyChunk('AppCanvas'))
+
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    await expectLaunchCoverHeldWhileDownloading(page, gate)
+
+    gate.release()
+    await expect(page.locator('iframe.canvas')).toBeAttached({ timeout: 10000 })
+    await expect(page.locator('#splash')).toHaveCount(0, { timeout: 10000 })
+  })
+
+  test('a Projects launch keeps the launch cover until the launcher can render', async ({ page }) => {
+    await setupAppRoutes(page, 95, mockFrameHTML(95))
+    const gate = await gateChunk(page, lazyChunk('ProjectsDirectory'))
+
+    await page.goto(`${BASE}/shell/?projects=1`, { waitUntil: 'domcontentloaded' })
+    await expectLaunchCoverHeldWhileDownloading(page, gate)
+
+    gate.release()
+    await expect(page.locator('.projects-directory')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('#splash')).toHaveCount(0, { timeout: 10000 })
+  })
+
+  test('a failed app-pane download shows recovery in that pane and keeps the shell', async ({ page }) => {
+    const appId = 96
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    // What a deploy that replaced the running build looks like to this page.
+    await page.route(lazyChunk('AppCanvas'), route => route.abort('failed'))
+
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+
+    const paneRecovery = page.locator('.errbound--inline')
+    await expect(paneRecovery).toContainText('Something broke', { timeout: 10000 })
+    await expect(paneRecovery.getByRole('button', { name: 'Refresh screen' })).toBeVisible()
+    // The failure stays in the pane: no shell-wide crash screen, and the
+    // launch cover lifts instead of waiting forever on code that never comes.
+    await expect(page.locator('.errbound:not(.errbound--inline)')).toHaveCount(0)
+    await expect(page.locator('#splash')).toHaveCount(0, { timeout: 10000 })
+    await expect(page.locator('.shell__content')).toBeVisible()
+  })
+
+  test('a panel that failed to download leaves the chat usable and opens after a reload', async ({ page }) => {
+    await setupAppRoutes(page, 94, mockFrameHTML(94))
+    let offline = true
+    for (const pattern of [lazyChunk('ChatUsageInspector'), lazyChunk('ChatUsageInspector', 'css')]) {
+      await page.route(pattern, route => (offline ? route.abort('failed') : route.continue()))
+    }
+    const composer = page.getByLabel('Message Möbius…')
+    const notice = page.getByRole('alert').filter({ hasText: "Couldn't open this panel" })
+    const openUsage = async () => {
+      await page.getByRole('button', { name: /^Chat options/ }).click()
+      await page.getByRole('button', { name: /^Chat usage/ }).click()
+    }
+
+    await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+    await expect(composer).toBeVisible({ timeout: 10000 })
+    await openUsage()
+    await expect(notice).toBeVisible({ timeout: 10000 })
+    // The failure stays a notice: no recovery panel takes the chat over.
+    await expect(page.locator('.errbound')).toHaveCount(0)
+    await expect(composer).toBeVisible()
+    await notice.getByRole('button', { name: 'Close' }).click()
+    await expect(notice).toHaveCount(0)
+    await composer.fill('still here')
+    await expectComposerValue(composer, 'still here')
+
+    offline = false
+    await openUsage()
+    await expect(notice).toBeVisible({ timeout: 10000 })
+    await notice.getByRole('button', { name: 'Reload' }).click()
+    await expect(composer).toBeVisible({ timeout: 10000 })
+    await openUsage()
+    const panel = page.locator('.cui__overlay')
+    await expect(panel).toBeVisible({ timeout: 10000 })
+    // Its stylesheet arrived too: the overlay is positioned by it.
+    expect(await panel.evaluate(node => getComputedStyle(node).position)).toBe('absolute')
   })
 })

@@ -750,6 +750,28 @@ def test_build_assistant_message_separates_distinct_text_blocks():
   assert msg["content"] == "I reverted the setting.\n\nYes, the app is back."
 
 
+def test_card_closing_message_is_reply_prose_at_the_card_position():
+  """A card's closing message rides on its block and joins the searchable,
+  compacted `content` exactly where a text block would; older cards add
+  nothing."""
+  blocks = [{"type": "text", "content": "Checked the release."}]
+  process_event({
+    "type": "question", "question_id": "card-1", "response_mode": "continuation",
+    "questions": [{"question": "Ship it?"}],
+    "message": "The build passed; **one** decision remains.",
+  }, blocks)
+  process_event({
+    "type": "question", "question_id": "card-0",
+    "questions": [{"question": "Older card?"}],
+  }, blocks)
+  assert blocks[1]["message"] == "The build passed; **one** decision remains."
+  assert "message" not in blocks[2]
+  msg = build_assistant_message(blocks)
+  assert msg["content"] == (
+    "Checked the release.\n\nThe build passed; **one** decision remains."
+  )
+
+
 def test_text_deltas_are_concatenated_exactly():
   blocks = []
   process_event({"type": "text", "content": "I reverted it."}, blocks)

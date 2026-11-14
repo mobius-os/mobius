@@ -190,3 +190,80 @@ def test_restart_must_discharge_the_routine_server_restart_requirement():
   result = _shell('api() { printf "%s\\n" "$reply"; }\n' + SOURCE[start:end],
                   {"state": "activation_needed", "activation": activation})
   assert result.returncode != 0
+
+
+# A container that answers like the image under test: before Restart now it runs
+# boot "old-boot"; afterwards it runs "new-boot" unless the scenario breaks that.
+RESTART_CONTAINER = r'''
+state=$(mktemp -d)
+trap 'rm -rf "$state"' EXIT
+api() { : > "$state/restarted"; printf '{"status":"restarting"}\n%s\n' "$RESTART_STATUS"; }
+sleep() { :; }
+docker() {
+  local after=false
+  [ -e "$state/restarted" ] && after=true
+  case "$*" in
+    "inspect -f {{.State.Running}} fixture")
+      [ "$after:$SCENARIO" = true:stopped ] && echo false || echo true ;;
+    "inspect -f {{.State.StartedAt}} {{.RestartCount}} fixture")
+      [ "$after:$SCENARIO" = true:replaced ] && echo "2026-01-01T00:01:00Z 0" \
+        || echo "2026-01-01T00:00:00Z 0" ;;
+    "exec fixture cat /data/.restart-ledger/boot-id")
+      [ "$after" = true ] && [ "$SCENARIO" != stuck ] && echo new-boot || echo old-boot ;;
+    "exec fixture cat /data/.restart-ledger/ack.json")
+      case "$SCENARIO" in
+        unbound) return 1 ;;
+        stale_ack) echo '{"source_boot_id": "older-boot", "target_boot_id": "new-boot"}' ;;
+        *) echo '{"source_boot_id": "old-boot", "target_boot_id": "new-boot"}' ;;
+      esac ;;
+    "exec fixture curl "*) return 0 ;;
+    "logs fixture")
+      [ "$SCENARIO" = no_rerun ] \
+        || echo "container-supervisor: planned restart: starting a fresh boot in this container." ;;
+    "logs fixture --tail 80") echo "fixture docker: logs fixture --tail 80" >&2 ;;
+    *) echo "unexpected docker call: $*" >&2; return 99 ;;
+  esac
+}
+restart_now_in_place
+'''
+
+
+def _restart_now(scenario, status=200):
+  env = {k: v for k, v in os.environ.items() if k not in {"BASH_ENV", "ENV"}}
+  env.update(SCENARIO=scenario, RESTART_STATUS=str(status))
+  return subprocess.run(
+    ["bash", "-euo", "pipefail", "-c", SHELL_HELPERS + RESTART_CONTAINER],
+    env=env, text=True, capture_output=True, timeout=30,
+  )
+
+
+def test_restart_now_passes_when_the_boot_reruns_inside_the_same_container():
+  result = _restart_now("in_place")
+  assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(("scenario", "status", "reason"), [
+  ("in_place", 409, "Restart now was refused (409)"),
+  ("stopped", 200, "Restart now stopped the container instead of restarting inside it"),
+  ("stuck", 200, "the instance did not serve a new boot within 240s of Restart now"),
+  ("replaced", 200, "Restart now replaced the container instead of rerunning its boot"),
+  ("no_rerun", 200, "the container supervisor did not rerun the boot"),
+  ("unbound", 200, "the new boot did not bind the accepted restart"),
+  ("stale_ack", 200, "the new boot bound another restart"),
+])
+def test_restart_now_fails_unless_the_new_boot_binds_the_request_in_place(
+  scenario, status, reason,
+):
+  result = _restart_now(scenario, status)
+  assert result.returncode == 1
+  assert f"upgrade path: {reason}" in result.stderr
+  assert "unexpected docker call" not in result.stderr
+
+
+def test_restart_now_is_not_skipped_for_the_candidate_image():
+  # The fixture skips Restart now on images whose entrypoint has no container
+  # supervisor, so renaming it must not silently drop the check.
+  dockerfile = (SCRIPT.parents[1] / "Dockerfile").read_text()
+  entrypoint = next(line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT"))
+  assert "container_supervisor.py" in entrypoint
+  assert "*container_supervisor.py*)\n" in SOURCE

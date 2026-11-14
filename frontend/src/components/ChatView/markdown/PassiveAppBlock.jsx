@@ -1,14 +1,17 @@
 /* Passive block session: a hidden, inert instance of an admitted app reports
    current state while the block is near the viewport; the host draws every
    control. See building-apps.md "Passive block sessions". */
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useCallback, useEffect, useId, useState } from 'react'
+import { Chat, Check } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import useAppBlockSession from '../hooks/useAppBlockSession.js'
-import { sessionSnapshot } from './appBlockSession.js'
-import { AppBlockLayout, AppCanvas, StaticAppBlock } from './AppBlockParts.jsx'
+import { ASK_LABEL, askMessage, passiveAskAllowed, sessionSnapshot } from './appBlockSession.js'
+import { AppBlockLayout, AppCanvas, AppLink, ExternalLinks, StaticAppBlock, StatusPill } from './AppBlockParts.jsx'
 import { usePassiveSlot } from './passiveSlots.js'
 import { useNearViewport } from './blockViewport.js'
+import { useKeptFocus } from './blockFocus.js'
 import { passiveBlockMode } from './blockOwnership.js'
+import { appBlockChatKey, blockFingerprint, useAppBlockChat } from './appBlockChat.js'
 
 export { passiveBlockMode }
 
@@ -44,70 +47,104 @@ export function sessionLocked(session, admitted) {
 }
 
 
-function SessionLinks({ links }) {
-  if (!links.length) return null
-  return <span className="md-app-block__links">{links.map(link =>
-    <a key={link.url} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>)}</span>
-}
-
 /** Host-drawn controls for one app action. Before this document reports,
  *  saved actions are history, not controls. Confirm takes the action's own
- *  fixed-size place; "Not now" sits beside it. */
-export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent }) {
+ *  fixed-size place; "Not now" sits beside it. An `open` action is a plain
+ *  link to the block in its app (`openHref`) and sends no event. */
+export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent,
+  openHref = '', onInternalNav = null }) {
+  const waitingId = useId()
   if (!state) return <span className="md-app-block__pending" role="status">Loading…</span>
   if (state.hidden) return null
+  // Only assistive technology hears why an otherwise ready Confirm waits.
+  const waiting = state.confirming && Boolean(state.confirmation) && !confirmArmed && !locked
   const control = state.confirming
     ? <span className="md-app-block__controls">
       <button type="button" className="md-app-block__cancel" disabled={locked}
         onClick={() => onEvent(target.intent, 'cancel')}>Not now</button>
       <button ref={confirmRef} type="button" className="md-app-block__action"
         disabled={locked || state.disabled || !state.confirmation || !confirmArmed}
+        aria-describedby={waiting ? waitingId : undefined}
         onClick={() => onEvent(target.intent, 'confirm')}>Confirm</button>
+      {waiting ? <span id={waitingId} className="md-app-block__sr-only">
+        Confirm turns on once the first and last rows above have been on screen.</span> : null}
     </span>
-    : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
-      aria-busy={state.busy || undefined} title={state.label || target.label}
-      onClick={() => onEvent(target.intent, 'activate')}>{state.label || target.label}</button>
+    : state.open && openHref
+      ? <AppLink className="md-app-block__action is-secondary" href={openHref} onInternalNav={onInternalNav}>
+        {state.label || target.label}</AppLink>
+      : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
+        aria-busy={state.busy || undefined} title={state.label || target.label}
+        onClick={() => onEvent(target.intent, 'activate')}>
+        {state.busy ? <span className="md-app-block__spinner" aria-hidden="true" /> : null}
+        {state.label || target.label}</button>
   return <div className="md-app-block__session">
     <div className="md-app-block__session-row">
-      {state.status ? <span className={`md-app-block__status is-${state.statusTone}`}>{state.status}</span> : null}
-      <SessionLinks links={state.links} />
+      <StatusPill status={state.status} tone={state.statusTone} />
+      <ExternalLinks links={state.links} />
       {control}
     </div>
-    {state.note && !state.confirming ? <p className={`md-app-block__note is-${state.tone}`} role="status">{state.note}</p> : null}
+    {/* A confirmation's own rows replace the note; one that cannot be shown
+        (incomplete or ambiguous) says why here. */}
+    {state.note && !state.confirmation ? <p className={`md-app-block__note is-${state.tone}`} role="status">{state.note}</p> : null}
   </div>
 }
 
-/** What Confirm will do, exactly as the app supplied it. The provenance note
- *  comes first: it describes the saved snapshot, not the app's list. */
-export function SessionConfirmation({ action, appName, listEndRef = null }) {
-  if (!action) return null
-  return <div className="md-app-block__confirmation" role="group" aria-label={`Confirm with ${appName}`}>
-    <p className="md-app-block__provenance" role="note">
-      {`The saved title and details above come from the conversation. The list below comes from ${appName}.`}</p>
-    {action.confirmation
-      ? <><strong>{appName} will act on:</strong><ul>{action.confirmation.map((item, i) => <li key={i}>
-        <span>{item.title}</span>
-        <dl>{item.facts.map((fact, j) => <div key={j}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
-      </li>)}</ul></>
-      : <p role="status">{action.note}</p>}
-    {/* After the last item: Confirm (drawn above) arms only once this end has
-        been on screen, so the whole list has passed through the viewport. */}
-    <span ref={listEndRef} className="md-app-block__list-end" aria-hidden="true" />
-  </div>
+/** The ask this block may draw now, or null: only one its admitted app
+ *  reported in this document (never a saved snapshot), on the newest block of
+ *  its kind in the chat the transcript attests, outside recovery. The parser
+ *  already drops an ask while an action confirms or is busy. */
+export function blockAsk({ state, admitted, allowed, context }) {
+  return state?.ask && admitted && allowed && Boolean(context?.chatId) && context.latest === true && !state.recoveryPending
+    ? state.ask : null
+}
+
+const ASK_LABELS = { sending: 'Requesting…', asked: 'Requested in chat', already: 'Requested in chat' }
+const ASK_WAIT = { sending: 'Sending a request to the agent in this chat.', asked: 'The request is in this chat.',
+  already: 'This chat already has this request.' }
+
+/** The host's ask control (`ask-v1`): its label is the host's, and one tap
+ *  sends the host-written request (askMessage) into this chat as the owner's
+ *  own visible message. It sends the app no event. `status` is the chat's
+ *  state for this card (appBlockChat.js askState). */
+export function AskControl({ status, locked, onAsk }) {
+  const waitingId = useId()
+  const waiting = status !== 'ready'
+  const sending = status === 'sending'
+  // A request already in the chat is a settled state, not a faded button.
+  const settled = status === 'asked' || status === 'already'
+  return <span className="md-app-block__controls">
+    <button type="button" className={`md-app-block__action is-ask${sending ? ' is-requesting' : ''}${settled ? ' is-settled' : ''}`}
+      disabled={locked || waiting} aria-busy={sending || undefined}
+      aria-describedby={waiting ? waitingId : undefined} onClick={onAsk}>
+      {sending ? <span className="md-app-block__spinner" aria-hidden="true" />
+        : settled ? <Check width={16} height={16} aria-hidden="true" /> : <Chat width={16} height={16} aria-hidden="true" />}
+      {ASK_LABELS[status] || ASK_LABEL}</button>
+    {waiting ? <span id={waitingId} className="md-app-block__sr-only">{ASK_WAIT[status]}</span> : null}
+    {/* The acknowledgement is announced, not only shown on a disabled button. */}
+    <span className="md-app-block__sr-only" role="status">{settled ? ASK_WAIT[status] : ''}</span>
+  </span>
 }
 
 /** The passive block for one parsed session state. The parser allows at most
- *  one enabled confirmation, and this is the action whose list is shown. */
+ *  one enabled confirmation; while it is open its app-supplied list is the
+ *  block's only rows, with one Not now/Confirm (sessionSnapshot), and
+ *  `listEdgeRefs` observes the list's two ends. `ask` is the host's ask
+ *  control when one may be drawn; it replaces every app control. */
 export function PassiveBlockView({ block, app, state, locked, confirmArmed = false, onEvent, onInternalNav,
-  sectionRef = null, confirmRef = null, listEndRef = null, notice = '', children = null }) {
+  sectionRef = null, confirmRef = null, listEdgeRefs = null, notice = '', onJump = null, ask = null, children = null }) {
   const actionState = key => state?.actions.find(action => action.key === key) || null
-  const actionFor = target => target
+  // A hidden action leaves no control, so its footer is not drawn either.
+  const actionFor = target => target && !ask && !actionState(target.intent)?.hidden
     ? <SessionControls target={target} state={actionState(target.intent)} locked={locked}
-      confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} />
+      confirmArmed={confirmArmed} confirmRef={confirmRef} onEvent={onEvent} openHref={block.href} onInternalNav={onInternalNav} />
     : null
-  return <AppBlockLayout block={sessionSnapshot(block, state)} app={app} onInternalNav={onInternalNav}
-    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef}>
-    <SessionConfirmation action={state?.actions.find(action => action.confirming)} appName={app.name} listEndRef={listEndRef} />
+  const snapshot = sessionSnapshot(block, state)
+  const count = snapshot.confirmation ? snapshot.items.length : 0
+  return <AppBlockLayout block={snapshot} app={app} onInternalNav={onInternalNav} ask={ask}
+    actionFor={actionFor} summary={state?.summary || ''} sectionRef={sectionRef} listEdgeRefs={listEdgeRefs} onJump={onJump}>
+    {/* Always present, so the polite announcement is heard when the rows change. */}
+    <p className="md-app-block__sr-only" role="status">
+      {count ? `${app.name} lists ${count} ${count === 1 ? 'item' : 'items'} to confirm.` : state?.title || ''}</p>
     {notice ? <p className="md-app-block__notice" role="status">{notice}</p> : null}
     {state?.notice ? <p className="md-app-block__notice" role="status">{state.notice}</p> : null}
     {children}
@@ -121,30 +158,54 @@ function SessionHost({ app, session }) {
       <AppCanvas appId={app.id} appName={app.name} appSlug={app.slug} version={appFrameVersion(app)}
         storageGeneration={app.storage_generation} offlineCapable={app.offline_capable === true}
         capabilityContract={app.capability_contract || null} active={false} visible={false} interactive={false}
-        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event}
+        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event} blockRefresh={session.blockRefresh}
         onBlockState={session.onBlockState} onBlockCapability={session.onBlockCapability} />
     </Suspense>
   </div>
+}
+
+/** Bring the newest block into view and move keyboard focus to it, without
+ *  animation when the reader prefers reduced motion. */
+export function jumpTo(node) {
+  if (!node) return
+  const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  node.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+  if (!node.hasAttribute('tabindex')) node.setAttribute('tabindex', '-1')
+  node.focus({ preventScroll: true })
 }
 
 export const ADMISSION_WITHDRAWN = name =>
   `${name} can no longer run in this chat. Open ${name} to check the result of the last action before trying again.`
 
 export default function PassiveAppBlock({ block, app, onInternalNav, admitted = true }) {
-  const [sectionRef, { near, distance }] = useNearViewport()
+  const [nearRef, { near, distance }] = useNearViewport()
+  // The transcript attests which chat this block is in and whether it is that
+  // chat's newest block of its app and intent; the block's JSON cannot.
+  const chat = useAppBlockChat(appBlockChatKey(block))
+  const chatRef = chat.ref
+  const [sectionNode, setSectionNode] = useState(null)
+  const sectionRef = useCallback(node => { nearRef(node); chatRef(node); setSectionNode(node) }, [nearRef, chatRef])
+  // A control that vanishes under keyboard focus (Send becoming Confirm, an
+  // action hidden while it works) leaves focus in the block (blockFocus.js).
+  useKeptFocus(sectionNode)
   // Observers follow the committed showing (set after it renders).
   const [showing, setShowing] = useState(null)
   const [confirmRef, confirmView] = useOnScreen(showing)
+  const [listStartRef, listStartView] = useOnScreen(showing)
   const [listEndRef, listEndView] = useOnScreen(showing)
+  const listEdgeRefs = { start: listStartRef, end: listEndRef }
   const [retained, setRetained] = useState(false)
   const [staticOpen, setStaticOpen] = useState(false)
   // Without admission no new frame starts; a retained one keeps its own.
   const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
+  const askAllowed = passiveAskAllowed(app)
   const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
-    confirmView, listEndView, admitted })
+    confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh, ask: askAllowed })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
+  const ask = blockAsk({ state: session.state, admitted, allowed: askAllowed, context: chat.context })
+  const message = ask ? askMessage(block.app, ask) : ''
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
@@ -152,7 +213,10 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   return <PassiveBlockView block={block} app={app} state={session.state} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
     onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
-    confirmRef={confirmRef} listEndRef={listEndRef}>
+    confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
+    ask={ask ? <AskControl status={chat.askState({ fingerprint: blockFingerprint(block), refs: ask.refs })} locked={sessionLocked(session, admitted)}
+      onAsk={() => { void chat.ask({ message, fingerprint: blockFingerprint(block), refs: ask.refs }) }} /> : null}
+    onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>
 }

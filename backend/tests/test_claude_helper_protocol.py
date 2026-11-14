@@ -134,6 +134,28 @@ async def test_errored_dispatch_reasks_then_starts_helper(tmp_path, failure_chan
 
 
 @pytest.mark.asyncio
+async def test_cancelling_reask_does_not_stop_idle_resumable_helper(tmp_path):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  turn.kind = 'message'
+  turn.agent_id = 'idle-agent'
+  host._turn_by_dispatch[turn.dispatch_id] = turn
+  host._specs[turn.dispatch_id] = turn.spec
+  host._dispatcher_call('SendMessage', {'to': turn.dispatch_id}, 'send')
+  host._fail_dispatch('send', 'SendMessage')
+  assert turn.dispatch_id in host._specs
+  assert not turn.dispatch_consumed
+  stopped = []
+  class Client:
+    async def stop_task(self, agent_id):
+      stopped.append(agent_id)
+  host._client = Client()
+  await host.stop(turn)
+  assert stopped == []
+  await host.close()
+
+
+@pytest.mark.asyncio
 async def test_errored_dispatch_exhausts_same_reask_budget(tmp_path):
   from claude_agent_sdk.types import UserMessage, ToolResultBlock
   host = _claude_host(tmp_path)
@@ -695,3 +717,26 @@ async def test_a_closed_host_cannot_leave_a_new_admission_waiting_forever(tmp_pa
   await host.close()
   turn = _turn(tmp_path)
   assert (await host.run_turn(turn)).host_lost and turn.status == 'failed'
+
+
+@pytest.mark.parametrize('exit_code,oom_kills_after,expected', [
+  (-9, 4, claude_helper_host.HOST_OUT_OF_MEMORY),
+  (-9, 3, 'The helper host stopped unexpectedly.'),
+  (1, 4, 'The helper host stopped unexpectedly.'),
+])
+def test_host_death_names_memory_only_with_kill_evidence(
+  tmp_path, monkeypatch, exit_code, oom_kills_after, expected,
+):
+  """A memory kill ends every helper in the shared host; the failure must say
+  so, while any other death keeps the generic wording."""
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  host._turn_by_dispatch[turn.dispatch_id] = turn
+  host._oom_kills_at_start = 3
+  host._exit_code = exit_code
+  monkeypatch.setattr(
+    'app.memory_observability.cgroup_oom_kill_count', lambda **_: oom_kills_after,
+  )
+  host._fail_open_turns()
+  assert turn.host_lost and turn.status == 'failed'
+  assert turn.summary == expected

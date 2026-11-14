@@ -4,6 +4,7 @@ import * as setupSession from '../../lib/setupSession.js'
 import './SetupWizard.css'
 
 export default function SetupWizard({ onDone }) {
+  const [setupCode, setSetupCode] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -23,6 +24,11 @@ export default function SetupWizard({ onDone }) {
   async function handleAccountSubmit(e) {
     e.preventDefault()
     setError('')
+    const normalizedCode = setupCode.trim()
+    if (!normalizedCode) {
+      setError('Enter the setup code from the server log.')
+      return
+    }
     const normalizedUsername = username.trim()
     if (!normalizedUsername) {
       setError('Enter a username.')
@@ -46,7 +52,11 @@ export default function SetupWizard({ onDone }) {
     }
     setLoading(true)
     try {
-      const res = await api.auth.setup.create({ username: normalizedUsername, password })
+      const res = await api.auth.setup.create({
+        setup_code: normalizedCode,
+        username: normalizedUsername,
+        password,
+      })
       if (!res.ok) {
         const data = await res.json()
         const detail = Array.isArray(data.detail)
@@ -85,6 +95,28 @@ export default function SetupWizard({ onDone }) {
           autoComplete="on"
         >
           <label className="setup__label">
+            Setup code
+            <input
+              className="setup__input"
+              type="text"
+              value={setupCode}
+              onChange={(e) => setSetupCode(e.target.value)}
+              name="setup-code"
+              maxLength={64}
+              required
+              autoFocus
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              aria-describedby="setup-code-hint"
+            />
+            <span className="setup__hint" id="setup-code-hint">
+              Möbius prints it in its server log when it starts (for example,
+              {' '}<code>docker compose logs app</code>). It is also saved in the
+              {' '}<code>setup-code</code> file in its data folder.
+            </span>
+          </label>
+          <label className="setup__label">
             Username
             <input
               className="setup__input"
@@ -94,7 +126,6 @@ export default function SetupWizard({ onDone }) {
               name="username"
               maxLength={64}
               required
-              autoFocus
               autoComplete="username"
             />
           </label>

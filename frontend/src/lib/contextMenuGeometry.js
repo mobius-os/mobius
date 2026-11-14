@@ -40,3 +40,31 @@ export function placeContextMenu({
     y: clamp(y, safePadding, viewportHeight - menuHeight - safePadding),
   }
 }
+
+/** Place a popover centred under an anchor box, or over it when there is no room below, inside `bounds`. */
+export function placeUnderAnchor({
+  anchor,
+  bounds,
+  size,
+  gap = 8,
+  padding = 12,
+}) {
+  const width = positiveNumber(size?.width, 0)
+  const height = positiveNumber(size?.height, 0)
+  const left = Number(bounds?.left) || 0
+  const top = Number(bounds?.top) || 0
+  const right = positiveNumber(bounds?.right, left + 1)
+  const bottom = positiveNumber(bounds?.bottom, top + 1)
+  const centre = (Number(anchor?.left) + Number(anchor?.right)) / 2 || 0
+  const below = (Number(anchor?.bottom) || 0) + gap
+  const above = (Number(anchor?.top) || 0) - height - gap
+  const y = below + height > bottom - padding && above >= top + padding ? above : below
+  const x = clamp(centre - width / 2, left + padding, right - width - padding)
+  return {
+    x,
+    y: clamp(y, top + padding, bottom - height - padding),
+    // Where the anchor's centre falls along the popover, so its pointer can aim at the anchor.
+    arrow: clamp(centre - x, 16, width - 16),
+    above: y === above && y !== below,
+  }
+}

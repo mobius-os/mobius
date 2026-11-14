@@ -3,13 +3,17 @@
    Exists because native long-press selection is unreliable on phones. It is a
    plain tap target only: it never intercepts press/hold or the context menu,
    so native text selection and its action menu stay fully available (the
-   chatUiPolish test locks that invariant). */
+   chatUiPolish test locks that invariant).
+   `read(button)` returns `{ plainText, markdown? }` at tap time, so a reply can
+   read its rendered answer; a failed copy says so instead of doing nothing. */
 import { useEffect, useRef, useState } from 'react'
 import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { copyPlainText } from './messageCopy.js'
+import { writeClipboard } from './messageCopy.js'
 
-export default function MessageCopyButton({ text }) {
-  const [copied, setCopied] = useState(false)
+const COPY_STATUS = { copied: 'Copied', failed: 'Couldn’t copy' }
+
+export default function MessageCopyButton({ read }) {
+  const [copyState, setCopyState] = useState('idle')
   const timerRef = useRef(null)
 
   useEffect(() => () => clearTimeout(timerRef.current), [])
@@ -18,23 +22,29 @@ export default function MessageCopyButton({ text }) {
     // The containing message row owns reveal timing; copying must not restart
     // that timer or double as another message-row click.
     e.stopPropagation()
-    if (!(await copyPlainText(text))) return
-    setCopied(true)
+    const payload = read(e.currentTarget)
+    const copied = payload ? await writeClipboard(payload) : false
+    setCopyState(copied ? 'copied' : 'failed')
     clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => setCopied(false), 1600)
+    timerRef.current = setTimeout(() => setCopyState('idle'), 1600)
   }
 
+  const status = COPY_STATUS[copyState] || ''
   return (
-    <button
-      type="button"
-      className={`chat__msg-copy${copied ? ' chat__msg-copy--copied' : ''}`}
-      onClick={handleCopy}
-      aria-label={copied ? 'Copied' : 'Copy message'}
-      title="Copy message"
-    >
-      {copied
-        ? <Check width={14} height={14} aria-hidden="true" />
-        : <Copy width={14} height={14} aria-hidden="true" />}
-    </button>
+    <>
+      <button
+        type="button"
+        className={`chat__msg-copy chat__msg-copy--${copyState}`}
+        onClick={handleCopy}
+        aria-label={status || 'Copy message'}
+        title={copyState === 'failed' ? 'Try copying again' : 'Copy message'}
+      >
+        {copyState === 'copied'
+          ? <Check width={14} height={14} aria-hidden="true" />
+          : <Copy width={14} height={14} aria-hidden="true" />}
+        {copyState === 'failed' && <span aria-hidden="true">{status}</span>}
+      </button>
+      <span className="chat__sr-only" role="status" aria-live="polite">{status}</span>
+    </>
   )
 }

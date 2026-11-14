@@ -165,8 +165,13 @@ def test_cancellation_mid_push_still_records_the_definite_result(setup, monkeypa
     return DispatchResult.confirmed({"head_sha": NEW})
   monkeypatch.setattr(repairs, "push_repair", push)
 
+  proposal = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["proposed"]
+  decision = routes.RepairDecision(repo=ITEM["repo"], number=ITEM["number"], head_sha=ITEM["head_sha"],
+                                   attempt_id=proposal["id"], decision="push")
+  owner = Principal(owner=principal.owner, app_id=None)
+
   async def cancel_mid_push():
-    task = asyncio.create_task(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    task = asyncio.create_task(routes.decide_repair(1, row.id, decision, db, owner))
     await asyncio.to_thread(started.wait, 5)
     task.cancel()
     await asyncio.sleep(0)

@@ -118,9 +118,9 @@ def test_new_app_compile_does_not_hold_sqlite_write_lock(
   concurrent_chat_id = "chat-created-during-app-compile"
 
   async def compile_while_chat_is_created(
-    _source, *, out_path, source_path=None,
+    _source, *, out_path, source_path=None, source_root=None,
   ):
-    del source_path
+    del source_path, source_root
     concurrent = SessionLocal()
     try:
       # A regression should fail promptly instead of waiting out the live
@@ -1364,6 +1364,28 @@ def test_local_manifest_does_not_grant_live_server_permissions(
   assert row.filesystem_access is False
   assert row.connections_manage is False
   assert row.connect_manage is False
+
+
+def test_local_manifest_names_each_privileged_grant_it_cannot_hold(client, auth):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  # identity_manage has no App column and github_connect is declared false:
+  # neither is a grant a local apply silently drops.
+  manifest["permissions"] = {
+    "manage_apps": True, "github_access": True, "github_connect": False,
+    "identity_manage": True,
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  ignored = "permissions.{} is ignored for a local app; only a Store-installed app can hold it"
+  expected = [ignored.format("manage_apps"), ignored.format("github_access")]
+  assert created.json()["warnings"] == expected
+  repeated = _apply(client, auth, source)
+  assert repeated.json()["mode"] == "unchanged"
+  assert repeated.json()["warnings"] == expected
 
 
 def test_local_package_flag_requires_an_installed_store_app(client, auth, db):

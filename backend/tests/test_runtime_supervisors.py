@@ -9,6 +9,7 @@ from app.broadcast import SystemBroadcast
 from app.runtime_supervisors import (
   PROVIDER_SESSION_RETENTION_BACKLOG_INTERVAL_SECS,
   PROVIDER_SESSION_RETENTION_INTERVAL_SECS,
+  REQUIRED_DATABASE_SUPERVISORS,
   RuntimeSupervisors,
   provider_retention_delay_after,
 )
@@ -131,10 +132,7 @@ async def test_optional_supervisor_exit_does_not_fail_core_readiness(monkeypatch
     return None
 
   async def start_required_and_optional():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
     supervisors._spawn("optional-retention", short_lived())
 
@@ -155,10 +153,7 @@ async def test_required_supervisor_exit_fails_core_readiness(monkeypatch):
     await asyncio.Event().wait()
 
   async def start_required():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
 
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_required)
@@ -478,3 +473,44 @@ async def test_capacity_tick_releases_accumulated_cache_after_the_boot_pass(
   data_dir = get_settings().data_dir
   assert events[:3] == ["tick", "tick", data_dir]
   assert release_threads[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_existing_runtime_sweep_recovers_revocations_after_ready_boot(monkeypatch):
+  import app.agent_coordination as coordination_module
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.chat_waits as waits_module
+  import app.goal_dependencies as dependencies_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  recovered = asyncio.Event()
+
+  async def no_reset_parks(*_args, **_kwargs):
+    return chat_module.ContinuationSweepResult()
+
+  async def no_waits(**_kwargs):
+    return 0
+
+  async def broken_dependency_delivery():
+    raise RuntimeError("an unrelated dependency cannot block revocation recovery")
+
+  async def recover_revocations():
+    recovered.set()
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_reset_parks)
+  monkeypatch.setattr(waits_module, "sweep_due_waits", no_waits)
+  monkeypatch.setattr(dependencies_module, "deliver_pending_dependencies", broken_dependency_delivery)
+  monkeypatch.setattr(coordination_module, "recover_work_claim_revocations", recover_revocations)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  try:
+    await asyncio.sleep(0)
+    broadcast.publish({"type": "platform_boot_ready"})
+    await asyncio.wait_for(recovered.wait(), timeout=1)
+  finally:
+    await supervisors.stop()

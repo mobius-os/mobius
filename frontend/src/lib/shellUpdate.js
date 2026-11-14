@@ -154,6 +154,18 @@ export function releaseWaitingShellUpdate(registration) {
   try { registration?.waiting?.postMessage({ type: 'SKIP_WAITING' }) } catch { /* unavailable */ }
 }
 
+// A sandboxed frame without allow-same-origin keeps navigator.serviceWorker
+// PRESENT while making its getter throw, so a bare read turns a crash a
+// boundary is handling into a second, uncatchable page error. Recovery simply
+// has no worker to consult there.
+export function safeServiceWorker() {
+  try {
+    return typeof navigator !== 'undefined' ? navigator.serviceWorker : null
+  } catch {
+    return null
+  }
+}
+
 // Error recovery reloads only when worker inspection proves this document is
 // stale. Network-first shell navigation makes the reload itself ordinary.
 //

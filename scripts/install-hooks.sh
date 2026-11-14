@@ -2,7 +2,8 @@
 # Install Möbius git hooks for this clone.
 #
 # Copies scripts/githooks/*, pre-commit, and the pre-push dependency checker
-# into the repo's SHARED hooks dir, so one install covers every linked worktree.
+# and frontend command runner into the repo's SHARED hooks dir, so one install
+# covers every linked worktree.
 # Idempotent — re-run after pulling updated hooks to refresh them.
 #
 #   ./scripts/install-hooks.sh
@@ -29,7 +30,7 @@ mkdir -p "$HOOKS_DIR"
 git config --local core.hooksPath "$HOOKS_DIR"
 install -m 0755 "$ROOT/scripts/pre-commit.sh" "$HOOKS_DIR/pre-commit"
 echo "installed pre-commit -> $HOOKS_DIR/pre-commit"
-for support in frontend-deps.sh check-frontend-deps.mjs; do
+for support in frontend-deps.sh check-frontend-deps.mjs wt-npm.sh; do
   install -m 0755 "$ROOT/scripts/$support" "$HOOKS_DIR/$support"
   echo "installed $support -> $HOOKS_DIR/$support"
 done

@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from app.platform_tools import ROUTINE_CONTROL_TOOL_NAMES
+
 RESULT_PREFIX = "MOBIUS_APP_ACTIVITY_V1:"
 MAX_RESULT_SCAN_CHARS = 262_144
 _MAX_COMMAND_CHARS = 8192
@@ -53,6 +55,8 @@ class AgentActivityBinding:
   # Activities triggered by an installed app's agent tool, keyed by the
   # agent-facing tool name (`<app>_<tool>`, see app_tools).
   by_app_tool: Mapping[str, ActivityCommand] = field(default_factory=dict)
+  # Agent-facing names of app tools their manifest declares `routine`.
+  routine_app_tools: frozenset[str] = frozenset()
 
   @property
   def is_empty(self) -> bool:
@@ -63,6 +67,7 @@ class AgentActivityBinding:
     cls,
     pairs: Iterable[tuple[str, ActivityCommand]],
     app_tools: Iterable[tuple[str, ActivityCommand]] = (),
+    routine_app_tools: Iterable[str] = (),
   ) -> "AgentActivityBinding":
     by_path: dict[str, ActivityCommand] = {}
     names: list[str] = []
@@ -76,7 +81,10 @@ class AgentActivityBinding:
     by_app_tool: dict[str, ActivityCommand] = {}
     for tool_name, command in app_tools:
       by_app_tool.setdefault(tool_name, command)
-    return cls(by_path=by_path, tool_names=tuple(names), by_app_tool=by_app_tool)
+    return cls(
+      by_path=by_path, tool_names=tuple(names), by_app_tool=by_app_tool,
+      routine_app_tools=frozenset(routine_app_tools),
+    )
 
 
 EMPTY_AGENT_ACTIVITY_BINDING = AgentActivityBinding(by_path={}, tool_names=())
@@ -169,15 +177,20 @@ def _running(command: ActivityCommand) -> dict:
   }
 
 
+def _control_tool_name(tool: object) -> str | None:
+  """The bare name of a call to the Möbius control server, else None."""
+  if isinstance(tool, str):
+    for prefix in _CONTROL_TOOL_PREFIXES:
+      if tool.startswith(prefix):
+        return tool[len(prefix):]
+  return None
+
+
 def _declared_app_tool(
   tool: object, binding: AgentActivityBinding,
 ) -> ActivityCommand | None:
-  if not isinstance(tool, str):
-    return None
-  for prefix in _CONTROL_TOOL_PREFIXES:
-    if tool.startswith(prefix):
-      return binding.by_app_tool.get(tool[len(prefix):])
-  return None
+  name = _control_tool_name(tool)
+  return binding.by_app_tool.get(name) if name else None
 
 
 def activity_from_app_tool(
@@ -186,6 +199,17 @@ def activity_from_app_tool(
   """Return the running card for a call to an installed app's agent tool."""
   declared = _declared_app_tool(tool, binding)
   return _running(declared) if declared is not None else None
+
+
+def is_routine_tool(tool: object, binding: AgentActivityBinding) -> bool:
+  """Whether the tool's owner declared its calls routine bookkeeping.
+
+  The platform declares its own control tools; an installed app declares its
+  tools in its manifest. The chat shows a successful routine call inside the
+  surrounding activity rather than as its own beat; a failed one stays visible.
+  """
+  name = _control_tool_name(tool)
+  return name in ROUTINE_CONTROL_TOOL_NAMES or name in binding.routine_app_tools
 
 
 def is_app_tool_call(tool: object, binding: AgentActivityBinding) -> bool:

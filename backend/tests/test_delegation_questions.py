@@ -233,7 +233,7 @@ def test_automatic_question_previews_are_bounded_with_exact_saved_identity(
 ):
   row = _seed(db, "preview")
   question_text = "Question " * 12000
-  options = ["Option " * 10000 for _ in range(16)]
+  options = [f"Option {index} " * 10000 for index in range(40)]
   asked = _ask(
     client, db, row, "ask-preview", question=question_text, options=options,
   )
@@ -260,6 +260,8 @@ def test_automatic_question_previews_are_bounded_with_exact_saved_identity(
   assert preview["full_question_url"] == f"/api/delegations/{row.id}"
   assert len(preview["question"]) <= 1000
   assert len(preview["options"]) == 16
+  assert preview["options_omitted"].startswith("24 more choices; full_question_url")
+  assert preview["options"][0].startswith("Option 0 ")
   assert all(len(option) <= 120 for option in preview["options"])
   assert len(hint) < 5000
 
@@ -785,10 +787,14 @@ def test_a_waiting_helper_blocks_goal_settlement_until_answered_or_stopped(
   _ask(client, db, row, "ask-goal")
   _settle(db, row.child_chat_id, "ask-goal")
   goal = db.get(models.ChatGoal, "goal-root")
-  assert goal_plans.active_goal_helpers(db, physical, goal) == ["task-goal"]
+
+  def working():
+    return list(goal_plans.active_goal_helpers(goal_plans.goal_helper_tree(db, physical, goal)).values())
+
+  assert working() == ["task-goal"]
   assert asyncio.run(delegations.cancel_delegation_execution(row.id)) is True
   db.expire_all()
-  assert goal_plans.active_goal_helpers(db, physical, goal) == []
+  assert working() == []
 
 
 # --- Escalation ----------------------------------------------------------------------
@@ -1118,13 +1124,13 @@ def test_owner_stop_preserves_a_queued_answer_without_starting_it(
   _wake_in_asking_root(db, row, "wake-stop-run", question.root_run_id)
   assert _answer(client, owner_token, row, "Use sqlite.", question_id).status_code == 202
 
-  _stopped, cleared = asyncio.run(chat_mod.stop_chat_for(row.child_chat_id))
-  # Stop wins: nothing starts, and the parent's answer is neither re-sent as
-  # owner text nor dropped.
-  assert delegations.helper_answer_continuation_id(question_id) not in cleared
+  asyncio.run(chat_mod.stop_chat_for(row.child_chat_id))
+  # Stop wins: nothing starts, and the parent's answer is neither turned into
+  # held owner text nor dropped.
   db.expire_all()
   assert db.get(models.ChatRun, "wake-stop-run").status == "stopped"
-  assert len(_queued_answers(db, row, question_id)) == 1
+  [answer] = _queued_answers(db, row, question_id)
+  assert "held" not in answer
   assert _status(db, row) == "stopped"
   chat_mod.reconcile_startup_chats(db)
   assert asyncio.run(delegations.reconcile_unstarted_delegations()) == 0

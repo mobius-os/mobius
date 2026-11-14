@@ -1,3 +1,4 @@
+import { composerValue, composerSelection, expectComposerValue } from './_composer.mjs'
 /**
  * Navigation and back button behavior tests.
  *
@@ -310,7 +311,7 @@ for (const width of [412, 1512]) {
     await expect(handoff).toBeFocused()
     await composer.fill('Draft stays with the real composer')
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Draft stays with the real composer')
+    await expectComposerValue(composer, 'Draft stays with the real composer')
     await expect(handoff).toHaveValue('')
   })
 }
@@ -552,7 +553,7 @@ test.describe('Navigation basics', () => {
       // Enter must not start a turn before activation has settled.
       await page.waitForTimeout(500)
       expect(sendRequests).toBe(0)
-      await expect(composer).toHaveValue('Visible after the cold read settles')
+      await expectComposerValue(composer, 'Visible after the cold read settles')
 
       releaseChatDetail()
       await expect(painted.locator('.chat__send')).toBeEnabled()
@@ -730,6 +731,80 @@ test('held chat cover suppresses stale floating actions while the destination se
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
 
+  for (const dismissal of ['toggle', 'outside', 'back', 'swipe']) {
+    test(`drawer ${dismissal} dismissal restores a suspended empty composer`, async ({ page }) => {
+      await setup(page)
+      const composer = page.locator('[data-chat-surface="painted"] .chat__editor-content')
+      const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+      const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+      await composer.focus()
+      await expectComposerValue(composer, '')
+      // A touch press preserves the field until the navigation boundary can
+      // remember it; a synthetic mouse click would blur before that boundary.
+      await toggle.tap()
+      await expect(navigation).toBeFocused()
+      await expect(composer).not.toBeFocused()
+      await expect(page.getByRole('textbox', { name: 'Preparing message input' })).not.toBeFocused()
+      if (dismissal === 'toggle') await toggle.tap()
+      if (dismissal === 'outside') {
+        await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+          pointerId: 81, pointerType: 'touch', isPrimary: true, button: 0,
+        })
+      }
+      if (dismissal === 'back') await goBack(page)
+      if (dismissal === 'swipe') {
+        await dispatchDrawerPointerGesture(page, {
+          pointerId: 82, points: [[230, 450], [170, 452], [90, 454]],
+        })
+      }
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      await expect(composer).toBeFocused()
+      await expectComposerValue(composer, '')
+      expect((await getNavState(page)).activeChatId).toBe(NAV_CHATS[0].id)
+    })
+  }
+
+  test('drawer dismissal leaves a previously unfocused saved draft keyboard closed', async ({ page }) => {
+    await setup(page)
+    const composer = page.locator('[data-chat-surface="painted"] .chat__editor-content')
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await composer.fill('Keep this draft without opening its keyboard')
+    await composer.blur()
+    await toggle.tap()
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeFocused()
+    await toggle.tap()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    // Wait for the sentinel to settle, not just the immediate visual close.
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+    await expect(composer).not.toBeFocused()
+    await expectComposerValue(composer, 'Keep this draft without opening its keyboard')
+  })
+
+  test('choosing another destination never restores the suspended old composer', async ({ page }) => {
+    await setup(page)
+    const composer = page.locator('[data-chat-surface="painted"] .chat__editor-content')
+    await composer.fill('This stays in the original chat')
+    await page.getByRole('button', { name: 'Toggle navigation' }).tap()
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).tap()
+    await expect(page.locator('[data-chat-surface="painted"]')).toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
+    const destination = page.locator('[data-chat-surface="painted"] .chat__editor-content')
+    await expect(destination).not.toBeFocused()
+    await expectComposerValue(destination, '')
+    // Suspend the destination's open keyboard, then leave chat entirely.
+    await destination.focus()
+    await page.getByRole('button', { name: 'Toggle navigation' }).tap()
+    await expect(navigation).toBeFocused()
+    await expect(destination).not.toBeFocused()
+    await navigateToSettings(page)
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+    // Settings unpaints the chat, so no `painted` surface remains to query.
+    // Neither a retained chat composer nor the keyboard handoff may take focus.
+    await expect(page.locator('.chat__editor-content:focus')).toHaveCount(0)
+    await expect(page.getByRole('textbox', { name: 'Preparing message input' })).not.toBeFocused()
+  })
+
   test('chat selection closes the drawer before the destination paints', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
@@ -792,7 +867,7 @@ test.describe('Touch navigation', () => {
 
     const painted = page.locator('[data-chat-surface="painted"]')
     const composer = painted.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(composer).toHaveValue('Keep this unfinished thought')
+    await expectComposerValue(composer, 'Keep this unfinished thought')
     await expect(painted.getByRole('button', { name: 'Remove reference.txt' })).toBeVisible()
 
     let createRequests = 0
@@ -812,7 +887,7 @@ test.describe('Touch navigation', () => {
       .toBe(blank.id)
     expect(createRequests).toBe(0)
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Keep this unfinished thought')
+    await expectComposerValue(composer, 'Keep this unfinished thought')
     await expect(painted.getByRole('button', { name: 'Remove reference.txt' })).toBeVisible()
   })
 
@@ -865,7 +940,7 @@ test.describe('Touch navigation', () => {
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => requestedId).toBe(intentId)
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Resume this saved thought')
+    await expectComposerValue(composer, 'Resume this saved thought')
     // The saved intent id owns the workspace destination from the first commit,
     // so the different visible blank is never adopted: the active chat is the
     // saved intent, not blank.id.
@@ -875,9 +950,9 @@ test.describe('Touch navigation', () => {
       .not.toBe(blank.id)
 
     releaseCreation()
-    const paintedComposer = presentation.locator('textarea')
+    const paintedComposer = presentation.locator('.chat__editor-content')
     await expect(paintedComposer).toBeFocused()
-    await expect(paintedComposer).toHaveValue('Resume this saved thought')
+    await expectComposerValue(paintedComposer, 'Resume this saved thought')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(intentId)
   })
@@ -925,7 +1000,7 @@ test.describe('Touch navigation', () => {
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => requestedId).toBe(intentId)
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue(durableInput)
+    await expectComposerValue(composer, durableInput)
     // Hydration fills the canonical composer's normal session cache. The
     // earlier null assertion proves the input came from IndexedDB only.
     await expect.poll(() => page.evaluate(id => (
@@ -934,10 +1009,10 @@ test.describe('Touch navigation', () => {
 
     releaseCreation()
     const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
+      `[data-chat-surface="painted"][data-chat-id="${intentId}"] .chat__editor-content`,
     )
     await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
+    await expectComposerValue(painted, durableInput)
   })
 
   test('an IDB-only draft survives authoritative intent-id rotation', async ({ page }) => {
@@ -991,7 +1066,7 @@ test.describe('Touch navigation', () => {
     await expect(newChatSurface(page, intentId)).toHaveCount(0)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue(durableInput)
+    await expectComposerValue(composer, durableInput)
     await expect.poll(() => page.evaluate(id => ({
       intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
       replacementDraft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -1002,10 +1077,10 @@ test.describe('Touch navigation', () => {
 
     releaseReplacement()
     const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${replacementId}"] textarea`,
+      `[data-chat-surface="painted"][data-chat-id="${replacementId}"] .chat__editor-content`,
     )
     await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
+    await expectComposerValue(painted, durableInput)
 
     // New Chat recorded its Back target under the minted id before the 409
     // rotated it. History must follow the replacement: Back returns to the chat
@@ -1094,13 +1169,13 @@ test.describe('Touch navigation', () => {
         const draft = 'This draft belongs to the unfinished chat'
         const composer = () => newChatSurface(page, id)
           .getByRole('textbox', { name: 'Message Möbius…', exact: true })
-        await expect(composer()).toHaveValue('')
+        await expectComposerValue(composer(), '')
         await composer().fill(draft)
         await page.keyboard.press('ControlOrMeta+,')
         await expect(newChatSurface(page, originalId)).toBeVisible()
-        await expect(newChatSurface(page, originalId)
-          .getByRole('textbox', { name: 'Message Möbius…', exact: true }))
-          .toHaveValue('Draft belonging only to the original chat')
+        await expectComposerValue(newChatSurface(page, originalId)
+          .getByRole('textbox', { name: 'Message Möbius…', exact: true }),
+          'Draft belonging only to the original chat')
         if (settleWhileAway) {
           releaseCreation()
           await expect.poll(() => page.evaluate(() =>
@@ -1110,7 +1185,7 @@ test.describe('Touch navigation', () => {
         }
         await page.keyboard.press('ControlOrMeta+.')
         await expect(composer()).toBeVisible()
-        await expect(composer()).toHaveValue(draft)
+        await expectComposerValue(composer(), draft)
         expect(prematureReads).toBe(0)
         if (!settleWhileAway) releaseCreation()
         if (outcome === 'error') {
@@ -1122,13 +1197,13 @@ test.describe('Touch navigation', () => {
         await expect.poll(() => page.evaluate(() =>
           JSON.parse(sessionStorage.getItem('new-chat-intent'))?.status,
         )).toBe('materialized')
-        await expect(composer()).toHaveValue(draft)
+        await expectComposerValue(composer(), draft)
         // A second round trip proves neither a late result nor the cleanup
         // replaced this entry with another empty chat.
         await page.keyboard.press('ControlOrMeta+,')
         await expect(newChatSurface(page, originalId)).toBeVisible()
         await page.keyboard.press('ControlOrMeta+.')
-        await expect(composer()).toHaveValue(draft)
+        await expectComposerValue(composer(), draft)
         expect(requestedIds.length).toBe(outcome === 'success' ? 1 : 2)
         expect(prematureReads).toBe(0)
       })
@@ -1220,8 +1295,7 @@ test.describe('Touch navigation', () => {
     await page.keyboard.press('ControlOrMeta+.')
     await expect.poll(() => ids.length).toBe(2)
     expect(ids[1]).not.toBe(ids[0])
-    await expect(newChatSurface(page, ids[1]).getByRole('textbox', { name: 'Message Möbius…', exact: true }))
-      .toHaveValue(draft)
+    await expectComposerValue(newChatSurface(page, ids[1]).getByRole('textbox', { name: 'Message Möbius…', exact: true }), draft)
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
     await expect.poll(intentStatus).not.toBe('failed')
     expect(ids.length).toBe(2)
@@ -1280,10 +1354,10 @@ test.describe('Touch navigation', () => {
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
     await expect.poll(() => requestedId).toBe(intentId)
     const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
+      `[data-chat-surface="painted"][data-chat-id="${intentId}"] .chat__editor-content`,
     )
     await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
+    await expectComposerValue(painted, durableInput)
   })
 
   test('New Chat keeps a queued old-chat focus inert through allocation', async ({ page }) => {
@@ -1322,7 +1396,7 @@ test.describe('Touch navigation', () => {
     // Model a focus callback that was queued by the outgoing ChatView before
     // the presentation committed. Native inertness must reject it even if the
     // callback itself has escaped React's request cleanup.
-    await coveredOldChat.locator('textarea')
+    await coveredOldChat.locator('.chat__editor-content')
       .evaluate(textarea => textarea.focus({ preventScroll: true }))
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => (
       requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -1332,10 +1406,10 @@ test.describe('Touch navigation', () => {
 
     releaseCreation()
     const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${requestedId}"] textarea`,
+      `[data-chat-surface="painted"][data-chat-id="${requestedId}"] .chat__editor-content`,
     )
     await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue('The cover owns this draft')
+    await expectComposerValue(painted, 'The cover owns this draft')
   })
 
   test('late New Chat allocation cannot steal navigation focus or lose the draft', async ({ page }) => {
@@ -1376,7 +1450,7 @@ test.describe('Touch navigation', () => {
     const resumed = newChatSurface(page, requestedId)
       .getByRole('textbox', { name: 'Message Möbius…' })
     await expect(resumed).toBeFocused()
-    await expect(resumed).toHaveValue('Navigation can recover this')
+    await expectComposerValue(resumed, 'Navigation can recover this')
   })
 
   for (const mode of ['single', 'panes']) {
@@ -1465,7 +1539,7 @@ test.describe('Touch navigation', () => {
       await expect.poll(() => page.evaluate(() => (
         JSON.parse(sessionStorage.getItem('new-chat-intent'))?.status
       ))).toBe('materialized')
-      await expect(composer).toHaveValue('Typed before the row exists')
+      await expectComposerValue(composer, 'Typed before the row exists')
       expect(await page.evaluate(() => window.__newChatSurfaceLost)).toBe(false)
       expect(creates).toEqual([requestedId])
       expect(readsBeforeCreate).toEqual([])
@@ -1509,7 +1583,7 @@ test.describe('Touch navigation', () => {
       .toBe(newChatId)
     await expect(page.locator('[data-chat-surface="painted"]'))
       .toHaveAttribute('data-chat-id', newChatId)
-    await expect(page.locator('[data-chat-surface="painted"] textarea')).toBeFocused()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__editor-content')).toBeFocused()
   })
 
   test('New chat keeps options geometry, phone focus, and early typing through allocation', async ({ page }) => {
@@ -1581,9 +1655,9 @@ test.describe('Touch navigation', () => {
 
     releaseCreation()
 
-    const composer = page.locator('[data-chat-surface="painted"] textarea')
+    const composer = page.locator('[data-chat-surface="painted"] .chat__editor-content')
     await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Typed while opening')
+    await expectComposerValue(composer, 'Typed while opening')
     // Allocation keeps the same canonical composer instead of swapping in a
     // second surface: exactly one message composer exists throughout.
     await expect(page.getByRole('textbox', { name: 'Message Möbius…' })).toHaveCount(1)
@@ -1592,11 +1666,10 @@ test.describe('Touch navigation', () => {
     await expect.poll(() => page.evaluate(id => (
       JSON.parse(sessionStorage.getItem('new-chat-intent'))
     ), requestedId)).toEqual({ chatId: requestedId, status: 'materialized' })
-    await expect.poll(() => composer.evaluate(element => ({
-      start: element.selectionStart,
-      end: element.selectionEnd,
-      length: element.value.length,
-    }))).toEqual({ start: 19, end: 19, length: 19 })
+    await expect.poll(async () => ({
+      ...await composerSelection(composer),
+      length: (await composerValue(composer)).length,
+    })).toEqual({ start: 19, end: 19, length: 19 })
     const readySurface = page.locator('[data-chat-surface="painted"]')
     const readyOptions = readySurface.locator('.composer-plus > button')
     await expect(readyOptions).toHaveCount(1)
@@ -1610,7 +1683,7 @@ test.describe('Touch navigation', () => {
     expect(Math.abs(readyOptionsBox.x - pendingOptionsBox.x)).toBeLessThanOrEqual(1)
     expect(Math.abs(readyOptionsBox.y - pendingOptionsBox.y)).toBeLessThanOrEqual(1)
     await page.keyboard.type(' after allocation')
-    await expect(composer).toHaveValue('Typed while opening after allocation')
+    await expectComposerValue(composer, 'Typed while opening after allocation')
   })
 
   test('failed New chat allocation survives reload and retries the same id', async ({ page }) => {
@@ -1672,7 +1745,7 @@ test.describe('Touch navigation', () => {
       .getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => createCount).toBe(2)
     await expect(restored).toBeFocused()
-    await expect(restored).toHaveValue('Survives retry and reload')
+    await expectComposerValue(restored, 'Survives retry and reload')
     await expect.poll(() => page.evaluate(id => ({
       intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
       draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -1682,9 +1755,9 @@ test.describe('Touch navigation', () => {
     })
 
     releaseRetry()
-    const paintedComposer = page.locator('[data-chat-surface="painted"] textarea')
+    const paintedComposer = page.locator('[data-chat-surface="painted"] .chat__editor-content')
     await expect(paintedComposer).toBeFocused()
-    await expect(paintedComposer).toHaveValue('Survives retry and reload')
+    await expectComposerValue(paintedComposer, 'Survives retry and reload')
     // The retried allocation resolves into the same canonical surface rather
     // than tearing down and remounting a separate presentation.
     await expect(page.getByRole('textbox', { name: 'Message Möbius…' })).toHaveCount(1)
@@ -2498,7 +2571,7 @@ test.describe('Drawer state machine — extended invariants', () => {
     await setup(page, { width: 1280, height: 800 })
 
     const paintedComposer = page.locator(
-      '[data-chat-surface="painted"] textarea[aria-label="Message Möbius…"]',
+      '[data-chat-surface="painted"] .chat__editor-content',
     )
     await paintedComposer.focus()
     await expect(paintedComposer).toBeFocused()
@@ -2506,7 +2579,8 @@ test.describe('Drawer state machine — extended invariants', () => {
     // Cmd+,/. invokes this same browser traversal outside the app. The route
     // restore must carry the outgoing chat's keyboard-forward intent back to
     // its real composer, rather than leaving focus on the document body.
-    await page.getByRole('button', { name: 'Apps', exact: true }).click()
+    // The sidebar's Apps heading opens the full Apps screen.
+    await page.getByRole('button', { name: /^Apps, \d+ installed\. Open all apps$/ }).click()
     await expect(page.getByRole('region', { name: 'Installed apps' })).toBeVisible()
 
     await goBack(page)
@@ -2747,6 +2821,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
     expect((await getNavState(page)).drawerOpen).toBe(false)
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: 'touch',
+    })
 
     // WebKit can retarget the compatibility click after the pointerdown has
     // removed the scrim. That click still belongs to the drawer dismissal.
@@ -2761,6 +2841,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     await openDrawer(page)
     await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 5,
+      pointerType: 'touch',
+    })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
       button: 0,
       isPrimary: true,
       pointerId: 5,
@@ -2930,6 +3016,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerId: 7,
       pointerType: 'touch',
     })
+    // The scrim holds the touch that dismissed it until that touch lifts (22i).
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 7,
+      pointerType: 'touch',
+    })
 
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
@@ -2972,7 +3065,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
         observer.disconnect()
         resolve({
           blocking: overlay.classList.contains('drawer-overlay--blocking'),
-          pointerEvents: getComputedStyle(overlay).pointerEvents,
+          dismissing: overlay.classList.contains('drawer-overlay--dismissing'),
           transitionProperty: getComputedStyle(drawer).transitionProperty,
         })
       })
@@ -2987,11 +3080,21 @@ test.describe('Drawer close paths converge through handleBack', () => {
       pointerType: 'touch',
     })
 
+    // Only the touch that dismissed the drawer still holds the scrim.
     expect(await committedClose).toEqual({
       blocking: false,
-      pointerEvents: 'none',
+      dismissing: true,
       transitionProperty: 'none',
     })
+    await page.locator('.drawer-overlay').dispatchEvent('pointerup', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 8,
+      pointerType: 'touch',
+    })
+    // Well inside the hold's 3 s watchdog, so only the pointerup can release it.
+    await expect(page.locator('.drawer-overlay'))
+      .toHaveCSS('pointer-events', 'none', { timeout: 1000 })
   })
 
   test('22g. Swipe close leaves a click-only next activation live', async ({ page }) => {
@@ -3068,6 +3171,111 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(settledWidth.client).toBeCloseTo(startWidth.client + 48, 0)
     expect(settledWidth.stored * paintScale).toBeCloseTo(settledWidth.client, 0)
     await page.mouse.up()
+  })
+
+  for (const terminal of ['pointerup', 'pointercancel']) {
+    test(`22i. The scrim keeps the touch that dismissed it until its ${terminal}`, async ({ page }) => {
+      await setup(page)
+      await page.evaluate(() => {
+        // Inside the shell's stacking context, so it sits beneath the scrim
+        // like workspace content and clear of the closing panel's shield.
+        const probe = document.createElement('button')
+        probe.id = 'drawer-underlay-probe'
+        probe.setAttribute('aria-label', 'Underlying action')
+        probe.style.cssText = 'position:fixed;right:8px;top:280px;width:40px;height:40px;z-index:50'
+        probe.addEventListener('click', () => {
+          probe.dataset.clicks = String(Number(probe.dataset.clicks || 0) + 1)
+        })
+        document.querySelector('.shell').appendChild(probe)
+      })
+      await openDrawer(page)
+      const overlay = page.locator('.drawer-overlay')
+      const touch = (type, pointerId) => overlay.dispatchEvent(type, {
+        button: 0,
+        isPrimary: true,
+        pointerId,
+        pointerType: 'touch',
+      })
+      const overlayOwnsProbe = () => page.evaluate(() => {
+        const rect = document.getElementById('drawer-underlay-probe').getBoundingClientRect()
+        return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+          === document.querySelector('.drawer-overlay')
+      })
+
+      await touch('pointerdown', 51)
+      await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+        .toHaveAttribute('aria-expanded', 'false')
+      // The rest of the dismissing drag stays on the scrim instead of scrolling
+      // the content beneath it.
+      await expect(overlay).toHaveClass(/drawer-overlay--dismissing/)
+      expect(await overlay.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('auto')
+      expect(await overlayOwnsProbe()).toBe(true)
+
+      // Another finger ending does not release the dismissing touch.
+      await touch(terminal, 52)
+      expect(await overlay.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('auto')
+
+      await touch(terminal, 51)
+      // Well inside the hold's 3 s watchdog, so only the terminal event releases it.
+      await expect(overlay).toHaveCSS('pointer-events', 'none', { timeout: 1000 })
+      expect(await overlayOwnsProbe()).toBe(false)
+      await page.getByRole('button', { name: 'Underlying action' }).click({ timeout: 1000 })
+      await expect(page.locator('#drawer-underlay-probe')).toHaveAttribute('data-clicks', '1')
+    })
+  }
+
+  test('22j. An immersive takeover closes the modal drawer and its history entry', async ({ page }) => {
+    const appId = 990203
+    await setup(page)
+    await page.route(/\/api\/apps\/(\?.*)?$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          id: appId, name: 'Immersive App', description: '', compiled_path: '',
+          chat_id: null, source_dir: null, pinned_at: null,
+          cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+          updated_at: '2026-07-12T12:00:00Z',
+        }]),
+      })
+    })
+    await page.route(new RegExp(`/api/apps/${appId}/frame`), route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
+    }))
+    await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ token: 'mock-app-token' }),
+    }))
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    const frame = await appFrameFor(page, appId)
+    const historyEntry = () => page.evaluate(() => ({
+      kind: history.state?.kind ?? null,
+      entryId: history.state?.entryId ?? null,
+      index: history.state?.index ?? null,
+    }))
+    const routeEntry = await historyEntry()
+
+    // The owner opens the drawer while the app is still loading; the app then
+    // claims immersive, which hides the drawer panel.
+    await openDrawer(page)
+    expect(await historyEntry()).not.toEqual(routeEntry)
+    await frame.evaluate(id => window.parent.postMessage(
+      { type: 'moebius:immersive', value: true, appId: id }, '*',
+    ), appId)
+    await expect(page.locator('.shell')).toHaveClass(/shell--immersive/)
+
+    await expect.poll(async () => (await getNavState(page)).drawerOpen).toBe(false)
+    await expect(page.locator('.drawer-overlay')).not.toHaveClass(/drawer-overlay--visible/)
+    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
+    await expect.poll(historyEntry).toEqual(routeEntry)
+
+    // The next tap reaches the shell's exit control instead of an invisible scrim.
+    await page.getByRole('button', { name: 'Exit full screen' }).click({ timeout: 1000 })
+    await expect(page.locator('.shell')).not.toHaveClass(/shell--barhidden/)
   })
 
   test('23. Brand toggle close does not navigate, even from a deep view', async ({ page }) => {

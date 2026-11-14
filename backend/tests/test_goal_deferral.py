@@ -93,7 +93,9 @@ def test_defer_never_abandons_a_handoff_and_refusal_is_atomic(client, owner_toke
     wait.status = blocker
     db.commit()
   elif blocker == "helper":
-    monkeypatch.setattr(goal_plans, "active_goal_helpers", lambda *args: ["live-helper"])
+    monkeypatch.setattr(goal_plans, "_delegation_tree", lambda *args, **kwargs: [
+      {"id": "live", "task_key": "live-helper", "status": "running", "children": []},
+    ])
   else:
     db.get(models.Chat, chat_id).pending_question_id = "existing-card"
     db.commit()
@@ -600,3 +602,11 @@ def test_owner_end_survives_partial_claim_settlement_failure_and_retries(db, cha
   asyncio.run(agent_coordination.settle_claims_with_owner(chat.id))
   db.expire_all()
   assert claim.released_at is not None and claim.completed_at is None
+
+
+def test_a_running_helper_is_one_completion_blocker(db, chat):
+  from app.goals import _helper_blockers
+  goal, run = seed(db, chat)
+  _helper(db, id="live", parent_chat_id=chat.id, goal=goal, run=run, status="running")
+  db.commit()
+  assert _helper_blockers(db, run, goal) == ["live"]

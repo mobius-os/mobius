@@ -1,0 +1,326 @@
+"""A warned storage continuation is durable, exact and limited to one turn."""
+
+import asyncio
+from datetime import timedelta
+
+import pytest
+
+from app import chat as runtime, models, schemas
+from app.agent_admission import TurnStartHolds, require_agent_turn_admission
+from app.chat_writer import (
+  StartTurn, StartTurnRecoveryChanged, get_writer,
+)
+from app.continuations import (
+  LOW_STORAGE_NOTICE, PROCESS_LIMIT_NOTICE, manual_resume_matches,
+)
+from app.resource_pressure import assess_resource_pressure
+from app.timeutil import now_naive_utc
+
+
+def park(db, chat, reason="storage"):
+  row = models.ChatRun(
+    id="waiting-run", chat_id=chat.id, status="parked", provider="claude",
+    park_reason=reason, parked_until=now_naive_utc() + timedelta(hours=1),
+  )
+  db.add(row)
+  db.commit()
+  return row
+
+
+def request(chat, **changes):
+  return StartTurn(
+    chat_id=chat.id, run_token="manual-storage", owner_input=True,
+    user_msg={"role": "user", "content": "", "kind": "continuation",
+              "continuation_reason": "manual", "cid": "storage-control", "ts": 10},
+    resume_run_id="waiting-run", allow_low_storage=True, **changes,
+  )
+
+
+def submit(cmd):
+  return get_writer().submit(cmd).result(timeout=5)
+
+
+def test_storage_continue_survives_receipt_retry_without_consuming_pending_work(db, chat):
+  park(db, chat)
+  pending = [{"role": "user", "content": "Later work", "cid": "later", "ts": 10}]
+  chat.pending_messages = pending
+  db.commit()
+  result = submit(request(chat))
+  assert result["history"][-1].content.startswith("Resume the interrupted")
+  db.expire_all()
+  control = db.get(models.ChatRun, "manual-storage").continuation_json
+  assert control["allow_low_storage"] is True
+  assert control["supersedes_run_token"] == "waiting-run"
+  assert db.get(models.Chat, chat.id).pending_messages == pending
+  assert submit(request(chat))["duplicate"] is True
+  changed = request(chat)
+  changed.allow_low_storage = False
+  assert isinstance(submit(changed), StartTurnRecoveryChanged)
+
+
+def test_process_wait_accepts_the_same_one_shot_continue_anyway(db, chat):
+  park(db, chat, "processes")
+  result = submit(request(chat))
+  assert result["history"][-1].content.startswith("Resume the interrupted")
+  db.expire_all()
+  control = db.get(models.ChatRun, "manual-storage").continuation_json
+  assert control["allow_low_storage"] is True
+  assert control["supersedes_run_token"] == "waiting-run"
+
+
+@pytest.mark.parametrize("reason", ["memory", "usage_limit", "restart"])
+def test_storage_override_cannot_relabel_another_wait(db, chat, reason):
+  park(db, chat, reason)
+  assert isinstance(submit(request(chat)), StartTurnRecoveryChanged)
+  db.expire_all()
+  assert db.get(models.ChatRun, "manual-storage") is None
+  assert db.get(models.ChatRun, "waiting-run").status == "parked"
+
+
+def test_storage_override_requires_owner_intent_and_exact_current_run(db, chat):
+  park(db, chat)
+  cmd = request(chat)
+  cmd.owner_input = False
+  assert isinstance(submit(cmd), StartTurnRecoveryChanged)
+  cmd = request(chat)
+  cmd.resume_run_id = "superseded-run"
+  assert isinstance(submit(cmd), StartTurnRecoveryChanged)
+
+
+def test_saved_question_keeps_authority_over_storage_override(db, chat):
+  park(db, chat)
+  chat.pending_question_id = "owner-card"
+  db.commit()
+  assert submit(request(chat)).question_id == "owner-card"
+  db.expire_all()
+  assert db.get(models.ChatRun, "manual-storage") is None
+
+
+def test_storage_override_requires_explicit_manual_run_target():
+  for fields in ({}, {"continuation": "manual"}, {"resume_run_id": "waiting-run"}):
+    with pytest.raises(ValueError, match="exact waiting run"):
+      schemas.SendMessage(content="", allow_low_storage=True, **fields)
+
+
+def test_receipt_cannot_upgrade_an_ordinary_resume_to_a_storage_override():
+  control = {"reason": "manual", "control_id": "cid", "supersedes_run_token": "waiting-run"}
+  assert not manual_resume_matches(
+    control, control_id="cid", run_id="waiting-run", allow_low_storage=True,
+  )
+
+
+def test_owner_continue_route_persists_override_and_rejects_changed_retry(client, auth, db, chat, monkeypatch):
+  park(db, chat)
+  scheduled = []
+
+  async def capture(*args, **kwargs):
+    scheduled.append(kwargs)
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
+  body = {"content": "", "cid": "route-control", "continuation": "manual",
+          "resume_run_id": "waiting-run", "allow_low_storage": True}
+  first = client.post(f"/api/chats/{chat.id}/messages", json=body, headers=auth)
+  assert first.status_code == 202, first.text
+  retry = client.post(f"/api/chats/{chat.id}/messages", json=body, headers=auth)
+  assert retry.status_code == 200 and retry.json()["status"] == "duplicate"
+  changed = client.post(f"/api/chats/{chat.id}/messages",
+                        json={**body, "allow_low_storage": False}, headers=auth)
+  assert changed.status_code == 409
+  db.expire_all()
+  assert db.get(models.ChatRun, scheduled[0]["run_token"]).continuation_json["allow_low_storage"] is True
+  assert len(scheduled) == 1
+
+
+@pytest.mark.parametrize("caller", [
+  {"browser": "guest"}, {"app_id": 7},
+  {"scope": "chat_embed", "operations": frozenset({"chat:send"})},
+])
+def test_only_the_installation_owner_may_continue_below_the_storage_floor(
+  client, db, chat, monkeypatch, caller,
+):
+  from app.browser_access import BrowserLineage
+  from app.deps import Principal, get_chat_view_principal
+  from app.main import app
+
+  park(db, chat)
+  scheduled = []
+
+  async def capture(*args, **kwargs):
+    scheduled.append(kwargs)
+
+  owner = db.query(models.Owner).one()
+  fields = dict(caller)
+  if fields.pop("browser", None):
+    fields["browser"] = BrowserLineage("guest-grant", "guest-session")
+  principal = Principal(owner=owner, app_id=fields.pop("app_id", None), **fields)
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
+  monkeypatch.setitem(app.dependency_overrides, get_chat_view_principal, lambda: principal)
+  response = client.post(f"/api/chats/{chat.id}/messages", json={
+    "content": "", "cid": "guest-control", "continuation": "manual",
+    "resume_run_id": "waiting-run", "allow_low_storage": True,
+  })
+  assert response.status_code == 403, response.text
+  db.expire_all()
+  assert scheduled == []
+  assert db.query(models.ChatRun).filter_by(chat_id=chat.id).count() == 1
+  assert db.get(models.ChatRun, "waiting-run").status == "parked"
+
+
+@pytest.mark.parametrize("control", [["allow_low_storage"], "manual", 3])
+def test_malformed_permission_is_no_permission(db, chat, control):
+  db.add(models.ChatRun(
+    id="odd-run", chat_id=chat.id, status="running", provider="claude",
+    continuation_json=control,
+  ))
+  db.commit()
+  assert runtime._run_allows_continue_anyway(chat.id, "odd-run") is False
+
+
+def _low_storage(data_dir, *, owner_overrides=frozenset()):
+  return require_agent_turn_admission(
+    data_dir, owner_overrides=owner_overrides, scratch_sweeper=_no_sweep,
+    status_reader=lambda _: {"facts": {"disk": {"free_bytes": 945 * 1024**2}},
+      "pressure": {"disk": {"state": "critical", "critical_below_bytes": 1024**3}}},
+    holds=TurnStartHolds(),
+  )
+
+
+def _near_task_cap(data_dir, *, owner_overrides=frozenset(), low_storage=False):
+  facts = {
+    "disk": {"free_bytes": (945 if low_storage else 8192) * 1024**2},
+    "processes": {"available": True, "current_tasks": 900, "limit_tasks": 1000},
+  }
+  pressure = assess_resource_pressure(facts)
+  if low_storage:
+    pressure["disk"] = {"state": "critical", "critical_below_bytes": 1024**3}
+  return require_agent_turn_admission(
+    data_dir, owner_overrides=owner_overrides, scratch_sweeper=_no_sweep,
+    status_reader=lambda _: {"facts": facts, "pressure": pressure},
+    holds=TurnStartHolds(),
+  )
+
+
+async def _no_sweep():
+  return {}
+
+
+def _run_turn(db, chat, monkeypatch, reason, admission=_low_storage):
+  row = models.ChatRun(
+    id="admission-run", chat_id=chat.id, status="running", provider="claude",
+    continuation_json={"reason": reason, "allow_low_storage": True},
+  )
+  db.add(row)
+  db.commit()
+  entered = []
+
+  async def provider(messages, *args, **kwargs):
+    entered.append(kwargs["run_token"])
+    prompts.extend(m.content for m in messages)
+    return runtime.chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+
+  prompts = []
+  monkeypatch.setattr(runtime, "require_agent_turn_admission", admission)
+  monkeypatch.setattr(runtime, "_run_chat_impl", provider)
+  source = schemas.ChatMessage(role="user", content="Resume the interrupted work.")
+  asyncio.run(runtime.run_chat([source], chat_id=chat.id, run_token=row.id))
+  db.expire_all()
+  return entered, db.get(models.ChatRun, row.id), prompts
+
+
+@pytest.mark.parametrize("reason, allowed", [("manual", True), ("storage", False)])
+def test_runtime_reads_permission_from_exact_committed_manual_control(db, chat, monkeypatch, reason, allowed):
+  entered, run, _ = _run_turn(db, chat, monkeypatch, reason)
+  if allowed:
+    assert entered == [run.id]
+  else:
+    assert entered == [] and run.park_reason == "storage"
+
+
+def test_unreadable_permission_keeps_normal_storage_admission(db, chat, monkeypatch):
+  def unreadable():
+    raise RuntimeError("database unavailable")
+
+  monkeypatch.setattr("app.database.SessionLocal", unreadable)
+  assert runtime._run_allows_continue_anyway(chat.id, "admission-run") is False
+  monkeypatch.undo()
+  monkeypatch.setattr(runtime, "_run_allows_continue_anyway", lambda *_: False)
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [] and run.park_reason == "storage"
+  assert run.status == "parked", "a read error is a storage wait, not a setup failure"
+
+
+def test_admitted_turn_never_reads_the_permission(db, chat, monkeypatch):
+  async def admitted(_data_dir, **_kwargs):
+    pass
+
+  def read(*_args):
+    pytest.fail("only a storage wait consults the saved permission")
+
+  monkeypatch.setattr(runtime, "_run_allows_continue_anyway", read)
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", admitted)
+  assert entered == [run.id]
+  assert prompts == ["Resume the interrupted work."], (
+    "a saved override that admission did not need adds no low-storage notice"
+  )
+
+
+def test_continue_anyway_tells_the_agent_storage_is_still_low(db, chat, monkeypatch):
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [run.id]
+  assert prompts[-1].startswith("Resume the interrupted work.")
+  assert prompts[-1].endswith(LOW_STORAGE_NOTICE)
+  assert "ask the owner before deleting anything else" in LOW_STORAGE_NOTICE
+
+
+def test_storage_guard_spares_the_turn_the_owner_continued(db, chat, monkeypatch):
+  """The guard pauses work that keeps filling a critical volume, but a turn
+  the owner continued anyway is their explicit choice to free space."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual")
+  assert entered == [run.id]
+  assert storage_guard._continued == {chat.id: run.id}
+
+
+def test_admitted_turn_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  from app import storage_guard
+
+  async def admitted(_data_dir, **_kwargs):
+    pass
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  _run_turn(db, chat, monkeypatch, "manual", admitted)
+  assert storage_guard._continued == {}
+
+
+def test_process_only_continue_is_not_spared_by_the_storage_guard(db, chat, monkeypatch):
+  """Only a turn whose storage floor was lifted is the owner's cleanup."""
+  from app import storage_guard
+
+  monkeypatch.setattr(storage_guard, "_continued", {})
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)
+  assert entered == [run.id]
+  assert storage_guard._continued == {}
+
+
+def test_continue_anyway_admits_one_turn_near_the_task_cap(db, chat, monkeypatch):
+  """When the cap is held by something other than agent work, the owner has a way out."""
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", _near_task_cap)
+  assert entered == [run.id]
+  assert prompts[-1] == f"Resume the interrupted work.\n\n{PROCESS_LIMIT_NOTICE}"
+  assert LOW_STORAGE_NOTICE not in prompts[-1]
+
+
+def test_process_wait_without_permission_still_parks(db, chat, monkeypatch):
+  entered, run, _ = _run_turn(db, chat, monkeypatch, "processes", _near_task_cap)
+  assert entered == [] and run.park_reason == "processes"
+
+
+def test_one_continue_anyway_lifts_storage_and_process_floors_and_names_both(db, chat, monkeypatch):
+  async def both(data_dir, **kwargs):
+    return await _near_task_cap(data_dir, low_storage=True, **kwargs)
+
+  entered, run, prompts = _run_turn(db, chat, monkeypatch, "manual", both)
+  assert entered == [run.id]
+  assert prompts[-1].endswith(f"{LOW_STORAGE_NOTICE}\n\n{PROCESS_LIMIT_NOTICE}")

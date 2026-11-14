@@ -1,7 +1,8 @@
+import { createContext, useContext } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { api } from '../api/client.js'
+import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
-import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
+import { waitingPaymentsRefresh, withoutPayment } from '../lib/creditsPayment.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -19,6 +20,10 @@ const settingsKey = ['settings']
 const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
+// Its own root, not under ['apps']: that prefix has stream-owned defaults that
+// stop a list refetching on mount, and it is persisted to disk. This list must
+// be fresh every time the Apps screen opens.
+const uninstalledAppsKey = ['uninstalled-apps']
 const chatAppArtifactsRootKey = ['chat-app-artifacts']
 const chatAppArtifactsKey = chatId => [
   ...chatAppArtifactsRootKey,
@@ -95,11 +100,16 @@ async function fetchProviderUsage(provider) {
   return jsonOrThrow(res, 'provider usage fetch failed:')
 }
 
+// The Möbius credit meter is the owner's account balance, so no surface
+// (Settings, the composer meter, a limit card) asks for it in a shared-browser
+// guest session.
+const ownerOnlyUsage = provider => provider === 'mobius' && isSharedBrowserAuth()
+
 function useProviderUsageQuery(provider, { enabled = true } = {}) {
   return useQuery({
     queryKey: providerUsageKey(provider),
     queryFn: () => fetchProviderUsage(provider),
-    enabled: enabled && Boolean(provider),
+    enabled: enabled && Boolean(provider) && !ownerOnlyUsage(provider),
     // A new chat or a return to Möbius must check the provider again. The
     // server coalesces probes, so this does not poll the rate-limited service.
     staleTime: 0,
@@ -142,6 +152,21 @@ function useChatAppArtifactsQuery(chatId, { enabled = true } = {}) {
     queryFn: ({ signal }) => fetchChatAppArtifacts(chatId, { signal }),
     enabled: Boolean(enabled && chatId),
     staleTime: 0,
+  })
+}
+
+async function fetchUninstalledApps({ signal } = {}) {
+  const res = await api.apps.uninstalled({ signal })
+  const data = await jsonOrThrow(res, 'uninstalled apps fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useUninstalledAppsQuery() {
+  return useQuery({
+    queryKey: uninstalledAppsKey,
+    queryFn: fetchUninstalledApps,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 }
 
@@ -191,17 +216,6 @@ async function fetchChats({ signal, timeoutMs, cache } = {}) {
   signal?.throwIfAborted()
   chatListReads.landed = Math.max(chatListReads.landed, read)
   return Array.isArray(data) ? data : []
-}
-
-async function fetchChatMessages(chatId, { signal } = {}) {
-  const res = await api.chats.detail(chatId, {
-    limit: 20,
-    compact: true,
-    signal,
-    timeoutMs: 15_000,
-  })
-  const data = await jsonOrThrow(res, 'chat fetch failed:')
-  return chatDetailCacheValue(data)
 }
 
 async function fetchChatCurrentUsage(
@@ -317,6 +331,25 @@ function useAppConsentQuery(appId) {
   })
 }
 
+// Whether a new waiting payment reaches this page as a system event: the shell
+// provides true, since its stream invalidates the waiting payments on
+// `credits_charge_requested`, and reads them slowly anyway in case one was
+// lost. Elsewhere (an app on its own page) they are polled faster while the
+// app is on screen (see waitingPaymentsRefresh).
+export const WaitingPaymentsPushedContext = createContext(false)
+
+// The app's credits charges waiting for the owner's Pay or Cancel. `visible`
+// is whether the app is on screen, where its Pay sheet can show.
+function useAppWaitingPaymentsQuery(appId, { enabled = true, visible = true } = {}) {
+  const pushed = useContext(WaitingPaymentsPushedContext)
+  return useQuery({
+    queryKey: ['app-credits-payments', appId],
+    enabled: !!appId && enabled,
+    queryFn: async () => jsonOrThrow(await api.apps.waitingPayments(appId), 'waiting payments fetch failed:'),
+    ...waitingPaymentsRefresh({ pushed, visible }),
+  })
+}
+
 function useAppTokenQuery(appId, { enabled = true } = {}) {
   return useQuery({
     queryKey: ['app-token', appId],
@@ -375,7 +408,11 @@ function markProviderConnected(queryClient, providerId) {
 async function fetchModelRegistry() {
   const res = await api.models.list()
   const data = await jsonOrThrow(res, 'model registry fetch failed:')
-  return data?.providers || {}
+  return {
+    providers: data?.providers || {},
+    defaults: data?.defaults || {},
+    replacements: data?.replacements || {},
+  }
 }
 
 // These are three cheap, read-only attempts after the initial request. The
@@ -391,8 +428,8 @@ function modelRegistryQueryOptions({ enabled = true } = {}) {
     enabled,
     // Mirror the server-side cache TTL so the client doesn't refetch
     // more often than upstream gives us new data. Refetches happen
-    // through explicit invalidation (the manage-models modal's
-    // refresh button) — not on every popover open.
+    // through explicit invalidation (a provider or account change), not on
+    // every popover open.
     staleTime: 5 * 60_000,
     retry: MODEL_READ_RETRY_COUNT,
   }
@@ -403,17 +440,70 @@ function useModelRegistryQuery(options) {
 }
 
 async function fetchModelPrefs() {
-  // Resolve to an empty preference set only after spending the same bounded
-  // retry budget as registry reads. React Query cannot retry a resolved fallback.
+  // After the same bounded retry budget as registry reads, an unreadable
+  // preference set resolves to "hide nothing" so the chat picker still offers
+  // every model. `unavailable` tells editors this is not the saved state, so
+  // they never show it as such. React Query cannot retry a resolved fallback.
   for (let attempt = 0; attempt <= MODEL_READ_RETRY_COUNT; attempt += 1) {
     try {
       const res = await api.owner.modelPrefs.get()
       const data = await jsonOrThrow(res, 'model prefs fetch failed:')
       return { hidden_ids: data?.hidden_ids || [] }
     } catch {
-      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [] }
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], unavailable: true }
     }
   }
+}
+
+// Picker visibility saves from every editor reach the server one at a time,
+// in the order they were made, so two quick taps on one switch never land out
+// of order. Only the newest save may replace the cache with the server's list,
+// so an earlier answer never briefly undoes a later change still shown
+// optimistically. Each save is time-boxed so one stuck request cannot hold
+// back every later save for the page's life. A save the browser gave up on
+// may still reach the server after a later one, so once any save's outcome is
+// unknown the newest save re-reads the list instead of trusting its answer.
+const MODEL_PREFS_SAVE_TIMEOUT_MS = 15_000
+let latestPrefsSave = Promise.resolve(null)
+let prefsSaveOutcomeUnknown = false
+
+async function sendModelPrefsChanges(changes) {
+  try {
+    const res = await api.owner.modelPrefs.update(changes, { timeoutMs: MODEL_PREFS_SAVE_TIMEOUT_MS })
+    const saved = res.ok ? await res.json() : null
+    return Array.isArray(saved?.hidden_ids) ? saved.hidden_ids : null
+  } catch {
+    prefsSaveOutcomeUnknown = true
+    return null
+  }
+}
+
+/**
+ * Shows `changes` (`{ id: hidden }`) at once and saves only them. Resolves
+ * true when the server applied them. After the newest save settles the cache
+ * holds the server's list: its answer, or a fresh read after a failure or
+ * after any save timed out.
+ */
+async function saveModelPrefsChanges(queryClient, changes) {
+  // A read already in flight would land the list from before this change.
+  await queryClient.cancelQueries({ queryKey: modelPrefsKey })
+  queryClient.setQueryData(modelPrefsKey, (prev) => {
+    const hidden = new Set(prev?.hidden_ids || [])
+    for (const [id, hide] of Object.entries(changes)) {
+      if (hide) hidden.add(id)
+      else hidden.delete(id)
+    }
+    return { hidden_ids: [...hidden] }
+  })
+  const save = latestPrefsSave.then(() => sendModelPrefsChanges(changes))
+  latestPrefsSave = save
+  const hiddenIds = await save
+  if (latestPrefsSave === save) {
+    if (hiddenIds) queryClient.setQueryData(modelPrefsKey, { hidden_ids: hiddenIds })
+    if (!hiddenIds || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+    prefsSaveOutcomeUnknown = false
+  }
+  return Boolean(hiddenIds)
 }
 
 function modelPrefsQueryOptions({ enabled = true } = {}) {
@@ -578,6 +668,22 @@ export const appQueries = {
     useQuery: useAppConsentQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-consent', appId] }),
   },
+  creditsPayments: {
+    useQuery: useAppWaitingPaymentsQuery,
+    invalidate: (queryClient, appId) => queryClient.invalidateQueries({
+      predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
+    }),
+    // An answered payment leaves the list before it is read again.
+    remove: (queryClient, appId, paymentId) => queryClient.setQueriesData({
+      predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
+    }, data => withoutPayment(data, paymentId)),
+  },
+  uninstalled: {
+    key: uninstalledAppsKey,
+    fetch: fetchUninstalledApps,
+    useQuery: useUninstalledAppsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: uninstalledAppsKey }),
+  },
   list: {
     key: appsKey,
     fetch: fetchApps,
@@ -689,7 +795,6 @@ export const chatQueries = {
   },
   messages: {
     key: (chatId) => ['chat-messages', chatId],
-    fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
   usage: {
@@ -753,6 +858,7 @@ export const modelQueries = {
     fetch: fetchModelPrefs,
     options: modelPrefsQueryOptions,
     useQuery: useModelPrefsQuery,
+    saveChanges: saveModelPrefsChanges,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },
 }

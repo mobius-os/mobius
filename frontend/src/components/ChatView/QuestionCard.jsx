@@ -1,7 +1,9 @@
 import DependencyBacklinks from './DependencyBacklinks.jsx'
+import { InlineMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { LocalAnswersContext } from './localAnswersContext.js'
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -28,7 +30,7 @@ import FileChips from './FileChips.jsx'
 import Attachments from './Attachments.jsx'
 import { pastedFiles, filePasteNeedsDefaultPrevented } from './pasteUpload.js'
 import { Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { ORPHANED_FILE_GROUP, fileBelongsToQuestion, fileQuestionTag, restoredQuestionFiles, resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
+import { ORPHANED_FILE_GROUP, fileBelongsToQuestion, fileQuestionTag, restoredQuestionFiles, resolveQuestionAnswer, questionOptionSubmission, unansweredQuestions } from './questionSubmission.js'
 import {
   isRestartCardAction,
   restartCardSelectedOptions,
@@ -56,9 +58,10 @@ export function CustomAnswerArea({
   onChange,
   onSubmitShortcut,
   onPasteFiles,
-  question,
+  questionTextId,
   value,
 }) {
+  const id = useId()
   const textareaRef = useRef(null)
   const plainPasteRef = useRef(false)
   const pendingCaretRef = useRef(null)
@@ -124,7 +127,9 @@ export function CustomAnswerArea({
       className="qcard__input"
       data-chat-scroll-region
       data-chat-inline-editor="question-answer"
-      aria-label={`Custom answer for: ${question}`}
+      id={id}
+      aria-label="Custom answer for:"
+      aria-labelledby={`${id} ${questionTextId}`}
       placeholder={answered ? 'No custom answer' : (placeholder || 'Or type your own answer…')}
       autoComplete="off"
       rows={1}
@@ -175,6 +180,7 @@ export default function QuestionCard({
   pendingCardRef,
 }) {
   const draftKey = questionDraftKey(chatId, questionId, questions)
+  const cardId = useId()
   const [answers, setAnswers] = useState(
     () => readQuestionDraft(draftKey).answers,
   )
@@ -184,6 +190,10 @@ export default function QuestionCard({
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(null)
   const [submitError, setSubmitError] = useState('')
+  // Set by a tap on Submit while answers are missing: the unanswered
+  // questions' hints turn to the accent colour so the gap is easy to find.
+  const [showMissing, setShowMissing] = useState(false)
+  const submitHintId = `qcard-submit-hint-${encodeURIComponent(draftKey)}`
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -217,6 +227,16 @@ export default function QuestionCard({
   const answered = Boolean(submitted) || !!answeredMap || completedAction
   const locallyQueued = !answered && Boolean(localAnswer)
   const selectionLocked = answered || locallyQueued
+  // The choice hint, paperclip, and Submit slot. A card first shown inactive
+  // (history; a stopped or superseded question opened later) stays compact.
+  // Once this mount has shown the card answerable, Stop or supersession only
+  // makes those controls inert: removing them collapsed the card by ~80px
+  // under the owner's eyes, and at the chat bottom the transcript slid down.
+  // The flag only ever latches on, so an interrupted render can at worst keep
+  // the inert controls; it can never hide them from a live card.
+  const shownAnswerableRef = useRef(!disabled)
+  if (!disabled) shownAnswerableRef.current = true
+  const showsAnswerControls = answered || shownAnswerableRef.current
   const attachLocked = selectionLocked || submitting || disabled
   const displayAnswers = answeredMap || localAnswer?.body?.answers || submitted?.answers || {}
   const grouped = questions.length > 1
@@ -244,13 +264,33 @@ export default function QuestionCard({
     writeQuestionDraft(draftKey, { answers, otherTexts, files })
   }, [draftKey, answers, otherTexts, files, answered, discardFiles])
 
-  const allAnswered = questionAnswersReady(questions, answers, otherTexts, readyFiles)
+  const unanswered = unansweredQuestions(questions, answers, otherTexts, readyFiles)
+  const allAnswered = unanswered.length === 0
   const selectedOptions = restartCardSelectedOptions(
     platformAction,
     questions,
     answers,
   )
   const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
+  // Incomplete cards stay tappable to reveal the first missing answer. Pending
+  // uploads alone still disable submission until their durable IDs arrive.
+  const unansweredLook = !allAnswered && !pendingFiles && !restartAction
+    && !selectionLocked
+  const needsAnswers = unansweredLook && !disabled && !submitting
+  // Quiet until a tap: the card shows no progress count up front.
+  const submitHint = needsAnswers && showMissing
+    ? 'Answer each question before submitting'
+    : ''
+
+  function showFirstUnanswered(questionCard) {
+    setShowMissing(true)
+    const index = questions.indexOf(unanswered[0])
+    const node = questionCard?.querySelector(`[data-question-index="${index}"]`)
+    if (!node) return
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    node.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+    node.querySelector('.qcard__opt-choice[tabindex="0"], textarea')?.focus({ preventScroll: true })
+  }
 
   function selectOption(question, label) {
     if (selectionLocked || disabled) return
@@ -459,18 +499,25 @@ export default function QuestionCard({
         const selectionCount = selectionLocked
           ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
           : selectedArr.length
+        // Screen-reader names point at the rendered question, not its Markdown.
+        const questionTextId = `${cardId}-q${qi}`
+        const attachId = `${questionTextId}-attach`
 
         return (
-          <div key={qi} className="qcard__q">
+          <div
+            key={qi}
+            className={`qcard__q${showMissing && needsAnswers && unanswered.includes(q) ? ' qcard__q--missing' : ''}`}
+            data-question-index={qi}
+          >
             {q.header && (
-              <div className="qcard__header">{q.header}</div>
+              <div className="qcard__header"><InlineMarkdown text={q.header} /></div>
             )}
-            <div className="qcard__text">{q.question}</div>
+            <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} literalTags onInternalNav={onInternalNav} /></div>
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
                 (□ checkbox for multi, ○ radio for single). */}
-            {!completedAction && (!disabled || answered) && hasOptions && (
+            {!completedAction && showsAnswerControls && hasOptions && (
               <div className="qcard__hint">
                 {writtenRestartAction
                   ? platformAction.observation?.observed_at
@@ -487,7 +534,7 @@ export default function QuestionCard({
             {!completedAction && hasOptions && <div
               className="qcard__opts"
               role={isMulti ? 'group' : 'radiogroup'}
-              aria-label={q.question}
+              aria-labelledby={questionTextId}
             >
               {/* For multi-select answered state, the comma-joined value is
                   parsed above so each chosen option highlights correctly. */}
@@ -499,48 +546,63 @@ export default function QuestionCard({
                   ? isChosen
                   : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
                 const dimmed = answered && !isChosen
-                const OptionSurface = inactive ? 'div' : 'button'
+                const descriptionId = opt.description ? `${questionTextId}-opt${oi}` : undefined
+                const pick = (event) => {
+                  const selectionBeforePointer = pointerSelectionRef.current
+                  pointerSelectionRef.current = null
+                  if (
+                    event.detail !== 0
+                    && pointerSelectionChangedWithin(selectionBeforePointer, event.currentTarget)
+                  ) return
+                  selectOption(q.question, opt.label)
+                }
                 return (
-                  <OptionSurface
+                  <div
                     key={oi}
-                    type={inactive ? undefined : 'button'}
-                    role={isMulti ? 'checkbox' : 'radio'}
-                    aria-checked={isActive}
-                    aria-disabled={inactive || undefined}
                     className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}${inactive ? ' qcard__opt--static' : ''}`}
                     onPointerDown={inactive ? undefined : () => {
                       pointerSelectionRef.current = textSelectionSnapshot()
                     }}
+                    // A tap on the explanation text picks the choice too.
+                    // Its links, image previews (including the portaled
+                    // lightbox) and copy buttons, and the choice itself, keep
+                    // their own clicks.
                     onClick={inactive ? undefined : (event) => {
-                      const selectionBeforePointer = pointerSelectionRef.current
-                      pointerSelectionRef.current = null
-                      if (
-                        event.detail !== 0
-                        && pointerSelectionChangedWithin(
-                          selectionBeforePointer,
-                          event.currentTarget,
-                        )
-                      ) return
-                      selectOption(q.question, opt.label)
+                      if (!event.currentTarget.contains(event.target)) return
+                      if (event.target.closest(INTERACTIVE_TARGET)) return
+                      pick(event)
                     }}
-                    title={opt.description || ''}
                   >
-                    <span
-                      className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
-                      aria-hidden="true"
-                    />
-                    {/* Description renders inline, not only as title= — a
-                        title tooltip is invisible on touch, and this is a
-                        phone-first surface. */}
-                    {opt.description ? (
-                      <span className="qcard__opt-body">
-                        <span className="qcard__opt-label">{opt.label}</span>
-                        <span className="qcard__opt-desc">{opt.description}</span>
-                      </span>
-                    ) : (
-                      opt.label
+                    {/* The control holds only the formatted label, so it never
+                        nests links or buttons. The explanation stays visible
+                        on touch as its own content, described to assistive
+                        technology through aria-describedby. */}
+                    <div
+                      className="qcard__opt-choice"
+                      tabIndex={inactive ? undefined : 0}
+                      role={isMulti ? 'checkbox' : 'radio'}
+                      aria-checked={isActive}
+                      aria-disabled={inactive || undefined}
+                      aria-describedby={descriptionId}
+                      onClick={inactive ? undefined : pick}
+                      onKeyDown={inactive ? undefined : (event) => {
+                        if (event.repeat || (event.key !== 'Enter' && event.key !== ' ')) return
+                        event.preventDefault()
+                        selectOption(q.question, opt.label)
+                      }}
+                    >
+                      <span
+                        className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
+                        aria-hidden="true"
+                      />
+                      <span className="qcard__opt-label"><InlineMarkdown text={opt.label} /></span>
+                    </div>
+                    {opt.description && (
+                      <div className="qcard__opt-desc" id={descriptionId}>
+                        <StandardMarkdown text={opt.description} literalTags onInternalNav={onInternalNav} />
+                      </div>
                     )}
-                  </OptionSurface>
+                  </div>
                 )
               })}
             </div>}
@@ -551,9 +613,11 @@ export default function QuestionCard({
                     It stays while the action row does, so Submit, queueing
                     and the Submitted state never move the card; once the
                     answer is locked it only stops taking files. */}
-                {!platformAction && (answered || !disabled) && (
+                {!platformAction && showsAnswerControls && (
                   <button type="button" className="qcard__attach"
-                    aria-label={grouped ? `Attach a photo or file to your answer to: ${q.question}` : 'Attach a photo or file'}
+                    id={attachId}
+                    aria-label={grouped ? 'Attach a photo or file to your answer to:' : 'Attach a photo or file'}
+                    aria-labelledby={grouped ? `${attachId} ${questionTextId}` : undefined}
                     title="Attach a photo or file" disabled={attachLocked} onClick={() => {
                       attachTargetRef.current = q.question
                       fileInputRef.current?.click()
@@ -575,7 +639,7 @@ export default function QuestionCard({
                     onSubmitShortcut={(questionCard) => {
                       if (canSubmit) handleSubmit(questionCard, null)
                     }}
-                    question={q.question}
+                    questionTextId={questionTextId}
                     value={selectionLocked
                       ? writtenAnswer
                       : (otherTexts[q.question] || '')}
@@ -592,7 +656,7 @@ export default function QuestionCard({
         <DependencyBacklinks chats={neededBy} onInternalNav={onInternalNav} />
       </details>}
       {hasCardFiles && fileTray(cardLevel, 'Files for all answers')}
-      {!platformAction && (answered || !disabled) && (
+      {!platformAction && showsAnswerControls && (
         <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
           disabled={attachLocked}
           aria-label="Attach files to your answer"
@@ -602,7 +666,7 @@ export default function QuestionCard({
             if (!attachLocked) addAnswerFiles(selected, attachTargetRef.current)
           }} />
       )}
-      {!completedAction && (answered || !disabled) && (
+      {!completedAction && showsAnswerControls && (
         <>
           {locallyQueued && (
             <div className="qcard__queue-status" role="status">
@@ -614,10 +678,18 @@ export default function QuestionCard({
           {submitError && !answered && !locallyQueued && (
             <div className="qcard__submit-error" role="status">{submitError}</div>
           )}
+          {submitHint && (
+            <div className="qcard__submit-hint" id={submitHintId}>{submitHint}</div>
+          )}
           <button
             type="button"
-            className="qcard__submit"
+            // A card stopped before it was answered keeps the quiet outline it had,
+            // dimmed by :disabled, rather than turning into a dimmed primary.
+            className={`qcard__submit${unansweredLook ? ' qcard__submit--incomplete' : ''}`}
+            aria-disabled={needsAnswers || undefined}
+            aria-describedby={submitHint ? submitHintId : undefined}
             onPointerDown={(event) => {
+              if (needsAnswers) return
               if (event.button !== 0 || event.isPrimary === false) return
               const questionCard = event.currentTarget.closest('.qcard')
               preparedSubmissionRef.current = onPrepareAnswer?.(questionCard) || null
@@ -628,11 +700,15 @@ export default function QuestionCard({
               if (event.buttons !== 0) cancelPreparedSubmission()
             }}
             onClick={(event) => {
+              if (needsAnswers) {
+                showFirstUnanswered(event.currentTarget.closest('.qcard'))
+                return
+              }
               const prepared = preparedSubmissionRef.current
               preparedSubmissionRef.current = null
               handleSubmit(event.currentTarget.closest('.qcard'), prepared)
             }}
-            disabled={!canSubmit || disabled || selectionLocked || submitting}
+            disabled={(!canSubmit && !needsAnswers) || disabled || selectionLocked || submitting}
           >
             {submitLabel}
           </button>
