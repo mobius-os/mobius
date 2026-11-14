@@ -5938,8 +5938,10 @@ export default function ChatView({
   const turnStarting = turnActive || questionFollowHandoff != null
   // The settled footer reply's end (see replyFooter). It is state set from a
   // committed render's layout effect, so a discarded render cannot name a
-  // reply, and it updates before paint.
-  const [settledEnd, setSettledEnd] = useState(null)
+  // reply, and it updates before paint. Kept with its chat, so switching
+  // chats never carries one chat's settled reply into another.
+  const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
+  const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
   // One footer for the whole chat, on the reply at its very end. Once the
   // owner speaks or answers a card there is none until the next reply starts,
   // so that reply's Thinking takes the footer's place instead of appearing
@@ -5954,8 +5956,11 @@ export default function ChatView({
   const footerGroup = footer?.group ?? null
   const footerEnd = footer?.end ?? null
   useLayoutEffect(() => {
-    if (!turnStarting) setSettledEnd(footerEnd)
-  }, [turnStarting, footerEnd])
+    if (!turnStarting) {
+      setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
+        ? prev : { chatId, end: footerEnd }))
+    }
+  }, [chatId, turnStarting, footerEnd])
   // A stretch that began before the loaded page reads its start only when
   // the footer is about to be used.
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(

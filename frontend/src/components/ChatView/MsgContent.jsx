@@ -7,7 +7,8 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {

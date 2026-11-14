@@ -12,6 +12,50 @@ const copyButton = readFileSync(new URL('../MessageCopyButton.jsx', import.meta.
 const metaRow = readFileSync(new URL('../MessageMetaRow.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
+/** ChatView.css read as rules: each rule's selectors (whitespace-normalized,
+ *  split at top-level commas), its enclosing @media condition, and its
+ *  declarations. Lets a test ask what a selector declares without depending
+ *  on the stylesheet's formatting or comments. */
+function cssRules(source) {
+  const rules = []
+  const walk = (body, media) => {
+    let at = 0
+    for (;;) {
+      const open = body.indexOf('{', at)
+      if (open < 0) return
+      let depth = 1
+      let close = open + 1
+      while (depth > 0 && close < body.length) {
+        if (body[close] === '{') depth += 1
+        else if (body[close] === '}') depth -= 1
+        close += 1
+      }
+      const head = body.slice(at, open).replace(/\s+/g, ' ').trim()
+      const inner = body.slice(open + 1, close - 1)
+      if (head.startsWith('@media')) walk(inner, head.slice('@media'.length).trim())
+      else if (!head.startsWith('@')) {
+        rules.push({
+          media,
+          selectors: head.split(/,(?![^(]*\))/).map(selector => selector.trim()),
+          declarations: Object.fromEntries(inner.split(';').map(line => line.split(':'))
+            .filter(parts => parts.length > 1)
+            .map(([name, ...value]) => [name.trim(), value.join(':').replace(/\s+/g, ' ').trim()])),
+        })
+      }
+      at = close
+    }
+  }
+  walk(source.replace(/\/\*[\s\S]*?\*\//g, ''), null)
+  return rules
+}
+const chatRules = cssRules(readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8'))
+/** What `selector` declares, outside any @media or within the one whose
+ *  condition includes `media`. */
+const declared = (selector, media = null) => Object.assign({}, ...chatRules
+  .filter(rule => rule.selectors.includes(selector)
+    && (media ? rule.media?.includes(media) : rule.media == null))
+  .map(rule => rule.declarations))
+
 test('messageCopyText joins prose blocks and skips activity chrome', () => {
   const msg = {
     role: 'assistant',
@@ -78,16 +122,18 @@ test('the chat has one reply footer, on the reply at its very end', () => {
 
 test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
   // The order time, Copy, Branch is rendered behaviour: replyFooter.test.js.
-  const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.match(footerCss, /\n\.chat__reply > \.chat__msg-meta--start \{ visibility: inherit; \}/,
+  assert.equal(declared('.chat__reply > .chat__msg-meta--start').visibility, 'inherit',
     'on every device the transparent footer stays focusable')
-  assert.match(footerCss, /\n\.chat__reply:has\(:focus-visible\) > \.chat__msg-meta--start \{\s*opacity: 1;\s*pointer-events: auto;/,
+  const focused = declared('.chat__reply:has(:focus-visible) > .chat__msg-meta--start')
+  assert.deepEqual([focused.opacity, focused['pointer-events']], ['1', 'auto'],
     'keyboard focus in the reply or footer reveals it, whatever the pointer')
-  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) and \(not \(any-pointer: coarse\)\) \{\s*\.chat__reply:hover > \.chat__msg-meta--start \{\s*opacity: 1;/,
-    'a fine pointer hovering the reply reveals it')
+  const hover = '.chat__reply:hover > .chat__msg-meta--start'
+  assert.equal(declared(hover, '(pointer: fine)').opacity, '1', 'a fine pointer hovering the reply reveals it')
+  assert.deepEqual(declared(hover), {}, 'hover alone, as on touch, does not')
   assert.match(chatView, /metaVisible=\{group === footerGroup && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
     'a tap reveals the footer for a moment, as on owner rows')
-  assert.match(footerCss, /\.chat__msg-meta--start > :is\(\.chat__msg-copy, \.chat__msg-branch\):not\(\.chat__msg-copy--failed\) \{\s*width: 24px;\s*height: 24px;\s*padding: 0;/,
+  const button = declared('.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed)')
+  assert.deepEqual([button.width, button.height, button.padding], ['24px', '24px', '0'],
     'Copy and Branch are equal square buttons with centred icons')
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
 
@@ -126,7 +172,9 @@ test('replies in one agent stretch sit as close as rows within a reply', () => {
   // An answered card, wait or helper result between two replies is hidden, so
   // the replies are adjacent; the conversation gap belongs between speakers.
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.match(css, /\.chat__list > :is\(\.chat__reply, \.chat__msg--peer\)\s*\+ :is\(\.chat__reply, \.chat__msg--peer, \.chat__msg--pending-reply\) \{\s*margin-block-start: calc\(8px - 24px\);/)
+  assert.equal(declared('.chat__list').gap, 'var(--chat-list-gap)')
+  assert.equal(declared('.chat__list > :is(.chat__reply, .chat__msg--peer) + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply)')['margin-block-start'],
+    'calc(8px - var(--chat-list-gap))', 'adjacent replies cancel the list gap down to 8px')
   // The Thinking row a new turn shows first sits where its reply will, so
   // the swap does not move the transcript.
   assert.match(chatView, /<li className="chat__msg chat__msg--assistant chat__msg--pending-reply">/)

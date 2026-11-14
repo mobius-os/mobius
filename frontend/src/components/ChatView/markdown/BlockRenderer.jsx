@@ -1,16 +1,13 @@
 import { useMemo } from 'react'
 import { MemoBlock, MathBlock } from './blocks.jsx'
 import InlineContent from './InlineContent.jsx'
-import { inlineTokens, markdownImageHrefs, tokenize } from './markdownParser.js'
+import { inlineTokens, tokenize } from './markdownParser.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
 import { appLinkCardFromParagraph } from './appLinkCard.js'
 import { markdownRangeTokens } from './steerMarkdownRange.js'
 import '../markdown.css'
-
-export { markdownImageHrefs }
-
 
 /**
  * InlineMarkdown — one-line agent text such as a choice label: emphasis, code

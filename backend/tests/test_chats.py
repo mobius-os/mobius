@@ -1481,3 +1481,30 @@ def test_detail_carries_when_each_reply_run_ended_without_changing_row_identity(
   assert [row["ts"] for row in rows] == [1, 2, 3, 4, 5, 6], "row identity is untouched"
   stored = transcript_rows.at(db, db.get(models.Chat, "run-ended"), 1)
   assert "run_ended_ts" not in stored, "the field is read-side only"
+
+
+def test_detail_end_times_skip_runs_closed_by_recovery_and_follow_branches(client, auth, db):
+  """A run closed by startup recovery records the recovery, not the reply's
+  end, so it has none. A branch's copied replies keep their source's runs."""
+  ended = datetime(2026, 11, 14, 9, 30)
+  db.add(create_chat(id="branch-source", title="Source", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "source-run", "content": "a", "ts": 2},
+    {"role": "user", "cid": "again", "content": "Again", "ts": 3},
+    {"role": "assistant", "id": "recovered-run", "content": "b", "ts": 4},
+  ]))
+  db.add(create_chat(id="branch-copy", title="Branch", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "source-run", "content": "a", "ts": 2},
+  ], branch_origin={"chat_id": "branch-source", "title": "Source", "through_count": 2}))
+  db.add(models.ChatRun(id="source-run", chat_id="branch-source", status="completed", ended_at=ended))
+  db.add(models.ChatRun(id="recovered-run", chat_id="branch-source", status="interrupted",
+                        end_reason="server_restart", ended_at=ended + timedelta(hours=3)))
+  db.commit()
+
+  source = client.get("/api/chats/branch-source?limit=10", headers=auth).json()["messages"]
+  branch = client.get("/api/chats/branch-copy?limit=10", headers=auth).json()["messages"]
+
+  ended_ms = round(ended.replace(tzinfo=UTC).timestamp() * 1000)
+  assert [row.get("run_ended_ts") for row in source] == [None, ended_ms, None, None]
+  assert [row.get("run_ended_ts") for row in branch] == [None, ended_ms]

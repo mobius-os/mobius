@@ -202,13 +202,13 @@
   padding: 8px 6px calc(var(--composer-h, 80px) + var(--chat-foot-safe-bottom) + 16px);
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  /* The conversation gap between speakers. */
+  --chat-list-gap: 24px;
+  gap: var(--chat-list-gap);
   /* Force content taller than scroll container so iOS
      triggers elastic bounce even when at the bottom. */
   min-height: calc(100% + 1px);
 }
-
-/* ── Empty state ───────────────────────────────────── */
 
 /* Replies and agent activity rows in one stretch (an answered card, a wait or
    a helper result between them is hidden) read as one response: they sit as
@@ -216,7 +216,7 @@
    row a new turn shows before its reply exists sits where that reply will. */
 .chat__list > :is(.chat__reply, .chat__msg--peer)
   + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply) {
-  margin-block-start: calc(8px - 24px);
+  margin-block-start: calc(8px - var(--chat-list-gap));
 }
 /* A reply is one conversation item; source rows keep their anchors and
    compact block spacing without cancelling the surrounding conversation gap. */
@@ -224,6 +224,8 @@
 .chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__markdown-copy-surface:empty)) {
   margin-top: 8px;
 }
+
+/* ── Empty state ───────────────────────────────────── */
 
 .chat__empty {
   display: flex;
