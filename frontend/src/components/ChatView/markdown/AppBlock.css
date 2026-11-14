@@ -187,6 +187,8 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__title-mark.is-danger { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger-text, color-mix(in srgb, var(--danger) 65%, var(--text))); }
 .md-app-block__title-mark-alert { font-size:13px; font-weight:700; line-height:1; }
 .md-app-block__title-mark .md-app-block__spinner { width:14px; height:14px; }
+.md-app-block__title-mark.is-busy { background:transparent; }
+.md-app-block__title-mark.is-busy .md-app-block__spinner { box-sizing:border-box; border-width:2px; transform-origin:center; }
 /* A folded block is one muted line, not a placeholder box: no rows, no controls. */
 .md-app-block--folded { border:0; background:transparent; }
 .md-app-block--folded > header { flex-wrap:wrap; padding:0 4px 0 8px; }
@@ -208,3 +210,4 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block--footer-status > footer .md-app-block__controls { flex:0 1 auto; }
 .md-app-block--footer-status.md-app-block--folded > footer { padding:0 4px 0 8px; }
 .md-app-block--folded .md-app-block__footer-status { color:var(--muted); }
+.md-app-block--footer-status a.md-app-block__link { color:var(--text); }

@@ -93,7 +93,7 @@ function ItemState({ live, title = '', linksInFooter = false }) {
  *  it. */
 export function TitleMark({ tone = 'neutral', busy = false }) {
   if (!busy && !['success', 'accent', 'attention', 'danger'].includes(tone)) return null
-  return <span className={`md-app-block__title-mark is-${busy ? 'neutral' : tone}`} aria-hidden="true">
+  return <span className={`md-app-block__title-mark is-${busy ? 'neutral is-busy' : tone}`} aria-hidden="true">
     {busy ? <span className="md-app-block__spinner" />
       : tone === 'success' || tone === 'accent' ? <Check width={14} height={14} />
         : <span className="md-app-block__title-mark-alert">!</span>}</span>

@@ -478,7 +478,7 @@ test('app rows replace the saved rows, facts and item controls, with no conversa
 
 test('a live title carries a state mark: spinner, check or exclamation mark, none when neutral', () => {
   assert.match(appRowsView({ title: 'Sending 2', titleBusy: true, rows: [] }),
-    /<header><span class="md-app-block__title-mark is-neutral" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
+    /<header><span class="md-app-block__title-mark is-neutral is-busy" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
   assert.match(appRowsView({ title: '2 pull requests opened', titleTone: 'success', rows: [] }),
     /<span class="md-app-block__title-mark is-success" aria-hidden="true"><svg/)
   assert.match(appRowsView({ title: '1 needs a fix', titleTone: 'attention', rows: [] }),
