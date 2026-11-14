@@ -1339,8 +1339,11 @@ async def _run_claude_stop_outcome(
   stop_reason: str | None = "interrupt",
   terminal_reason: str | None = None,
   exit_code: int | None = None,
+  frames: tuple = (),
 ):
   """Run one fake response stream, with an owner Stop in flight when `owned`.
+
+  `frames` stream before the Stop lands, as output already under way would.
 
   The Stop goes through the public `interrupt()`: it records ownership before
   its first await, signals the client, then waits for the runner to finish —
@@ -1363,6 +1366,8 @@ async def _run_claude_stop_outcome(
       self._transport = type("Transport", (), {"_process": None})()
 
     async def receive_response(self):
+      for frame in frames:
+        yield frame
       if owned:
         handle = registry.get_handle("claude-stop-shape", RunnerKind.CLAUDE_SDK)
         assert handle is not None
@@ -1387,6 +1392,137 @@ async def _run_claude_stop_outcome(
   for stop in stops:
     await stop
   return result
+
+
+def _stream_event(event, parent_tool_use_id=None):
+  return StreamEvent(
+    uuid="stream-1", session_id="sess-1", event=event,
+    parent_tool_use_id=parent_tool_use_id,
+  )
+
+
+def _text_stream_event(parent_tool_use_id=None):
+  return _stream_event(
+    {"type": "content_block_delta", "index": 0,
+     "delta": {"type": "text_delta", "text": "Looking"}},
+    parent_tool_use_id,
+  )
+
+
+_MESSAGE_START = {"type": "message_start", "message": {
+  "id": "msg_1", "type": "message", "role": "assistant", "content": [],
+  "model": "claude-opus-4-8",
+}}
+
+
+@pytest.mark.parametrize("event, responded", [
+  (_MESSAGE_START, True),
+  ({"type": "content_block_start", "index": 0,
+    "content_block": {"type": "text", "text": ""}}, True),
+  ({"type": "content_block_delta", "index": 0,
+    "delta": {"type": "text_delta", "text": "Looking"}}, True),
+  ({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}, True),
+  ({"type": "message_stop"}, True),
+  ({"type": "ping"}, False),
+  ({"type": "error", "error": {"type": "overloaded_error"}}, False),
+  ({"type": "future_unknown_event"}, False),
+  ({}, False),
+])
+def test_only_known_response_stream_events_prove_a_provider_response(
+  event, responded,
+):
+  """Keepalives, error frames and event types added later are tolerated on
+  the stream but never count as the model's response."""
+  assert claude_events.is_provider_response(_stream_event(event)) is responded
+
+
+def _owner_card_tool_call():
+  return AssistantMessage(
+    content=[ToolUseBlock(
+      id="toolu-card", name="mcp__mobius_control__request_question",
+      input={"question": "Which branch?"},
+    )],
+    model="claude-opus-4-8", session_id="sess-1", message_id="msg-card",
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["terminal", "resultless", "process_error"])
+@pytest.mark.parametrize("evidence", [
+  "message_start", "text_delta", "owner_card_tool_call", "native_child_delta",
+])
+async def test_claude_stop_after_model_output_reports_a_provider_response(
+  monkeypatch, mode, evidence,
+):
+  """Partial model output proves availability even though Stop cut it short."""
+  frame = {
+    "message_start": lambda: _stream_event(_MESSAGE_START),
+    "text_delta": _text_stream_event,
+    "owner_card_tool_call": _owner_card_tool_call,
+    "native_child_delta": lambda: _text_stream_event("toolu-agent"),
+  }[evidence]()
+  result = await _run_claude_stop_outcome(
+    monkeypatch, mode, owned=True, frames=(frame,),
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["provider_responded"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["terminal", "resultless", "process_error"])
+@pytest.mark.parametrize("local_frames", [
+  "none", "synthetic_limit_error", "synthetic_no_response", "replayed_input",
+  "system_frame", "keepalive_ping", "unknown_stream_frame",
+])
+async def test_claude_stop_before_model_output_reports_no_provider_response(
+  monkeypatch, mode, local_frames,
+):
+  """Only remote model output counts: a CLI-fabricated assistant message (the
+  usage-limit report included), replayed input, system frames and the
+  ResultMessage aggregate never prove that an older quota limit is stale."""
+  frames = {
+    "none": (),
+    "synthetic_limit_error": (AssistantMessage(
+      content=[TextBlock(text="You've hit your usage limit")],
+      model="<synthetic>", error="rate_limit", session_id="sess-1",
+    ),),
+    "synthetic_no_response": (AssistantMessage(
+      content=[TextBlock(text="No response requested.")],
+      model="<synthetic>", session_id="sess-1",
+    ),),
+    "replayed_input": (UserMessage(content="Any news?", uuid="replayed-1"),),
+    "system_frame": (SystemMessage(subtype="init", data={"session_id": "sess-1"}),),
+    "keepalive_ping": (_stream_event({"type": "ping"}),),
+    "unknown_stream_frame": (_stream_event({"type": "future_unknown_event"}),),
+  }[local_frames]
+  result = await _run_claude_stop_outcome(
+    monkeypatch, mode, owned=True, frames=frames,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert "provider_responded" not in result
+
+
+@pytest.mark.asyncio
+async def test_claude_completed_turn_with_model_output_reports_a_provider_response(
+  monkeypatch,
+):
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield AssistantMessage(
+        content=[TextBlock(text="Done.")], model="claude-opus-4-8",
+        session_id="sess-1", message_id="msg-1",
+      )
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("claude-response-complete")
+
+  assert result["error"] is None
+  assert result["provider_responded"] is True
 
 
 @pytest.mark.asyncio
@@ -3921,6 +4057,7 @@ async def test_stop_while_claude_turn_prepares_never_sends_the_prompt(monkeypatc
     result = await task
 
     assert result["prompt_sent"] is False
+    assert "provider_responded" not in result
     assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
     assert all(not client.queries for client in clients)
   finally:
@@ -3953,6 +4090,7 @@ async def test_stop_while_claude_connects_ends_the_turn_before_its_prompt(monkey
     result = await task
 
     assert result["prompt_sent"] is False
+    assert "provider_responded" not in result
     assert clients[0].queries == []
     assert clients[0].disconnected is True
     assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
@@ -3998,6 +4136,7 @@ async def test_stop_that_finds_the_handle_while_connecting_ends_the_turn_cleanly
     assert await stop is True
     result = await task
     assert result["prompt_sent"] is False
+    assert "provider_responded" not in result
     assert clients[0].queries == []
     assert clients[0].disconnected is True
   finally:

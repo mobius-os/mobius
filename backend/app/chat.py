@@ -5479,6 +5479,7 @@ _MEMORY_RECLAIM_DISPOSITIONS = frozenset({
 
 async def _acknowledge_provider_success(
   *, chat_id: str, run_token: str, delivered_through,
+  provider_responded: bool,
   wait_results: tuple[str, ...] = (),
   dependency_results: tuple[str, ...] = (),
   side_question_cids: tuple[str, ...] = (),
@@ -5488,7 +5489,9 @@ async def _acknowledge_provider_success(
   A failed acknowledgement conservatively leaves provider availability limited
   and repeats an already-seen peer note, Wait result or added side question
   on a later turn; it never records success before the provider call has
-  actually returned successfully.
+  actually returned successfully. ``provider_responded`` is the runner's
+  response evidence: without it the carried input is still receipted, but an
+  older quota observation stays in force.
   """
   if not chat_id or not run_token:
     return
@@ -5496,6 +5499,7 @@ async def _acknowledge_provider_success(
     await _await_ack(get_writer().submit(AcknowledgeProviderSuccess(
       chat_id=chat_id,
       run_token=run_token,
+      provider_responded=provider_responded,
       peer_message_through_created_at=(
         delivered_through.created_at if delivered_through is not None else None
       ),
@@ -6758,6 +6762,7 @@ async def _run_chat_impl_with_db(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
+          provider_responded=bool(runner_result.get("provider_responded")),
           wait_results=wait_results,
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,
@@ -6986,6 +6991,7 @@ async def _run_chat_impl_with_db(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
+          provider_responded=bool(runner_result.get("provider_responded")),
           wait_results=wait_results,
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,

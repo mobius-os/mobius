@@ -680,6 +680,69 @@ def test_a_helper_turn_counts_each_of_its_own_model_calls_once(tmp_path):
   }
 
 
+@pytest.mark.parametrize("frames, responded", [
+  ("own_model_output", True),
+  ("own_partial_stream", True),
+  ("own_message_start", True),
+  ("own_keepalive_ping", False),
+  ("dispatcher_output_only", False),
+  ("own_synthetic_limit_error", False),
+])
+def test_a_helper_turn_records_only_its_own_provider_response(
+  tmp_path, frames, responded,
+):
+  """Availability evidence is the helper's own remote model output: the
+  dispatcher's calls and a CLI-synthesized usage-limit report are not it."""
+  from claude_agent_sdk import types as sdk
+
+  messages = {
+    "own_model_output": [sdk.AssistantMessage(
+      content=[sdk.TextBlock(text="x")], model="claude",
+      parent_tool_use_id="toolu_spawn", message_id="msg_1",
+    )],
+    "own_partial_stream": [sdk.StreamEvent(
+      uuid="e1", session_id="s", parent_tool_use_id="toolu_spawn",
+      event={"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "x"}},
+    )],
+    "own_message_start": [sdk.StreamEvent(
+      uuid="e1", session_id="s", parent_tool_use_id="toolu_spawn",
+      event={"type": "message_start", "message": {"id": "msg_1"}},
+    )],
+    "own_keepalive_ping": [sdk.StreamEvent(
+      uuid="e1", session_id="s", parent_tool_use_id="toolu_spawn",
+      event={"type": "ping"},
+    )],
+    "dispatcher_output_only": [sdk.AssistantMessage(
+      content=[sdk.TextBlock(text="dispatcher")], model="claude",
+      message_id="msg_root",
+    )],
+    "own_synthetic_limit_error": [sdk.AssistantMessage(
+      content=[sdk.TextBlock(text="You've hit your usage limit")],
+      model="<synthetic>", parent_tool_use_id="toolu_spawn",
+      error="rate_limit",
+    )],
+  }[frames]
+
+  assert _read_stream(tmp_path, messages).provider_responded is responded
+
+
+@pytest.mark.parametrize("responded", [True, False])
+def test_a_hosted_turn_result_carries_its_provider_response(
+  tmp_path, monkeypatch, responded,
+):
+  def settle(turn, _verb):
+    turn.provider_responded = responded
+    settle.host._on_task_end(turn.agent_id, "completed", None, None)
+
+  turn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+  result = turn("task")
+
+  assert result["error"] is None
+  assert result.get("provider_responded", False) is responded
+
+
 def _settle_with(calls):
   def settle(turn, verb):
     for message_id, usage in calls(verb):
@@ -810,6 +873,8 @@ def test_an_owner_stop_keeps_the_helpers_calls_as_partial_usage(
   assert stopped is True
   assert stopped_agents == ["agent-1"]
   assert result["error"] is None
+  # Its usage was recorded without any observed model output.
+  assert "provider_responded" not in result
   usage = result["usage_metrics"]
   assert (usage["total_tokens"], usage["calculation"]) == (75, "helper_call_sum")
   assert stored == (75, 70, "partial")

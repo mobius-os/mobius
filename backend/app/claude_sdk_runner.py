@@ -88,6 +88,7 @@ from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
   dispatch_sdk_message,
+  is_provider_response,
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
@@ -1240,6 +1241,8 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Whether any frame of this attempt was remote model output (RunnerResult).
+  provider_responded = False
   # The handle for the client currently streaming this turn. Declared in the
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
@@ -1480,7 +1483,7 @@ async def run_claude_sdk_turn(
     return {"continue_": True}
 
   async def _run_once() -> RunnerResult:
-    nonlocal current_session_id, cost_usd, active_client
+    nonlocal current_session_id, cost_usd, active_client, provider_responded
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
     # can park until the STRUCTURED reset time rather than parsing the error
@@ -1749,6 +1752,8 @@ async def run_claude_sdk_turn(
           if first_output_span is not None and isinstance(sdk_msg, (StreamEvent, AssistantMessage)):
             tracing.end_span(first_output_span)
             first_output_span = None
+          if is_provider_response(sdk_msg):
+            provider_responded = True
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -1975,6 +1980,8 @@ async def run_claude_sdk_turn(
               teardown.finish()
 
   result = await _run_once()
+  if provider_responded:
+    result["provider_responded"] = True
   # CLI 2.1.277+ restores the earlier session's cost on resume, and the source
   # session's on a fork. The durable metrics owner has the prior snapshot and
   # derives the additive turn cost from how this session started.

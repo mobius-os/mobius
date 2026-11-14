@@ -283,7 +283,11 @@ class _FakeTurnHandle:
     steer_exc: Exception | None = None,
     interrupt_exc: Exception | None = None,
     stream_exc: Exception | None = None,
+    turn_id: str | None = None,
   ):
+    if turn_id is not None:
+      # The SDK's AsyncTurnHandle carries the accepted turn's stable id.
+      self.id = turn_id
     self._notifications = notifications or []
     self._steer_exc = steer_exc
     self._interrupt_exc = interrupt_exc
@@ -2459,6 +2463,7 @@ def _run_turn_whose_stream_dies(
   notifications=None,
   sdk_patch=None,
   helper_host_key=None,
+  turn_id=None,
 ):
   """Runs one turn whose stream raises `exc`, optionally mid-teardown.
 
@@ -2469,7 +2474,7 @@ def _run_turn_whose_stream_dies(
   turn something to have spent; `sdk_patch` supplies the payload classes
   those notifications need to be recognized as.
   """
-  turn_handle = _FakeTurnHandle(notifications, stream_exc=exc)
+  turn_handle = _FakeTurnHandle(notifications, stream_exc=exc, turn_id=turn_id)
   thread = _FakeThread("thread-1", turn_handle)
 
   class FakeAsyncCodex:
@@ -2816,6 +2821,160 @@ def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
   assert len(result["usage_metrics"]["model_calls"]) == 1
 
 
+class _ResponseDelta:
+  def __init__(self, delta, item_id="item-1"):
+    self.delta = delta
+    self.item_id = item_id
+
+
+class _ResponseItemStarted:
+  def __init__(self, item):
+    self.item = item
+
+
+class _ResponseMcpToolCall:
+  def __init__(self):
+    self.id = "call-request-question"
+    self.server = "mobius_control"
+    self.tool = "request_question"
+    self.arguments = {"question": "Which branch?"}
+
+
+class _ResponseUserMessage:
+  id = "user-echo"
+
+
+class _ResponseTokenUsage:
+  def __init__(self, turn_id):
+    self.turn_id = turn_id
+    self.token_usage = SimpleNamespace(
+      last=SimpleNamespace(
+        input_tokens=200, cached_input_tokens=100, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=300,
+      ),
+      total=SimpleNamespace(
+        input_tokens=200, cached_input_tokens=100, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=300,
+      ),
+      model_context_window=200_000,
+      model_dump=lambda **_kwargs: {},
+    )
+
+
+_RESPONSE_SDK = {
+  "AgentMessageDeltaNotification": _ResponseDelta,
+  "ReasoningTextDeltaNotification": type("_ReasoningDelta", (_ResponseDelta,), {}),
+  "ItemStartedNotification": _ResponseItemStarted,
+  "McpToolCallThreadItem": _ResponseMcpToolCall,
+  "ThreadTokenUsageUpdatedNotification": _ResponseTokenUsage,
+}
+
+
+_STABLE_TURN_ID = "turn-stable-1"
+
+
+@pytest.mark.parametrize("evidence", [
+  "agent_text_delta", "reasoning_delta", "model_tool_call",
+])
+def test_codex_stop_after_model_output_reports_a_provider_response(
+  monkeypatch, evidence,
+):
+  """A Stop can cut a turn the provider was already answering; that partial
+  output (an owner card's tool call included) still proves availability."""
+  payload = {
+    "agent_text_delta": lambda: _ResponseDelta("Looking"),
+    "reasoning_delta": lambda: _RESPONSE_SDK["ReasoningTextDeltaNotification"]("Plan"),
+    "model_tool_call": lambda: _ResponseItemStarted(_ResponseMcpToolCall()),
+  }[evidence]()
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=_mark_interrupted,
+    notifications=[SimpleNamespace(method="item", payload=payload)],
+    sdk_patch=_RESPONSE_SDK,
+    turn_id=_STABLE_TURN_ID,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["provider_responded"] is True
+
+
+@pytest.mark.parametrize("local_frames", [
+  "none", "this_turn_usage", "replayed_earlier_turn_usage", "unknown_turn_usage",
+  "empty_delta", "user_message_echo",
+])
+def test_codex_stop_before_model_output_reports_no_provider_response(
+  monkeypatch, local_frames,
+):
+  """Submitted input that the provider never answered must not read as proof
+  that an older quota limit is stale, whatever preceded Stop. Token usage is
+  accounting, even when stamped with this turn's id: it keeps its metrics
+  attribution but is not model output."""
+  notifications = {
+    "none": [],
+    "this_turn_usage": [_ResponseTokenUsage(_STABLE_TURN_ID)],
+    "replayed_earlier_turn_usage": [_ResponseTokenUsage("earlier-turn")],
+    "unknown_turn_usage": [_ResponseTokenUsage("")],
+    "empty_delta": [_ResponseDelta("")],
+    "user_message_echo": [_ResponseItemStarted(_ResponseUserMessage())],
+  }[local_frames]
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=_mark_interrupted,
+    notifications=[SimpleNamespace(method="item", payload=p) for p in notifications],
+    sdk_patch=_RESPONSE_SDK,
+    turn_id=_STABLE_TURN_ID,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert "provider_responded" not in result
+  if local_frames == "this_turn_usage":
+    # Metrics attribution for this turn's own model call is unchanged.
+    assert len(result["usage_metrics"]["model_calls"]) == 1
+
+
+def test_codex_completed_turn_with_model_output_reports_a_provider_response(
+  monkeypatch,
+):
+  completed_turn = SimpleNamespace(id=_STABLE_TURN_ID, usage=None, error=None)
+  thread = _FakeThread("thread-1", _FakeTurnHandle([
+    SimpleNamespace(method="item", payload=_ResponseDelta("Done.")),
+    SimpleNamespace(method="item", payload=_ResponseTokenUsage(_STABLE_TURN_ID)),
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ], turn_id=_STABLE_TURN_ID))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update(_RESPONSE_SDK)
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-response-complete", bc=_FakeBroadcast(),
+    pending_questions={}, db=None,
+  ))
+
+  assert result["error"] is None
+  assert result["provider_responded"] is True
+
+
 def test_codex_turn_model_call_publishes_live_context_occupancy(monkeypatch):
   """Each of this turn's model calls updates the composer's context gauge
   with the same figure the settled run records for its last call."""
@@ -3057,10 +3216,12 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
     )
   )
 
+  # The provider answered after its own retry, so the turn reports a response.
   assert result == {
     "session_id": "thread-1",
     "cost_usd": None,
     "error": None,
+    "provider_responded": True,
   }
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
@@ -5375,6 +5536,7 @@ def test_a_stop_before_the_codex_turn_starts_reports_the_prompt_unsent(
   assert thread.turn_args is None
   assert result["error"] is None
   assert result["prompt_sent"] is False
+  assert "provider_responded" not in result
 
 
 @pytest.mark.parametrize("delivery", ["notification", "completed"])
