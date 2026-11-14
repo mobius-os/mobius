@@ -328,10 +328,12 @@ export function PrimaryAction({
  *   draftAside         — { set, take }: keeps the draft stored while history
  *                        shows another message, and hands it back.
  *   queuedComposerRef  — caller-owned ref. The bar installs
- *                        `{ open(cid), setAside(cid) }` so the queue tray's
- *                        pencil and × reach the chat box.
- *   onQueuedInComposerChange — receives the cid of the queued message the
- *                        box is editing, or null, for the tray's tag.
+ *                        `{ open(cid), setAside(cid), back(fromKeyboard) }`
+ *                        so the queue tray's pencil, × and Stop editing reach
+ *                        the chat box.
+ *   onQueuedInComposerChange — receives `{ cid, saving }` for the queued
+ *                        message the box is editing, or null, for the tray's
+ *                        Stop editing row.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
@@ -520,10 +522,11 @@ export default function ChatInputBar({
     saveQueued: onSaveQueued,
     draftAside,
   })
-  const { open: openInComposer, setAside: setAsideFromComposer } = composerHistory
+  const { open: openInComposer, setAside: setAsideFromComposer, escape: backToDraft } = composerHistory
 
-  // The queue tray is ChatView's sibling of this bar; its pencil and × reach
-  // the box through this caller-owned ref, like attachTriggerRef above.
+  // The queue tray is ChatView's sibling of this bar; its pencil, × and Stop
+  // editing reach the box through this caller-owned ref, like
+  // attachTriggerRef above.
   useLayoutEffect(() => {
     if (!queuedComposerRef) return undefined
     queuedComposerRef.current = {
@@ -533,16 +536,24 @@ export default function ChatInputBar({
         focusComposerElement(inputRef?.current)
       },
       setAside: setAsideFromComposer,
+      back: (fromKeyboard) => {
+        backToDraft()
+        // Stop editing pressed from the keyboard holds focus, and a collapsed
+        // tray removes its row with it: hand focus back to the box. A tap
+        // never moved focus, and refocusing would raise the phone keyboard.
+        if (fromKeyboard) focusComposerElement(inputRef?.current)
+      },
     }
     return () => { queuedComposerRef.current = null }
-  }, [queuedComposerRef, openInComposer, setAsideFromComposer, inputRef])
+  }, [queuedComposerRef, openInComposer, setAsideFromComposer, backToDraft, inputRef])
 
-  // The tray tags the row open here; a chat box that goes away takes its
-  // tag with it.
+  // The tray marks the row open here; a chat box that goes away takes its
+  // mark with it.
   useEffect(() => {
-    onQueuedInComposerChange?.(composerHistory.queuedKey)
+    const cid = composerHistory.queuedKey
+    onQueuedInComposerChange?.(cid ? { cid, saving: composerHistory.saving } : null)
     return () => onQueuedInComposerChange?.(null)
-  }, [composerHistory.queuedKey, onQueuedInComposerChange])
+  }, [composerHistory.queuedKey, composerHistory.saving, onQueuedInComposerChange])
 
   // Programmatic composer edits arrive through the controlled value boundary.
   // Restore their caret after React commits without changing focus or scroll.
