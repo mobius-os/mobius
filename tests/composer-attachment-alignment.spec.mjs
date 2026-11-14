@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /** Attachments grow above the composer without moving its text or action. */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
@@ -50,13 +51,13 @@ for (const viewport of [{ width: 1512, height: 911 }, { width: 390, height: 844 
       await expect(remove).toBeVisible()
       await expect(painted.locator('.chat__attach-card-spin')).toHaveCount(0)
       await expect.poll(geometry).toEqual(before)
-      await expect(composer).toHaveValue(draft)
+      await expectComposerValue(composer, draft)
       await expect(composer).toBeFocused()
 
       await remove.click()
       await expect(remove).toHaveCount(0)
       await expect.poll(geometry).toEqual(before)
-      await expect(composer).toHaveValue(draft)
+      await expectComposerValue(composer, draft)
       await expect(composer).toBeFocused()
     })
   }
@@ -97,7 +98,7 @@ for (const viewport of [{ width: 1512, height: 911 }, { width: 390, height: 844 
         await expect(painted.locator('.chat__pill')).not.toHaveAttribute('data-composer-tall')
       }
       await expect.poll(horizontalGeometry).toEqual(before)
-      await expect(composer).toHaveValue(draft)
+      await expectComposerValue(composer, draft)
       await expect(composer).toBeFocused()
     }
   })

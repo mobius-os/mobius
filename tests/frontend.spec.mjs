@@ -1,3 +1,4 @@
+import { composerValue, expectComposerValue } from './_composer.mjs'
 /**
  * Core frontend behavior tests.
  *
@@ -91,9 +92,10 @@ test.describe('Input behavior', () => {
     await setup(page)
     await createChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    const editor = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await expectComposerValue(editor, '')
+    const input = page.locator('[data-chat-surface="painted"] .chat__input.chat__markdown-input')
     await input.evaluate(el => {
-      el.value = ''
       el.style.height = '280px'
       el.closest('.chat__pill')?.setAttribute('data-composer-tall', '')
     })
@@ -190,9 +192,7 @@ test.describe('Input behavior', () => {
     await createChat(page)
     await sendMessage(page, 'Test message')
 
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toBe('')
   })
 
@@ -1228,9 +1228,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
     expect(hasEmpty).toBe(true)
 
     // Textarea should still have the text.
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toContain('Line one')
   })
 })
@@ -1269,9 +1267,7 @@ test.describe('Enter key — desktop (no touch)', () => {
     expect(hasEmpty).toBe(true)
 
     // Textarea should have multiline content.
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toContain('Line one')
     expect(value).toContain('\n')
   })

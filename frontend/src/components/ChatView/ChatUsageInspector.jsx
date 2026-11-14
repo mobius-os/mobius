@@ -9,6 +9,7 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { chatQueries, modelQueries } from '../../hooks/queries.js'
+import { catalogProviders } from '../../lib/modelCatalog.js'
 import {
   formatCacheHitRate,
   formatCostUsd,
@@ -234,7 +235,7 @@ export default function ChatUsageInspector({ chatId, onClose }) {
               </button>
             </div>
           ) : query.data ? (
-            <UsageData data={query.data} registry={registryQuery.data} />
+            <UsageData data={query.data} registry={catalogProviders(registryQuery.data)} />
           ) : null}
         </div>
       </div>

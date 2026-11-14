@@ -3,6 +3,7 @@
 import { chatQueries, modelQueries } from '../../../hooks/queries.js'
 import { contextNeverStarted } from '../contextBreakdown.js'
 import { resolvedContextTokenCounts } from '../brainUsage.js'
+import { catalogProviders } from '../../../lib/modelCatalog.js'
 
 /**
  * `tokens` is `{ used, maximum }` or null when unknown. `noSession` means the
@@ -44,7 +45,7 @@ export default function useContextTokens({
   )
   const tokens = resolvedContextTokenCounts(
     contextUsageQuery.isLoading ? null : contextUsageQuery.data,
-    modelRegistryQuery.isLoading ? null : modelRegistryQuery.data,
+    modelRegistryQuery.isLoading ? null : catalogProviders(modelRegistryQuery.data),
     provider,
     model,
     { noSession, live: enabled ? liveContext : null },

@@ -10,6 +10,7 @@ import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import {
   lazy,
   startTransition,
@@ -65,6 +66,7 @@ import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
+  requireDeliveryReady,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -177,12 +179,13 @@ import { steerPendingHint } from './queuedHint.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
-  sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { sendFailureNotice } from './HelperChatSendNotice.jsx'
 import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
@@ -857,7 +860,7 @@ export default function ChatView({
 
   const showMessageMeta = useCallback((event, key) => {
     if (event.defaultPrevented) return
-    if (event.target.closest?.('button, a, input, textarea, select, summary, [role="button"]')) return
+    if (event.target.closest?.(INTERACTIVE_TARGET)) return
     if (window.getSelection?.()?.toString()) return
     if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
     setVisibleMessageMetaKey(key)
@@ -923,11 +926,12 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
-  // tray's pencil and × reach the chat box; it reports which queued message
-  // the box is editing for the tray's "In the chat box" tag.
+  // ChatInputBar installs `{ open(cid), setAside(cid), back(fromKeyboard) }`
+  // here so the queue tray's pencil, × and Stop editing reach the chat box; it
+  // reports which queued message the box is editing and whether it is saving,
+  // for the row that offers Stop editing.
   const queuedComposerRef = useRef(null)
-  const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
+  const [queuedInComposer, setQueuedInComposer] = useState(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -1618,6 +1622,10 @@ export default function ChatView({
   // payload and hydrate only runtime fields — do not replace the transcript.
   const refreshRuntimeState = useCallback(async ({ shared = false } = {}) => {
     if (provisionalNewChatRef.current) return null
+    // Until activation settles it alone reads this chat, and the result below
+    // would be discarded anyway; a focus or recovery nudge during activation
+    // must not spend a runtime read the activation already makes redundant.
+    if (!activationSettledRef.current) return null
     const gen = fetchGenRef.current
     try {
       const read = () => (
@@ -1627,7 +1635,8 @@ export default function ChatView({
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
       if (chatIdStaleRef.current) return null
       // A running status alone must not attach a stream over a transcript that
-      // never loaded; a resumed reply would then look like the whole chat.
+      // never loaded; a resumed reply would then look like the whole chat. An
+      // activation retry can begin while this read is in flight.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
       // Runtime-only reads cannot retire recovery before Resume appends its acknowledged row.
@@ -2961,6 +2970,10 @@ export default function ChatView({
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
+        // The recovery edge retries a visible failed activation at once. A
+        // failure before delivery is confirmed (the startup window) must make
+        // the next ready verdict such an edge rather than wait for quiet retries.
+        requireDeliveryReady()
         if (retry != null) {
           activationRecoveryRef.current.attempts += 1
           activationRecoveryRef.current.timer = setTimeout(retryActivation, retry)
@@ -3334,9 +3347,14 @@ export default function ChatView({
     }
     // A failed send's recovery belongs to the composer's draft; a send from
     // elsewhere only re-reads the transcript, which shows it if it arrived.
-    function keepFailedDraft(failedAttempt) {
+    function keepFailedDraft(failedAttempt, error) {
       if (!fromComposer) return
-      rememberFailedAttempt(failedAttempt)
+      // A helper's chat refuses every owner send, so nothing landed and there
+      // is no delivery to reconcile. Any attempt still remembered (an earlier
+      // lost send of this draft) is settled too, or a later transcript read
+      // would replace the refusal with "send it again".
+      if (isHelperChatSendFailure(error)) clearFailedAttempt()
+      else rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
     }
     function settleAmbiguousFailure(failedAttempt) {
@@ -3590,9 +3608,11 @@ export default function ChatView({
             transportContent: text,
             attachments: composerFileSnapshot,
           }
-          keepFailedDraft(failedAttempt)
+          keepFailedDraft(failedAttempt, err)
         }
-        const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+        const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+          online: getOnlineSnapshot(), onInternalNav: internalNav,
+        })
         setSendFailure(banner)
         if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
         if (modelSelectionBlocked) {
@@ -3805,7 +3825,7 @@ export default function ChatView({
           transportContent: sendText,
           attachments: composerFileSnapshot,
         }
-        keepFailedDraft(failedAttempt)
+        keepFailedDraft(failedAttempt, err)
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
         // same cid with the restored draft so a manual retry can only reconcile
@@ -3817,7 +3837,9 @@ export default function ChatView({
           return next
         })
       }
-      const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+      const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+        online: getOnlineSnapshot(), onInternalNav: internalNav,
+      })
       setSendFailure(banner)
       if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
       if (modelSelectionBlocked) {
@@ -3858,6 +3880,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     acknowledgeFirstMessageAccepted,
+    internalNav,
   ])
 
   useEffect(() => {
@@ -6417,7 +6440,9 @@ export default function ChatView({
             }}
             onRetry={handleRetryRejected}
             onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
-            inComposerCid={queuedInComposerCid}
+            onStopEditing={fromKeyboard => queuedComposerRef.current?.back(fromKeyboard)}
+            inComposerCid={queuedInComposer?.cid ?? null}
+            inComposerSaving={!!queuedInComposer?.saving}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
@@ -6491,12 +6516,14 @@ export default function ChatView({
           onSaveQueued={handleUpdatePending}
           draftAside={composerDraftAside}
           queuedComposerRef={queuedComposerRef}
-          onQueuedInComposerChange={setQueuedInComposerCid}
+          onQueuedInComposerChange={setQueuedInComposer}
           provider={chatInfo?.provider}
           projectRef={chatInfo?.project || null}
           leftButtons={
             <BrainUsageButton
-              usageEnabled={!embedded}
+              // A hidden instance paints no gauge (a handoff cover still
+              // does); it reads usage when it is shown again.
+              usageEnabled={!embedded && (!hidden || keepTranscriptPainted)}
               chatId={chatId}
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
