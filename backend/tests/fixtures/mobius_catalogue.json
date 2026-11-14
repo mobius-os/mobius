@@ -1,0 +1,105 @@
+{
+  "contract_version": 1,
+  "default_model": "evolve",
+  "data": [
+    {
+      "id": "spark",
+      "effort_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "context_window": 262144,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "name": "Spark (Qwen3.8 27B)",
+      "owned_by": "mobius",
+      "default_effort": "medium",
+      "supports_reasoning_summaries": true
+    },
+    {
+      "id": "evolve",
+      "effort_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "context_window": 1000000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "auto_compact_token_limit": 420000,
+      "name": "Evolve (Qwen3.8 Max 0902)",
+      "owned_by": "mobius",
+      "default_effort": "medium",
+      "supports_reasoning_summaries": true
+    },
+    {
+      "id": "reflect",
+      "effort_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "context_window": 1048576,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "auto_compact_token_limit": 420000,
+      "name": "Reflect (DeepSeek V4.1 Flash)",
+      "owned_by": "mobius",
+      "default_effort": "medium",
+      "supports_reasoning_summaries": true
+    },
+    {
+      "id": "flow",
+      "effort_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "context_window": 1048576,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "auto_compact_token_limit": 420000,
+      "name": "Flow (GLM 5.3 Flash)",
+      "owned_by": "mobius",
+      "default_effort": "medium",
+      "supports_reasoning_summaries": true
+    },
+    {
+      "id": "prism",
+      "effort_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "context_window": 1048576,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "auto_compact_token_limit": 420000,
+      "name": "Prism (Gemini 3.8 Flash)",
+      "owned_by": "mobius",
+      "default_effort": "medium",
+      "supports_reasoning_summaries": true
+    }
+  ]
+}

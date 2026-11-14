@@ -414,25 +414,18 @@ def test_mobius_effort_scale_uses_the_public_product_model():
 
 
 @pytest.mark.asyncio
-async def test_mobius_registry_uses_accepted_app_catalog_without_broker_request(
-  tmp_path, monkeypatch,
-):
-  """The accepted declaration owns stable picker IDs, even if the broker differs."""
-  monkeypatch.setattr(
-    providers.MobiusProvider,
-    "check_auth",
-    lambda self, _data_dir: None,
-  )
-
-  class ForbiddenClient:
-    def __init__(self, *args, **kwargs):
-      raise AssertionError("accepted app model discovery must not call the broker")
-
-  monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
-
-  provider = providers.MobiusProvider()
-  rows = await provider.fetch_models(str(tmp_path))
-  assert rows == provider.declaration["models"]
+async def test_mobius_discovery_runs_broker_work_off_the_event_loop(tmp_path, monkeypatch):
+  import threading
+  provider = providers.PROVIDERS["mobius"]
+  event_thread = threading.get_ident()
+  calls = []
+  def refresh(data_dir):
+    assert threading.get_ident() != event_thread
+    calls.append(data_dir)
+    return provider.declaration["models"]
+  monkeypatch.setattr(provider, "_refresh_catalogue", refresh)
+  assert await provider.fetch_models(str(tmp_path)) == provider.declaration["models"]
+  assert calls == [str(tmp_path)]
 
 
 # --- Expired-token refresh (the 401 root cause) -----------------------

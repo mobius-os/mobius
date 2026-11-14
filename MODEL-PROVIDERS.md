@@ -54,23 +54,45 @@ installed providers. The provider identity is the stable local app row ID
 change labels, efforts, context limits, and models, but the accepted declaration
 changes only after the normal reviewed update/Apply boundary.
 
-The Möbius subscription models are not an app declaration. The platform owns
-their catalogue (`backend/app/mobius_models.json`: model names, effort levels,
-context ceilings), and it changes only with a platform release. The built-in
-`mobius` provider serves it through the image-owned identity broker at a fixed
-`http://127.0.0.1:8765/v1` endpoint with no app secret; the broker keeps
-account credentials and signs inference requests. The `identity_broker`
-transport stays valid in a manifest (reserved to the reviewed `identity` app),
-but the registry ignores an installed app's declaration of it. Other connector
-apps use HTTPS and their own encrypted keys. Any model connection can use the
-default-on `GET/PATCH /api/auth/providers/{provider_id}/enabled` switch; for
-an app provider only its declaring app or the owner may change it. Turning one
-off removes it from pickers and blocks new turns without deleting saved chats.
+The Möbius subscription models are not an app declaration. The built-in
+`mobius` provider reads `GET /v1/models` through the local identity broker;
+model changes do not require a client release. The provider identity and
+transport remain platform-owned at `http://127.0.0.1:8765/v1`; service metadata
+cannot change the endpoint, credentials, or runtime. The broker keeps account
+credentials and signs inference requests.
+
+The version-1 service contract supplies `contract_version`, `default_model`,
+and `data`: each model has a stable `id`, `name`, `owned_by: "mobius"`, context
+window, input modalities, effort levels/default, and runtime capabilities.
+An optional `replacements` map declares retired ID → active ID directly.
+Replacement IDs never appear as picker rows; saved selections resolve at use,
+without rewriting chat history, delegations or preferences. Missing successors
+remain unavailable rather than silently choosing the default. Services must
+publish explicit replacements before retiring saved IDs. Existing services
+without this optional field continue to work unchanged.
+
+The existing five-minute model-registry refresh owns discovery; failures retry
+after thirty seconds and preserve the complete last-good snapshot. A private,
+identity-scoped disk cache survives restarts, but cannot cross account changes.
+With no valid snapshot the list is empty: the client does not invent models.
+Defaults and runtime capabilities come from the same snapshot. Each agent run
+owns a temporary frozen SDK catalogue, so another refresh cannot change its
+startup metadata. The SDK template's usable-window ratio is applied equally
+to picker context display; the service may also publish an explicit
+`auto_compact_token_limit`. New wire protocols still require runtime updates.
+
+`GET /api/models` retains `providers` and adds provider-keyed `defaults` and
+`replacements` for picker/background selection. Claude and Codex discovery is
+unchanged. The `identity_broker` manifest transport remains accepted only for
+the reviewed `identity` app but inert; uninstalling that app cannot remove the
+provider. Other connector apps use HTTPS and their own encrypted keys.
+The default-on `GET/PATCH /api/auth/providers/{provider_id}/enabled` switch
+removes a provider from pickers and blocks new turns without deleting chats.
 
 ## Boundaries and next steps
 
 - Claude, Codex and Möbius are built in. The Möbius provider keeps the stable
-  `mobius` identity for existing chats and offers its platform-owned models
+  `mobius` identity for existing chats and offers its service-discovered models
   with no app installed. Both broker and external app connections use the
   Responses harness and one picker/agent registry.
 - The Möbius account (sign-in, profile, deployments) and its **Möbius models**

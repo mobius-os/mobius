@@ -1206,6 +1206,8 @@ class ModelRegistryResponse(BaseModel):
 
   # Map provider id → ordered list of models.
   providers: dict[str, list[ModelEntry]]
+  defaults: dict[str, str] = Field(default_factory=dict)
+  replacements: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class ModelPrefsUpdate(BaseModel):

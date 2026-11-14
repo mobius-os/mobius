@@ -11,13 +11,16 @@ from app.schemas import AgentSettingsOverride, ChatProviderSwitch
 
 
 def _provider():
-  return providers.MobiusProvider()
+  provider = providers.MobiusProvider()
+  provider._publish_catalogue(_catalogue())
+  return provider
 
 
 def _catalogue():
-  return json.loads(
-    (Path(providers.__file__).with_name("mobius_models.json")).read_text()
-  )
+  from app.mobius_catalogue import parse_catalogue
+  return parse_catalogue(json.loads(
+    (Path(__file__).parent / "fixtures" / "mobius_catalogue.json").read_text()
+  ))
 
 
 def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
@@ -127,7 +130,7 @@ def test_subscription_search_uses_codex_native_provider_endpoint():
   assert 'web_search="disabled"' not in overrides
 
 
-def test_subscription_catalog_comes_from_platform_catalogue(tmp_path, monkeypatch):
+def test_subscription_catalog_comes_from_discovered_snapshot(tmp_path, monkeypatch):
   provider = _provider()
   monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
   catalogue = _catalogue()
@@ -145,16 +148,7 @@ def test_subscription_catalog_comes_from_platform_catalogue(tmp_path, monkeypatc
   assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "mobius")
 
 
-def test_platform_catalogue_satisfies_the_published_model_provider_contract():
-  """The catalogue keeps the manifest block's shape so one writer serves both."""
-  from app.manifest_contract import validate_manifest_contract
-
-  validate_manifest_contract({
-    "id": "identity", "name": "Möbius · You", "description": "Catalogue shape",
-    "version": "1.0.0", "entry": "index.jsx",
-    "permissions": {"identity_manage": True},
-    "model_provider": _catalogue(),
-  })
+def test_discovered_catalogue_updates_both_runtime_defaults():
   assert providers.DEFAULT_MODELS["mobius"] == _catalogue()["default_model"]
   assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == _catalogue()["default_model"]
 

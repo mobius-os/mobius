@@ -39,9 +39,10 @@ import json
 import os
 import shutil
 import time
+import tempfile
 import uuid
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1743,6 +1744,7 @@ async def _run_codex_sdk_turn(
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
+  provider_config_overrides: list[str] | None = None,
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
@@ -1893,6 +1895,7 @@ async def _run_codex_sdk_turn(
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(
+    provider_config_overrides if provider_config_overrides is not None else
     get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
   )
   config_overrides.extend(_codex_platform_hook_overrides())
@@ -2891,6 +2894,7 @@ async def run_codex_sdk_turn(
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
+  provider_config_overrides: list[str] | None = None,
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
@@ -2910,7 +2914,31 @@ async def run_codex_sdk_turn(
     data_dir = get_settings().data_dir
 
   ownership = await acquire_codex_session_activity_async(data_dir)
+  catalogue_directory = None
   try:
+    if provider_id == "mobius":
+      from app.providers import PROVIDERS, _fetch_model_entries, _write_responses_catalog
+      import copy
+      await _fetch_model_entries(data_dir, "mobius")
+      provider = copy.copy(PROVIDERS["mobius"])
+      provider.declaration = copy.deepcopy(provider.declaration)
+      if helper_host_key is not None:
+        from app.helper_hosts import setup_digest
+        helper_host_key = replace(helper_host_key, setup=setup_digest(
+          helper_host_key.setup, provider.declaration,
+        ))
+      agent_settings = dict(agent_settings or {})
+      agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
+      if not agent_settings["model"] or not provider.declaration["models"]:
+        return {**prompt_not_sent_result(session_id),
+                "error": "This Möbius model is unavailable. Refresh models and choose a current model."}
+      base_env = {**base_env, "MOBIUS_AGENT_MODEL": agent_settings["model"]}
+      # A concurrent refresh or another chat must not rewrite the catalogue
+      # this app-server reads. The run owns this temporary immutable snapshot.
+      catalogue_directory = tempfile.TemporaryDirectory(prefix="mobius-models-")
+      catalog_path = Path(catalogue_directory.name) / "catalog.json"
+      _write_responses_catalog(catalog_path, provider.declaration, broker=True)
+      provider_config_overrides = provider.codex_config_overrides(catalog_path)
     return await _run_codex_sdk_turn(
       user_message=user_message,
       session_id=session_id,
@@ -2929,12 +2957,15 @@ async def run_codex_sdk_turn(
       run_policy=run_policy,
       connector_plan=connector_plan,
       provider_id=provider_id,
+      provider_config_overrides=provider_config_overrides,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
       helper_host_key=helper_host_key,
       goal_brief_refresh=goal_brief_refresh,
     )
   finally:
+    if catalogue_directory is not None:
+      catalogue_directory.cleanup()
     ownership.release()
     from app.file_cache import reclaim_provider_cache
     await reclaim_provider_cache("codex")
