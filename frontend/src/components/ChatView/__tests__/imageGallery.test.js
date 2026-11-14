@@ -172,6 +172,18 @@ test('lightbox fills its actual overlay and dismisses from every backdrop edge',
   )
 })
 
+test('zoomed lightbox images re-rasterize instead of stretching a promoted layer', () => {
+  const css = lightboxCss.replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.doesNotMatch(
+    css,
+    /\.lightbox-image\s*\{[^}]*will-change/s,
+    'a will-change layer keeps its fitted-size raster, so zoom blurs small text',
+  )
+  assert.match(lightboxSource, /transform: `translate\(\$\{transform\.x\}px, \$\{transform\.y\}px\) scale\(/)
+  assert.doesNotMatch(lightboxSource, /translate3d|translateZ/,
+    'a 3D transform promotes the image the same way will-change does')
+})
+
 test('chat image viewers mount above only their owning chat pane', () => {
   assert.match(panePortalSource, /anchorRef\.current\?\.closest\('\.chat'\)/)
   assert.match(panePortalSource, /createPortal\(children, chat\)/)
