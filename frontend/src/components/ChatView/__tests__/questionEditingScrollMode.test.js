@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import {
   modeForInlineEditorGrowth,
   modeForQuestionEditingViewportChange,
-  modeForQuestionEditorGrowth,
 } from '../scroll/geometry.js'
 
 test('question editing rebases only an ordinary held viewport to native caret movement', () => {
@@ -156,21 +155,12 @@ test('an answer card higher up grows down, and a held-away reader is not moved',
   }), null)
 })
 
-test('upward answer growth is adopted by reading holds and settled pins only', () => {
-  const hold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 480 }
-  assert.equal(modeForQuestionEditorGrowth({ kind: 'ANCHOR_AT', key: 'x', offset: 0 }, hold), hold)
-  assert.equal(modeForQuestionEditorGrowth({ kind: 'PIN_USER_MSG', cid: 'c-1' }, hold), hold)
-
-  for (const owned of [
-    // FOLLOW_BOTTOM already keeps the tail, which is the same upward growth.
-    { kind: 'FOLLOW_BOTTOM' },
-    // An armed pin keeps its reservation handoff to FOLLOW_BOTTOM.
-    { kind: 'PIN_USER_MSG', cid: 'c-1', followWhenFilled: true },
-    // A submitted answer's frozen position is not reopened by layout.
-    { kind: 'ANCHOR_AT', key: 'q', offset: 84, questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' } },
-  ]) {
-    assert.equal(modeForQuestionEditorGrowth(owned, hold), owned)
-  }
-  const anchor = { kind: 'ANCHOR_AT', key: 'x', offset: 0 }
-  assert.equal(modeForQuestionEditorGrowth(anchor, null), anchor)
+test('a card taller than the view grows down when answered from its top', () => {
+  // A grouped card: the field being typed in sits near the top of the view
+  // and the card's lower edge is far below the scroller. Its bottom is not at
+  // the chat bottom, so the field grows down and keeps the caret reveal.
+  const tall = bottomCardTranscript({ scrollTop: 1500, cardBottom: 1800, editorBottom: 120 })
+  assert.equal(modeForInlineEditorGrowth({
+    ...tall, growth: 20, scrollTopBefore: 1500, ...bottomViewport,
+  }), null)
 })

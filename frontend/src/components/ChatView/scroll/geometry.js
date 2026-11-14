@@ -319,10 +319,12 @@ export function modeForInlineEditorReveal({
  * hold applies.
  *
  * "At the bottom" means the card's lower edge was within `bottomBand` of the
- * usable bottom, or beneath the overlaid composer (an open phone keyboard), and
- * the editor's own bottom edge was visible. A card higher up still grows down
- * into the room below it, and a reader holding the card out of view is not
- * moved; both keep the ordinary caret reveal. Returns null when no hold
+ * usable bottom, or beneath the overlaid composer (an open phone keyboard)
+ * but still inside the scroller, and the editor's own bottom edge was
+ * visible. A card higher up still grows down into the room below it, as does
+ * a card taller than the view whose lower edge is below the scroller (a
+ * grouped card answered from its top), and a reader holding the card out of
+ * view is not moved; all keep the ordinary caret reveal. Returns null when no hold
  * applies. Like `modeForInlineEditorReveal`, it derives the target without
  * writing it. */
 export function modeForInlineEditorGrowth({
@@ -355,7 +357,9 @@ export function modeForInlineEditorGrowth({
   if (editorBottomBefore < visibleTop || editorBottomBefore > visibleBottom + 0.5) {
     return null
   }
-  if (cardBottomBefore < visibleBottom - bottomBand) return null
+  const scrollerBottom = scrollEl.getBoundingClientRect?.().bottom
+  if (cardBottomBefore < visibleBottom - bottomBand
+      || !(cardBottomBefore <= scrollerBottom + 0.5)) return null
 
   const layoutDelta = clientLengthToLayout(growth, space)
   if (!Number.isFinite(layoutDelta)) return null
@@ -626,8 +630,8 @@ export function isQuestionSubmissionMode(mode) {
 
 /** A focused custom Q&A answer gives the browser one narrow exception to the
  * ordinary viewport-resize rule: native caret reveal becomes the new exact
- * reading hold instead of being overwritten by the pre-keyboard anchor.
- * Stronger send pins, live following, and the question-submission overlay keep
+ * reading hold instead of being overwritten by the pre-keyboard anchor, and so
+ * does an answer's upward growth at the chat bottom. Stronger send pins, live following, and the question-submission overlay keep
  * their existing ownership contracts. */
 export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
   if (mode?.kind !== 'ANCHOR_AT'
@@ -636,20 +640,6 @@ export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
   if (mode.key === caretAnchor.key
       && Math.abs(mode.offset - caretAnchor.offset) <= 0.5) return mode
   return caretAnchor
-}
-
-
-/** Which modes adopt an upward-growth hold while the owner types an answer.
- * An ordinary reading hold and a settled send pin do: the owner is writing at
- * the bottom and the card must not slide under the composer. FOLLOW_BOTTOM
- * already keeps the tail, which is the same upward growth. An armed pin keeps
- * its reservation handoff to FOLLOW_BOTTOM, and the question-submission
- * overlay keeps its frozen position. */
-export function modeForQuestionEditorGrowth(mode, growthHold = null) {
-  if (!growthHold) return mode
-  if (mode?.kind === 'ANCHOR_AT' && !isQuestionSubmissionMode(mode)) return growthHold
-  if (mode?.kind === 'PIN_USER_MSG' && !mode.followWhenFilled) return growthHold
-  return mode
 }
 
 
