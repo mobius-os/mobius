@@ -51,6 +51,10 @@ try:
     import msvcrt
 except ImportError:  # POSIX uses fcntl above.
     msvcrt = None
+try:
+    import winreg
+except ImportError:  # Only Windows has the registry.
+    winreg = None
 
 CONFIG_DIR = os.path.expanduser("~/.mobius-connect")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -60,11 +64,15 @@ PID_PATH = os.path.join(CONFIG_DIR, "runner.pid")
 LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
+# Windows starts the runner at sign-in from the per-user Run key: no admin
+# rights, no Task Scheduler policy, and removed cleanly on uninstall.
+WINDOWS_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+WINDOWS_RUN_VALUE = "MobiusConnect"
 RUNNER_PROTOCOL_VERSION = 4
 # Increment this for every shipped runner change that an existing installation
 # should receive. Protocol only describes wire compatibility; compatible
 # releases can keep using the same protocol while still offering an update.
-RUNNER_RELEASE = 7
+RUNNER_RELEASE = 8
 # What this runner can do, announced on every stream. Möbius gates behavior on
 # these names, never on release numbers: independently maintained copies of
 # this runner can reach the same release number with different abilities.
@@ -435,19 +443,79 @@ def _install_systemd(py):
     return True
 
 
-def _install_background(py):
-    # Last resort (no launchd/systemd): detached background process. Survives
-    # closing the terminal, but NOT a reboot.
+def _start_detached(py):
+    """Start the runner as a background process that outlives this terminal.
+
+    Its PID file entry is also the handoff: a previous background runner sees
+    that it no longer owns the file and exits (see `_serve_all`), so reinstalling
+    or updating never leaves two runners, and nothing signals a PID that may
+    have been reused by an unrelated process since it was written."""
+    kwargs = {"start_new_session": True}
+    if os.name == "nt":
+        # start_new_session means nothing on Windows; without leaving the
+        # console, closing the PowerShell window would end the runner too.
+        kwargs = {"creationflags": (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )}
     with open(LOG_PATH, "ab") as log:
         proc = subprocess.Popen(
             [py, RUNNER_PATH, "--background-service"], stdout=log, stderr=log,
-            stdin=subprocess.DEVNULL, start_new_session=True,
+            stdin=subprocess.DEVNULL, **kwargs
         )
     with open(PID_PATH, "w", encoding="utf-8") as fh:
         fh.write(str(proc.pid))
+
+
+def _install_background(py):
+    # Last resort (no launchd/systemd): detached background process. Survives
+    # closing the terminal, but NOT a reboot.
+    _start_detached(py)
     print("Started in the background (survives closing this terminal, NOT a reboot).")
     print("  Logs: tail -f %s" % LOG_PATH)
     print("  Uninstall: python3 %s --uninstall" % RUNNER_PATH)
+    return True
+
+
+def _windowless_python(py):
+    # pythonw.exe runs the same interpreter without opening a console window.
+    folder, name = os.path.split(py)
+    if name.lower() == "python.exe":
+        candidate = os.path.join(folder, "pythonw.exe")
+        if os.path.exists(candidate):
+            return candidate
+    return py
+
+
+def _windows_run_command(py):
+    return subprocess.list2cmdline([py, RUNNER_PATH, "--background-service"])
+
+
+def _install_windows(py):
+    py = _windowless_python(py)
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WINDOWS_RUN_KEY) as key:
+            winreg.SetValueEx(
+                key, WINDOWS_RUN_VALUE, 0, winreg.REG_SZ, _windows_run_command(py),
+            )
+    except OSError as exc:
+        print("Could not register Connect to start at sign-in: %s" % exc)
+        return _install_background(py)
+    _start_detached(py)
+    print("Installed: running in the background now, and starts again whenever you sign in to Windows.")
+    print("  Logs:      Get-Content -Wait %s" % LOG_PATH)
+    print("  Uninstall: python %s --uninstall" % RUNNER_PATH)
+    return True
+
+
+def _remove_windows_startup():
+    """Remove the sign-in registration; False when there was none."""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, WINDOWS_RUN_KEY, 0, winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.DeleteValue(key, WINDOWS_RUN_VALUE)
+    except FileNotFoundError:
+        return False
     return True
 
 
@@ -459,6 +527,8 @@ def _install_service(base):
         return _install_launchd(py)
     if system == "Linux":
         return _install_systemd(py)
+    if system == "Windows" and winreg is not None:
+        return _install_windows(py)
     return _install_background(py)
 
 
@@ -509,6 +579,8 @@ def _uninstall_service(stop_running=True):
         if stop_running:
             stop_cmd = ["systemctl", "--user", "stop", "mobius-connect.service"]
         print("Removed systemd service registration.")
+    elif system == "Windows" and winreg is not None and _remove_windows_startup():
+        print("Removed the start-at-sign-in registration.")
 
     pid = _background_pid()
     _remove_file(CONFIG_PATH)
@@ -523,7 +595,7 @@ def _uninstall_service(stop_running=True):
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-    elif stop_running:
+    elif stop_running and os.name != "nt":
         # Compatibility for fallback installs made before PID tracking.
         _run(["pkill", "-f", RUNNER_PATH])
 
@@ -1472,7 +1544,7 @@ def _serve_connection_safe(conn, stop_event=None):
         print("connection to %s stopped: %s" % (conn.get("url"), exc))
 
 
-def _serve_all():
+def _serve_all(background_service=False):
     """Serve every paired connection from this one runner process.
 
     Supervises each connection independently: one live thread per configured
@@ -1486,6 +1558,9 @@ def _serve_all():
     workers = {}  # key -> (thread, stop_event)
     try:
         while True:
+            if background_service and _background_pid() not in (None, os.getpid()):
+                print("A newer background runner took over; exiting.")
+                break
             conns = _connections()
             if not conns:
                 break
@@ -1564,12 +1639,19 @@ def main():
 
     if args.background_service:
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        if sys.stdout is None or sys.stderr is None:
+            # Started at Windows sign-in by pythonw.exe, which has no console:
+            # keep the same log the installer points to.
+            log = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+            sys.stdout = sys.stdout or log
+            sys.stderr = sys.stderr or log
         with open(PID_PATH, "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
     try:
-        _serve_all()
+        _serve_all(background_service=args.background_service)
     finally:
-        if args.background_service:
+        # A runner that handed over leaves its successor's PID file in place.
+        if args.background_service and _background_pid() == os.getpid():
             _remove_file(PID_PATH)
 
 
