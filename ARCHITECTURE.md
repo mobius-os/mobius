@@ -2144,17 +2144,18 @@ The owner may turn on **Full access** for one grant (`full_access`, off by
 default). It lifts exactly one gate, `require_owner_or_full_access_control`,
 for that grant's lineage while `browser_access.has_full_access` holds; it is
 read on every check, so turning it off or revoking applies to the next
-request, including work the guest already started. That gate sits only on the
-workspace lifecycle a connected Möbius with Full access can drive: deleting,
-recovering and compacting chats, app maintenance, skills, settings,
-notifications, project lifecycle and platform updates and restarts.
+request, including work the guest already started. It is a deliberate subset
+of what a connected Möbius with Full access can do, whose agent bearer is the
+owner's own: that gate sits only on workspace lifecycle routes (deleting,
+recovering and compacting chats, app maintenance, settings, notifications,
+project lifecycle, and platform updates and restarts).
 `require_installation_owner_control` itself never admits a guest, so a route
 stays owner-only unless it opts in. By rule, no route that mints a
 credential, makes the owner's own decision (app consent and permissions,
 runtime capabilities, payments), uses the owner's accounts or credit, manages
 sharing or invites of any kind, subscribes to the owner's notifications, or
-creates anything that would outlive the grant (schedules, reminders, hosted
-publications, paired machines) opts in. Shared folders and screen control
+creates anything that would outlive the grant (schedules, reminders, skills,
+hosted publications, paired machines) opts in. Shared folders and screen control
 refuse every guest.
 
 Revocation commits access denial first, then cancels attributed app-service

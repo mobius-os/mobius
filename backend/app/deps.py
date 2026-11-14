@@ -866,13 +866,13 @@ def require_owner_or_full_access_control(
   """``require_installation_owner_control``, or a shared-browser guest (or
   their top-level work) whose grant has Full access, read on every request.
 
-  The only gate Full access lifts. It sits on the workspace lifecycle a
-  connected Möbius with Full access can drive: chats, apps, skills,
-  settings, notifications and platform updates. It never sits on a route
-  that mints a credential, makes the owner's own decision (app consent,
-  runtime capabilities, payments), uses the owner's accounts or credit,
-  manages sharing or invites, subscribes to the owner's notifications, or
-  creates anything that would outlive the grant."""
+  The only gate Full access lifts: workspace lifecycle (chats, app
+  maintenance, settings, notifications, projects, platform updates). It
+  never sits on a route that mints a credential, makes the owner's own
+  decision (app consent, runtime capabilities, payments), uses the owner's
+  accounts or credit, manages sharing or invites, subscribes to the owner's
+  notifications, or creates anything that would outlive the grant (such as
+  schedules, reminders or skills, which steer the owner's agents)."""
   if principal.delegation_id is None and principal.browser is not None:
     with SessionLocal() as db:
       if browser_access.has_full_access(db, principal.browser, principal.owner.id):

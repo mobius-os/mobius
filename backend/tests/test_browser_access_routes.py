@@ -656,6 +656,7 @@ def test_full_access_lifts_only_its_own_gate_for_that_person_while_on(https, aut
     ("post", "/api/projects/p1/invites", {}),
     ("post", "/api/shared-apps/s1/invites", {}),
     ("post", "/api/apps/1/runtime-capabilities/accept", {}),
+    ("post", "/api/skills/install", {}),
     ("post", "/api/apps/1/consent", {"digest": "x"}),
     ("delete", "/api/apps/1/consent", None),
     ("post", "/api/apps/1/credits-charges/p1", {"pay": True}),

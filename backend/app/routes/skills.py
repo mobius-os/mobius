@@ -62,7 +62,7 @@ from app.deps import (
   get_owner_or_app_with_manage_skills,
   get_principal,
   reject_cross_site,
-  require_owner_or_full_access_control,
+  require_nondelegated_owner_or_app_control,
 )
 from app import fs_locks
 from app.manifest_contract import SKILL_MAX_BYTES
@@ -828,7 +828,7 @@ def list_skills(principal=Depends(get_principal)) -> dict:
   "/install", status_code=201,
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_owner_or_full_access_control),
+    Depends(require_nondelegated_owner_or_app_control),
   ],
 )
 async def install_skill(
@@ -1003,7 +1003,7 @@ async def install_skill(
   "/{name}",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_owner_or_full_access_control),
+    Depends(require_nondelegated_owner_or_app_control),
   ],
 )
 async def update_skill(
@@ -1361,7 +1361,7 @@ async def refresh_catalog_index(
   "/{name}",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_owner_or_full_access_control),
+    Depends(require_nondelegated_owner_or_app_control),
   ],
 )
 async def uninstall_skill(
