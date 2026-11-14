@@ -81,6 +81,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { retryHelperRecovery } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
@@ -4391,15 +4392,19 @@ export default function ChatView({
     !activationSettledRef.current
     || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
+  const helperDelegationId = chatInfo?.helper_delegation_id
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
     resumeRequestRef.current = request
     try {
+      if (helperDelegationId) {
+        return await retryHelperRecovery(apiFetch, helperDelegationId, options.resumeRunId)
+      }
       return await sendAfterSettingsSaved(text, attachments, options)
     } finally {
       if (resumeRequestRef.current === request) resumeRequestRef.current = null
     }
-  }, [chatId, sendAfterSettingsSaved])
+  }, [chatId, helperDelegationId, sendAfterSettingsSaved])
   const { resume: handleResume, state: resumeState } = useResume({
     chatId,
     runId: recoveryRunId,

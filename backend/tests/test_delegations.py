@@ -4121,3 +4121,27 @@ def test_queued_helper_result_resolves_a_root_shared_by_several_helpers(db):
   queued = {"role": "user", "hidden": True, "kind": DELEGATION_RESULT_MESSAGE_KIND,
             "source_work_id": "q1", "cid": "delegation-result:x", "content": "r"}
   assert queued_continuation_root(db, "p3", queued) == "q1"
+
+
+def test_helper_retry_identity_is_owner_detail_only(client, owner_token, db):
+  """Recovery finds its delegation without exposing parent metadata to embeds."""
+  from app.routes.chats import _chat_detail_response
+
+  parent = create_chat(id="retry-identity-parent", title="Parent", messages=[])
+  child = create_chat(id="retry-identity-child", title="Helper", messages=[])
+  db.add_all([parent, child])
+  db.add(models.Delegation(
+    id="retry-identity-delegation", parent_chat_id=parent.id,
+    parent_root_run_id="retry-identity-root", task_key="retry-identity",
+    child_chat_id=child.id, provider="codex", scope="write", cwd="/data",
+    prompt_sha256=hashlib.sha256(b"retry identity").hexdigest(),
+  ))
+  db.commit()
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  detail = client.get(f"/api/chats/{child.id}", headers=headers)
+  assert detail.status_code == 200, detail.text
+  assert detail.json()["helper_delegation_id"] == "retry-identity-delegation"
+  ordinary = client.get(f"/api/chats/{parent.id}", headers=headers)
+  assert ordinary.status_code == 200, ordinary.text
+  assert ordinary.json()["helper_delegation_id"] is None
+  assert _chat_detail_response(child, db=db, expose_session=False)["helper_delegation_id"] is None

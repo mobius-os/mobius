@@ -1003,6 +1003,10 @@ def _chat_detail_response(
     # project files activates only for a chat that belongs to a live project.
     "project": _project_ref_for_chat(db, chat),
     "branch_origin": _branch_origin_ref(db, chat),
+    # Retry the existing delegated attempt, never an independent owner turn.
+    "helper_delegation_id": db.query(models.Delegation.id).filter(
+      models.Delegation.child_chat_id == chat.id,
+    ).limit(1).scalar() if expose_session else None,
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
