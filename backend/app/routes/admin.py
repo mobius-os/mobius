@@ -29,7 +29,8 @@ from sqlalchemy.orm import Session
 from app import activity, deployment_control, models, platform_update
 from app.database import get_db
 from app.deps import (
-  get_current_owner, get_current_owner_for_lifecycle_control, get_current_owner_for_full_access_control,
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.restart_util import (
@@ -74,7 +75,7 @@ def read_activity(
   since: str = Query(..., description="ISO8601 lower bound (inclusive)"),
   until: str | None = Query(None, description="ISO8601 upper bound; defaults to now"),
   app_id: int | None = Query(None, description="Filter to one app"),
-  _owner: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Streams the activity log as JSONL within [since, until], optionally
   filtered to one app_id.
@@ -160,7 +161,7 @@ class ContainerCutoverPrepare(BaseModel):
 def emit_activity_event(
   body: ActivityEmit,
   _csrf: None = Depends(reject_cross_site),
-  _owner: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Lets cron scripts (and the rare server-external caller) record an
   activity event via the API instead of writing to the file directly.
@@ -259,7 +260,7 @@ def restart_server(
 )
 async def prepare_external_container_cutover(
   body: ContainerCutoverPrepare,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Park exact live runs for a root-opened Host replacement.
 
@@ -311,7 +312,7 @@ async def rebuild_status(
   dependencies=[Depends(reject_cross_site)],
 )
 async def withdraw_host_rebuild_request(
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Withdraw a queued host request the replacement helper never claimed.
 
@@ -336,7 +337,7 @@ async def withdraw_host_rebuild_request(
 )
 def prepare_container_replacement(
   body: ContainerReplacementPrepare,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Drain active turns before the root-owned host job cuts over.
 

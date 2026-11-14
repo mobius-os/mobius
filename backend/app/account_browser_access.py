@@ -3,7 +3,6 @@
 import base64
 import hashlib
 import hmac
-import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -18,7 +17,6 @@ from app import browser_access as access
 from app.config import get_settings
 from app.timeutil import now_naive_utc
 
-log = logging.getLogger(__name__)
 PENDING_TTL = timedelta(minutes=10)
 
 
@@ -274,8 +272,5 @@ async def leave(db: Session, pending_id: str) -> access.BrowserAccessGrant:
   except Exception:
     db.rollback()
     raise
-  grant = access.revoke_grant(db, grant.id, grant.owner_id)
-  ended = await access.end_grant(db, grant)
-  if ended.stop_error is not None:
-    log.warning("browser grant %s left; stopping its work failed: %r", grant.id, ended.stop_error)
+  grant, _ended = await access.revoke_and_end(db, grant.id, grant.owner_id)
   return grant

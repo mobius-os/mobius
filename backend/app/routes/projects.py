@@ -1917,7 +1917,7 @@ def list_project_agent_messages(
 def send_project_agent_message(
   project_id: str,
   body: ProjectAgentMessageCreate,
-  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)

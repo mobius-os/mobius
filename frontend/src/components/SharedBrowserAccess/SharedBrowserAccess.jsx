@@ -111,7 +111,7 @@ export default function SharedBrowserAccess({ initialEntry = null }) {
     <section className="shared-browser-access__card">
       <h1>{title}</h1>
       {status === 'leave-confirm' && <>
-        <p>After mobius.you confirms it’s you, your access to this Möbius ends in every browser, and anything you started here is stopped. It disappears from your Shared with me list.</p>
+        <p>After mobius.you confirms it’s you, your access to this Möbius ends in every browser, and anything you started here is stopped. mobius.you then removes it from your Shared with me list.</p>
         <p>To come back, the owner has to invite you again. Close this tab to keep your access.</p>
         {/* A same-origin POST, so a link from another site alone never leaves. */}
         <form method="post" action={`${BASE}/api/connect/browser-access/session/account/leave/start?grant_id=${encodeURIComponent(entry.value)}`}>

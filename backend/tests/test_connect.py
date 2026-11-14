@@ -578,6 +578,29 @@ async def test_outbound_revoke_ends_local_access_when_remote_is_unreachable(
   assert stopped[0] == profile_id
 
 
+def test_overlapping_outbound_revokes_both_succeed(tmp_path, monkeypatch):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"connections": [{"url": "https://friend.example", "host_id": "h", "token": "t"}]},
+  )
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: None)
+
+  def other_revoke_finishes_first(_config):
+    # The other revoke discards the profile while this notice is in flight.
+    with connect_outbound._lock:
+      connect_outbound._discard(profile_id)
+
+  monkeypatch.setattr(connect_outbound, "_disconnect_remote", other_revoke_finishes_first)
+  assert connect_outbound._revoke_profile(profile_id) is True
+  assert not connect_outbound._profile_dir(profile_id).exists()
+
+
 def test_outbound_revoke_stops_runner_before_contacting_remote(
   tmp_path, monkeypatch,
 ):

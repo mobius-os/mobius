@@ -528,12 +528,12 @@ def _disconnect_remote(config: dict) -> None:
     base_url = connect_runner._validated_base_url(str(config.get("url") or ""))
   except ValueError as exc:
     raise OutboundConnectError(
-      "The saved Connect address is invalid, so access was kept.",
+      "The saved Connect address is invalid, so the other Möbius wasn’t told.",
     ) from exc
   token = str(config.get("token") or "")
   if not token:
     raise OutboundConnectError(
-      "The saved Connect credential is missing, so access was kept.",
+      "The saved Connect credential is missing, so the other Möbius wasn’t told.",
     )
   request = urllib.request.Request(
     base_url + "/api/connect/disconnect",
@@ -552,11 +552,11 @@ def _disconnect_remote(config: dict) -> None:
   except urllib.error.HTTPError as exc:
     if exc.code not in (401, 403, 404):
       raise OutboundConnectError(
-        "Couldn’t confirm revocation with the other Möbius, so access was kept.",
+        "Couldn’t confirm revocation with the other Möbius.",
       ) from exc
   except (OSError, ValueError, urllib.error.URLError) as exc:
     raise OutboundConnectError(
-      "Couldn’t confirm revocation with the other Möbius, so access was kept.",
+      "Couldn’t confirm revocation with the other Möbius.",
     ) from exc
 
 
@@ -596,7 +596,9 @@ def _revoke_profile(profile_id: str) -> bool:
     _atomic_json(_meta_path(profile_id), {**meta, "status": "revoking"})
   notified = already_revoked or _notify_remote(profile_id)
   with _lock:
-    _discard(profile_id)
+    # A concurrent revoke of the same profile may have discarded it already.
+    if _profile_dir(profile_id).exists():
+      _discard(profile_id)
   return notified
 
 

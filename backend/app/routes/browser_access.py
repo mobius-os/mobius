@@ -2,7 +2,6 @@
 
 from datetime import timedelta
 from typing import Literal
-import logging
 from urllib.parse import urlsplit, quote
 import re
 import secrets
@@ -21,7 +20,6 @@ from app.deps import (
   require_installation_owner_control, reject_cross_site,
 )
 
-log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/connect/browser-access", tags=["connect"])
 _limiter = Limiter(key_func=get_remote_address)
 _COOKIE = "mobius_shared_browser"
@@ -104,7 +102,8 @@ def _grant_view(db: Session, grant) -> dict:
     "kind": grant.kind,
     "recipient_handle": grant.recipient_handle,
     "directory_cleanup_pending": grant.remote_status == "cleanup_pending",
-    "full_access": bool(grant.full_access),
+    # Full access is offered only on account grants (see has_full_access).
+    "full_access": bool(grant.full_access) if grant.kind == "account" else None,
   }
 
 
@@ -376,6 +375,8 @@ def update_browser_grant(
     raise HTTPException(404, "No such shared access.")
   if grant.revoked_at is not None:
     raise HTTPException(409, "This access was revoked.")
+  if grant.kind != "account":
+    raise HTTPException(409, "Full access needs a mobius.you account grant.")
   grant.full_access = body.full_access
   db.commit()
   return JSONResponse({"grant": _grant_view(db, grant)}, headers=_NO_STORE)
@@ -385,12 +386,7 @@ def update_browser_grant(
 async def revoke_browser_access(
   grant_id: str, owner: models.Owner = Depends(_manager), db: Session = Depends(get_db),
 ):
-  grant = access.revoke_grant(db, grant_id, owner.id)
-  # The revoke is committed before cleanup, so a failed stop step is reported
-  # as unfinished stopping (retryable), never as access that was kept.
-  ended = await access.end_grant(db, grant)
-  if ended.stop_error is not None:
-    log.warning("browser grant %s revoked; stopping its work failed: %r", grant.id, ended.stop_error)
+  grant, ended = await access.revoke_and_end(db, grant_id, owner.id)
   if not (ended.stop_pending or ended.directory_cleanup_pending):
     return Response(status_code=204)
   body = {

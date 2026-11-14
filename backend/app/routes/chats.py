@@ -85,7 +85,8 @@ from app.helper_transcripts import read_helper_conversation
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
-  Principal, get_current_owner_for_full_access_control,
+  Principal, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, get_principal,
   reject_cross_site, require_nondelegated_owner_control,
@@ -2976,7 +2977,7 @@ async def recover_chat(
 async def switch_chat_provider(
   body: ChatProviderSwitch,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Have the incoming provider prepare and atomically commit a handoff.
@@ -3210,7 +3211,7 @@ async def _compact_chat_locked(
 async def compact_chat(
   chat_id: str,
   body: ChatCompactRequest | None = None,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Compact the next turn while keeping the old two-call switch compatible.
@@ -3375,7 +3376,7 @@ async def ask_chat_side_question(
   chat_id: str,
   body: SideQuestionAsk,
   request: Request,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Answer a ``/btw`` question from a temporary copy of this chat.
@@ -3432,7 +3433,7 @@ async def ask_chat_side_question(
 async def keep_chat_side_question(
   chat_id: str,
   body: SideQuestionKeep,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Add a side question's answer to the transcript ("Add to chat").

@@ -30,7 +30,8 @@ from starlette.background import BackgroundTask
 from app import auth, deployment_control, models, platform_activation, platform_update
 from app.database import SessionLocal, get_db
 from app.deps import (
-  get_current_owner, get_current_owner_for_full_access_control,
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.platform_update import (
@@ -298,7 +299,7 @@ async def apply_platform_update(
 async def rebuild_reviewed_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Rebuild the container for the reviewed update target.
 
@@ -344,7 +345,7 @@ async def rebuild_reviewed_platform_update(
 @router.post("/park-for-agent", dependencies=[Depends(reject_cross_site)])
 async def park_platform_update_for_agent(
   request: PlatformApplyIn,
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> platform_update.UnfinishedUpdate:
   """Park a reviewed, blocked update on a frozen copy for its resolver chat."""
   try:
@@ -386,7 +387,7 @@ async def cancel_unfinished_platform_update(
   status_code=204,
 )
 async def keep_settling_platform_update(
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> None:
   """Keep a settling update whose container replacement can no longer be
   confirmed: the owner's explicit decision when the controller is unavailable."""
@@ -407,7 +408,7 @@ class ConflictResolverChatIn(BaseModel):
 async def create_platform_conflict_resolver_chat(
   request: ConflictResolverChatIn | None = None,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_full_access_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> PlatformConflictResolverChatOut:
   """Create or return the resolver chat for a recorded platform update conflict."""
   try:
