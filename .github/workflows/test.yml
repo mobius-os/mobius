@@ -413,7 +413,9 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
       - name: Install frontend deps
         # Required because themeService.test.js transitively imports
         # @tanstack/react-query (via hooks/queries.js). Without
@@ -423,6 +425,15 @@ jobs:
         # hijacked release would otherwise run code here on install.
         working-directory: frontend
         run: npm ci --ignore-scripts
+      - name: Install root test deps
+        # The root lockfile provides Playwright for the browser harness unit
+        # tests and the mounted Shell test. Browsers come from the next step,
+        # so no package needs its install script.
+        run: npm ci --ignore-scripts
+      - name: Install Playwright browsers
+        # Shell/__tests__/chatOpenRequests.test.js drives the real app in
+        # Chromium and fails in CI without it; same install as the e2e job.
+        run: npx playwright install --with-deps chromium
       - name: Audit frontend runtime dependencies
         working-directory: frontend
         run: |
@@ -462,11 +473,6 @@ jobs:
         run: npm run test:packager
       - name: Run dependency safety check tests
         run: node --test 'scripts/dependency-safety/*.test.mjs'
-      - name: Install browser harness deps
-        # The harness imports Playwright helpers even though it does not launch
-        # a browser. Install the root lockfile instead of relying on the
-        # unrelated frontend dependency tree to provide that package.
-        run: npm ci --ignore-scripts
       - name: Run browser harness unit tests
         run: npm run test:e2e-harness
 
