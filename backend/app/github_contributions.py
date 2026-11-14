@@ -37,7 +37,7 @@ from app import (
   settled,
 )
 from app.config import get_settings
-from app.contribution_errors import ContributionSubmitError, push_rejected
+from app.contribution_errors import ContributionSubmitError, push_gate_refused, push_rejected
 from app.github_connection import has_full_pr_access
 from app.manifest_identity import RAW_GITHUB_HOST, parse_root_manifest
 from app.terminal_output import readable_output
@@ -4514,7 +4514,7 @@ def _submit_prepared_pr(
               repo, push_remote, branch, push_source_sha, remote_before_push,
             )
         except _git_ops.PushGateRefused as exc:
-          last_push_error, gate_refused = exc.detail or exc.message, True
+          last_push_error, gate_refused = exc.transcript or exc.message, True
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4565,7 +4565,8 @@ def _submit_prepared_pr(
                 "head_repository": upstream_repo, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            explain = push_gate_refused if gate_refused else push_rejected
+            raise explain(last_push_error, record_patch=record_patch)
 
     else:
       if public_branch_recovery:
@@ -4629,7 +4630,7 @@ def _submit_prepared_pr(
               repo, branch, push_source_sha, remote_before_push,
             )
         except _git_ops.PushGateRefused as exc:
-          last_push_error, gate_refused = exc.detail or exc.message, True
+          last_push_error, gate_refused = exc.transcript or exc.message, True
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4680,7 +4681,8 @@ def _submit_prepared_pr(
                 "head_repository": fork_slug, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            explain = push_gate_refused if gate_refused else push_rejected
+            raise explain(last_push_error, record_patch=record_patch)
 
       published_repo = fork_slug
     pushed_branch_url = (
@@ -5119,15 +5121,16 @@ def _push_stack_tip_with_lease(
 ) -> None:
   """Atomically advance one unchanged upstream ref to a proven stack tip."""
   remote = f"https://github.com/{upstream_repo}.git"
+  ref = f"refs/heads/{target_branch}"
+  # The gate runs once, before any attempt: a retry only re-sends the push,
+  # so a refusal can never follow an attempt whose outcome is unknown.
+  _git_ops._pre_push_gate(repo, remote, landed_sha, ref, expected_base)
   last_error = ""
   last_actual = expected_base
   saw_ambiguous_attempt = False
   for attempt in range(_PUSH_RETRIES):
     try:
-      proc = _git_ops.push(
-        repo, remote, landed_sha, f"refs/heads/{target_branch}",
-        lease=expected_base,
-      )
+      proc = _git_ops._send_push(repo, remote, landed_sha, ref, expected_base)
     except (subprocess.TimeoutExpired, OSError) as exc:
       proc = None
       last_error = str(exc)

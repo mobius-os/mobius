@@ -119,7 +119,7 @@ def test_a_commit_made_during_the_gate_is_not_what_gets_pushed(checkout, tmp_pat
   remote = bare_remote(tmp_path)
   reviewed = head_of(checkout)
 
-  assert git_ops.push(checkout, str(remote), reviewed, "refs/heads/topic").returncode == 0
+  assert git_ops.push(checkout, str(remote), reviewed, "refs/heads/topic", lease="").returncode == 0
 
   assert head_of(checkout) != reviewed  # the gate did commit
   assert branch_at(remote) == reviewed
@@ -130,7 +130,7 @@ def test_a_refusing_gate_stops_the_push_with_its_output(checkout, tmp_path):
   remote = bare_remote(tmp_path)
 
   with pytest.raises(git_ops.PushGateRefused) as refused:
-    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic")
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
 
   assert "verdict=blocked" in refused.value.detail
   assert branch_at(remote) is None
@@ -142,7 +142,7 @@ def test_a_gate_that_does_not_finish_is_refused_not_ambiguous(checkout, tmp_path
   remote = bare_remote(tmp_path)
 
   with pytest.raises(git_ops.PushGateRefused):
-    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic")
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
   assert branch_at(remote) is None
 
 
@@ -150,7 +150,7 @@ def test_nothing_the_gate_starts_outlives_it(checkout, tmp_path):
   pid_file = tmp_path / "child"
   install_hook(checkout, f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\n")
 
-  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic")
+  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic", lease="")
 
   stat = Path(f"/proc/{pid_file.read_text().strip()}/stat")
   assert not stat.exists() or stat.read_text().split(") ", 1)[1].startswith("Z")
@@ -172,7 +172,7 @@ def test_the_gate_cannot_find_gh_credentials_in_the_home(checkout, tmp_path, mon
   assert "home-token" in record.read_text()
   install_hook(checkout, reader.read_text())
 
-  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic")
+  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic", lease="")
 
   assert "home-token" not in record.read_text()
 
@@ -193,7 +193,7 @@ def test_the_platform_gate_refuses_a_reverted_private_path_without_the_token(
   remote = bare_remote(tmp_path)
 
   with pytest.raises(git_ops.PushGateRefused) as refused:
-    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic")
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
 
   assert "verdict=blocked cause=privacy" in refused.value.detail
   assert "GH_TOKEN" not in record.read_text()
@@ -240,7 +240,7 @@ def test_a_remote_receive_pack_never_runs(checkout, tmp_path, https_only):
   assert marker.exists()
   marker.unlink()
 
-  pushed = git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic")
+  pushed = git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic", lease="")
   assert pushed.returncode != 0
   assert not marker.exists()
 

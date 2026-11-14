@@ -6831,13 +6831,15 @@ def test_git_push_timeout_outlives_the_mandatory_pre_push_gate(
   monkeypatch.setattr(contribution_git.subprocess, "Popen", Popen)
 
   contribution_git._git(tmp_path, "status", "--porcelain")
-  contribution_git.push(tmp_path, "origin", "a" * 40, "refs/heads/demo")
+  contribution_git.push(tmp_path, "origin", "a" * 40, "refs/heads/demo", lease="")
 
   ordinary = calls[0][1]["timeout"]
   push = calls[-1]
   # The gate runs as its own local step, before and apart from the push, and
   # both keep the long deadline the gate needs.
-  assert push[0][3:] == ["push", "origin", f"{'a' * 40}:refs/heads/demo"]
+  assert push[0][3:] == [
+    "push", "--force-with-lease=refs/heads/demo:", "origin", f"{'a' * 40}:refs/heads/demo",
+  ]
   assert waits[0] == contribution_git._PUSH_TIMEOUT > ordinary
   assert push[1]["timeout"] == contribution_git._PUSH_TIMEOUT
   assert ordinary == contribution_git._SUBMIT_TIMEOUT
@@ -10463,8 +10465,16 @@ def test_definite_push_rejection_rearms_signed_attempt(
   assert "last_submit_stage" not in events[1][2]
 
 
+@pytest.mark.parametrize("transcript, code, says", [
+  ("fatal: unable to access: HTTP 503\n"
+   "[pre-push] verdict=blocked cause=checks checks=frontend-unit\n",
+   None, "frontend-unit"),
+  ("fatal: unable to access: HTTP 503\n"
+   "The pre-push checks did not finish within 900 seconds.\n",
+   "push_gate_refused", "checks Möbius runs before publishing did not pass"),
+])
 def test_a_refusing_pre_push_gate_is_a_rejection_never_ambiguous(
-  tmp_path, monkeypatch,
+  tmp_path, monkeypatch, transcript, code, says,
 ):
   """The gate ran locally, so even transport words in its transcript prove nothing left."""
   record, diff_path, branch, head = _existing_fork_submission(
@@ -10474,10 +10484,7 @@ def test_a_refusing_pre_push_gate_is_a_rejection_never_ambiguous(
   events = []
 
   def refuse(*_a, **_k):
-    raise github_contributions._git_ops.PushGateRefused(
-      "fatal: unable to access: HTTP 503\n"
-      "[pre-push] verdict=blocked cause=checks checks=frontend-unit\n"
-    )
+    raise github_contributions._git_ops.PushGateRefused(transcript)
   monkeypatch.setattr(
     github_contributions,
     "_authoritative_public_reconciliation",
@@ -10512,8 +10519,9 @@ def test_a_refusing_pre_push_gate_is_a_rejection_never_ambiguous(
   assert events[0][1]["branch"] == branch
   assert events[0][2]["last_submit_push_sha"] == head
   assert events[1][1]["action"] == "push_rejected"
-  assert caught.value.code != "push_ambiguous"
-  assert "frontend-unit" in caught.value.message
+  assert caught.value.code == code
+  assert says in caught.value.message
+  assert "GitHub would not accept" not in caught.value.message
   assert "last_submit_stage" not in events[1][2]
 
 
@@ -11575,6 +11583,42 @@ def test_stack_tip_push_uses_exact_base_lease(monkeypatch, tmp_path):
   )]
 
 
+def test_stack_tip_retry_never_reruns_the_gate_after_an_unknown_attempt(
+  monkeypatch, tmp_path,
+):
+  """A timed-out first push stays unconfirmed: the gate ran once, before it."""
+  from app import github_contribution_git as contribution_git
+  from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
+
+  gates = []
+  sends = iter((
+    subprocess.TimeoutExpired("git push", 900),
+    _cp("", returncode=1, stderr="[pre-push] verdict=blocked cause=checks checks=x"),
+  ))
+
+  def send(*_args):
+    outcome = next(sends)
+    if isinstance(outcome, BaseException):
+      raise outcome
+    return outcome
+
+  def unreadable(*_args, **_kwargs):
+    raise OSError("GitHub unreachable")
+
+  monkeypatch.setattr(contribution_git, "_pre_push_gate", lambda *a: gates.append(a))
+  monkeypatch.setattr(contribution_git, "_send_push", send)
+  monkeypatch.setattr(contribution_git, "_upstream_branch_sha", unreadable)
+  monkeypatch.setattr("app.github_contributions.time.sleep", lambda _s: None)
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _push_stack_tip_with_lease(
+      tmp_path, upstream_repo="mobius-os/app-demo", target_branch="main",
+      expected_base="b" * 40, landed_sha="c" * 40,
+    )
+  assert caught.value.code == "landing_unconfirmed"
+  assert len(gates) == 1
+
+
 def test_stack_tip_push_reconciles_a_lost_success_response(monkeypatch, tmp_path):
   from app.routes.github import _push_stack_tip_with_lease
 
@@ -11643,6 +11687,8 @@ def test_stack_tip_push_keeps_journal_when_transport_and_probe_raise(
   """Raised transport errors remain an ambiguous public outcome."""
   from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
 
+  # The transport step alone: the gate ran, and passed, before it.
+  monkeypatch.setattr("app.github_contribution_git._pre_push_gate", lambda *_a: None)
   monkeypatch.setattr("app.github_contributions._PUSH_RETRIES", 1)
   monkeypatch.setattr(
     "app.github_contribution_git._git",
@@ -11676,6 +11722,8 @@ def test_stack_tip_push_timeout_stays_ambiguous_when_probe_is_still_old(
   """An early old-tip read cannot prove a timed-out push will not land later."""
   from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
 
+  # The transport step alone: the gate ran, and passed, before it.
+  monkeypatch.setattr("app.github_contribution_git._pre_push_gate", lambda *_a: None)
   monkeypatch.setattr("app.github_contributions._PUSH_RETRIES", 1)
   monkeypatch.setattr(
     "app.github_contribution_git._git",

@@ -18,7 +18,7 @@ from typing import Callable, Iterator
 from urllib.parse import quote
 
 from app import app_git, github_auth
-from app.contribution_errors import ContributionSubmitError
+from app.contribution_errors import ContributionSubmitError, push_gate_refused
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
@@ -212,51 +212,64 @@ def _git(
 class PushGateRefused(ContributionSubmitError):
   """The repository's pre-push gate refused or did not finish; nothing was pushed."""
 
-  def __init__(self, detail: str):
-    super().__init__(
-      "The checks Möbius runs before publishing refused this push. "
-      "Nothing was published.",
-      code="push_gate_refused", detail=detail,
-    )
+  def __init__(self, transcript: str):
+    refused = push_gate_refused(transcript)
+    super().__init__(refused.message, code=refused.code, detail=refused.detail)
+    self.transcript = transcript
 
 
 def push(
-  repo: Path, remote: str, commit: str, ref: str, *, lease: str | None = None,
+  repo: Path, remote: str, commit: str, ref: str, *, lease: str,
 ) -> subprocess.CompletedProcess:
-  """Push one exact commit to ``ref``, behind the repository's pre-push gate.
+  """Push one exact commit to ``ref`` behind the repository's pre-push gate.
 
-  Hooks are inert for the token-bearing push, so the gate runs first as its
-  own local step on the same commit id the push then sends: nothing the gate
-  (or anything else) commits meanwhile can change what is published.
-  ``lease`` is the expected remote tip ("" for absent); None pushes without
-  one. Raises ``PushGateRefused`` when the gate refuses or times out, and
-  otherwise returns the push's result unchecked.
+  The gate runs once, as its own local step, then the token-bearing push
+  sends the same commit id. ``lease`` is the expected remote tip ("" for
+  absent). Raises ``PushGateRefused`` when the gate refuses or times out,
+  and otherwise returns the push's result unchecked.
   """
+  _pre_push_gate(repo, remote, commit, ref, lease)
+  return _send_push(repo, remote, commit, ref, lease)
+
+
+def _send_push(
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
+) -> subprocess.CompletedProcess:
+  """The network push alone, hooks inert; callers run the gate first."""
   if not _FULL_GIT_OID.match(commit):
     raise ContributionSubmitError("Only an exact commit id can be pushed.")
-  _pre_push_gate(repo, remote, commit, ref, lease)
-  lease_args = () if lease is None else (f"--force-with-lease={ref}:{lease}",)
-  return _git(repo, "push", *lease_args, remote, f"{commit}:{ref}", check=False)
+  return _git(
+    repo, "push", f"--force-with-lease={ref}:{lease}", remote, f"{commit}:{ref}",
+    check=False,
+  )
 
 
 def _pre_push_gate(
-  repo: Path, remote: str, commit: str, ref: str, lease: str | None,
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
 ) -> None:
   """Run the pre-push hook Git would run, as a pre-push hook, without credentials.
 
   It is the hook in the repository's common hooks directory, where Git looks
   when the checkout does not redirect hooks and where the platform installs
-  its gate. It runs in its own process group, which is killed when it ends,
-  so nothing it starts outlives it into the token-bearing push.
+  its gate. Like Git, it passes the pushed commit on stdin; checks the hook
+  makes of HEAD or the working tree see the checkout as it is, as they did
+  inside a push. It runs in its own process group, which is killed when it
+  ends, so nothing it starts outlives it into the token-bearing push.
   """
-  common = _git(
-    repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
-  ).stdout.strip()
-  hook = Path(common) / "hooks" / "pre-push"
-  if not (hook.is_file() and os.access(hook, os.X_OK)):
-    return
-  named = _git(repo, "remote", "get-url", remote, check=False)
+  try:
+    common = _git(
+      repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ).stdout.strip()
+    hook = Path(common) / "hooks" / "pre-push"
+    if not (hook.is_file() and os.access(hook, os.X_OK)):
+      return
+    named = _git(repo, "remote", "get-url", remote, check=False)
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    # Still local: nothing was sent, so this is a refusal, never ambiguous.
+    raise PushGateRefused(f"Git could not prepare the pre-push checks: {exc}") from exc
   url = named.stdout.strip() if named.returncode == 0 else remote
+  if not _FULL_GIT_OID.match(commit):
+    raise ContributionSubmitError("Only an exact commit id can be pushed.")
   line = f"{commit} {commit} {ref} {lease or '0' * 40}\n"
   with _scratch_home(_git_env(repo)) as env, \
       tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as output:
