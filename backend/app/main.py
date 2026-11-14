@@ -86,6 +86,8 @@ from app import activity, models, stall_recorder, tracing
 from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
   app_consent_router,
+  agent_gateway_router,
+  app_agent_router,
   app_tools_router,
   auth_router, browser_access_router,
   app_chat_router,
@@ -1062,6 +1064,9 @@ class _OpaqueOriginCorsMiddleware:
 
 
 app.add_middleware(_OpaqueOriginCorsMiddleware)
+# A confined app agent's key reaches only its role's allow-list.
+from app.agent_roles import AgentKeyScope  # noqa: E402
+app.add_middleware(AgentKeyScope)
 
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
@@ -1098,6 +1103,8 @@ app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
+app.include_router(agent_gateway_router)
+app.include_router(app_agent_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)

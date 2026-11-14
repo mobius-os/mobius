@@ -5,7 +5,7 @@ import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import bcrypt
 import jwt
@@ -244,6 +244,42 @@ def create_app_token(
   return create_access_token(
     claims,
     expires_delta=expires_delta,
+    token_epoch=token_epoch,
+    browser=browser,
+  )
+
+
+def create_app_agent_token(
+  app_id: int,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  app_nonce: str | None,
+  consent: str | None,
+  chat_id: str,
+  run_id: str,
+  grant: dict[str, Any],
+  browser: BrowserLineage | None = None,
+) -> str:
+  """The key of one confined app agent run (``agent_roles.AgentKey``).
+
+  It is the app's own credential, with nonce and consent checked like the
+  app's frame token, bound to the run like ``create_agent_token`` so it
+  expires with the physical run. ``grant`` names the role, tools and provider
+  the run's room was built for; the key allow-list and the Agent Gateway
+  enforce them.
+  """
+  claims = {
+    "sub": owner_username, "scope": "app", "app_id": app_id,
+    "agent_chat": chat_id, "agent_run": run_id, **grant,
+  }
+  if app_nonce is not None:
+    claims["app_nonce"] = app_nonce
+  if consent is not None:
+    claims["consent"] = consent
+  return create_access_token(
+    claims,
+    expires_delta=AGENT_RUN_TOKEN_TTL,
     token_epoch=token_epoch,
     browser=browser,
   )

@@ -792,6 +792,62 @@ stages the app. Source: `backend/app/app_consent.py`.
   grants still apply before the owner answers; local and agent-built apps are
   not gated; there is no Settings screen for revoking.
 
+## App agent roles
+
+An app's `agent_role` decides what every agent it starts can reach (manifest
+shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
+`backend/app/agent_gateway.py` and `backend/scripts/mobius_fence.py`.
+
+- **Roles.** `viewer` reads the app's files and data, `editor` reads and changes
+  them, `explorer` starts in an empty folder, and `owner` has full access and
+  declares no tools. An app that declares no role keeps full access.
+- **The room.** A Viewer, Editor or Explorer agent runs whole in a room built
+  before it starts: Landlock walls (system folders read-only, the app's storage
+  directory read-only or writable by role with ordinary files only, nothing
+  else), a seccomp connect guard that admits only the Möbius API address, and
+  `no_new_privs`, with signals scoped to the room. Each grant (role and tools)
+  has its own durable home in the chat's folder, holding its sessions, and
+  Möbius never writes into it: what it hands the runtime sits in a read-only
+  folder beside it. A host that cannot build rooms (Linux
+  6.12 or later with libseccomp) does not start the agent.
+- **The agent key.** The run's bearer is the app's own credential bound to the
+  live run (`auth.create_app_agent_token`), carrying its role, tools and
+  provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
+  app's own storage by role, and the routes of declared tools; route checks
+  still apply after it. The key stops working as soon as the app's role
+  differs from its grant. Any change of role, tools or consent (apply, Store
+  update, revoke) also ends the app's running agent turns through the
+  ordinary chat Stop; a Stop that fails is reported.
+- **The Agent Gateway.** `/api/agent-gateway/v1/...` serves only the run
+  provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
+  tools the app did not declare (including any tool the provider would run in
+  its own container) and hosted MCP servers, refuses a request that forces a
+  removed tool, and adds the owner's login outside the room.
+- **Tools.** An agent's own tools (shell, file edits, planning) always work,
+  inside its room. `tools` adds Möbius tools that reach beyond it. `web` is
+  provider-hosted search through the gateway plus `open_page` through the
+  guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
+  activity. `notify` is `notify_owner`. `ask` is `request_question` and
+  `request_approval` for the run's own chat (a confined key is an agent run of
+  that chat; Codex ends the turn through the owner-card hook inside the room).
+  `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
+  page outside the room. `<app>.<tool>` (such as `memory.search`) offers that
+  one installed-app tool through `/api/agent/app-tools`, which serves a
+  confined key only what it declared. A new tool is one `agent_roles.TOOLS`
+  entry naming its control tools, key routes, gateway types and whether it
+  shows private data.
+- **Consent.** One `agent_role` row whose scope names what the role reaches
+  (`data:read`, `data:write`, `tool:<name>`), so an update asks again only when
+  it adds reach, and shows only what it adds. Owner and undeclared agent apps
+  use the critical `agent_start` row, which covers every confined role;
+  dropping an accepted role asks for it.
+- **History.** A confined agent continues only its own grant's session. The
+  chat transcript is never reseeded into a room, because it may hold what a
+  wider grant (or the owner era before roles) read.
+- **Not yet covered:** app jobs and services still run unconfined; searches
+  that run at Anthropic are not recorded one by one; confined agents cannot
+  start helpers yet.
+
 ## Stable error codes
 
 Providers may use DOM-style names for familiar browser handling, but app logic

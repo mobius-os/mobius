@@ -1747,6 +1747,7 @@ async def _run_codex_sdk_turn(
   coordination_enabled: bool = True,
   helper_host_key=None,
   goal_brief_refresh=None,
+  app_room=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1847,11 +1848,15 @@ async def _run_codex_sdk_turn(
         base_instructions = skill.read_text(encoding="utf-8")
       except OSError:
         base_instructions = None
-  deliverable_instruction = generated_files.delivery_instruction(generated_dir)
-  base_instructions = (
-    f"{base_instructions.rstrip()}\n\n{deliverable_instruction}\n"
-    if base_instructions else deliverable_instruction + "\n"
-  )
+  if app_room is not None:
+    # A confined app agent's room cannot reach the chat's deliverables folder.
+    base_instructions = f"{(base_instructions or '').rstrip()}\n"
+  else:
+    deliverable_instruction = generated_files.delivery_instruction(generated_dir)
+    base_instructions = (
+      f"{base_instructions.rstrip()}\n\n{deliverable_instruction}\n"
+      if base_instructions else deliverable_instruction + "\n"
+    )
 
   env = dict(base_env)
   env["MOBIUS_COORDINATION_ENABLED"] = (
@@ -1882,25 +1887,40 @@ async def _run_codex_sdk_turn(
   restricted = delegated
   from app.app_tools import live_app_tools
   from app.platform_tools import codex_turn_mcp_config
-  connector_thread_config = codex_turn_mcp_config(
-    connector_plan,
-    control_enabled=True,
-    top_level=not delegated,
-    coordination_enabled=coordination_enabled,
-    app_tool_names=tuple(
-      tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
-    ),
-  )
+  provider_overrides = get_provider(
+    provider_id, data_dir=runtime_data_dir,
+  ).codex_config_overrides()
   config_overrides = _codex_config_overrides()
-  config_overrides.extend(
-    get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
-  )
-  config_overrides.extend(_codex_platform_hook_overrides())
-  # Keep the app-server in its own process group for turn-end cleanup.
-  launch_args = _codex_app_server_launch_args(
-    codex_bin,
-    config_overrides,
-  )
+  if app_room is not None:
+    # A confined app agent: only its declared control tools, no platform
+    # hooks, and the model reached through the gateway (agent_roles.Room).
+    connector_thread_config = codex_turn_mcp_config(
+      None, control_enabled=app_room.offers_tools,
+      app_agent_tools=app_room.control_tools, app_tool_names=app_room.app_tools,
+    )
+    config_overrides.extend(app_room.codex_overrides(provider_overrides))
+    if app_room.asks_owner:
+      config_overrides.append(_codex_owner_card_hook_override())
+    if codex_bin is None:
+      raise RuntimeError("Codex is not installed, so this app's agent cannot start.")
+    launch_args = app_room.codex_launch_args(codex_bin, config_overrides)
+  else:
+    connector_thread_config = codex_turn_mcp_config(
+      connector_plan,
+      control_enabled=True,
+      top_level=not delegated,
+      coordination_enabled=coordination_enabled,
+      app_tool_names=tuple(
+        tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
+      ),
+    )
+    config_overrides.extend(provider_overrides)
+    config_overrides.extend(_codex_platform_hook_overrides())
+    # Keep the app-server in its own process group for turn-end cleanup.
+    launch_args = _codex_app_server_launch_args(
+      codex_bin,
+      config_overrides,
+    )
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
     cwd=cwd,
@@ -2071,9 +2091,14 @@ async def _run_codex_sdk_turn(
       # keyed without per-turn facts); this thread trusts only the ones it
       # uses. Every turn needs its recorded-result end hook; a lazy Goal
       # refresher also covers coordinator promotion after provider entry.
-      required_hooks = [_codex_owner_card_hook_override()]
+      # A room has no Goals; it ends a turn on a card only when it may ask.
+      required_hooks = (
+        [_codex_owner_card_hook_override()]
+        if app_room is None or app_room.asks_owner else []
+      )
       brief_hooks = (
-        [_codex_goal_brief_hook_override()] if goal_brief_refresh is not None else []
+        [_codex_goal_brief_hook_override()]
+        if goal_brief_refresh is not None and app_room is None else []
       )
       if required_hooks or brief_hooks:
         connector_thread_config = await _codex_platform_hook_thread_config(
@@ -2895,6 +2920,7 @@ async def run_codex_sdk_turn(
   coordination_enabled: bool = True,
   helper_host_key=None,
   goal_brief_refresh=None,
+  app_room=None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2933,6 +2959,7 @@ async def run_codex_sdk_turn(
       coordination_enabled=coordination_enabled,
       helper_host_key=helper_host_key,
       goal_brief_refresh=goal_brief_refresh,
+      app_room=app_room,
     )
   finally:
     ownership.release()

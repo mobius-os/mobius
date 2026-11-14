@@ -5957,6 +5957,31 @@ async def _refuse_delegated_write_replay(
   )
 
 
+async def _refuse_room_provider(
+  bc, chat_id: str, run_token: str | None, run_gen: int | None, db, *,
+  provider_name: str,
+) -> chat_queue.TerminalDisposition:
+  """End a confined app agent's turn on a runtime its room cannot start.
+
+  Running it unconfined instead would hand the app more than its role.
+  """
+  error_message = (
+    f"This app's agents run confined, which {provider_name} does not support. "
+    "Choose Claude, Codex or Möbius models for this chat."
+  )
+  bc.publish({"type": "error", "message": error_message})
+  disposition = await _terminal_setup_error_cleanup(
+    chat_id, run_token or "", run_gen, error_message=error_message,
+  )
+  bc.publish({"type": "done"})
+  clear_active_broadcast_if(bc)
+  bc.mark_completed()
+  if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
+    _publish_chat_run_finished(chat_id)
+  db.close()
+  return disposition
+
+
 async def _run_chat_impl_with_db(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -6012,6 +6037,19 @@ async def _run_chat_impl_with_db(
       )
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
+  # An app whose role confines its agents runs each turn in a room, with its
+  # own agent key and no owner context (app.agent_roles). Other app chats keep
+  # the ordinary runtime.
+  room_app = room_role = None
+  if (
+    run_policy is None and chat_row is not None
+    and chat_row.created_by_app_id is not None
+  ):
+    from app.agent_roles import confined_role_for_app, effective_grant, record_run_grant
+    room_app = db.get(models.App, chat_row.created_by_app_id)
+    room_role = confined_role_for_app(room_app)
+    # A change of the app's grant stops this run (stop_runs_outside_grant).
+    record_run_grant(chat_id, effective_grant(room_app))
   # A retired session is not resumed: its own history would keep the model
   # following a withdrawn instruction. A top-level chat starts fresh and is
   # reseeded from its transcript, exactly as for a lost session. (A retired
@@ -6061,7 +6099,7 @@ async def _run_chat_impl_with_db(
   # the command's length limit. Keep it out of the persisted prompt snapshot as
   # well, so later turns reuse the stable constitution bytes.
   startup_context = ""
-  if starts_fresh and run_policy is None:
+  if starts_fresh and run_policy is None and room_role is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
     ordered_chat_ids = recent_chat_summary_order(db)
     block = memory.build_memory_block(
@@ -6125,12 +6163,14 @@ async def _run_chat_impl_with_db(
     # unchanging, so re-sending it every message would just waste the context
     # window. Compose app-context + report into one block so the report keeps
     # its place right AFTER </app_context>.
-    block = app_context_block
+    # A room agent's reach is in its system prompt; it gets only the report.
+    block = "" if room_role is not None else app_context_block
     if starts_fresh:
       report_block = _build_app_report_block(db, chat_id, settings.data_dir)
       if report_block:
-        block = f"{app_context_block}\n\n{report_block}"
-    user_message = f"{block}\n\n{user_message}"
+        block = f"{block}\n\n{report_block}" if block else report_block
+    if block:
+      user_message = f"{block}\n\n{user_message}"
 
   # Coordination is a peer-network context surface, not transcript history.
   # Every durable child has its own chat address.
@@ -6142,7 +6182,7 @@ async def _run_chat_impl_with_db(
     coordination_message_through = coordination_delivery.delivered_through
     if coordination_context:
       user_message = f"{coordination_context}\n\n{user_message}"
-  coordination_tools_enabled = _should_enable_coordination_tools(
+  coordination_tools_enabled = room_role is None and _should_enable_coordination_tools(
     chat_id=chat_id,
     delegated=run_policy is not None,
     project_id=(chat_row.project_id if chat_row is not None else None),
@@ -6319,6 +6359,25 @@ async def _run_chat_impl_with_db(
     agent_token = delegation_execution_token(
       db, run_policy, run_id=run_token,
     )
+  elif room_role is not None:
+    from app import app_consent
+    from app.agent_roles import ROOM_PROVIDERS, AgentKey
+    room_provider = provider_id or DEFAULT_PROVIDER
+    if room_provider not in ROOM_PROVIDERS:
+      return await _refuse_room_provider(
+        bc, chat_id, run_token, run_gen, db, provider_name=provider.name,
+      )
+    agent_token = auth.create_app_agent_token(
+      room_app.id,
+      owner.username,
+      owner.token_epoch,
+      app_nonce=room_app.token_nonce,
+      consent=app_consent.session_id(room_app),
+      chat_id=chat_id,
+      run_id=run_token,
+      grant=AgentKey.claims_for(room_role, room_provider),
+      browser=run_browser,
+    )
   else:
     agent_token = auth.create_agent_token(
       chat_id,
@@ -6364,6 +6423,16 @@ async def _run_chat_impl_with_db(
   from app.agent_scratch import scratch_for_chat
   scratch = scratch_for_chat(chat_id)
   base_env["TMPDIR"] = base_env["TMP"] = base_env["TEMP"] = str(scratch)
+  app_room = None
+  if room_role is not None:
+    from app.agent_roles import Room
+    from app.generated_files import chat_folder
+    app_room = Room.for_run(
+      room_role, chat_dir=chat_folder(settings.data_dir, chat_id),
+      scratch=scratch, api_base_url=settings.api_base_url,
+      storage_dir=Path(app_context_env.get("APP_STORAGE_DIR")
+                       or Path(settings.data_dir) / "apps" / str(room_app.id)),
+    )
   # Partner display geometry (sent by the React shell on each turn). CSS
   # width/height preserve framing; pixel ratio preserves physical text/detail
   # density. Always set: shell-less turns receive documented defaults.
@@ -6463,6 +6532,14 @@ async def _run_chat_impl_with_db(
       system_prompt = exact_prompt_for_chat(
         chat_row, run_policy.system_prompt, db, persist=True,
       )
+    elif app_room is not None:
+      # Derived from the role every turn, never snapshotted: a role the owner
+      # accepts later must not meet an earlier prompt.
+      from app.agent_roles import system_prompt as room_system_prompt
+      system_prompt = room_system_prompt(
+        room_role, app_id=room_app.id, app_name=room_app.name, room=app_room,
+        app_prompt=custom_prompt,
+      )
     else:
       base_prompt = custom_prompt if custom_prompt else _read_skill_text()
       # Composing reads each app's fragment from Git, so a chat that has no
@@ -6524,7 +6601,7 @@ async def _run_chat_impl_with_db(
       log.info(
         "owner MCP connections withheld (%s) chat_id=%s", reason, chat_id,
       )
-    connector_turn_plan = build_turn_plan(
+    connector_turn_plan = None if app_room is not None else build_turn_plan(
       db, include_owner_connectors=include_owner_connectors,
       owner_id=owner.id, owner_epoch=owner.token_epoch,
       browser_grant_id=run_lineage.browser_grant_id,
@@ -6558,7 +6635,8 @@ async def _run_chat_impl_with_db(
     and branch_first_turn(db, chat_row)
   )
   branch_fork = (
-    first_turn_fork(db, chat_row, provider_id, settings.data_dir) if first_branch_turn else None
+    first_turn_fork(db, chat_row, provider_id, settings.data_dir)
+    if first_branch_turn and app_room is None else None
   )
   resumed_context_fallback = (
     _build_resumed_context(chat_row, keep_task=run_policy is not None)
@@ -6566,6 +6644,11 @@ async def _run_chat_impl_with_db(
       (session_id or fresh_delegated_session or first_branch_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and run_policy is None
+      # A confined agent continues only its own grant's session, which lives
+      # in that grant's durable room. The chat transcript may hold what a
+      # wider grant (or the owner era before roles) read, so it is never
+      # reseeded into a room.
+      and app_room is None
     )
     else None
   )
@@ -6652,7 +6735,11 @@ async def _run_chat_impl_with_db(
     db, run_policy, provider_id=provider_id, connector_plan=connector_turn_plan,
   )
   data_dir = Path(settings.data_dir)
-  cwd = run_policy.cwd if run_policy is not None else top_level_chat_cwd(str(data_dir))
+  cwd = (
+    run_policy.cwd if run_policy is not None
+    else str(app_room.cwd) if app_room is not None
+    else top_level_chat_cwd(str(data_dir))
+  )
 
   if fresh_delegated_session:
     return await _refuse_delegated_write_replay(
@@ -6677,6 +6764,8 @@ async def _run_chat_impl_with_db(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
+    if app_room is not None:
+      sdk_env.update(app_room.env(agent_token))
     sink = _ChatEventSink(
       bc,
       chat_id,
@@ -6737,6 +6826,7 @@ async def _run_chat_impl_with_db(
         coordination_enabled=coordination_tools_enabled,
         helper_host_key=helper_host_key,
         goal_brief_refresh=goal_brief_refresh,
+        app_room=app_room,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -6841,6 +6931,8 @@ async def _run_chat_impl_with_db(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
+    if app_room is not None:
+      sdk_env.update(app_room.env(agent_token))
     # Resumable check + DB-transcript reseed fallback. A stored
     # session_id whose CLI transcript is gone (a pre-fix phantom id, or
     # one cleaned up after ~30 days) would make `claude --resume` die
@@ -6941,6 +7033,7 @@ async def _run_chat_impl_with_db(
             goal_brief_refresh=goal_brief_refresh,
             fork_from=fork_from,
             run_generation=run_gen,
+            app_room=app_room,
           )
 
         runner_result = await claude_turn(user_message=user_message, fork_from=branch_fork)

@@ -2286,11 +2286,13 @@ async def apply_app_source(
         result = await settled.settle(_apply(None), what="App apply")
 
   _publish_apply_events(result, body.chat_id)
-  return schemas.AppApplyOut(
-    mode=result.mode,
-    app=result.app,
-    warnings=list(result.warnings),
-  )
+  warnings = list(result.warnings)
+  from app.agent_roles import stop_runs_outside_grant
+  if not await stop_runs_outside_grant(db, result.app.id):
+    warnings.append(
+      "Some of this app's running agents did not stop after its agent role changed."
+    )
+  return schemas.AppApplyOut(mode=result.mode, app=result.app, warnings=warnings)
 
 
 @asynccontextmanager

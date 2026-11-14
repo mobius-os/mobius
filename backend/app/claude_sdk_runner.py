@@ -1208,6 +1208,7 @@ async def run_claude_sdk_turn(
   goal_brief_refresh=None,
   fork_from: dict | None = None,
   run_generation: int | None = None,
+  app_room=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1234,6 +1235,7 @@ async def run_claude_sdk_turn(
       load, regardless of this flag.
     connector_plan: Detached owner-managed MCP configuration built before the
       request session was released. It is plain data and never queries SQLite.
+    app_room: The ``agent_roles.Room`` a confined app agent runs in, or None.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -1511,8 +1513,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
+      # A room cannot reach the chat's deliverables folder.
       "system_prompt": (
-        _system_prompt_with_register(skill_text).rstrip()
+        _system_prompt_with_register(skill_text).rstrip() + "\n" if app_room is not None
+        else _system_prompt_with_register(skill_text).rstrip()
         + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
       ),
       "resume": session_id if session_id is not None else None,
@@ -1578,7 +1582,18 @@ async def run_claude_sdk_turn(
         "permission_mode": "acceptEdits",
         })
       options_kwargs.update(restricted_options)
-    if skills_enabled:
+    if app_room is not None:
+      # The room limits a confined agent, and Möbius serves its web: Claude's
+      # own page fetch runs inside the room, which has no internet.
+      options_kwargs["setting_sources"] = None
+      launcher = Path(base_env.get("TMPDIR") or tempfile.gettempdir())
+      options_kwargs["cli_path"] = app_room.claude_launcher(
+        launcher / "mobius-room-claude", _CLAUDE_CLI,
+      )
+      options_kwargs["disallowed_tools"] += [
+        "WebFetch", *(() if app_room.web else ("WebSearch",)),
+      ]
+    elif skills_enabled:
       options_kwargs["skills"] = "all"
     if _model:
       options_kwargs["model"] = _model
@@ -1621,16 +1636,24 @@ async def run_claude_sdk_turn(
         claude_control_servers,
         expected_control_tool_names,
       )
-      connector_config_handle = startup_file_stack.enter_context(
-        claude_mcp_config_handle(
-          connector_plan,
-          extra_servers=claude_control_servers(
-            enabled=control_server_enabled,
-          ),
+      if app_room is not None:
+        # A room cannot open this server's file descriptors, and its control
+        # tools carry no credential, so their configuration travels inline.
+        control_server_enabled = app_room.offers_tools
+        options_kwargs["mcp_servers"] = claude_control_servers(
+          enabled=control_server_enabled,
         )
-      )
-      if connector_config_handle:
-        options_kwargs["mcp_servers"] = connector_config_handle.path
+      else:
+        connector_config_handle = startup_file_stack.enter_context(
+          claude_mcp_config_handle(
+            connector_plan,
+            extra_servers=claude_control_servers(
+              enabled=control_server_enabled,
+            ),
+          )
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
     except Exception:
       startup_file_stack.close()
       startup_file_stack = ExitStack()
@@ -1640,12 +1663,15 @@ async def run_claude_sdk_turn(
         exc_info=True,
       )
     try:
-      options_kwargs["system_prompt"] = {
-        "type": "file",
-        "path": startup_file_stack.enter_context(
-          _system_prompt_file(options_kwargs["system_prompt"])
-        ),
-      }
+      if app_room is None:
+        # A room agent gets its prompt as text: the room cannot open this
+        # server's file descriptors, and it carries no credential.
+        options_kwargs["system_prompt"] = {
+          "type": "file",
+          "path": startup_file_stack.enter_context(
+            _system_prompt_file(options_kwargs["system_prompt"])
+          ),
+        }
       options = ClaudeAgentOptions(**options_kwargs)
       client = ClaudeSDKClient(options)
     except Exception:
@@ -1674,18 +1700,22 @@ async def run_claude_sdk_turn(
             await asyncio.wait_for(client.connect(), timeout=30.0)
           active_client.mark_connected()
           with tracing.span("claude.control_mcp_ready"):
+            # A room waits only for its control tools; other apps' tools
+            # come and go with those apps.
+            control_configured = control_server_enabled and (
+              connector_config_handle is not None
+              if app_room is None else bool(app_room.control_tools)
+            )
             control_ready_error = await _await_control_mcp_ready(
               client,
-              enabled=(
-                control_server_enabled and connector_config_handle is not None
-              ),
+              enabled=control_configured,
               expected_tool_names=(
-                expected_control_tool_names(
+                None if not control_configured
+                else app_room.control_tools if app_room is not None
+                else expected_control_tool_names(
                   top_level=run_policy is None,
                   coordination_enabled=coordination_enabled,
                 )
-                if control_server_enabled and connector_config_handle is not None
-                else None
               ),
             )
           if control_ready_error:

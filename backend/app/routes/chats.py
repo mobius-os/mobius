@@ -3837,6 +3837,15 @@ def _add_app_chat(
     )
   if provider not in providers.PROVIDERS:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
+  from app.agent_roles import ROOM_PROVIDERS, confined_role_for_app
+  if (
+    provider not in ROOM_PROVIDERS
+    and confined_role_for_app(db.get(models.App, app_id))
+  ):
+    raise HTTPException(
+      status_code=422,
+      detail="This app's agents run confined, on Claude, Codex or Möbius models.",
+    )
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
   ):

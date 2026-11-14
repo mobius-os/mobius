@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
+from app.agent_roles import AgentKey, confined_role_for_app
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -121,6 +122,9 @@ class Principal:
   app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
+  # Set for the key of one confined app agent run: the role, tools and
+  # provider its room was built for (agent_roles.AgentKey).
+  app_agent: AgentKey | None = None
 
   @property
   def browser_grant_id(self) -> str | None:
@@ -539,6 +543,11 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
   if not app_consent.session_valid(app, payload.get("consent")):
     raise HTTPException(status_code=401, detail="App has not been approved.")
+  key = AgentKey.from_claims(payload)
+  if key is not None and not key.matches(confined_role_for_app(app)):
+    # A narrower role (or none) applies from the next request of a run that
+    # started under a wider one, not from its next run.
+    raise HTTPException(status_code=401, detail="This app's agent role has changed.")
   return app_id
 
 
@@ -766,6 +775,7 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
     app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
+    app_agent=AgentKey.from_claims(payload) if app_id is not None else None,
   )
 
 
@@ -936,8 +946,16 @@ def get_agent_run_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve the owner bearer minted for one exact physical agent run."""
+  """Resolve the bearer minted for one exact physical agent run.
+
+  A confined app agent's key is one too, bound to its app's own chat. The key
+  allow-list (agent_roles.AgentKeyScope) decides which of these run-bound
+  routes it reaches: the ones its app's declared tools name.
+  """
   principal = get_principal(token, db)
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   if (
     principal.scope != "owner"
     or principal.app_id is not None
