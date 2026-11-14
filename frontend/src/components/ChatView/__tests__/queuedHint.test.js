@@ -1,7 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { queuedHint } from '../queuedHint.js'
+import { queuedHint, steerPendingHint } from '../queuedHint.js'
+
+test('a delivered mid-turn steer says when the agent reads it, never that it is still waiting to send', () => {
+  const hint = steerPendingHint()
+  assert.equal(hint, 'Agent will read this after its current step')
+  assert.doesNotMatch(hint, /send|turn finishes/i)
+})
 
 test('a live turn keeps the original "after the current turn finishes" copy', () => {
   assert.equal(
@@ -43,4 +49,12 @@ test('with held and new rows the caption tells them apart', () => {
   assert.equal(queuedHint({ turnActive: true, held: 1, total: 2 }),
     '1 waiting for you; the rest send after this turn')
   assert.equal(queuedHint({ turnActive: false, held: 1, total: 2 }), '1 waiting for you')
+})
+
+
+test('a shared-browser guest is told the owner sends the held rows', () => {
+  assert.equal(queuedHint({ turnActive: false, held: 2, total: 2, sharedGuest: true }),
+    'Waiting for the owner to send')
+  assert.equal(queuedHint({ turnActive: true, held: 1, total: 2, sharedGuest: true }),
+    '1 waiting for the owner; the rest send after this turn')
 })

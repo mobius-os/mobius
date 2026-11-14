@@ -16,7 +16,7 @@ GUIDE = hashlib.sha256(b"guide").hexdigest()
 @pytest.fixture(autouse=True)
 def _app_owned_reviewer_policy(monkeypatch):
   """Route tests exercise the trust adapter; app tests own policy details."""
-  async def validate(_db, _app_id, body, _head_sha):
+  async def validate(_db, _app_id, body, _head_sha, *, principal):
     return str(body).strip()
 
   async def manual(_app_id, body, _nonce, _db):

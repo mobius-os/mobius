@@ -4,7 +4,7 @@
    owns which controls exist and which owner event may be sent. */
 
 import { safeSourceUrl } from '../messageSources.js'
-import { appBlockHref, appIntent, blockBadges, shortText } from './appBlock.js'
+import { appBlockHref, appIntent, blockBadges, lineCounts, shortText } from './appBlock.js'
 
 export const SESSION_LIMITS = Object.freeze({
   actions: 24, label: 40, status: 40, note: 500, notice: 500, summary: 240,
@@ -20,10 +20,11 @@ const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger', 'acc
  *  covers `title`, `items`, `itemFacts`, `open` and the `accent` tone;
  *  `rows-v2` adds app-sourced `rows`, `titleTone`/`titleBusy`, the host's
  *  `context` (chat id, newest block) and `moebius:app-block-refresh` hints.
+ *  `lines-v1` draws a row's `lines` change size after its `meta`.
  *  `ask-v1` (only for an app admitted to `chat.blocks.ask`, passiveAskAllowed)
  *  adds the host-drawn `ask`. An app that does not see a feature is on an
  *  older host, or lacks the grant, and should keep its older presentation. */
-export const SESSION_FEATURES = Object.freeze(['row-state', 'rows-v2'])
+export const SESSION_FEATURES = Object.freeze(['row-state', 'rows-v2', 'lines-v1'])
 export const ASK_FEATURE = 'ask-v1'
 const RECOVERY_ERROR = 'This app session needs recovery. Open the app to check the result before trying again.'
 export const INCOMPLETE_CONFIRMATION = 'Open the app to review this action. Its full current identity is unavailable here.'
@@ -56,7 +57,11 @@ export function confirmationOf(value) {
   for (const item of value) {
     if (!text(item?.title) || !Array.isArray(item.facts) || item.facts.length > SESSION_LIMITS.confirmationFacts
       || item.facts.some(fact => !text(fact?.label) || !text(fact?.value))) return null
-    items.push({ title: item.title, facts: item.facts.map(({ label, value: factValue }) => ({ label, value: factValue })) })
+    items.push({ title: item.title, facts: item.facts.map(({ label, value: factValue, lines: raw }) => {
+      // A change size is drawn from its counts; `value` stays its text.
+      const lines = lineCounts(raw)
+      return { label, value: factValue, ...(lines ? { lines } : {}) }
+    }) })
   }
   return items
 }
@@ -99,7 +104,8 @@ export function sessionItems(value, intents) {
 
 /** App-sourced rows (`rows-v2`): the app's own list for the block, replacing
  *  the saved items and facts for display. Each row is a title, one quiet
- *  metadata line, an optional pill (`pill`, `tone`, `busy`), up to two
+ *  metadata line (`meta`, then any `lines` change size), an optional pill
+ *  (`pill`, `tone`, `busy`), up to two
  *  `https:` links and an optional intent its title opens in the app. Rows
  *  never carry a control. `null` means the report has no rows (the saved
  *  snapshot stays); an empty list means the app shows no rows. Rows without
@@ -111,7 +117,8 @@ export function sessionRows(value, app) {
     const title = shortText(raw?.title, SESSION_LIMITS.rowTitle)
     if (!title) continue
     const intent = appIntent(raw.intent)
-    rows.push({ title, meta: shortText(raw.meta, SESSION_LIMITS.rowMeta),
+    const lines = lineCounts(raw.lines)
+    rows.push({ title, meta: shortText(raw.meta, SESSION_LIMITS.rowMeta), ...(lines ? { lines } : {}),
       ...(intent && app ? { intent, href: appBlockHref(app, intent) } : {}),
       live: { status: shortText(raw.pill, SESSION_LIMITS.itemStatus), statusTone: tone(raw.tone), busy: raw.busy === true,
         note: '', links: sessionLinks(raw.links, SESSION_LIMITS.itemLinks, SESSION_LIMITS.itemLinkLabel) } })
@@ -190,7 +197,8 @@ export function sessionState(message, sessionId, keys, intents = new Set(), app 
 function recoveryHold(previous, incoming, error = previous?.checkpoint && !previous?.recoveryError ? null : RECOVERY_ERROR) {
   const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
     .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
-      hidden: false, open: false, note: error || RECOVERY_ERROR }))
+      // The block's notice says it once; the action adds no second copy.
+      hidden: false, open: false, note: '' }))
   return { ...incoming, actions, title: '', titleTone: 'neutral', titleBusy: false, items: new Map(), rows: null, itemFacts: '', ask: null, checkpoint: previous?.checkpoint ?? null, retain: true, recoveryPending: true,
     recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
 }
@@ -254,7 +262,7 @@ export function sessionSnapshot(block, state) {
     titleTone: state?.title ? state.titleTone || 'neutral' : 'neutral', titleBusy: Boolean(state?.title && state.titleBusy) }
   if (state?.rows && !confirming) {
     return { ...block, ...heading, appRows: true, facts: [], badges: badges(block.badges, block.action?.intent),
-      items: state.rows.map(row => ({ title: row.title, href: row.href || '', meta: row.meta, facts: [], badges: [], action: null, appRow: true, live: row.live })) }
+      items: state.rows.map(row => ({ title: row.title, href: row.href || '', meta: row.meta, lines: row.lines || null, facts: [], badges: [], action: null, appRow: true, live: row.live })) }
   }
   // The app's live title and row state replace the saved snapshot's; an
   // open confirmation (above) shows only the app's list.

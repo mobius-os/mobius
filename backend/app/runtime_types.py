@@ -1,8 +1,16 @@
 """Typed runtime contracts shared across runners and chat plumbing."""
 
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app.events import EventType
+
+
+class SessionStart(TypedDict):
+  """How a provider call started: what session state, and cost, it restored."""
+
+  kind: Literal["fresh", "resumed", "forked"]
+  # The resumed session, or the source session a fork restored.
+  session_id: NotRequired[str]
 
 
 class RunnerResult(TypedDict):
@@ -10,6 +18,11 @@ class RunnerResult(TypedDict):
 
   session_id: str | None
   cost_usd: float | None
+  # Claude returns a restored session estimate; the durable accounting owner
+  # resolves it to a turn cost before logging, broadcasting or summing it.
+  cost_scope: NotRequired[Literal["turn", "session"]]
+  # Only the runner knows which snapshot a session-scoped cost restored.
+  session_start: NotRequired[SessionStart]
   error: str | None
   usage: NotRequired[dict | None]
   usage_metrics: NotRequired[dict | None]
@@ -29,6 +42,11 @@ class RunnerResult(TypedDict):
   # The provider's safety check declined the turn; retrying it unchanged on
   # the same model is refused again.
   provider_refusal: NotRequired[bool]
+
+
+def prompt_not_sent_result(session_id: str | None) -> RunnerResult:
+  """The result of a turn superseded before its provider received the prompt."""
+  return {"session_id": session_id, "cost_usd": None, "error": None, "prompt_sent": False}
 
 
 class ChatEvent(TypedDict):

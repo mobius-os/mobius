@@ -31,7 +31,35 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
+// The one owner-facing label table for platform-resource waits. A kind listed
+// here is an automatic resource wait on every surface: the live Waiting card,
+// the settled pause record and the continuation marker that resumed it. A
+// kind with `continueAnyway` copy also offers the owner's warned one-turn
+// override (the server's OWNER_OVERRIDABLE_RESOURCES); memory never does.
+export const RESOURCE_PAUSE_LABELS = {
+  memory: {
+    summary: 'Waiting for memory to settle',
+    pressure: 'Memory reached its measured critical boundary',
+    paused: 'Paused while memory was low',
+    resumed: 'Memory freed up — continuing automatically',
+  },
+  storage: {
+    summary: 'Waiting for storage headroom',
+    pressure: 'Storage reached its measured critical boundary',
+    paused: 'Paused while storage was low',
+    resumed: 'Storage freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite low storage—for example, to free space. If the disk fills completely, saving may fail.',
+  },
+  processes: {
+    summary: 'Waiting for process headroom',
+    pressure: 'Running processes and threads reached their measured critical boundary',
+    paused: 'Paused while processes and threads were near the limit',
+    resumed: 'Processes and threads freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite the process limit—for example, to find what is holding processes. If the limit is reached, tools may fail to start.',
+  },
+}
+
+export const RESOURCE_PAUSE_KINDS = new Set(Object.keys(RESOURCE_PAUSE_LABELS))
 
 export function isResourcePause(block) {
   return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
@@ -39,13 +67,10 @@ export function isResourcePause(block) {
 
 export function resourcePausePresentation(block, handoff = null) {
   const kind = block?.pause?.kind
-  // A memory/storage park keeps its one saved card while the server keeps
+  const resource = RESOURCE_PAUSE_KINDS.has(kind) ? RESOURCE_PAUSE_LABELS[kind] : null
+  // A platform-resource park keeps its one saved card while the server keeps
   // moving the next check later, so the time saved on the card goes stale.
-  const next = RESOURCE_PAUSE_KINDS.has(kind)
-    ? null
-    : clockLabel(pauseTiming(block?.pause).checkAt)
-  const storage = kind === 'storage'
-  const memory = kind === 'memory'
+  const next = resource ? null : clockLabel(pauseTiming(block?.pause).checkAt)
   const limit = ['rate_limit', 'usage_limit', 'limit'].includes(kind)
   const automatic = handoff?.kind === 'automatic' && handoff.reason === kind
   const restoring = handoff?.kind === 'automatic' && handoff.reason === 'restoring_edits'
@@ -54,22 +79,20 @@ export function resourcePausePresentation(block, handoff = null) {
   const manual = !restoring && (!!blocked || ((kind === 'model_capacity' || limit) && !automatic))
   return {
     manual,
-    summary: storage ? 'Waiting for storage headroom'
-      : memory ? 'Waiting for memory to settle'
-        : limit ? 'Provider usage limit' : 'Model capacity',
+    summary: resource ? resource.summary
+      : limit ? 'Provider usage limit' : 'Model capacity',
     next: restoring ? 'restoring local work'
       : restart ? 'server restart needed'
       : handoff?.kind === 'owner_input' ? 'answer needed'
       : manual
       ? 'manual recovery' : next ? `checks again ${next}` : 'checks again automatically',
-    owner: storage || memory ? 'Möbius resource monitor' : 'Provider availability',
-    pressure: storage ? 'Storage reached its measured critical boundary'
-      : memory ? 'Memory reached its measured critical boundary'
-        : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
+    owner: resource ? 'Möbius resource monitor' : 'Provider availability',
+    pressure: resource ? resource.pressure
+      : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
     wakeUp: restoring ? 'Möbius is restoring local work; this chat continues after that work is restored and loaded'
       : restart ? 'Waiting for a server restart to load restored work; use the saved Restart card'
       : blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'
-      : blocked && ['memory', 'storage'].includes(kind) ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
+      : blocked && resource ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
       : kind === 'model_capacity' && !automatic ? 'Automatic retries are unavailable; choose another model and Resume'
       : limit && !automatic ? handoff?.reason === 'manual_resume'
         ? 'Enable automatic continuation or choose another model and Resume'

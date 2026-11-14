@@ -5,8 +5,8 @@ GitHub is connected in Settings. The platform owns grants, reviewers, receipts
 and public actions; this client neither installs an app nor creates a queue.
 
 Thin app adapters import api, prepare_selection(references, mode, chat_id,
-app_id=None), freeze_preview(selection, options=None, agent=None, allow_mark_ready=False), and the
-re-exported verify_selection, start_body and review_path helpers. A saved
+app_id=None), freeze_preview(selection, options=None, agent=None, takeover_reason=None), and
+the re-exported verify_selection, start_body and review_path helpers. A saved
 selection binds app_id into its identity; the adapter must not reimplement
 preview hashing, selection inspection or admission.
 """
@@ -82,19 +82,25 @@ def prepare_selection(references, mode, chat_id, app_id=None):
           "created_at": datetime.now(timezone.utc).isoformat()}
 
 
-def freeze_preview(selection, options=None, agent=None, *, allow_mark_ready=False):
-  """Save resolved prompts/model before consent; later start never re-resolves silently."""
-  if allow_mark_ready and selection["mode"] != "review_fix_merge":
-    raise ValueError("Mark-ready permission requires review_fix_merge.")
+def freeze_preview(selection, options=None, agent=None, *, takeover_reason=None):
+  """Save resolved prompts/model before consent; later start never re-resolves silently.
+
+  A takeover of someone else's PR needs the owner's reason, frozen with the grant.
+  A takeover never marks a draft ready or merges: those stay the owner's own taps.
+  """
+  if takeover_reason is not None and (selection["mode"] != "review_fix_merge" or not takeover_reason.strip()):
+    raise ValueError("A takeover reason is a short non-empty note, for review_fix_merge only.")
+  if selection["mode"] == "review_merge" and not (options or {}).get("propose_verdict"):
+    raise ValueError("Review and merge merges only after the owner's own Approve: "
+                     "pass options with post_review and propose_verdict set to true.")
   preview = api(review_path(selection.get("app_id"), "/review-preview"), method="POST",
                 data={"mode": selection["mode"], "options": options, "agent": agent})
   snapshot = preview["options"]
   if not re.fullmatch(r"[0-9a-f]{64}", preview["preview_sha256"]) or not snapshot.get("model"):
     raise ValueError("The platform did not return a complete frozen prompt/model preview.")
   scope = "named_pr_repairs_and_reviewed_successors" if selection["mode"] == "review_fix_merge" else None
-  if allow_mark_ready:
-    scope = "named_pr_repairs_ready_and_reviewed_successors"
-  frozen = {**selection, **({"confirmation_scope": scope} if scope else {}), "options": frozen_options(snapshot),
+  frozen = {**selection, **({"confirmation_scope": scope} if scope else {}),
+    **({"takeover_reason": takeover_reason.strip()} if takeover_reason else {}), "options": frozen_options(snapshot),
     "agent": {"provider": snapshot["provider"], "model": snapshot["model"],
               "effort": snapshot.get("reasoning_effort")},
     "preview_sha256": preview["preview_sha256"], "resolved_snapshot": snapshot}
@@ -143,8 +149,8 @@ def main(argv=None):
   preview = commands.add_parser("preview", help="Inspect named PRs and freeze prompts/model without starting work")
   preview.add_argument("prs", nargs="+")
   preview.add_argument("--mode", choices=("review", "review_merge", "review_fix_merge"), default="review")
-  preview.add_argument("--allow-mark-ready", action="store_true", help="Explicitly authorize draft readiness after independent review and passing checks")
-  preview.add_argument("--options", help="JSON file with the five editable fields")
+  preview.add_argument("--takeover-reason", help="Why the owner takes over someone else's PR (review_fix_merge)")
+  preview.add_argument("--options", help="JSON file with the editable fields and opt-ins")
   preview.add_argument("--agent", help="JSON file: provider/model/effort")
   preview.add_argument("--output", required=True, help="New private JSON preview path; never overwrites")
   start = commands.add_parser("start", help="Use explicit approval in this owning chat for an exact saved preview")
@@ -169,8 +175,8 @@ def main(argv=None):
     result = api(path + "/observe", method="POST", data={}) if args.command == "observe" else api(path)
   elif args.command == "preview":
     selection = freeze_preview(prepare_selection(args.prs, args.mode, os.environ["CHAT_ID"], args.app_id),
-      read_object(args.options) if args.options else None, read_object(args.agent) if args.agent else None, allow_mark_ready=args.allow_mark_ready,
-      )
+      read_object(args.options) if args.options else None, read_object(args.agent) if args.agent else None,
+      takeover_reason=args.takeover_reason)
     save_preview(args.output, selection)
     result = {"selection": selection, "preview_file": args.output, "approved": False}
   else:

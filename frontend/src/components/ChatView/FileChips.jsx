@@ -4,6 +4,7 @@ import ChatPanePortal from './ChatPanePortal.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
+import { markAttachmentThumbFit } from './attachmentThumbFit.js'
 
 /** Classifies a file by extension into a colored badge variant.
  *  Returns {kind, label} where kind = 'pdf' | 'doc' | 'code' and
@@ -139,7 +140,12 @@ export default function FileChips({ files, onRemove, chatId, disabled = false })
                 }}
                 aria-label={`Preview ${chip.name}`}
               >
-                <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
+                <img
+                  className="chat__attach-card-thumb"
+                  src={previewSrc}
+                  alt=""
+                  onLoad={markAttachmentThumbFit}
+                />
               </button>
             ) : previewFailed ? (
               <span className="chat__attach-card-preview-error" role="status">

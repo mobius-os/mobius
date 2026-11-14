@@ -305,18 +305,29 @@ test('an admitted module without session support falls back to a fresh visible v
   await expect(view.locator('#fixture-intent')).toHaveText('review:plain')
 })
 
-test('row titles and result links are 44px targets, and row fact labels stay visible by default', async ({ page, request }) => {
+test('rows and result links are 44px targets, and row fact labels stay visible by default', async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await installFixtures(page, request)
   const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:rows', title: 'Two rows',
     interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
     items: [{ title: 'Row one', intent: 'open:r1', facts: [{ label: 'From account', value: 'Alice' }] },
-      { title: 'Row two', intent: 'open:r2', facts: [{ label: 'To account', value: 'Bob' }] }] }) })
+      { title: 'Row two', intent: 'open:r2', facts: [{ label: 'To account', value: 'Bob' }] },
+      // A title-only row is still a full target.
+      { title: 'Row three', intent: 'open:r3' }] }) })
   const block = chat.locator('.md-app-block')
   const action = block.locator('footer .md-app-block__action')
   await expect(action).toHaveText('Send all')
   const height = locator => locator.evaluate(node => node.getBoundingClientRect().height)
-  for (const title of await block.locator('.md-app-block__item-title').all()) expect(await height(title)).toBeGreaterThanOrEqual(44)
+  // The whole row opens its entry: at least 44px tall, and its padding hits the row's title link.
+  const rows = block.locator('.md-app-block__items > li')
+  await expect(rows).toHaveCount(3)
+  for (const row of await rows.all()) {
+    expect(await height(row)).toBeGreaterThanOrEqual(44)
+    expect(await row.evaluate(node => {
+      const box = node.getBoundingClientRect()
+      return document.elementFromPoint(box.right - 4, box.bottom - 3)?.closest('a')?.textContent
+    })).toBe(await row.locator('.md-app-block__item-title').textContent())
+  }
   // Without the value-only opt-in, a sighted reader sees each label.
   const label = block.locator('.md-app-block__facts dt').first()
   await expect(label).toHaveText('From account')
@@ -329,6 +340,49 @@ test('row titles and result links are 44px targets, and row fact labels stay vis
   await expect(confirm).toBeEnabled()
   await confirm.click()
   const links = block.locator('.md-app-block__item-state .md-app-block__link')
-  await expect(links).toHaveCount(2)
-  for (const link of await links.all()) expect(await height(link)).toBeGreaterThanOrEqual(44)
+  await expect(links).toHaveCount(3)
+  for (const link of await links.all()) {
+    expect(await height(link)).toBeGreaterThanOrEqual(44)
+    // The link's own target, top to bottom, is the link, not the row's title link.
+    expect(await link.evaluate(node => {
+      const box = node.getBoundingClientRect()
+      return [box.top + 1, box.bottom - 1].every(y => document.elementFromPoint(box.left + box.width / 2, y)?.closest('a') === node)
+    })).toBe(true)
+  }
 })
+
+test('two result links that wrap in one row keep separate 44px targets, clear of the row title', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installFixtures(page, request)
+  const chat = await openTranscript(page, { assistant: fence({ app: 'e2e-block-session', intent: 'open:links', title: 'Links',
+    interaction: 'inline', action: { label: 'Send all', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Two links', intent: 'open:two-links' }, { title: 'One link', intent: 'open:one-link' }] }) })
+  const block = chat.locator('.md-app-block')
+  await block.locator('footer .md-app-block__action').click()
+  const confirm = block.locator('footer .md-app-block__action')
+  await expect(confirm).toHaveText('Confirm')
+  await seeConfirmationEnds(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  await expect(block.locator('.md-app-block__item-state .md-app-block__link')).toHaveCount(3)
+  const geometry = await block.evaluate(node => [...node.querySelectorAll('.md-app-block__items > li')].map(row => {
+    const title = row.querySelector('.md-app-block__item-title').getBoundingClientRect()
+    return [...row.querySelectorAll('.md-app-block__item-state .md-app-block__link')].map(link => {
+      const box = link.getBoundingClientRect()
+      const x = box.left + Math.min(box.width / 2, 20)
+      const hits = [box.top + 1, box.bottom - 1].map(y => document.elementFromPoint(x, y)?.closest('a')?.href)
+      return { href: link.href, top: box.top, bottom: box.bottom, height: box.height, hits, clearOfTitle: box.top >= title.bottom - 0.5 }
+    })
+  }))
+  const [two, one] = geometry
+  expect(two).toHaveLength(2)
+  expect(two[1].top, 'the long labels wrap onto separate lines').toBeGreaterThan(two[0].top)
+  expect(two[1].top, 'their targets do not overlap').toBeGreaterThanOrEqual(two[0].bottom - 0.5)
+  for (const link of [...two, ...one]) {
+    expect(link.height).toBeGreaterThanOrEqual(44)
+    expect(link.hits).toEqual([link.href, link.href])
+    expect(link.clearOfTitle).toBe(true)
+  }
+})
+

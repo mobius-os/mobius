@@ -12,27 +12,27 @@ from pathlib import Path
 import pytest
 
 from app import app_git, platform_update
-from app.compiler import _compile_failure_detail
+from app.app_compile_contract import compile_failure_detail
 from app.github_contributions import ContributionSubmitError, _exact_reviewed_pr_text
 from app.platform_activation import PlatformActivationImpact
 
 
 def test_signal_killed_compile_names_the_signal_and_likely_memory_cause():
-  detail = _compile_failure_detail(-9, b"")
+  detail = compile_failure_detail(-9, b"")
   assert "SIGKILL" in detail
   assert "memory" in detail
 
 
 def test_signal_kill_with_real_stderr_keeps_rolldowns_own_error():
-  assert _compile_failure_detail(-9, b"real diagnostics") == "real diagnostics"
+  assert compile_failure_detail(-9, b"real diagnostics") == "real diagnostics"
 
 
 def test_ordinary_compile_failure_passes_stderr_through_unchanged():
-  assert _compile_failure_detail(1, b"Unexpected token") == "Unexpected token"
+  assert compile_failure_detail(1, b"Unexpected token") == "Unexpected token"
 
 
 def test_non_kill_signal_is_named_without_the_memory_claim():
-  detail = _compile_failure_detail(-11, b"")
+  detail = compile_failure_detail(-11, b"")
   assert "SIGSEGV" in detail
   assert "memory" not in detail
 

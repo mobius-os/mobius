@@ -1227,6 +1227,11 @@ export const api = {
     acceptConsent: (appId, digest) => apiFetch(`/apps/${appId}/consent`, {
       method: 'POST', body: JSON.stringify({ digest }),
     }),
+    // Every credits charge waits for the owner's Pay or Cancel.
+    waitingPayments: (appId) => apiFetch(`/apps/${appId}/credits-charges`),
+    answerPayment: (appId, paymentId, pay) => apiFetch(`/apps/${appId}/credits-charges/${encodeURIComponent(paymentId)}`, {
+      method: 'POST', body: JSON.stringify({ pay }),
+    }),
     markActivitySeen: (appId, activityVersion, appCreatedAt) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion, app_created_at: appCreatedAt }),
@@ -1271,12 +1276,23 @@ export const api = {
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
+  chatWaits: {
+    // The whole claim texts a Goal or wait view showed in part.
+    dependencyText: (dependencyId, options = {}) => apiFetch(
+      `/chat-waits/dependencies/${encodeURIComponent(dependencyId)}/text`,
+      options,
+    ),
+  },
   agentCoordination: {
     history: (chatId, { before, limit = 50 } = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
     ),
     chat: (chatId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    message: (chatId, messageId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
       options,
     ),
     project: (projectId, options = {}) => apiFetch(
@@ -1686,6 +1702,23 @@ export const api = {
       { method: 'DELETE' },
     ),
   },
+  // The shell's owner confirmation of one sensitive app action: the server
+  // describes it in words (preview), then records the owner's tap (mint).
+  // Errors carry the platform's sentence as `message` and its `code`.
+  ownerGrants: {
+    preview: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants/preview', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not check this request',
+    ),
+    mint: async (payload, options = {}) => jsonOrThrow(
+      await apiFetch('/owner-grants', {
+        ...options, method: 'POST', body: JSON.stringify(payload),
+      }),
+      'Could not confirm this request',
+    ),
+  },
   sharedFolders: {
     list: () => apiFetch('/shared-folders'),
     report: (subscriptionId, body) => apiFetch(
@@ -1810,6 +1843,21 @@ export const api = {
         // Sign-out reloads the page right after; let the request finish.
         keepalive: true,
       }),
+    },
+    // Outside channels (Slack, Discord, ntfy, webhooks) that get a copy of
+    // notifications. The link goes in once and is never read back.
+    channels: {
+      list: () => apiFetch('/push/channels'),
+      add: (payload) => apiFetch('/push/channels', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      update: (id, payload) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
+      remove: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+      test: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     },
   },
 }

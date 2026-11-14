@@ -182,4 +182,90 @@ test.describe('handleStop keeps the queue for the owner', () => {
     await expect(surface.locator('.queued__row')).toHaveCount(0)
     expect(ordinaryMessageHits).toBe(2)
   })
+
+  test('a Stop whose interrupt fails still shows the queue the server settled', async ({ page }) => {
+    // The server holds the owner's rows before it interrupts the turn, so a
+    // timed-out interrupt (`stopped: false`) has held them all the same. The
+    // tray must stop promising they send after this turn.
+    let ordinaryMessageHits = 0
+    let queueSends = 0
+    let steerHits = 0
+    let stopHits = 0
+    let resolveSteer
+    const steerGate = new Promise(r => { resolveSteer = r })
+    let resolveStop
+    const stopGate = new Promise(r => { resolveStop = r })
+    const live = await mockLiveRuntime(page)
+    const stream = await installControlledChatStream(page, 'streaming response...')
+    let queuedMessage
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+      const body = route.request().postDataJSON()
+      if (body.force_steer) {
+        steerHits++
+        await steerGate
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'not_steered' }),
+        })
+      }
+      if (body.continuation === 'queue') {
+        queueSends++
+        return route.fulfill({ status: 500 })
+      }
+      ordinaryMessageHits++
+      if (ordinaryMessageHits === 2) {
+        queuedMessage = { role: 'user', content: body.content, ts: 12344, cid: body.cid }
+        live.pending = [queuedMessage]
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'queued', ts: 12344, position: 1, pending_message: queuedMessage }),
+        })
+      }
+      live.running = true
+      const message = { role: 'user', content: body.content, cid: body.cid, ts: 12343 }
+      live.messages.push(message)
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'started', message }),
+      })
+    })
+    await page.route('**/api/chat/stop', async (route) => {
+      stopHits++
+      await stopGate
+      // The queue is settled, but the runner did not acknowledge the interrupt.
+      live.pending = [{ ...queuedMessage, held: true }]
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        json: { stopped: false, cleared_pending_cids: [] },
+      })
+    })
+
+    await setupChat(page)
+    await createChat(page, 'handleStop failed interrupt')
+    await stream.arm()
+    await sendMessage(page, 'first message')
+    const surface = page.locator('[data-chat-surface="painted"]')
+    await expect(surface.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await queueMessage(page, 'queued message')
+    await expect(surface.locator('.queued__hint')).toHaveText('Will send after the current turn finishes')
+
+    // A Steer in flight reveals Stop; let the refused steer return the row
+    // to the tray before the Stop answers.
+    await surface.locator('.chat__steer').click()
+    await expect.poll(() => steerHits).toBe(1)
+    await surface.locator('.chat__stop').click()
+    await expect.poll(() => stopHits).toBe(1)
+    resolveSteer()
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    resolveStop()
+
+    await expect(surface.locator('.queued__hint')).toHaveText('Waiting for you — sends when you send')
+    await expect(surface.locator('.queued__text')).toHaveText('queued message')
+    expect(queueSends).toBe(0)
+    expect(ordinaryMessageHits).toBe(2)
+  })
 })

@@ -233,7 +233,7 @@ def test_automatic_question_previews_are_bounded_with_exact_saved_identity(
 ):
   row = _seed(db, "preview")
   question_text = "Question " * 12000
-  options = ["Option " * 10000 for _ in range(16)]
+  options = [f"Option {index} " * 10000 for index in range(40)]
   asked = _ask(
     client, db, row, "ask-preview", question=question_text, options=options,
   )
@@ -260,6 +260,8 @@ def test_automatic_question_previews_are_bounded_with_exact_saved_identity(
   assert preview["full_question_url"] == f"/api/delegations/{row.id}"
   assert len(preview["question"]) <= 1000
   assert len(preview["options"]) == 16
+  assert preview["options_omitted"].startswith("24 more choices; full_question_url")
+  assert preview["options"][0].startswith("Option 0 ")
   assert all(len(option) <= 120 for option in preview["options"])
   assert len(hint) < 5000
 

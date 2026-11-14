@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import uuid
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app import models
 from app.config import get_settings
-from app.project_retention import PROJECT_LIFECYCLE_LOCK
+from app.project_retention import (
+  CREATING_ROOT_PREFIX,
+  PROJECT_LIFECYCLE_LOCK,
+  RETIRED_ROOT_PREFIX,
+  retire_owned_root,
+  sweep_marked_roots,
+)
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
 
@@ -67,31 +71,6 @@ def owned_snapshot_root(instance_id: str, snapshot_path: str) -> Path | None:
   return expected
 
 
-def remove_snapshot_root(root: Path) -> None:
-  if root.is_symlink():
-    root.unlink(missing_ok=True)
-  elif root.exists():
-    shutil.rmtree(root)
-
-
-def _sweep_orphaned_snapshot_roots(db: Session) -> None:
-  instances_root = Path(get_settings().data_dir).resolve() / "shared" / "app-instances"
-  if not instances_root.is_dir() or instances_root.is_symlink():
-    return
-  live_ids = {str(instance_id) for (instance_id,) in db.query(models.SharedAppInstance.id).all()}
-  for child in instances_root.iterdir():
-    try:
-      uuid.UUID(child.name)
-    except (ValueError, AttributeError):
-      continue
-    if child.name in live_ids:
-      continue
-    try:
-      remove_snapshot_root(child)
-    except OSError:
-      log.exception("Could not remove orphaned shared-app snapshot %s", child)
-
-
 def purge_expired_shared_apps(db: Session) -> list[str]:
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   with PROJECT_LIFECYCLE_LOCK:
@@ -114,10 +93,13 @@ def purge_expired_shared_apps(db: Session) -> list[str]:
       db.expire_all()
       for root in roots:
         try:
-          remove_snapshot_root(root)
+          retire_owned_root(root)
         except OSError:
           log.exception("Could not remove expired shared-app snapshot %s", root)
-    _sweep_orphaned_snapshot_roots(db)
+    sweep_marked_roots(
+      Path(get_settings().data_dir).resolve() / "shared" / "app-instances",
+      (RETIRED_ROOT_PREFIX, CREATING_ROOT_PREFIX),
+    )
     return ids
 
 

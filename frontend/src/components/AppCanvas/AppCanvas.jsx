@@ -9,6 +9,7 @@ import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import useImmersiveStateEcho from '../../hooks/useImmersiveStateEcho.js'
 import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   AppTokenStartupState, appTokenIdentity, appTokenStartupState,
@@ -30,6 +31,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import AppConsentPanel from './AppConsentPanel.jsx'
+import { AppCreditsPaymentDialog } from './AppCreditsDialogs.jsx'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   accountLinkCompletion,
@@ -43,19 +45,27 @@ import {
   attributedFrameVersion,
   attributedShellShortcutAction,
   confirmAppFileExport,
+  confirmAppOwnerGrant,
   navPushOutcome,
   retireStaleAppFileExport,
+  retireStaleAppOwnerGrant,
   serveAppFileExportRequest,
+  serveAppOwnerGrantRequest,
   serveClipboardWrite,
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
-import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
+import {
+  useAppActivityFrameForwarding, useManagedAppFrameForwarding,
+} from '../../hooks/useManagedAppEvents.js'
 import {
   blockEventDelivery, blockRefreshDelivery, blockSessionEnvelope, createBlockDocuments, forwardBlockState, hostRequestAllowed,
 } from './appBlockSessionHost.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
-import { finishAppFileExport } from '../../lib/appFileExport.js'
+import { answerRefusalSheet, paysWithCredits } from '../../lib/creditsPayment.js'
+import { fileExportInk, finishAppFileExport } from '../../lib/appFileExport.js'
+import { closeAppOwnerGrant } from '../../lib/appOwnerGrant.js'
+import OwnerConfirmSheet from './OwnerConfirmSheet.jsx'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -65,16 +75,6 @@ import './AppCanvas.css'
 function appFrameRequestUrl(appId, version, frameRev) {
   return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
     + (frameRev ? `-${frameRev}` : '')
-}
-
-// Label ink on the app's own manifest colour (always #rrggbb): white while it
-// keeps 3:1, the rule the theme's --accent-fg uses, else a near-black.
-function fileExportInk(color) {
-  if (!/^#[0-9a-f]{6}$/i.test(color || '')) return undefined
-  const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255)
-    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
-  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#172008'
 }
 
 function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm }) {
@@ -158,6 +158,10 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //   File export: {type:'moebius:file-export', requestId, path, name?}
 //      live visible frame → shell confirmation → own storage file download.
 //      The app supplies no app id or token; result is file-export-result.
+//   Owner grant: {type:'moebius:owner-grant', requestId, action, scope, body}
+//      live visible frame → shell-drawn confirm sheet (the server words it) →
+//      short-lived grant minted with the owner's bearer; result is
+//      owner-grant-result {ok | cancelled | error, code?}. No app id, no grant id.
 //
 //   2. {type: 'moebius:frame-mounted', appId, supportsAppBlocks} frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
@@ -203,6 +207,11 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      unless backgroundPlayback says the document owns an open media session
 //      (deliberate playback the drawer still controls). covered holds the same
 //      work while the modal drawer is over a frame that stays painted.
+//
+//   3d. {type: 'moebius:app-activity'}                     parent → frame
+//      The shell saw new activity for this app, or its system stream reopened
+//      (useAppActivityFrameForwarding in hooks/useManagedAppEvents.js).
+//      Carries no content; the runtime's onActivity listeners refresh.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -470,6 +479,47 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [cameraPreview, setCameraPreview] = useState(null)
   const [pendingFileExport, setPendingFileExport] = useState(null)
   const pendingFileExportRef = useRef(null)
+  const [pendingOwnerGrant, setPendingOwnerGrant] = useState(null)
+  const pendingOwnerGrantRef = useRef(null)
+  // A charge waiting for the owner's Pay (see AppCreditsPaymentDialog). Only
+  // an app whose contract may spend credits can raise one, so no other app's
+  // opening reads the waiting payments.
+  const paymentsQuery = appQueries.creditsPayments.useQuery(appId, {
+    enabled: paysWithCredits(capabilityContract),
+    visible,
+  })
+  const waitingPayment = paymentsQuery.data?.payments?.[0] || null
+  const [paymentBusy, setPaymentBusy] = useState(false)
+  const [paymentError, setPaymentError] = useState('')
+  // A payment that is no longer waiting when the owner answers (it lapsed, or
+  // another device answered it) leaves the waiting list at once, so the reason
+  // is kept here until the owner closes it.
+  const [paymentRefusal, setPaymentRefusal] = useState(null)
+  const shownPayment = paymentRefusal?.payment || waitingPayment
+  async function answerPayment(pay) {
+    const payment = waitingPayment
+    if (!payment) return
+    setPaymentBusy(true)
+    setPaymentError('')
+    try {
+      const res = await api.apps.answerPayment(appId, payment.id, pay)
+      if (res.ok) {
+        // Answered: its sheet leaves now, before Pay re-arms for a second press.
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+      } else if (res.status === 409) {
+        const body = await res.json().catch(() => ({}))
+        appQueries.creditsPayments.remove(queryClient, appId, payment.id)
+        setPaymentRefusal({ payment, ...answerRefusalSheet(body) })
+      } else {
+        setPaymentError('That could not be saved. Try again.')
+      }
+    } catch {
+      setPaymentError('That could not be saved. Try again.')
+    } finally {
+      setPaymentBusy(false)
+      void appQueries.creditsPayments.invalidate(queryClient, appId)
+    }
+  }
   const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
@@ -682,6 +732,11 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the promoted frame's recorded intent so an immersive game stays immersive
   // across a rebuild without a chrome flash.
   const frameImmersiveRef = useRef(new Map())
+  // The runtime's immersive.set() is optimistic, so every request needs an
+  // answer even when the verdict does not change (a held request while panes
+  // share the screen). Counting requests re-runs the state echo
+  // (useImmersiveStateEcho below).
+  const [immersiveRequestCount, setImmersiveRequestCount] = useState(0)
   // Decides which recorded requests reach Shell live or on a lifecycle
   // transition; see createImmersiveLifecycle for the one-visit rules.
   const immersiveLifecycleRef = useRef(null)
@@ -710,6 +765,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           if (pendingExport?.source === detachedSource) {
             finishFileExport(pendingExport, { cancelled: true })
           }
+          if (pendingOwnerGrantRef.current?.source === detachedSource) cancelOwnerGrant()
           capabilityHostRef.current?.detachSource?.(
             detachedSource,
           )
@@ -769,6 +825,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       getLiveVersion: () => liveVersionRef.current,
       getSourceVersion: source => attributedFrameVersion(framesRef.current, source),
       getToken: () => hostTokenRef.current })
+  }
+  function cancelOwnerGrant() {
+    closeAppOwnerGrant({ pendingRef: pendingOwnerGrantRef, setPending: setPendingOwnerGrant })
+  }
+  function confirmOwnerGrant() {
+    return confirmAppOwnerGrant({ pendingRef: pendingOwnerGrantRef, setPending: setPendingOwnerGrant,
+      appId, visible: visibleRef.current, liveVersion: liveVersionRef.current, frames: framesRef.current })
   }
   const capabilityContractRef = useRef(capabilityContract)
   capabilityContractRef.current = capabilityContract
@@ -836,6 +899,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   }
 
   useManagedAppFrameForwarding(framesRef, subscribeManagedAppEvents, capabilityContract)
+  useAppActivityFrameForwarding(framesRef, loadedDocsRef, subscribeManagedAppEvents, appId)
 
   // A host that owns the browser-history cursor may ask the visible app to
   // follow it. Keep exact contentWindow selection here rather than making the
@@ -992,6 +1056,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         frames: framesRef.current, liveVersion: liveVersionRef.current,
         visible: visibleRef.current, pendingRef: pendingFileExportRef,
         setPending: setPendingFileExport, appId })) return
+      if (serveAppOwnerGrantRequest({ message: msg, source: e.source,
+        frames: framesRef.current, liveVersion: liveVersionRef.current,
+        visible: visibleRef.current, pendingRef: pendingOwnerGrantRef,
+        setPending: setPendingOwnerGrant, appId })) return
       // ATTRIBUTE the message to the exact frame that sent it. Two frames are
       // alive during a swap, so we must NOT assume a single contentWindow —
       // compare e.source to each mounted frame's window and recover its version.
@@ -1103,6 +1171,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         // harmless presentation hint the frame may choose.
         const mode = msg.mode === 'bar' ? 'bar' : 'full'
         frameImmersiveRef.current.set(srcVersion, { value, mode })
+        setImmersiveRequestCount(count => count + 1)
         if (immersiveLifecycleRef.current.frameRequested({
           version: srcVersion,
           liveVersion: liveVersionRef.current,
@@ -1412,10 +1481,14 @@ const AppCanvas = forwardRef(function AppCanvas({
     retireStaleAppFileExport({ pendingRef: pendingFileExportRef,
       setPending: setPendingFileExport, appId, visible,
       liveVersion: swap.liveVersion, frames: framesRef.current })
+    retireStaleAppOwnerGrant({ pendingRef: pendingOwnerGrantRef,
+      setPending: setPendingOwnerGrant, appId, visible,
+      liveVersion: swap.liveVersion, frames: framesRef.current })
   }, [appId, visible, swap.liveVersion])
   useEffect(() => () => {
     const request = pendingFileExportRef.current
     if (request) finishFileExport(request, { cancelled: true })
+    cancelOwnerGrant()
   }, [appId])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
@@ -1768,13 +1841,15 @@ const AppCanvas = forwardRef(function AppCanvas({
   }, [immersiveMode, swap.liveVersion])
 
   // Keep the app's window.mobius.immersive helper in sync with the shell's
-  // applied verdict (see sendImmersiveState). Same triggers as the insets echo.
-  useEffect(() => {
+  // applied verdict (see sendImmersiveState): on every flip, promotion, and
+  // request, so an optimistic request the shell holds is corrected too.
+  useImmersiveStateEcho({
+    immersiveMode, liveVersion: swap.liveVersion, requestCount: immersiveRequestCount,
+  }, () => {
     for (const v of framesRef.current.keys()) {
       if (loadedDocsRef.current.has(v)) sendImmersiveState(v)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersiveMode, swap.liveVersion])
+  })
 
   // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
   // device or a window resize moves the notch/home-indicator (landscape puts
@@ -2068,6 +2143,17 @@ const AppCanvas = forwardRef(function AppCanvas({
         <AppFileExportDialog appName={appName} themeColor={themeColor} request={pendingFileExport}
           onCancel={cancelFileExport}
           onConfirm={confirmFileExport} />
+      )}
+      {pendingOwnerGrant && visible && (
+        <OwnerConfirmSheet appName={appName} themeColor={themeColor} request={pendingOwnerGrant}
+          onCancel={cancelOwnerGrant} onConfirm={confirmOwnerGrant} />
+      )}
+      {shownPayment && visible && !pendingFileExport && !pendingOwnerGrant && (
+        <AppCreditsPaymentDialog key={`${shownPayment.id}:${paymentRefusal ? 'refused' : 'waiting'}`}
+          appId={appId} appName={appName} payment={shownPayment}
+          busy={paymentBusy} error={paymentError} refusal={paymentRefusal}
+          onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
+          onClose={() => setPaymentRefusal(null)} />
       )}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it

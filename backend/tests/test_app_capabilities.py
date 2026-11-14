@@ -56,6 +56,7 @@ def test_legacy_closed_defaults_do_not_manufacture_capability_changes():
     "connections_manage",
     "connect_manage",
     "identity_manage",
+    "credits_manage",
     "railway_manage",
     "helper_activity_read",
   ):
@@ -103,8 +104,11 @@ def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public
   [
     (("data", "connect_manage"), True),
     (("data", "identity_manage"), True),
+    (("data", "credits_manage"), True),
     (("data", "railway_manage"), True),
     (("data", "helper_activity_read"), True),
+    (("data", "spend_credits"), ["ana/prompts"]),
+    (("data", "check_credits_charges"), ["prompts"]),
     (("public", "storage", "read"), True),
     (("public", "storage", "write_prefix"), "public/submissions/"),
   ],
@@ -114,7 +118,8 @@ def test_legacy_receipt_still_reports_real_new_grants(path, value):
   installed["schema"] = 4
   installed.pop("public")
   for field in (
-    "connect_manage", "identity_manage", "railway_manage", "helper_activity_read",
+    "connect_manage", "identity_manage", "credits_manage", "railway_manage",
+    "helper_activity_read",
   ):
     installed["data"].pop(field)
   candidate = json.loads(json.dumps(installed))
@@ -864,6 +869,61 @@ def test_job_secret_permission_rejects_invalid_names(names):
     validate_manifest_contract(_manifest(permissions={'job_secret_read': names}))
 
 
+@pytest.mark.parametrize('targets', [True, 'ana/prompts', ['ana'], ['Ana/prompts'],
+                                    ['ana/prompts', 'ana/prompts'], ['a/b'] * 17,
+                                    [None], ['ana/../x']])
+def test_spend_credits_must_name_each_seller_it_pays(targets):
+  with pytest.raises(ManifestContractError, match='spend_credits'):
+    validate_manifest_contract(_manifest(permissions={'spend_credits': targets}))
+
+
+@pytest.mark.parametrize('targets', [['*'], ['*/'], ['**/prompts'], ['*ana/prompts'],
+                                    ['*/../x'], ['*/prompts', '*/prompts']])
+def test_any_creator_names_exactly_one_app(targets):
+  with pytest.raises(ManifestContractError, match='spend_credits'):
+    validate_manifest_contract(_manifest(permissions={'spend_credits': targets}))
+
+
+def test_a_marketplace_may_pay_any_creator_of_its_app():
+  contract = _contract(permissions={'spend_credits': ['*/prompts']})
+  assert contract['data']['spend_credits'] == ['*/prompts']
+  named = _contract(permissions={'spend_credits': ['ana/prompts']})
+  assert diff_contracts(named, contract)['widens'] is True
+
+
+def test_paying_one_more_seller_widens_and_paying_fewer_does_not():
+  one = _contract(permissions={'spend_credits': ['ana/prompts']})
+  two = _contract(permissions={'spend_credits': ['ana/prompts', 'bob/notes']})
+  assert one['data']['spend_credits'] == ['ana/prompts']
+  assert diff_contracts(one, two)['widens'] is True
+  assert diff_contracts(two, one)['widens'] is False
+
+
+@pytest.mark.parametrize('apps', [True, 'prompts', ['ana/prompts'], ['Prompts'],
+                                  ['prompts', 'prompts'], ['a'] * 17, [None], ['..'],
+                                  ['a' * 81]])
+def test_check_credits_charges_must_name_each_priced_app_it_checks(apps):
+  with pytest.raises(ManifestContractError, match='check_credits_charges'):
+    validate_manifest_contract(_manifest(permissions={'check_credits_charges': apps}))
+
+
+def test_checking_one_more_apps_charges_widens_and_never_implies_spending():
+  one = _contract(permissions={'check_credits_charges': ['prompts']})
+  two = _contract(permissions={'check_credits_charges': ['notes', 'prompts']})
+  assert one['data']['check_credits_charges'] == ['prompts']
+  assert 'spend_credits' not in one['data'] and one['data']['credits_manage'] is False
+  assert diff_contracts(one, two)['widens'] is True
+  assert diff_contracts(two, one)['widens'] is False
+
+
+def test_identity_management_never_implies_managing_credits():
+  identity = _contract(permissions={'identity_manage': True})
+  assert identity['data']['identity_manage'] is True
+  assert identity['data']['credits_manage'] is False
+  both = _contract(permissions={'identity_manage': True, 'credits_manage': True})
+  assert diff_contracts(identity, both)['widens'] is True
+
+
 def test_job_secret_permission_is_reviewed_normalized_and_omission_revokes():
   from types import SimpleNamespace
   from app.app_capabilities import contract_from_app_state
@@ -1421,8 +1481,11 @@ def test_complete_service_revocation_never_widens_from_transfer_limits_the_runti
     ("helper_activity_read", True),
     ("location_history_read", True),
     ("identity_manage", True),
+    ("credits_manage", True),
     ("railway_manage", True),
     ("job_secret_read", ["tg-1"]),
+    ("spend_credits", ["ana/prompts"]),
+    ("check_credits_charges", ["prompts"]),
   ],
 )
 @pytest.mark.parametrize(

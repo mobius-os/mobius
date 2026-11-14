@@ -98,7 +98,3 @@ test('a queue a Stop held waits for the owner\'s send only while no turn runs', 
 })
 
 
-test('a shared-browser guest is not offered the owner\'s held queue', () => {
-  const held = [{ cid: 'a', held: true }]
-  assert.equal(queueAwaitsOwnerSend({ turnActive: false, pendingMessages: held, sharedGuest: true }), false)
-})

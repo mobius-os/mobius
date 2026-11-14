@@ -8,9 +8,10 @@ on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 and merge it with local edits, or record a conflict),
 ``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
-``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
-normal Settings restart). Read failures are explicit so Settings cannot mistake
-an unavailable update source for an up-to-date installation. Conflict resolution
+``POST /restart`` (owner-confirmed self-restart through the same drained,
+supervisor-handled path as the normal Settings restart). Read failures are
+explicit so Settings cannot mistake an unavailable update source for an
+up-to-date installation. Conflict resolution
 is a separate owner-clicked endpoint so applying an update never silently starts an agent turn.
 """
 
@@ -114,11 +115,28 @@ class PlatformApplyIn(BaseModel):
   )
 
 
-def _with_stall(read_status, **kwargs) -> PlatformStatus:
-  """Status plus whether its unfinished update has stalled (resolver chat state)."""
-  status = read_status(**kwargs)
-  with SessionLocal() as db:
-    return platform_update.with_update_stall(db, status)
+async def _owner_status(read_status, *, stall: bool = True, **kwargs) -> PlatformStatus:
+  """Status for Settings: Cancel is offered only when cancelling can succeed,
+  decided before the stall view, whose actions depend on it.
+
+  The updater alone cannot tell whether a bound replacement ended; the
+  deployment controller can.
+  """
+  status = await asyncio.to_thread(read_status, **kwargs)
+  pending = status.get("unfinished_update")
+  if (
+    pending and pending["cancellable"]
+    and await deployment_control.bound_replacement_may_run()
+  ):
+    status["unfinished_update"] = {**pending, "cancellable": False}
+  if not stall:
+    return status
+
+  def with_stall() -> PlatformStatus:
+    with SessionLocal() as db:
+      return platform_update.with_update_stall(db, status)
+
+  return await asyncio.to_thread(with_stall)
 
 
 @router.get("/status")
@@ -137,11 +155,10 @@ async def get_platform_status(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        _with_stall, platform_update.platform_status,
-        target_sha=release["build_sha"],
+      return await _owner_status(
+        platform_update.platform_status, target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(_with_stall, platform_update.platform_status)
+    return await _owner_status(platform_update.platform_status)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -169,11 +186,11 @@ async def check_platform_updates(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        platform_update.check_for_updates,
+      return await _owner_status(
+        platform_update.check_for_updates, stall=False,
         target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(platform_update.check_for_updates)
+    return await _owner_status(platform_update.check_for_updates, stall=False)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -406,7 +423,8 @@ def restart_platform(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
-  restarts this worker (force-exit fallback) so it reboots with the new code."""
+  drains and asks the container supervisor to rerun the boot in place, so it
+  starts with the new code (force-exit fallback)."""
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:

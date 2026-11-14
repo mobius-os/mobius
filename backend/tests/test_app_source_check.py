@@ -341,3 +341,15 @@ def test_template_dollar_without_interpolation_is_a_literal_dependency(reference
   files = {"index.jsx": reference, "helper$.js": "export default 1"}
   assert [finding.code for finding in check_app_source(files, entry="index.jsx").errors] == ["undeclared_source"]
   assert check_app_source(files, entry="index.jsx", source_files=["helper$.js"]).ok
+
+
+def test_hosts_declared_for_direct_access_are_not_reported():
+  from app.app_source_check import check_manifest_tree
+
+  files = {"index.jsx": "fetch('https://api.example.com/v1'); fetch('https://other.example.com')"}
+  manifest = {"entry": "index.jsx", "capabilities": {"network.direct": {
+    "version": 1, "origins": ["https://api.example.com"],
+  }}}
+  findings = check_manifest_tree(manifest, files).findings
+  assert [f.code for f in findings] == ["external_host"]
+  assert "other.example.com" in findings[0].detail

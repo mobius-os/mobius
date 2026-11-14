@@ -171,6 +171,12 @@ List every imported sibling source file in `source_files`. Keep
 `offline_capable` false for a new app and preserve an existing app's value on
 update; see `building-apps.md` if offline use is a real product promise.
 
+Privileged grants (`manage_apps`, `manage_skills`, `github_access`,
+`github_connect`, `filesystem_access`, `connections_manage`, `connect_manage`)
+come only from a reviewed Store install. A local app's manifest value for them
+is ignored and the owner has no route to grant them, so do not plan a local
+feature on them.
+
 The manifest's `icon` is the package-artwork source of truth: apply validates
 and materializes that exact accepted file, so do not upload a second copy after
 applying. The apply helper also applies the offline flag and versioned
