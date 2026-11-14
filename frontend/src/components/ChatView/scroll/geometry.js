@@ -305,6 +305,72 @@ export function modeForInlineEditorReveal({
 }
 
 
+/** Return the hold that makes a question answer grow UPWARD, like the
+ * composer: when the answer's card sat at the bottom of the usable viewport,
+ * the editor's bottom edge ends where it was on screen before the edit, and
+ * the conversation above it moves.
+ *
+ * `editorBottomBefore` is the editor's client bottom edge read before the
+ * edit. Whatever else moved the viewport in the same pass (a deletion at the
+ * physical tail clamping scrollTop, a native caret reveal, an anchor repair
+ * for content above), the edge's remaining displacement is exactly what is
+ * still owed, so the target is the current scrollTop plus that displacement.
+ * Without a pre-edit edge (a resize no input drove) no hold applies.
+ *
+ * "At the bottom" means the card's lower edge was within `bottomBand` of the
+ * usable bottom, or beneath the overlaid composer (an open phone keyboard)
+ * but still inside the scroller, and the editor's own bottom edge was
+ * visible. A card higher up still grows down into the room below it, as does
+ * a card taller than the view whose lower edge is below the scroller (a
+ * grouped card answered from its top), and a reader holding the card out of
+ * view is not moved; all keep the ordinary caret reveal. Returns null when no
+ * hold applies. Like `modeForInlineEditorReveal`, it derives the target
+ * without writing it. */
+export function modeForInlineEditorGrowth({
+  scrollEl,
+  editor,
+  editorBottomBefore,
+  visibleTop,
+  visibleBottom,
+  bottomBand,
+}) {
+  if (!scrollEl || !editor
+      || !Number.isFinite(editorBottomBefore)
+      || !Number.isFinite(visibleTop)
+      || !Number.isFinite(visibleBottom)
+      || visibleBottom <= visibleTop) return null
+  const card = editor.closest?.('[data-question-id]')
+  const editorRect = editor.getBoundingClientRect?.()
+  const cardRect = card?.getBoundingClientRect?.()
+  if (!Number.isFinite(editorRect?.bottom) || !Number.isFinite(cardRect?.bottom)) {
+    return null
+  }
+  // The card's lower edge moves with the field's: the rows under the field
+  // keep their size.
+  const shift = editorRect.bottom - editorBottomBefore
+  if (Math.abs(shift) <= 0.5) return null
+  const cardBottomBefore = cardRect.bottom - shift
+  const scrollerBottom = scrollEl.getBoundingClientRect?.().bottom
+  if (editorBottomBefore < visibleTop || editorBottomBefore > visibleBottom + 0.5
+      || cardBottomBefore < visibleBottom - bottomBand
+      || !(cardBottomBefore <= scrollerBottom + 0.5)) return null
+
+  const layoutDelta = clientLengthToLayout(shift, captureLayoutSpace(scrollEl))
+  if (!Number.isFinite(layoutDelta)) return null
+  const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight)
+  const targetScrollTop = Math.min(
+    maxScrollTop,
+    Math.max(0, scrollEl.scrollTop + layoutDelta),
+  )
+  if (Math.abs(targetScrollTop - scrollEl.scrollTop) <= 0.5) return null
+  return _anchorModeForRow(
+    scrollEl,
+    _topmostVisibleMsg(scrollEl, targetScrollTop),
+    targetScrollTop,
+  )
+}
+
+
 /** Create a settled anchor with the latest real conversation content at the
  * viewport bottom. This is a one-time restoration target, NOT FOLLOW_BOTTOM:
  * later streaming/layout growth cannot drag the reader after return. */
@@ -558,8 +624,8 @@ export function isQuestionSubmissionMode(mode) {
 
 /** A focused custom Q&A answer gives the browser one narrow exception to the
  * ordinary viewport-resize rule: native caret reveal becomes the new exact
- * reading hold instead of being overwritten by the pre-keyboard anchor.
- * Stronger send pins, live following, and the question-submission overlay keep
+ * reading hold instead of being overwritten by the pre-keyboard anchor, and so
+ * does an answer's upward growth at the chat bottom. Stronger send pins, live following, and the question-submission overlay keep
  * their existing ownership contracts. */
 export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
   if (mode?.kind !== 'ANCHOR_AT'
