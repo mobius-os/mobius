@@ -2,7 +2,6 @@ import { createContext, useContext } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
-import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
 import { waitingPaymentsRefresh, withoutPayment } from '../lib/creditsPayment.js'
 
 function jsonOrThrow(res, label) {
@@ -217,17 +216,6 @@ async function fetchChats({ signal, timeoutMs, cache } = {}) {
   signal?.throwIfAborted()
   chatListReads.landed = Math.max(chatListReads.landed, read)
   return Array.isArray(data) ? data : []
-}
-
-async function fetchChatMessages(chatId, { signal } = {}) {
-  const res = await api.chats.detail(chatId, {
-    limit: 20,
-    compact: true,
-    signal,
-    timeoutMs: 15_000,
-  })
-  const data = await jsonOrThrow(res, 'chat fetch failed:')
-  return chatDetailCacheValue(data)
 }
 
 async function fetchChatCurrentUsage(
@@ -807,7 +795,6 @@ export const chatQueries = {
   },
   messages: {
     key: (chatId) => ['chat-messages', chatId],
-    fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
   usage: {

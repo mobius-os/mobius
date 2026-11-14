@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /* Saved close answers never manufacture a model turn or disturb owner intent. */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 import { installMockProviderUsage, runtimeSnapshot, mockDeliveryReady } from './_chatTestPrerequisites.mjs'
@@ -125,7 +126,7 @@ test('quiet acknowledgement preserves draft and attachment without starting a st
   expect(f.attempts).toHaveLength(1)
   expect(f.attempts[0].selected_options).toEqual({ help: ['0'] })
   expect(f.streams()).toBe(beforeStreams)
-  await expect(f.composer).toHaveValue(draft)
+  await expectComposerValue(f.composer, draft)
   await expect(f.attachment).toBeVisible()
   await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
 })
@@ -135,7 +136,7 @@ test('quiet rejection keeps selected choice and draft retryable with its explana
   await f.card.getByRole('radio', { name: /No thanks/ }).click()
   await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
   await expect(f.card.getByRole('status')).toContainText('unfinished Goal')
-  await expect(f.composer).toHaveValue(draft)
+  await expectComposerValue(f.composer, draft)
   await expect(f.attachment).toBeVisible()
   await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
   await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
@@ -166,7 +167,7 @@ for (const acknowledgement of ['detail', 'replay']) {
     expect(f.attempts.length).toBeGreaterThanOrEqual(1)
     for (const attempt of f.attempts) expect(attempt).toEqual(f.attempts[0])
     expect(f.answerWrites()).toBe(1)
-    await expect(f.composer).toHaveValue(draft)
+    await expectComposerValue(f.composer, draft)
     await expect(f.attachment).toBeVisible()
   })
 }
@@ -185,7 +186,7 @@ for (const restartVersion of [1, 2]) {
     expect(f.attempts).toHaveLength(1)
     expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })
     expect(f.streams()).toBe(beforeStreams)
-    await expect(f.composer).toHaveValue(draft)
+    await expectComposerValue(f.composer, draft)
     await expect(f.attachment).toBeVisible()
     await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
   })
@@ -201,7 +202,7 @@ test('writing Restart now does not grant option authority', async ({ page }) => 
   expect(f.attempts).toHaveLength(1)
   expect(f.attempts[0]).not.toHaveProperty('selected_options')
   expect(f.attempts[0].answers).toEqual({ [question]: 'Restart now' })
-  await expect(f.composer).toHaveValue(draft)
+  await expectComposerValue(f.composer, draft)
   await expect(f.attachment).toBeVisible()
 })
 
@@ -211,7 +212,7 @@ test('a legacy deferred Restart receipt remains settled without reviving its rem
   await expect(f.card.getByRole('radio')).toHaveCount(0)
   await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
   expect(f.attempts).toHaveLength(0)
-  await expect(f.composer).toHaveValue(draft)
+  await expectComposerValue(f.composer, draft)
   await expect(f.attachment).toBeVisible()
 })
 
@@ -221,7 +222,7 @@ test('independent activation settles a Restart card without fabricating an owner
   await expect(f.card.locator('[aria-checked="true"]')).toHaveCount(0)
   await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
   expect(f.attempts).toHaveLength(0)
-  await expect(f.composer).toHaveValue(draft)
+  await expectComposerValue(f.composer, draft)
   await expect(f.attachment).toBeVisible()
 })
 
@@ -247,7 +248,7 @@ test('known-offline fresh send stays in its local queue without POST or transcri
   const marker = 'OFFLINE-QUEUED-FOLLOWUP'
   await f.composer.focus()
   await f.composer.fill(marker)
-  await expect(f.composer).toHaveValue(marker)
+  await expectComposerValue(f.composer, marker)
   const network = await disconnectAnswerDelivery(page)
   await page.evaluate(marker => {
     window.__offlineTrace = []
@@ -267,7 +268,7 @@ test('known-offline fresh send stays in its local queue without POST or transcri
   await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
   const row = f.surface.locator('.queued__row').filter({ hasText: marker })
   await expect(row).toBeVisible()
-  await expect(f.composer).toHaveValue('')
+  await expectComposerValue(f.composer, '')
   const queuedTop = await f.card.evaluate(element => element.getBoundingClientRect().top)
   expect(Math.abs(queuedTop - readingTop)).toBeLessThanOrEqual(2)
   expect(network.attempts()).toBe(0)
@@ -302,7 +303,7 @@ for (const mode of ['quiet', 'reply', 'restart']) {
     expect(f.attempts).toHaveLength(0)
     await expect(f.surface.locator('.queued__row')).toHaveCount(0)
     await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
-    await expect(f.composer).toHaveValue(draft)
+    await expectComposerValue(f.composer, draft)
     await expect(f.attachment).toBeVisible()
     if (mode === 'quiet') {
       // Durable local answer ownership survives a document replacement; it is
@@ -316,7 +317,7 @@ for (const mode of ['quiet', 'reply', 'restart']) {
     await expect.poll(() => f.attempts.length).toBe(1)
     if (mode === 'restart') await expect(f.card.getByRole('status')).toContainText('Restart requested')
     else await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeDisabled()
-    await expect(f.composer).toHaveValue(draft)
+    await expectComposerValue(f.composer, draft)
     await expect(f.attachment).toBeVisible()
   })
 }
@@ -330,7 +331,7 @@ test('a follow-up can queue behind a locally saved answer without clearing its b
   await f.attachment.click()
   await f.composer.focus()
   await f.composer.fill('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-  await expect(f.composer).toHaveValue('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
+  await expectComposerValue(f.composer, 'FOLLOWUP-B-AFTER-LOCAL-ANSWER')
   await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(f.surface.locator('.queued__row')).toContainText('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
   await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
@@ -360,7 +361,7 @@ for (const action of ['edit', 'cancel']) {
     if (action === 'edit') {
       // The pencil opens the queued message in the chat box.
       await row.getByRole('button', { name: 'Edit queued message' }).click()
-      await expect(f.composer).toHaveValue(marker)
+      await expectComposerValue(f.composer, marker)
       await f.composer.fill('REVISED-LOCAL-MESSAGE')
       await f.surface.getByRole('button', { name: 'Save queued message' }).click()
       await expect(row).toContainText('REVISED-LOCAL-MESSAGE')
@@ -441,7 +442,7 @@ for (const action of ['edit', 'cancel']) {
         await f.surface.getByRole('button', { name: 'Save queued message' }).click()
         await expect(f.surface.locator('.chat__history-strip'))
           .toContainText('Delivery is being confirmed. Your edit is kept here.')
-        await expect(f.composer).toHaveValue('UNCONFIRMED-EDIT')
+        await expectComposerValue(f.composer, 'UNCONFIRMED-EDIT')
         await expect(row).toContainText('CONFIRMED-QUEUE-MESSAGE')
       } else {
         await row.getByRole('button', { name: 'Cancel queued message' }).click()

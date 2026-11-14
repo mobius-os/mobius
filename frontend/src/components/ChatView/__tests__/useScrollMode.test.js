@@ -269,7 +269,8 @@ test('nested controls keep their own keys and available scroll range', () => {
 })
 
 test('a composer press or direct edit requests follow only at the physical tail', () => {
-  const composer = { matches: selector => selector === 'textarea.chat__input' }
+  const composer = { matches: selector => selector.split(', ').includes('textarea.chat__input') }
+  const markdownComposer = { matches: selector => selector.split(', ').includes('.chat__editor-content') }
   const otherControl = { matches: () => false }
   const atTail = makeScrollEl({
     scrollHeight: 2000,
@@ -296,6 +297,11 @@ test('a composer press or direct edit requests follow only at the physical tail'
     type: 'pointerdown', button: 1, target: composer,
   }, atTail), false,
     'non-primary presses do not express writing intent')
+  const formattedWord = { closest: selector => selector === '.chat__editor-content' ? markdownComposer : null }
+  assert.equal(composerTailIntentRequestsFollow({ type: 'pointerdown', button: 0, target: formattedWord }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'pointerdown', button: 0, target: formattedWord }, aboveTail), false)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'input', target: markdownComposer }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({ type: 'input', target: markdownComposer }, aboveTail), false)
   assert.equal(composerTailIntentRequestsFollow({
     type: 'input', target: otherControl,
   }, atTail), false)
