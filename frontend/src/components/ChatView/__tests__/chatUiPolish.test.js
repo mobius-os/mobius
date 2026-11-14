@@ -345,11 +345,15 @@ test('queued tray hover fills never stick after a touch expand or collapse', () 
   assert.doesNotMatch(ungated, /\.queued[\w-]*(?:[.:][\w-]+|\([^)]*\))*:hover/,
     'queued tray :hover rules must live inside (hover: hover) and (pointer: fine)')
 
-  // Header and rows share one secondary fill; --bg read as a hole in the tray.
-  const rowHover = gated.match(/[^{}]*\.queued__row:hover[^{}]*\{[^}]*\}/)?.[0] || ''
-  assert.match(rowHover, /\.queued__hdr:hover/)
-  assert.match(rowHover, /background:\s*var\(--surface-2\)/)
-  assert.doesNotMatch(gated, /\.queued__row:hover[^{]*\{[^}]*var\(--bg\)/)
+  // A hovered row must neither sink to --bg (a hole in the tray) nor take the
+  // action wells' own fill, which would erase the send/edit/cancel buttons.
+  const fill = (rule) => rule.match(/background:\s*([^;]+);/)?.[1].trim()
+  const rowFill = fill(gated.match(/\.queued__row:hover\s*\{[^}]*\}/)?.[0] || '')
+  const actionFill = fill(ungated.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || '')
+  assert.ok(rowFill, 'hovered queued rows have a fill')
+  assert.ok(actionFill, 'queued action wells have a resting fill')
+  assert.notEqual(rowFill, actionFill, 'hovered row fill must differ from the action wells')
+  assert.doesNotMatch(rowFill, /var\(--bg\)/)
 
   // Press feedback stays available to touch.
   assert.match(ungated, /\.queued__cancel:not\(:disabled\):active\s*\{[^}]*var\(--danger\)/)

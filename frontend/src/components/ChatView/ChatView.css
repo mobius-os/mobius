@@ -4940,6 +4940,8 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   display: block;
 }
 
+/* Repeated as :hover inside the fine-pointer block below; one selector list
+   would put hover back on touch. */
 .queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
@@ -4948,14 +4950,17 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 /* Hover fills belong to fine pointers only. A touch tap leaves :hover on the
    tapped element until the next tap elsewhere, so an ungated rule kept the
-   header or row lit after every expand/collapse. The row uses the header's
-   own secondary fill: the darker --bg read as a hole punched in the tray, and
-   on desktop it lit whichever row the expanding tray slid under a still
-   pointer. */
+   header or row lit after every expand/collapse. The row lifts halfway toward
+   --surface-2 rather than sinking to --bg (which read as a hole punched in the
+   tray) or reaching --surface-2 itself, the action wells' own fill, which
+   would erase them. */
 @media (hover: hover) and (pointer: fine) {
-  .queued__hdr:hover,
-  .queued__row:hover {
+  .queued__hdr:hover {
     background: var(--surface-2); /* CONTRACT: secondary opaque fill */
+  }
+
+  .queued__row:hover {
+    background: color-mix(in srgb, var(--surface-2) 50%, var(--surface)); /* CONTRACT: opaque lift that stays below the wells' --surface-2 */
   }
 
   .queued__row--in-composer:hover {
