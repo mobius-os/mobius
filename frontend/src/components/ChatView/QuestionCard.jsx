@@ -37,6 +37,7 @@ import {
   restartCardStatusDetail,
   restartCardStatusLabel,
 } from './restartCard.js'
+import { questionActionCompleted } from './questionOpen.js'
 
 
 const CUSTOM_ANSWER_MAX_HEIGHT = 180
@@ -222,8 +223,7 @@ export default function QuestionCard({
   // A ready-boot receipt is independent of the offered action. Keep an
   // unanswered button and written reply available without manufacturing an
   // owner answer or bypassing the server's continuation hold.
-  const completedAction = Boolean(actionStatusLabel)
-    && platformAction?.status !== 'awaiting_owner'
+  const completedAction = questionActionCompleted(platformAction)
   const answered = Boolean(submitted) || !!answeredMap || completedAction
   const locallyQueued = !answered && Boolean(localAnswer)
   const selectionLocked = answered || locallyQueued

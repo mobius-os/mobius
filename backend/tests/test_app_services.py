@@ -2771,18 +2771,21 @@ async def test_http_scope_cancellation_drains_auth_before_session_cleanup(
       if entered.is_set():
         assert await asyncio.to_thread(finished.wait, 5)
 
-  # Cancellation can interrupt FastAPI's exception cleanup before __exit__,
-  # leaving get_db in a traceback cycle. Finalize it before checking ordering.
-  gc.collect()
-  if cancel_before_start:
-    assert not entered.is_set()
-  else:
-    assert finished.is_set() and closed.is_set()
   if outcome is None:
     assert scope.cancelled_caught
   else:
     assert dependency_error and isinstance(outcome, RuntimeError)
     assert str(outcome) == "authentication failed"
+
+  # The exception and task retain the traceback. Once released, collection
+  # may only schedule FastAPI's async-generator finalizer; wait for its close.
+  del outcome, task
+  gc.collect()
+  if cancel_before_start:
+    assert not entered.is_set()
+  else:
+    assert finished.is_set()
+    assert await asyncio.to_thread(closed.wait, 5)
 
 
 DENSE_RESPONSE_SERVICE = b'''import json, sys
