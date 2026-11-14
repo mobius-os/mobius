@@ -14,9 +14,11 @@ export function appBlockRoute({ requested, installed, admitted, started }) {
 /** Static unless an admitted, supporting session has a frame slot. A view
  *  the reader opened in the static form stays until the reader closes it. An
  *  unresolved (retained) session always stays, even when admission is
- *  withdrawn: it is then held, with no new action, until it settles. This is
- *  decided here, from the session's own synchronous state. */
-export function passiveBlockMode({ admitted = true, supported, near, granted, retained, staticOpen }) {
+ *  withdrawn: it is then held, with no new action, until it settles.
+ *  An idle presentation may stay visible without a frame slot; it grants no
+ *  authority and does not retain a frame. Both decisions use the session's
+ *  own synchronous state. */
+export function passiveBlockMode({ admitted = true, supported, near, granted, retained, staticOpen, hasPresentation = false }) {
   if (retained) return 'passive'
-  return !admitted || supported === false || staticOpen || (near && !granted) ? 'static' : 'passive'
+  return !admitted || supported === false || staticOpen || (near && !granted && !hasPresentation) ? 'static' : 'passive'
 }

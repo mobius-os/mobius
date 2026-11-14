@@ -61,6 +61,7 @@ test('the session envelope names every block action and no state is shown before
   assert.equal(h.result.current.state, null)
   assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'no event before the document negotiates')
   capability(true, 1)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'negotiation alone grants no controls')
   report({})
   assert.equal(h.result.current.state.actions.length, 2)
 })
@@ -122,20 +123,59 @@ test('a reload during an unacknowledged Confirm holds ownership instead of offer
   assert.equal(h.result.current.retained, true)
 })
 
-test('releasing an idle frame offscreen discards its negotiation; re-entry waits for fresh state', () => {
+test('an idle return keeps its display asleep until a real refresh requires authority', () => {
   const { h, capability, report } = mounted()
   capability(true, 1)
-  report({})
-  assert.ok(h.result.current.state)
+  report({ title: '1 pull request' })
+  const displayed = h.result.current.displayState
   h.rerender({ block, near: false })
   assert.equal(h.result.current.frameMounted, false)
+  assert.equal(h.result.current.retained, false)
   assert.equal(h.result.current.state, null)
   assert.equal(h.result.current.supported, null)
+  assert.equal(h.result.current.displayState.title, displayed.title)
   h.rerender({ block, near: true })
+  assert.equal(h.result.current.frameMounted, false, 'scrolling is not invalidation')
+  assert.equal(h.result.current.wantsFrame, false, 'sleeping cards do not consume idle slots')
+  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'turn' } })
   assert.equal(h.result.current.frameMounted, true)
-  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'stale controls cannot act during renegotiation')
-  report({}, 1)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false)
+  report({ title: 'Old document' }, 1)
   assert.equal(h.result.current.state, null, 'the released document cannot report again')
+  assert.equal(h.result.current.displayState.title, displayed.title)
+  capability(true, 2)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false, 'negotiation cannot unlock the old display')
+  assert.equal(h.result.current.displayState.title, displayed.title)
+  report({ title: 'Could not load' }, 2)
+  assert.equal(h.result.current.displayState.title, 'Could not load', 'a fresh failure replaces the observation honestly')
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), true)
+})
+
+for (const changed of [
+  { block: { ...block, title: 'Other block' } },
+  { revision: 'new' },
+  { context: { chatId: 'other', latest: true } },
+  { context: { latest: false } },
+  { admitted: false },
+]) test('idle presentation is scoped to block, revision, admission and chat: ' + JSON.stringify(changed), () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Known result' })
+  h.rerender({ block, near: false })
+  assert.equal(h.result.current.displayState.title, 'Known result')
+  h.rerender({ block, near: false, ...changed })
+  assert.equal(h.result.current.displayState, null)
+})
+
+test('a confirmation is never borrowed as an idle display on document reset', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Before action' })
+  report({ actions: [{ key: 'send:b', label: 'Confirm', confirming: true }] })
+  capability(true, 2)
+  assert.equal(h.result.current.state, null)
+  assert.equal(h.result.current.displayState, null)
+  assert.equal(h.result.current.confirmArmed, false)
 })
 
 test('an unresolved owner stays mounted offscreen', () => {
@@ -508,16 +548,17 @@ test('the envelope carries the host-attested chat context and follows the newest
   assert.equal('context' in h.result.current.blockSession, false)
 })
 
-test('a refresh hint is raised only for a mounted, supported document, bound to its generation', () => {
-  const h = renderObserved({ block, near: true, refresh: { seq: 0, reason: '' } })
-  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'turn' } })
-  assert.equal(h.result.current.blockRefresh, null, 'no document has negotiated yet')
-  h.result.current.onBlockCapability(true, { generation: 4, reset: true })
-  h.rerender({ block, near: true, refresh: { seq: 2, reason: 'visible' } })
-  assert.deepEqual(h.result.current.blockRefresh,
-    { seq: 2, reason: 'visible', sessionId: h.result.current.sessionId, generation: 4 })
-  h.rerender({ block, near: false, refresh: { seq: 3, reason: 'turn' } })
-  assert.equal(h.result.current.blockRefresh.seq, 2, 'a released frame gets no hint')
+test('refresh requires a new document observation, not an unrelated report from the old one', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 4); report({ title: 'Old observation' })
+  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'visible' } })
+  assert.equal(h.result.current.authoritative, false)
+  report({ title: 'Unrelated old report' }, 4)
+  assert.equal(h.result.current.authoritative, false)
+  capability(true, 5)
+  report({ title: 'Fresh read' }, 5)
+  assert.equal(h.result.current.authoritative, true)
+  assert.equal(h.result.current.displayState.title, 'Fresh read')
 })
 
 test('ask-v1 is advertised and an ask accepted only when the app is admitted to ask', () => {
@@ -533,3 +574,146 @@ test('ask-v1 is advertised and an ask accepted only when the app is admitted to 
     assert.equal(h.result.current.event, null, 'reporting an ask sends the app no event')
   }
 })
+
+
+test('loading after a refresh preserves the last complete display but never enables actions', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Published', rows: [{ title: 'Result', links: [{ label: '#1', url: 'https://example.com/pr/1' }] }] })
+  const saved = h.result.current.displayState
+  h.rerender({ block, near: false })
+  h.rerender({ block, near: false, refresh: { seq: 1, reason: 'turn' } })
+  assert.equal(h.result.current.frameMounted, false)
+  h.rerender({ block, near: true, refresh: { seq: 1, reason: 'turn' } })
+  assert.equal(h.result.current.frameMounted, true)
+  capability(true, 2)
+  report({ loading: true, title: 'Loading' })
+  assert.deepEqual(h.result.current.displayState, saved)
+  assert.equal(h.result.current.dispatch('send:b', 'activate'), false)
+  report({ loading: false, title: 'Read failed', actions: [{ key: 'send:b', label: 'Try again' }] })
+  assert.equal(h.result.current.displayState.title, 'Read failed', 'a settled failure must not be hidden')
+})
+
+test('one sleeping activation waits for current settled authority and never replays confirmation', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ title: 'Ready' })
+  h.rerender({ block, near: false })
+  h.rerender({ block, near: true })
+  assert.equal(h.result.current.requestEvent('send:b', 'confirm'), false)
+  assert.equal(h.result.current.requestEvent('send:b', 'cancel'), false)
+  assert.equal(h.result.current.requestEvent('send:b', 'activate'), true)
+  assert.equal(h.result.current.requestEvent('send:b', 'activate'), false)
+  assert.equal(h.result.current.frameMounted, true)
+  assert.equal(h.result.current.event, null)
+  capability(true, 2)
+  report({ loading: true })
+  assert.equal(h.result.current.event, null)
+  report({ loading: false })
+  assert.equal(h.result.current.event.event, 'activate')
+  assert.equal(h.result.current.event.generation, 2)
+  assert.equal(h.result.current.event.key, 'send:b')
+  assert.equal(h.result.current.requestEvent('send:b', 'confirm'), false)
+})
+
+for (const action of [{ key: 'send:b', disabled: true }, { key: 'send:b', hidden: true }, { key: 'send:b', open: true }, { key: 'other' }]) {
+  test('a waking tap cannot activate an unavailable current action: ' + JSON.stringify(action), () => {
+    const { h, capability, report } = mounted()
+    capability(true, 1)
+    report({})
+    h.rerender({ block, near: false })
+    h.rerender({ block, near: true })
+    h.result.current.requestEvent('send:b', 'activate')
+    capability(true, 2)
+    report({ actions: [action] })
+    assert.equal(h.result.current.event, null)
+    assert.equal(h.result.current.awaitingAck, false)
+  })
+}
+
+test('revoking admission cancels an unsent waking activation', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1); report({})
+  h.rerender({ block, near: false })
+  h.rerender({ block, near: true })
+  h.result.current.requestEvent('send:b', 'activate')
+  h.rerender({ block, near: false, admitted: false })
+  assert.equal(h.result.current.awaitingAck, false)
+  assert.equal(h.result.current.event, null)
+})
+
+for (const changed of [false, true]) test('sleeping asks revalidate exact references before sending: changed=' + changed, () => {
+  const ask = { refs: [{ id: 'row-1', code: 'needs_review', rev: 'abc1234' }] }
+  const h = renderObserved({ block, near: true, ask: true })
+  const report = fields => h.result.current.onBlockState({ type: 'moebius:app-block-state',
+    sessionId: h.result.current.sessionId, actions: [], ...fields }, { generation: h.result.current.generation })
+  h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+  report({ ask })
+  h.rerender({ block, near: false, ask: true })
+  h.rerender({ block, near: true, ask: true })
+  assert.deepEqual(h.result.current.displayState.ask, ask)
+  const sent = []
+  assert.equal(h.result.current.requestAsk(value => sent.push(value)), true)
+  assert.equal(h.result.current.requestAsk(value => sent.push(value)), false)
+  assert.deepEqual(sent, [])
+  h.result.current.onBlockCapability(true, { generation: 2, reset: true })
+  report({ loading: true })
+  assert.deepEqual(sent, [])
+  report({ ask: changed ? { refs: [{ ...ask.refs[0], rev: 'def5678' }] } : ask })
+  assert.deepEqual(sent, changed ? [] : [ask])
+  assert.equal(h.result.current.event, null, 'an ask never sends an app action')
+})
+
+for (const changed of [{ revision: 'new' }, { context: { chatId: 'other', latest: true } }, { context: { latest: false } }]) {
+  test('scope change revokes action authority before a replacement report: ' + JSON.stringify(changed), () => {
+    const { h, capability, report } = mounted()
+    capability(true, 1); report({ title: 'Ready' })
+    h.rerender({ block, near: true, ...changed })
+    assert.equal(h.result.current.authoritative, false)
+    assert.equal(h.result.current.requestEvent('send:b', 'activate'), false)
+    report({ title: 'Late old document' }, 1)
+    assert.equal(h.result.current.authoritative, false)
+    assert.equal(h.result.current.event, null)
+  })
+}
+
+test('refresh revokes an old Ask before the next report', () => {
+  const h = renderObserved({ block, near: true, ask: true })
+  h.result.current.onBlockCapability(true, { generation: 1, reset: true })
+  h.result.current.onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current.sessionId,
+    actions: [], ask: { refs: [{ id: 'row', code: 'needs_review', rev: 'abc1234' }] } }, { generation: 1 })
+  h.rerender({ block, near: true, ask: true, refresh: { seq: 1, reason: 'turn' } })
+  const sent = []
+  h.result.current.requestAsk(value => sent.push(value))
+  assert.equal(h.result.current.authoritative, false)
+  assert.deepEqual(sent, [])
+})
+
+test('old retained settlement never grants authority in a changed scope', () => {
+  const { h, capability, report } = mounted()
+  capability(true, 1)
+  report({ retain: true, checkpoint: { id: 'work', data: '{}' } })
+  h.rerender({ block, near: true, revision: 'new' })
+  report({ checkpoint: null, title: 'Old settled' }, 1)
+  assert.equal(h.result.current.authoritative, false)
+  assert.equal(h.result.current.requestEvent('send:b', 'activate'), false)
+  capability(true, 2)
+  report({ title: 'New version' }, 2)
+  assert.equal(h.result.current.authoritative, true)
+})
+
+for (const changed of [{ refresh: { seq: 1, reason: 'turn' } }, { revision: 'new' }]) {
+  test('invalidating an idle confirmation cancels it without stranding the card: ' + JSON.stringify(changed), () => {
+    const { h, capability, report } = mounted()
+    capability(true, 1)
+    report({ retain: true, actions: [{ key: 'send:b', confirming: true, confirmation: [{ title: 'Exact', facts: [] }] }] })
+    assert.equal(h.result.current.retained, true)
+    h.rerender({ block, near: true, ...changed })
+    assert.equal(h.result.current.retained, false)
+    assert.equal(h.result.current.state, null)
+    assert.equal(h.result.current.dispatch('send:b', 'confirm'), false)
+    capability(true, 2)
+    report({ title: 'Ready again' }, 2)
+    assert.equal(h.result.current.authoritative, true)
+  })
+}

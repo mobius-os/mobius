@@ -124,6 +124,9 @@ export function appBlockFromToken(token) {
     // same value-only facts (labels for assistive technology). Without it an
     // app's confirmation keeps visible labels, as before.
     confirmFacts: value.confirm_facts === 'values' ? 'values' : '',
+    // Compact cards place their title/status beside the action, without an
+    // extra header or app-opening link. Row links remain available.
+    statusPlacement: value.status_placement === 'footer' ? 'footer' : '',
     height: typeof value.height === 'number' && Number.isFinite(value.height)
       ? Math.max(240, Math.min(640, value.height)) : 480,
   }

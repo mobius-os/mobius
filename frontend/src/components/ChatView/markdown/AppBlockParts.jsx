@@ -79,10 +79,10 @@ export function StatusPill({ status, tone = 'neutral', busy = false }) {
 }
 
 /** A row's live state from a passive session (appBlockSession.js sessionItems). */
-function ItemState({ live, title = '' }) {
+function ItemState({ live, title = '', linksInFooter = false }) {
   if (!live) return null
   return <span className="md-app-block__item-state">
-    <ExternalLinks links={live.links} context={title} />
+    {linksInFooter ? null : <ExternalLinks links={live.links} context={title} />}
     <StatusPill status={live.status} tone={live.statusTone} busy={live.busy} />
   </span>
 }
@@ -108,7 +108,7 @@ export function UnavailableNotice({ slug, loading }) {
 /** The block's rows. A passive session's confirmation rows (sessionSnapshot)
  *  come from the app and link nowhere; `listEdgeRefs` marks their first and
  *  last row so Confirm can require both ends to have been on screen. */
-export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = null }) {
+export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = null, linksInFooter = false }) {
   if (!items.length) return null
   const first = items.findIndex(item => item.confirmation)
   const last = items.findLastIndex(item => item.confirmation)
@@ -124,7 +124,7 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
         {item.meta}{item.meta && item.lines ? ' · ' : null}{item.lines ? <LineCounts lines={item.lines} /> : null}</p> : null}
       {item.live?.note ? <p className="md-app-block__item-note">{item.live.note}</p> : null}
     </div>
-    <ItemState live={item.live} title={item.title} />
+    <ItemState live={item.live} title={item.title} linksInFooter={linksInFooter} />
     {actionFor(item.action)}
     {i === last ? <span ref={listEdgeRefs?.end} className="md-app-block__list-edge is-end" aria-hidden="true" /> : null}
   </li>)}</ul>
@@ -158,27 +158,42 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   // An app that reports no rows and shows no control folds its block to one
   // quiet line (for example "Continued below" on an earlier card).
   const folded = block.appRows && !block.items.length && !action && !toggle && !summary
-  return <section ref={sectionRef} className={`md-app-block${valueFacts}${folded ? ' md-app-block--folded' : ''}`} aria-label={block.title}>
-    <header>
+  // Compact inline blocks keep one action lane throughout their lifecycle.
+  // Hiding a control must not collapse it; row results take the same place.
+  const actionLane = !folded && block.session && !block.expand && Boolean(block.action)
+  const linksInFooter = actionLane && block.appRows
+  const results = linksInFooter ? block.items.filter(item => item.live?.links.length) : []
+  const footerStatus = block.statusPlacement === 'footer'
+  const status = <>
       <TitleMark tone={block.titleTone} busy={block.titleBusy} />
       <strong>{block.title}</strong>
       <Badges badges={block.badges} />
-      {folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
-        Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null}
+    </>
+  const jump = folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
+    Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null
+  return <section ref={sectionRef} className={`md-app-block${valueFacts}${folded ? ' md-app-block--folded' : ''}${actionLane ? ' md-app-block--action-lane' : ''}${footerStatus ? ' md-app-block--footer-status' : ''}`} aria-label={block.title}>
+    {footerStatus ? null : <header>
+      {status}{jump}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
       {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
         {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
         <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
-    </header>
+    </header>}
     {/* While the rows are the app's confirmation or its own rows, nothing is
         added around them. A live title is the app's; saved rows are still the
         conversation's. */}
     {block.confirmation || block.appRows ? null
-      : <p className="md-app-block__source">{block.liveTitle ? 'Rows from this conversation' : 'From this conversation'}</p>}
+      : <p className={`md-app-block__source${actionLane ? ' md-app-block__sr-only' : ''}`}>{block.liveTitle ? 'Rows from this conversation' : 'From this conversation'}</p>}
     {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
-    <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} />
-    {action || toggle ? <footer>{toggle}{action}</footer> : null}
+    <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} linksInFooter={linksInFooter} />
+    {footerStatus || actionLane || action || toggle ? <footer>
+      {footerStatus ? <div className="md-app-block__footer-status">{status}</div> : null}
+      {footerStatus ? jump : null}
+      {results.length ? <div className="md-app-block__results">{results.map((item, i) =>
+        <ExternalLinks key={i} links={item.live.links} context={item.title} />)}</div> : null}
+      {toggle}{action}
+    </footer> : null}
     {app ? null : <UnavailableNotice slug={block.app} loading={appsLoading} />}
     {children}
   </section>
