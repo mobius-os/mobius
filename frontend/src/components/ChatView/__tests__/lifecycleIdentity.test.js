@@ -230,3 +230,19 @@ test('combined recovery notice keeps cause visible and offers dated history', ()
  assert.doesNotMatch(html, /Interrupted work continued/)
  assert.match(html, /datetime=/i)
 })
+
+
+test('deliberate answer continuations are not described as automatic retries', async () => {
+ const { continuationTitle } = await vite.ssrLoadModule('/src/components/ChatView/ContinuationCard.jsx')
+ for (const [reason, label] of [
+   ['question_answer', 'Continued after your answer'],
+   ['helper_answer', 'Continued after parent answer'],
+ ]) {
+   assert.equal(continuationTitle(reason), label, 'history uses the same truthful title as its header')
+   const html = render(h(Resume, { msg: { continuation_reason: reason } }))
+   assert.ok(html.includes(label))
+   assert.doesNotMatch(html, /Resumed automatically/)
+ }
+ assert.equal(continuationTitle('manual'), 'Resumed manually')
+ assert.equal(continuationTitle('restart'), 'Resumed automatically')
+})
