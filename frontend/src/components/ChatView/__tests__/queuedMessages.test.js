@@ -6,9 +6,24 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 
-const vite = await createSsrRenderServer()
+// `?hook-shim` loads a second copy of the tray whose `react` is the hook shim,
+// so a test can collapse it the way the header tap does and render the result.
+// Server rendering never resolves a bare `react` through plugins, so the
+// import is rewritten.
+const SHIM = '/src/components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+const vite = await createSsrRenderServer({
+  plugins: [{
+    name: 'queued-tray-hook-shim',
+    enforce: 'pre',
+    transform: (code, id) => (
+      id.endsWith('/QueuedMessages.jsx?hook-shim') ? code.replace("from 'react'", `from '${SHIM}'`) : null
+    ),
+  }],
+})
 after(() => vite.close())
 const { default: QueuedMessages } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
+const { renderHook } = await vite.ssrLoadModule(SHIM)
+const { default: ShimTray } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx?hook-shim')
 const { PrimaryAction } = await vite.ssrLoadModule('/src/components/ChatView/ChatInputBar.jsx')
 const { composerDraftPreview, composerHistoryKeyHint } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
 
@@ -191,9 +206,9 @@ test('a message queued during a turn is not captioned as waiting for the owner',
 test('editing a queued message shows no strip unless it has to warn', async () => {
   const { composerHistoryStripCopy } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
   const position = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
-  assert.equal(composerHistoryStripCopy(position), null, 'the tray row marks it instead')
-  assert.deepEqual(composerHistoryStripCopy(position, { saving: true }),
-    { title: 'Saving the queued message…', srOnly: true }, 'a save in progress is still announced')
+  assert.equal(composerHistoryStripCopy(position).srOnly, true, 'the tray row marks it instead')
+  assert.equal(composerHistoryStripCopy(position, { saving: true }).hint, 'Saving…',
+    'a save in progress is still announced')
   assert.equal(composerHistoryStripCopy(position, { note: 'Could not save' }).warn, true,
     'a failed save still says so')
   assert.equal(composerHistoryStripCopy({ kind: 'sent' }).title, 'Earlier message',
@@ -206,33 +221,20 @@ test('the chat box keeps one status region and changes only its text', async () 
   const queued = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
   const region = /^<span class="chat__sr-only" role="status" aria-live="polite">([^<]*)<\/span>/
   assert.equal(render({ position: null }).match(region)?.[1], '', 'present and empty outside history')
-  assert.equal(render({ position: queued }).match(region)?.[1], '', 'present and empty while editing quietly')
+  const editing = render({ position: queued })
+  assert.equal(editing.match(region)?.[1], 'Editing queued message 1 of 1. Enter saves it, Esc goes back',
+    'opening a queued message is spoken')
+  assert.doesNotMatch(editing, /chat__history-strip/, 'and nothing is shown')
+  assert.equal(render({ position: queued, touch: true }).match(region)?.[1],
+    'Editing queued message 1 of 1. Send saves it')
   const saving = render({ position: queued, saving: true })
-  assert.equal(saving.match(region)?.[1], 'Saving the queued message…', 'a save is spoken')
+  assert.equal(saving.match(region)?.[1], 'Editing queued message 1 of 1. Saving…', 'a save is spoken')
   assert.doesNotMatch(saving, /chat__history-strip/, 'and nothing is shown')
   const failed = render({ position: queued, note: 'Could not save' })
   assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
   assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
   assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
 })
-
-// QueuedMessages run under the hook shim, so a test can collapse the tray the
-// way the header tap does and render what the owner then sees. Server
-// rendering never resolves a bare `react` through plugins, so the tray's own
-// import is rewritten.
-const SHIM = '/src/components/ChatView/hooks/__tests__/react-hook-shim.mjs'
-const shimVite = await createSsrRenderServer({
-  plugins: [{
-    name: 'queued-tray-hook-shim',
-    enforce: 'pre',
-    transform: (code, id) => (
-      id.endsWith('/QueuedMessages.jsx') ? code.replace("from 'react'", `from '${SHIM}'`) : null
-    ),
-  }],
-})
-after(() => shimVite.close())
-const { renderHook } = await shimVite.ssrLoadModule(SHIM)
-const { default: ShimTray } = await shimVite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
 
 function findByClass(node, className) {
   if (Array.isArray(node)) return node.map(child => findByClass(child, className)).find(Boolean)
@@ -252,6 +254,7 @@ test('a collapsed tray still shows the row open in the chat box and its Stop edi
   props.inComposerCid = 'q2'
   tray.rerender()
   assert.match(html(), /aria-expanded="false"/, 'the tray stays collapsed')
+  assert.match(html(), /showing only the message in the chat box/, 'and says what it still shows')
   assert.equal(html().match(/role="listitem"/g)?.length, 1, 'only the row in the chat box')
   assert.match(html(), /queued__row--in-composer[\s\S]*Also update the changelog[\s\S]*>Stop editing</)
   findByClass(tray.result.current, 'queued__in-composer').props.onClick()

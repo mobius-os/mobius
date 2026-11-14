@@ -110,6 +110,9 @@ export default function QueuedMessages({
         <span className="queued__count">
           {items.length} queued
         </span>
+        {collapsed && shownItems.length > 0 && (
+          <span className="chat__sr-only">, showing only the message in the chat box</span>
+        )}
         <span className="queued__hint">
           {hint}
         </span>
@@ -247,7 +250,7 @@ export default function QueuedMessages({
                     className="queued__in-composer"
                     onPointerDown={(e) => e.preventDefault()}
                     onClick={() => onStopEditing?.()}
-                    title="Back to your draft without saving (Esc)"
+                    title="Back to your draft (Esc)"
                   >
                     Stop editing
                   </button>
