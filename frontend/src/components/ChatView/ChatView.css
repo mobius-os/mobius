@@ -934,7 +934,7 @@
   animation: cursorPulse 1.5s ease-in-out infinite;
 }
 
-.progressive-markdown[data-is-streaming="true"] {
+.md-blocks[data-is-streaming="true"] {
   position: relative;
 }
 
