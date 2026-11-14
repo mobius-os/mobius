@@ -5996,6 +5996,14 @@ async def _run_chat_impl_with_db(
       _log_superseded_run(chat_id, "codex-skill-sync")
       return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
+  if provider_id == "mobius":
+    from app.providers import _fetch_model_entries
+    await _fetch_model_entries(settings.data_dir, "mobius")
+
+  if _run_generation_superseded(chat_id, run_gen):
+    _log_superseded_run(chat_id, "model-discovery")
+    return chat_queue.TerminalDisposition.STALE_NO_ACTION
+
   app_context_block = ""
   app_context_env: dict[str, str] = {}
   chat_row = None
@@ -6407,6 +6415,11 @@ async def _run_chat_impl_with_db(
       settings.data_dir, chat_overrides, provider=provider_id,
     )
   )
+
+  if provider_id == "mobius":
+    agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
+    if not agent_settings["model"] or not provider.declaration["models"]:
+      raise ValueError("This Möbius model is unavailable. Refresh models and choose a current model.")
 
   # Helpers inherit this admission's resolved selection, not mutable global
   # preferences or another turn using the same provider host.

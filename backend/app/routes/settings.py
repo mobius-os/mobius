@@ -466,7 +466,16 @@ async def list_model_registry(
   """
   data_dir = get_app_settings().data_dir
   registry = await providers.list_models(data_dir, force_refresh=refresh)
-  return ModelRegistryResponse(providers=registry)
+  defaults = {pid: model for pid, model in providers.DEFAULT_BACKGROUND_MODELS.items()
+              if pid in registry and model and pid != "mobius"}
+  replacements = {}
+  if "mobius" in registry:
+    snapshot = providers.PROVIDERS["mobius"].registry_snapshot()
+    registry["mobius"] = snapshot["models"]
+    if snapshot["default"]:
+      defaults["mobius"] = snapshot["default"]
+    replacements["mobius"] = snapshot["replacements"]
+  return ModelRegistryResponse(providers=registry, defaults=defaults, replacements=replacements)
 
 
 owner_router = APIRouter(prefix="/api/owner", tags=["owner"])
