@@ -38,10 +38,38 @@ def test_unavailable_explicit_update_provider_does_not_fallback(db, monkeypatch)
 
 
 def test_completed_app_resolver_archives_without_deleting_history(db, chat):
-  update_chat.archive_completed_app_resolver(db, chat.id)
+  from app import drawer_pins
+  with drawer_pins.serialized_write():
+    assert update_chat.archive_completed_app_resolver(db, chat.id)
+    db.commit()
   db.refresh(chat)
   assert chat.archived_at is not None
   assert chat.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_pending_update_filing_commits_binding_and_archive_together(
+  db, chat, tmp_path, monkeypatch,
+):
+  from app import pending_update
+  repo = tmp_path / "app"
+  (repo / ".git").mkdir(parents=True)
+  app = models.App(
+    name="Update target", slug="update-target", source_dir=str(repo),
+    conflict_resolver_chat_id=chat.id,
+    conflict_resolver_upstream_commit="target",
+  )
+  db.add(app)
+  db.commit()
+  monkeypatch.setattr(pending_update, "_drop_pending_update_worktree", lambda _: None)
+
+  await pending_update.clear_pending_conflict_update(db, app, completed=True)
+
+  db.expire_all()
+  assert db.get(models.App, app.id).conflict_resolver_chat_id is None
+  filed = db.get(models.Chat, chat.id)
+  assert filed.archived_at is not None
+  assert filed.deleted_at is None
 
 
 def test_platform_resolver_archives_only_exact_confirmed_target(

@@ -472,6 +472,28 @@ def _unseen_goal_result_queries(db, run, goal):
 def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
                        cancel=None, defer=None, tasks=None, finished_claims=()):
+  # Completion may also file the chat. Take the drawer lock before the first
+  # Goal write, in the same order as an owner's archive transaction.
+  if complete is not None:
+    from app import drawer_pins
+    with drawer_pins.serialized_write():
+      return _update_goal_record(
+        db, run, goal, expected_revision, checkpoint=checkpoint,
+        next_action=next_action, complete=complete,
+        cannot_complete=cannot_complete, cancel=cancel, defer=defer,
+        tasks=tasks, finished_claims=finished_claims,
+      )
+  return _update_goal_record(
+    db, run, goal, expected_revision, checkpoint=checkpoint,
+    next_action=next_action, complete=complete,
+    cannot_complete=cannot_complete, cancel=cancel, defer=defer,
+    tasks=tasks, finished_claims=finished_claims,
+  )
+
+
+def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
+                       next_action=None, complete=None, cannot_complete=None,
+                       cancel=None, defer=None, tasks=None, finished_claims=()):
   from app.goal_plans import (
     GoalPlanConflict, GoalPlanError, named_ids, normalize_tasks, staged_task_edits,
   )
@@ -646,12 +668,9 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     record_activity_position(db, goal.chat_id, "goal-outcome:" + goal.id)
   archived_chat = None
   if status == "completed":
-    from app import chat_archive, drawer_pins
-    with drawer_pins.serialized_write():
-      archived_chat = chat_archive.stage_archive_after_goal_completion(
-        db, goal.chat_id,
-      )
-      db.commit()
+    from app import chat_archive
+    archived_chat = chat_archive.stage_archive_after_goal_completion(db, goal.chat_id)
+    db.commit()
   else:
     db.commit()
   db.refresh(goal)

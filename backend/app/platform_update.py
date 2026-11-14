@@ -5116,7 +5116,7 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _restore_working_edits(repo, local)
     if result.status != "updated":
       return result.status
-    if parked.get("replay") and flag.get("chat_id"):
+    if flag.get("chat_id"):
       _atomic_write_text(_completed_resolver_path(repo), json.dumps({
         "target": target, "chat_id": flag["chat_id"],
       }))

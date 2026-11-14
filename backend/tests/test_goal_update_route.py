@@ -1,6 +1,9 @@
 """The single agent-facing Goal operation behind the update_goal tool."""
 
 from datetime import UTC, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Event
 
 import pytest
 
@@ -590,6 +593,41 @@ def test_ordinary_goal_completion_does_not_archive_chat(client, owner_token, db)
   assert completed.status_code == 200, completed.text
   db.expire_all()
   assert db.get(models.Chat, chat_id).archived_at is None
+
+
+def test_goal_completion_waits_for_drawer_lock_before_sqlite_write(
+  client, owner_token, db, monkeypatch,
+):
+  from app import database, drawer_pins
+  _, chat_id = _active_goal(client, owner_token, db)
+  headers = _agent_run_auth(db, chat_id, "goal-root")
+  original = drawer_pins.serialized_write
+  waiting_for_drawer = Event()
+
+  @contextmanager
+  def observed_lock():
+    waiting_for_drawer.set()
+    with original():
+      yield
+
+  monkeypatch.setattr(drawer_pins, "serialized_write", observed_lock)
+  # This is the owner's archive lock. Completion must wait here without
+  # holding SQLite's writer slot, so the archive can commit first.
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    with original():
+      completion = pool.submit(
+        client.post, f"/api/chats/{chat_id}/goal/update",
+        json={"complete": True}, headers=headers,
+      )
+      assert waiting_for_drawer.wait(5)
+      with database.SessionLocal() as owner_db:
+        chat = owner_db.get(models.Chat, chat_id)
+        chat.archived_at = datetime.now(UTC)
+        owner_db.commit()
+    response = completion.result(timeout=10)
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  assert db.get(models.Chat, chat_id).archived_at is not None
 
 
 def test_failed_turn_does_not_archive_temporary_goal_chat(client, owner_token, db):

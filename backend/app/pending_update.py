@@ -260,12 +260,17 @@ async def clear_pending_conflict_update(
   # crash afterwards leaves only a stray checkout, which the next conflict or
   # resolver replaces.
   pending_update_receipt_file(source_dir).unlink(missing_ok=True)
-  app.conflict_resolver_chat_id = None
-  app.conflict_resolver_upstream_commit = None
-  db.flush()
+  from app import chat_archive, drawer_pins
   from app.update_chat import archive_completed_app_resolver
-  if not archive_completed_app_resolver(db, resolver_chat_id):
+  with drawer_pins.serialized_write():
+    app.conflict_resolver_chat_id = None
+    app.conflict_resolver_upstream_commit = None
+    db.flush()
+    archived = archive_completed_app_resolver(db, resolver_chat_id)
     db.commit()
+  if archived:
+    chat = db.get(models.Chat, resolver_chat_id)
+    chat_archive.publish_archive_changed(chat)
   await settled.run_settled(_drop_pending_update_worktree, source_dir)
   shutil.rmtree(
     Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,

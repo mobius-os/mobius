@@ -2050,7 +2050,7 @@ def test_uncommitted_edits_stay_uncommitted_across_a_parked_conflict(clone_env):
   assert not worktree.exists()
 
 
-def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
+def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env, db, chat):
   origin, platform = clone_env
   served = _served_sha(platform)
   (platform / "backend/app/main.py").write_text(
@@ -2068,6 +2068,8 @@ def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
   assert _served_sha(platform) == served
   assert "LINE_A = 'DIRTY'" in (platform / "backend/app/main.py").read_text()
 
+  pu._write_conflict_flag(target, res.conflict_paths, chat.id, res.overlay)
+
   worktree = Path(res.overlay["worktree"])
   (worktree / "backend/app/main.py").write_text(
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'MERGED'"),
@@ -2081,6 +2083,15 @@ def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
   assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
     " M backend/app/main.py",
   ]
+  marker = pu._completed_resolver_path(platform)
+  assert json.loads(marker.read_text()) == {"target": target, "chat_id": chat.id}
+  db.refresh(chat)
+  assert chat.archived_at is None
+  pu._write_activation_marker(target, [], upstream_sha=target)
+  assert not pu.platform_status(platform)["activation"]["required_actions"]
+  db.refresh(chat)
+  assert chat.archived_at is not None
+  assert not marker.exists()
 
 
 def test_dirty_resolution_merges_with_a_late_commit(clone_env):

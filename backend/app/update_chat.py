@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app import background_agents, chat_archive, models, providers
+from app import background_agents, models, providers
 from app.config import get_settings
 
 
@@ -40,7 +40,10 @@ def resolve_update_chat_choice(db: Session, requested: UpdateAgentChoice | None)
 
 
 def archive_completed_app_resolver(db: Session, chat_id: str | None) -> bool:
-  """File only when no other app in the batch still binds this resolver."""
+  """Stage filing when no other app in the batch still binds this resolver.
+
+  Caller holds the drawer lock through commit and publishes afterward.
+  """
   if not chat_id:
     return False
   remaining = db.query(models.App.id).filter(
@@ -51,6 +54,8 @@ def archive_completed_app_resolver(db: Session, chat_id: str | None) -> bool:
   chat = db.get(models.Chat, chat_id)
   if (chat is not None and chat.deleted_at is None
       and chat.created_by_app_id is None and chat.archived_at is None):
-    chat_archive.archive_chat(db, chat)
+    from app.timeutil import now_naive_utc
+    chat.archived_at = now_naive_utc()
+    chat.pinned_at = None
     return True
   return False
