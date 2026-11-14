@@ -464,6 +464,8 @@ def effective_agent_settings(
       merged[k] = v
   if prov == "mobius":
     merged["model"] = PROVIDERS["mobius"].resolve_model(merged["model"])
+    if PROVIDERS["mobius"].model_effort_levels(merged["model"]) == []:
+      merged["effort"] = None
   return merged
 
 
@@ -1140,6 +1142,19 @@ class MobiusProvider(BaseProvider):
     if model in self.declaration.get("replacements", {}):
       return self.declaration["replacements"][model]
     return model if model in {m["id"] for m in self.declaration["models"]} else None
+
+  def model_effort_levels(self, model: str | None) -> list[str] | None:
+    """None means unknown; [] means this selected model rejects effort."""
+    for row in self.declaration["models"]:
+      if row["id"] == model:
+        return row.get("effort_levels")
+    return None
+
+  def validate_model_effort(self, model: str | None, effort: str | None) -> bool:
+    levels = self.model_effort_levels(model)
+    if levels is None:
+      return effort is None or effort in self.switch_efforts
+    return effort is None or effort in levels
 
   @staticmethod
   def _catalog_path() -> Path:

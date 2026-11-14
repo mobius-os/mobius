@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import copy
 import threading
 import tomllib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from app import providers
+from app import models, providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
+
+
+def _no_effort_catalogue(monkeypatch):
+  declaration = copy.deepcopy(_catalogue())
+  declaration["models"].append({
+    "id": "no-effort", "label": "No effort", "effort_levels": [],
+  })
+  monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", declaration)
+  monkeypatch.setattr(providers.MobiusProvider, "check_auth", lambda _self, _dir: None)
 
 
 def _provider():
@@ -166,6 +176,59 @@ def test_saved_evolve_selection_keeps_inkling_id_for_atomic_provider_handoff():
     switch_id="switch-to-evolve",
   )
   assert switch.provider == "mobius"
+
+
+def test_no_effort_model_patch_clears_old_effort_and_rejects_new_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  _no_effort_catalogue(monkeypatch)
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "spark", "effort": "high"}
+  db.commit()
+  invalid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": "none"},
+  })
+  assert invalid.status_code == 422, invalid.text
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).agent_settings_json["model"] == "spark"
+  valid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": None},
+  })
+  assert valid.status_code == 200, valid.text
+  assert valid.json()["effective"]["effort"] is None
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.agent_settings_json["model"] == "no-effort"
+  assert "effort" not in row.agent_settings_json
+
+
+def test_no_effort_model_provider_switch_omits_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import compaction
+  _no_effort_catalogue(monkeypatch)
+  chat.agent_settings_json = {"model": "claude-opus-4-8", "effort": "high"}
+  db.commit()
+  async def summary(_messages, **kwargs):
+    assert kwargs["effort"] is None
+    return "Handoff"
+  monkeypatch.setattr(compaction, "summarize_chat", summary)
+  rejected = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "bad-effort",
+    "agent_settings_json": {"model": "no-effort", "effort": "medium"},
+  })
+  assert rejected.status_code == 422, rejected.text
+  accepted = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "no-effort-switch",
+    "agent_settings_json": {"model": "no-effort", "effort": None,
+                            "effort_by_provider": {"claude": "high"}},
+  })
+  assert accepted.status_code == 200, accepted.text
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.provider == "mobius"
+  assert "effort" not in row.agent_settings_json
+  assert row.agent_settings_json["effort_by_provider"] == {"claude": "high"}
 
 
 def test_subscription_never_becomes_an_implicit_connected_default(monkeypatch):

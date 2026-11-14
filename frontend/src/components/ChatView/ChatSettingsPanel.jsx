@@ -71,7 +71,7 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import { catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import EffortStepper from '../ui/EffortStepper.jsx'
-import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
+import { modelEfforts, modelSelectionSettings, rememberEffort, validEffort } from '../ui/modelEfforts.js'
 import {
   beginProviderSwitch,
   clearProviderSwitch,
@@ -361,10 +361,7 @@ export default function ChatSettingsPanel({
       allowedEfforts,
       draftEffortByProvider[providerValue] ?? draftEffort,
     )
-    const nextEffortByProvider = {
-      ...draftEffortByProvider,
-      [providerValue]: nextEffort,
-    }
+    const nextEffortByProvider = rememberEffort(draftEffortByProvider, providerValue, nextEffort)
 
     if (!hasAssistantTurns) {
       setDraftModel(value)
@@ -373,11 +370,7 @@ export default function ChatSettingsPanel({
       setDraftEffortByProvider(nextEffortByProvider)
       patchChat({
         provider: providerValue,
-        agent_settings_json: {
-          model: value,
-          effort: nextEffort,
-          effort_by_provider: nextEffortByProvider,
-        },
+        agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
       })
       return true
     }
@@ -441,19 +434,12 @@ export default function ChatSettingsPanel({
     // a stale earlier one (#7 ensemble finding).
     pendingSwitchPreviousRef.current = null
     const nextEffort = validEffort(allowedEfforts, draftEffort)
-    const nextEffortByProvider = {
-      ...draftEffortByProvider,
-      [providerValue]: nextEffort,
-    }
+    const nextEffortByProvider = rememberEffort(draftEffortByProvider, providerValue, nextEffort)
     setDraftModel(value)
     setDraftEffort(nextEffort)
     setDraftEffortByProvider(nextEffortByProvider)
     await patchChat({
-      agent_settings_json: {
-        model: value,
-        effort: nextEffort,
-        effort_by_provider: nextEffortByProvider,
-      },
+      agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
     })
   }, [
     draftProvider,

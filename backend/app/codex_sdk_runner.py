@@ -2932,6 +2932,8 @@ async def run_codex_sdk_turn(
       if not agent_settings["model"] or not provider.declaration["models"]:
         return {**prompt_not_sent_result(session_id),
                 "error": "This Möbius model is unavailable. Refresh models and choose a current model."}
+      if provider.model_effort_levels(agent_settings["model"]) == []:
+        agent_settings["effort"] = None
       base_env = {**base_env, "MOBIUS_AGENT_MODEL": agent_settings["model"]}
       # A concurrent refresh or another chat must not rewrite the catalogue
       # this app-server reads. The run owns this temporary immutable snapshot.

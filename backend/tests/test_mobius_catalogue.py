@@ -167,9 +167,11 @@ def test_empty_effort_scale_is_valid_and_writes_runtime_catalogue(discovery, tmp
   assert runtime['models'][0]['supported_reasoning_levels'] == []
 
 @pytest.mark.asyncio
-async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, tmp_path, monkeypatch):
+@pytest.mark.parametrize("efforts,expected_effort", [(["low", "high"], "low"), ([], None)])
+async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, tmp_path, monkeypatch, efforts, expected_effort):
   from app import codex_sdk_runner
   provider, state = discovery
+  state["catalogue"]["data"][0].update(effort_levels=efforts, default_effort=efforts[0] if efforts else None)
   captured = {}
   async def run(**kwargs):
     options = kwargs['provider_config_overrides']
@@ -179,9 +181,11 @@ async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, 
     before = path.read_bytes()
     assert kwargs['agent_settings']['model'] == 'new-vision'
     assert kwargs['base_env']['MOBIUS_AGENT_MODEL'] == 'new-vision'
-    state['catalogue']['data'][0]['name'] = 'Next release'
+    assert kwargs['agent_settings']['effort'] == expected_effort
+    state['catalogue']['data'][0].update(name='Next release', effort_levels=['high'], default_effort='high')
     provider._refresh_catalogue(str(tmp_path))
     assert path.read_bytes() == before
+    assert kwargs['agent_settings']['effort'] == expected_effort
     assert json.loads(before)['models'][0]['display_name'] == 'New vision'
     return {'session_id': None, 'error': None}
   monkeypatch.setattr(codex_sdk_runner, '_run_codex_sdk_turn', run)
