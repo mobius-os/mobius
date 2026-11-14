@@ -1,6 +1,10 @@
 /* ComposerHistoryStrip — says which message the chat box holds while browsing
- * with ↑/↓ or the queue's pencil, what Enter will do, and that the draft is
- * kept. Its × is the touch and pointer equivalent of Esc. */
+ * earlier messages with ↑/↓, what Enter will do, and that the draft is kept.
+ * Its × is the touch and pointer equivalent of Esc. A queued message being
+ * edited needs no strip: the queue tray marks its row and offers Stop editing,
+ * so the strip appears for it only after a save failed. Otherwise its
+ * position, what Enter does and a save in progress are spoken alone, through
+ * the status region every position shares. */
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 
 const DRAFT_PREVIEW_LENGTH = 34
@@ -33,6 +37,9 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
         ? 'Saving…'
         : (touch ? 'Send saves it' : 'Enter saves it, Esc goes back')),
       warn: !!note,
+      // The tray's row is the visible cue, saving included; the strip shows
+      // only a save that failed.
+      srOnly: !note,
     }
   }
   return {
@@ -52,18 +59,27 @@ export function composerHistoryKeyHint({ browsing = false, hasEntries = false, t
   return null
 }
 
+/** Joins phrases into spoken sentences, adding a period only where missing. */
+function sentences(parts) {
+  return parts.filter(Boolean).reduce((text, part) => `${text}${/[.!?…]$/.test(text) ? '' : '.'} ${part}`)
+}
+
 export default function ComposerHistoryStrip({
   position, note, saving, touch, draftFileCount = 0, onBack,
 }) {
   const copy = composerHistoryStripCopy(position, { touch, saving, note })
-  if (!copy) return null
-  const draft = composerDraftPreview(position.draft, draftFileCount)
-  return (
-    <div
-      className={`chat__history-strip${copy.warn ? ' chat__history-strip--warn' : ''}`}
-      role="status"
-      aria-live="polite"
-    >
+  const draft = copy ? composerDraftPreview(position.draft, draftFileCount) : ''
+  // One status region that stays mounted and changes its text: many screen
+  // readers skip a live region that arrives already holding its message.
+  const status = (
+    <span className="chat__sr-only" role="status" aria-live="polite">
+      {copy ? sentences([copy.title, copy.hint, draft && `Draft kept: ${draft}`]) : ''}
+    </span>
+  )
+  if (!copy || copy.srOnly) return status
+  return (<>
+    {status}
+    <div className={`chat__history-strip${copy.warn ? ' chat__history-strip--warn' : ''}`}>
       <span className="chat__history-strip-text">
         <b className="chat__history-strip-title">{copy.title}</b>
         {' '}
@@ -86,5 +102,5 @@ export default function ComposerHistoryStrip({
         <X width={14} height={14} aria-hidden="true" />
       </button>
     </div>
-  )
+  </>)
 }

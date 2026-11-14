@@ -32,6 +32,7 @@ from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.platform_update import (
@@ -274,7 +275,7 @@ async def get_platform_update_progress(
 async def apply_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> PlatformApplyResult:
   """Apply exactly the release represented by the reviewed immutable plan."""
   try:
@@ -366,7 +367,7 @@ async def park_platform_update_for_agent(
   status_code=204,
 )
 async def cancel_unfinished_platform_update(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> None:
   """Drop an update that has not been swapped in; the live checkout never changed."""
   try:
@@ -430,7 +431,7 @@ async def create_platform_conflict_resolver_chat(
 
 @router.post("/restart", dependencies=[Depends(reject_cross_site)])
 def restart_platform(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
   drains and asks the container supervisor to rerun the boot in place, so it
