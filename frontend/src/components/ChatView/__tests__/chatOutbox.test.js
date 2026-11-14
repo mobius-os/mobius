@@ -31,6 +31,7 @@ import {
   holdInteractiveDispatch,
 } from '../chatOutbox.js'
 import { sendDraftIdentity } from '../sendAttemptIdentity.js'
+import { sendWithAmbiguityRecovery } from '../sendTransportRecovery.js'
 import { retireInteractiveIntent } from '../useStreamConnection.js'
 
 const realLocalStorage = globalThis.localStorage
@@ -537,6 +538,64 @@ test('releasing a hold the drain never stepped around requests no delivery', asy
     assert.deepEqual(releases, [])
   } finally {
     unsubscribe()
+  }
+})
+
+test('lost interactive ACK keeps the drain out until the exact CID retry settles', { timeout: 5_000 }, async () => {
+  const cid = 'lost-ack'
+  const body = { cid, content: 'one turn', attachments: [{ id: 'file-1' }] }
+  const owner = { chatId: 'c1', principalKey: currentPrincipalKey() }
+  const release = holdInteractiveDispatch(cid)
+  let allowReachability
+  let checkingReachability
+  const reachabilityStarted = new Promise(resolve => { checkingReachability = resolve })
+  const reachability = new Promise(resolve => { allowReachability = resolve })
+  const interactivePosts = []
+  const backgroundPosts = []
+  let send
+  try {
+    assert.equal(await enqueue({ chatId: 'c1', cid, body }), true)
+    send = sendWithAmbiguityRecovery({
+      send: async () => {
+        const claim = await claimIntentDispatch(cid, owner)
+        assert.equal(claim.status, 'claimed')
+        interactivePosts.push(structuredClone(claim.record.body))
+        if (interactivePosts.length === 1) {
+          throw Object.assign(new Error('response lost after POST'), { name: 'ChatTransportError' })
+        }
+        return httpResponse(200) // duplicate acknowledgement for the same CID
+      },
+      verifyReachability: async () => {
+        checkingReachability()
+        return reachability
+      },
+      isAmbiguousError: error => error?.name === 'ChatTransportError',
+    })
+    await Promise.race([
+      reachabilityStarted,
+      send.then(() => { throw new Error('send settled before checking reachability') }),
+    ])
+    await drain(async record => {
+      backgroundPosts.push(record.cid)
+      return httpResponse(202)
+    })
+    assert.deepEqual(backgroundPosts, [], 'the drain must not race the uncertain interactive POST')
+    assert.deepEqual((await list()).map(record => record.cid), [cid])
+    allowReachability(true)
+    assert.equal((await send).status, 200)
+    assert.deepEqual(interactivePosts, [body, body], 'retry must use the same canonical request body and CID')
+    assert.equal(await retireInteractiveIntent({ cid, chatId: 'c1', outboxRetained: true, outcome: 'delivered' }), false)
+    release()
+    await drain(async record => {
+      backgroundPosts.push(record.cid)
+      return httpResponse(202)
+    })
+    assert.deepEqual(backgroundPosts, [], 'accepted turn must not be admitted again by the drain')
+    assert.deepEqual(await list(), [])
+  } finally {
+    allowReachability(true)
+    release()
+    await Promise.allSettled([send])
   }
 })
 
