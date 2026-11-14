@@ -6,7 +6,7 @@ import { peerTime } from './peerTimeline.js'
 import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
-import { HELPER_AWAITING_PARENT_LABEL, isWorkingHelper } from './workingHelper.js'
+import { helperPresentation, isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
@@ -50,30 +50,32 @@ function useElapsed(startedAt, running) {
 }
 
 
-// What a settled helper's row says in place of its live step.
-const SETTLED = {
-  completed: ['done', 'Helper finished'],
-  failed: ['failed', 'Failed'],
-  needs_review: ['failed', 'Needs review'],
-  interrupted: ['failed', 'Interrupted'],
-  // Paused on its question to this chat's agent: not finished, not failed.
-  needs_input: ['running', HELPER_AWAITING_PARENT_LABEL],
+/* A helper's conversation (task, steps and result) over this chat, read-only
+   and updating live while it works. Its owner decides how long it stays open:
+   a row that can remount (the foot's regrouping list) must not own it. */
+export function HelperEventConversation({ event, chatId, host, onClose, onInternalNav }) {
+  return <HelperConversation
+    chatId={chatId}
+    taskId={event.delegation_id}
+    name={event.task_key || 'Helper'}
+    status={event.status}
+    host={host}
+    onClose={onClose}
+    onInternalNav={onInternalNav}
+  />
 }
 
 /* A helper's one row, from launch to result: its name, provider and model,
    then what it is doing now with a running clock, or how it ended and how long
-   it took. One tap opens its conversation (task, steps and result) over this
-   chat, read-only and updating live while it works. */
-export function HelperRow({ event, chatId, onInternalNav }) {
-  const [open, setOpen] = useState(false)
-  const rowRef = useRef(null)
+   it took. A tap asks `onOpen` to show its conversation; `children` (the
+   transcript row's own dialog) render inside the row. */
+export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
   const name = event.task_key || 'Helper'
   const working = isWorkingHelper({ ...event, type: 'helper_result' })
   const paused = event.status === 'paused'
   const live = useElapsed(event.started_at, working && !paused)
-  const [dot, outcome] = working
-    ? [paused ? 'failed' : 'running', paused ? 'On hold' : helperStep(event) || 'Working']
-    : SETTLED[event.status] || ['failed', 'Stopped']
+  const { dot, label } = helperPresentation(event.status)
+  const outcome = working && !paused ? helperStep(event) || label : label
   const elapsed = working
     ? live
     : Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
@@ -94,26 +96,33 @@ export function HelperRow({ event, chatId, onInternalNav }) {
     {canOpen && <ChevronRight className="chat__subagent-open" width={14} height={14} aria-hidden="true" />}
   </>
   const rowClass = `chat__subagent${running ? ' chat__subagent--running' : ''}`
-  return <div ref={rowRef} className={`chat__subagents-list chat__helper-row${working ? ' chat__helper-working' : ''}`}>
+  return <div ref={ref} className={`chat__subagents-list chat__helper-row${working ? ' chat__helper-working' : ''}`}>
     {canOpen
       ? <button
           type="button"
           className={`${rowClass} chat__subagent--openable`}
           aria-label={`${name}: ${sub}. Open its conversation`}
           aria-haspopup="dialog"
-          onClick={() => setOpen(true)}
+          onClick={onOpen}
         >{body}</button>
       : <div className={rowClass}>{body}</div>}
-    {open && <HelperConversation
+    {children}
+  </div>
+}
+
+// A transcript row stays where it was launched, so it owns its dialog.
+export function HelperRow({ event, chatId, onInternalNav }) {
+  const [open, setOpen] = useState(false)
+  const rowRef = useRef(null)
+  return <HelperRowLine ref={rowRef} event={event} chatId={chatId} onOpen={() => setOpen(true)}>
+    {open && <HelperEventConversation
+      event={event}
       chatId={chatId}
-      taskId={event.delegation_id}
-      name={name}
-      status={working ? (paused ? 'stopped' : 'running') : dot === 'done' ? 'done' : event.status === 'failed' ? 'failed' : event.status === 'needs_input' ? 'waiting' : 'stopped'}
       host={rowRef.current?.closest('.chat')}
       onClose={() => setOpen(false)}
       onInternalNav={onInternalNav}
     />}
-  </div>
+  </HelperRowLine>
 }
 
 export default function HelperResultCard({ event, chatId, onInternalNav }) {

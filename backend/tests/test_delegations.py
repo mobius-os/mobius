@@ -8,6 +8,7 @@ from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 import threading
 
@@ -1007,7 +1008,9 @@ def test_helper_without_resumable_session_needs_parent_review(
   assert "DELEGATION_WRITE_REVIEW_REQUIRED" in str(final)
 
 
-def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
+def test_child_policy_is_integrity_checked_and_session_loss_needs_review(
+  client, owner_token, db,
+):
   app = models.App(
     slug="test-delegations-116",
     source_dir="/tmp/mobius-tests/test-delegations-116",
@@ -1080,6 +1083,21 @@ def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
   status, _, result = derived_status(db, row)
   assert status == "needs_review"
   assert result == "Review before replaying."
+
+  # The preview must retain Needs review after its footer row disappears.
+  # Error markers classify status, but are not conversation/error disclosure.
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  response = client.get("/api/chats/parent/helpers/delegation", headers=headers)
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "needs_review"
+  assert response.json()["blocks"] == [
+    {"role": "user", "content": "Make the bounded edit."},
+  ]
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in response.text
+  assert "Review before replaying." not in response.text
+  assert client.get(
+    "/api/chats/child/helpers/delegation", headers=headers,
+  ).status_code == 404
 
   mark_cancelled(db, row)
   mark_cancelled(db, row)
@@ -4184,3 +4202,86 @@ def test_queued_helper_result_resolves_a_root_shared_by_several_helpers(db):
   queued = {"role": "user", "hidden": True, "kind": DELEGATION_RESULT_MESSAGE_KIND,
             "source_work_id": "q1", "cid": "delegation-result:x", "content": "r"}
   assert queued_continuation_root(db, "p3", queued) == "q1"
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_footer_helper_union_counts_before_capping(db, monkeypatch, overlap):
+  from types import SimpleNamespace
+  from app import delegations
+
+  background = [SimpleNamespace(id=f"bg-{i}", task_key=f"Helper {i}",
+                                provider="codex") for i in range(20)]
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows",
+                      lambda *_: [(row, "running") for row in background])
+  monkeypatch.setattr(delegations, "_delegation_status_batch",
+                      lambda _db, rows, **_: ({row.id: "running" for row in rows}, {}))
+  nodes = [{"id": f"{'bg' if overlap else 'goal'}-{i}", "status": "running"}
+           for i in range(20)]
+  nodes[0]["children"] = [{"id": "nested", "status": "running"}]
+  nodes.append({"id": "settled", "status": "completed"})
+  goal = {"id": "goal", "status": "active", "plan": {"delegations": nodes}}
+  result = serialize_background_helpers(db, "parent", goal=goal)
+  assert result["count"] == 20  # Only background work owns automatic wake.
+  assert len(result["items"]) == 16
+  union = result["with_goal"]
+  assert union["goal_id"] == "goal"
+  assert union["count"] == (20 if overlap else 40)
+  assert len(union["items"]) == 16
+  assert len({row["id"] for row in union["items"]}) == 16
+  assert "with_goal" not in serialize_background_helpers(
+    db, "parent", goal={**goal, "status": "completed"},
+  )
+
+
+def test_footer_goal_helpers_do_not_invent_background_wake_ownership(db, monkeypatch):
+  from app import delegations
+
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows", lambda *_: [])
+  goal = {"id": "goal", "status": "paused", "plan": {"delegations": [
+    {"id": "direct", "status": "needs_input", "children": [
+      {"id": "nested", "status": "running"},
+    ]},
+    {"id": "settled", "status": "completed"},
+  ]}}
+  summary = serialize_background_helpers(db, "parent", goal=goal)
+  assert summary["count"] == 0
+  assert summary["items"] == []
+  assert summary["with_goal"]["count"] == 1
+  assert [row["id"] for row in summary["with_goal"]["items"]] == ["direct"]
+
+
+@pytest.mark.parametrize("run_status,diagnostic,expected", [
+  ("failed", "DELEGATION_WRITE_REVIEW_REQUIRED: Review before replaying.", "needs_review"),
+  ("failed", "Ordinary failure.", "failed"),
+  ("completed", "", "completed"),
+])
+def test_footer_status_refines_failed_results_without_changing_wake_eligibility(
+  client, owner_token, db, run_status, diagnostic, expected,
+):
+  from app import delegations
+
+  parent, child, delegation = _seed_delegation(
+    db, suffix=f"footer-{expected}", child_status=run_status,
+    result_blocks=[{"type": "error", "message": diagnostic}] if diagnostic else [],
+  )
+  owed_before = delegations._self_resuming_helper_rows(db, {parent})
+  assert [row.id for row, _ in owed_before] == [delegation]
+  summary = serialize_background_helpers(db, parent)
+  assert summary["count"] == 1
+  assert summary["items"][0]["id"] == delegation
+  assert summary["items"][0]["status"] == expected
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in json.dumps(summary)
+  assert "Review before replaying." not in json.dumps(summary)
+  assert "Ordinary failure." not in json.dumps(summary)
+  assert [(row.id, status) for row, status in
+          delegations._self_resuming_helper_rows(db, {parent})] == [
+    (row.id, status) for row, status in owed_before
+  ]
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  detail = client.get(f"/api/chats/{parent}", headers=headers)
+  assert detail.status_code == 200
+  assert detail.json()["background_helpers"] == summary
+  preview = client.get(f"/api/chats/{parent}/helpers/{delegation}", headers=headers)
+  assert preview.status_code == 200
+  assert preview.json()["status"] == expected
+  assert client.get(f"/api/chats/{child}/helpers/{delegation}", headers=headers).status_code == 404
