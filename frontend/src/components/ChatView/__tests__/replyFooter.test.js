@@ -20,7 +20,8 @@ const vite = await createSsrRenderServer({
       ? 'export default { sanitize: value => String(value) }' : null }],
 })
 after(() => vite.close())
-const { default: Reply, agentStretches } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
+const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
+const { agentStretches, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
@@ -45,7 +46,8 @@ function renderReply(messages, props = {}) {
     createElement(Reply, {
       replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
       useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
-      stretchStartKey: group.rows[0].key, stretchCopyable: replyProse(messages).length > 0,
+      // ChatView offers Copy exactly when the stretch's prose has a part.
+      copy: stretchProse([group]).length ? () => null : undefined,
       ...props,
     })))
 }
@@ -275,4 +277,84 @@ test('the footer offers Branch right after Copy', () => {
   assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'), 'the time leads')
   assert.doesNotMatch(renderReply([turn], { footer: 'working', onBranch: () => {} }),
     /aria-label="Branch in new chat"/, 'no Branch while the agent works')
+})
+
+// Which reply holds the footer, in what state, and the stretch it copies.
+const row = (id, extra = {}) => ({ role: 'assistant', id, ts: turn.ts, blocks: [{ type: 'text', content: id }], ...extra })
+const ownerRow = { role: 'user', content: 'Next', ts: turn.ts }
+const cardAnswer = { role: 'user', content: 'Answer', hidden: true, kind: 'continuation', ts: turn.ts }
+function footerOf(messages, options = {}) {
+  const replyGroups = assistantReplyGroups(messages)
+  const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
+  return replyFooter({
+    messages, replyGroups, stretches: agentStretches(messages, replyGroups), lastVisibleIndex, ...options,
+  })
+}
+const firstIds = (messages, footer) => footer.groups.map(group => messages[group.start].id)
+
+test('the footer sits on the chat’s last reply and spans its stretch', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, row('b')]
+  const footer = footerOf(messages)
+  assert.equal(footer.group.start, 3)
+  assert.equal(footer.state, 'settled')
+  assert.deepEqual(firstIds(messages, footer), ['a', 'b'], 'an answered card does not end the stretch')
+  assert.equal(footer.start, 1, 'the stretch starts after the owner’s row')
+  assert.equal(footer.truncated, false)
+  assert.equal(footerOf([row('a'), ownerRow]), null, 'no footer once the owner has spoken')
+})
+
+test('a stretch that reaches the loaded page’s first row may have begun earlier', () => {
+  const messages = [cardAnswer, row('a'), cardAnswer, row('b')]
+  assert.deepEqual({ ...footerOf(messages, { offset: 40 }), group: undefined, groups: undefined },
+    { group: undefined, groups: undefined, state: 'settled', end: 43, start: 0, truncated: true })
+  assert.equal(footerOf(messages).truncated, false, 'the whole chat is loaded')
+})
+
+test('a starting turn clears the footer; only a reply the turn writes reserves its line', () => {
+  const messages = [ownerRow, row('a')]
+  const settledEnd = footerOf(messages).end
+  assert.equal(footerOf(messages, { turnStarting: true, settledEnd }).state, null,
+    'sending or answering a card clears the footer at once')
+  assert.equal(footerOf(messages, { turnStarting: true, settledEnd, liveIndex: 1 }).state, null,
+    'the live surface briefly reselecting the settled reply does not bring its line back')
+  const live = [...messages, ownerRow, { role: 'assistant', id: 'live', blocks: [] }]
+  const working = footerOf(live, { turnStarting: true, settledEnd, liveIndex: 3 })
+  assert.equal(working.group.start, 3)
+  assert.equal(working.state, 'working')
+})
+
+test('a turn continuing the reply that held the footer keeps its line reserved', () => {
+  // A hidden steer joins the same run's next row into the same reply group,
+  // so its first row (and the group's key) is unchanged; its end moves.
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const settled = [ownerRow, row('run')]
+  const settledEnd = footerOf(settled).end
+  const resumed = [...settled, steer, row('run:assistant:1')]
+  const footer = footerOf(resumed, { turnStarting: true, settledEnd, liveIndex: 3 })
+  assert.equal(footer.group.start, 1, 'the same reply')
+  assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
+})
+
+test('Copy’s parts come from the stretch’s replies as they render, each naming its row', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, failedReply(
+    { type: 'text', content: 'Usage limit reached' }, { type: 'error', message: 'Usage limit reached' })]
+  const footer = footerOf(messages)
+  assert.deepEqual(stretchProse(footer.groups), [{ block: 0, markdown: 'a', key: 'a' }],
+    'an error echo is the error, so a stretch ending on one copies only what came before')
+  assert.deepEqual(stretchProse(footerOf([ownerRow, row('tools', { blocks: [{ type: 'tool', name: 'Bash' }] })]).groups), [],
+    'nothing to copy, so no Copy')
+})
+
+test('the footer reads when the reply settled: its last row’s time', () => {
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const later = Date.UTC(2026, 9, 22, 7, 5)
+  const messages = [row('run'), steer, row('run:assistant:1', { ts: later })]
+  const group = assistantReplyGroups(messages).get(0)
+  const html = renderWithModels(createElement(PeerTimelineContext.Provider,
+    { value: { tools: new Map(), positions: new Map() } },
+    createElement(Reply, {
+      replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
+      useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
+    })))
+  assert.match(actionRow(html), /<time class="chat__ts" title="22nd Oct 2026, /)
 })

@@ -1,8 +1,8 @@
 /* MessageMetaRow keeps a message's time and actions in one row: its time,
    Copy, and on the chat's reply footer (`side="start"`) Branch. Beside an
    owner message's bubble it is revealed on tap; the reply footer reads how
-   long ago the reply was, aligned with the reply's prose, and on a fine
-   pointer appears when the reply is hovered or the row is focused.
+   long ago the reply settled, aligned with the reply's prose, and appears
+   when the reply is tapped, keyboard-focused, or hovered with a fine pointer.
    `copy(button)` returns the clipboard payload (see MessageCopyButton);
    `branch()` opens a new chat continuing through this reply. */
 import { useEffect, useState } from 'react'
@@ -45,8 +45,9 @@ export default function MessageMetaRow({
   const time = timestamp && (footer
     ? <time className="chat__ts" title={formatDateTime(timestamp)}>{formatRecentDateTime(timestamp, now)}</time>
     : <time className="chat__ts">{formatDateTime(timestamp)}</time>)
-  // CSS visibility owns hiding: a hidden row leaves the focus order and the
-  // accessibility tree, and a revealed one rejoins both.
+  // CSS owns hiding: a hidden owner row leaves the focus order and the
+  // accessibility tree, and a revealed one rejoins both; the reply footer
+  // stays reachable by keyboard while transparent.
   return (
     <div
       className={`chat__msg-meta chat__msg-meta--${side}${visible ? ' chat__msg-meta--visible' : ''}`}

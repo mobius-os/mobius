@@ -1,37 +1,17 @@
 /* One reply owns live/saved source rows and continuous prose. The reply that
    ends an agent stretch also holds the stretch's References, and the one at
    the very end of the chat holds the one footer: its time, Copy of everything
-   the agent said since the owner last spoke, and Branch. */
-import { Fragment, memo, useContext, useLayoutEffect, useMemo, useRef } from 'react'
+   the agent said since the owner last spoke, and Branch (see replyFooter.js). */
+import { Fragment, memo, useContext, useMemo } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
-import { registerReplyProse, renderedStretchClipboard, replyProse } from './messageCopy.js'
 import { carryDurableBlockState, streamItemsToAssistantPayload } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
 import { mergeProjectedActivity } from './peerTimeline.js'
 import { presentAssistantReply, presentAssistantActivity, replyQuestionSuppression } from './assistantReplies.js'
 import { PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
-
-/** The agent's stretches: each reply that ends one, mapped to the replies in
- * it, oldest first. A stretch runs until the next visible row that is not a
- * reply (an owner message or a visible marker). Answered cards, waits and
- * helper results are hidden carriers, so it runs on across them, and the live
- * reply's placeholder is a group, so it extends its stretch while it runs. */
-export function agentStretches(messages, replyGroups) {
-  const stretches = new Map()
-  let stretch = []
-  for (const group of new Set(replyGroups.values())) {
-    stretch.push(group)
-    let next = group.end + 1
-    while (messages[next]?.hidden) next += 1
-    if (replyGroups.has(next)) continue
-    stretches.set(group, stretch)
-    stretch = []
-  }
-  return stretches
-}
 
 // Both the component and payload stay memoized: a composer edit must not
 // recreate the expensive answer tree or its live-to-saved disclosure identities.
@@ -48,11 +28,10 @@ function AssistantReply({
   isStreaming = false,
   isLastMsg = true,
   footer = null,
-  stretchStartKey,
-  stretchCopyable = false,
-  stretchClipboard = null,
+  copy,
   metaVisible = false,
   onRevealMeta,
+  onFooterIntent,
   stretchSourceRows = [],
   onBranch,
   pendingQuestionRef,
@@ -96,16 +75,6 @@ function AssistantReply({
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
   const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
-  // A settled reply records its prose for the stretch's footer to copy.
-  const prose = useMemo(() => (isStreaming ? null : {
-    rowKeys: rows.map(row => row.key), parts: replyProse(rows.map(row => row.message)),
-  }), [rows, isStreaming])
-  const replyRef = useRef(null)
-  useLayoutEffect(() => {
-    const element = replyRef.current
-    registerReplyProse(element, prose)
-    return () => registerReplyProse(element, null)
-  }, [prose])
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
@@ -116,11 +85,12 @@ function AssistantReply({
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
   return <PeerTimelineContext.Provider value={displayTimeline}><li
-    ref={replyRef}
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.
     onClick={settled && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
-    data-reply-key={metaKey}
+    // Pointing at or focusing the footer's reply readies what it copies.
+    onPointerEnter={settled ? onFooterIntent : undefined}
+    onFocus={settled ? onFooterIntent : undefined}
     // The whole active reply is the current response: activity presentation may
     // move its live tools into an earlier row than the streaming one.
     data-current-response={activeRowIndex >= 0 ? 'true' : undefined}
@@ -180,10 +150,10 @@ function AssistantReply({
         gap. It is mounted while the agent works too, empty: settling fills
         the reserved line instead of adding one under a followed transcript. */}
     {footer && <MessageMetaRow
-      timestamp={settled ? presentationRows[0].message.ts : null}
-      copy={settled && stretchCopyable ? button => stretchClipboard || renderedStretchClipboard(
-        button.closest('.chat__reply'), stretchStartKey,
-      ) : undefined}
+      // When the reply settled, as near as the transcript records it: its
+      // last row's time (a row keeps the time it began).
+      timestamp={settled ? presentationRows.findLast(row => row.message.ts != null)?.message.ts : null}
+      copy={settled ? copy : undefined}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.
       branch={settled && onBranch && branchThroughId != null

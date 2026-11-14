@@ -1,8 +1,10 @@
+import { Marked } from 'marked'
 import { stripAugmentation } from './msgText.js'
 import { isContinuationMessage, isSideQuestionMessage } from './chatRuntimeState.js'
 import { renderedBlockEntries, repairInterleavedQuestionText } from './streamReducers.js'
 import { markdownClipboardHtml, plainTextFromFragment } from './markdownClipboard.js'
 import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
+import { mathTokens } from './markdown/mathTokens.js'
 
 const isSystemRow = msg => !msg || msg.kind === 'compaction'
   || isContinuationMessage(msg) || isSideQuestionMessage(msg)
@@ -79,64 +81,59 @@ export function stretchTail(messages) {
   return { rows: messages.slice(start), complete: start > 0 }
 }
 
-/* Each settled reply element's prose, so the one footer at the end of the
- * agent's stretch can copy every reply in it. Keyed by the rendered element,
- * so an unmounted reply drops out by itself. */
-const replyProseByElement = new WeakMap()
-
-export function registerReplyProse(replyElement, prose) {
-  if (!replyElement) return
-  if (prose) replyProseByElement.set(replyElement, prose)
-  else replyProseByElement.delete(replyElement)
-}
-
-function renderedTextBlock(replyElement, rowKey, block) {
-  const row = Array.from(replyElement?.querySelectorAll('li.chat__msg[data-key]') || [])
+function renderedTextBlock(listElement, rowKey, block) {
+  const row = Array.from(listElement?.querySelectorAll('li.chat__msg[data-key]') || [])
     .find(item => item.dataset.key === rowKey)
   return Array.from(row?.querySelectorAll(`[data-markdown-block="${block}"]`) || [])
     .find(element => element.closest('li.chat__msg') === row) || null
 }
 
-/** One reply's prose as a clipboard payload, read from the rendered reply
- *  exactly as a text selection would be: readable plain text of what is on
- *  screen (no Markdown punctuation, escapes, or private image addresses) plus
- *  the Markdown source the composer restores on paste. `rowKeys` are the keys
- *  of the rows `replyProse` read. Null when a part is not rendered. */
-export function renderedReplyClipboard(replyElement, rowKeys, parts) {
+const escapeHtml = text => text.replace(/[&<>"]/g, char => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]))
+// Math renders as the TeX annotation KaTeX carries, which is what the
+// clipboard rules read from the transcript.
+const texHtml = (tag, className) => token => `<${tag} class="${className}">`
+  + `<annotation encoding="application/x-tex">${escapeHtml(token.text)}</annotation></${tag}>`
+const markdownParser = new Marked({ gfm: true })
+markdownParser.use(mathTokens(), { extensions: [
+  { name: 'inlineKatex', renderer: texHtml('span', 'katex') },
+  { name: 'blockKatex', renderer: texHtml('div', 'md-math-block') },
+  // Raw HTML renders as nothing, as in the transcript: an HTML block is not
+  // shown, and an inline tag drops while the text between tags stays.
+], renderer: { html: () => '' } })
+
+/** Markdown as plain HTML: the chat's Markdown parser and math tokens without
+ *  the live renderer's effects or app context, so an image keeps its alt text
+ *  and an app link stays a link. */
+export function markdownHtml(text) {
+  return markdownParser.parse(text)
+}
+
+/** Markdown's plain text by the transcript's clipboard rules, read from an
+ *  inert template (nothing in it loads). */
+function markdownPlainText(text) {
+  const template = document.createElement('template')
+  template.innerHTML = markdownHtml(text)
+  return plainTextFromFragment(template.content)
+}
+
+/** The clipboard payload of `parts` (see `stretchProse`): the Markdown source
+ *  the composer restores on paste, and readable plain text. A part rendered
+ *  in `listElement` reads its plain text from the screen exactly as a text
+ *  selection would (no Markdown punctuation, escapes, or private image
+ *  addresses); one that is not (a stretch's start before the loaded page)
+ *  reads it from its Markdown's HTML. Null when no part has plain text. */
+export function stretchClipboard(parts, listElement) {
   const markdown = []
   const plain = []
   for (const part of parts) {
     let plainText = part.markdown
     if (Number.isInteger(part.block)) {
-      const element = renderedTextBlock(replyElement, rowKeys[part.message], part.block)
-      if (!element) return null
-      plainText = plainTextFromFragment(element)
+      const element = renderedTextBlock(listElement, part.key, part.block)
+      plainText = element ? plainTextFromFragment(element) : markdownPlainText(part.markdown)
     }
     markdown.push(part.markdown)
     if (plainText) plain.push(plainText)
-  }
-  if (plain.length === 0) return null
-  return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
-}
-
-/** The whole stretch's clipboard payload: every reply from the one whose
- *  first row is `startKey` through `lastReply` (the reply holding the footer),
- *  in transcript order, as each registered its prose. Null when nothing in it
- *  is copyable or a part is not rendered. */
-export function renderedStretchClipboard(lastReply, startKey) {
-  const replies = Array.from(lastReply?.closest('.chat__list')?.querySelectorAll('li.chat__reply') || [])
-  const end = replies.indexOf(lastReply)
-  if (end < 0) return null
-  const start = replies.findIndex(reply => reply.dataset.replyKey === startKey)
-  const markdown = []
-  const plain = []
-  for (const reply of replies.slice(start >= 0 && start <= end ? start : end, end + 1)) {
-    const prose = replyProseByElement.get(reply)
-    if (!prose?.parts.length) continue
-    const copied = renderedReplyClipboard(reply, prose.rowKeys, prose.parts)
-    if (!copied) return null
-    markdown.push(copied.markdown)
-    plain.push(copied.plainText)
   }
   if (plain.length === 0) return null
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }

@@ -210,8 +210,6 @@
 
 /* ── Empty state ───────────────────────────────────── */
 
-/* A reply is one conversation item; source rows keep their anchors and
-   compact block spacing without cancelling the surrounding conversation gap. */
 /* Replies and agent activity rows in one stretch (an answered card, a wait or
    a helper result between them is hidden) read as one response: they sit as
    close as rows within a reply, not a conversation gap apart. The Thinking
@@ -220,6 +218,8 @@
   + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply) {
   margin-block-start: calc(8px - 24px);
 }
+/* A reply is one conversation item; source rows keep their anchors and
+   compact block spacing without cancelling the surrounding conversation gap. */
 .chat__reply-rows { list-style: none; padding: 0; margin: 0; }
 .chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__markdown-copy-surface:empty)) {
   margin-top: 8px;
@@ -503,14 +503,19 @@
 }
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
 /* The footer is hidden until wanted, like an owner message's row: a tap on
-   the reply reveals it for a moment (ChatView's tap reveal), and with a fine
-   pointer hovering the reply, or focusing a control in it, shows it too. It
-   stays focusable while transparent so a keyboard can reach it. Its line
-   stays reserved, so revealing it moves nothing. */
+   the reply reveals it for a moment (ChatView's tap reveal), keyboard focus
+   on a control in the reply or footer shows it on any device, and with a
+   fine pointer hovering the reply does too. It stays focusable while
+   transparent so a keyboard can reach it. Its line stays reserved, so
+   revealing it moves nothing. */
+.chat__reply > .chat__msg-meta--start { visibility: inherit; }
+.chat__reply:has(:focus-visible) > .chat__msg-meta--start {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
 @media (hover: hover) and (pointer: fine) and (not (any-pointer: coarse)) {
-  .chat__reply > .chat__msg-meta--start { visibility: inherit; }
-  .chat__reply:hover > .chat__msg-meta--start,
-  .chat__reply > .chat__msg-meta--start:focus-within {
+  .chat__reply:hover > .chat__msg-meta--start {
     opacity: 1;
     pointer-events: auto;
     transition-delay: 0s;

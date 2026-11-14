@@ -22,6 +22,7 @@ test('recent moments read as how long ago, older ones as their date', async () =
   assert.equal(formatRecentDateTime(now - 5 * 3_600_000 - 59 * 60_000, now), '5 hours ago')
   const dayOld = now - 86_400_000
   assert.equal(formatRecentDateTime(dayOld, now), formatDateTime(dayOld))
-  assert.equal(formatRecentDateTime(now + 120_000, now), formatDateTime(now + 120_000), 'a future clock skew shows its date')
+  assert.equal(formatRecentDateTime(now + 20_000, now), 'Just now', 'a server clock slightly ahead is still now')
+  assert.equal(formatRecentDateTime(now + 120_000, now), formatDateTime(now + 120_000), 'a moment well in the future shows its date')
   assert.equal(formatRecentDateTime(null, now), '')
 })

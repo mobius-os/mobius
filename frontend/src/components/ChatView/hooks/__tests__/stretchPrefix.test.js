@@ -3,8 +3,16 @@
    the whole stretch is projected as the transcript shows it. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { markdownHtml, readStretchStart, stretchClipboard, stretchProse } from '../useStretchPrefix.js'
-import { stretchTail } from '../../messageCopy.js'
+import { readStretchStart } from '../useStretchPrefix.js'
+import { markdownHtml, stretchClipboard, stretchTail } from '../../messageCopy.js'
+import { stretchProse as stretchParts } from '../../replyFooter.js'
+import { assistantReplyGroups } from '../../assistantReplies.js'
+import { projectSettledSteerContinuations } from '../../steerContinuity.js'
+
+// As ChatView reads a stretch whose start was read: the read start and the
+// loaded rows grouped together.
+const stretchProse = rows => stretchParts([...new Set(assistantReplyGroups(rows).values())])
+  .map(part => part.markdown)
 
 const owner = content => ({ role: 'user', content })
 const reply = content => ({ role: 'assistant', blocks: [{ type: 'text', content }] })
@@ -51,13 +59,46 @@ test('a replayed continuation copies once, within the read start or across its e
   assert.deepEqual(stretchProse([...readStart, ...loaded]), ['Before.', 'The framework survives.'])
 })
 
-test('plain text comes from the rendered Markdown and Markdown stays in its own carrier', () => {
-  const rendered = { '**Result**': 'Result', '![Chart](/api/chats/c/media/x.png)': 'Chart' }
-  assert.deepEqual(stretchClipboard(Object.keys(rendered), markdown => rendered[markdown]), {
-    markdown: '**Result**\n\n![Chart](/api/chats/c/media/x.png)',
-    plainText: 'Result\n\nChart',
+test('an exact replay after a visible steer copies only what the transcript shows', () => {
+  // The owner steered mid-reply; the continuation re-sent the sealed text.
+  // The transcript cuts that replay, so the read start must too, even though
+  // the sealed row before the steer belongs to the previous stretch.
+  const sealed = { role: 'assistant', id: 'run', content: 'The frame', blocks: [{ type: 'text', content: 'The frame' }] }
+  const steered = { role: 'user', steered: true, content: 'Keep going' }
+  const continuation = run('The framework survives.', 1)
+  const page = [sealed, steered, continuation]
+  const shown = projectSettledSteerContinuations(page, { preserveHidden: true })[2]
+  assert.notEqual(shown.blocks[0].content, 'The framework survives.', 'the transcript cuts the replay')
+  return readStretchStart(() => ({ offset: 0, messages: page }), 3).then(rows => {
+    assert.deepEqual(stretchProse(rows), [shown.blocks[0].content.trim()])
   })
-  assert.equal(stretchClipboard(['   '], () => ''), null)
+})
+
+test('a rendered part reads the screen; one before the loaded page reads its Markdown’s HTML', () => {
+  const block = { textContent: 'Result', nodeType: 3, nodeValue: 'Result' }
+  const rowElement = { dataset: { key: 'row-1' }, querySelectorAll: selector => (
+    selector === '[data-markdown-block="0"]' ? [block] : []) }
+  block.closest = () => rowElement
+  const list = { querySelectorAll: () => [rowElement] }
+  const previous = globalThis.document
+  // A template whose content is the HTML's text: enough to show the fallback
+  // reads the Markdown's HTML, not its source.
+  globalThis.document = { createElement: () => ({
+    set innerHTML(html) { this.content = { nodeType: 3, nodeValue: html.replace(/<[^>]+>/g, '') } },
+  }) }
+  try {
+    assert.deepEqual(stretchClipboard([
+      { key: 'earlier', block: 0, markdown: '**Before**' },
+      { key: 'row-1', block: 0, markdown: '**Result**' },
+      { markdown: 'Merge?\n- Yes' },
+    ], list), {
+      markdown: '**Before**\n\n**Result**\n\nMerge?\n- Yes',
+      plainText: 'Before\n\nResult\n\nMerge?\n- Yes',
+    })
+  } finally {
+    globalThis.document = previous
+  }
+  assert.equal(stretchClipboard([], list), null)
 })
 
 test('the read start’s HTML keeps image alt text and app links without the live renderer', () => {
