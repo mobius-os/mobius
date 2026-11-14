@@ -88,6 +88,7 @@ from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
   Principal, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, get_principal,
   reject_cross_site, require_nondelegated_owner_control,
@@ -2772,7 +2773,7 @@ def get_current_chat_usage(
 )
 async def delete_chat(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
@@ -2922,7 +2923,7 @@ async def delete_chat(
 async def recover_chat(
   chat_id: str,
   body: schemas.RecoveryRequest | None = None,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
@@ -3342,7 +3343,7 @@ async def compact_chat(
 @router.get("/{chat_id}/compact-progress")
 def get_compaction_progress(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   """Read saved manual preparation; observing it never starts provider work."""
@@ -3353,7 +3354,7 @@ def get_compaction_progress(
 @router.post("/{chat_id}/compact-stop", dependencies=[Depends(reject_cross_site)])
 async def stop_manual_compaction(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   """Cancel context preparation only, leaving queued input and session intact."""
