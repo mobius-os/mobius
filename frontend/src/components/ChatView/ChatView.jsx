@@ -3338,9 +3338,11 @@ export default function ChatView({
     function keepFailedDraft(failedAttempt, error) {
       if (!fromComposer) return
       // A helper's chat refuses every owner send, so nothing landed and there
-      // is no delivery to reconcile. Remembering the attempt would let a later
-      // transcript read replace the refusal with "send it again".
-      if (!isHelperChatSendFailure(error)) rememberFailedAttempt(failedAttempt)
+      // is no delivery to reconcile. Any attempt still remembered (an earlier
+      // lost send of this draft) is settled too, or a later transcript read
+      // would replace the refusal with "send it again".
+      if (isHelperChatSendFailure(error)) clearFailedAttempt()
+      else rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
     }
     function settleAmbiguousFailure(failedAttempt) {

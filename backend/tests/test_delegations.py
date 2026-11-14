@@ -1468,7 +1468,50 @@ def test_ordinary_chat_send_is_not_delegation_managed(
     headers={"Authorization": f"Bearer {owner_token}"},
   )
 
-  assert "delegation_managed" not in response.text
+  # The helper gate runs first; this fixture's parent then stops at the next
+  # gate, which proves the send got past the delegation refusal.
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "model_selection_required"
+
+
+def _direct_send(client, owner_token, chat_id):
+  return client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Can I talk to you directly?"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+
+def test_nested_helper_refusal_links_the_nearest_owner_chat(
+  client, owner_token, db,
+):
+  # A nested helper's parent is itself a helper chat, which also refuses
+  # owner sends, so the link skips up to the chat the owner can write in.
+  top_id, middle_id, _ = _seed_delegation(db, suffix="send-gate-top")
+  _, leaf_id, _ = _seed_delegation(db, suffix="send-gate-leaf", parent_id=middle_id)
+
+  response = _direct_send(client, owner_token, leaf_id)
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  assert detail["parent_chat_id"] == top_id
+
+
+def test_helper_refusal_omits_a_deleted_parent_chat(
+  client, owner_token, db,
+):
+  parent_id, child_id, _ = _seed_delegation(db, suffix="send-gate-deleted")
+  parent = db.get(models.Chat, parent_id)
+  parent.deleted_at = now_naive_utc()
+  db.commit()
+
+  response = _direct_send(client, owner_token, child_id)
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  assert "parent_chat_id" not in detail
 
 
 def _capture_activity_starts(monkeypatch):

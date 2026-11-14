@@ -15,7 +15,9 @@ export function isHelperChatSendFailure(error) {
     && error?.code === 'delegation_managed'
 }
 
-export const HELPER_CHAT_SEND_MESSAGE = 'This is a helper’s chat. Message it from its parent chat.'
+// The notice links these words to the parent chat when the server names it.
+export const HELPER_CHAT_SEND_LINK_TEXT = 'parent chat'
+export const HELPER_CHAT_SEND_MESSAGE = `This is a helper’s chat. Message it from its ${HELPER_CHAT_SEND_LINK_TEXT}.`
 
 export function isAmbiguousSendFailure(error) {
   return error?.name === 'ChatTransportError'
