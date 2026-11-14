@@ -249,7 +249,8 @@ export default function QueuedMessages({
                     type="button"
                     className="queued__in-composer"
                     onPointerDown={(e) => e.preventDefault()}
-                    onClick={() => onStopEditing?.()}
+                    // A keyboard press is a click with no pointer detail.
+                    onClick={(event) => onStopEditing?.(event.detail === 0)}
                     title="Back to your draft (Esc)"
                   >
                     Stop editing

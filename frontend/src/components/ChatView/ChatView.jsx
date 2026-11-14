@@ -925,9 +925,10 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), setAside(cid), back() }` here so the
-  // queue tray's pencil, × and Stop editing reach the chat box; it reports
-  // which queued message the box is editing, the row that offers Stop editing.
+  // ChatInputBar installs `{ open(cid), setAside(cid), back(fromKeyboard) }`
+  // here so the queue tray's pencil, × and Stop editing reach the chat box; it
+  // reports which queued message the box is editing, the row that offers Stop
+  // editing.
   const queuedComposerRef = useRef(null)
   const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
   // The model/effort picker can accept another choice before the prior save
@@ -6428,7 +6429,7 @@ export default function ChatView({
             }}
             onRetry={handleRetryRejected}
             onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
-            onStopEditing={() => queuedComposerRef.current?.back()}
+            onStopEditing={fromKeyboard => queuedComposerRef.current?.back(fromKeyboard)}
             inComposerCid={queuedInComposerCid}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}

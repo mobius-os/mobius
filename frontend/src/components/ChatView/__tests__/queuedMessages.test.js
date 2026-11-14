@@ -203,19 +203,7 @@ test('a message queued during a turn is not captioned as waiting for the owner',
   assert.match(html, /1 waiting for you; the rest send after this turn/)
 })
 
-test('editing a queued message shows no strip unless it has to warn', async () => {
-  const { composerHistoryStripCopy } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
-  const position = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
-  assert.equal(composerHistoryStripCopy(position).srOnly, true, 'the tray row marks it instead')
-  assert.equal(composerHistoryStripCopy(position, { saving: true }).hint, 'Saving…',
-    'a save in progress is still announced')
-  assert.equal(composerHistoryStripCopy(position, { note: 'Could not save' }).warn, true,
-    'a failed save still says so')
-  assert.equal(composerHistoryStripCopy({ kind: 'sent' }).title, 'Earlier message',
-    'browsing earlier messages keeps its strip')
-})
-
-test('the chat box keeps one status region and changes only its text', async () => {
+test('a queued edit shows the strip only while saving or after a failed save, through one status region', async () => {
   const { default: ComposerHistoryStrip } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
   const render = props => renderToStaticMarkup(createElement(ComposerHistoryStrip, props))
   const queued = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
@@ -229,11 +217,13 @@ test('the chat box keeps one status region and changes only its text', async () 
     'Editing queued message 1 of 1. Send saves it')
   const saving = render({ position: queued, saving: true })
   assert.equal(saving.match(region)?.[1], 'Editing queued message 1 of 1. Saving…', 'a save is spoken')
-  assert.doesNotMatch(saving, /chat__history-strip/, 'and nothing is shown')
+  assert.match(saving, /class="chat__history-strip"[\s\S]*Saving…/, 'and shown, so Enter never looks dead')
   const failed = render({ position: queued, note: 'Could not save' })
   assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
   assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
   assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
+  assert.match(render({ position: { kind: 'sent' } }), /class="chat__history-strip"[\s\S]*Earlier message/,
+    'browsing earlier messages keeps its strip')
   assert.equal(render({ position: { kind: 'started' } }).match(region)?.[1],
     'This message already started. Your text is kept, so you can send it as a new message.',
     'a title that ends its own sentence gets no second period')
@@ -247,8 +237,8 @@ function findByClass(node, className) {
 }
 
 test('a collapsed tray still shows the row open in the chat box and its Stop editing', () => {
-  let stops = 0
-  const props = { items, inComposerCid: null, onStopEditing: () => { stops += 1 } }
+  const stops = []
+  const props = { items, inComposerCid: null, onStopEditing: fromKeyboard => stops.push(fromKeyboard) }
   const tray = renderHook(() => ShimTray(props))
   const html = () => renderToStaticMarkup(tray.result.current)
   findByClass(tray.result.current, 'queued__hdr').props.onClick()
@@ -260,8 +250,11 @@ test('a collapsed tray still shows the row open in the chat box and its Stop edi
   assert.match(html(), /showing only the message in the chat box/, 'and says what it still shows')
   assert.equal(html().match(/role="listitem"/g)?.length, 1, 'only the row in the chat box')
   assert.match(html(), /queued__row--in-composer[\s\S]*Also update the changelog[\s\S]*>Stop editing</)
-  findByClass(tray.result.current, 'queued__in-composer').props.onClick()
-  assert.equal(stops, 1, 'Stop editing is reachable while collapsed')
+  const stop = findByClass(tray.result.current, 'queued__in-composer').props
+  stop.onClick({ detail: 1 })
+  stop.onClick({ detail: 0 })
+  assert.deepEqual(stops, [false, true],
+    'reachable while collapsed; only a keyboard press asks for focus back')
 
   props.inComposerCid = null
   tray.rerender()

@@ -328,8 +328,9 @@ export function PrimaryAction({
  *   draftAside         — { set, take }: keeps the draft stored while history
  *                        shows another message, and hands it back.
  *   queuedComposerRef  — caller-owned ref. The bar installs
- *                        `{ open(cid), setAside(cid), back() }` so the queue
- *                        tray's pencil, × and Stop editing reach the chat box.
+ *                        `{ open(cid), setAside(cid), back(fromKeyboard) }`
+ *                        so the queue tray's pencil, × and Stop editing reach
+ *                        the chat box.
  *   onQueuedInComposerChange — receives the cid of the queued message the
  *                        box is editing, or null, for the tray's Stop editing row.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
@@ -534,11 +535,12 @@ export default function ChatInputBar({
         focusComposerElement(inputRef?.current)
       },
       setAside: setAsideFromComposer,
-      back: () => {
+      back: (fromKeyboard) => {
         backToDraft()
         // Stop editing pressed from the keyboard holds focus, and a collapsed
-        // tray removes its row with it: hand focus back to the box.
-        focusComposerElement(inputRef?.current)
+        // tray removes its row with it: hand focus back to the box. A tap
+        // never moved focus, and refocusing would raise the phone keyboard.
+        if (fromKeyboard) focusComposerElement(inputRef?.current)
       },
     }
     return () => { queuedComposerRef.current = null }
