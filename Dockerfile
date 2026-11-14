@@ -56,8 +56,8 @@ RUN useradd -m -s /bin/bash mobius
 # turns at it. amd64 browsers come from the pinned layer that follows.
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CODEX_VERSION=0.163.0
-ARG CODEX_SDK_VERSION=0.163.0
+ARG CODEX_VERSION=0.167.2
+ARG CODEX_SDK_VERSION=0.167.2
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git iproute2 jq poppler-utils procps ripgrep sudo tini unzip util-linux xxd \
@@ -526,11 +526,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
 # reaped on every runtime, including hosts that inject no init of their own
 # (Railway). `-s` (subreaper) keeps reaping working whether tini is PID 1 or a
 # child of another init (Compose's docker-init).
-# `-e 143` reports a SIGTERM stop as a clean exit 0. Every planned stop (an
-# in-app restart, a host or Railway redeploy) ends in SIGTERM, and both `su`
-# and uvicorn re-raise it after shutting down, so without the remap Railway
-# records each planned restart as "Deployment crashed" and emails the owner.
-# Real failures keep their own status, and SIGKILL/OOM still exits 137. Both
-# restart policies (railway.toml ALWAYS, Compose unless-stopped) revive exit 0.
-ENTRYPOINT ["/usr/bin/tini", "-s", "-e", "143", "--"]
+# The container supervisor reruns the boot in place for an in-app restart, so a
+# restart never depends on the host's restart policy (Railway's default
+# ON_FAILURE never revives a clean stop) and the host never sees it. Host stops
+# and crashes still end the container with their own status; see its docstring.
+# `-e 143` reports a host's SIGTERM stop (a redeploy or `docker stop`) as a
+# clean exit 0: `su` and uvicorn re-raise SIGTERM after shutting down, so
+# without the remap Railway records each one as "Deployment crashed" and emails
+# the owner. Real failures keep their own status, and SIGKILL/OOM still exits 137.
+ENTRYPOINT ["/usr/bin/tini", "-s", "-e", "143", "--", "python3", "-I", "/app/runtime/container_supervisor.py"]
 CMD ["./scripts/entrypoint.sh"]

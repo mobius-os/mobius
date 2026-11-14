@@ -9,6 +9,7 @@ from app.broadcast import SystemBroadcast
 from app.runtime_supervisors import (
   PROVIDER_SESSION_RETENTION_BACKLOG_INTERVAL_SECS,
   PROVIDER_SESSION_RETENTION_INTERVAL_SECS,
+  REQUIRED_DATABASE_SUPERVISORS,
   RuntimeSupervisors,
   provider_retention_delay_after,
 )
@@ -131,10 +132,7 @@ async def test_optional_supervisor_exit_does_not_fail_core_readiness(monkeypatch
     return None
 
   async def start_required_and_optional():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
     supervisors._spawn("optional-retention", short_lived())
 
@@ -155,10 +153,7 @@ async def test_required_supervisor_exit_fails_core_readiness(monkeypatch):
     await asyncio.Event().wait()
 
   async def start_required():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
 
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_required)

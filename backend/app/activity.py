@@ -38,6 +38,8 @@ read both):
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
   {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
   {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}
+  {"ev":"owner_grant",   "ts", "app_id", "action", "outcome":"minted|consumed|refused", "by"?}
+                           # the owner's confirmation of one action (owner_grants.py); never the request itself
 
 `app_id` may be 0 / null for platform-level events (the bootstrap store
 install has no numeric id when it fires; an `app_error` with NO `app_id`

@@ -7,6 +7,7 @@ import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mj
 import { upsertTerminalErrorItem } from '../streamReducers.js'
 import { ownsRecoveryAction } from '../recoveryCard.js'
 import { isProviderLimitPause, pauseTiming } from '../resetTime.js'
+import { isResourcePause, resourcePausePresentation } from '../waitingPresentation.js'
 
 const vite = await createSsrRenderServer()
 const { default: ErrorCard } = await vite.ssrLoadModule(
@@ -96,7 +97,7 @@ test('provider date beyond bounded check remains separate and elapsed checks do 
 
 test('resource and model-capacity checks never claim provider quota resets', () => {
   const check_at = '2099-09-14T12:00:00Z'
-  for (const kind of ['memory', 'storage', 'model_capacity']) {
+  for (const kind of ['memory', 'storage', 'processes', 'model_capacity']) {
     const block = { type: 'error', pause: { kind, check_at } }
     const html = renderToStaticMarkup(createElement(ErrorCard, { block }))
     assert.doesNotMatch(html, /Provider reports the limit resets|Provider reset time unknown|Rate limit/)
@@ -130,6 +131,7 @@ for (const [label, overrides, kind] of [
   ['historical card', { isLastMsg: false }, 'limit'],
   ['memory wait', {}, 'memory'],
   ['storage wait', {}, 'storage'],
+  ['process wait', {}, 'processes'],
 ]) {
   test(`early retry does not bypass ${label} ownership`, () => {
     const html = renderToStaticMarkup(createElement(MsgContent, {
@@ -545,7 +547,7 @@ test('continuations render as product markers, not user bubbles', () => {
   assert.match(continuationCard, /Resumed manually/)
   assert.match(continuationCard, /Server restarted — continuing automatically/)
   assert.match(continuationCard, /Retry check due — trying the provider again/)
-  assert.match(msgContent, /onClick=\{\(\) => onResume\(\{ allowLowStorage: storageOverrideAvailable \}\)\}/,
+  assert.match(msgContent, /onClick=\{\(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)\}/,
     'Resume delegates the lifecycle action instead of manufacturing owner text')
   assert.match(chatView, /const markerRow = isContinuationMessage\(msg\)/,
     'continuation rows are marker rows')
@@ -625,8 +627,8 @@ test('resource parks appear in the standard Waiting surface', () => {
     'the shared Waiting surface should explain resource ownership and wake-up')
   assert.match(chatView, /const hasPendingResume = !!pendingResumeBlock[\s\S]*&& !resourcePause/,
     'an automatically managed resource wait must not advertise a manual resume nudge')
-  assert.match(chatView, /Waiting for storage headroom\. This chat will resume automatically\./,
-    'the screen-reader status must describe the actual automatic handoff')
+  assert.match(chatView, /resourcePausePresentation\(resourcePause\)\.summary\}\. This chat will resume automatically\./,
+    'the screen-reader status must describe the actual automatic handoff for every resource kind')
 })
 
 test('the park card keeps provider mechanics behind progressive disclosure', () => {
@@ -716,11 +718,11 @@ test('continuation blocker changes survive mounted and cached runtime reconcilia
   }
 })
 
-test('manual recovery remains available while only storage waits offer a warned override', () => {
-  for (const kind of ['memory', 'storage', 'model_capacity']) {
+test('manual recovery remains available while only storage and process waits offer a warned override', () => {
+  for (const kind of ['memory', 'storage', 'processes', 'model_capacity']) {
     const props = {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind } }] },
-      isLastMsg: true, onResume() {}, resumeState: {}, canOverrideStorage: true,
+      isLastMsg: true, onResume() {}, resumeState: {}, canContinueAnyway: true,
     }
     const manual = renderToStaticMarkup(createElement(MsgContent, { ...props, handoff: { kind: 'recovery' } }))
     assert.match(manual, /class="chat__resume chat__recovery-action"/)
@@ -728,10 +730,12 @@ test('manual recovery remains available while only storage waits offer a warned 
     const unknown = renderToStaticMarkup(createElement(MsgContent, props))
     assert.doesNotMatch(unknown, /class="chat__resume chat__recovery-action"/)
     const automatic = renderToStaticMarkup(createElement(MsgContent, { ...props, handoff: { kind: 'automatic', reason: kind } }))
-    if (kind === 'storage') {
+    if (kind === 'storage' || kind === 'processes') {
       assert.match(automatic, />Continue anyway<\/button>/)
       assert.match(manual, />Continue anyway<\/button>/)
-      assert.match(automatic, /If the disk fills completely, saving may fail\./)
+      assert.match(automatic, kind === 'storage'
+        ? /If the disk fills completely, saving may fail\./
+        : /If the limit is reached, tools may fail to start\./)
       assert.match(automatic, /continue automatically/)
       assert.doesNotMatch(manual, />Resume<\/button>/)
     } else {
@@ -761,7 +765,7 @@ for (const [name, overrides] of [
     const html = renderToStaticMarkup(createElement(MsgContent, {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
       isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' },
-      canOverrideStorage: true, ...overrides,
+      canContinueAnyway: true, ...overrides,
     }))
     assert.doesNotMatch(html, /Continue anyway/)
   })
@@ -769,20 +773,20 @@ for (const [name, overrides] of [
 
 test('only the installation owner is offered Continue anyway; guests and embeds keep Resume', () => {
   // ChatView derives the prop from the same owner rule as a fresh session.
-  assert.match(chatView, /canOverrideStorage=\{canStartFreshSession\}/)
+  assert.match(chatView, /canContinueAnyway=\{canStartFreshSession\}/)
   const props = {
     msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
     isLastMsg: true, onResume() {}, resumeState: {}, handoff: { kind: 'recovery' },
   }
   for (const viewer of [{ embedded: true }, { ownerWorkspace: false }]) {
     const html = renderToStaticMarkup(createElement(MsgContent, {
-      ...props, canOverrideStorage: canStartRefusalFreshSession(viewer),
+      ...props, canContinueAnyway: canStartRefusalFreshSession(viewer),
     }))
     assert.doesNotMatch(html, /Continue anyway|If the disk fills completely/)
     assert.match(html, /class="chat__resume chat__recovery-action"[^>]*>(Resume|Try now)<\/button>/)
   }
   const owner = renderToStaticMarkup(createElement(MsgContent, {
-    ...props, canOverrideStorage: canStartRefusalFreshSession({ embedded: false, ownerWorkspace: true }),
+    ...props, canContinueAnyway: canStartRefusalFreshSession({ embedded: false, ownerWorkspace: true }),
   }))
   assert.match(owner, />Continue anyway<\/button>/)
 })
@@ -792,7 +796,7 @@ for (const state of [{ pending: true }, { unavailable: true }]) {
     const html = renderToStaticMarkup(createElement(MsgContent, {
       msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'storage' } }] },
       isLastMsg: true, onResume() {}, handoff: { kind: 'automatic', reason: 'storage' }, resumeState: state,
-      canOverrideStorage: true,
+      canContinueAnyway: true,
     }))
     assert.match(html, /disabled=""/)
     assert.match(html, state.pending ? /Continuing…/ : /Reconnecting…/)
@@ -830,4 +834,14 @@ test('an error card’s Copy hands its button the raw error message', () => {
   walk(ErrorCard({ block: { type: 'error', message } }))
   assert.equal(found.length, 1)
   assert.deepEqual(found[0].read({}), { plainText: message })
+})
+
+test('process-headroom waits present as an automatic Möbius resource wait', () => {
+  const block = { type: 'error', resumable: true, pause: { kind: 'processes' } }
+  assert.equal(isResourcePause(block), true)
+  const view = resourcePausePresentation(block)
+  assert.equal(view.summary, 'Waiting for process headroom')
+  assert.equal(view.owner, 'Möbius resource monitor')
+  assert.equal(view.manual, false)
+  assert.equal(view.wakeUp, 'This chat resumes automatically when pressure clears')
 })

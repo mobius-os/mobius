@@ -1,17 +1,21 @@
 """Autopilot lifecycle for Contribute PRs — the platform-owned trust anchor.
 
-After the owner clicks Send with autopilot on, the Contribute app's background
-cron (job.sh) detects each new review / failing check / conflict and asks the
-platform to respond. This module owns the state that decides whether a response
-may run and drives the round: the ``ContributionAutopilot`` DB row is written
-ONLY here and by the submit endpoints, so nothing an agent can write (the app
-ledger, the diff, the worktree) can authorize an action or forge a claim.
+After the owner clicks Send with autopilot on, or switches following on for a
+PR that is already open (confirmed on Möbius's own sheet), the Contribute app's
+background cron (job.sh) detects each new review / failing check / conflict and
+asks the platform to respond. This module owns the state that decides whether a
+response may run and drives the round: the ``ContributionAutopilot`` DB row is
+written ONLY here, by the submit endpoints and by the owner's toggle, so nothing
+an agent can write (the app ledger, the diff, the worktree) can authorize an
+action or forge a claim.
 
 The lifecycle, per (app_id, record_id):
 
   grant (submit)  ─▶  idle
   /respond  ─▶  claim (state=responding, fresh run_id, 45-min lease) ─▶ spawn round
   agent  ─▶  /update (validated push) / /reply ─▶ /complete ─▶ idle, round logged
+  ask mode ─▶ no /update: the round restages a prepared update, the owner's
+  Update PR press publishes it, and /complete settles the round as ``prepared``
   crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it
   2 consecutive stale/failed rounds ─▶ escalate (there is no round budget:
   follow-up continues while rounds keep completing)
@@ -61,7 +65,18 @@ MAX_IGNORED_EVENT_URLS = 20
 # advance the round count/cursor). Public actions prove ``pushed``/``replied``;
 # the agent may explicitly settle an exact no-change review as ``handled``.
 PRODUCTIVE_OUTCOMES = frozenset({"pushed", "replied"})
-SETTLED_OUTCOMES = PRODUCTIVE_OUTCOMES | {"handled"}
+# ``prepared`` is an ask-mode round that left a prepared update for the owner's
+# Update PR press; the completing route proves it from the record.
+SETTLED_OUTCOMES = PRODUCTIVE_OUTCOMES | {"handled", "prepared"}
+PUSH_MODES = ("auto", "ask")
+ASK_MODE_REFUSAL = (
+  "Following on this pull request asks the owner before each push, so a "
+  "round cannot push by itself."
+)
+ASK_MODE_OWNER_ONLY = (
+  "Following on this pull request asks the owner before each push, so only "
+  "you can publish its update, by pressing Update PR. An agent cannot."
+)
 
 
 # ─────────────────────────── row access ────────────────────────────
@@ -91,13 +106,19 @@ def stamp_grant(
   target_head_repository: str | None = None,
   target_branch: str | None = None,
   target_repo_path: str | None = None,
+  push_mode: str | None = None,
 ) -> models.ContributionAutopilot:
   """Idempotent grant upsert — the ONLY authorization autopilot consults.
 
-  Called from the submit success path (the request carrying the owner's click).
+  Called from the submit success path (the request carrying the owner's click)
+  and from the owner-confirmed toggle that starts following an open PR.
   A re-send refreshes ``granted_head_sha`` and re-enables a previously paused
-  grant, but never wipes the round log or cursor.
+  grant, but never wipes the round log or cursor. Without ``push_mode`` (Send)
+  a new grant pushes by itself and an existing grant keeps its mode, so a
+  re-send cannot widen ask-before-push.
   """
+  if push_mode is not None and push_mode not in PUSH_MODES:
+    raise ValueError("push_mode must be auto or ask")
   row = get_row(db, app_id, record_id)
   now = now_naive_utc()
   if row is None:
@@ -112,6 +133,7 @@ def stamp_grant(
       target_head_repository=target_head_repository,
       target_branch=target_branch,
       target_repo_path=target_repo_path,
+      push_mode=push_mode or "auto",
       state="idle",
       rounds_json=[],
       created_at=now,
@@ -131,6 +153,8 @@ def stamp_grant(
     row.target_head_repository = target_head_repository
     row.target_branch = target_branch
     row.target_repo_path = target_repo_path
+    if push_mode is not None:
+      row.push_mode = push_mode
     row.updated_at = now
   db.commit()
   return row
@@ -491,6 +515,7 @@ def complete_round(
   summary: str,
   head_sha: str | None = None,
   event_at: str | None = None,
+  prepared_update: bool = False,
 ) -> dict:
   """Finalize a round the agent claims to have completed.
 
@@ -499,23 +524,16 @@ def complete_round(
   Requires the live claim's run_id. Settled outcomes reset the failure counter,
   bump ``rounds_used``, and advance the handled-event cursor; a failed round
   counts toward escalation. Public action endpoints prove ``pushed`` and
-  ``replied``; ``handled`` is reserved for an exact no-change review. Returns
+  ``replied``; ``handled`` is reserved for an exact no-change review.
+  ``prepared`` settles an ask-mode round only when the caller proved
+  (``prepared_update``) that the record now waits as a prepared update. Returns
   ``{"status": "ok"|"stale", "escalate": bool}``.
   """
   row = get_row(db, app_id, record_id)
   if not verify_claim(row, run_id):
     return {"status": "stale", "escalate": False, "productive": False}
 
-  # Public action endpoints, not the caller, decide whether a push or reply
-  # happened. A no-change review is different: the claimed agent may settle
-  # the exact attention item as ``handled`` without manufacturing public noise.
-  # Any successful public action still wins over that caller-declared outcome.
-  if row.round_action in PRODUCTIVE_OUTCOMES:
-    recorded_outcome = row.round_action
-  elif outcome == "handled":
-    recorded_outcome = "handled"
-  else:
-    recorded_outcome = "failed"
+  recorded_outcome = _settled_outcome(row, outcome, prepared_update)
   productive = recorded_outcome in SETTLED_OUTCOMES
   entry = {
     "attention_key": row.attention_key,
@@ -559,6 +577,25 @@ def complete_round(
   return {
     "status": "ok", "escalate": escalate, "productive": productive,
   }
+
+
+def _settled_outcome(
+  row: models.ContributionAutopilot, outcome: str, prepared_update: bool,
+) -> str:
+  """The outcome the round log records, from proof rather than agent prose.
+
+  Public action endpoints, not the caller, decide whether a push or reply
+  happened. A no-change review is different: the claimed agent may settle the
+  exact attention item as ``handled`` without manufacturing public noise. Any
+  successful public action still wins over that caller-declared outcome.
+  """
+  # A proven prepared update is what the owner must act on next, so it
+  # outranks a reply made in the same round. Ask mode never records a push.
+  if outcome == "prepared" and prepared_update and row.push_mode == "ask":
+    return "prepared"
+  if row.round_action in PRODUCTIVE_OUTCOMES:
+    return row.round_action
+  return "handled" if outcome == "handled" else "failed"
 
 
 def record_spawn_failure(
@@ -608,13 +645,23 @@ def release_for_retry(
 
 
 def set_enabled(
-  db: Session, app_id: int, record_id: str, enabled: bool
+  db: Session, app_id: int, record_id: str, enabled: bool,
+  *, push_mode: str | None = None,
 ) -> models.ContributionAutopilot | None:
-  """Owner Pause/Resume. Resume clears escalation state and the round count."""
+  """Owner Pause/Resume. Resume clears escalation state and the round count.
+
+  ``push_mode`` changes how an existing grant pushes; the caller has spent the
+  owner's confirmation for it. Either way the live claim is released, so a
+  round started under the old mode cannot act under the new one.
+  """
+  if push_mode is not None and push_mode not in PUSH_MODES:
+    raise ValueError("push_mode must be auto or ask")
   row = get_row(db, app_id, record_id)
   if row is None:
     return None
   row.enabled = bool(enabled)
+  if push_mode is not None:
+    row.push_mode = push_mode
   if enabled:
     _release_claim(row)
     row.rounds_used = 0
@@ -700,6 +747,7 @@ def mirror_block(row: models.ContributionAutopilot) -> dict:
     "enabled": bool(row.enabled),
     "granted_at": row.granted_at.isoformat() if row.granted_at else None,
     "state": row.state,
+    "push_mode": row.push_mode or "auto",
     "rounds_used": int(row.rounds_used or 0),
     "last_round": last,
     "rounds": rounds,

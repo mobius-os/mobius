@@ -51,7 +51,7 @@ def checkout_gc_scope(db) -> dict[str, set[str]]:
         state = attempt.get("state")
         if state == "pushed":
           terminal.add(path)
-        elif state != "rejected":
+        elif state not in reviews.REPAIR_NON_EFFECTS:
           protected.add(path)
       checkout = outcome.get("checkout") or {}
       path = checkout.get("checkout") if isinstance(checkout, dict) else None
@@ -151,8 +151,9 @@ async def publish_attempt(db, row, target, validation, receipt, principal, *, gh
   db.refresh(row)
   previous = row.outcomes_json[item_key]
   attempts = list(previous["repair_attempts"])
-  armed = attempts[-1]
-  pushed = [*attempts[:-1], {**armed, "state": "pushed"}]
+  # The owner's push arms its proposal where it stands; any other arm is appended.
+  armed = next(attempt for attempt in attempts if attempt.get("id") == receipt["id"])
+  pushed = [{**attempt, "state": "pushed"} if attempt is armed else attempt for attempt in attempts]
   caller = asyncio.current_task()
 
   def authorize_live():

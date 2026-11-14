@@ -423,3 +423,26 @@ def test_embed_session_is_denied_by_generic_owner_app_surfaces(
     client.get(f"/api/chats/{chat_id}/agent-context", headers=headers),
   ]
   assert [response.status_code for response in checks] == [403] * len(checks)
+
+
+def test_an_embed_reads_its_own_dependency_text_and_no_other(client, owner_token, db):
+  _, _, chat_id, _, session = _session(client, owner_token, name="dependency-embed")
+  other = create_chat(id="dependency-other-chat", title="Other", messages=[])
+  db.add(other)
+  db.flush()
+  for dependency_id, waiting in (("embed-dependency", chat_id), ("other-dependency", other.id)):
+    db.add(models.GoalDependency(
+      id=dependency_id, waiting_chat_id=waiting, waiting_goal_id=f"goal-{dependency_id}",
+      target_kind="claim_acquisition", target_key=f"claim:{dependency_id}",
+      target_acquisition_id=f"acquisition-{dependency_id}",
+      outcome_json={"kind": "completed", "summary": "S" * 2_000, "outcome": "O" * 5_000,
+                    "source_chat_id": "private-source", "source_chat_title": "Private"},
+    ))
+  db.commit()
+  headers = _embed_headers(session)
+  own = client.get("/api/chat-waits/dependencies/embed-dependency/text", headers=headers)
+  assert own.status_code == 200, own.text
+  assert own.json() == {"id": "embed-dependency", "condition": "S" * 2_000, "outcome": "O" * 5_000}
+  assert "private-source" not in own.text and "Private" not in own.text
+  assert client.get("/api/chat-waits/dependencies/other-dependency/text",
+                    headers=headers).status_code in (403, 404)

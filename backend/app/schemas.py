@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import PurePath
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
@@ -153,6 +153,9 @@ class StoreListingIn(BaseModel):
   screenshots: list[StoreListingScreenshotIn] = Field(
     default_factory=list, max_length=MAX_STORE_SCREENSHOTS,
   )
+  # An SPDX id from store_licenses.OFFERED_LICENSES. Omitted keeps the
+  # current license; the save refuses any other value.
+  license: str | None = Field(default=None, max_length=40)
 
 
 class AppResolveUpdate(BaseModel):
@@ -288,6 +291,9 @@ class AppOut(BaseModel):
   # Internal publication inputs. Clients receive the typed projections below,
   # never the nullable persistence fields or executable path.
   published_manifest_url: str | None = Field(default=None, exclude=True)
+  # Consent inputs to the frame reload key (granted direct sites).
+  accepted_consent: dict | None = Field(default=None, exclude=True)
+  project_templates_json: Any = Field(default=None, exclude=True)
   public_name: str | None = Field(default=None, exclude=True)
   public_bundle_path: str | None = Field(default=None, exclude=True)
   public_bundle_digest: str | None = Field(default=None, exclude=True)
@@ -873,7 +879,8 @@ class SendMessage(BaseModel):
   # Exact physical run shown by Resume; stale recovery controls cannot start
   # a new continuation after automatic recovery has already advanced it.
   resume_run_id: str | None = None
-  # Explicit, warned Continue anyway control for one storage-waiting run.
+  # Explicit, warned Continue anyway control for one storage- or
+  # process-waiting run. The name predates the process floor.
   allow_low_storage: bool = False
   # Goal Resume names the durable obligation, not an unrelated chat tail.
   resume_goal_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -943,7 +950,7 @@ class SendMessage(BaseModel):
     if self.allow_low_storage and (
       self.continuation != "manual" or not self.resume_run_id
     ):
-      raise ValueError("Continue anyway requires the exact storage-waiting run")
+      raise ValueError("Continue anyway requires the exact waiting run")
     goal_target = self.resume_goal_id is not None or self.resume_goal_revision is not None
     if goal_target and (
       self.resume_goal_id is None or self.resume_goal_revision is None

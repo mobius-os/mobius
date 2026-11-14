@@ -1886,8 +1886,47 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0099_app_chat_scope_starts",
     "0100_chat_branch_origin",
     "0101_claim_revocation_outbox",
+    "0102_work_claim_text",
+    "0103_shared_peer_note_bodies",
+    "0104_claude_session_costs",
+    "0105_autopilot_push_mode",
   ]
   assert second == first
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_autopilot_push_mode_exists_after_fresh_and_frozen_upgrade(tmp_path, start):
+  """A follow-up grant stamped before ask-before-push existed keeps pushing by itself."""
+  db_path = tmp_path / "push-mode-boot.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+      connection.execute(
+        "INSERT INTO contribution_autopilot "
+        "(app_id, record_id, enabled, state, rounds_used, max_rounds, consecutive_failures) "
+        "VALUES (1, 'sent-earlier', 1, 'idle', 0, 5, 0)"
+      )
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_autopilot_push_mode(eng)  # Idempotent on a crash retry.
+
+  assert "0105_autopilot_push_mode" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO contribution_autopilot "
+      "(app_id, record_id, enabled, state, rounds_used, max_rounds, consecutive_failures) "
+      "VALUES (1, 'sent-now', 1, 'idle', 0, 5, 0)"
+    ))
+    modes = dict(conn.execute(text(
+      "SELECT record_id, push_mode FROM contribution_autopilot"
+    )).all())
+  assert set(modes.values()) == {"auto"}
+  assert ("sent-earlier" in modes) is (start == "schema_0013")
+  eng.dispose()
 
 
 @pytest.mark.parametrize("start", ["fresh", "schema_0013"])
@@ -4827,3 +4866,54 @@ def test_retired_write_journal_tables_are_dropped_idempotently(tmp_path):
   tables = set(inspect(eng).get_table_names())
   assert not {"agent_write_streams", "agent_write_intents"} & tables
   assert {"chats", "chat_runs"} <= tables
+
+
+def test_work_claim_text_widens_postgres_columns_and_skips_sqlite(monkeypatch):
+  import sqlalchemy
+
+  statements = []
+
+  class RecordingEngine:
+    dialect = SimpleNamespace(name="postgresql")
+
+    def begin(self):
+      return self
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def execute(self, statement):
+      statements.append(str(statement))
+
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda _eng: SimpleNamespace(
+    get_table_names=lambda: ["agent_work_claims"]))
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == [
+    f"ALTER TABLE agent_work_claims ALTER COLUMN {column} TYPE TEXT"
+    for column in ("summary", "takeover_reason", "outcome")
+  ]
+  statements.clear()
+  RecordingEngine.dialect = SimpleNamespace(name="sqlite")
+  migrations._widen_work_claim_text(RecordingEngine())
+  assert statements == []
+
+
+def test_shared_peer_note_bodies_migration_is_additive_and_idempotent(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-bodies.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE agent_coordination_messages (id VARCHAR(64) PRIMARY KEY, body TEXT NOT NULL)"
+    ))
+    conn.execute(text("INSERT INTO agent_coordination_messages VALUES ('old', 'Old body')"))
+  migrations._add_shared_peer_note_bodies(eng)
+  migrations._add_shared_peer_note_bodies(eng)
+  inspector = inspect(eng)
+  assert "agent_coordination_note_bodies" in inspector.get_table_names()
+  assert "body_id" in {c["name"] for c in inspector.get_columns("agent_coordination_messages")}
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT body, body_id FROM agent_coordination_messages"
+    )).one() == ("Old body", None)

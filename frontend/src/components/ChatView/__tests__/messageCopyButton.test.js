@@ -90,7 +90,9 @@ test('copy follows the timestamp inside one tap-revealed metadata row', () => {
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.match(css, /\.chat__msg-meta \{[\s\S]*visibility: hidden;/)
-  assert.match(css, /\.chat__msg-meta--visible \{[\s\S]*visibility: visible;/)
+  const revealRule = css.match(/\.chat__msg-meta--visible \{([^}]*)\}/)[1]
+  assert.match(revealRule, /visibility: inherit;/,
+    'a revealed row follows its view: forcing visible paints it over the app when the shell hides a mounted chat')
   const metaRule = css.match(/\.chat__msg-meta \{([^}]*)\}/)[1]
   const boxHeight = metaRule.match(/(?:^|\s)height: (\d+)px;/)?.[1]
   assert.ok(boxHeight, 'the row must use the message gap instead of centering controls in zero height')

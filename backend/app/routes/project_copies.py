@@ -7,7 +7,6 @@ import hashlib
 import json
 import re
 import secrets
-import shutil
 import uuid
 
 import httpx
@@ -22,9 +21,10 @@ from sqlalchemy.orm import Session
 from app import models, workspace_files
 from app.federation_transport import federation_request, FederationTransportError
 from app.config import get_settings
+from app.credential_files import is_credential_file
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
-from app.project_retention import PROJECT_LIFECYCLE_LOCK
+from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.routes.projects import _live_project, _project_root, _project_response, _template_by_id, _safe_template
 from app.timeutil import now_naive_utc
 
@@ -32,7 +32,12 @@ router = APIRouter(prefix="/api/project-copies", tags=["project-copies"])
 MAX_PACKAGE = 16 * 1024 * 1024
 MAX_SOURCE = 10 * 1024 * 1024
 MAX_FILES = 500
-EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius'})
+EXCLUDED = frozenset({'.git', '.hg', '.svn', 'node_modules', '__pycache__', 'artifacts', '.venv', 'venv', 'dist', 'build', 'data', 'storage', 'uploads', 'chats', '.ssh', '.aws', '.mobius', '.env', 'credentials', 'cli-auth', 'app-secrets'})
+# Saved app data is private by nature; credential files follow the shared rule.
+DATA_SUFFIXES = ('.sqlite', '.sqlite3', '.db')
+# A copy is an unreviewed snapshot, so it also skips .pem files, which can
+# hold a private key; Store publication reads their content instead.
+PEM_SUFFIXES = ('.pem',)
 SOURCE_SUFFIXES = frozenset({'.jsx', '.tsx', '.js', '.ts', '.html', '.htm', '.css', '.scss', '.json', '.md', '.txt', '.py', '.tex', '.bib', '.sty', '.cls', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.toml', '.yaml', '.yml'})
 WARNING = 'Only selected files are shared. Check them for private information or passwords written into the files. Chats, saved app data, and built previews are not included.'
 
@@ -61,9 +66,10 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower == '.env' or lower.startswith('.env.') or lower.endswith(('.pem', '.key', '.p12', '.sqlite', '.sqlite3', '.db')) or lower in {'credentials', 'credentials.json', 'secrets.json', '.npmrc', '.pypirc', '.secret-key', 'service-token.txt', 'cli-auth', 'app-secrets'}:
+    if lower in EXCLUDED or lower.startswith('.env.') or lower.endswith(DATA_SUFFIXES + PEM_SUFFIXES):
       return False
-  return True
+  # The shared rule names credential files; private folders are EXCLUDED above.
+  return not is_credential_file(rel.name)
 
 
 def digest(value: dict) -> str:
@@ -262,19 +268,18 @@ async def import_copy(body: CopyImport, _: models.Owner = Depends(get_current_ow
     snapshot['source_copy'] = {'digest': body.digest}
     if root.exists() or root.is_symlink():
       raise HTTPException(409, 'The project destination already exists.')
-    root.mkdir(parents=True)
-    try:
-      for item in package['files']:
-        target = workspace_files.resolve_path(root, item['path'])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(item['content'], validate=True))
-      project = models.Project(id=project_id, name=(body.name or package['name']).strip() or 'Project copy', project_type=template_id, root_path=locator.as_posix(), chat_id=None, source_app_id=app.id if app is not None else None, template_snapshot_json=snapshot, artifacts_json=None)
-      db.add(project)
-      db.commit()
-    except Exception:
-      db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
-      raise
+    with creation_staging_root(root) as staging:
+      try:
+        for item in package['files']:
+          target = workspace_files.resolve_path(staging, item['path'])
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_bytes(base64.b64decode(item['content'], validate=True))
+        project = models.Project(id=project_id, name=(body.name or package['name']).strip() or 'Project copy', project_type=template_id, root_path=locator.as_posix(), chat_id=None, source_app_id=app.id if app is not None else None, template_snapshot_json=snapshot, artifacts_json=None)
+        db.add(project)
+        place_and_commit_new_root(db, staging, root)
+      except Exception:
+        db.rollback()
+        raise
     db.refresh(project)
     return {**_project_response(project), 'copy_warning': warning}
 

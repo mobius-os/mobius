@@ -16,8 +16,9 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageOps, JpegImagePlugin, UnidentifiedImageError
 
-from app import app_git, icon_assets, models
+from app import app_git, icon_assets, models, store_licenses
 from app.config import get_settings
+from app.credential_files import is_credential_file
 from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
   MAX_STORE_SCREENSHOTS,
@@ -57,12 +58,12 @@ def _is_unsafe_path_character(char: str) -> bool:
 
 
 # Path segments refused anywhere in a published tree, each with the reason the
-# author sees. Private folder names remain a guard beyond the content scan.
+# author sees. Credentials are found by file name and content below, not
+# guessed from a folder name: apps legitimately ship folders such as secrets/
+# (a secrets-manager UI) or credentials/ (setup docs).
 _UNPUBLISHED_SEGMENTS = {
   ".git": "Git's own metadata is never app source.",
   ".env": "environment files usually hold credentials.",
-  "credentials": "private credential directories must not be published.",
-  "secrets": "private secret directories must not be published.",
   ".github": (
     "Möbius does not publish .github files, because creating GitHub workflow "
     "files needs a broader GitHub token scope than publishing uses."
@@ -73,11 +74,6 @@ _UNPUBLISHED_SEGMENTS = {
     "public repository."
   ),
 }
-_SENSITIVE_FILES = {
-  ".netrc", ".npmrc", ".pypirc",
-  "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
-  "credentials.json", "service-account.json",
-}
 # Heuristics catch recognizable credentials, not every possible secret.
 # Authors still need to review the accepted source before publication.
 _SECRET_PATTERNS = (
@@ -87,9 +83,19 @@ _SECRET_PATTERNS = (
   re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
   re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
   re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+  re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}"),
+  re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
   re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
-  re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b"),
+  # Every OpenAI key format, old and new, embeds base64 "OpenAI".
+  # The marker sits within the first few dozen characters of every OpenAI key;
+  # bounding the prefix keeps the scan linear on long runs of "sk-".
+  re.compile(r"\bsk-[A-Za-z0-9_-]{0,200}T3BlbkFJ[A-Za-z0-9_-]{20,}"),
+  re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b"),
   re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
+  # Slack incoming webhooks; documentation's all-X secret part is a placeholder.
+  re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/(?![Xx]{24})[A-Za-z0-9]{24}"),
+  # Telegram bot tokens: numeric bot id, then a 35-character secret that starts AA.
+  re.compile(r"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"),
 )
 _JOURNAL_STATES = {"listing_pending", "failed", "live"}
 _LOCAL_APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
@@ -380,7 +386,7 @@ def _validate_path(path: str) -> None:
       raise CommunityPublicationError(
         f"Remove {path} before publishing: {reason}", "sensitive_path",
       )
-  if folded[-1] in _SENSITIVE_FILES or folded[-1].startswith(".env."):
+  if is_credential_file(parts[-1]):
     raise CommunityPublicationError(
       f"Remove {path} before publishing: it is a common credential file name.",
       "sensitive_path",
@@ -403,6 +409,7 @@ LISTING_ITEMS = (
   ("tagline", "Tagline"),
   ("description", "Description"),
   ("screenshots", "Screenshots"),
+  ("license", "License"),
   ("hero", "Banner image"),
 )
 _OPTIONAL_LISTING_ITEMS = {"hero"}
@@ -803,6 +810,26 @@ def _listing_screenshots(store: dict, by_path: dict[str, dict]) -> list[dict]:
   return projected
 
 
+def _listing_license(manifest: dict, by_path: dict[str, dict], listed: bool) -> str:
+  """The license publishing accepts from the source, with its text beside it."""
+  spdx = store_licenses.publishable_license(manifest, listed=listed)
+  if not spdx:
+    declared = store_licenses.declared_license(manifest)
+    if declared in store_licenses.LISTED_FREE_SPDX:
+      raise _incomplete(
+        f"Choose a free license the Store offers. Only an app the Store "
+        f"already lists under {declared} can keep publishing under it.",
+      )
+    raise _incomplete(
+      "Choose a free license so people know how they may use and share your app.",
+    )
+  if not store_licenses.has_license_file(by_path):
+    raise _incomplete(
+      "Add the license text. Saving the listing writes the LICENSE file.",
+    )
+  return spdx
+
+
 def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dict:
   """The listing as currently written, valid or not, for editing."""
   def text(field: str) -> str:
@@ -828,6 +855,11 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
+    # The choice the editor shows (only an offered one), and what the
+    # source declares now, so the owner can see a license the Store doesn't
+    # offer, including one an already listed app keeps.
+    "license": store_licenses.offered_license(manifest),
+    "declared_license": store_licenses.declared_license(manifest),
   }
 
 
@@ -875,6 +907,8 @@ def _published_images_with_metadata(
 def store_listing_review(
   files: list[dict[str, str]],
   source_problems: list[CommunityPublicationError] | tuple = (),
+  *,
+  listed: bool = False,
 ) -> dict:
   """Check every Store listing requirement of one accepted snapshot at once.
 
@@ -887,6 +921,9 @@ def store_listing_review(
   directly without a copy step. It remains ordinary accepted source rather
   than ``static_assets`` package input; the manifest contract reserves this
   subtree so installer-owned runtime bytes cannot collide with it.
+  ``listed`` says the Store already lists this app, so the License item
+  also accepts the other free licenses it may keep (see
+  ``keeps_a_listed_license``).
   """
   by_path = {
     str(item.get("path") or ""): item
@@ -939,6 +976,7 @@ def store_listing_review(
     store, "description", "a description", DESCRIPTION_MAX_BYTES,
   ))
   check("screenshots", lambda: _listing_screenshots(store, by_path))
+  check("license", lambda: _listing_license(manifest, by_path, listed))
   check("hero", lambda: (
     _listing_asset(store.get("hero"), "banner image", by_path)
     if store.get("hero") not in (None, "") else None
@@ -964,6 +1002,7 @@ def store_listing_review(
       "icon": results["icon"],
       "hero": {"path": hero} if hero else None,
       "screenshots": results["screenshots"],
+      "license": results["license"],
     }
   draft = _listing_draft(manifest, store, by_path)
   return {
@@ -971,12 +1010,28 @@ def store_listing_review(
     "checklist": checklist,
     "listing": listing,
     "draft": draft,
+    "license_options": store_licenses.license_options(),
   }
 
 
-def public_store_listing(files: list[dict[str, str]]) -> dict:
+def keeps_a_listed_license(files: list[dict[str, str]]) -> bool:
+  """Whether the snapshot's license is publishable only for an already listed app.
+
+  Only then does publishing need to ask the Store whether the app is listed.
+  The Host still admits the update only when its listed revision declares
+  the same license.
+  """
+  by_path = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
+  try:
+    manifest = _parsed_manifest(by_path)
+  except CommunityPublicationError:
+    return False
+  return store_licenses.declared_license(manifest) in store_licenses.LISTED_FREE_SPDX
+
+
+def public_store_listing(files: list[dict[str, str]], *, listed: bool = False) -> dict:
   """Return the publishable listing, or raise its first unmet requirement."""
-  review = store_listing_review(files)
+  review = store_listing_review(files, listed=listed)
   if review["listing"] is None:
     first = next(item for item in review["checklist"] if not item["done"])
     raise CommunityPublicationError(first["message"], first["code"])
@@ -1189,7 +1244,8 @@ def read_public_snapshot(
 
   Only source that cannot be read at all raises; the listing preview reports
   everything else as checklist items. Over the package budget, only the
-  manifest and listing artwork are read, which is all the review needs.
+  manifest, listing artwork and root license text are read, which is all
+  the review needs.
 
   Reading a Git tree rather than the editable worktree prevents an unsaved or
   concurrently-changing draft from crossing the public-source consent boundary.
@@ -1222,10 +1278,12 @@ def read_public_snapshot(
         manifest = json.loads(_blob(repo, manifest_entry))
       except ValueError:
         manifest = {}
+    # The root license text too, so the License item stays honest.
     wanted = {"mobius.json"} | _listing_paths(manifest)
     entries = [
       entry for entry in entries
-      if entry.path in wanted and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
+      if (entry.path in wanted or store_licenses.is_license_file(entry.path))
+      and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
     ]
 
   files: list[dict[str, str]] = []

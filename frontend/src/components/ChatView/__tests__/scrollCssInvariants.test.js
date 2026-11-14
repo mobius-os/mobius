@@ -59,7 +59,7 @@ test('the composer and transcript use the same chat bottom inset', () => {
 
   // One value: zero while the shell is fitted above a keyboard, otherwise the
   // platform's share (default all) of the device bottom safe area.
-  assert.match(chat, /--chat-foot-safe-bottom:\s*var\(\s*--chat-foot-bottom-inset,\s*calc\(env\(safe-area-inset-bottom,\s*0px\)\s*\*\s*var\(--chat-foot-inset-reserve,\s*1\)\)\s*\)/)
+  assert.match(chat, /--chat-foot-safe-bottom:\s*var\(\s*--shell-bottom-inset,\s*calc\(env\(safe-area-inset-bottom,\s*0px\)\s*\*\s*var\(--chat-foot-inset-reserve,\s*1\)\)\s*\)/)
   assert.match(foot, /bottom:\s*var\(--chat-foot-safe-bottom\)/)
   assert.match(list, /var\(--composer-h,\s*80px\)\s*\+\s*var\(--chat-foot-safe-bottom\)\s*\+\s*16px/)
   // Only installed iOS narrows it, to the Android composer position.
@@ -68,6 +68,49 @@ test('the composer and transcript use the same chat bottom inset', () => {
   assert.doesNotMatch(css, /--chat-foot-extra-bottom/)
   assert.doesNotMatch(foot, /safe-area-inset-bottom[\s\S]*-\s*14px/)
   assert.doesNotMatch(list, /safe-area-inset-bottom[\s\S]*-\s*14px/)
+})
+
+// App frames read 0 for env(safe-area-inset-bottom), and outside full
+// immersive AppCanvas forwards zero insets (lib/safeAreaInsets.js), so the
+// surface hosting a frame owns the device bottom inset. Without it, an app's
+// bottom controls sit under the home indicator / navigation bar of an
+// edge-to-edge host, while the chat beside it clears them.
+const componentsDir = join(dir, '..', '..')
+function cssRuleBody(file, selector) {
+  const source = '\n' + readFileSync(join(componentsDir, ...file.split('/')), 'utf8')
+  const start = source.indexOf(`\n${selector} {`)
+  assert.notEqual(start, -1, `selector ${selector} not found in ${file}`)
+  const open = source.indexOf('{', start)
+  return source.slice(open + 1, source.indexOf('}', open)).replace(/\/\*[\s\S]*?\*\//g, '')
+}
+// The same keyboard override as the composer: 0 while the shell is fitted
+// above a keyboard, so a frame rests directly on it.
+const KEYBOARD_AWARE_BOTTOM_PADDING =
+  /padding-bottom:\s*var\(\s*--shell-bottom-inset,\s*env\(safe-area-inset-bottom,\s*0px\)\s*\)/
+const DEVICE_BOTTOM_PADDING = /padding-bottom:\s*env\(safe-area-inset-bottom,\s*0px\)/
+
+test('the shell keeps app frames above the device bottom bar', () => {
+  assert.match(cssRuleBody('Shell/Shell.css', '.shell__app-view'), KEYBOARD_AWARE_BOTTOM_PADDING)
+})
+
+test('only full immersive app frames run full-bleed to the bottom edge', () => {
+  // Full immersive alone receives the real insets. Bar-collapse still gets
+  // zeros, so it must keep the shell's padding.
+  const shellCss = readFileSync(join(componentsDir, 'Shell', 'Shell.css'), 'utf8')
+  assert.match(cssRuleBody('Shell/Shell.css', '.shell--immersive .shell__app-view'), /padding-bottom:\s*0;/)
+  assert.doesNotMatch(shellCss, /\.shell--bar(?:collapsed|hidden)\s+\.shell__app-view/)
+})
+
+test('standalone, shared, and project app frames stay above the device bottom bar', () => {
+  assert.match(cssRuleBody('StandaloneApp/StandaloneApp.css', '.standalone-app'), DEVICE_BOTTOM_PADDING)
+  assert.match(cssRuleBody('Projects/SharedApp.css', '.shared-app'), DEVICE_BOTTOM_PADDING)
+  assert.match(
+    cssRuleBody(
+      'Projects/Projects.css',
+      '.project-preview:not(.project-preview--asset),\n.project-finder__live-preview,\n.artifact-viewer__website',
+    ),
+    KEYBOARD_AWARE_BOTTOM_PADDING,
+  )
 })
 
 test('the composer backdrop fills the safe area without moving controls into it', () => {

@@ -620,6 +620,30 @@ test('project deletion closes its project and artifact tabs in every workspace w
   assertInvariants(state.ws)
 })
 
+// A project deleted elsewhere while its result is open only in Standard, with
+// Builder showing something unrelated: the result lives in the single-screen
+// slot, not in any pane, and must not come back on the switch to Standard.
+test('project deletion clears a result saved only in the Standard slot while Builder is active', () => {
+  let ws = paneModel.setSingleScreen(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'unrelated')]),
+    tabModel.artifactTab('project-a', 'site'),
+  )
+  ws = paneModel.setViewMode(ws, 'panes')
+  assert.equal(ws.viewMode, 'panes')
+  assert.deepEqual(paneModel.flatten(ws), [makeTab('chat', 'unrelated')])
+
+  let state = paneModel.workspaceReducer(
+    { ws, undo: null },
+    { type: 'CLOSE_PROJECT_TABS', projectId: 'project-a' },
+  )
+  assert.equal(state.ws.singleScreen, null, 'the deleted result leaves the Standard slot')
+  assert.deepEqual(paneModel.flatten(state.ws), [makeTab('chat', 'unrelated')])
+
+  state = paneModel.workspaceReducer(state, { type: 'SET_VIEW_MODE', mode: 'single' })
+  assert.notEqual(paneModel.singleScreenKey(state.ws), 'artifact:project-a:site')
+  assertInvariants(state.ws)
+})
+
 // ── Projection: geometry (projectLayout / modeForRect / canSplit) ───────────
 
 // A depth-2, four-leaf tree: s0 row → s1 col(p1,p2) | s2 col(p3,p4).
