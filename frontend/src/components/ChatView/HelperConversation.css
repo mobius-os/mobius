@@ -37,7 +37,7 @@
 .helper-convo__open {
   flex: none;
   align-self: center;
-  color: var(--accent-text, var(--accent)); /* CONTRACT: link-coloured action in the dialog head */
+  color: var(--text);
   font-size: 13px;
   text-underline-offset: 3px;
 }
@@ -107,3 +107,26 @@
 .helper-convo__task > :last-child > :last-child,
 .helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
 .helper-convo__text { font-size: 14px; }
+
+
+/* Dock only when this chat has room for two readable columns. Narrow workspace
+   panes keep the overlay even when the overall desktop window is wide. */
+.chat:has(> .helper-convo__overlay--docked) > .chat__scroll { width: calc(50% + 32px); }
+.chat:has(> .helper-convo__overlay--docked) > .chat__foot { right: 50%; }
+.helper-convo__overlay--docked {
+  inset: 0 0 0 50%;
+  padding: 0;
+  background: var(--bg);
+  place-items: stretch;
+}
+.helper-convo__overlay--docked .helper-convo {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: none;
+}
+.helper-convo a { color: var(--text); }

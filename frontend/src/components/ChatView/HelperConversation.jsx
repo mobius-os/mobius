@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { apiFetch } from '../../api/client.js'
+import useHelperPreviewDocked from './hooks/useHelperPreviewDocked.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
@@ -37,6 +38,9 @@ async function readConversation(chatId, taskId, signal) {
 export default function HelperConversation({
   chatId, taskId, name, status, host, onClose, onInternalNav,
 }) {
+  const docked = useHelperPreviewDocked(host)
+  const hostRef = useRef(host)
+  hostRef.current = host
   const [state, setState] = useState({ phase: 'loading' })
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
@@ -45,7 +49,9 @@ export default function HelperConversation({
   const titleId = useId()
   const running = status === 'running'
 
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose })
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose,
+    modal: !host && !docked, lockScroll: !host && !docked,
+    inertBoundaryRef: docked ? undefined : hostRef })
 
   useEffect(() => {
     const controller = new AbortController()
@@ -79,12 +85,12 @@ export default function HelperConversation({
     .filter(Boolean).join(' · ')
 
   return createPortal(
-    <div className="helper-convo__overlay" role="presentation" onClick={onClose}>
+    <div className={`helper-convo__overlay${docked ? ' helper-convo__overlay--docked' : ''}`} role="presentation" onClick={docked ? undefined : onClose}>
       <div
         ref={dialogRef}
         className="helper-convo"
         role="dialog"
-        aria-modal="true"
+        aria-modal={!host && !docked ? true : undefined}
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}
       >
