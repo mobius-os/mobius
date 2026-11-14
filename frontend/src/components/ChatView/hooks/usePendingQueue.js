@@ -432,15 +432,13 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     // A committed transcript identity is terminal for this mounted chat's
     // queue. A snapshot still containing it predates that handoff; applying
     // any of that snapshot would also drop sends queued after it was read.
+    if (completedCids.size) completeByCid([...completedCids])
     const staleQueue = (serverList || []).some(row => (
       intentDispositionsRef.current.get(cidOf(row)) === 'completed'
-      && !completedCids.has(cidOf(row))
     ))
-    if (completedCids.size) completeByCid([...completedCids])
     if (staleQueue) return
-    const isCompleted = row => intentDispositionsRef.current.get(cidOf(row)) === 'completed'
     const local = pendingMessagesRef.current || []
-    const serverRows = (serverList || []).filter(m => !isCompleted(m))
+    const serverRows = serverList || []
     const serverCidSet = new Set(serverRows.map(m => cidOf(m)))
 
     const reconciled = serverRows.map(m => {

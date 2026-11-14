@@ -1016,3 +1016,16 @@ test('completed identities do not leak across chat or principal changes', async 
   assert.equal(hook.result.current.pendingMessages.length, 1)
   hook.unmount()
 })
+
+for (const priorCut of [false, true]) {
+  test(`a stale queue paired with newer transcript preserves siblings (prior cut: ${priorCut})`, () => {
+    const { result } = renderHook(usePendingQueue)
+    const steered = fixtureMsg({ cid: 'steered' })
+    result.current.add(steered)
+    if (priorCut) result.current.completeByCid([steered.cid])
+    result.current.add(fixtureMsg({ cid: 'later' }))
+    result.current.confirmQueued('later', { ts: 600 })
+    result.current.hydrateFromTranscript([steered], [steered])
+    assert.deepEqual(result.current.pendingMessages.map(row => row.cid), ['later'])
+  })
+}
