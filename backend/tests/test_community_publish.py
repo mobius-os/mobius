@@ -14,6 +14,7 @@ from app.community_publish import (
   build_public_snapshot,
   public_store_listing,
   read_public_store_asset,
+  store_listing_review,
 )
 
 
@@ -56,6 +57,7 @@ def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
     "version": "1.0.0",
     "entry": "index.jsx",
     "icon": "icon.png",
+    "license": "MIT",
     "store": {
       "tagline": "Small and exact.",
       "description": "A calm list for the things that matter.",
@@ -70,6 +72,7 @@ def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
     _public_file("mobius.json", json.dumps(manifest).encode()),
     _public_file("index.jsx", b"export default function App() {}"),
     _public_file("icon.png", _png((1, 1, 1))),
+    _public_file("LICENSE", b"MIT License"),
     _public_file("static/store/hero.png", _png((2, 2, 2))),
     _public_file("static/store/screen.png", _png((3, 3, 3))),
   ]
@@ -198,6 +201,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
     "version": "1.0.0",
     "entry": "index.jsx",
     "icon": "icon.png",
+    "license": "MIT",
     "store": {
       "tagline": "Small and exact.",
       "description": "A calm list for the things that matter.",
@@ -212,6 +216,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
     "export default function App() { return null }\n", encoding="utf-8",
   )
   (repo / "icon.png").write_bytes(_png())
+  (repo / "LICENSE").write_text("MIT License\n", encoding="utf-8")
   (repo / "static" / "store").mkdir(parents=True)
   (repo / "static" / "store" / "screen.png").write_bytes(_png((7, 7, 7)))
   (repo / "static" / "runtime").mkdir()
@@ -234,6 +239,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
   assert resolved == accepted
   assert listing["screenshots"][0]["src"] == "static/store/screen.png"
   assert "static/store/screen.png" in published_paths
+  assert "LICENSE" in published_paths
   assert "static/runtime/bundle.js" not in published_paths
   assert ".mobius-static-assets.json" not in published_paths
 
@@ -491,6 +497,13 @@ def test_a_tree_over_the_file_limit_reads_only_what_the_review_needs(
   repo, app, _ = _app_repo(tmp_path)
   _commit_files(repo, app, {
     f"src/file{index}.js": b"export {}" for index in range(community_publish.MAX_SOURCE_FILES + 50)
+  } | {
+    "mobius.json": json.dumps({
+      "id": "test-app", "name": "Test app", "version": "1.0.0",
+      "entry": "index.jsx", "license": "MIT",
+    }).encode(),
+    "COPYING": b"MIT License",
+    "src/LICENSE": b"vendored",
   })
   reads = []
   real_blob = community_publish._blob
@@ -502,8 +515,14 @@ def test_a_tree_over_the_file_limit_reads_only_what_the_review_needs(
   _, files, problems = community_publish.read_public_snapshot(app)
 
   assert [problem.code for problem in problems] == ["payload_too_large"]
-  assert [item["path"] for item in files] == ["mobius.json"]
-  assert set(reads) == {"mobius.json"} and len(reads) <= 2
+  # The root license text is read too, so the License item stays honest.
+  assert sorted(item["path"] for item in files) == ["COPYING", "mobius.json"]
+  assert set(reads) == {"COPYING", "mobius.json"} and len(reads) <= 3
+  license_item = next(
+    item for item in store_listing_review(files, problems)["checklist"]
+    if item["id"] == "license"
+  )
+  assert license_item["done"] is True, license_item
 
 
 def test_snapshot_publishes_file_names_install_accepts(tmp_path):

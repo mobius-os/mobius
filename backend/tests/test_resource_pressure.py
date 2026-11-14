@@ -171,6 +171,7 @@ def test_unknown_resource_does_not_hide_known_pressure():
   assert {reason["code"] for reason in pressure["reasons"]} == {
     "disk_facts_unavailable",
     "memory_pressure_critical",
+    "process_limit_unavailable",
   }
 
 
@@ -188,6 +189,7 @@ def test_resource_status_keeps_facts_and_pressure_separate():
       "limit_bytes": 1000,
       "pressure": {},
     },
+    processes={"available": True, "current_tasks": 100, "limit_tasks": 1000},
   )
 
   assert set(status) == {"facts", "pressure"}
@@ -206,3 +208,33 @@ def test_memory_reason_names_each_tripped_signal():
   assert any("unreclaimable footprint is 80%" in s for s in signals)
   assert any("PSI some avg60 1.5" in s for s in signals)
   assert not any("PSI full" in s for s in signals)
+
+
+def _process_facts(current, limit):
+  return {"processes": {
+    "available": True, "current_tasks": current, "limit_tasks": limit,
+  }}
+
+
+def test_thread_count_near_the_cgroup_task_cap_is_critical_pressure():
+  """Past the task cap nothing can start a thread, even with spare memory."""
+  assert assess_resource_pressure(_process_facts(500, 1000))["processes"]["state"] == "normal"
+  assert assess_resource_pressure(_process_facts(720, 1000))["processes"]["state"] == "constrained"
+  pressure = assess_resource_pressure(_process_facts(860, 1000))
+  assert pressure["state"] == "critical"
+  assert pressure["processes"]["current_tasks"] == 860
+  assert {reason["code"] for reason in pressure["reasons"]} >= {
+    "process_pressure_critical",
+  }
+
+
+def test_uncapped_or_unreadable_task_counts_stay_unknown():
+  for processes in (
+    {"available": False},
+    {"available": True, "current_tasks": 500, "limit_tasks": None},
+  ):
+    assert _process_pressure_state(processes) == "unknown"
+
+
+def _process_pressure_state(processes):
+  return assess_resource_pressure({"processes": processes})["processes"]["state"]

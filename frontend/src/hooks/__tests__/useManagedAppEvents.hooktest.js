@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook, __setRerender } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
 import {
+  useAppActivityFrameForwarding,
   useManagedAppEvents,
   useManagedAppFrameForwarding,
 } from '../useManagedAppEvents.js'
@@ -156,5 +157,85 @@ test('null app ids are dropped and capability revocation stops delivery', () => 
   hook.rerender({ data: { manage_apps: false } })
   hook.result.current({ type: 'app_updated', appId: 8 })
   assert.deepEqual(posted.map(item => item.message.event.appId), ['7'])
+  hook.unmount()
+})
+
+// One shell with three mounted canvases: app 9 (two loaded documents and one
+// still loading), app 7, and an app manager (id 3) holding manage_apps.
+function renderShellWithCanvases() {
+  const canvas = (versions) => {
+    const posted = new Map(versions.map(v => [v, []]))
+    const frames = new Map(versions.map(v => [v, {
+      contentWindow: { postMessage: (message) => posted.get(v).push(message) },
+    }]))
+    return { framesRef: { current: frames }, loadedDocsRef: { current: new Set() }, posted }
+  }
+  const social = canvas(['v1', 'v2', 'v3'])
+  social.loadedDocsRef.current = new Set(['v1', 'v2'])
+  const kanban = canvas(['v1'])
+  kanban.loadedDocsRef.current = new Set(['v1'])
+  const manager = canvas(['v1'])
+  manager.loadedDocsRef.current = new Set(['v1'])
+  const hook = renderHook(() => {
+    const [subscribe, observe, observeStreamReopened] = useManagedAppEvents()
+    useAppActivityFrameForwarding(social.framesRef, social.loadedDocsRef, subscribe, 9)
+    useAppActivityFrameForwarding(kanban.framesRef, kanban.loadedDocsRef, subscribe, '7')
+    useManagedAppFrameForwarding(manager.framesRef, subscribe, { data: { manage_apps: true } })
+    useAppActivityFrameForwarding(manager.framesRef, manager.loadedDocsRef, subscribe, 3)
+    return { observe, observeStreamReopened }
+  })
+  return { hook, social, kanban, manager }
+}
+
+const NUDGE = { type: 'moebius:app-activity' }
+
+test("an app's activity nudges only that app's loaded frames, and never reaches an app manager", () => {
+  const { hook, social, kanban, manager } = renderShellWithCanvases()
+  hook.result.current.observe({ type: 'app_activity', appId: 9, version: 4 })
+  assert.deepEqual(social.posted.get('v1'), [NUDGE])
+  assert.deepEqual(social.posted.get('v2'), [NUDGE])
+  assert.deepEqual(social.posted.get('v3'), [])
+  assert.deepEqual(kanban.posted.get('v1'), [])
+  assert.deepEqual(manager.posted.get('v1'), [])
+
+  hook.result.current.observe({ type: 'app_activity', appId: 42 })
+  hook.result.current.observe({ type: 'app_activity' })
+  assert.equal(social.posted.get('v1').length, 1)
+  assert.deepEqual(manager.posted.get('v1'), [])
+
+  // Lifecycle events still reach the manager, not the app frames' activity channel.
+  hook.result.current.observe({ type: 'app_updated', appId: 9 })
+  assert.deepEqual(manager.posted.get('v1').map(m => m.type), ['moebius:managed-app-event'])
+  assert.equal(social.posted.get('v1').length, 1)
+  hook.unmount()
+  hook.result.current.observe({ type: 'app_activity', appId: 9 })
+  assert.equal(social.posted.get('v1').length, 1)
+})
+
+test('a reopened system stream nudges every mounted app once, without a manager event', () => {
+  const { hook, social, kanban, manager } = renderShellWithCanvases()
+  hook.result.current.observeStreamReopened()
+  assert.deepEqual(social.posted.get('v1'), [NUDGE])
+  assert.deepEqual(social.posted.get('v2'), [NUDGE])
+  assert.deepEqual(social.posted.get('v3'), [])
+  assert.deepEqual(kanban.posted.get('v1'), [NUDGE])
+  assert.deepEqual(manager.posted.get('v1'), [NUDGE])
+  hook.unmount()
+})
+
+test('a canvas that switches apps hears only the new app', () => {
+  const posted = []
+  const framesRef = { current: new Map([['v1', { contentWindow: { postMessage: m => posted.push(m) } }]]) }
+  const loadedDocsRef = { current: new Set(['v1']) }
+  const hook = renderHook((appId) => {
+    const [subscribe, observe] = useManagedAppEvents()
+    useAppActivityFrameForwarding(framesRef, loadedDocsRef, subscribe, appId)
+    return observe
+  }, 9)
+  hook.rerender(7)
+  hook.result.current({ type: 'app_activity', appId: 9 })
+  assert.deepEqual(posted, [])
+  hook.result.current({ type: 'app_activity', appId: 7 })
+  assert.deepEqual(posted, [NUDGE])
   hook.unmount()
 })

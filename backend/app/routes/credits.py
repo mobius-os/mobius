@@ -12,6 +12,9 @@ caller and applies the whole rule for what it may do:
   under its ``spend_credits`` grant.
 - ``get_credits_price_reader``: a seller's public prices, which a paying app
   shows before it charges.
+- ``get_credits_receipt_reader``: one charge's receipt, which a marketplace
+  checks before it unlocks what a buyer says they paid for, under its
+  read-only ``check_credits_charges`` grant.
 
 This is money, so ``credits_manage`` is its own critical grant: the
 ``identity_manage`` grant the identity routes accept covers the sign-in link
@@ -24,14 +27,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import credits_client, models
+from app import credits_client, credits_confirmations, models
 from app.deps import (
+  app_manages_credits,
+  credits_charge_apps,
   get_credits_controller,
   get_credits_price_reader,
   get_credits_reader,
+  get_credits_receipt_reader,
   get_credits_spender,
   reject_cross_site,
-  spend_credits_targets,
+  spend_credits_allows,
 )
 
 router = APIRouter(
@@ -72,6 +78,9 @@ class _ChargeRequest(BaseModel):
   idempotency_key: str = Field(min_length=8, max_length=200)
   # The price the app showed the owner; a higher current price refuses.
   max_price_micro: int = Field(ge=0)
+  # Only "credits" for now; any other method is refused rather than ignored,
+  # so an app asking for a card payment is never charged credits instead.
+  method: str = Field(default="credits", max_length=20)
 
 
 def _credits(action, *args):
@@ -93,6 +102,12 @@ def pair_credits(
   _owner: models.Owner = Depends(get_credits_controller),
 ):
   return _credits(credits_client.pair, body.operator_url, body.key)
+
+
+@router.post("/pair/account")
+def pair_credits_with_account(_owner: models.Owner = Depends(get_credits_controller)):
+  """Connect a Möbius launched from mobius.you to its owner's wallet in one step."""
+  return _credits(credits_client.pair_with_account)
 
 
 @router.post("/unpair")
@@ -173,9 +188,15 @@ def charge_credits_for_call(
 
   The price is the seller's, read at the credits service, so the app cannot
   choose what a call costs; it can only refuse to pay more than it showed.
-  It pays only the ``"<seller>/<app>"`` entries the owner allowed at install.
+  It pays only the ``"<seller>/<app>"`` (or ``"*/<app>"``) entries the owner
+  allowed.
   """
-  if f"{body.seller}/{body.app}" not in spend_credits_targets(app):
+  if body.method != "credits":
+    raise HTTPException(422, {
+      "code": "payment_method_unsupported",
+      "message": "Only payments from Möbius credits are supported.",
+    })
+  if not spend_credits_allows(app, body.seller, body.app):
     raise HTTPException(403, {
       "code": "seller_not_allowed",
       "message": (
@@ -186,10 +207,75 @@ def charge_credits_for_call(
   # The permanent package id outlives reinstalls and slug changes; an
   # owner-built app has none, so its row id stands in.
   payer = f"package:{app.package_id}" if app.package_id else f"app:{app.id}"
-  return _credits(
-    lambda: credits_client.charge(
+  # Nothing is charged until the owner has seen this payment and pressed Pay.
+  payment = credits_confirmations.require(
+    app_id=app.id, app_name=app.name,
+    key=credits_client.app_scoped_key(payer, body.idempotency_key),
+    seller=body.seller, priced_app=body.app, action=body.action,
+    max_price_micro=body.max_price_micro,
+    describe=lambda: _quote(body.seller, body.app, body.action, body.max_price_micro))
+  # A payer may read its own charge; only an app that also manages the owner's
+  # credits may read the owner's balance the service returns alongside it.
+  manages = app_manages_credits(app)
+  try:
+    charged = credits_client.charge(
       body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro,
-      payer=payer, buyer_app=app.package_id or app.slug))
+      payer=payer, buyer_app=app.package_id or app.slug)
+  except credits_client.CreditsUnavailable as error:
+    # A definite refusal charged nothing, so forget the confirmation and ask the
+    # owner again next time. An unknown outcome may have charged: its retry must
+    # replay the same confirmed payment, so leave the confirmation in place.
+    if error.code != credits_client.CHARGE_OUTCOME_UNKNOWN:
+      credits_confirmations.forget(payment)
+    raise credits_client.as_http(error if manages else credits_client.payer_refusal_view(error)) from error
+  return charged if manages else credits_client.payer_charge_view(charged)
+
+
+def _quote(seller: str, priced_app: str, action: str,
+           max_price_micro: int) -> credits_confirmations.Quote:
+  """What the owner is asked to pay: the seller's own description and price.
+
+  Anything the credits service would refuse is refused here, before the owner
+  is asked to pay for it: an action the seller never priced (or switched off),
+  a price that cannot be read, or a price above what the app agreed to pay.
+  """
+  listed = credits_client.prices(seller, priced_app).get("prices") or []
+  match = next((p for p in listed if isinstance(p, dict) and p.get("action") == action), None)
+  if match is None or match.get("enabled") is False:
+    raise HTTPException(404, {
+      "code": "price_not_found",
+      "message": "The creator hasn't set this price up at mobius.you yet.",
+    })
+  price_micro = match.get("price_micro")
+  if not isinstance(price_micro, int) or isinstance(price_micro, bool) or price_micro < 0:
+    # The owner is never asked to approve a price nobody can show them.
+    raise HTTPException(502, {
+      "code": "price_unreadable",
+      "message": "The creator's price couldn't be read. Try again later.",
+    })
+  if price_micro > max_price_micro:
+    raise HTTPException(409, {
+      "code": "price_changed",
+      "message": "The creator's price is higher than this app agreed to pay.",
+      "price_micro": price_micro, "max_price_micro": max_price_micro,
+    })
+  return credits_confirmations.Quote(
+    description=str(match.get("description") or ""), price_micro=price_micro)
+
+
+@router.get("/charges/{charge_id}")
+def read_credits_charge_receipt(
+  charge_id: str,
+  app: models.App = Depends(get_credits_receipt_reader),
+):
+  """Who paid this owner, for which call, and how much: a claimed sale, checked.
+
+  A marketplace unlocks an item for a buyer on another Möbius only after its
+  service confirms the charge id that buyer's Möbius reports. Either lane
+  may ask; reading a receipt moves no money. Only a charge that paid this
+  owner for one of the apps the grant names is shown; any other is not found.
+  """
+  return _credits(credits_client.own_sale_receipt, charge_id, credits_charge_apps(app))
 
 
 @router.post("/connect")

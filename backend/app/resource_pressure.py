@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from app.memory_observability import cgroup_memory_snapshot
+from app.memory_observability import cgroup_memory_snapshot, cgroup_tasks_snapshot
 
 
 MIB = 1024 * 1024
@@ -34,6 +34,13 @@ _DISK_CONSTRAINED_CEILING = 2 * GIB
 _DISK_CRITICAL_FRACTION = 0.05
 _DISK_CRITICAL_FLOOR = 32 * MIB
 _DISK_CRITICAL_CEILING = 1 * GIB
+# Below this the volume is about to refuse writes outright. The storage guard
+# then releases the recovery reserve (app.disk_reserve) so the database can
+# still commit. It is not a separate pressure state: consumers that only care
+# about admission keep reading "critical".
+_DISK_EXHAUSTED_FRACTION = 0.0075
+_DISK_EXHAUSTED_FLOOR = 16 * MIB
+_DISK_EXHAUSTED_CEILING = 64 * MIB
 
 # memory.current includes reclaimable file cache, so pressure is based on the
 # existing cgroup working-set estimate.  PSI catches sustained contention that
@@ -44,6 +51,12 @@ _MEMORY_CONSTRAINED_SOME_AVG60 = 1.0
 _MEMORY_CONSTRAINED_FULL_AVG60 = 0.5
 _MEMORY_CRITICAL_SOME_AVG60 = 10.0
 _MEMORY_CRITICAL_FULL_AVG60 = 2.0
+
+# Every thread in the container counts against the cgroup task cap. A new agent
+# turn adds a CLI with dozens of threads plus its tools, and running turns keep
+# spawning, so admission stops short of the cap rather than at it.
+_TASKS_CONSTRAINED_RATIO = 0.70
+_TASKS_CRITICAL_RATIO = 0.85
 
 _STATE_RANK = {
   "unknown": -1,
@@ -84,11 +97,28 @@ def _memory_facts(snapshot: dict[str, Any]) -> dict[str, Any]:
   return {key: snapshot.get(key) for key in keys if key in snapshot}
 
 
+def _disk_facts(
+  data_dir: str | Path, disk_usage: Callable[[str | Path], Any],
+) -> dict[str, Any]:
+  try:
+    usage = disk_usage(data_dir)
+  except OSError:
+    return {"available": False, "path": str(data_dir)}
+  return {
+    "available": True,
+    "path": str(data_dir),
+    "total_bytes": int(usage.total),
+    "used_bytes": int(usage.used),
+    "free_bytes": int(usage.free),
+  }
+
+
 def resource_facts(
   data_dir: str | Path,
   *,
   disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
   memory: dict[str, Any] | None = None,
+  processes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Read one cheap point-in-time capacity snapshot.
 
@@ -97,20 +127,7 @@ def resource_facts(
   implied by this function.
   """
   captured_at = datetime.now(UTC).isoformat()
-  try:
-    usage = disk_usage(data_dir)
-    disk = {
-      "available": True,
-      "path": str(data_dir),
-      "total_bytes": int(usage.total),
-      "used_bytes": int(usage.used),
-      "free_bytes": int(usage.free),
-    }
-  except OSError:
-    disk = {
-      "available": False,
-      "path": str(data_dir),
-    }
+  disk = _disk_facts(data_dir, disk_usage)
 
   memory_snapshot = (
     cgroup_memory_snapshot() if memory is None else memory
@@ -119,6 +136,7 @@ def resource_facts(
     "captured_at": captured_at,
     "disk": disk,
     "memory": _memory_facts(memory_snapshot),
+    "processes": cgroup_tasks_snapshot() if processes is None else processes,
   }
 
 
@@ -163,6 +181,12 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     floor_bytes=_DISK_CRITICAL_FLOOR,
     ceiling_bytes=_DISK_CRITICAL_CEILING,
   )
+  exhausted_below = _bounded_headroom(
+    total,
+    fraction=_DISK_EXHAUSTED_FRACTION,
+    floor_bytes=_DISK_EXHAUSTED_FLOOR,
+    ceiling_bytes=_DISK_EXHAUSTED_CEILING,
+  )
   state = "normal"
   reason = None
   if free < critical_below:
@@ -186,6 +210,7 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
     "free_ratio": free / total,
     "constrained_below_bytes": constrained_below,
     "critical_below_bytes": critical_below,
+    "exhausted_below_bytes": exhausted_below,
     "reason": reason,
   }
 
@@ -302,6 +327,44 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def _process_pressure(processes: dict[str, Any]) -> dict[str, Any]:
+  """Assess the cgroup task cap; uncapped or unreadable telemetry is unknown."""
+  current = processes.get("current_tasks")
+  limit = processes.get("limit_tasks")
+  if (
+    not processes.get("available")
+    or not isinstance(current, int)
+    or not isinstance(limit, int)
+    or limit <= 0
+  ):
+    return {
+      "state": "unknown",
+      "reason": {"resource": "processes", "code": "process_limit_unavailable"},
+    }
+  ratio = current / limit
+  state = (
+    "critical" if ratio >= _TASKS_CRITICAL_RATIO
+    else "constrained" if ratio >= _TASKS_CONSTRAINED_RATIO
+    else "normal"
+  )
+  result = {
+    "state": state,
+    "tasks_ratio": ratio,
+    "current_tasks": current,
+    "limit_tasks": limit,
+    "constrained_at_ratio": _TASKS_CONSTRAINED_RATIO,
+    "critical_at_ratio": _TASKS_CRITICAL_RATIO,
+    "reason": None,
+  }
+  if state != "normal":
+    result["reason"] = {
+      "resource": "processes",
+      "code": f"process_pressure_{state}",
+      "tasks_ratio": ratio,
+    }
+  return result
+
+
 def assess_memory_pressure(
   memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -323,7 +386,10 @@ def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:
   memory = _memory_pressure(
     facts.get("memory") if isinstance(facts.get("memory"), dict) else {},
   )
-  assessments = (disk, memory)
+  processes = _process_pressure(
+    facts.get("processes") if isinstance(facts.get("processes"), dict) else {},
+  )
+  assessments = (disk, memory, processes)
   known = [
     assessment["state"]
     for assessment in assessments
@@ -343,6 +409,7 @@ def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:
     "reasons": reasons,
     "disk": disk,
     "memory": memory,
+    "processes": processes,
   }
 
 
@@ -351,14 +418,41 @@ def resource_status(
   *,
   disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
   memory: dict[str, Any] | None = None,
+  processes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Return the stable facts/pressure seam future policy can consume."""
   facts = resource_facts(
     data_dir,
     disk_usage=disk_usage,
     memory=memory,
+    processes=processes,
   )
   return {
     "facts": facts,
     "pressure": assess_resource_pressure(facts),
   }
+
+
+def disk_status(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> dict[str, Any]:
+  """The data volume's facts and pressure alone, shaped like one resource of
+  :func:`resource_status`.
+
+  It reads one ``statvfs`` and no cgroup file, so it is cheap enough to ask
+  every second and before anything writes: the storage guard, startup (the
+  recovery reserve) and a scheduled app job's launch.
+  """
+  disk = _disk_facts(data_dir, disk_usage)
+  return {"facts": disk, "pressure": _disk_pressure(disk)}
+
+
+def disk_is_critical(
+  data_dir: str | Path,
+  *,
+  disk_usage: Callable[[str | Path], Any] = shutil.disk_usage,
+) -> bool:
+  """Whether the data volume is below its critical free-space line."""
+  return disk_status(data_dir, disk_usage=disk_usage)["pressure"]["state"] == "critical"

@@ -161,6 +161,24 @@ def real_end_orphaned_hosts(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def idle_storage_guard(monkeypatch):
+  """Keep the app lifespan's storage guard from acting on the real machine.
+
+  A real guard would allocate a 256 MiB recovery reserve in each test's data
+  directory and, on a low volume, stop agent commands outside the test. The
+  supervisor still owns a live task, so readiness is unchanged; the guard's
+  own tests drive ``tick`` directly.
+  """
+  import asyncio
+  from app import storage_guard
+
+  async def idle(self):
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr(storage_guard.StorageGuard, "run", idle)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_git_env(monkeypatch, tmp_path, tmp_path_factory):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
 
@@ -365,7 +383,7 @@ def fresh_db():
   restart_util_mod._RESTART_ADMITTED = False
   chat_mod._clear_after_terminal_generation.clear()
   chat_mod._clear_after_terminal_status.clear()
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoffs.clear()
   chat_mod._next_limit_auto_resume_at = 0.0
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any

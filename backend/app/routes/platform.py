@@ -8,9 +8,10 @@ on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 and merge it with local edits, or record a conflict),
 ``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
-``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
-normal Settings restart). Read failures are explicit so Settings cannot mistake
-an unavailable update source for an up-to-date installation. Conflict resolution
+``POST /restart`` (owner-confirmed self-restart through the same drained,
+supervisor-handled path as the normal Settings restart). Read failures are
+explicit so Settings cannot mistake an unavailable update source for an
+up-to-date installation. Conflict resolution
 is a separate owner-clicked endpoint so applying an update never silently starts an agent turn.
 """
 
@@ -422,7 +423,8 @@ def restart_platform(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
-  restarts this worker (force-exit fallback) so it reboots with the new code."""
+  drains and asks the container supervisor to rerun the boot in place, so it
+  starts with the new code (force-exit fallback)."""
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:

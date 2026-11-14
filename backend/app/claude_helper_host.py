@@ -41,6 +41,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.runtime_types import prompt_not_sent_result
 from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
@@ -1163,8 +1164,14 @@ async def run_claude_host_turn(
   helper_host_key: HostKey,
   data_dir: str,
   goal_brief_refresh=None,
+  run_generation: int | None = None,
 ) -> dict:
-  """Run one delegated Claude helper turn inside its parent's shared host."""
+  """Run one delegated Claude helper turn inside its parent's shared host.
+
+  ``run_generation`` is the chat run generation this turn was admitted for;
+  a Stop or delete while the host starts supersedes it, and the turn then ends
+  without dispatching work.
+  """
   from app.process_groups import RUN_MARKER_ENV, terminate_run_processes
   from app.runner_registry import registry, RunnerKind
 
@@ -1233,8 +1240,12 @@ async def run_claude_host_turn(
         helper_host_key, options_factory=factory, session_file=session_file,
       ),
     ) as host:
-      handle = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
-      registry.register(handle)
+      candidate = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
+      if not registry.register(candidate, run_generation=run_generation):
+        candidate.mark_finished()
+        log.info("Claude helper turn superseded before dispatch chat_id=%s", chat_id)
+        return prompt_not_sent_result(session_id)
+      handle = candidate
       started_at = time.monotonic()
 
       async def on_started(started: HelperTurn) -> None:
