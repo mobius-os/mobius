@@ -829,8 +829,10 @@ class ActiveCodexTurn:
     run_marker: str | None = None,
     shared_host: bool = False,
     goal_brief_refresh: Any | None = None,
+    model: str | None = None,
   ):
     self.chat_id = chat_id
+    self.model = model
     self._goal_brief_refresh = goal_brief_refresh
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
@@ -2288,6 +2290,7 @@ async def _run_codex_sdk_turn(
         run_marker=base_env.get(RUN_MARKER_ENV),
         shared_host=helper_host is not None,
         goal_brief_refresh=goal_brief_refresh,
+        model=model,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(

@@ -532,9 +532,10 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None, run_generation: int | None = None,
+    *, sink=None, run_generation: int | None = None, model: str | None = None,
   ):
     self.chat_id = chat_id
+    self.model = model
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._sink = sink
@@ -1655,6 +1656,7 @@ async def run_claude_sdk_turn(
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
       run_generation=run_generation,
+      model=_model,
     )
     if not registry.register(active_client, run_generation=run_generation):
       startup_file_stack.close()

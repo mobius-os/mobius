@@ -509,8 +509,8 @@ def _mirror_agent_defaults(
     db.commit()
 
 
-def _remember_owner_model_choice(db: Session, model_id: str | None, provider_id: str) -> None:
-  """Mirror only a confirmed owner pick, serialized with visibility edits."""
+def _remember_owner_model_use(db: Session, model_id: str | None) -> None:
+  """Record an admitted owner send, serialized with visibility edits."""
   if not model_id:
     return
   from sqlalchemy import text
@@ -523,7 +523,6 @@ def _remember_owner_model_choice(db: Session, model_id: str | None, provider_id:
     owner.model_prefs_json = providers.remember_recent_model(
       owner.model_prefs_json, model_id,
     )
-    owner.provider = provider_id
   db.commit()
 
 
@@ -2002,9 +2001,7 @@ async def patch_chat(
     # auto-resume-only PATCH on a historical chat must not change which
     # provider the next new chat inherits.
     if is_owner_input_principal(principal) and not body.by_agent and chat.provider:
-      if "model" in agent_settings_patch:
-        _remember_owner_model_choice(db, settings_obj.get("model"), chat.provider)
-      elif target_provider is not None or picker_settings_changed:
+      if target_provider is not None or picker_settings_changed:
         owner = db.query(models.Owner).first()
         if owner is not None:
           owner.provider = chat.provider
@@ -3236,7 +3233,6 @@ async def _compact_chat_locked(
       settings_obj=settings_obj,
     )
     if result.get("status") == "committed":
-      _remember_owner_model_choice(db, settings_obj.get("model"), body.provider)
       activity.log_event(
         "provider_switch",
         chat_id=chat_id,

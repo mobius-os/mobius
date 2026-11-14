@@ -853,8 +853,8 @@ def test_model_prefs_default_is_curated(client, auth):
   assert res.json() == {"hidden_ids": providers.hidden_model_ids(None), "recent_ids": [], "selected_agent": None}
 
 
-def test_model_prefs_seed_empty_history_from_explicit_global_pick(client, auth, db):
-  """Upgraded owners see their last saved choice first, not a runtime default."""
+def test_model_prefs_empty_history_is_not_ordered_by_unsent_global_pick(client, auth, db):
+  """A selection is not model use, even for an owner with no history."""
   from app import models, providers
 
   providers.update_agent_settings(
@@ -868,7 +868,7 @@ def test_model_prefs_seed_empty_history_from_explicit_global_pick(client, auth, 
   response = client.get("/api/owner/model-prefs", headers=auth)
   assert response.status_code == 200
   assert response.json() == {
-    "hidden_ids": ["custom-hidden"], "recent_ids": ["claude-opus-4-7"],
+    "hidden_ids": ["custom-hidden"], "recent_ids": [],
     "selected_agent": {"provider": "claude", "model": "claude-opus-4-7", "effort": "medium"},
   }
   db.refresh(owner)
@@ -966,16 +966,16 @@ def test_visibility_change_preserves_confirmed_model_recency(client, auth, db):
   assert owner.model_prefs_json["recent_ids"] == ["claude-opus-4-7"]
 
 
-def test_distinct_chat_choices_merge_recent_models_under_owner_lock(client, auth):
+def test_distinct_chat_sends_merge_recent_models_under_owner_lock(client, auth):
   """Different chat transition locks must not lose owner MRU updates."""
   from app.database import SessionLocal
-  from app.routes.chats import _remember_owner_model_choice
+  from app.routes.chats import _remember_owner_model_use
 
   model_ids = [f"model-{n}" for n in range(8)]
 
   def remember(model_id):
     with SessionLocal() as session:
-      _remember_owner_model_choice(session, model_id, "claude")
+      _remember_owner_model_use(session, model_id)
 
   with ThreadPoolExecutor(max_workers=8) as pool:
     list(pool.map(remember, model_ids))

@@ -48,6 +48,7 @@ from app.chat_writer import (
 from app.app_chat_scopes import ScopedStartRefused
 from app.continuations import has_runnable_pending
 from app.chat_steering import (
+  active_model_for_chat,
   has_live_steerable_turn,
   steer_into_active_turn,
 )
@@ -1504,9 +1505,42 @@ async def _send_message_impl(
       # won the transition lock first.
       db.rollback()
       chat = get_active_chat_for_principal(db, chat_id, principal)
-      return await _send_message_locked(
+      # Started and queued turns record recency with their writer admission;
+      # this route alone owns a successfully steered live turn's model.
+      record_use = _owner_model_use_send(principal, body)
+      already_saved = bool(body.cid and (
+        any(cid_of(row) == body.cid for row in (chat.pending_messages or []))
+        or transcript_rows.client_message_seq(db, chat, body.cid) is not None
+      )) if record_use else False
+      steer_model = (
+        active_model_for_chat(chat_id, chat.provider or "claude")
+        if record_use else None
+      )
+      response = await _send_message_locked(
         body, chat_id, principal, db, chat, restore_archived,
       )
+      if record_use and not already_saved and response.status_code == 202:
+        status = json.loads(response.body).get("status")
+        if status == "steered" and steer_model:
+          from app.routes.chats import _remember_owner_model_use
+          try:
+            _remember_owner_model_use(db, steer_model)
+          except Exception:
+            db.rollback()
+            log.exception("Could not record owner model use chat_id=%s", chat_id)
+      return response
+
+
+def _owner_model_use_send(principal: Principal, body: schemas.SendMessage) -> bool:
+  """Only a visible, direct human send can change owner picker recency."""
+  return (
+    principal.scope == "owner" and principal.browser is None
+    and is_owner_input_principal(principal)
+    and not body.hidden
+    and not body.answers and not body.selected_options
+    and not body._scoped_start and not body.force_steer
+    and body.continuation not in ("manual", "queue")
+  )
 
 
 async def _send_message_locked(
@@ -1534,9 +1568,13 @@ async def _send_message_locked(
       detail="Only the owner can resume a paused chat.",
     )
   next_execution_provider = _next_execution_provider(db, chat)
-  if _selected_model_for_chat(
-    chat, provider=next_execution_provider,
-  ) is None:
+  selected_settings = effective_agent_settings(
+    get_settings().data_dir,
+    coerce_agent_settings(chat.agent_settings_json) or None,
+    provider=next_execution_provider,
+  )
+  selected_model = selected_settings.get("model")
+  if not isinstance(selected_model, str) or not selected_model.strip():
     raise _model_selection_required_conflict()
   if body.continuation == "queue":
     return await _send_queue(chat_id, db, principal, restore_archived)
@@ -1877,6 +1915,13 @@ async def _send_message_locked(
     # in an unrelated chat. Owner-created empty chats deliberately retain the
     # live-default behavior documented by create_chat.
     default_provider = next_execution_provider
+    initial_agent_settings = None
+    if not manual_resume and not _coerce_chat_settings(chat).get("model"):
+      initial_agent_settings = {
+        key: selected_settings[key]
+        for key in ("model", "effort", "effort_by_provider")
+        if key in selected_settings
+      }
 
     ack = get_writer().submit(
       StartTurn(
@@ -1885,6 +1930,8 @@ async def _send_message_locked(
         user_msg=user_msg,
         title_source=body.content,
         default_provider=default_provider,
+        initial_agent_settings=initial_agent_settings,
+        remember_owner_model_use=_owner_model_use_send(principal, body),
         initiated_by_app_id=principal.app_id,
         browser_grant_id=principal.browser_grant_id,
         restore_archived=restore_archived,

@@ -267,6 +267,7 @@ export default function useStreamConnection(chatId, {
   onLiveQuestion,
   onQuestionResponseStart,
   onContextUsage,
+  onOwnerSendAccepted,
 }) {
   // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
   // keeps them off every frame-paced render while a reply is revealing.
@@ -1865,6 +1866,11 @@ export default function useStreamConnection(chatId, {
       }
       const data = await res.json()
       responseData = data
+      if (!hidden && !forceSteer && !answers && !selected_options
+        && continuation !== 'manual' && continuation !== 'queue'
+        && (['started', 'steered'].includes(data.status) || data.started === true)) {
+        onOwnerSendAccepted?.()
+      }
       // Any parsed 2xx response is authoritative acceptance (including
       // duplicate/queued/answer-delivered). A lost response instead leaves the
       // record in place for the shell-wide reconnect drain.
@@ -2027,6 +2033,7 @@ export default function useStreamConnection(chatId, {
   }, [
     clearQuestionResponseTracking,
     disconnect,
+    onOwnerSendAccepted,
     setStreamAssistantMessageId,
     setStreamItems,
   ])

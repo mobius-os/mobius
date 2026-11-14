@@ -1068,6 +1068,9 @@ def test_send_requires_explicit_model_before_any_durable_side_effect(
 def test_fresh_send_response_includes_stored_user_message(
   client, auth, chat, db, monkeypatch,
 ):
+  from app.routes.chats_stream import _selected_model_for_chat
+
+  expected_model = _selected_model_for_chat(chat)
   async def _noop_run_chat(*args, **kwargs):
     return None
 
@@ -1089,6 +1092,7 @@ def test_fresh_send_response_includes_stored_user_message(
   db.refresh(chat)
   assert list(transcript_rows.history(chat)) == [body["message"]]
   assert chat.provider == "claude"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"][0] == expected_model
 
 
 def test_uploaded_file_can_start_a_turn_without_typed_text(

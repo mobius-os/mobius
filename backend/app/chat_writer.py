@@ -704,6 +704,9 @@ class StartTurn(_Command):
   user_msg: dict = field(default_factory=dict)
   title_source: str = ""
   default_provider: str = "claude"
+  # Already-resolved settings, frozen when this admitted turn inherits a model.
+  initial_agent_settings: dict | None = None
+  remember_owner_model_use: bool = False
   initiated_by_app_id: int | None = None
   browser_grant_id: str | None = None
   # The rendered recovery control names its exact interrupted physical run.
@@ -3963,6 +3966,12 @@ class ChatWriterActor:
     _require_browser_grant(db, grant_id)
     if not existing:
       chat.provider = cmd.default_provider or "claude"
+    if cmd.initial_agent_settings is not None:
+      from app.chat_visibility import coerce_agent_settings
+      chat.agent_settings_json = {
+        **cmd.initial_agent_settings,
+        **(coerce_agent_settings(chat.agent_settings_json) or {}),
+      }
     # Build the agent history as schemas.ChatMessage objects, exactly as the
     # production initial-send path in routes/chats_stream.py does — run_chat
     # consumes `messages[-1].content` (attribute access), so a raw dict would
@@ -4075,6 +4084,11 @@ class ChatWriterActor:
         if resuming else None
       ),
     ))
+    if cmd.remember_owner_model_use:
+      from app.chat_visibility import coerce_agent_settings
+      self._remember_admitted_owner_model_use(
+        db, (coerce_agent_settings(chat.agent_settings_json) or {}).get("model"),
+      )
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
     if goal_id is not None:
@@ -5491,6 +5505,18 @@ class ChatWriterActor:
         raise _PersistFailed("RejectBrowserPending did not persist")
     return {"rejected": rejected}
 
+  @staticmethod
+  def _remember_admitted_owner_model_use(db, model_id: str | None) -> None:
+    """Include model recency in the same commit as a new owner-driven run."""
+    if not isinstance(model_id, str) or not model_id.strip():
+      return
+    from app import providers
+    owner = db.query(models.Owner).first()
+    if owner is not None:
+      owner.model_prefs_json = providers.remember_recent_model(
+        owner.model_prefs_json, model_id,
+      )
+
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
 
@@ -5728,6 +5754,31 @@ class ChatWriterActor:
       goal_objective=goal_objective,
       goal_id=goal_id,
     )
+    # This group's own provenance, not the POST that happened to wake a stale
+    # queue, decides whether it records owner use. Freeze the resolved model
+    # before the runner can observe later global-default edits.
+    owner_model_use = (
+      grant_id is None
+      and any(row.get("_owner_input_at")
+              and row.get("_initiated_by_app_id") is None
+              and not row.get("hidden")
+              for row in promoted_group)
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    )
+    if owner_model_use:
+      from app import providers
+      from app.chat_visibility import coerce_agent_settings
+      from app.config import get_settings
+      settings = coerce_agent_settings(chat.agent_settings_json) or {}
+      effective = providers.effective_agent_settings(
+        get_settings().data_dir, settings or None, provider=chat.provider,
+      )
+      if not settings.get("model") and effective.get("model"):
+        settings["model"] = effective["model"]
+        chat.agent_settings_json = settings
+      self._remember_admitted_owner_model_use(db, effective.get("model"))
     self._commit_admitted_run_start(
       db, chat, new_run, assistant_ts,
       failure_message="PromotePending did not persist",

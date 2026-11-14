@@ -3,6 +3,13 @@
 from app.runner_registry import RunnerKind, registry
 
 
+def active_model_for_chat(chat_id: str, provider: str) -> str | None:
+  """The live steer target's resolved model, not mutable picker settings."""
+  kind = RunnerKind.CLAUDE_SDK if provider == "claude" else RunnerKind.CODEX_SDK
+  handle = registry.get_handle(chat_id, kind)
+  return getattr(handle, "model", None)
+
+
 def has_live_steerable_turn(chat_id: str, provider: str) -> bool:
   """Whether the current provider handle can accept an in-band message."""
   if provider == "claude":
