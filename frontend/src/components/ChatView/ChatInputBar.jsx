@@ -331,8 +331,9 @@ export function PrimaryAction({
  *                        `{ open(cid), setAside(cid), back(fromKeyboard) }`
  *                        so the queue tray's pencil, × and Stop editing reach
  *                        the chat box.
- *   onQueuedInComposerChange — receives the cid of the queued message the
- *                        box is editing, or null, for the tray's Stop editing row.
+ *   onQueuedInComposerChange — receives `{ cid, saving }` for the queued
+ *                        message the box is editing, or null, for the tray's
+ *                        Stop editing row.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
@@ -549,9 +550,10 @@ export default function ChatInputBar({
   // The tray marks the row open here; a chat box that goes away takes its
   // mark with it.
   useEffect(() => {
-    onQueuedInComposerChange?.(composerHistory.queuedKey)
+    const cid = composerHistory.queuedKey
+    onQueuedInComposerChange?.(cid ? { cid, saving: composerHistory.saving } : null)
     return () => onQueuedInComposerChange?.(null)
-  }, [composerHistory.queuedKey, onQueuedInComposerChange])
+  }, [composerHistory.queuedKey, composerHistory.saving, onQueuedInComposerChange])
 
   // Programmatic composer edits arrive through the controlled value boundary.
   // Restore their caret after React commits without changing focus or scroll.

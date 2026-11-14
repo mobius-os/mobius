@@ -28,15 +28,17 @@ import {
  * first line. Click the row to expand and see the full content. The pencil
  * opens the message in the chat box (ChatInputBar's history), where Enter
  * saves it in the same queue position; while it is open there the row offers
- * Stop editing instead of the pencil, and stays shown even when the tray is
- * collapsed. The X cancels (DELETE the pending message on the backend).
+ * Stop editing instead of the pencil (or "Saving…" while Enter's save runs),
+ * and stays shown even when the tray is collapsed. The X cancels (DELETE the
+ * pending message on the backend).
  *
  * Visual model: a soft, slightly raised stack — distinct from the chat
  * transcript so it's clear these are "not yet sent" turns. Lives between
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onEditInComposer, inComposerCid = null, onStopEditing, onRetry, onSteerOne,
+  items, onCancel, onEditInComposer, inComposerCid = null, inComposerSaving = false, onStopEditing,
+  onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
   restarting = false, onSendHeld, sharedGuest = false,
 }) {
@@ -245,15 +247,18 @@ export default function QueuedMessages({
                 {inComposer ? (
                   // The chat box holds this message; this returns it to the
                   // draft without saving (Esc on a keyboard).
+                  // While its save runs the control says so and is disabled:
+                  // stopping could not undo a save already sent.
                   <button
                     type="button"
                     className="queued__in-composer"
                     onPointerDown={(e) => e.preventDefault()}
                     // A keyboard press is a click with no pointer detail.
                     onClick={(event) => onStopEditing?.(event.detail === 0)}
-                    title="Back to your draft (Esc)"
+                    title={inComposerSaving ? undefined : 'Back to your draft (Esc)'}
+                    disabled={inComposerSaving}
                   >
-                    Stop editing
+                    {inComposerSaving ? 'Saving…' : 'Stop editing'}
                   </button>
                 ) : (
                   <button

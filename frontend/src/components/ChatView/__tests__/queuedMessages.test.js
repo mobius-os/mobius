@@ -203,7 +203,7 @@ test('a message queued during a turn is not captioned as waiting for the owner',
   assert.match(html, /1 waiting for you; the rest send after this turn/)
 })
 
-test('a queued edit shows the strip only while saving or after a failed save, through one status region', async () => {
+test('a queued edit shows the strip only after a failed save, and speaks through one status region', async () => {
   const { default: ComposerHistoryStrip } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
   const render = props => renderToStaticMarkup(createElement(ComposerHistoryStrip, props))
   const queued = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
@@ -217,13 +217,15 @@ test('a queued edit shows the strip only while saving or after a failed save, th
     'Editing queued message 1 of 1. Send saves it')
   const saving = render({ position: queued, saving: true })
   assert.equal(saving.match(region)?.[1], 'Editing queued message 1 of 1. Saving…', 'a save is spoken')
-  assert.match(saving, /class="chat__history-strip"[\s\S]*Saving…/, 'and shown, so Enter never looks dead')
+  assert.doesNotMatch(saving, /chat__history-strip/, 'the tray row shows it, so the box never jumps')
   const failed = render({ position: queued, note: 'Could not save' })
   assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
   assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
   assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
-  assert.match(render({ position: { kind: 'sent' } }), /class="chat__history-strip"[\s\S]*Earlier message/,
-    'browsing earlier messages keeps its strip')
+  const sent = render({ position: { kind: 'sent', draft: 'Then deploy it' } })
+  assert.match(sent, /class="chat__history-strip"[\s\S]*Earlier message/, 'browsing earlier messages keeps its strip')
+  assert.equal(sent.match(region)?.[1],
+    'Earlier message. Enter sends it again, Esc goes back. Draft kept: Then deploy it', 'and says the draft is kept')
   assert.equal(render({ position: { kind: 'started' } }).match(region)?.[1],
     'This message already started. Your text is kept, so you can send it as a new message.',
     'a title that ends its own sentence gets no second period')
@@ -259,4 +261,15 @@ test('a collapsed tray still shows the row open in the chat box and its Stop edi
   props.inComposerCid = null
   tray.rerender()
   assert.doesNotMatch(html(), /role="listitem"/, 'the owner’s collapse holds after the edit')
+})
+
+test('while its save runs, the row says Saving… and Stop editing is disabled', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items, inComposerCid: 'q2', inComposerSaving: true,
+  }))
+  assert.match(html, /<button[^>]*class="queued__in-composer"[^>]*disabled=""[^>]*>Saving…<\/button>/)
+  assert.doesNotMatch(html, /Stop editing/, 'it cannot stop a save already sent')
+  const settled = renderToStaticMarkup(createElement(QueuedMessages, { items, inComposerCid: 'q2' }))
+  assert.match(settled, /<button type="button" class="queued__in-composer" title="[^"]*">Stop editing<\/button>/,
+    'enabled again once the save settles')
 })

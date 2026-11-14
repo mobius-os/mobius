@@ -4917,7 +4917,10 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
-.queued__in-composer:active {
+.queued__in-composer:disabled {
+  cursor: default;
+}
+.queued__in-composer:not(:disabled):active {
   background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: press fill, as the other queued actions give on touch */
 }
 .queued__in-composer:focus-visible {
@@ -4990,7 +4993,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
     border-color: color-mix(in srgb, var(--text) 22%, var(--border-light));
   }
 
-  .queued__in-composer:hover {
+  .queued__in-composer:not(:disabled):hover {
     background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: accent wash on opaque fill, clear of the row's own */
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
   }
