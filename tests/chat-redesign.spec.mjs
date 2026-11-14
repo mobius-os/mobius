@@ -115,7 +115,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // The option buttons MUST be enabled (the regression was that
     // post-question tool_start events kept isStreaming=true →
     // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
+    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard').getByRole('radio')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
   })
 
