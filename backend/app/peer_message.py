@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.context_budget import PEER_NOTE_CHARS, without_excerpt_marker
 from app.agent_coordination import (
   MESSAGE_DELIVERIES as _DELIVERIES,
   MESSAGE_KINDS as _KINDS,
@@ -25,15 +26,16 @@ MAX_PEER_NOTES = 8
 MAX_RESULT_MESSAGES = 200  # bounds both current receipts and historic markers
 MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
-# The card preserves the FULL note (the platform caps a note at 4,000 chars),
-# so an owner never mistakes an excerpt for the whole note. body_truncated only
-# trips on the defensive over-limit case.
-MAX_BODY_CHARS = 4000
+# The card shows a note whole within PEER_NOTE_CHARS, the display limit notes
+# share with turn context. A longer note's receipt carries the agents' marked
+# excerpt and truncated=true; the card drops the agent-facing marker and
+# labels the excerpt for the owner (its marker's body_truncated) instead.
 # The provider-handoff transcript stays tight regardless — a coordination note
 # is summarized there, not reproduced in full, to protect the context budget.
 MAX_COMPACTION_BODY_CHARS = 400
 MAX_NAME_CHARS = 120
 MAX_KIND_CHARS = 24
+MAX_SEND_ID_CHARS = 64
 
 DIRECTION_SEND = "send"
 # Persisted transcripts may contain read markers created before inbound
@@ -200,15 +202,17 @@ def _bounded_message_rows(messages: list[Any]) -> list[dict]:
       continue
     raw = message.get("body")
     stripped = raw.strip() if isinstance(raw, str) else ""
-    body = stripped[:MAX_BODY_CHARS]
+    body = stripped[:PEER_NOTE_CHARS]
     # The platform contract requires a non-empty body. Do not manufacture an
     # expandable card from a malformed empty row.
     if not body:
       continue
-    # The card shows the full note (MAX_BODY_CHARS == the platform's note cap);
-    # body_truncated only trips on a defensive over-limit note.
+    truncated = bool(message.get("truncated"))
+    if truncated:
+      body = without_excerpt_marker(body)
     rows.append({
-      **message, "body": body, "body_truncated": len(stripped) > MAX_BODY_CHARS,
+      **message, "body": body,
+      "body_truncated": truncated or len(stripped) > PEER_NOTE_CHARS,
     })
   return rows
 
@@ -258,13 +262,16 @@ def bounded_peer_message(value: Any) -> dict | None:
       "peers": peers,
       "count": _safe_count(value.get("count"), len(peers)),
       "kind": _kind(value.get("kind")),
-      "body": _clip(value.get("body"), MAX_BODY_CHARS),
+      "body": _clip(value.get("body"), PEER_NOTE_CHARS),
       "body_truncated": bool(value.get("body_truncated")),
       "broadcast": bool(value.get("broadcast")),
     }
     delivery = _delivery(value.get("delivery"))
     if delivery:
       marker["delivery"] = delivery
+    send_id = _clip(value.get("send_id"), MAX_SEND_ID_CHARS)
+    if send_id:
+      marker["send_id"] = send_id
     return marker
 
   if status == STATUS_RECEIVED:
@@ -273,7 +280,7 @@ def bounded_peer_message(value: Any) -> dict | None:
     for note in source[:MAX_PEER_NOTES]:
       if not isinstance(note, dict):
         continue
-      body = _clip(note.get("body"), MAX_BODY_CHARS)
+      body = _clip(note.get("body"), PEER_NOTE_CHARS)
       if not body:
         continue
       bounded_note = {
@@ -361,6 +368,10 @@ def settle_peer_message(
   delivery = _delivery(first.get("delivery"))
   if delivery:
     marker["delivery"] = delivery
+  # The send's identity joins this card to its stored rows in the timeline.
+  send_id = _clip(first.get("send_id"), MAX_SEND_ID_CHARS)
+  if send_id:
+    marker["send_id"] = send_id
   return marker
 
 

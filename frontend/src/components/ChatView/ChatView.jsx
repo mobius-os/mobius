@@ -114,7 +114,7 @@ import BranchOrigin from './BranchOrigin.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime, isProviderLimitPause, pauseTiming } from './resetTime.js'
-import { isResourcePause } from './waitingPresentation.js'
+import { isResourcePause, resourcePausePresentation } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
@@ -173,6 +173,7 @@ import {
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { createQueuedEditOrder } from './queuedEditOrder.js'
+import { steerPendingHint } from './queuedHint.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
@@ -5735,9 +5736,7 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (serverHandoff?.kind === 'recovery') return 'This chat needs recovery. Review the saved recovery card.'
     if (resourcePause) {
-      return resourcePause.pause?.kind === 'storage'
-        ? 'Waiting for storage headroom. This chat will resume automatically.'
-        : 'Waiting for memory to settle. This chat will resume automatically.'
+      return `${resourcePausePresentation(resourcePause).summary}. This chat will resume automatically.`
     }
     if (modelCapacityPause) {
       const label = formatResetTime(pendingLimitCheckAt)
@@ -5957,7 +5956,7 @@ export default function ChatView({
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
-      canOverrideStorage={canStartFreshSession}
+      canContinueAnyway={canStartFreshSession}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6296,6 +6295,7 @@ export default function ChatView({
                   chatId={chatId}
                   messageKey={dataKey}
                 />
+                <span className="chat__steer-pending-note">{steerPendingHint()}</span>
                 <MessageMetaRow
                   timestamp={reservedSteerMessage.ts || null}
                   copy={copyText ? () => ({ plainText: copyText }) : null}

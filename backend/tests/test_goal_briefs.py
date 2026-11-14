@@ -11,7 +11,7 @@ import pytest
 from app.chat_writer import create_chat
 
 from app import auth as auth_mod, models
-from app.goal_context import project_goal
+from app.goal_context import fit_brief, project_goal
 from app.goal_plans import goal_assignment, normalize_tasks
 from tests.goal_fixtures import goal_run
 # Bind the real Claude runner helpers before any test patches the runner.
@@ -147,7 +147,7 @@ def test_every_task_in_a_list_is_shown_without_paging():
   goal = _goal([_task("parent", status="running"), *children,
                 _task("x"), _task("y")])
   view = project_goal(goal, "parent")
-  # Plan order, all of them: MAX_TASKS is the bound, not a page size.
+  # Plan order, all of them: read_goal lists are whole, never paged.
   assert [c["id"] for c in view["children"]] == [c["id"] for c in children]
   assert view["children"][50]["note"] == "Blocked late in plan order"
   assert not [key for key in view if key.endswith("_page") or key == "navigation"]
@@ -156,7 +156,7 @@ def test_every_task_in_a_list_is_shown_without_paging():
 
 
 def _max_plan(width, depth):
-  """An admitted plan with every text field at its validation limit."""
+  """An admitted plan whose text fields are all long."""
   text = lambda c: (c * MAX_NOTE)
   tasks, parent = [], None
   for level in range(depth):
@@ -172,7 +172,7 @@ def _max_plan(width, depth):
   return normalize_tasks([{k: v for k, v in t.items() if v is not None} for t in tasks])
 
 
-def test_production_maximum_plan_brief_is_well_below_the_plan():
+def test_a_long_plan_projection_is_well_below_the_plan():
   tasks = _max_plan(MAX_TASKS - 3, 3)
   assert len(tasks) == MAX_TASKS
   goal = _goal(tasks)
@@ -621,11 +621,11 @@ def test_read_goal_tool_is_one_result_bearing_read_for_both_levels(monkeypatch):
   assert calls[-1] == ("GET", "/api/chats/chat%201/goal-brief")
   with pytest.raises(ValueError, match="does not take: goal_id"):
     control._call_read_goal({"goal_id": "other"})
-  # Paging is gone: every list is whole, bounded by MAX_TASKS.
+  # Paging is gone: read_goal lists are whole; only the turn brief is budgeted.
   with pytest.raises(ValueError, match="does not take: page"):
     control._call_read_goal({"task": "build", "page": 2})
   schema = control._TOOL_DEFINITIONS[control.READ_GOAL_TOOL]["inputSchema"]
-  assert set(schema["properties"]) == {"task"}
+  assert set(schema["properties"]) == {"task", "field", "offset", "version"}
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
@@ -823,3 +823,194 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
   finally:
     for turn in turns:
       turn.env_file.remove()
+
+
+def test_a_short_brief_is_identical_to_the_full_projection():
+  goal = _goal([_task("parent", status="running", note="Keep files"),
+                _task("leaf", "parent", "blocked", note="Waiting on review")])
+  assert fit_brief(project_goal(goal, "parent"), "parent") == project_goal(goal, "parent")
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_the_objective_is_never_clipped(role):
+  """An owner's /goal objective was never capped; the brief shows it whole."""
+  objective = "O" * 100_000
+  goal = _goal([_task("parent", status="running")], objective=objective, hold_json=None)
+  brief = fit_brief(project_goal(goal, "parent", role=role), "parent", role=role)
+  assert brief["objective"] == objective
+
+
+def test_brief_projection_walks_large_plans_once(monkeypatch):
+  from app import goal_context
+
+  calls = []
+  real = goal_context._work_reach
+  monkeypatch.setattr(goal_context, "_work_reach", lambda *args: calls.append(1) or real(*args))
+  blocked = [_task(f"b{i:04d}", "leaf", "blocked", note="waiting") for i in range(4000)]
+  goal = _goal([_task("root", status="running"), _task("leaf", "root", "running"), *blocked])
+  view = project_goal(goal, "leaf", role="helper")
+  # One reach computation for the whole blocker filter, not one per blocker.
+  assert calls == [1]
+  assert len(view["children"]) == 4000
+
+  chain = [_task("c0", status="running")]
+  chain += [_task(f"c{i}", f"c{i - 1}", "running") for i in range(1, 5000)]
+  chain.append(_task("side", "c10", "running"))
+  # The deepest task holding every running leaf: c10 holds c4999 and side.
+  assert project_goal(_goal(chain))["focus"] == "c10"
+
+
+def test_read_goal_returns_a_long_objective_and_task_note_whole(client, owner_token, db):
+  chat = _goal_fixture(db)
+  goal = db.get(models.ChatGoal, "goal-a")
+  objective = "".join(f"{index:07d}" for index in range(30_000))
+  note = "".join(f"n{index:06d}" for index in range(30_000))
+  goal.objective = objective
+  tasks = copy.deepcopy(goal.plan_json["tasks"])
+  next(task for task in tasks if task["id"] == "verify")["note"] = note
+  goal.plan_json = {**goal.plan_json, "tasks": tasks}
+  db.commit()
+  headers = _token(db, chat, "run-a")
+  url = f"/api/chats/{chat}/goal-brief"
+
+  # The route returns texts whole; the control tool pages long results.
+  assert client.get(url, headers=headers, params={"field": "objective"}).json()["text"] == objective
+  assert client.get(url, headers=headers,
+                    params={"task": "verify", "field": "note"}).json()["text"] == note
+  assert client.get(url, headers=headers, params={"field": "secret"}).status_code == 422
+
+
+def test_sibling_filtering_is_linear_in_prerequisites():
+  class CountingId(str):
+    comparisons = 0
+
+    def __eq__(self, other):
+      CountingId.comparisons += 1
+      return str.__eq__(self, other)
+
+    __hash__ = str.__hash__
+
+  deps = [CountingId(f"d{i:05d}") for i in range(2000)]
+  tasks = [_task(str(dep), "root", "completed") for dep in deps]
+  tasks += [_task("root", status="running"),
+            _task("focus", "root", "running", depends_on=deps)]
+  tasks += [_task(f"s{i:05d}", "root") for i in range(4000)]
+  project_goal(_goal(tasks), "focus")
+  # A list scan per sibling would compare about 6000 * 2000 times.
+  assert CountingId.comparisons < 100_000
+
+
+def test_a_page_past_the_end_is_refused():
+  from app.context_budget import text_page
+  assert text_page("abc", 0)["next_offset"] is None
+  with pytest.raises(ValueError, match="past the end"):
+    text_page("abc", 3)
+
+
+def test_a_helper_cannot_read_coordinator_only_goal_fields(client, owner_token, db):
+  chat = _goal_fixture(db)
+  helper = _helper(db, chat, "goal-a", "builder", task="build")
+  db.get(models.ChatGoal, "goal-a").next_action = "Owner step"
+  db.commit()
+  headers = _token(db, helper.child_chat_id, _helper_run(db, helper), helper.id)
+  url = f"/api/chats/{helper.child_chat_id}/goal-brief"
+  assert client.get(url, headers=headers, params={"field": "next_action"}).status_code == 403
+  assert client.get(url, headers=headers, params={"field": "objective"}).json()["text"] == "Objective A"
+
+
+def _old_cap_plan():
+  """A plan at every old input cap: 64 tasks, 160-character titles, 1,000-
+  character notes, results and conditions, 16 dependencies per task."""
+  text = lambda char: char * 1_000
+  tasks = [_task("root", status="running", title="R" * 160, completion_condition=text("c"),
+                 note=text("n"))]
+  tasks += [_task(f"d{i:02d}", status="completed", title="D" * 160, result=text("r"))
+            for i in range(16)]
+  tasks.append(_task("focus", "root", "running", title="F" * 160, note=text("f"),
+                     completion_condition=text("k"), result=text("s"),
+                     depends_on=[f"d{i:02d}" for i in range(16)]))
+  tasks += [_task(f"c{i:02d}", "focus", title="C" * 160, note=text("x"),
+                  depends_on=[f"d{j:02d}" for j in range(16)]) for i in range(26)]
+  tasks += [_task(f"b{i:02d}", status="blocked", title="B" * 160, note=text("b"))
+            for i in range(64 - len(tasks))]
+  assert len(tasks) == 64
+  return _goal(normalize_tasks(tasks), objective="O" * 1_000, next_action="N" * 2_000,
+               checkpoint="Plan saved.")
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_plan_valid_under_the_old_caps_shows_exactly_as_before(role):
+  from app.prompt_blocks import json_block_data
+  goal = _old_cap_plan()
+  projection = project_goal(goal, "focus", role=role)
+  before = json_block_data(projection)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  # The display limits equal the old caps: nothing such a plan holds changes.
+  assert brief == projection
+  assert json_block_data(brief) == before
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_step_after_step_chain_at_the_old_task_cap_shows_whole(role, nested):
+  # Each step depends on the one before, so its children are also prerequisites
+  # of their siblings: one task listed twice costs one entry of the budget.
+  parent = "group" if nested else None
+  tasks = [_task("group", status="running")] if nested else []
+  tasks += [_task(f"s{i:02d}", parent, depends_on=[f"s{i - 1:02d}"] if i else [])
+            for i in range(64 - len(tasks))]
+  goal = _goal(normalize_tasks(tasks))
+  focus = "group" if nested else None
+  projection = project_goal(goal, focus, role=role)
+  assert len(projection["children"]) + len(projection.get("dependencies", [])) > 64
+  assert fit_brief(project_goal(goal, focus, role=role), focus, role=role) == projection
+
+
+def test_longer_texts_and_lists_show_within_the_old_caps_with_a_pointer():
+  long = "L" * 50_000
+  tasks = [_task(f"d{i:02d}", status="completed", result=long) for i in range(30)]
+  tasks.append(_task("focus", status="running", title="T" * 500, note=long,
+                     depends_on=[f"d{i:02d}" for i in range(30)]))
+  tasks += [_task(f"c{i:03d}", "focus", note=long) for i in range(100)]
+  goal = _goal(tasks, objective=long, next_action=long)
+  brief = fit_brief(project_goal(goal, "focus"), "focus")
+
+  assert brief["objective"] == long
+  assert len(brief["next_action"]) <= 2_000 and "read_goal(field=next_action)" in brief["next_action"]
+  # A shortened title ends in a bare marker; the brief explains it once.
+  assert len(brief["task"]["title"]) == 160 and brief["task"]["title"].endswith("…")
+  assert brief["titles_shortened"].startswith("Titles ending in … are shortened")
+  assert "read_goal(task=focus, field=note) reads it whole" in brief["task"]["note"]
+  assert len(brief["task"]["depends_on"]) == 16
+  assert brief["task"]["depends_on_omitted"] == "14 more; read_goal(task=focus) lists them all"
+  # The lists share 64 entries, prerequisites before children.
+  assert len(brief["dependencies"]) == 30
+  assert len(brief["children"]) == 34
+  assert brief["children_omitted"] == "66 more; read_goal(task=focus) lists them all"
+  assert all(len(dep["result"]) <= 1_000 for dep in brief["dependencies"])
+  # The saved plan and the full read stay whole.
+  assert project_goal(goal, "focus")["task"]["note"] == long
+
+
+@pytest.mark.parametrize("role", ["coordinator", "helper"])
+def test_a_large_plan_brief_never_lists_more_than_an_old_cap_plan_could(role):
+  long = "L" * 20_000
+  tasks = [_task(f"a{i}", f"a{i - 1}" if i else None, "running", note=long,
+                 completion_condition=long) for i in range(40)]
+  tasks += [_task(f"d{i:03d}", status="completed", result=long) for i in range(80)]
+  tasks.append(_task("focus", "a39", "running", note=long,
+                     depends_on=[f"d{i:03d}" for i in range(80)]))
+  tasks += [_task(f"c{i:03d}", "focus", note=long, depends_on=["d000"]) for i in range(100)]
+  tasks += [_task(f"s{i:03d}", "a39", note=long) for i in range(60)]
+  tasks += [_task(f"b{i:03d}", status="blocked", note=long) for i in range(56)]
+  goal = _goal(normalize_tasks(tasks), next_action=long)
+  brief = fit_brief(project_goal(goal, "focus", role=role), "focus", role=role)
+  lists = ("ancestors", "dependencies", "children", "siblings", "open_blockers")
+  assert sum(len(brief.get(key) or []) for key in lists) <= 64
+  # The nearest ancestors come first and constrain the focus.
+  assert brief["ancestors"][-1]["id"] == "a39"
+  for key in lists:
+    for entry in brief.get(key) or []:
+      assert all(len(entry.get(field) or "") <= 1_000
+                 for field in ("note", "result", "completion_condition"))
+      assert len(entry.get("depends_on") or []) <= 16

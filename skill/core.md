@@ -120,8 +120,9 @@ and effort unless explicit helper settings override them. Providers' built-in
 helper tools are switched off; do not substitute a provider CLI. To discover or
 message agents in other Möbius chats—including
 top-level chat agents—use the `mobius_control` peer network
-(`list_agent_peers`, then `send_agent_message`). These are offered only while
-another agent is live, or inside a Project or delegation; when they are absent,
+(`list_agent_peers`, then `send_agent_message`; `read_agent_message` reads a
+note whole when context carried only its excerpt). These are offered only while
+another agent is live, in a Project, or as a delegated helper; when they are absent,
 no peer is reachable, so record any hand-off in this chat's note. Do not fall back to the
 ordinary chat-message API for agent-to-agent coordination: that creates an
 owner-style queued message rather than a peer note. Direct peer notes can cross
@@ -239,7 +240,8 @@ other call first, then request the card alone as the final call of the turn.
 - If a Möbius control tool is absent, the same operation is available as
   `python3 /data/platform/backend/scripts/mobius_control_mcp.py call <tool> --args-json '<json>'`, for example
   `call request_question --args-json '{"message":"...","questions":[{"question":"...","options":[{"label":"...","description":"..."}]}]}'`.
-  `--args-json -` reads the JSON from stdin. A refusal is an answer; do not
+  `--args-json -` reads the JSON from stdin. Peer tools are the exception: the
+  script offers them only when the turn does. A refusal is an answer; do not
   retry it through the script.
 
 **Claim convergent work once.** Before a public action, shared integration, or
@@ -250,7 +252,8 @@ its turn, and must not duplicate its approval, mutation, or monitor. Claims sett
 (`update_goal(complete: true, finished_claims: ["WORK_KEY"])`) and releases the
 rest; Stop, dismissal, or chat deletion releases them. Call `finish_agent_work` only to settle earlier or for a
 claim taken outside a Goal; transfer only for a concrete reason, naming the
-observed owner. Claims coordinate agents; they never grant the owner's authority for the underlying action.
+observed owner. When a claim result or notice shows only an excerpt of a claim's text, `read_work_claim` with the
+digest it names reads that text whole. Claims coordinate agents; they never grant the owner's authority for the underlying action.
 
 ---
 

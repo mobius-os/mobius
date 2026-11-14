@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -43,13 +44,19 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import get_settings
+from app.runtime_identity import broker_client
 
 TIMEOUT_SECONDS = 20.0
 KEY_PREFIX = "mbc_"
 # The credits service's account handles, priced-action slugs and UUID ids.
 _HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
-_TOPUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Where a Möbius launched from mobius.you asks its launcher for a key of its
+# own; the identity broker adds the installation's managed credential.
+ACCOUNT_KEY_ROUTE = "/managed/api/instance/v1/credits/key"
+# How a refused key reads: the service's own code, or ours when it sent none.
+KEY_REFUSED_CODES = frozenset({"key_refused", "invalid_api_key"})
 
 
 class CreditsUnavailable(Exception):
@@ -69,6 +76,39 @@ class CreditsUnavailable(Exception):
 def as_http(error: CreditsUnavailable) -> HTTPException:
   return HTTPException(
     error.status, {**error.extra, "code": error.code, "message": error.message})
+
+
+# A server/transport failure or unreadable receipt on ``charges`` may follow a
+# committed charge, so its retry must replay the same payment rather than ask
+# again (see ``_charge_outcome_unknown``). Every other charge refusal is
+# definite: nothing was charged.
+CHARGE_OUTCOME_UNKNOWN = "charge_outcome_unknown"
+
+# A charge answer from the service carries the owner's running balance
+# (``balance``/``balance_micro``), and a refusal can carry the owner's own
+# figures too (``available_micro`` on ``insufficient_credits``, a key's spend
+# cap and what it has spent on ``key_spend_cap``). A paying app learns only
+# about its own charge, never the owner's figures, unless it also holds
+# ``credits_manage``. Both views are allowlists, so a field the service adds
+# later stays hidden until it is known to be safe.
+_PAYER_CHARGE_FIELDS = ("charge_id", "amount_micro", "amount", "replayed")
+# What a refused payer may act on: what its call would cost and what it agreed
+# to pay (``price_changed``, ``insufficient_credits``).
+_PAYER_REFUSAL_FIELDS = ("required_micro", "price_micro", "max_price_micro")
+
+
+def payer_charge_view(answer: dict) -> dict:
+  """A charge answer with only the fields its paying app needs to act on it:
+  the charge's id, what it paid, and whether the service replayed an earlier
+  identical charge."""
+  return {name: answer[name] for name in _PAYER_CHARGE_FIELDS if name in answer}
+
+
+def payer_refusal_view(error: CreditsUnavailable) -> CreditsUnavailable:
+  """The same refusal keeping only the fields about the app's own call, so no
+  figure of the owner's (balance, spend cap, amount spent) reaches it."""
+  extra = {name: error.extra[name] for name in _PAYER_REFUSAL_FIELDS if name in error.extra}
+  return CreditsUnavailable(error.message, status=error.status, code=error.code, extra=extra)
 
 
 # --- The stored key ----------------------------------------------------------
@@ -181,7 +221,7 @@ def _charge_outcome_unknown() -> CreditsUnavailable:
   # charge. Never present it as a refusal or retry it with a different key.
   return CreditsUnavailable(
     "The charge outcome is unknown. Retry with the same idempotency key.",
-    status=503, code="charge_outcome_unknown")
+    status=503, code=CHARGE_OUTCOME_UNKNOWN)
 
 
 def _call(method: str, path: str, credentials: dict, payload: dict | None = None) -> dict:
@@ -237,14 +277,18 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
 def summary() -> dict:
   """Credits and earnings for this owner, or why they cannot be shown."""
   credentials = load_credentials()
+  # Also sent once paired: a key the service refuses can be replaced this way.
+  can_pair_with_account = get_settings().mobius_sso_enabled
   if credentials is None:
     return {"mode": "unpaired", "service_host": None, "pairing": None,
-            "balance": None, "earnings": None, "error": None}
+            "balance": None, "earnings": None, "error": None,
+            "can_pair_with_account": can_pair_with_account}
   result = {
     "mode": "customer",
     "service_host": urlsplit(credentials["operator_url"]).hostname,
     "pairing": credentials["pairing"],
     "balance": None, "earnings": None, "error": None,
+    "can_pair_with_account": can_pair_with_account,
   }
   # Both reads at once, so a slow service costs one timeout, not two.
   with ThreadPoolExecutor(max_workers=2) as pool:
@@ -272,6 +316,81 @@ def pair(operator_url: str, key: str) -> dict:
   _call("GET", "balance", candidate)
   _save_credentials(candidate["operator_url"], key)
   return {"paired": True}
+
+
+# Serializes account pairing, so a second request waits and then finds the
+# installation paired instead of retiring the key the first one just saved.
+_ACCOUNT_PAIRING = threading.Lock()
+
+
+def pair_with_account() -> dict:
+  """Connect to the owner's own wallet, with no key for anyone to copy.
+
+  A Möbius launched from mobius.you asks its launcher, through the identity
+  broker that holds its managed credential, for a key of its own. The
+  launcher issues one and retires any key this installation had, and
+  ``pair`` then checks it at the service and seals it like any other.
+  Because asking retires the current key before the new one is checked, a
+  paired installation asks only once the service refuses the key it holds
+  (revoked, or retired by a later connect), and one request at a time asks.
+  """
+  if not get_settings().mobius_sso_enabled:
+    raise CreditsUnavailable(
+      "This Möbius was not launched from mobius.you, so it needs a credits key "
+      "from the credits operator.", status=409, code="not_managed")
+  with _ACCOUNT_PAIRING:
+    credentials = load_credentials()
+    if credentials is not None and not _key_refused(credentials):
+      raise CreditsUnavailable(
+        "This Möbius is already connected to its credits.",
+        status=409, code="already_paired")
+    operator_url, key = _launcher_key()
+    return pair(operator_url, key)
+
+
+def _key_refused(credentials: dict) -> bool:
+  """Whether the service refuses this key, so replacing it retires nothing.
+
+  Anything short of a refusal, including a service that cannot be reached,
+  counts as a key that may still work.
+  """
+  try:
+    _call("GET", "balance", credentials)
+  except CreditsUnavailable as error:
+    return error.code in KEY_REFUSED_CODES
+  return False
+
+
+def _launcher_key() -> tuple[str, str]:
+  """The service address and key the launcher issued for this installation.
+
+  Every way the launcher can fail to supply them reads as the launcher being
+  unavailable: the owner copied and entered nothing, so ``pair``'s
+  paste-a-key guidance would not apply.
+  """
+  unavailable = CreditsUnavailable(
+    "mobius.you could not connect your credits just now. Try again in a moment.",
+    status=503, code="credits_unavailable")
+  try:
+    with broker_client(timeout=TIMEOUT_SECONDS) as client:
+      response = client.post(ACCOUNT_KEY_ROUTE)
+  except (httpx.HTTPError, OSError) as error:
+    raise unavailable from error
+  try:
+    body = response.json()
+  except ValueError:
+    body = None
+  if response.status_code != 200 or not isinstance(body, dict):
+    raise unavailable
+  service_url, key = body.get("service_url"), body.get("key")
+  key = key.strip() if isinstance(key, str) else ""
+  if not (key.startswith(KEY_PREFIX) and len(key) > len(KEY_PREFIX)
+          and isinstance(service_url, str)):
+    raise unavailable
+  try:
+    return normalise_service_url(service_url), key
+  except CreditsUnavailable as error:
+    raise unavailable from error
 
 
 def unpair() -> dict:
@@ -340,7 +459,7 @@ def _path_piece(value: str, pattern: re.Pattern[str]) -> str:
 
 def read_topup(topup_id: str) -> dict:
   """A purchase's state; reading it confirms a paid checkout with Stripe."""
-  return _call("GET", f"topups/{_path_piece(topup_id, _TOPUP_ID)}", _paired())
+  return _call("GET", f"topups/{_path_piece(topup_id, _UUID)}", _paired())
 
 
 def purchase_terms() -> dict:
@@ -388,6 +507,28 @@ def charge(seller: str, app: str, action: str, idempotency_key: str,
     "seller": seller, "app": app, "action": action,
     "idempotency_key": app_scoped_key(payer, idempotency_key),
     "max_price_micro": int(max_price_micro), "buyer_app": buyer_app})
+
+
+def own_sale_receipt(charge_id: str, apps: list[str]) -> dict:
+  """A charge that paid this owner for one of ``apps``: a claimed sale, checked.
+
+  A marketplace app unlocks an item for a buyer on another Möbius only after
+  this confirms the charge id that buyer handed over. The credits service shows
+  any charge to any key holder who has its id, so the scope is applied here: an
+  app sees only payments to this installation's own account for the priced
+  apps it declared, never the owner's own purchases or a sale of another app.
+  The account's handle is read fresh each time, so a renamed account never
+  matches its old name. Reading a receipt moves no money, so its failures keep
+  the service's own refusal.
+  """
+  credentials = _paired()
+  receipt = _call("GET", f"charges/{_path_piece(charge_id, _UUID)}", credentials)
+  seller = receipt.get("seller")
+  if receipt.get("app") in apps and isinstance(seller, str) \
+      and seller == _call("GET", "balance", credentials).get("handle"):
+    return receipt
+  raise CreditsUnavailable(
+    "No charge to you for this app has that id.", status=404, code="charge_not_found")
 
 
 def app_scoped_key(payer: str, idempotency_key: str) -> str:

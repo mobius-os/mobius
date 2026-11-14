@@ -84,12 +84,23 @@ bots, send messages or make paid calls.
 The owner, or an installed Store app with accepted `credits_manage` consent
 (including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned. Shared-browser guests and delegated helpers cannot pair.
+control for pasting a key is planned. A Möbius launched from mobius.you (the
+summary's `can_pair_with_account`) can instead call
+`POST /api/identity/credits/pair/account` with no body, which Settings offers
+as **Connect credits**: the launcher issues this installation its own key. It
+answers 409 `not_managed` on a self-hosted Möbius, 409 `already_paired` when
+paired unless the service refuses the key this Möbius holds (asking would
+retire a key that may still work), and 503 `credits_unavailable` when
+mobius.you cannot supply a usable key. A refused key (`key_refused` or
+`invalid_api_key` in the summary's `error`) is replaced by the same call,
+which Settings offers as **Reconnect credits**.
+Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use
-`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
-their account, price and charge requests receive 403.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. Owner-built local apps never get it, even if their `mobius.json`
+declares it; their account requests receive 403. A local app may still pay
+with `spend_credits`, with no standing grant, because every charge waits for
+the owner's Pay (below), and may check a charge (below).
 
 A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
@@ -108,19 +119,49 @@ that pick the same key never replay each other's charge. An upstream 5xx,
 transport failure or unreadable receipt on `/charges` answers 503
 `charge_outcome_unknown`: the charge may have been made. Retry with the same
 idempotency key, never a new one. The client never retries automatically.
-Other refusals keep the service's `detail.code` and fields (`not_paired`,
+Nothing is charged until the owner presses Pay on a sheet the shell shows
+over the app: until then the charge answers 409 `confirmation_required` (the
+app retries the same key). A cancel answers 403 `payment_declined` to every
+retry with that key for ten minutes; asking again takes a new key. A price
+that cannot be read (502 `price_unreadable`), is unpriced (`price_not_found`), or
+exceeds `max_price_micro` (`price_changed`) is refused before the owner is
+asked. Charges are paid from credits only: any `method` other than
+`"credits"` answers 422 `payment_method_unsupported`. One app may
+have at most five payments waiting (429 `too_many_payments_waiting`).
+Other refusals keep the service's `detail.code` and message (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
-`key_spend_cap`). `not_paired` means the owner has not connected credits yet.
+`key_spend_cap`). The 200 answer gives the paying app only its own charge: the
+charge id, the amount charged, and whether the service replayed an earlier
+identical charge; a refusal likewise keeps only the figures about the call
+(`required_micro`, `price_micro`, `max_price_micro`), never the owner's
+balance or a key's spend cap. An app that also holds `credits_manage` keeps
+every field. `not_paired` means the owner has not connected credits yet.
 A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
 and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.
 Balance, history and purchase reads refuse a shared-browser guest.
 
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
+
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing
-prices, and keeping or withdrawing earnings. Besides the owner, only an app
-with `permissions.credits_manage: true` reaches it, a separate critical
-consent row. `identity_manage` covers the sign-in link only and never includes
+prices, and keeping or withdrawing earnings. Besides the owner, only an
+installed Store app with accepted `permissions.credits_manage: true` reaches
+it, a separate critical consent row. `identity_manage` covers the sign-in link only and never includes
 it. Reading a seller's published prices also admits a `spend_credits` app.
 The summary and purchase terms carry a `pairing` id that changes when the
 service or its key does; a top-up that names an earlier `pairing` is refused
@@ -615,6 +656,22 @@ app ids are never identity. Only the visible frame may open sessions. Controls
 from other frames, duplicate request ids, undeclared names, version mismatches,
 and stale results are ignored or rejected without changing another session.
 
+One undeclared request is the documented exception to routing new shell
+operations through this broker: `moebius:owner-grant`, behind
+`window.mobius.ownerGrant.request(action, scope, body)`. It asks the shell to
+confirm a sensitive action with the owner in a sheet the shell draws outside the
+frame; only the owner's tap records a short-lived, single-use grant on the
+server, and the frame never receives it. A confirmation is a restriction, not a
+power, so it must not cost the owner a consent row or make a Store app dormant;
+`fileExport` and `clipboard` are the precedent. It keeps the broker's identity
+rules: the host binds it to the exact visible `contentWindow`, the app id is
+never taken from the payload, and the sheet's words come from the server. The
+shell acks a request it accepts, and the runtime rejects it after a short wait
+without an ack, so a tab whose shell predates the request fails fast. Enforcement
+is per app: only an app that declares `"owner_confirm": true` in its manifest is
+refused at the guarded routes without a grant. That key is not part of the
+capability contract, so it adds no consent row and cannot make an app dormant.
+
 ## Provider contract
 
 The host registry maps a capability id to:
@@ -762,6 +819,7 @@ Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
 - `device.storage`, `device.asset-cache`
+- `network.direct` (exact outside origins for images and requests)
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.tracking` (phone app), `location.current`, `location.watch`
@@ -784,6 +842,34 @@ methods; wildcard access can remain possible through explicit owner approval.
 Moving credential possession into a generic host request transport would not
 change that authorization model. Likewise, app storage and cross-app access are
 durable server capabilities, not browser-session providers.
+
+### Direct requests to declared outside sites
+
+Some providers require that searches and media loads come from the person's own
+device rather than a server proxy (GIF providers are one example), and the
+opaque app frame's policy otherwise allows no outside image or request origin.
+`network.direct` lets an app declare up to eight exact HTTPS origins:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
+
+There is no broker call. Once the owner accepted the grant, that app's frame
+policy adds the origins to `img-src` and `connect-src` only; scripts, styles,
+fonts and frames never widen, so the grant cannot add code. The origins are the
+consent row's scope, so a new site asks again and dropping one does not. An app
+still waiting for consent gets none, and the frame's validator changes with the
+grant so a cached frame never keeps an old policy. Wildcards, paths, plain HTTP
+and bare hosts without a public name are refused. The owner reads that those
+sites see the device's internet address and what the app asks them for.
+A published public app runs in the same frame, so its visitors' devices reach
+those sites too.
 
 ### Small device-local app state
 
