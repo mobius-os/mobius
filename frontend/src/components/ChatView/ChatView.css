@@ -2454,6 +2454,7 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+  transform: translateY(min(var(--foot-hide, 0px), var(--foot-rows-travel, 0px)));
 }
 
 .chat__floating-transients {
@@ -5308,3 +5309,26 @@ button.chat__dependency-link:disabled { cursor: default; opacity: .55; }
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: 2px;
 }
+
+
+/* Handoffs exit at the viewport bottom, behind stationary input. The chat's
+   overflow clips the transform; layout and transcript clearance stay fixed. */
+.chat__foot {
+  --foot-hide: 0px;
+  --foot-hide-fraction: 0;
+}
+.chat__foot-handoffs {
+  position: relative;
+  z-index: -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-card-gap);
+  transform: translateY(var(--foot-hide));
+}
+.chat__foot-handoffs:empty { display: none; }
+.chat__foot .chat__foot-handoffs > * { width: 100%; margin-bottom: 0; }
+.chat__foot .chat__foot-handoffs[inert],
+.chat__foot .chat__foot-handoffs[inert] * { pointer-events: none; }
