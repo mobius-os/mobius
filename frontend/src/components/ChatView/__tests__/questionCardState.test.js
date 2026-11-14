@@ -187,11 +187,13 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
+  assert.match(component, /const showsAnswerControls = answered \|\| shownAnswerableRef\.current/,
+    'answered cards and cards this mount has shown answerable keep their controls')
+  assert.match(component, /\{!completedAction && showsAnswerControls && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /let submitLabel = writtenRestartAction \? 'Continue' : 'Submit'[\s\S]*if \(answered\) submitLabel = 'Submitted'[\s\S]*if \(submitting\) submitLabel = 'Submitting…'/,
     'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
-  assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && hasOptions && \(\s*<div className="qcard__hint"/,
+  assert.match(component, /\{!completedAction && showsAnswerControls && hasOptions && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after submission only when there are choices')
   assert.doesNotMatch(component, /qcard__opt--other/,
     'a custom answer should be a direct writing surface, not an Other option')
