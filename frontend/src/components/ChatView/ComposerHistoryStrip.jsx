@@ -66,7 +66,7 @@ export default function ComposerHistoryStrip({
   // readers skip a live region that arrives already holding its message.
   const status = (
     <span className="chat__sr-only" role="status" aria-live="polite">
-      {copy ? [copy.title, copy.hint].filter(Boolean).join('. ') : ''}
+      {copy ? `${copy.title}${/[.!?…]$/.test(copy.title) ? '' : '.'} ${copy.hint}` : ''}
     </span>
   )
   if (!copy || copy.srOnly) return status

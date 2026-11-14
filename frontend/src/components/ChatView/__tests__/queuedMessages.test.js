@@ -234,6 +234,9 @@ test('the chat box keeps one status region and changes only its text', async () 
   assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
   assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
   assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
+  assert.equal(render({ position: { kind: 'started' } }).match(region)?.[1],
+    'This message already started. Your text is kept, so you can send it as a new message.',
+    'a title that ends its own sentence gets no second period')
 })
 
 function findByClass(node, className) {

@@ -331,7 +331,7 @@ export function PrimaryAction({
  *                        `{ open(cid), setAside(cid), back() }` so the queue
  *                        tray's pencil, × and Stop editing reach the chat box.
  *   onQueuedInComposerChange — receives the cid of the queued message the
- *                        box is editing, or null, for the tray's tag.
+ *                        box is editing, or null, for the tray's Stop editing row.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
@@ -522,8 +522,9 @@ export default function ChatInputBar({
   })
   const { open: openInComposer, setAside: setAsideFromComposer, escape: backToDraft } = composerHistory
 
-  // The queue tray is ChatView's sibling of this bar; its pencil and × reach
-  // the box through this caller-owned ref, like attachTriggerRef above.
+  // The queue tray is ChatView's sibling of this bar; its pencil, × and Stop
+  // editing reach the box through this caller-owned ref, like
+  // attachTriggerRef above.
   useLayoutEffect(() => {
     if (!queuedComposerRef) return undefined
     queuedComposerRef.current = {
@@ -533,13 +534,18 @@ export default function ChatInputBar({
         focusComposerElement(inputRef?.current)
       },
       setAside: setAsideFromComposer,
-      back: backToDraft,
+      back: () => {
+        backToDraft()
+        // Stop editing pressed from the keyboard holds focus, and a collapsed
+        // tray removes its row with it: hand focus back to the box.
+        focusComposerElement(inputRef?.current)
+      },
     }
     return () => { queuedComposerRef.current = null }
   }, [queuedComposerRef, openInComposer, setAsideFromComposer, backToDraft, inputRef])
 
-  // The tray tags the row open here; a chat box that goes away takes its
-  // tag with it.
+  // The tray marks the row open here; a chat box that goes away takes its
+  // mark with it.
   useEffect(() => {
     onQueuedInComposerChange?.(composerHistory.queuedKey)
     return () => onQueuedInComposerChange?.(null)

@@ -4917,6 +4917,9 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
+.queued__in-composer:active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: press fill, as the other queued actions give on touch */
+}
 .queued__in-composer:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus ring on the visible well */
