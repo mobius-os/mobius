@@ -62,30 +62,36 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('older reply actions reveal only on tap; only the latest reply keeps its row in view', () => {
+test('the chat has one reply footer, on the reply at its very end', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
-    'hovering an earlier reply must not reveal another Copy above the current reply')
+  // Hover reveals only the footer's Branch and time, never a row.
+  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta\s*[,{]/,
+    'hovering a reply must not reveal another row above the current reply')
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /metaVisible=\{\(!turnActive && last\) \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
-    'only the idle latest reply pins its actions; a new turn hides the previous footer')
+  // Which reply holds the footer and in what state is replyFooter's,
+  // behaviour-tested in replyFooter.test.js.
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
 })
 
-test('ChatView passes each reply whether it ends the agent’s stretch', () => {
-  assert.match(chatView, /endsStretch=\{endsAgentStretch\(peerTimeline\.messages, replyGroups, group\)\}/)
-})
-
-test('copy follows the timestamp inside one tap-revealed metadata row', () => {
-  assert.ok(
-    metaRow.indexOf('<time className="chat__ts">')
-      < metaRow.indexOf('<MessageCopyButton read={copy} />'),
-    'copy must render immediately after the timestamp',
-  )
+test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
+  assert.ok(metaRow.indexOf('{time}') < metaRow.indexOf('<MessageCopyButton read={copy} />')
+    && metaRow.indexOf('<MessageCopyButton read={copy} />') < metaRow.indexOf('<MessageBranchButton branch={branch} />'),
+  'time, Copy, Branch')
+  const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(footerCss, /\n\.chat__reply > \.chat__msg-meta--start \{ visibility: inherit; \}/,
+    'on every device the transparent footer stays focusable')
+  assert.match(footerCss, /\n\.chat__reply:has\(:focus-visible\) > \.chat__msg-meta--start \{\s*opacity: 1;\s*pointer-events: auto;/,
+    'keyboard focus in the reply or footer reveals it, whatever the pointer')
+  assert.match(footerCss, /@media \(hover: hover\) and \(pointer: fine\) and \(not \(any-pointer: coarse\)\) \{\s*\.chat__reply:hover > \.chat__msg-meta--start \{\s*opacity: 1;/,
+    'a fine pointer hovering the reply reveals it')
+  assert.match(chatView, /metaVisible=\{group === footerGroup && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'a tap reveals the footer for a moment, as on owner rows')
+  assert.match(footerCss, /\.chat__msg-meta--start > :is\(\.chat__msg-copy, \.chat__msg-branch\):not\(\.chat__msg-copy--failed\) \{\s*width: 24px;\s*height: 24px;\s*padding: 0;/,
+    'Copy and Branch are equal square buttons with centred icons')
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
@@ -117,4 +123,15 @@ test('a copy that fails says so instead of silently doing nothing', () => {
   assert.match(copyButton, /setCopyState\(copied \? 'copied' : 'failed'\)/)
   assert.match(copyButton, /role="status" aria-live="polite"/,
     'the outcome is announced, like tool-output copy')
+})
+
+test('replies in one agent stretch sit as close as rows within a reply', () => {
+  // An answered card, wait or helper result between two replies is hidden, so
+  // the replies are adjacent; the conversation gap belongs between speakers.
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(css, /\.chat__list > :is\(\.chat__reply, \.chat__msg--peer\)\s*\+ :is\(\.chat__reply, \.chat__msg--peer, \.chat__msg--pending-reply\) \{\s*margin-block-start: calc\(8px - 24px\);/)
+  // The Thinking row a new turn shows first sits where its reply will, so
+  // the swap does not move the transcript.
+  assert.match(chatView, /<li className="chat__msg chat__msg--assistant chat__msg--pending-reply">/)
+  assert.match(css, /\.chat__reply-rows > \.chat__msg \+ \.chat__msg[^{]*\{\s*margin-top: 8px;/)
 })

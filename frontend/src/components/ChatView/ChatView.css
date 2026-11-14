@@ -210,6 +210,14 @@
 
 /* ── Empty state ───────────────────────────────────── */
 
+/* Replies and agent activity rows in one stretch (an answered card, a wait or
+   a helper result between them is hidden) read as one response: they sit as
+   close as rows within a reply, not a conversation gap apart. The Thinking
+   row a new turn shows before its reply exists sits where that reply will. */
+.chat__list > :is(.chat__reply, .chat__msg--peer)
+  + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply) {
+  margin-block-start: calc(8px - 24px);
+}
 /* A reply is one conversation item; source rows keep their anchors and
    compact block spacing without cancelling the surrounding conversation gap. */
 .chat__reply-rows { list-style: none; padding: 0; margin: 0; }
@@ -469,12 +477,12 @@
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
-/* A reply's row is its own line under the reply, not an overlay in the
-   conversation gap: it keeps its space while hidden and while the reply is
-   still streaming, so settling, revealing or pinning it never moves the
-   transcript, and it always sits the same distance below the reply's last
-   line (its fixed height comes from .chat__msg-meta). Time and Copy stay
-   together, inset to match the reply's prose. */
+/* The chat's one reply footer, on its last reply, is its own line under the
+   reply, not an overlay in the conversation gap: it keeps its space while
+   the agent works, so settling never moves the transcript, and it always
+   sits the same distance below the reply's last line (its fixed height comes
+   from .chat__msg-meta). Time and Copy stay together, inset to match the
+   reply's prose. */
 .chat__msg-meta--start {
   display: flex;
   width: fit-content;
@@ -482,14 +490,42 @@
   margin: 6px 0 0;
   padding: 0 8px;
 }
-/* An earlier reply in a stretch has no time: pull Copy back by its own
-   padding so its glyph still lines up with the reply's prose. */
+/* The footer's actions are equal 24px square buttons, icon centred, side by
+   side; the time sits the same distance from Copy's icon as Copy's icon from
+   Branch's. Without a time, Copy is pulled back so its icon lines up with
+   the reply's prose. */
+.chat__msg-meta--start { gap: 0; }
+.chat__msg-meta--start > .chat__ts { margin-right: 5px; }
+.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed) {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
-/* Older replies reveal actions only on tap/click; hovering must not expose
-   another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. Reveal by inheriting, never forcing `visible`: a
-   hidden shell view keeps its ChatView mounted behind an app, and a forced
-   `visible` descendant would paint the row over that app. */
+/* The footer is hidden until wanted, like an owner message's row: a tap on
+   the reply reveals it for a moment (ChatView's tap reveal), keyboard focus
+   on a control in the reply or footer shows it on any device, and with a
+   fine pointer hovering the reply does too. It stays focusable while
+   transparent so a keyboard can reach it. Its line stays reserved, so
+   revealing it moves nothing. */
+.chat__reply > .chat__msg-meta--start { visibility: inherit; }
+.chat__reply:has(:focus-visible) > .chat__msg-meta--start {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+@media (hover: hover) and (pointer: fine) and (not (any-pointer: coarse)) {
+  .chat__reply:hover > .chat__msg-meta--start {
+    opacity: 1;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+}
+/* A tap or click reveals a row for a moment: an owner message's, and the
+   reply footer's (which a fine pointer also reveals on hover). Reveal by
+   inheriting, never forcing `visible`: a hidden shell view keeps its ChatView
+   mounted behind an app, and a forced `visible` descendant would paint the
+   row over that app. */
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: inherit;
@@ -505,8 +541,8 @@
 /* ── One-tap message copy ──────────────────────────────
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
-   see chatUiPolish.test), but a single tap reveals a quiet ghost button
-   below a reply or beside an owner message. */
+   see chatUiPolish.test), but a quiet ghost button sits in the chat's one
+   reply footer, and a single tap reveals one beside an owner message. */
 .chat__msg-copy,
 .chat__msg-branch {
   display: inline-flex;

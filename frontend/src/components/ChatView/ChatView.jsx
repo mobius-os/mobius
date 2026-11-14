@@ -106,7 +106,7 @@ import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
-import AssistantReply, { endsAgentStretch } from './AssistantReply.jsx'
+import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
@@ -198,6 +198,9 @@ import {
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
+import { stretchClipboard } from './messageCopy.js'
+import { agentStretches, replyFooter, stretchProse } from './replyFooter.js'
+import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
@@ -5917,6 +5920,64 @@ export default function ChatView({
     }
   }
 
+  const stretches = useMemo(
+    () => agentStretches(peerTimeline.messages, replyGroups),
+    [peerTimeline.messages, replyGroups],
+  )
+  // Each stretch's earlier replies' rows, for the References its last reply
+  // lists; replies inside a stretch list none.
+  const stretchSourceRows = useMemo(() => new Map([...stretches].map(([end, groups]) => [
+    end, groups.slice(0, -1).flatMap(group => group.rows.map(row => row.message)),
+  ])), [stretches])
+  // Answering a card starts the turn the moment it is submitted, before the
+  // server acknowledges it; a failed answer clears this and the footer returns.
+  const turnStarting = turnActive || questionFollowHandoff != null
+  // The settled footer reply's end, recorded from committed renders only, so
+  // a discarded render cannot name a reply (see replyFooter).
+  const settledFooterEndRef = useRef(null)
+  // One footer for the whole chat, on the reply at its very end. Once the
+  // owner speaks or answers a card there is none until the next reply starts,
+  // so that reply's Thinking takes the footer's place instead of appearing
+  // below it.
+  const footer = replyFooter({
+    messages: peerTimeline.messages,
+    replyGroups,
+    stretches,
+    liveIndex: showActiveAssistantSurface ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1,
+    lastVisibleIndex: lastVisibleMessageIndex,
+    offset,
+    turnStarting,
+    settledEnd: settledFooterEndRef.current,
+  })
+  const footerGroup = footer?.group ?? null
+  const settledFooterEnd = turnStarting ? null : footer?.end ?? null
+  useLayoutEffect(() => {
+    if (!turnStarting) settledFooterEndRef.current = settledFooterEnd
+  }, [turnStarting, settledFooterEnd])
+  // A stretch that began before the loaded page reads its start only when
+  // the footer is about to be used.
+  const [stretchStartRows, requestStretchStart] = useStretchPrefix(chatId, footer?.truncated ? offset : 0)
+  const footerSettled = footer?.state === 'settled'
+  const footerTruncated = !!footer?.truncated
+  const footerGroups = footer?.groups
+  const footerParts = useMemo(() => {
+    if (!footerSettled) return null
+    if (!footerTruncated) return stretchProse(footerGroups, peerTimeline.positions)
+    if (!stretchStartRows) return null
+    // The read start and the loaded rows are grouped together, so a reply
+    // split across the page's edge copies as one.
+    const rows = [...stretchStartRows, ...peerTimeline.messages.slice(0, footerGroup.end + 1)]
+    return stretchProse([...new Set(assistantReplyGroups(rows, {
+      offset: offset - stretchStartRows.length, displayKeys: assistantDisplayKeys,
+    }).values())])
+  }, [footerSettled, footerTruncated, footerGroups, footerGroup, offset, stretchStartRows,
+    peerTimeline.messages, peerTimeline.positions, assistantDisplayKeys])
+  // Copy shows exactly when the stretch's parts are known and say something;
+  // pressing it builds the clipboard from those same parts.
+  const footerCopy = useMemo(() => (footerParts?.length
+    ? button => stretchClipboard(footerParts, button.closest('.chat__list'))
+    : undefined), [footerParts])
+
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
     setDepth: depth => { fileDragDepthRef.current = depth },
@@ -5975,11 +6036,16 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      endsStretch={endsAgentStretch(peerTimeline.messages, replyGroups, group)}
-      // Only an idle latest reply pins its actions. A live reply may not yet
-      // have a stored row; that must not leave the previous reply pinned too.
-      metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={showMessageMeta}
+      // The footer clears the moment a new turn starts (an answered card
+      // included) and fills again where the agent next stops.
+      footer={group === footerGroup ? footer.state : null}
+      copy={group === footerGroup ? footerCopy : undefined}
+      metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={group === footerGroup ? showMessageMeta : undefined}
+      onFooterIntent={group === footerGroup && footer.truncated ? requestStretchStart : undefined}
+      // References of the latest stretch leave with its footer while the
+      // agent works, and return, whole, where it next stops.
+      stretchSourceRows={group === footerGroup && turnStarting ? null : stretchSourceRows.get(group) || null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
@@ -6248,7 +6314,7 @@ export default function ChatView({
           {branchOriginAtEnd && branchOriginRow}
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
-            <li className="chat__msg chat__msg--assistant">
+            <li className="chat__msg chat__msg--assistant chat__msg--pending-reply">
               {/* The placeholder occupies the same wrapper and shared header as
                   the first real activity stretch, so event promotion cannot
                   change its alignment. The hook remains a presence probe only. */}

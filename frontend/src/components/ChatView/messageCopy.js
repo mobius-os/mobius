@@ -1,10 +1,10 @@
+import { Marked } from 'marked'
 import { stripAugmentation } from './msgText.js'
 import { isContinuationMessage, isSideQuestionMessage } from './chatRuntimeState.js'
-import { isAgentWorkBlock } from './activityGrouping.js'
-import { bareControlName } from './toolActivityLabel.js'
 import { renderedBlockEntries, repairInterleavedQuestionText } from './streamReducers.js'
 import { markdownClipboardHtml, plainTextFromFragment } from './markdownClipboard.js'
 import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
+import { mathTokens } from './markdown/mathTokens.js'
 
 const isSystemRow = msg => !msg || msg.kind === 'compaction'
   || isContinuationMessage(msg) || isSideQuestionMessage(msg)
@@ -29,138 +29,108 @@ export function messageCopyText(msg) {
   return msg.content ? clean(msg.content).trim() : ''
 }
 
-/* Owner-facing bookkeeping that closes a turn (saving notes, asking, notifying,
- * settling a Goal). It never changes what the answer says, so prose written
- * before it is still the answer. Any other tool after the last prose means
- * that prose was a progress note ("Checking the logs:"), not an answer. */
-const CLOSING_CONTROLS = new Set([
-  'checkpoint_chat', 'request_question', 'request_approval', 'request_secret',
-  'request_restart', 'notify_owner', 'memory_remember', 'reflection_log_friction',
-  'declare_wait', 'cancel_wait', 'update_goal', 'claim_agent_work',
-  'finish_agent_work', 'open_item', 'AskUserQuestion',
-])
-
-function isClosingControl(block) {
-  const name = block?.tool ?? block?.name
-  return block?.type === 'tool' && CLOSING_CONTROLS.has(bareControlName(name) ?? name)
-}
-
-/** Thinking and closing bookkeeping, as opposed to real work. A compacted
- *  activity block (a reloaded transcript folds adjacent tool and thinking
- *  steps into one) is bookkeeping only when every step it folded is. */
-function isBookkeeping(block) {
-  if (block?.type === 'thinking') return true
-  if (block?.type === 'activity') {
-    const entries = block.entries || []
-    return entries.length > 0 && entries.every(entry => isBookkeeping(entry?.item))
-  }
-  return isClosingControl(block)
-}
-
-/** An ordinary question card as copyable text: each question, then its
- * choices as a list. Sealed secret cards never copy. */
+/** An open question card as copyable text: each question, then its choices
+ * as a list. Answered cards and sealed secret cards never copy. */
 function questionCopyText(block) {
+  if (block.secure_input || block.answers) return ''
   return (block.questions || []).map(question => [
     question?.question?.trim(),
     ...(question?.options || []).map(option => option?.label && `- ${option.label}`),
   ].filter(Boolean).join('\n')).filter(Boolean).join('\n\n')
 }
 
-/** What a reply's actions work from: its answer, and the failure card (an
- *  error, a usage limit, a stop) it ended on instead of finishing, if any.
+/** Everything a reply said, in order: each prose block (a card's closing
+ *  message is prose too) and any still-open question card. Tool output,
+ *  thinking, answered cards and error chrome never copy (each has its own
+ *  surface), and provider text that only repeats an error is that error.
  *
- *  A turn interleaves short progress notes with tool and thinking activity;
- *  the answer is the last run of prose, read across every visible row of the
- *  reply (steer-joined text appears once, on its owning row). Thinking and
- *  closing bookkeeping after the answer (a question card's own tool call, a
- *  closing save) keep it, and cards neither copy nor split the run. Real work
- *  after the last prose makes that prose a progress note: the reply then
- *  copies the question card it ended on, or nothing.
- *
- *  `parts` locate each answer block as rendered: `message` indexes the given
- *  rows and `block` is the rendered position MsgContent gives it as
+ *  Each part with a `block` locates its rendered element: `message` indexes
+ *  the given rows and `block` is the position MsgContent renders it at as
  *  `data-markdown-block` (renderedBlockEntries), so Copy reads the text the
- *  owner sees.
- *
- *  A failed reply's answer is only prose still being written when it failed:
- *  a note followed by more work was narration, not an answer, and a
- *  provider's text that repeats the error message is the error itself.
- *
- *  `endingError` is the error card rendered last in the reply's last visible
- *  row, the only place a card can own recovery (`ownsRecoveryAction`). */
-export function replyOutcome(messages) {
-  let parts = []
-  let workedSinceRun = false
-  let realWorkSinceRun = false
-  let endingQuestion = null
-  let failed = false
-  let endingError = null
-  const errorMessages = new Set()
-  messages.forEach((msg, message) => {
-    if (msg.hidden) return
-    endingError = null
-    if (isSystemRow(msg)) return
-    const blocks = repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
-      ? msg.blocks : [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }])
-    renderedBlockEntries(blocks).forEach(({ item: block, idx: index }) => {
-      endingError = block?.type === 'error' ? block : null
-      if (block?.type === 'error') {
-        failed = true
-        if (block.message?.trim()) errorMessages.add(block.message.trim())
-      } else if (isAgentWorkBlock(block)) {
-        workedSinceRun = true
-        failed = false
-        if (!isBookkeeping(block)) {
-          realWorkSinceRun = true
-          endingQuestion = null
-        }
-      } else if (block?.type === 'question') {
-        if (!block.secure_input) endingQuestion = block
+ *  owner sees. A card part has only its `markdown`. */
+export function replyProse(messages) {
+  const rows = messages.map(msg => (msg.hidden || isSystemRow(msg) ? [] : renderedBlockEntries(
+    repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
+      ? msg.blocks : [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }]),
+  )))
+  const errors = new Set(rows.flat().flatMap(({ item }) => (
+    item?.type === 'error' && item.message?.trim() ? [item.message.trim()] : [])))
+  const parts = []
+  rows.forEach((entries, message) => {
+    entries.forEach(({ item: block, idx: index }) => {
+      if (block?.type === 'question') {
+        const markdown = questionCopyText(block)
+        if (markdown) parts.push({ markdown })
       } else if (block?.type === 'text' && block.content?.trim()) {
-        if (workedSinceRun) parts = []
-        workedSinceRun = false
-        realWorkSinceRun = false
-        endingQuestion = null
-        failed = false
-        parts.push({
-          message,
-          block: index,
-          markdown: (block.markdown_range
-            ? markdownRangeSource(block.markdown_range) : block.content).trim(),
-        })
+        const markdown = (block.markdown_range
+          ? markdownRangeSource(block.markdown_range) : block.content).trim()
+        if (!errors.has(markdown)) parts.push({ message, block: index, markdown })
       }
     })
   })
-  if (failed) {
-    parts = workedSinceRun ? [] : parts.filter(part => !errorMessages.has(part.markdown))
-  } else if (realWorkSinceRun) {
-    const question = endingQuestion && questionCopyText(endingQuestion)
-    parts = question ? [{ markdown: question }] : []
-  }
-  return { answer: parts.map(part => part.markdown).join('\n\n'), endingError, parts }
+  return parts
 }
 
-function renderedTextBlock(replyElement, rowKey, block) {
-  const row = Array.from(replyElement?.querySelectorAll('li.chat__msg[data-key]') || [])
+/** The rows at the end of an older history page that belong to the agent's
+ *  stretch continuing past it: back to the last visible row that is not a
+ *  reply. `complete` is false when the whole page belongs to the stretch, so
+ *  its start lies on an earlier page still. */
+export function stretchTail(messages) {
+  let start = messages.length
+  while (start > 0 && (messages[start - 1].hidden || messages[start - 1].role === 'assistant')) start -= 1
+  return { rows: messages.slice(start), complete: start > 0 }
+}
+
+function renderedTextBlock(listElement, rowKey, block) {
+  const row = Array.from(listElement?.querySelectorAll('li.chat__msg[data-key]') || [])
     .find(item => item.dataset.key === rowKey)
   return Array.from(row?.querySelectorAll(`[data-markdown-block="${block}"]`) || [])
     .find(element => element.closest('li.chat__msg') === row) || null
 }
 
-/** The reply answer's clipboard payload, read from the rendered reply exactly
- *  as a text selection would be: readable plain text of what is on screen
- *  (no Markdown punctuation, escapes, or private image addresses) plus the
- *  Markdown source the composer restores on paste. `rowKeys` are the keys of
- *  the rows `replyOutcome` read. Null when a part is not rendered. */
-export function renderedReplyClipboard(replyElement, rowKeys, parts) {
+const escapeHtml = text => text.replace(/[&<>"]/g, char => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]))
+// Math renders as the TeX annotation KaTeX carries, which is what the
+// clipboard rules read from the transcript.
+const texHtml = (tag, className) => token => `<${tag} class="${className}">`
+  + `<annotation encoding="application/x-tex">${escapeHtml(token.text)}</annotation></${tag}>`
+const markdownParser = new Marked({ gfm: true })
+markdownParser.use(mathTokens(), { extensions: [
+  { name: 'inlineKatex', renderer: texHtml('span', 'katex') },
+  { name: 'blockKatex', renderer: texHtml('div', 'md-math-block') },
+  // Raw HTML renders as nothing, as in the transcript: an HTML block is not
+  // shown, and an inline tag drops while the text between tags stays.
+], renderer: { html: () => '' } })
+
+/** Markdown as plain HTML: the chat's Markdown parser and math tokens without
+ *  the live renderer's effects or app context, so an image keeps its alt text
+ *  and an app link stays a link. */
+export function markdownHtml(text) {
+  return markdownParser.parse(text)
+}
+
+/** Markdown's plain text by the transcript's clipboard rules, read from an
+ *  inert template (nothing in it loads). */
+function markdownPlainText(text) {
+  const template = document.createElement('template')
+  template.innerHTML = markdownHtml(text)
+  return plainTextFromFragment(template.content)
+}
+
+/** The clipboard payload of `parts` (see `stretchProse`): the Markdown source
+ *  the composer restores on paste, and readable plain text. A part rendered
+ *  in `listElement` reads its plain text from the screen exactly as a text
+ *  selection would (no Markdown punctuation, escapes, or private image
+ *  addresses); one that is not (a stretch's start before the loaded page)
+ *  reads it from its Markdown's HTML. Null when no part has plain text. */
+export function stretchClipboard(parts, listElement) {
   const markdown = []
   const plain = []
   for (const part of parts) {
     let plainText = part.markdown
     if (Number.isInteger(part.block)) {
-      const element = renderedTextBlock(replyElement, rowKeys[part.message], part.block)
-      if (!element) return null
-      plainText = plainTextFromFragment(element)
+      const element = renderedTextBlock(listElement, part.key, part.block)
+      plainText = element ? plainTextFromFragment(element) : markdownPlainText(part.markdown)
     }
     markdown.push(part.markdown)
     if (plainText) plain.push(plainText)
