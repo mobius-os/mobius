@@ -49,3 +49,23 @@ test('raw HTML does not execute and app-action fences remain inert inside Q&A', 
   assert.match(html, /<strong>Safe<\/strong>/)
   assert.match(html, /md-code-block/)
 })
+
+test('choice labels and headers render inline Markdown only', () => {
+  const html = render({ questions: [{ header: '# Plan', question: 'Pick a speed', options: [
+    { label: '1. **Fast**' }, { label: '# Careful', description: 'Slower' },
+  ] }] })
+  assert.match(html, /1\. <strong>Fast<\/strong>/)
+  assert.match(html, /# Careful/)
+  assert.match(html, /# Plan/)
+  assert.doesNotMatch(html, /<ol|<h1/)
+})
+
+test('screen-reader names come from the rendered question, not its Markdown source', () => {
+  const html = render({ questions: [{ question: 'Use **fast** mode?', options: [{ label: 'Yes' }] },
+    { question: 'Anything else?' }] })
+  const id = html.match(/class="qcard__text" id="([^"]+)"/)[1]
+  assert.match(html, new RegExp(`role="radiogroup" aria-labelledby="${id}"`))
+  assert.match(html, new RegExp(`aria-label="Custom answer for:" aria-labelledby="[^" ]+ ${id}"`))
+  assert.match(html, new RegExp(`aria-label="Attach a photo or file to your answer to:" aria-labelledby="[^" ]+ ${id}"`))
+  assert.doesNotMatch(html, /aria-label[^>]*\*\*/)
+})

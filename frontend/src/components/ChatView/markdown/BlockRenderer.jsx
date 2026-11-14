@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Marked } from 'marked'
 import { MemoBlock, MathBlock } from './blocks.jsx'
+import InlineContent from './InlineContent.jsx'
 import { mathTokens } from './mathTokens.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
@@ -53,6 +54,17 @@ export function markdownImageHrefs(text) {
 function tokenize(text, { writtenByOwner = false, math = true } = {}) {
   if (!math) return plainMd.lexer(text || '')
   return (writtenByOwner ? mdOwnerText : md).lexer(text || '')
+}
+
+
+/**
+ * InlineMarkdown — one-line fields such as a choice label. Emphasis, code and
+ * links render, but text like `1. Fast` or `# Plan` stays text instead of
+ * becoming a list or heading.
+ */
+export function InlineMarkdown({ text, onInternalNav }) {
+  const tokens = useMemo(() => md.Lexer.lexInline(text || '', md.defaults), [text])
+  return <InlineContent tokens={tokens} onInternalNav={onInternalNav} />
 }
 
 

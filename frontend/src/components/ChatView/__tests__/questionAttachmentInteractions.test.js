@@ -21,7 +21,7 @@ const vite = await createSsrRenderServer({
       if (id === 'question-card-hooks') return '\0question-card-hooks'
     },
     load(id) {
-      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null;`
+      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null; export const useId = () => 'qcard';`
     },
   }],
 })
@@ -40,7 +40,11 @@ function find(tree, predicate) {
   return element
 }
 const submit = tree => find(tree, node => node.props?.className?.split(' ').includes('qcard__submit'))
-const editor = (tree, question) => find(tree, node => node.props?.question === question)
+const editor = (tree, question) => {
+  const block = find(tree, node => node.props?.['data-question-index'] != null
+    && elements(node.props.children).some(child => child.props?.text === question))
+  return find(block.props.children, node => node.type === CustomAnswerArea)
+}
 const chipSets = tree => elements(tree).filter(node => Array.isArray(node.props?.files))
 const chips = (tree, index = 0) => chipSets(tree)[index]
 const sentSets = tree => elements(tree).filter(node => Array.isArray(node.props?.attachments))
@@ -339,7 +343,7 @@ test('answer paste matches the composer: Markdown by default, plain on the short
   const paste = props => {
     const changes = []
     const box = renderHook(CustomAnswerArea, {
-      question: 'Q?', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
+      questionTextId: 'q-text', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
       onChange: value => changes.push(value), ...props,
     })
     let prevented = false
@@ -392,13 +396,15 @@ test('Markdown choice links and child controls do not choose an answer; keyboard
     onAnswer: (...args) => { posted = args },
   })
   const option = () => find(card.result.current, node => node.props?.role === 'radio')
-  const inside = { contains: () => true }
+  // The choice itself is a role="radio" control; only controls nested inside
+  // it, such as a Markdown link or copy button, keep the click.
+  const choice = { contains: node => node !== null }
   try {
     // A portaled image lightbox bubbles its backdrop click through React.
     option().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
     assert.equal(option().props['aria-checked'], false)
     for (const tag of ['a', 'button']) {
-      option().props.onClick({ detail: 0, currentTarget: inside, target: { closest: () => ({ tagName: tag }) } })
+      option().props.onClick({ detail: 0, currentTarget: choice, target: { closest: () => ({ tagName: tag }) } })
       assert.equal(option().props['aria-checked'], false)
     }
     const surface = {}
@@ -417,10 +423,16 @@ test('clicking formatted option text toggles multi-select without altering Markd
     questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`' }] }],
   })
   const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
-  const click = index => options()[index].props.onClick({ detail: 0, currentTarget: { contains: () => true }, target: { closest: () => null } })
+  // Text inside a choice resolves to the choice itself (role="checkbox"); a
+  // control that only wraps the choice from outside must not block the toggle.
+  const click = (index, control = 'choice') => {
+    const choice = { contains: node => node === choice || node === text }
+    const text = { closest: () => control === 'choice' ? choice : { outside: true } }
+    options()[index].props.onClick({ detail: 0, currentTarget: choice, target: text })
+  }
   try {
     click(0)
-    click(1)
+    click(1, 'outside')
     assert.deepEqual(options().map(node => node.props['aria-checked']), [true, true])
     click(0)
     assert.deepEqual(options().map(node => node.props['aria-checked']), [false, true])

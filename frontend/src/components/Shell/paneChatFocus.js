@@ -1,13 +1,4 @@
-const INTERACTIVE_TARGET = [
-  'a',
-  'button',
-  'input',
-  'textarea',
-  'select',
-  '[contenteditable="true"]',
-  '[role="button"]',
-  '[role="link"]',
-].join(',')
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 
 // Pane selection should feel keyboard-forward on a desktop browser without
 // summoning a software keyboard on touch devices. Keeping this decision at the

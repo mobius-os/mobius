@@ -1,8 +1,9 @@
 import DependencyBacklinks from './DependencyBacklinks.jsx'
-import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { InlineMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { LocalAnswersContext } from './localAnswersContext.js'
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -57,9 +58,10 @@ export function CustomAnswerArea({
   onChange,
   onSubmitShortcut,
   onPasteFiles,
-  question,
+  questionTextId,
   value,
 }) {
+  const id = useId()
   const textareaRef = useRef(null)
   const plainPasteRef = useRef(false)
   const pendingCaretRef = useRef(null)
@@ -125,7 +127,9 @@ export function CustomAnswerArea({
       className="qcard__input"
       data-chat-scroll-region
       data-chat-inline-editor="question-answer"
-      aria-label={`Custom answer for: ${question}`}
+      id={id}
+      aria-label="Custom answer for:"
+      aria-labelledby={`${id} ${questionTextId}`}
       placeholder={answered ? 'No custom answer' : (placeholder || 'Or type your own answer…')}
       autoComplete="off"
       rows={1}
@@ -176,6 +180,7 @@ export default function QuestionCard({
   pendingCardRef,
 }) {
   const draftKey = questionDraftKey(chatId, questionId, questions)
+  const cardId = useId()
   const [answers, setAnswers] = useState(
     () => readQuestionDraft(draftKey).answers,
   )
@@ -483,6 +488,9 @@ export default function QuestionCard({
         const selectionCount = selectionLocked
           ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
           : selectedArr.length
+        // Screen-reader names point at the rendered question, not its Markdown.
+        const questionTextId = `${cardId}-q${qi}`
+        const attachId = `${questionTextId}-attach`
 
         return (
           <div
@@ -491,9 +499,9 @@ export default function QuestionCard({
             data-question-index={qi}
           >
             {q.header && (
-              <div className="qcard__header"><StandardMarkdown text={q.header} onInternalNav={onInternalNav} /></div>
+              <div className="qcard__header"><InlineMarkdown text={q.header} onInternalNav={onInternalNav} /></div>
             )}
-            <div className="qcard__text"><StandardMarkdown text={q.question} onInternalNav={onInternalNav} /></div>
+            <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} onInternalNav={onInternalNav} /></div>
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
@@ -515,7 +523,7 @@ export default function QuestionCard({
             {!completedAction && hasOptions && <div
               className="qcard__opts"
               role={isMulti ? 'group' : 'radiogroup'}
-              aria-label={q.question}
+              aria-labelledby={questionTextId}
             >
               {/* For multi-select answered state, the comma-joined value is
                   parsed above so each chosen option highlights correctly. */}
@@ -545,8 +553,10 @@ export default function QuestionCard({
                       // act independently of the surrounding answer choice.
                       // Portaled previews (the image lightbox) bubble React
                       // events here from outside the DOM subtree of this option.
-                      if (!event.currentTarget.contains(event.target)) return
-                      if (event.target.closest('a, button, input, textarea, select, summary, [role="button"]')) return
+                      const choice = event.currentTarget
+                      if (!choice.contains(event.target)) return
+                      const control = event.target.closest(INTERACTIVE_TARGET)
+                      if (control !== choice && choice.contains(control)) return
                       if (
                         event.detail !== 0
                         && pointerSelectionChangedWithin(
@@ -573,11 +583,11 @@ export default function QuestionCard({
                         not a native button containing nested controls. */}
                     {opt.description ? (
                       <div className="qcard__opt-body">
-                        <div className="qcard__opt-label"><StandardMarkdown text={opt.label} onInternalNav={onInternalNav} /></div>
+                        <span className="qcard__opt-label"><InlineMarkdown text={opt.label} onInternalNav={onInternalNav} /></span>
                         <div className="qcard__opt-desc"><StandardMarkdown text={opt.description} onInternalNav={onInternalNav} /></div>
                       </div>
                     ) : (
-                      <div className="qcard__opt-label"><StandardMarkdown text={opt.label} onInternalNav={onInternalNav} /></div>
+                      <span className="qcard__opt-label"><InlineMarkdown text={opt.label} onInternalNav={onInternalNav} /></span>
                     )}
                   </div>
                 )
@@ -592,7 +602,9 @@ export default function QuestionCard({
                     answer is locked it only stops taking files. */}
                 {!platformAction && (answered || !disabled) && (
                   <button type="button" className="qcard__attach"
-                    aria-label={grouped ? `Attach a photo or file to your answer to: ${q.question}` : 'Attach a photo or file'}
+                    id={attachId}
+                    aria-label={grouped ? 'Attach a photo or file to your answer to:' : 'Attach a photo or file'}
+                    aria-labelledby={grouped ? `${attachId} ${questionTextId}` : undefined}
                     title="Attach a photo or file" disabled={attachLocked} onClick={() => {
                       attachTargetRef.current = q.question
                       fileInputRef.current?.click()
@@ -614,7 +626,7 @@ export default function QuestionCard({
                     onSubmitShortcut={(questionCard) => {
                       if (canSubmit) handleSubmit(questionCard, null)
                     }}
-                    question={q.question}
+                    questionTextId={questionTextId}
                     value={selectionLocked
                       ? writtenAnswer
                       : (otherTexts[q.question] || '')}
