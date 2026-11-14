@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Marked } from 'marked'
 import { MemoBlock, MathBlock } from './blocks.jsx'
+import InlineContent from './InlineContent.jsx'
 import { mathTokens } from './mathTokens.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
@@ -22,6 +23,9 @@ import '../markdown.css'
  *     or a stack trace's `<anonymous>`. A tokenizer returning undefined (not
  *     false, which falls back to the default) leaves that text to the
  *     paragraph and text tokenizers; autolinks such as `<https://…>` still work.
+ * Agent text shown outside a reply, such as a question card, also keeps
+ * tag-like text literal (`literalTags`): a choice like `Return Promise<void>`
+ * must read the same as the answer it submits.
  * These are separate instances rather than per-call options because
  * `Marked#lexer(src, options)` replaces the instance defaults, extensions
  * included.
@@ -32,11 +36,10 @@ function configuredMarked(options = {}) {
   return instance
 }
 
+const literalTagTokenizer = { html: () => undefined, tag: () => undefined }
 const md = configuredMarked()
-const mdOwnerText = configuredMarked({
-  breaks: true,
-  tokenizer: { html: () => undefined, tag: () => undefined },
-})
+const mdOwnerText = configuredMarked({ breaks: true, tokenizer: literalTagTokenizer })
+const mdLiteralTags = configuredMarked({ tokenizer: literalTagTokenizer })
 // Agent-written chat notes are plain Markdown: a `$` there is a shell variable
 // or a price, never TeX, so they lex without math tokens.
 const plainMd = new Marked()
@@ -50,9 +53,33 @@ export function markdownImageHrefs(text) {
   return hrefs
 }
 
-function tokenize(text, { writtenByOwner = false, math = true } = {}) {
+function tokenize(text, { writtenByOwner = false, literalTags = false, math = true } = {}) {
   if (!math) return plainMd.lexer(text || '')
-  return (writtenByOwner ? mdOwnerText : md).lexer(text || '')
+  if (writtenByOwner) return mdOwnerText.lexer(text || '')
+  return (literalTags ? mdLiteralTags : md).lexer(text || '')
+}
+
+
+/**
+ * InlineMarkdown — one-line agent text such as a choice label: emphasis, code
+ * and math only. `1. Fast` or `# Plan` stay text rather than becoming a list or
+ * heading, tag-like text stays literal, and a link or image shows as its text,
+ * so the result never holds a control and can sit inside one (a radio).
+ */
+export function InlineMarkdown({ text }) {
+  const tokens = useMemo(
+    () => textOnly(mdLiteralTags.Lexer.lexInline(text || '', mdLiteralTags.defaults)),
+    [text],
+  )
+  return <InlineContent tokens={tokens} />
+}
+
+function textOnly(tokens) {
+  return tokens.flatMap(token => {
+    if (token.type === 'link') return textOnly(token.tokens || [])
+    if (token.type === 'image') return token.text ? [{ type: 'text', text: token.text }] : []
+    return token.tokens ? [{ ...token, tokens: textOnly(token.tokens) }] : [token]
+  })
 }
 
 
@@ -90,7 +117,7 @@ export function ProgressiveMarkdown({
         aria-atomic={isStreaming ? 'false' : undefined}
       >
         {tokens.map((token, i) => {
-          const appCard = appLinkCardFromParagraph(token, window.location.href)
+          const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
           if (appCard) {
             return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
           }
@@ -131,7 +158,8 @@ export function ProgressiveMarkdown({
  * Settled blocks normally render once. A pathological cold transcript can
  * prepare one long block over several hidden frames; `renderFraction` reveals
  * token prefixes while one memoized token tree keeps already-prepared DOM.
- * `writtenByOwner` selects the owner-text rules described at `configuredMarked`.
+ * `writtenByOwner` and `literalTags` select the rules described at
+ * `configuredMarked`.
  * `math={false}` renders plain Markdown with no TeX (agent-written notes).
  */
 export function StandardMarkdown({
@@ -139,6 +167,7 @@ export function StandardMarkdown({
   markdownRange,
   renderFraction,
   writtenByOwner = false,
+  literalTags = false,
   onInternalNav,
   mediaDimensions,
   allowAppBlocks = false,
@@ -152,8 +181,8 @@ export function StandardMarkdown({
   const tokens = useMemo(
     () => groupMarkdownImages(markdownRange
       ? markdownRangeTokens(markdownRange)
-      : tokenize(text, { writtenByOwner, math })),
-    [text, markdownRange, writtenByOwner, math],
+      : tokenize(text, { writtenByOwner, literalTags, math })),
+    [text, markdownRange, writtenByOwner, literalTags, math],
   )
   const fraction = Number(renderFraction)
   const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1
@@ -163,7 +192,7 @@ export function StandardMarkdown({
   return (
     <div className="standard-markdown md-blocks">
       {visibleTokens.map((token, i) => {
-        const appCard = appLinkCardFromParagraph(token, window.location.href)
+        const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
         if (appCard) {
           return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
         }

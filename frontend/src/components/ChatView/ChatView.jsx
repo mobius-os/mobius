@@ -10,6 +10,7 @@ import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import {
   lazy,
   startTransition,
@@ -857,7 +858,7 @@ export default function ChatView({
 
   const showMessageMeta = useCallback((event, key) => {
     if (event.defaultPrevented) return
-    if (event.target.closest?.('button, a, input, textarea, select, summary, [role="button"]')) return
+    if (event.target.closest?.(INTERACTIVE_TARGET)) return
     if (window.getSelection?.()?.toString()) return
     if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
     setVisibleMessageMetaKey(key)
