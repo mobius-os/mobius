@@ -413,6 +413,9 @@ def _project_chat_response(chat: models.Chat) -> dict[str, Any]:
   return {
     "id": chat.id,
     "title": chat.title,
+    # An owner-chosen name marks a chat kept for later, so a project's New
+    # chat never reopens it as a blank.
+    "title_locked": bool(chat.title_locked),
     "has_messages": bool(chat.has_messages),
     "provider": chat.provider,
     "created_at": chat.created_at,

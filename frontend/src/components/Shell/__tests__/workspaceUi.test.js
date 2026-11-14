@@ -32,6 +32,11 @@ const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
+const pinnedItemMutations = readFileSync(new URL('../../Drawer/usePinnedItemMutations.js', import.meta.url), 'utf8')
+const itemMenuGestures = readFileSync(
+  new URL('../../Drawer/useItemMenuGestures.js', import.meta.url),
+  'utf8',
+)
 const drawerItemActionMenu = readFileSync(
   new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
   'utf8',
@@ -120,7 +125,7 @@ test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
   assert.match(shell, /const tabStorage = isSharedBrowserAccess \? sharedWorkspaceStorage : sessionStore\(\)/)
   assert.match(
     shell,
-    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*\}\)/,
+    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*recoveringFromCrash,\s*\}\)/,
     'owner durability and one-time migration remain canonical; guest storage is separate',
   )
   assert.doesNotMatch(
@@ -266,6 +271,13 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
   assert.match(drawer, /\{showingArchived \? 'Archived chats' : 'Recents'\} unavailable\./)
   assert.match(drawer, /No archived chats\. Archive one from its menu to file it here\./)
   assert.match(drawer, /Nothing recent yet/)
+})
+
+test('a pointer press switches drawer lists without leaving a latent keyboard ring', () => {
+  const tab = drawer.match(/<button\s+type="button"\s+role="tab"[\s\S]*?>\n/)?.[0] ?? ''
+  assert.match(tab, /data-list-tab=\{tab\}/)
+  assert.match(tab, /onMouseDown=\{event => event\.preventDefault\(\)\}/)
+  assert.match(tab, /onClick=\{\(\) => selectListTab\(tab\)\}/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -782,10 +794,12 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'reordering has one Pointer Events lifecycle')
   assert.doesNotMatch(drawer, /beginTouchMenuHold|touchMenuCleanupRef|drawerGestureEndPoint/,
     'drawer menu access must not own a parallel custom touch lifecycle')
-  assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
-  assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 1,
-    'the card still suppresses native contextmenu during its own hold')
+  assert.match(itemMenuGestures, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
+  assert.match(itemMenuGestures, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
+  assert.match(itemMenuGestures, /const triggerProps = \{\s*onContextMenuCapture: suppressTouchContextMenu,/,
+    'a standalone trigger still suppresses native contextmenu during its own hold')
+  assert.equal((drawer.match(/\{\.\.\.cardMenuTriggerProps\}/g) || []).length, 1,
+    'only the card, not the drawer row, owns its own hold')
   assert.doesNotMatch(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:/,
     'the shared controller owns callout suppression for its full hold window')
   assert.doesNotMatch(drawer, /data-hold-ready/)
@@ -976,8 +990,12 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
   assert.match(
+    pinnedItemMutations,
+    /const projectedItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)/,
+  )
+  assert.match(
     drawer,
-    /const projectedDrawerItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
+    /const projectedDrawerItems = pins\.projectedItems[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
   )
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
@@ -1088,13 +1106,14 @@ test('drawer rows keep action and reorder chrome out of the list', () => {
   )
   assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle/)
   assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(drawer, /openMenuFromKey\(event\)/)
   assert.match(
-    drawer,
+    itemMenuGestures,
     /event\.key === 'ContextMenu' \|\| \(event\.shiftKey && event\.key === 'F10'\)/,
   )
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
-  assert.match(drawer, /focusFirstAction: event\.type === 'keydown'/,
+  assert.match(itemMenuGestures, /focusFirstAction: event\.type === 'keydown'/,
     'only keyboard invocation should focus the first drawer action')
   assert.match(drawer, /focusFirstAction=\{menu\?\.focusFirstAction === true\}/)
   assert.match(
@@ -1126,9 +1145,11 @@ test('drawer row actions have one opening path without a custom touch hold', () 
   assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
     'Back ownership must be registered before the portaled menu paints')
   assert.match(drawer, /function openItemMenuAt\(\s*point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
-  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+  assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(itemMenuGestures, /onContextMenu: openItemMenu,/,
     'app cards and drawer rows must share one semantic opening function')
-  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
+  assert.match(drawer, /\} = useItemMenuGestures\(openItemMenuAt\)/)
+  assert.match(itemMenuGestures, /if \(suppressTouchContextMenu\(event\)\) return/,
     'native touch contextmenu must never pre-empt the shared held gesture')
   assert.doesNotMatch(
     dragBinding,
@@ -1160,24 +1181,24 @@ test('both context menus dismiss without stealing the destination press, includi
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
-  assert.match(drawer, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
-  assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
-  assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
-  assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(openingPoint, sourceBtn\)/,
+  assert.match(itemMenuGestures, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
+  assert.match(itemMenuGestures, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
+  assert.match(itemMenuGestures, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
+  assert.match(itemMenuGestures, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
+  assert.match(itemMenuGestures, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
+  assert.match(itemMenuGestures, /cleanup\(\)[\s\S]*?openMenuAtRef\.current\(openingPoint, sourceBtn\)/,
     'the release path must not normalize the pointer point twice')
-  assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
+  assert.match(itemMenuGestures, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
 test('launcher cards and drawer rows share the stationary menu threshold', () => {
-  const dragImports = drawer.match(
+  const dragImports = itemMenuGestures.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
   assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /\}, PRESS_MENU_HOLD_MS\)/)
-  assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
+  assert.match(itemMenuGestures, /\}, PRESS_MENU_HOLD_MS\)/)
+  assert.match(itemMenuGestures, /> PRE_HOLD_MOVE_PX/)
   assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
     'the drag stage timing is shared across drawer rows and tabs')
   assert.doesNotMatch(
@@ -1405,6 +1426,27 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   // Both cold-restore probes read the SAME contract (rhyme, not two copies).
   assert.match(appFrameCache, /probeDeletion\(`\/apps\//)
   assert.match(shell, /probeDeletion\(`\/chats\//)
+  assert.match(shell, /probeDeletion\(`\/projects\//)
+})
+
+// A tab for a project deleted elsewhere renders nothing, so restoring it used to
+// leave a blank shell that never finished loading. It must be closed, and only on
+// a direct 404, with the Projects list shown if it was on screen.
+test('a deleted project tab is closed on proof of deletion, never left blank', () => {
+  const start = shell.indexOf('const projectsLiveFetched')
+  const effect = shell.slice(start, shell.indexOf('// App delete lives here', start))
+  assert.ok(start > 0)
+  assert.match(effect, /projectsQuery\.isSuccess && projectsQuery\.isFetchedAfterMount/)
+  assert.match(effect, /projectById\.has\(id\) \|\| parseAppSourceProjectId\(id\)/)
+  assert.match(effect, /verdict === 'deleted' && !reappeared\) closeRemovedProject\(projectId\)/)
+  const helper = shell.slice(shell.indexOf('function closeRemovedProject'), start)
+  assert.match(helper, /if \(showProjects \|\| showing\) navTo\('projects'\)/)
+  // One reducer action clears builder panes AND the Standard single-screen slot;
+  // a per-tab close would miss a result saved only in that slot.
+  assert.match(helper, /dispatchWorkspace\(\{ type: 'CLOSE_PROJECT_TABS', projectId: id \}\)/)
+  assert.doesNotMatch(helper, /type: 'CLOSE_TAB'/)
+  // Deleting a project here takes the same path.
+  assert.match(shell, /closeRemovedProject\(projectId, \{ showProjects: true \}\)/)
 })
 
 test('round4-3: the null-slot landing is passive and interactive New Chat uses ChatView', () => {
@@ -1606,6 +1648,19 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('archiving a chat the list has not read yet files it and brings its row in', async () => {
+  const h = harness()
+  h.fullRead({ id: 'other', archived_at: null, pinned_at: null })
+  const pending = h.act('a', true)
+  await tick()
+  assert.deepEqual(h.calls, ['archive'], 'an unseen id still reaches the server')
+  h.requests[0].resolve({ ok: true })
+  assert.equal(await pending, true)
+  assert.deepEqual(h.refreshes, ['a'])
+  assert.equal(h.row.archived_at, 'server-archive')
+  assert.equal(h.notices[0].options.action.label, 'Undo')
 })
 
 test('unreachable archive says so and offers Try again', async () => {

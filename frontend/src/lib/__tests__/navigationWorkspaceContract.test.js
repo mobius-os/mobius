@@ -218,3 +218,14 @@ test('M1: snapshotRoute records Settings only when the takeover actually paints'
   // Back must never record 'settings' from the raw suspended flag in builder.
   assert.doesNotMatch(snap, /settingsOpenRef\.current \? 'settings'/)
 })
+
+// After the browser killed the page, recovery must happen before any app frame
+// is chosen: the workspace is recovered in the reducer's initializer (before the
+// first render) and the cold-restored app never seeds the warm frame list.
+test('crash recovery runs before frame selection, not after the first render', () => {
+  assert.match(navigation, /export const recoveringFromCrash = previousPageDied\(\)/)
+  assert.match(navigation, /coldRestoredCanvasAppId =\s*\(!recoveringFromCrash &&/)
+  assert.match(navigation, /if \(recoveringFromCrash && snapshotRoute\(\)\.view === 'canvas'\)/)
+  assert.match(workspaceSession, /recoveringFromCrash \? paneModel\.withoutBootApps\(restored\) : restored/)
+  assert.match(shell, /useWorkspaceSession\(\{[\s\S]*?recoveringFromCrash,\s*\}\)/)
+})

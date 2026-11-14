@@ -18,6 +18,7 @@ from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only
 
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
+from app import contribution_review_list as list_view
 from app import contribution_review_presets as presets
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
@@ -55,7 +56,9 @@ REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
                        "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
-                       "pr_machine": True, "owner_confirm": True}
+                       "pr_machine": True, "owner_confirm": True,
+                       # Following (the autopilot grant) can start on a sent PR, and can ask before each push.
+                       "follow_after_send": True, "follow_ask_mode": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -541,42 +544,35 @@ async def start_reviews(app_id: int | None, body: StartReviews,
 
 @router.get(APP_PREFIX + "/{app_id}/review-runs")
 def list_reviews(app_id: int | None, db: Session = Depends(get_db),
-                 principal: Principal = Depends(get_principal)):
+                 principal: Principal = Depends(get_principal),
+                 view: Literal["full", "summary"] = "full"):
+  """The owner's review runs, newest first.
+
+  `view=summary` is the cheap form for a client that polls: every run keeps what a row or badge
+  needs and loses its documents (see `contribution_review_list`); a run's full detail is `GET .../review-runs/{run_id}`.
+  An answer in that form says so with a top-level `"view": "summary"`; a Möbius older than the option
+  ignores it and answers in full, without the marker.
+  """
   _authorize_context(db, app_id, principal)
   rows = db.query(models.ContributionReviewRun).filter(
     models.ContributionReviewRun.owner_id == principal.owner.id,
     _read_context_filter(app_id),
   ).order_by(models.ContributionReviewRun.created_at.desc()).limit(100).all()
-  return {"runs": [_list_run_view(db, row, app_id) for row in rows],
-          "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  answer = {"runs": [_list_run_view(db, row, app_id, view) for row in rows],
+            "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  if view == "summary":
+    answer["view"] = view
+  return answer
 
 
-def _list_run_view(db, row, app_id):
-  """Keep owning clients compatible; bound only privacy-projected navigation."""
+def _list_run_view(db, row, app_id, view="full"):
+  """A run as the list shows it: one the asking app owns whole (or as its summary), a core run it reads through always minimized."""
   value = _run_view(db, row, context_app_id=app_id)
   if app_id is None or row.app_id == app_id:
-    return value
-  fields = ("repo", "number", "head_sha", "base_ref", "base_sha", "state", "url", "title",
-            "review_chat_id", "review_run_id", "merge_sha", "queue_entry_id",
-            "successor", "approved_head_sha", "approved_base_sha", "current_base_sha")
-  items = []
-  for item in value["items"]:
-    brief = {key: item[key] for key in fields if key in item}
-    if item.get("summary"):
-      summary = item["summary"]
-      if len(summary) > 240:
-        omission = "… open this run for the full findings"
-        brief.update(summary=summary[:240-len(omission)] + omission, summary_truncated=True)
-      else:
-        brief["summary"] = summary
-    if item.get("public_review"):
-      receipt = item["public_review"]
-      brief["public_review"] = {key: receipt[key] for key in ("state", "url", "id") if key in receipt}
-    items.append(brief)
-  value["items"] = items
+    return list_view.summary_run(value) if view == "summary" else value
+  value["items"] = [list_view.navigation_item(item) for item in value["items"]]
   if "options" in value:
-    value["options"] = {key: val for key, val in (value["options"] or {}).items()
-      if key in {"provider", "model", "reasoning_effort", "post_review", "confirmation_scope"}}
+    value["options"] = list_view.navigation_options(value["options"])
   return value
 
 

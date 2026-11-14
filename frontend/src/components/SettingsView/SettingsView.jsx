@@ -28,8 +28,9 @@ import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
-import WalletSection from './WalletSection.jsx'
+import WalletSection, { WalletConnect } from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
+import { creditsSection } from '../../lib/creditsWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -1156,7 +1157,7 @@ export default function SettingsView({
 
         <NotificationChannelsSummary active={active} onOpen={() => openDetailPage(NOTIFICATIONS_ELSEWHERE_PAGE)} />
 
-        {showOwnerAccounts && wallet.summary?.mode === 'customer' && (
+        {showOwnerAccounts && creditsSection(wallet.summary) === 'wallet' && (
           <WalletSection
             summary={wallet.summary}
             terms={wallet.terms}
@@ -1165,6 +1166,14 @@ export default function SettingsView({
             notice={wallet.notice}
             refusal={wallet.refusal}
             onBuy={wallet.buy}
+            onReconnect={wallet.pairWithAccount}
+          />
+        )}
+        {showOwnerAccounts && creditsSection(wallet.summary) === 'connect' && (
+          <WalletConnect
+            busy={wallet.busy}
+            refusal={wallet.refusal}
+            onConnect={wallet.pairWithAccount}
           />
         )}
 
