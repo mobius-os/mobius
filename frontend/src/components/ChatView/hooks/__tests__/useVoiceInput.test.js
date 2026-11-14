@@ -381,24 +381,27 @@ test("another chat starting during a manual-edit pause takes over and the pause 
 })
 
 test('dictation and its error notes build on a Markdown editor draft, which has no textarea value', () => {
+  // The editor's text follows what the composer commits, as it does live, so
+  // an error note must build on the dictated words, not the draft at start.
+  let doc = ''
   const originalFind = EditorView.findFromDOM
-  EditorView.findFromDOM = () => ({ state: { doc: { toString: () => '**keep this draft**' } } })
+  EditorView.findFromDOM = () => ({ state: { doc: { toString: () => doc } } })
   const input = { classList: { contains: name => name === 'cm-content' } }
   try {
     for (const error of ['not-allowed', 'network', 'service-not-allowed']) {
+      doc = '**keep this draft**'
       const instances = installSpeechRecognition()
-      const transcripts = []
       const { result } = renderHook(() => useVoiceInput({
-        onTranscript: text => transcripts.push(text),
+        onTranscript: text => { doc = text },
         inputRef: { current: input },
       }))
       result.current.startVoice()
       instances[0].onresult(speechResult(' and more'))
-      assert.equal(transcripts.at(-1), '**keep this draft** and more')
+      assert.equal(doc, '**keep this draft** and more')
 
       instances[0].onerror({ error })
       assert.equal(result.current.listeningRef.current, false)
-      assert.match(transcripts.at(-1), /^\*\*keep this draft\*\* \[/)
+      assert.ok(doc.startsWith('**keep this draft** and more ['), doc)
     }
   } finally {
     EditorView.findFromDOM = originalFind
