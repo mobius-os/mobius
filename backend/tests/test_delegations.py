@@ -1007,7 +1007,9 @@ def test_helper_without_resumable_session_needs_parent_review(
   assert "DELEGATION_WRITE_REVIEW_REQUIRED" in str(final)
 
 
-def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
+def test_child_policy_is_integrity_checked_and_session_loss_needs_review(
+  client, owner_token, db,
+):
   app = models.App(
     slug="test-delegations-116",
     source_dir="/tmp/mobius-tests/test-delegations-116",
@@ -1080,6 +1082,21 @@ def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
   status, _, result = derived_status(db, row)
   assert status == "needs_review"
   assert result == "Review before replaying."
+
+  # The preview must retain Needs review after its footer row disappears.
+  # Error markers classify status, but are not conversation/error disclosure.
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  response = client.get("/api/chats/parent/helpers/delegation", headers=headers)
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "needs_review"
+  assert response.json()["blocks"] == [
+    {"role": "user", "content": "Make the bounded edit."},
+  ]
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in response.text
+  assert "Review before replaying." not in response.text
+  assert client.get(
+    "/api/chats/child/helpers/delegation", headers=headers,
+  ).status_code == 404
 
   mark_cancelled(db, row)
   mark_cancelled(db, row)
