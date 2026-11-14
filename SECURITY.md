@@ -86,6 +86,23 @@ These are intentional design decisions appropriate for a single-owner app:
   rate-limits and can revoke each installation, and the mobile app must open a
   notification's tap link only when it is on the origin of the Möbius it is
   signed in to, so a taken-over phone can be shown text but not sent elsewhere.
+- **The identity broker trusts every `mobius` process alike:** its socket is
+  `root:mobius` mode 0660, and the backend, agents and app processes all run
+  as `mobius`, so any of them can call a broker route directly, without the
+  backend's checks on who is asking. That is no new opening at the operating
+  system level, since the same user can already read the installation secret,
+  but it does step around backend-only rules such as "delegated helpers cannot
+  manage credits". The managed credits-key route used by one-tap credits
+  pairing is the first broker route that returns a credential that spends
+  money: a direct call receives a live `mbc_` key in plain text and makes
+  mobius.you retire the key the backend holds. The backend asks again only
+  once the service refuses the key it holds; that check binds honest callers,
+  not a hostile local process. The same holds for every rule the backend puts
+  on spending credits, such as an app's reviewed `spend_credits` grant and the
+  sellers it lists: it binds callers of the backend's API, not code running as
+  `mobius`. An app's server-side service is a subprocess of the backend, so it
+  can reach the socket, take a live key and charge outside those rules: it has
+  the Möbius process's operating-system authority, as server-side app jobs do.
 - **90-day service token:** The app-job supervisor reads it only to mint a
   short-lived app token; job scripts do not inherit it. It is stored at
   `/data/service-token.txt` (chmod 600, mobius user only).

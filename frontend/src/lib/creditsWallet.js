@@ -104,6 +104,28 @@ export function termsFor(terms, summary) {
 }
 
 /**
+ * Which Credits section Settings shows: the wallet once paired, the one-tap
+ * connect card for an unpaired Möbius launched from mobius.you, or none (an
+ * unpaired self-hosted Möbius pairs with a key from its credits operator).
+ */
+export function creditsSection(summary) {
+  if (summary?.mode === 'customer') return 'wallet'
+  if (summary?.mode === 'unpaired' && summary.can_pair_with_account === true) return 'connect'
+  return null
+}
+
+/**
+ * Whether the wallet offers to reconnect: the service refuses the key this
+ * Möbius holds (revoked, or retired by a later connect), and the launcher can
+ * issue a new one. A key that may still work is never replaced.
+ */
+export function canReconnect(summary) {
+  return summary?.mode === 'customer'
+    && summary.can_pair_with_account === true
+    && ['key_refused', 'invalid_api_key'].includes(summary.error?.code)
+}
+
+/**
  * One line of wallet activity, in words.
  *
  * A charge is described by the service as "Used <seller>/<app>/<action>"; the

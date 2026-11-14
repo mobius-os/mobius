@@ -84,7 +84,17 @@ bots, send messages or make paid calls.
 The owner, or an installed Store app with accepted `credits_manage` consent
 (including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned. Shared-browser guests and delegated helpers cannot pair.
+control for pasting a key is planned. A Möbius launched from mobius.you (the
+summary's `can_pair_with_account`) can instead call
+`POST /api/identity/credits/pair/account` with no body, which Settings offers
+as **Connect credits**: the launcher issues this installation its own key. It
+answers 409 `not_managed` on a self-hosted Möbius, 409 `already_paired` when
+paired unless the service refuses the key this Möbius holds (asking would
+retire a key that may still work), and 503 `credits_unavailable` when
+mobius.you cannot supply a usable key. A refused key (`key_refused` or
+`invalid_api_key` in the summary's `error`) is replaced by the same call,
+which Settings offers as **Reconnect credits**.
+Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
 `credits_manage` works only for installed Store apps with accepted owner
 consent. Owner-built local apps never get it, even if their `mobius.json`

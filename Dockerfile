@@ -56,8 +56,8 @@ RUN useradd -m -s /bin/bash mobius
 # turns at it. amd64 browsers come from the pinned layer that follows.
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CODEX_VERSION=0.163.0
-ARG CODEX_SDK_VERSION=0.163.0
+ARG CODEX_VERSION=0.167.2
+ARG CODEX_SDK_VERSION=0.167.2
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git iproute2 jq poppler-utils procps ripgrep sudo tini unzip util-linux xxd \

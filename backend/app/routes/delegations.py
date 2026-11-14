@@ -221,6 +221,8 @@ async def submit_or_attach(
     ).first()
     if app is None:
       raise HTTPException(status_code=404, detail="Delegation owner app not found.")
+  if body.provider == "mobius":
+    await providers._fetch_model_entries(get_settings().data_dir, "mobius")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, body.provider,
   ):
@@ -399,6 +401,9 @@ async def delegation_capabilities(
       "error": error,
     }
   registry = await providers.list_models(get_settings().data_dir)
+  snapshot = providers.PROVIDERS["mobius"].registry_snapshot()
+  if "mobius" in registry:
+    registry["mobius"] = snapshot["models"]
   models_by_provider = {
     provider_id: [
       {"id": entry["id"], "name": entry["label"]}
@@ -424,7 +429,8 @@ async def delegation_capabilities(
     "connections": connections,
     "models": models_by_provider,
     "aliases": aliases,
-    "defaults": providers.DEFAULT_MODELS,
+    "defaults": {**providers.DEFAULT_MODELS, "mobius": snapshot["default"]},
+    "replacements": {"mobius": snapshot["replacements"]},
   }
 
 

@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -43,6 +44,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import get_settings
+from app.runtime_identity import broker_client
 
 TIMEOUT_SECONDS = 20.0
 KEY_PREFIX = "mbc_"
@@ -50,6 +52,11 @@ KEY_PREFIX = "mbc_"
 _HANDLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Where a Möbius launched from mobius.you asks its launcher for a key of its
+# own; the identity broker adds the installation's managed credential.
+ACCOUNT_KEY_ROUTE = "/managed/api/instance/v1/credits/key"
+# How a refused key reads: the service's own code, or ours when it sent none.
+KEY_REFUSED_CODES = frozenset({"key_refused", "invalid_api_key"})
 
 
 class CreditsUnavailable(Exception):
@@ -270,14 +277,18 @@ def _call(method: str, path: str, credentials: dict, payload: dict | None = None
 def summary() -> dict:
   """Credits and earnings for this owner, or why they cannot be shown."""
   credentials = load_credentials()
+  # Also sent once paired: a key the service refuses can be replaced this way.
+  can_pair_with_account = get_settings().mobius_sso_enabled
   if credentials is None:
     return {"mode": "unpaired", "service_host": None, "pairing": None,
-            "balance": None, "earnings": None, "error": None}
+            "balance": None, "earnings": None, "error": None,
+            "can_pair_with_account": can_pair_with_account}
   result = {
     "mode": "customer",
     "service_host": urlsplit(credentials["operator_url"]).hostname,
     "pairing": credentials["pairing"],
     "balance": None, "earnings": None, "error": None,
+    "can_pair_with_account": can_pair_with_account,
   }
   # Both reads at once, so a slow service costs one timeout, not two.
   with ThreadPoolExecutor(max_workers=2) as pool:
@@ -305,6 +316,81 @@ def pair(operator_url: str, key: str) -> dict:
   _call("GET", "balance", candidate)
   _save_credentials(candidate["operator_url"], key)
   return {"paired": True}
+
+
+# Serializes account pairing, so a second request waits and then finds the
+# installation paired instead of retiring the key the first one just saved.
+_ACCOUNT_PAIRING = threading.Lock()
+
+
+def pair_with_account() -> dict:
+  """Connect to the owner's own wallet, with no key for anyone to copy.
+
+  A Möbius launched from mobius.you asks its launcher, through the identity
+  broker that holds its managed credential, for a key of its own. The
+  launcher issues one and retires any key this installation had, and
+  ``pair`` then checks it at the service and seals it like any other.
+  Because asking retires the current key before the new one is checked, a
+  paired installation asks only once the service refuses the key it holds
+  (revoked, or retired by a later connect), and one request at a time asks.
+  """
+  if not get_settings().mobius_sso_enabled:
+    raise CreditsUnavailable(
+      "This Möbius was not launched from mobius.you, so it needs a credits key "
+      "from the credits operator.", status=409, code="not_managed")
+  with _ACCOUNT_PAIRING:
+    credentials = load_credentials()
+    if credentials is not None and not _key_refused(credentials):
+      raise CreditsUnavailable(
+        "This Möbius is already connected to its credits.",
+        status=409, code="already_paired")
+    operator_url, key = _launcher_key()
+    return pair(operator_url, key)
+
+
+def _key_refused(credentials: dict) -> bool:
+  """Whether the service refuses this key, so replacing it retires nothing.
+
+  Anything short of a refusal, including a service that cannot be reached,
+  counts as a key that may still work.
+  """
+  try:
+    _call("GET", "balance", credentials)
+  except CreditsUnavailable as error:
+    return error.code in KEY_REFUSED_CODES
+  return False
+
+
+def _launcher_key() -> tuple[str, str]:
+  """The service address and key the launcher issued for this installation.
+
+  Every way the launcher can fail to supply them reads as the launcher being
+  unavailable: the owner copied and entered nothing, so ``pair``'s
+  paste-a-key guidance would not apply.
+  """
+  unavailable = CreditsUnavailable(
+    "mobius.you could not connect your credits just now. Try again in a moment.",
+    status=503, code="credits_unavailable")
+  try:
+    with broker_client(timeout=TIMEOUT_SECONDS) as client:
+      response = client.post(ACCOUNT_KEY_ROUTE)
+  except (httpx.HTTPError, OSError) as error:
+    raise unavailable from error
+  try:
+    body = response.json()
+  except ValueError:
+    body = None
+  if response.status_code != 200 or not isinstance(body, dict):
+    raise unavailable
+  service_url, key = body.get("service_url"), body.get("key")
+  key = key.strip() if isinstance(key, str) else ""
+  if not (key.startswith(KEY_PREFIX) and len(key) > len(KEY_PREFIX)
+          and isinstance(service_url, str)):
+    raise unavailable
+  try:
+    return normalise_service_url(service_url), key
+  except CreditsUnavailable as error:
+    raise unavailable from error
 
 
 def unpair() -> dict:

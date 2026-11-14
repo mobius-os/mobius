@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Spacer / scroll behavior tests for ChatView.
  *
@@ -290,7 +291,7 @@ test.describe('Spacer mechanics', () => {
     const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
     await expect(scroll).toHaveAttribute('data-scroll-mode', 'PIN_USER_MSG')
     await composer.fill('Second message')
-    await expect(composer).toHaveValue('Second message')
+    await expectComposerValue(composer, 'Second message')
     await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM')
     await composer.press('Enter')
     await page.evaluate(() => new Promise(r =>
@@ -1436,9 +1437,8 @@ test.describe('Scroll edge cases', () => {
     await page.evaluate(() => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
       const scroll = surface.querySelector('.chat__scroll')
-      const input = surface.querySelector('.chat__input')
       scroll.scrollTop = scroll.scrollHeight
-      input.focus({ preventScroll: true })
+      surface.querySelector('.chat__editor-content').focus({ preventScroll: true })
     })
     const atTail = await measure(page)
     expect(atTail.scrollH - atTail.scrollTop - atTail.clientH).toBeLessThanOrEqual(4)
@@ -1449,6 +1449,7 @@ test.describe('Scroll edge cases', () => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
       const scroll = surface.querySelector('.chat__scroll')
       const input = surface.querySelector('.chat__input')
+      const editor = surface.querySelector('.chat__editor-content')
       const foot = surface.querySelector('.chat__foot')
       window.__mobiusChatScrollTrace = {
         version: 1,
@@ -1468,7 +1469,7 @@ test.describe('Scroll edge cases', () => {
 
       // A bottom-edge touch can still be waiting to prove whether a native
       // scroll will arrive. Paste from the software keyboard then changes the
-      // already-focused textarea without another DOM pointer event.
+      // already-focused editor without another DOM pointer event.
       scroll.dispatchEvent(new PointerEvent('pointerdown', {
         bubbles: true,
         button: 0,
@@ -1481,26 +1482,16 @@ test.describe('Scroll edge cases', () => {
         'Third pasted line.',
         'Fourth pasted line.',
       ]
-      const valueSetter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        'value',
-      ).set
-      valueSetter.call(input, lines[0])
-      input.dispatchEvent(new InputEvent('input', {
-        bubbles: true,
-        inputType: 'insertFromPaste',
-        data: lines[0],
-      }))
+      const paste = text => {
+        const clipboardData = new DataTransfer()
+        clipboardData.setData('text/plain', text)
+        editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }))
+      }
+      paste(lines[0])
       const immediate = sample()
       const settledFrames = []
       for (const line of lines.slice(1)) {
-        const next = `${input.value}\n${line}`
-        valueSetter.call(input, next)
-        input.dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          inputType: 'insertLineBreak',
-          data: line,
-        }))
+        paste(`\n${line}`)
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
         settledFrames.push(sample())
       }
