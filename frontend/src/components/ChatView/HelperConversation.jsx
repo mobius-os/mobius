@@ -12,8 +12,9 @@ import { isPlainLeftClick } from './internalLink.js'
 import './HelperConversation.css'
 
 // A running helper keeps writing its conversation; re-read it on this cadence
-// while the dialog is open. A settled helper is read once.
+// while the preview is open; idle previews check less often for a later resume.
 const LIVE_REFRESH_MS = 3000
+const IDLE_REFRESH_MS = 15000
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
 const STATUS_LABELS = { running: 'Working', done: 'Finished', failed: 'Failed', waiting: HELPER_AWAITING_PARENT_LABEL }
@@ -66,7 +67,7 @@ export default function HelperConversation({
           ? prev
           : { phase: 'error', message: error?.message || 'Could not load this conversation.' })
       }
-      if (running && !controller.signal.aborted) timer = setTimeout(load, LIVE_REFRESH_MS)
+      if (!controller.signal.aborted) timer = setTimeout(load, running ? LIVE_REFRESH_MS : IDLE_REFRESH_MS)
     }
     load()
     return () => {
