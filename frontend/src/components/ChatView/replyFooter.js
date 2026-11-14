@@ -28,28 +28,24 @@ export function agentStretches(messages, replyGroups) {
  *  It sits on the reply at the very end of the chat: the live reply's group
  *  at `liveIndex` while one is shown (-1 otherwise), else the one holding the
  *  last visible row. `state` is 'settled' while no turn is starting or
- *  running; while one is, 'working' (an empty, reserved line) on a reply the
- *  turn is writing, and null on the reply that held the footer when it
- *  started, which the live surface can briefly reselect before the turn's
- *  reply exists. That reply is told apart by where it ends: `settledEnd` is
- *  the absolute index of the settled footer reply's last row, and a turn
- *  continuing that same reply adds a row after it.
+ *  running; while one is, 'working' keeps that reply's empty line even when
+ *  a question resumes its existing row. A visible owner send removes the old
+ *  footer; a stale live selection must not bring it back below that message.
  *
  *  `start` is the index of the stretch's first row after the owner's, so a
  *  hidden carrier opening it stays with it; `truncated` says the stretch may
  *  have begun before the loaded page (whose first row is at `offset`). */
 export function replyFooter({
   messages, replyGroups, stretches, liveIndex = -1, lastVisibleIndex, offset = 0,
-  turnStarting = false, settledEnd = null,
+  turnStarting = false,
 }) {
   const group = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
   const groups = group && stretches.get(group)
-  if (!groups) return null
+  if (!groups || group.end < lastVisibleIndex) return null
   let before = groups[0].start - 1
   while (before >= 0 && messages[before]?.hidden) before -= 1
   const end = offset + group.end
-  const state = !turnStarting ? 'settled'
-    : liveIndex >= 0 && end !== settledEnd ? 'working' : null
+  const state = turnStarting ? 'working' : 'settled'
   return { group, groups, state, end, start: before + 1, truncated: before < 0 && offset > 0 }
 }
 

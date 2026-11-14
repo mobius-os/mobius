@@ -322,17 +322,32 @@ test('a stretch that reaches the loaded page’s first row may have begun earlie
   assert.equal(footerOf(messages).truncated, false, 'the whole chat is loaded')
 })
 
-test('a starting turn clears the footer; only a reply the turn writes reserves its line', () => {
+test('answering a question keeps the existing footer line through same-row continuation', () => {
   const messages = [ownerRow, row('a')]
-  const settledEnd = footerOf(messages).end
-  assert.equal(footerOf(messages, { turnStarting: true, settledEnd }).state, null,
-    'sending or answering a card clears the footer at once')
-  assert.equal(footerOf(messages, { turnStarting: true, settledEnd, liveIndex: 1 }).state, null,
-    'the live surface briefly reselecting the settled reply does not bring its line back')
-  const live = [...messages, ownerRow, { role: 'assistant', id: 'live', blocks: [] }]
-  const working = footerOf(live, { turnStarting: true, settledEnd, liveIndex: 3 })
+  for (const liveIndex of [-1, 1]) {
+    const footer = footerOf(messages, { turnStarting: true, liveIndex })
+    assert.equal(footer.state, 'working', 'pending submission and live reuse both keep an empty line')
+    assert.equal(footerCopyParts(footer, { messages }), null, 'controls stay hidden until settlement')
+  }
+  assert.equal(footerOf(messages).state, 'settled', 'failed submission or terminal settlement restores controls')
+})
+
+test('a visible owner send removes the previous footer even if live selection still points to it', () => {
+  const messages = [ownerRow, row('a'), ownerRow]
+  for (const liveIndex of [-1, 1]) {
+    assert.equal(footerOf(messages, { turnStarting: true, liveIndex }), null)
+  }
+  const live = [...messages, { role: 'assistant', id: 'live', blocks: [] }]
+  const working = footerOf(live, { turnStarting: true, liveIndex: 3 })
   assert.equal(working.group.start, 3)
   assert.equal(working.state, 'working')
+})
+
+test('a hidden continuation preserves the line until its new reply takes over', () => {
+  const messages = [ownerRow, row('a'), cardAnswer]
+  assert.equal(footerOf(messages, { turnStarting: true }).state, 'working')
+  const resumed = [...messages, row('b')]
+  assert.equal(footerOf(resumed, { turnStarting: true, liveIndex: 3 }).group.start, 3)
 })
 
 test('a turn continuing the reply that held the footer keeps its line reserved', () => {
@@ -340,9 +355,8 @@ test('a turn continuing the reply that held the footer keeps its line reserved',
   // so its first row (and the group's key) is unchanged; its end moves.
   const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
   const settled = [ownerRow, row('run')]
-  const settledEnd = footerOf(settled).end
   const resumed = [...settled, steer, row('run:assistant:1')]
-  const footer = footerOf(resumed, { turnStarting: true, settledEnd, liveIndex: 3 })
+  const footer = footerOf(resumed, { turnStarting: true, liveIndex: 3 })
   assert.equal(footer.group.start, 1, 'the same reply')
   assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
 })

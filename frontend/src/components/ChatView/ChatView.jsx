@@ -5946,33 +5946,18 @@ export default function ChatView({
     end, groups.slice(0, -1).flatMap(group => group.rows.map(row => row.message)),
   ])), [stretches])
   // Answering a card starts the turn the moment it is submitted, before the
-  // server acknowledges it; a failed answer clears this and the footer returns.
+  // server acknowledges it; failure restores controls in the reserved line.
   const turnStarting = turnActive || questionFollowHandoff != null
-  // The settled footer reply's end (see replyFooter). It is state set from a
-  // committed render's layout effect, so a discarded render cannot name a
-  // reply, and it updates before paint. Kept with its chat, so switching
-  // chats never carries one chat's settled reply into another.
-  const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
-  const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
-  // One footer for the whole chat, on the reply at its very end. Once the
-  // owner speaks or answers a card there is none until the next reply starts,
-  // so that reply's Thinking takes the footer's place instead of appearing
-  // below it.
+  // Keep the final reply's line during continuation. A new visible owner
+  // message ends that reply's ownership; hidden answer carriers do not.
   const footerLiveIndex = showActiveAssistantSurface
     ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
   const footer = useMemo(() => replyFooter({
     messages: peerTimeline.messages, replyGroups, stretches, liveIndex: footerLiveIndex,
-    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd,
+    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting,
   }), [peerTimeline.messages, replyGroups, stretches, footerLiveIndex,
-    lastVisibleMessageIndex, offset, turnStarting, settledEnd])
+    lastVisibleMessageIndex, offset, turnStarting])
   const footerGroup = footer?.group ?? null
-  const footerEnd = footer?.end ?? null
-  useLayoutEffect(() => {
-    if (!turnStarting) {
-      setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
-        ? prev : { chatId, end: footerEnd }))
-    }
-  }, [chatId, turnStarting, footerEnd])
   // A stretch that began before the loaded page reads its start only when
   // the footer is about to be used.
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(
@@ -6048,8 +6033,7 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      // The footer clears the moment a new turn starts (an answered card
-      // included) and fills again where the agent next stops.
+      // Controls clear while the final reply continues; its line stays.
       footer={group === footerGroup ? footer.state : null}
       copy={group === footerGroup ? footerCopy : undefined}
       metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
