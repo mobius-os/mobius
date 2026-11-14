@@ -625,46 +625,57 @@ def test_guest_cannot_launch_clean_owner_conflict_resolver(https, auth, route, b
   assert "installation owner" in response.json()["detail"]
 
 
-def test_full_access_lifts_installation_controls_for_that_person_only_while_on(https, auth):
+def test_full_access_lifts_only_its_own_gate_for_that_person_while_on(https, auth):
   other, other_token, _ = invite(https, label="Bob")
   # A second person signs in from their own browser.
   https.cookies.clear()
   grant, token, _ = invite(https)
   guest = {"Authorization": "Bearer " + token}
-  assert https.get(ROOT, headers=guest).status_code == 403
+  allowed = "/api/notifications/seen-all"
+  assert https.post(allowed, headers=guest).status_code == 403
   turned_on = https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)
   assert turned_on.status_code == 200, turned_on.text
   assert turned_on.json()["grant"]["full_access"] is True
-  # Applies at once to the bearer the guest already holds.
-  listed = https.get(ROOT, headers=guest)
-  assert listed.status_code == 200, listed.text
-  assert {g["id"]: g["full_access"] for g in listed.json()["grants"]} == {grant: True, other: False}
-  # Only that person: everyone else keeps the guest boundary.
-  assert https.get(ROOT, headers={"Authorization": "Bearer " + other_token}).status_code == 403
-  # The owner's own screen stays the owner's, as it does for a connected Möbius.
-  assert https.get("/api/screen-control/sessions/fake/events", headers=guest).status_code == 403
-  # So do the owner's own decisions, such as accepting an app's requested access.
-  assert https.post("/api/apps/1/consent", json={"digest": "x"}, headers=guest).status_code == 403
-  assert https.delete("/api/apps/1/consent", headers=guest).status_code == 403
-  # And the owner's own account: credit is never moved or paid by a guest.
-  unpaired = https.post("/api/identity/credits/unpair", headers=guest)
-  assert unpaired.status_code == 403 and "installation owner" in unpaired.json()["detail"]
-  assert https.post("/api/apps/1/credits-charges/p1", json={"pay": True}, headers=guest).status_code == 403
-  # Minting a credential would outlive this grant's revocation, so it stays
-  # with the installation owner.
-  for route, body in [
-    ("/api/auth/install-pass", {}),
-    ("/api/auth/shell-install-pass", None),
-    ("/api/auth/app-job-token", {"app_id": 1}),
-  ]:
-    minted = https.post(route, json=body, headers=guest)
-    assert minted.status_code == 403, (route, minted.text)
-    assert "installation owner" in minted.json()["detail"]
+  # Applies at once to the bearer the guest already holds, for that person only.
+  assert https.post(allowed, headers=guest).status_code == 200
+  assert https.post(allowed, headers={"Authorization": "Bearer " + other_token}).status_code == 403
+  # Everything else on the strict installation-owner gate stays the owner's:
+  # sharing and invites of any kind, push subscriptions, owner decisions,
+  # the owner's accounts and credit, credential minting, and the owner's
+  # own screen.
+  refused = [
+    ("get", ROOT, None),
+    ("patch", ROOT + "/" + other, {"full_access": True}),
+    ("delete", ROOT + "/" + other, None),
+    ("post", ROOT + "/accounts", {"recipient_handle": "another-person"}),
+    ("get", ROOT + "/shared", None),
+    ("post", ROOT + "/shared/respond", {"origin": "https://other.example", "grant_id": "g" * 32, "action": "accept"}),
+    ("post", "/api/push/subscribe", {"endpoint": "https://push.example/x", "keys": {"p256dh": "k", "auth": "a"}}),
+    ("put", "/api/push/devices", {"token": "t", "platform": "ios"}),
+    ("get", "/api/push/devices", None),
+    ("post", "/api/projects/p1/invites", {}),
+    ("post", "/api/shared-apps/s1/invites", {}),
+    ("post", "/api/apps/1/runtime-capabilities/accept", {}),
+    ("post", "/api/apps/1/consent", {"digest": "x"}),
+    ("delete", "/api/apps/1/consent", None),
+    ("post", "/api/apps/1/credits-charges/p1", {"pay": True}),
+    ("post", "/api/identity/credits/unpair", None),
+    ("post", "/api/auth/install-pass", {}),
+    ("post", "/api/auth/shell-install-pass", None),
+    ("post", "/api/auth/app-job-token", {"app_id": 1}),
+    ("post", "/api/admin/sign-out-everywhere", None),
+    ("get", "/api/screen-control/sessions/fake/events", None),
+  ]
+  for method, route, body in refused:
+    kwargs = {"headers": guest} if body is None else {"headers": guest, "json": body}
+    response = getattr(https, method)(route, **kwargs)
+    assert response.status_code == 403, (method, route, response.text)
+  assert https.get(ROOT, headers=auth).json()["grants"][0]["full_access"] is False
   assert https.patch(ROOT + "/" + grant, json={"full_access": False}, headers=auth).status_code == 200
-  assert https.get(ROOT, headers=guest).status_code == 403
+  assert https.post(allowed, headers=guest).status_code == 403
   https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)
   assert https.delete(ROOT + "/" + grant, headers=auth).status_code in (202, 204)
-  assert https.get(ROOT, headers=guest).status_code == 401
+  assert https.post(allowed, headers=guest).status_code == 401
   assert https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth).status_code == 409
 
 

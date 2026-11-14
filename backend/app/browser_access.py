@@ -51,8 +51,8 @@ class BrowserAccessGrant(Base):
   origin = Column(String(255), nullable=True)
   remote_status = Column(String(24), nullable=True)
   grantor_binding = Column(String(128), nullable=True)
-  # The owner's per-recipient choice to also grant installation controls, as
-  # Full access does for a connected Möbius. Read live on every check.
+  # The owner's per-recipient Full access: it lifts only
+  # ``deps.require_owner_or_full_access_control``. Read live on every check.
   full_access = Column(Boolean, nullable=False, default=False, server_default=false())
 
 
@@ -193,7 +193,7 @@ def is_live(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
 
 
 def has_full_access(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
-  """Whether this live guest lineage also holds installation controls.
+  """Whether this live guest lineage holds Full access.
 
   Read fresh on every check, so turning Full access off or revoking ends it
   at once, including for work the guest already started."""

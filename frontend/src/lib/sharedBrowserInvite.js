@@ -3,9 +3,10 @@ export function consumeSharedBrowserEntry(location, history) {
   const fragment = location.hash?.replace(/^#/, '') || ''
   const params = new URLSearchParams(fragment)
   if (fragment) history.replaceState(history.state, '', location.pathname + location.search)
-  // Each hint names one admission: an invitation, an account sign-in, or an
-  // account proof the recipient made to give their access up.
-  const kinds = [['invite', 'invite'], ['account-finalize', 'account'], ['account-leave', 'leave']]
+  // Each hint names one admission: an invitation, an account sign-in, or a
+  // grant the recipient is about to leave or has just left.
+  const kinds = [['invite', 'invite'], ['account-finalize', 'account'],
+    ['account-leave', 'leave'], ['account-left', 'left']]
     .filter(([key]) => params.has(key))
   if (!kinds.length) return null
   if (kinds.length > 1) return { kind: 'invalid' }

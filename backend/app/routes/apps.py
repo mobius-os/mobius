@@ -85,10 +85,11 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   get_current_owner_or_app, get_principal, get_principal_or_public_service,
   Principal, revocable_browser_stream,
   get_owner_or_app_with_manage_apps, reject_cross_site,
-  require_nondelegated_owner_control, require_nondelegated_owner_or_app_control,
+  require_nondelegated_owner_control, require_owner_or_full_access_control,
 )
 from app.resource_access import live_app, live_app_or_404, recheck_app_identity
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -2181,7 +2182,7 @@ async def _create_conflict_resolver_chat(
   response_model=schemas.AppConflictResolverChatOut,
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 async def create_conflict_resolver_batch_chat(
@@ -2198,7 +2199,7 @@ async def create_conflict_resolver_batch_chat(
   response_model=schemas.AppConflictResolverChatOut,
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_owner_or_full_access_control),
   ],
 )
 async def create_conflict_resolver_chat(
@@ -2861,7 +2862,7 @@ async def set_app_badge(
 
   The write runs under the app's storage lock; keep it a tiny transition.
   """
-  require_nondelegated_owner_or_app_control(principal)
+  require_owner_or_full_access_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
       status_code=403, detail="App token can only set its own badge.",
@@ -3342,7 +3343,7 @@ async def get_icon(
 async def delete_uninstalled_app_permanently(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ):
   """Erases an uninstalled app now instead of waiting out its 7-day window.
 

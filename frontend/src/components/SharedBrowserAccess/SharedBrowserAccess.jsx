@@ -7,7 +7,6 @@ import {
   finalizeSharedBrowserAccount,
   renewSharedBrowserSession,
   leaveSharedBrowserSession,
-  leaveSharedBrowserAccess,
   BASE,
 } from '../../api/client.js'
 import { watchSharedBrowserEntries } from '../../lib/sharedBrowserInvite.js'
@@ -18,6 +17,7 @@ const Shell = lazy(() => import('../Shell/Shell.jsx'))
 function entryStatus(entry) {
   if (entry?.kind === 'invite') return 'invited'
   if (entry?.kind === 'leave') return 'leave-confirm'
+  if (entry?.kind === 'left') return 'left'
   if (entry?.kind === 'invalid') return 'ended'
   return 'checking'
 }
@@ -27,7 +27,6 @@ export default function SharedBrowserAccess({ initialEntry = null }) {
   const [entry, setEntry] = useState(initialEntry)
   const [grant, setGrant] = useState(null)
   const [status, setStatus] = useState(entryStatus(initialEntry))
-  const [leftName, setLeftName] = useState('')
   const [logoutFailed, setLogoutFailed] = useState(false)
   const admissionVersionRef = useRef(0)
 
@@ -44,7 +43,7 @@ export default function SharedBrowserAccess({ initialEntry = null }) {
   }), [queryClient])
 
   useEffect(() => {
-    if (entry?.kind === 'invite' || entry?.kind === 'invalid' || entry?.kind === 'leave') return undefined
+    if (['invite', 'invalid', 'leave', 'left'].includes(entry?.kind)) return undefined
     let live = true
     const admissionVersion = admissionVersionRef.current
     const admission = entry?.kind === 'account'
@@ -81,22 +80,6 @@ export default function SharedBrowserAccess({ initialEntry = null }) {
     }
   }
 
-  async function giveUpAccess() {
-    if (entry?.kind !== 'leave' || !entry.value) return
-    const admissionVersion = admissionVersionRef.current
-    const pendingId = entry.value
-    setEntry({ kind: 'leave', value: '' })
-    setStatus('leaving')
-    try {
-      const data = await leaveSharedBrowserAccess(pendingId)
-      if (admissionVersion !== admissionVersionRef.current) return
-      setLeftName(data.name)
-      setStatus('left')
-    } catch {
-      if (admissionVersion === admissionVersionRef.current) setStatus('leave-failed')
-    }
-  }
-
   async function leave() {
     setGrant(null)
     setStatus('ended')
@@ -117,26 +100,25 @@ export default function SharedBrowserAccess({ initialEntry = null }) {
       <Shell sharedBrowserAccess={{ grant, onLeave: leave }} onInitialVisualReady={() => document.getElementById('splash')?.remove()} />
     </Suspense>
   }
-  const settled = ['invited', 'ended', 'leave-confirm', 'left', 'leave-failed'].includes(status)
+  const settled = ['invited', 'ended', 'leave-confirm', 'left'].includes(status)
   const title = {
     invited: 'Trusted access to this Möbius',
     ended: 'Shared access ended',
     'leave-confirm': 'Leave this shared Möbius?',
-    leaving: 'Leaving…',
     left: 'You left this shared Möbius',
-    'leave-failed': 'Couldn’t leave',
   }[status] || 'Checking shared access…'
   return <main className="shared-browser-access" data-mobius-visual-state={settled ? 'settled' : undefined}>
     <section className="shared-browser-access__card">
       <h1>{title}</h1>
       {status === 'leave-confirm' && <>
-        <p>Your access to this Möbius ends now, in every browser, and anything you started here is stopped. It disappears from your Shared with me list.</p>
+        <p>After mobius.you confirms it’s you, your access to this Möbius ends in every browser, and anything you started here is stopped. It disappears from your Shared with me list.</p>
         <p>To come back, the owner has to invite you again. Close this tab to keep your access.</p>
-        <button type="button" onClick={giveUpAccess}>Leave</button>
+        {/* A same-origin POST, so a link from another site alone never leaves. */}
+        <form method="post" action={`${BASE}/api/connect/browser-access/session/account/leave/start?grant_id=${encodeURIComponent(entry.value)}`}>
+          <button type="submit">Leave</button>
+        </form>
       </>}
-      {status === 'leaving' && <p role="status">Ending your access…</p>}
-      {status === 'left' && <p>{leftName ? `Your access to ${leftName} has ended.` : 'Your access has ended.'} You can close this tab.</p>}
-      {status === 'leave-failed' && <p>Your access was not changed. Start again from Leave in Shared with me.</p>}
+      {status === 'left' && <p>Your access to this Möbius has ended. You can close this tab.</p>}
       {status === 'invited' && <>
         <p>This invitation grants access to the same chats, apps, data, and actions on this Möbius instance. It is not a private workspace or a limited preview.</p>
         <p>Accept only if you trust the person who shared it and are comfortable acting in their instance.</p>

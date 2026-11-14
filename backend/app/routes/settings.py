@@ -31,7 +31,7 @@ from app.database import get_db
 from app.deps import (
   Principal,
   get_current_owner,
-  get_current_owner_for_lifecycle_control,
+  get_current_owner_for_lifecycle_control, get_current_owner_for_full_access_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
   get_owner_principal,
@@ -385,7 +385,7 @@ async def redeem_claude_reset(
 @settings_router.post("", dependencies=[Depends(reject_cross_site)])
 def update_settings(
   body: SettingsUpdate,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ) -> dict:
   """Save owner-wide provider, model, skills, and background-agent settings.
@@ -615,7 +615,7 @@ def dependency_setup_status(_: models.Owner = Depends(get_current_owner)):
 
 
 @router.post("/api/setup/rerun", status_code=202, dependencies=[Depends(reject_cross_site)])
-async def rerun_dependency_setup(_: models.Owner = Depends(get_current_owner_for_lifecycle_control)):
+async def rerun_dependency_setup(_: models.Owner = Depends(get_current_owner_for_full_access_control)):
   from app import app_setup
   app_setup.request_run(cancel=True)
   return {"status": "pending"}

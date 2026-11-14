@@ -2141,15 +2141,21 @@ handles in the public directory. This is an API boundary, not a sandbox
 around what a guest-started agent or a guest-edited app can later do.
 
 The owner may turn on **Full access** for one grant (`full_access`, off by
-default), matching the Full access a connected Möbius can hold:
-`require_installation_owner_control` then admits that grant's lineage while
-`browser_access.has_full_access` holds. It is read on every check, so turning
-it off or revoking applies to the next request, including work the guest
-already started. The owner's own decisions (`require_installation_owner`, such
-as app consent and credit payments), the owner's own accounts
-(`require_account_owner`), credential minting (install passes and job tokens,
-which would carry no grant lineage), shared folders and screen control refuse
-every guest.
+default). It lifts exactly one gate, `require_owner_or_full_access_control`,
+for that grant's lineage while `browser_access.has_full_access` holds; it is
+read on every check, so turning it off or revoking applies to the next
+request, including work the guest already started. That gate sits only on the
+workspace lifecycle a connected Möbius with Full access can drive: deleting,
+recovering and compacting chats, app maintenance, skills, settings,
+notifications, project lifecycle and platform updates and restarts.
+`require_installation_owner_control` itself never admits a guest, so a route
+stays owner-only unless it opts in. By rule, no route that mints a
+credential, makes the owner's own decision (app consent and permissions,
+runtime capabilities, payments), uses the owner's accounts or credit, manages
+sharing or invites of any kind, subscribes to the owner's notifications, or
+creates anything that would outlive the grant (schedules, reminders, hosted
+publications, paired machines) opts in. Shared folders and screen control
+refuse every guest.
 
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input
@@ -2181,14 +2187,14 @@ validation leaves that prior session unchanged. Verified proof admission expires
 within 60 seconds; old pending rows are pruned on subsequent starts.
 
 A recipient can leave without waiting for the owner. Shared with me carries a
-`leave_url` to `/session/account/leave/start` on the sharing instance, which runs
-the same proof flow under a separate pending cookie: the cookie that matches the
-callback state decides its purpose, so a sign-in proof can never leave and a
-leave proof can never sign in. The callback sends a leave proof to a
-confirmation in the shared shell, so a cross-site link alone ends nothing; its
-same-origin POST consumes the proof and runs the owner's revoke and
-`end_grant`, including directory removal. Declining an invitation is the same
-action.
+`leave_url` to a confirmation page in the sharing instance's shared shell.
+Its Leave button is a same-origin POST to `/session/account/leave/start`, so
+a cross-site link alone ends nothing; that runs the same proof flow under a
+separate pending cookie. The cookie that matches the callback state decides
+its purpose, so a sign-in proof can never leave and a leave proof can never
+sign in. A leave proof is spent in the callback itself, which runs the
+owner's revoke and `end_grant`, including directory removal, so no
+confirmation window can lapse. Declining an invitation is the same action.
 
 Local validation pins the issuer, runtime origin and grantor credential generation
 (or managed instance ID and owner subject). Changing those bindings invalidates

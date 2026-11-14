@@ -226,12 +226,14 @@ def _shared_instance(row) -> dict | None:
       or row.get("status") not in ("invited", "accepted")
       or type(row.get("unread")) is not bool):
     return None
-  query = "?grant_id=" + quote(gid, safe="")
-  return {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
-          "status": row["status"], "unread": row["unread"],
-          "open_url": origin + "/api/connect/browser-access/session/account/start" + query,
-          # Leaving runs on the sharing instance, which must support it.
-          "leave_url": origin + "/api/connect/browser-access/session/account/leave/start" + query}
+  instance = {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
+              "status": row["status"], "unread": row["unread"],
+              "open_url": origin + "/api/connect/browser-access/session/account/start?grant_id=" + quote(gid, safe="")}
+  # Leaving runs on the sharing instance. Only the directory can say that
+  # instance supports it (this side never contacts it), so no word, no link.
+  if row.get("leave") is True:
+    instance["leave_url"] = origin + "/shell/shared#account-leave=" + quote(gid, safe="")
+  return instance
 
 
 @router.get("/shared")
@@ -287,10 +289,14 @@ def start_account_session(request: Request, grant_id: str, db: Session = Depends
   return _start_proof(db, grant_id, _PENDING_COOKIE)
 
 
-@router.get("/session/account/leave/start")
+@router.post("/session/account/leave/start")
 @_limiter.limit("10/minute")
 def start_account_leave(request: Request, grant_id: str, db: Session = Depends(get_db)):
-  """Recipient-initiated: prove the account, then confirm leaving here."""
+  """The recipient confirmed Leave on this origin's page; now prove the account.
+
+  Only a same-origin POST starts it, so a cross-site link alone never ends
+  someone's access, and the proof is spent the moment it returns."""
+  _cookie_request(request)
   return _start_proof(db, grant_id, _LEAVE_COOKIE)
 
 
@@ -307,11 +313,17 @@ async def complete_account_session(
   )
   proof_expiry = await account_access.exchange_code(pending, grant, code)
   account_access.mark_verified(db, pending.id, proof_expiry)
-  # Leaving is confirmed on this origin, so a cross-site link alone never
-  # ends someone's access.
-  fragment = "account-leave=" if leaving else "account-finalize="
-  return RedirectResponse("/shell/shared#" + fragment + pending.id, status_code=303,
-                          headers=_SECRET_HEADERS)
+  if not leaving:
+    return RedirectResponse("/shell/shared#account-finalize=" + pending.id, status_code=303,
+                            headers=_SECRET_HEADERS)
+  left = await account_access.leave(db, pending.id)
+  response = RedirectResponse("/shell/shared#account-left=" + quote(left.id, safe=""),
+                              status_code=303, headers=_SECRET_HEADERS)
+  response.delete_cookie(_LEAVE_COOKIE, path=_PENDING_PATH,
+                         secure=True, httponly=True, samesite="lax")
+  # This browser's shared session belonged to the grant and is now dead.
+  response.delete_cookie(_COOKIE, path=_COOKIE_PATH, secure=True, httponly=True, samesite="strict")
+  return response
 
 
 @router.post("/session/account/finalize")
@@ -329,24 +341,6 @@ def finalize_account_session(
   response = _session_response(db, grant, session, owner, secret)
   response.delete_cookie(_PENDING_COOKIE, path=_PENDING_PATH,
                          secure=True, httponly=True, samesite="lax")
-  return response
-
-
-@router.post("/session/account/leave")
-@_limiter.limit("10/minute")
-async def leave_shared_access(
-  body: FinalizeAccountRequest, request: Request, db: Session = Depends(get_db),
-):
-  _cookie_request(request)
-  pending = account_access.verified_for_cookie(db, request.cookies.get(_LEAVE_COOKIE, ""))
-  if pending.id != body.pending_id:
-    raise HTTPException(401, "Account sign-in unavailable. Start again from the shared link.")
-  grant = await account_access.leave(db, pending.id)
-  response = JSONResponse({"left": True, "name": grant.label}, headers=_NO_STORE)
-  response.delete_cookie(_LEAVE_COOKIE, path=_PENDING_PATH,
-                         secure=True, httponly=True, samesite="lax")
-  # This browser's shared session belonged to the grant and is now dead.
-  response.delete_cookie(_COOKIE, path=_COOKIE_PATH, secure=True, httponly=True, samesite="strict")
   return response
 
 

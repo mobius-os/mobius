@@ -11,8 +11,7 @@ from app import auth, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner_for_lifecycle_control,
-  get_installation_owner_for_credential_minting, reject_cross_site,
+  get_current_owner_for_lifecycle_control, reject_cross_site,
 )
 from app.shell_install_pass import (
   COOKIE_NAME,
@@ -48,7 +47,7 @@ def _failure() -> JSONResponse:
   dependencies=[Depends(reject_cross_site)],
 )
 def prepare_shell_install_pass(
-  owner: models.Owner = Depends(get_installation_owner_for_credential_minting),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Prepare the owner session iOS copies into a new Home Screen shell."""

@@ -49,6 +49,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   get_project_principal, reject_cross_site, require_account_owner_control,
   resolve_project_principal,
 )
@@ -1916,7 +1917,7 @@ def list_project_agent_messages(
 def send_project_agent_message(
   project_id: str,
   body: ProjectAgentMessageCreate,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
@@ -2115,7 +2116,7 @@ def patch_project(
 )
 async def delete_project(
   project_id: str,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   # The receipt is readable as soon as the tombstone commits. Recovery must
@@ -2208,7 +2209,7 @@ async def delete_project(
 async def recover_project(
   project_id: str,
   body: schemas.RecoveryRequest | None = None,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_full_access_control),
   db: Session = Depends(get_db),
 ):
   async with serialize_project_lifecycle(project_id):

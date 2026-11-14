@@ -7436,7 +7436,7 @@ _SCHEMA_MIGRATIONS = (
   ("0103_shared_peer_note_bodies", _add_shared_peer_note_bodies),
   ("0104_claude_session_costs", _repair_claude_session_costs),
   ("0105_autopilot_push_mode", _add_autopilot_push_mode),
-  ("0099_browser_grant_full_access", _add_browser_grant_full_access),
+  ("0106_browser_grant_full_access", _add_browser_grant_full_access),
 )
 
 

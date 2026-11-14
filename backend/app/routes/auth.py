@@ -41,7 +41,6 @@ from app.deps import (
   get_principal,
   get_chat_view_principal,
   get_current_owner, get_current_owner_for_lifecycle_control,
-  get_installation_owner_for_credential_minting,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
   acts_for_guest, get_owner_or_delegated_owner_for_app_token, reject_cross_site,
@@ -362,7 +361,7 @@ def _invalid_install_pass() -> None:
 )
 def mint_install_pass(
   body: schemas.InstallPassRequest,
-  owner: models.Owner = Depends(get_installation_owner_for_credential_minting),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Mints a one-time pass for installing one app to the home screen.
@@ -593,7 +592,7 @@ def create_app_token_endpoint(
 @router.post("/app-job-token", dependencies=[Depends(reject_cross_site)])
 def create_app_job_token_endpoint(
   body: schemas.AppTokenRequest,
-  owner: models.Owner = Depends(get_installation_owner_for_credential_minting),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
