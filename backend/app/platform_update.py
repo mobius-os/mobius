@@ -4786,7 +4786,12 @@ def confirm_platform_swap_loaded(repo: Path = PLATFORM_REPO) -> bool:
   back. A server started from other source (the baked floor) leaves the record
   for the next platform boot.
   """
-  if read_prepared_update() is None:
+  record = read_prepared_update()
+  # A replacement-bound update belongs to its controller, not this boot.
+  # Its late-edit resolver may hold the reconciliation lock while testing;
+  # waiting for that lock here would stop HTTP readiness until it finishes.
+  # Server-owned confirmation still rechecks ownership under the lock below.
+  if record is None or record["operation"] is not None:
     return False
   with _reconcile_flock():
     record = read_prepared_update()
