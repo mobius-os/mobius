@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Tests for SSE stream reconnection behavior.
  *
@@ -59,7 +60,7 @@ async function setupChat(page) {
       const surface = document.querySelector('[data-chat-surface="painted"]')
       const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
       return !!composer
-        && !composer.disabled
+        && composer.isContentEditable
         && !surface.querySelector('.chat__stop')
         && !surface.querySelector('.queued__row')
     },
@@ -802,7 +803,7 @@ test.describe('Stream reconnection', () => {
     await expect(surface.locator('.queued__text')).toHaveText('follow up')
     await expect(surface.getByRole('button', { name: 'Send queued message now', exact: true })).toBeEnabled()
     await expect(surface.locator('.chat__msg--user')).toHaveCount(1)
-    await expect(input).toHaveValue('')
+    await expectComposerValue(input, '')
     expect(live.pending[0]).toMatchObject({ content: 'follow up', cid: posts[1].cid })
     expect(live.running).toBe(true)
     expect(await stream.state()).toEqual({ requests: 1, open: true, terminals: 0, aborts: 0 })
@@ -1278,8 +1279,7 @@ test.describe('Stream reconnection', () => {
     expect(JSON.stringify(answerPosted.answers)).toContain('Red')
     await expect(questionCard).toHaveCount(1)
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
-    await expect(activeComposer)
-      .toHaveValue('keep this draft safe')
+    await expectComposerValue(activeComposer, 'keep this draft safe')
     // With the card answered, a kept draft offers Send even while the run is
     // live, so the button cannot show it. The goal rail on both sides of the
     // connection status is the guarantee that the run was not settled.

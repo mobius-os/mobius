@@ -124,15 +124,6 @@ export function modeAfterSpacerResize(mode, spacerH) {
 }
 
 
-/** Whether a content resize re-applies a tracking mode. A FOLLOW_BOTTOM resize
- * driven by the focused inline answer editor is the reader typing, not the live
- * tail advancing: following it scrolls the card being written in by a line per
- * Shift+Enter. Tail growth in the same batch is followed on the next firing the
- * editor does not drive. */
-export function resizeReappliesMode(kind, { editorResized = false } = {}) {
-  return !(kind === 'FOLLOW_BOTTOM' && editorResized)
-}
-
 /** A short stream ended before filling its reservation: retain the pin
  * identity but retire its live-only automatic-follow handoff. */
 export function settledPinMode(mode) {
@@ -237,8 +228,10 @@ export function readerScrollEscapeDirection(
 export function composerTailIntentRequestsFollow(event, scrollEl) {
   const primaryPress = event?.type === 'pointerdown' && event?.button === 0
   const directEdit = event?.type === 'input'
+  const inComposer = event?.target?.matches?.('textarea.chat__input, .chat__editor-content')
+    || event?.target?.closest?.('.chat__editor-content')
   if ((!primaryPress && !directEdit)
-      || !event?.target?.matches?.('textarea.chat__input')
+      || !inComposer
       || !scrollEl) return false
   return isNearPhysicalBottom(scrollEl)
 }

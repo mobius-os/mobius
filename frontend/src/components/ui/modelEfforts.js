@@ -44,5 +44,16 @@ export function validEffort(efforts, preferred) {
   if (rows.some((effort) => effort.value === preferred)) return preferred
   return rows.find((effort) => effort.value === 'medium')?.value
     || rows[0]?.value
-    || ''
+    || null
+}
+
+export function rememberEffort(effortsByProvider, provider, effort) {
+  const next = { ...effortsByProvider }
+  if (effort == null) delete next[provider]
+  else next[provider] = effort
+  return next
+}
+
+export function modelSelectionSettings(model, effort, effortsByProvider) {
+  return { model, effort, effort_by_provider: effortsByProvider }
 }

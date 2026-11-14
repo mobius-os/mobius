@@ -12,6 +12,7 @@ import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
 import { modelDisplayName } from './chatUsageFormat.js'
 import { modelQueries } from '../../hooks/queries.js'
+import { catalogProviders } from '../../lib/modelCatalog.js'
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
 
@@ -95,7 +96,7 @@ export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
   const elapsed = working
     ? live
     : Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
-  const registry = modelQueries.registry.useQuery().data
+  const registry = catalogProviders(modelQueries.registry.useQuery().data)
   const sub = [helperEngine(event, registry), outcome].filter(Boolean).join(' · ')
   const canOpen = !!(chatId && event.delegation_id)
   const running = working && !paused
