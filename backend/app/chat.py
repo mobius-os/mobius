@@ -3031,6 +3031,24 @@ def _finalize_broadcast_if_running(chat_id: str) -> None:
   _publish_chat_run_finished(chat_id)
 
 
+def _publish_done(bc, chat_id: str, run_token: str | None, **fields) -> None:
+  """Publish a turn's final `done` event. Once its run has ended, it carries
+  `run_ended_ts`, so the client stamps the reply it promotes from the stream
+  with the same end time a later chat detail read carries
+  (app.run_end_times)."""
+  from app.database import SessionLocal
+  from app.run_end_times import run_ended_ts
+  ended = None
+  if run_token:
+    try:
+      with SessionLocal() as read_db:
+        ended = run_ended_ts(read_db, chat_id, {run_token}).get(run_token)
+    except Exception:
+      # The end time is presentation only; it must never hold up `done`.
+      _get_logger().warning("run end time unreadable chat_id=%s", chat_id, exc_info=True)
+  bc.publish({"type": "done", **fields, **({"run_ended_ts": ended} if ended is not None else {})})
+
+
 def _publish_chat_run_finished(chat_id: str) -> None:
   if chat_id:
     get_system_broadcast().publish({
@@ -3626,7 +3644,7 @@ def _schedule_continuation(
           "to schedule). It will be recovered automatically."
         ),
       })
-      bc.publish({"type": "done"})
+      _publish_done(bc, chat_id, run_token)
       bc.mark_completed()
     # Every caller announces chat_run_started before it reaches this helper.
     # Balance that shell-level signal when task creation fails, or the shell's
@@ -4773,7 +4791,7 @@ async def _complete_turn(
         "stale turn lifecycle flush failed chat_id=%s", chat_id, exc_info=True,
       )
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     # Deliberately NO shell chat_run_finished here: the successor turn (or the
     # Stop that took the generation) owns this chat's terminal signaling.
@@ -4851,7 +4869,7 @@ async def _complete_turn(
     # Identity-keyed: a Stop + fresh send racing in during the finalize await
     # may already hold the active pointer; clear only if it's still ours.
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -4864,7 +4882,7 @@ async def _complete_turn(
       sink=sink, chat_id=chat_id, run_gen=run_gen,
     )
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done", "cost_usd": cost_usd})
+    _publish_done(bc, chat_id, sink.run_token, cost_usd=cost_usd)
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
       _publish_chat_run_finished(chat_id)
@@ -4952,12 +4970,12 @@ async def _complete_turn(
         "Rate limited — the retry reminder could not be scheduled. "
         "Send a message or tap Resume to continue.",
       ))
-      bc.publish({"type": "done"})
+      _publish_done(bc, chat_id, sink.run_token)
       bc.mark_completed()
       _publish_chat_run_finished(chat_id)
       db.close()
       return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -5008,7 +5026,7 @@ async def _complete_turn(
         "unavailable). Please resend it."
       ),
     })
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -5034,7 +5052,7 @@ async def _complete_turn(
     })
   # Any error event was already broadcast via sink.publish before
   # finalize; don't re-emit it here (it would double-deliver).
-  bc.publish({"type": "done", "cost_usd": cost_usd})
+  _publish_done(bc, chat_id, sink.run_token, cost_usd=cost_usd)
   bc.mark_completed()
   if not next_user:
     _publish_chat_run_finished(chat_id)
@@ -5239,7 +5257,7 @@ async def run_chat(
       bc = get_broadcast(chat_id) if chat_id else None
       if bc is not None and still_ours:
         bc.publish(dict(pause))
-        bc.publish({"type": "done"})
+        _publish_done(bc, chat_id, run_token)
         bc.mark_completed()
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
@@ -5290,7 +5308,7 @@ async def run_chat(
       bc = get_broadcast(chat_id) if chat_id else None
       if bc is not None and still_ours:
         bc.publish(_pause_note(message))
-        bc.publish({"type": "done"})
+        _publish_done(bc, chat_id, run_token)
         bc.mark_completed()
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
@@ -6303,7 +6321,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=error_message,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -6496,7 +6514,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=error_message,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -6654,7 +6672,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=auth_error,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -7068,7 +7086,7 @@ async def _run_chat_impl_with_db(
     chat_id, run_token or "", run_gen, error_message=error_message,
   )
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
-  bc.publish({"type": "done"})
+  _publish_done(bc, chat_id, run_token)
   bc.mark_completed()
   if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
     _publish_chat_run_finished(chat_id)
