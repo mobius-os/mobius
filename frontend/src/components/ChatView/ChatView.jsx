@@ -233,6 +233,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   supersedeResumedPauseBlocks,
+  combineRecoveryHistory,
   serverSnapshotBehindLocal,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
@@ -5496,11 +5497,11 @@ export default function ChatView({
   // then just looks stopped. Detect the tail resumable block so the offscreen
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
-  const recoveryMessages = useMemo(() => supersedeResumedPauseBlocks(messages, {
+  const recoveryMessages = useMemo(() => combineRecoveryHistory(supersedeResumedPauseBlocks(messages, {
     running: serverRunning && !hasPendingQuestion,
     activeAssistantMessageId,
     streamAssistantMessageId,
-  }), [messages, serverRunning, hasPendingQuestion, activeAssistantMessageId, streamAssistantMessageId])
+  })), [messages, serverRunning, hasPendingQuestion, activeAssistantMessageId, streamAssistantMessageId])
   const pendingResumeBlock = tailResumableBlock(recoveryMessages)
   const resourcePause = isResourcePause(pendingResumeBlock)
     ? pendingResumeBlock

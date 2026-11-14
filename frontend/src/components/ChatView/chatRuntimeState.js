@@ -177,6 +177,46 @@ export function supersedeResumedPauseBlocks(messages, {
   return projected
 }
 
+/** Combine adjacent settled interruption events for display only. Prose,
+ * owner messages, questions and Goal/Wait outcomes remain hard boundaries.
+ * Original rows and timestamps remain untouched for recovery and search. */
+export function combineRecoveryHistory(messages) {
+  if (!Array.isArray(messages)) return messages
+  let result = messages
+  let previousIndex = -1
+  const write = (index, row) => {
+    if (result === messages) result = [...messages]
+    result[index] = row
+  }
+  for (let index = 0; index < messages.length; index += 1) {
+    const row = result[index]
+    if (row.hidden) continue
+    if ((isContinuationMessage(row) || row.continuation_reason) && previousIndex >= 0) {
+      const previous = result[previousIndex]
+      const blocks = previous.blocks || []
+      const pause = blocks.at(-1)
+      if (pause?.type === PAUSE_RECORD_BLOCK) {
+        const remaining = blocks.slice(0, -1)
+        const carriesHistory = remaining.length === 0 && !previous.content
+          && !previous.goal_summaries?.length && !previous.wait_summaries?.length
+        const events = [
+          ...(carriesHistory ? previous.recovery_events || [] : []),
+          // The answer's timestamp predates the pause; never present it as pause time.
+          { type: 'pause', source: pause.source, ts: pause.source.ts },
+          { type: 'resume', reason: row.continuation_reason, ts: row.ts },
+        ]
+        write(previousIndex, {
+          ...previous, blocks: remaining,
+          ...(carriesHistory ? { hidden: true } : {}),
+        })
+        write(index, { ...row, recovery_events: events })
+      }
+    }
+    previousIndex = index
+  }
+  return result
+}
+
 /** A visible transcript row authored by the owner, excluding product events
  * that retain role=user only because the provider receives `continue`, and
  * added side questions, which the agent receives as context, not a request.

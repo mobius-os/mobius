@@ -2,8 +2,17 @@
 
 import { ArrowRotateCw } from '@openai/apps-sdk-ui/components/Icon'
 import MarkerCard from './MarkerCard.jsx'
+import { pauseRecordTitle } from './PauseRecordCard.jsx'
 import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
+
+function EventTime({ ts }) {
+  if (!Number.isFinite(ts)) return null
+  const date = new Date(ts)
+  return <time dateTime={date.toISOString()} title={formatDateTime(date)}>
+    {date.toDateString() === new Date().toDateString() ? formatTime(date) : formatDateTime(date)}
+  </time>
+}
 
 export default function ContinuationCard({ msg }) {
   const manual = msg?.continuation_reason === 'manual'
@@ -26,6 +35,9 @@ export default function ContinuationCard({ msg }) {
   // When the work continued: for a recovery answer or marker row, its own
   // timestamp is the moment the resumed turn started.
   const resumedAt = Number.isFinite(msg?.ts) ? new Date(msg.ts) : null
+  const events = msg?.recovery_events || []
+  const pauses = events.filter(event => event.type === 'pause')
+  const causes = [...new Set(pauses.map(event => pauseRecordTitle(event.source)))]
   return (
     <MarkerCard
       title={resumedAt ? <>
@@ -36,8 +48,16 @@ export default function ContinuationCard({ msg }) {
             ? formatTime(resumedAt) : formatDateTime(resumedAt)}
         </time>
       </> : title}
-      subtitle={subtitle}
+      subtitle={causes.length ? causes.join(' · ') : subtitle}
       icon={<ArrowRotateCw width={14} height={14} aria-hidden="true" />}
-    />
+    >
+      {events.length > 0 && <ol className="chat__recovery-events">
+        {events.map((event, index) => <li key={index}>
+          <span>{event.type === 'pause' ? pauseRecordTitle(event.source)
+            : event.reason === 'manual' ? 'Resumed manually' : 'Resumed automatically'}</span>
+          <EventTime ts={event.ts} />
+        </li>)}
+      </ol>}
+    </MarkerCard>
   )
 }

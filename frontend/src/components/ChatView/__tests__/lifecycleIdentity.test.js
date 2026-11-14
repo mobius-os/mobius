@@ -215,3 +215,18 @@ test('a full text past the display limit nests validly inside an inline row', as
  assert.doesNotMatch(html, /<div/)
  assert.match(html, /<span class="peer-note-full">/)
 })
+
+test('combined recovery notice keeps cause visible and offers dated history', () => {
+ const html = render(h(Resume, { msg: {
+   continuation_reason: 'manual', ts: Date.UTC(2026, 0, 1, 12),
+   recovery_events: [
+     { type: 'pause', source: { resumable: true, pause: { kind: 'restart' } } },
+     { type: 'resume', reason: 'manual', ts: Date.UTC(2026, 0, 1, 12) },
+   ],
+ } }))
+ assert.match(html, /Resumed manually/)
+ assert.match(html, /Paused for a platform update/)
+ assert.match(html, /aria-expanded="false"/)
+ assert.doesNotMatch(html, /Interrupted work continued/)
+ assert.match(html, /datetime=/i)
+})
