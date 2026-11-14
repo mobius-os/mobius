@@ -332,6 +332,10 @@
 .wt-menu__brand .shell__wordmark { font-size: 18px; }
 .wt-menu__search { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; color: var(--text); }
 .wt-menu__foot { margin-top: auto; }
+.wt-menu__apps { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 4px; }
+.wt-menu__apps-title { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.wt-menu__apps-row { display: flex; gap: 8px; }
+.wt-menu__apps-row i { width: 30px; height: 30px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 24%, var(--bg)); transition: background-color .9s ease; }
 .wt-menu__pumpkin { display: none; width: 28px; height: 28px; }
 .wt-themed.is-themed .wt-menu__pumpkin { display: block; }
 .wt-themed.is-themed .wt-menu .shell__logo { display: none; }

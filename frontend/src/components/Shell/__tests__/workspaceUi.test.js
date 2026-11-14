@@ -889,7 +889,7 @@ test('the Apps tab never disables the mobile drawer layered above it', () => {
     'workspace content is inert while the drawer is open; the drawer must stay interactive')
   assert.doesNotMatch(drawer, /interactionLocked \|\| appsActive/,
     'Apps is a tab underneath navigation, not a modal owner of Escape')
-  assert.match(drawer, /activeView === 'apps' \? ' drawer__item--active'/,
+  assert.match(drawer, /appsViewActive=\{activeView === 'apps'\}/,
     'the Apps entry highlights from the focused-pane route, matching how chats do')
   assert.match(shell, /appsActive=\{appsVisibleAsTab\}/)
 })
@@ -1007,15 +1007,29 @@ test('large drawer lists memoize ordering and row actions without changing row o
     'the drawer must render one item-menu controller')
 })
 
-test('successful project artifacts render as direct Recents destinations', () => {
-  assert.match(drawer, /kind === 'artifact' \? \(/)
-  assert.match(drawer, /<DrawerArtifactRow/)
-  assert.match(drawer, /<ProjectArtifactIcon artifact=\{item\}/)
-  assert.doesNotMatch(drawer, /<ArtifactIdentityIcon artifact=\{item\}/,
-    'Recents uses one semantic glyph rather than nesting a tile inside a row icon')
-  assert.match(drawer, /actions\.select\('artifact', item\.id\)/)
-  assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
-  assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
+test('built artifacts open from their project, never as Recents rows', () => {
+  assert.doesNotMatch(drawer, /DrawerArtifactRow/, 'artifacts are not Recents rows')
+  // The sidebar has no artifact or project rows, so it takes no inputs to
+  // open, rename, recolour, or delete them.
+  assert.doesNotMatch(drawer, /kind === 'artifact'|kind === 'project'|onArtifact|activeArtifactRef|onProjectRename|onProjectDelete/)
+})
+
+// Projects are not sidebar rows, so pinning a project happens on the Projects
+// list, where pinned projects lead and can be unpinned in place.
+test('projects are pinned and unpinned from the Projects list', () => {
+  const directory = readFileSync(new URL('../../Projects/ProjectsDirectory.jsx', import.meta.url), 'utf8')
+  const actions = readFileSync(new URL('../../Projects/ProjectActions.jsx', import.meta.url), 'utf8')
+  // One pin owner: the list shows pending pins and writes through pins.pin,
+  // never a second writer that a stale list read could undo.
+  assert.match(shell, /<ProjectsDirectory\s+projects=\{pins\.projectedItems\.projects\}/)
+  assert.match(shell, /onPin=\{pinProject\}/)
+  assert.match(shell, /function pinProject\(project, pinned\) \{\s+return pins\.pin\('project', project\.id, pinned\)/)
+  assert.doesNotMatch(shell, /api\.projects\.setPinned/)
+  assert.match(directory, /\.sort\(\(a, b\) => Boolean\(b\.pinned_at\) - Boolean\(a\.pinned_at\)\)/)
+  assert.match(directory, /aria-label=\{`Unpin \$\{project\.name\}`\}/)
+  // The pin owner projects the change and reports failures itself, so the
+  // menu closes at once instead of waiting on the server.
+  assert.match(actions, /onClick=\{\(\) => \{ close\(\); onPin\(project, !project\.pinned_at\) \}\}/)
 })
 
 test('artifact previews keep recovery actions visible without a build-log drawer', () => {
@@ -1044,16 +1058,12 @@ test('a selected project-owned chat Recent includes its project chip in one row 
     drawerCss,
     /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
   )
-  assert.doesNotMatch(
-    drawerCss.match(/\.drawer__item--apps\s*\{[\s\S]*?\}/)?.[0] || '',
-    /margin-(?:top|bottom)/,
-    'Apps must not insert drift before the Projects glyph shared with the closed rail',
-  )
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
-  assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
+  // Section headings may carry an icon; chat rows never do.
+  assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b(?![^>]*drawer__section-icon)|<PinFilled\b/)
 })
 
 test('New chat and Apps share one compact navigation rhythm', () => {

@@ -2062,6 +2062,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   async function setProjectColor(project, color) {
     return patchProject(project, { color })
   }
+  // The Projects list pins through the shell's one pin owner, so its queue,
+  // stale-read cancellation and failure recovery cover projects too.
+  function pinProject(project, pinned) {
+    return pins.pin('project', project.id, pinned)
+  }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
   const enterProjectRef = useRef(enterProject)
@@ -5093,31 +5098,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeView={activeView}
         activeAppId={activeAppId}
         projects={projects}
-        projectsStatus={projectsStatus}
-        onRetryProjects={() => projectsQuery.refetch()}
-        activeProjectId={activeProjectId}
         activeProjectChatProjectId={activeProjectChatProjectId}
-        activeArtifactRef={activeArtifactRef}
-        projectTemplates={projectTemplates}
         onProject={enterProject}
-        onProjectRename={(project, name) => {
-          if (typeof name === 'string') return renameProject(project, name)
-          setProjectRenameId(String(project.id))
-          openProject(project)
-          return undefined
-        }}
-        onProjectColor={setProjectColor}
-        onProjectDelete={deleteProject}
-        onArtifact={(artifactRef) => {
-          const parsed = tabModel.parseArtifactTabId(artifactRef)
-          if (!parsed) return
-          const project = projectById.get(parsed.projectId)
-          if (project) openArtifact(project, parsed.artifactId)
-        }}
         onProjectsOpen={() => navTo('projects')}
-        onProjectCreate={createProjectFromTemplate}
-        onProjectImportGithub={importProjectFromGithub}
-        onProjectImportSource={importProjectSource}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -5569,7 +5552,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   onPending={surfaceVisible ? holdLaunchCover : undefined}
                 >
                   <ProjectsDirectory
-                    projects={projects}
+                    projects={pins.projectedItems.projects}
                     templates={projectTemplates}
                     status={projectsStatus}
                     onRetry={() => Promise.all([
@@ -5582,6 +5565,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onImportSource={importProjectSource}
                     onRename={renameProject}
                     onColor={setProjectColor}
+                    onPin={pinProject}
                     onDelete={deleteProject}
                   />
                 </LazySurface>

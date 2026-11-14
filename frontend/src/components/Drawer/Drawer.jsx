@@ -4,7 +4,10 @@ import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import {
+  Archive,
+  Clock,
   Pause,
+  Pin,
   Play,
   Stop,
 } from '@openai/apps-sdk-ui/components/Icon'
@@ -13,14 +16,12 @@ import { api, reservePinnedIntent } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
-  AppsNavIcon,
   NewChatNavIcon,
   ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import AppIcon from '../AppIcon.jsx'
-import ProjectCreateMenu from '../Projects/ProjectCreateMenu.jsx'
-import ProjectArtifactIcon from '../Projects/ProjectArtifactIcon.jsx'
+import DrawerAppsStrip from './DrawerAppsStrip.jsx'
 import ProjectIdentityIcon from '../Projects/ProjectIdentityIcon.jsx'
 import {
   computePinnedDrag,
@@ -115,23 +116,9 @@ export default function Drawer({
   activeView,
   activeAppId,
   projects = EMPTY_LIST,
-  projectsStatus = 'success',
-  onRetryProjects,
-  activeProjectId,
   activeProjectChatProjectId,
-  activeArtifactRef,
-  projectTemplates = EMPTY_LIST,
   onProject,
-  onProjectRename,
-  onProjectColor,
-  onProjectDelete,
-  onArtifact,
   onProjectsOpen,
-  onProjectCreate,
-  onProjectImportGithub,
-  // Same import path the Projects screen offers, so a page or local app can
-  // become an editable project from either + menu.
-  onProjectImportSource,
   chats,
   chatsStatus = 'success',
   onRetryChats,
@@ -195,22 +182,18 @@ export default function Drawer({
   const failedSet = failedChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
-  // An open artifact is its own destination: it never lights up a project row.
-  const activeProject = projects.find(project => (
-    (activeView === 'project' && String(activeProjectId) === String(project.id))
-    || (activeView === 'chat'
-      && String(activeProjectChatProjectId) === String(project.id))
-  ))
+  // Projects are reached only through the Projects entry, so it stays lit on
+  // the Projects screen, inside a project, and in a project's chat — the same
+  // rule as the collapsed rail.
+  const projectsActive = activeView === 'projects'
+    || activeView === 'project'
+    || Boolean(activeProjectChatProjectId)
   // One source of truth for which row the focused pane is showing, so a chat
   // and an app are selected by the same rule wherever the row is rendered.
   const isRowActive = ({ kind, item }) => (
     kind === 'chat'
       ? activeView === 'chat' && activeChatId === item.id
-      : kind === 'artifact'
-        ? activeView === 'artifact' && String(activeArtifactRef) === String(item.id)
-        : kind === 'project'
-          ? activeView === 'project' && String(activeProjectId) === String(item.id)
-          : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
+      : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
   )
   const resizeRef = useRef(null)
   const pinnedReorderGenerationRef = useRef(0)
@@ -237,12 +220,12 @@ export default function Drawer({
   const {
     pinned: basePinnedItems,
     recents: allRecents,
+    recentApps,
     archived: archivedItems,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(
     projectedDrawerItems.chats,
     projectedDrawerItems.apps,
-    projectedDrawerItems.projects,
   ), [projectedDrawerItems])
   const listItems = showingArchived ? archivedItems : allRecents
 
@@ -328,6 +311,9 @@ export default function Drawer({
     if (!open) return
     measureListWindow()
   }, [measureListWindow, open, pinnedItems.length, listTab])
+  const measureListWindowIfOpen = useCallback(() => {
+    if (open) measureListWindow()
+  }, [measureListWindow, open])
   useEffect(() => {
     if (!open) return undefined
     const root = navigationScrollRef.current
@@ -385,6 +371,12 @@ export default function Drawer({
 
     const chatId = String(activeChatId)
     if (revealedActiveChatRef.current === chatId) return
+    // A project chat is reached from its project folder, not Recents, so never
+    // scroll the drawer down looking for it.
+    if (activeProjectChatProjectId) {
+      revealedActiveChatRef.current = chatId
+      return
+    }
 
     const isPinned = pinnedItems.some(({ kind, item }) => (
       kind === 'chat' && String(item.id) === chatId
@@ -413,6 +405,7 @@ export default function Drawer({
     revealedActiveChatRef.current = chatId
   }, [
     activeChatId,
+    activeProjectChatProjectId,
     activeView,
     listItems,
     open,
@@ -429,7 +422,6 @@ export default function Drawer({
     openMenu,
     projectedDrawerItems.chats,
     projectedDrawerItems.apps,
-    projectedDrawerItems.projects,
   )
   const {
     open: openItemMenuHistory,
@@ -504,18 +496,13 @@ export default function Drawer({
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
       if (kind === 'chat') current.onChat(id)
-      else if (kind === 'artifact') current.onArtifact?.(id)
-      else if (kind === 'project') {
-        const project = current.projects.find(row => String(row.id) === String(id))
-        if (project) current.onProject?.(project)
-      }
       else current.onApp(id)
     },
     prefetch(kind, id) {
       if (kind === 'chat') rowActionInputsRef.current.prefetchChat(id)
     },
-    // The Recents project chip opens a chat/artifact's owning project. Reuses
-    // the same open-project path as the drawer's project rows.
+    // A project chat's chip, or an app's "Open project" action, opens the
+    // owning project.
     openProject(project) {
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
@@ -543,7 +530,6 @@ export default function Drawer({
       current.setRenaming(null)
       if (!next || next === previous) return
       if (kind === 'chat') current.onRenameChat(id, next)
-      else if (kind === 'project') current.renameProject(id, next)
       else current.renameApp(id, next)
     },
     copyName(name) {
@@ -567,10 +553,6 @@ export default function Drawer({
     remove(kind, id) {
       const current = rowActionInputsRef.current
       if (kind === 'chat') current.onDeleteChat(id)
-      else if (kind === 'project') {
-        const project = current.projects.find(row => String(row.id) === String(id))
-        if (project) current.onProjectDelete?.(project)
-      }
       else current.onDeleteApp?.(id)
     },
     removeData(id) {
@@ -647,11 +629,6 @@ export default function Drawer({
     if (await saveDrawerRename(() => api.apps.update(id, { name }), onNotice)) refreshApps()
   }
 
-  async function renameProject(id, name) {
-    const project = projects.find(row => String(row.id) === String(id))
-    if (project) await saveDrawerRename(() => onProjectRename?.(project, name), onNotice)
-  }
-
   async function publishHostedApp(id) {
     const res = await api.apps.publishHosted(id)
     if (!res.ok) {
@@ -697,7 +674,6 @@ export default function Drawer({
       const currentPinned = buildDrawerSections(
         queryClient.getQueryData(chatQueries.keys.all) || chats,
         queryClient.getQueryData(appQueries.keys.all) || apps,
-        queryClient.getQueryData(projectQueries.keys.all) || projects,
       ).pinned
       const currentKeys = currentPinned.map(({ kind, item }) => `${kind}:${item.id}`)
       const visibleKeys = reconcilePinnedOrder(orderedKeys, currentKeys)
@@ -705,7 +681,13 @@ export default function Drawer({
         visibleKeys.length < 2
         || visibleKeys.every((key, index) => key === currentKeys[index])
       ) return false
-      const items = visibleKeys.map(key => {
+      // Pinned projects live only on the Projects screen, but the server's
+      // atomic reorder covers every pin, so carry them after the drawer rows.
+      const hiddenProjectKeys = (queryClient.getQueryData(projectQueries.keys.all) || projects)
+        .filter(project => project.pinned_at)
+        .map(project => `project:${project.id}`)
+      const sentKeys = [...visibleKeys, ...hiddenProjectKeys]
+      const items = sentKeys.map(key => {
         const sep = key.indexOf(':')
         return { kind: key.slice(0, sep), id: key.slice(sep + 1) }
       })
@@ -724,7 +706,7 @@ export default function Drawer({
           `${item.kind}:${item.id}`,
           item.pinned_at,
         ]))
-        if (rank.size !== visibleKeys.length || visibleKeys.some(key => !rank.has(key))) {
+        if (rank.size !== sentKeys.length || sentKeys.some(key => !rank.has(key))) {
           throw new Error('Pinned reorder returned an incomplete order')
         }
         if (generation !== pinnedReorderGenerationRef.current) return false
@@ -850,6 +832,11 @@ export default function Drawer({
   function clearClickSuppression() {
     suppressGeneratedClickRef.current = false
   }
+  // A child that pans on its own (the Apps row) asks for the same one-shot
+  // swallow of the touch click its release generates.
+  const suppressReleaseClick = useCallback(() => {
+    suppressGeneratedClickRef.current = true
+  }, [])
 
   function onDrawerClickCapture(e) {
     if (interactionLocked) {
@@ -926,6 +913,9 @@ export default function Drawer({
     // A row is being lifted out of the drawer — the drag controller owns this
     // gesture; swipe-to-close stands down (design §3.1).
     if (dragActiveRef?.current) { drawerGestureRef.current = null; return }
+    // A sideways-scrolling strip (the Apps row) owns horizontal swipes that
+    // start on it; swipe-to-close would otherwise steal them.
+    if (e.target?.closest?.('[data-drawer-hscroll]')) { drawerGestureRef.current = null; return }
     drawerGestureRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -1080,12 +1070,10 @@ export default function Drawer({
 
   rowActionInputsRef.current = {
     onChat,
+    onAppsOpen,
     onApp,
     onAddSourceToProjects,
     onProject,
-    onProjectDelete,
-    onArtifact,
-    projects,
     onDeleteChat,
     onSetChatArchived,
     onRenameChat,
@@ -1100,7 +1088,6 @@ export default function Drawer({
     resetAppsSurfaceUi,
     setSharingApp,
     renameApp,
-    renameProject,
     pins,
     reorderPinned,
     prefetchChat,
@@ -1184,39 +1171,19 @@ export default function Drawer({
 
             <div className="drawer__scroll drawer__scroll--navigation" ref={navigationScrollRef}>
               <button
-                ref={appsButtonRef}
                 type="button"
-                className={`drawer__item drawer__item--apps${activeView === 'apps' ? ' drawer__item--active' : ''}`}
-                aria-current={activeView === 'apps' ? 'page' : undefined}
-                onClick={openApps}
+                className={`drawer__item drawer__item--projects${projectsActive ? ' drawer__item--active' : ''}`}
+                aria-current={activeView === 'projects' ? 'page' : undefined}
+                onClick={() => {
+                  resetAppsSurfaceUi({ restoreFocus: false })
+                  onProjectsOpen?.()
+                }}
               >
                 <span className="drawer__item-icon" aria-hidden="true">
-                  <AppsNavIcon />
+                  <ProjectsNavIcon />
                 </span>
-                <span className="drawer__item-text">Apps</span>
+                <span className="drawer__item-text">Projects</span>
               </button>
-
-              <div className="drawer__projects-nav">
-                <button
-                  type="button"
-                  className={`drawer__item drawer__item--projects${activeView === 'projects' || activeView === 'project' || activeProject ? ' drawer__item--active' : ''}`}
-                  aria-current={activeView === 'projects' ? 'page' : undefined}
-                  onClick={onProjectsOpen}
-                >
-                  <span className="drawer__item-icon" aria-hidden="true">
-                    <ProjectsNavIcon />
-                  </span>
-                  <span className="drawer__item-text">Projects</span>
-                </button>
-                <ProjectCreateMenu
-                  templates={projectTemplates}
-                  onCreate={onProjectCreate}
-                  onImportGithub={onProjectImportGithub}
-                  onImportSource={onProjectImportSource}
-                  className="drawer__projects-add"
-                  align="end"
-                />
-              </div>
 
               {nowPlaying && (
                 <NowPlaying
@@ -1230,7 +1197,9 @@ export default function Drawer({
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
                   <h2 id="drawer-pinned-label" className="drawer__label">
+                    <Pin className="drawer__section-icon" width={16} height={16} aria-hidden="true" />
                     <span>Pinned</span>
+                    <span className="drawer__section-count">{pinnedItems.length}</span>
                   </h2>
                   {pinnedItems.map(({ kind, item }) => (
                     <DrawerRow
@@ -1261,6 +1230,26 @@ export default function Drawer({
                   ))}
                 </section>
               )}
+
+              <DrawerAppsStrip
+                apps={recentApps}
+                activeAppId={activeView === 'canvas' ? activeAppId : null}
+                ownerInputSet={ownerInputSet}
+                streamingSet={streamingSet}
+                newAppSet={newAppSet}
+                actions={rowActions}
+                drawerRowGesturesRef={drawerRowGesturesRef}
+                suppressReleaseClick={suppressReleaseClick}
+                titleRef={appsButtonRef}
+                appsViewActive={activeView === 'apps'}
+                onOpenAll={openApps}
+                renamingId={renaming?.surface === 'strip' && renaming.kind === 'app' ? renaming.id : null}
+                onApp={(id) => {
+                  resetAppsSurfaceUi({ restoreFocus: false })
+                  onApp?.(id)
+                }}
+                onLayoutChange={measureListWindowIfOpen}
+              />
 
               <section
                 ref={listSectionRef}
@@ -1302,6 +1291,9 @@ export default function Drawer({
                         onMouseDown={event => event.preventDefault()}
                         onClick={() => selectListTab(tab)}
                       >
+                        {tab === 'recents'
+                          ? <Clock className="drawer__section-icon" width={16} height={16} aria-hidden="true" />
+                          : <Archive className="drawer__section-icon" width={16} height={16} aria-hidden="true" />}
                         {tab === 'recents' ? 'Recents' : 'Archived'}
                         {tab === 'archived' && archivedItems.some(({ item }) => (
                           ownerInputSet.has(item.id) || failedSet.has(item.id)
@@ -1331,14 +1323,7 @@ export default function Drawer({
                     />
                   )}
                   {listItems.length > 0 ? visibleListItems.map(({ kind, item }) => (
-                    kind === 'artifact' ? (
-                      <DrawerArtifactRow
-                        key={`${kind}:${item.id}`}
-                        item={item}
-                        active={isRowActive({ kind, item })}
-                        actions={rowActions}
-                      />
-                    ) : <DrawerRow
+                    <DrawerRow
                       key={`${kind}:${item.id}`}
                       kind={kind}
                       item={item}
@@ -1363,9 +1348,9 @@ export default function Drawer({
                       dragActiveRef={dragActiveRef}
                       drawerRowGesturesRef={drawerRowGesturesRef}
                     />
-                  )) : chatsStatus === 'loading' || appsStatus === 'loading' || projectsStatus === 'loading' ? (
+                  )) : chatsStatus === 'loading' || appsStatus === 'loading' ? (
                     <p className="drawer__list-status" role="status">Loading {showingArchived ? 'archived chats' : 'recents'}…</p>
-                  ) : chatsStatus === 'error' || appsStatus === 'error' || projectsStatus === 'error' ? (
+                  ) : chatsStatus === 'error' || appsStatus === 'error' ? (
                     <div className="drawer__list-status" role="alert">
                       <span>{showingArchived ? 'Archived chats' : 'Recents'} unavailable.</span>
                       <button
@@ -1373,7 +1358,6 @@ export default function Drawer({
                         onClick={() => {
                           onRetryChats?.()
                           onRetryApps?.()
-                          onRetryProjects?.()
                         }}
                       >
                         Retry
@@ -1538,28 +1522,6 @@ function NowPlaying({ session, app, onOpen, onControl }) {
     </section>
   )
 }
-
-
-// A built artifact is a plain Recents destination: name and type glyph only,
-// no project belonging. Its project is reachable from the project's own row.
-const DrawerArtifactRow = memo(function DrawerArtifactRow({ item, active, actions }) {
-  return (
-    <div className={`drawer__row drawer__row--artifact${active ? ' drawer__row--active' : ''}`}>
-      <button
-        type="button"
-        className={`drawer__item${active ? ' drawer__item--active' : ''}`}
-        aria-current={active ? 'page' : undefined}
-        aria-label={`Open ${item.display_name || item.name || item.artifact_id}`}
-        onClick={() => actions.select('artifact', item.id)}
-      >
-        <span className="drawer__item-icon drawer__artifact-icon" aria-hidden="true">
-          <ProjectArtifactIcon artifact={item} size={19} strokeWidth={1.8} />
-        </span>
-        <span className="drawer__item-text">{item.display_name || item.name || item.artifact_id}</span>
-      </button>
-    </div>
-  )
-})
 
 
 /** One row in the chat or app list — handles select, inline rename,
@@ -1957,14 +1919,6 @@ const DrawerRow = memo(function DrawerRow({
         {kind === 'app' && (
           <AppIcon item={item} label={label} className="drawer__app-icon" />
         )}
-        {kind === 'project' && (
-          <ProjectIdentityIcon
-            project={item}
-            size={24}
-            className="drawer__project-icon"
-            label={`${label} project`}
-          />
-        )}
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
             edge (where the pin lives). aria-label exposes the state. */}
@@ -2010,7 +1964,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
   actions,
   restoreFocusRef,
 }) {
-  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && ['app', 'artifact'].includes(menu.kind)))
+  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && menu.kind === 'app'))
   const projectAction = projectSourceAction(projects, importSources.data, menu?.kind, menu?.id)
   const kind = menu?.kind || 'chat'
   const id = menu?.id

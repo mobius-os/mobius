@@ -91,7 +91,7 @@ export default function useWorkspaceDrag({
   labelForTabRef, // ref → (tab) => string
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
-  drawerRowGesturesRef, // key -> ref({ openMenu, beginReorder }) registered by Drawer rows
+  drawerRowGesturesRef, // data-drawer-key -> ref({ openMenu, beginReorder }) from Drawer rows and Apps-row icons
   closeDrawer,
   openDrawer,
   openTabMenuAtRef, // ref -> (clientX, clientY, tab, paneId) => void
@@ -328,7 +328,11 @@ export default function useWorkspaceDrag({
           ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
           : 0,
       })
-      const drawerGesture = () => drawerRowGesturesRef?.current?.get(key)?.current
+      // One item can appear twice in the drawer (a pinned app is also an Apps
+      // row icon), so the pressed element names its own gesture handler with
+      // `data-drawer-key`; the drag key still says what a drop opens.
+      const gestureKey = srcEl.dataset.drawerKey || key
+      const drawerGesture = () => drawerRowGesturesRef?.current?.get(gestureKey)?.current
 
       // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
       // source, for the WHOLE hold window — not at arm, when the magnifier has
@@ -394,7 +398,11 @@ export default function useWorkspaceDrag({
           held = true
           // Install the cancelable touch gate only after a stationary hold.
           // Quick drawer pans keep the browser's compositor-owned fast path.
-          if (sourceKind === 'drawer' && srcEl.hasAttribute('data-pinned-key')) {
+          // A pinned row needs it for vertical reorder; an Apps-row icon sits
+          // in a sideways-panning row, where the browser would otherwise take
+          // the post-hold drag into a pane as a scroll and cancel it.
+          if (sourceKind === 'drawer'
+            && (srcEl.hasAttribute('data-pinned-key') || srcEl.closest('[data-drawer-hscroll]'))) {
             releaseHeldTouchPan = reserveHeldTouchPan(srcEl)
           }
           if (navigator.vibrate) { try { navigator.vibrate(DRAG_HOLD_HAPTIC_MS) } catch { /* unsupported */ } }

@@ -48,5 +48,4 @@ test('a successful rename stays quiet, whether it returns a response or a row', 
 test('the rename box allows exactly what the server accepts for each kind', () => {
   assert.equal(drawerNameMaxLength('chat'), 500)
   assert.equal(drawerNameMaxLength('app'), 500)
-  assert.equal(drawerNameMaxLength('project'), 256)
 })

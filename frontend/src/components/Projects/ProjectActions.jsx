@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Ellipsis from 'lucide-react/dist/esm/icons/ellipsis.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
+import Pin from 'lucide-react/dist/esm/icons/pin.mjs'
+import PinOff from 'lucide-react/dist/esm/icons/pin-off.mjs'
 import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
 import './Projects.css'
 
@@ -25,6 +27,7 @@ export default function ProjectActions({
   showTrigger = true,
   onRename,
   onColor,
+  onPin,
   onDelete,
 }) {
   const [open, setOpen] = useState(false)
@@ -185,6 +188,11 @@ export default function ProjectActions({
                   </div>
                 )}
                 {error && <p className="project-actions__error" role="alert">{error}</p>}
+                {onPin && (
+                  <button type="button" role="menuitem" disabled={busy} onClick={() => { close(); onPin(project, !project.pinned_at) }}>
+                    {project.pinned_at ? <><PinOff size={16} /> Unpin</> : <><Pin size={16} /> Pin</>}
+                  </button>
+                )}
                 <button type="button" role="menuitem" disabled={busy} onClick={() => { close(); onRename?.(project) }}><Pencil size={16} /> Rename</button>
                 <button type="button" role="menuitem" className="project-menu__danger" disabled={busy} onClick={() => setConfirmingDelete(true)}><Trash2 size={16} /> Delete project</button>
               </>

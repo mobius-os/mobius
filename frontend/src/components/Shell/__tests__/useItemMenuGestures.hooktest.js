@@ -96,6 +96,28 @@ test('a stationary touch hold opens the menu once and its release does not open 
   assert.equal(h.gestures().consumeHeldClick(), false, 'only that one click is consumed')
 })
 
+test('a hold that ends without a click cannot swallow the next tap or key press', t => {
+  const h = harness(t)
+  const hold = () => {
+    h.gestures().triggerProps.onPointerDown(syntheticEvent({
+      pointerType: 'touch', button: 0, clientX: 40, clientY: 60, currentTarget: row,
+    }))
+    h.advance(PRESS_MENU_HOLD_MS)
+    h.gestures().triggerProps.onPointerCancel()
+  }
+
+  hold()
+  h.gestures().triggerProps.onPointerDown(syntheticEvent({
+    pointerType: 'touch', button: 0, clientX: 90, clientY: 60, currentTarget: row,
+  }))
+  h.gestures().triggerProps.onPointerUp()
+  assert.equal(h.gestures().consumeHeldClick(), false, 'a fresh tap opens its item')
+
+  hold()
+  h.gestures().triggerProps.onKeyDown(syntheticEvent({ key: 'Enter', currentTarget: row }))
+  assert.equal(h.gestures().consumeHeldClick(), false, 'keyboard activation opens its item')
+})
+
 test('moving a held touch scrolls instead of opening the menu', t => {
   const h = harness(t)
   const { triggerProps } = h.gestures()
