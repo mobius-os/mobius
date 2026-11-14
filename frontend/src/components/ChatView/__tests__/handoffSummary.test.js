@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { trayHelpers } from '../goalHelpers.js'
+import { isTerminalHelperStatus } from '../workingHelper.js'
 
 import {
   HANDOFF_ROW_LIMIT,
@@ -66,4 +67,14 @@ test('failed, interrupted and review-needed helpers retain their distinct outcom
   const helpers = ['failed', 'interrupted', 'needs_review'].map(status => helper(status, status))
   assert.equal(handoffSummaryLabel({ helpers }), '1 failed · 1 needs review · 1 interrupted')
   assert.equal(handoffGroups({ helpers })[0].count, 3)
+})
+
+
+test('preview terminality does not confuse an unfinished hold with a stopped helper', () => {
+  for (const status of ['accepted', 'retrying', 'starting', 'running', 'resuming', 'paused', 'needs_input', 'waiting']) {
+    assert.equal(isTerminalHelperStatus(status), false, status)
+  }
+  for (const status of ['completed', 'done', 'failed', 'needs_review', 'interrupted', 'stopped', 'cancelled', 'killed']) {
+    assert.equal(isTerminalHelperStatus(status), true, status)
+  }
 })

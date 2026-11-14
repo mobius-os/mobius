@@ -8,6 +8,7 @@ from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 import threading
 
@@ -4212,6 +4213,8 @@ def test_footer_helper_union_counts_before_capping(db, monkeypatch, overlap):
                                 provider="codex") for i in range(20)]
   monkeypatch.setattr(delegations, "_self_resuming_helper_rows",
                       lambda *_: [(row, "running") for row in background])
+  monkeypatch.setattr(delegations, "_delegation_status_batch",
+                      lambda _db, rows, **_: ({row.id: "running" for row in rows}, {}))
   nodes = [{"id": f"{'bg' if overlap else 'goal'}-{i}", "status": "running"}
            for i in range(20)]
   nodes[0]["children"] = [{"id": "nested", "status": "running"}]
@@ -4245,3 +4248,40 @@ def test_footer_goal_helpers_do_not_invent_background_wake_ownership(db, monkeyp
   assert summary["items"] == []
   assert summary["with_goal"]["count"] == 1
   assert [row["id"] for row in summary["with_goal"]["items"]] == ["direct"]
+
+
+@pytest.mark.parametrize("run_status,diagnostic,expected", [
+  ("failed", "DELEGATION_WRITE_REVIEW_REQUIRED: Review before replaying.", "needs_review"),
+  ("failed", "Ordinary failure.", "failed"),
+  ("completed", "", "completed"),
+])
+def test_footer_status_refines_failed_results_without_changing_wake_eligibility(
+  client, owner_token, db, run_status, diagnostic, expected,
+):
+  from app import delegations
+
+  parent, child, delegation = _seed_delegation(
+    db, suffix=f"footer-{expected}", child_status=run_status,
+    result_blocks=[{"type": "error", "message": diagnostic}] if diagnostic else [],
+  )
+  owed_before = delegations._self_resuming_helper_rows(db, {parent})
+  assert [row.id for row, _ in owed_before] == [delegation]
+  summary = serialize_background_helpers(db, parent)
+  assert summary["count"] == 1
+  assert summary["items"][0]["id"] == delegation
+  assert summary["items"][0]["status"] == expected
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in json.dumps(summary)
+  assert "Review before replaying." not in json.dumps(summary)
+  assert "Ordinary failure." not in json.dumps(summary)
+  assert [(row.id, status) for row, status in
+          delegations._self_resuming_helper_rows(db, {parent})] == [
+    (row.id, status) for row, status in owed_before
+  ]
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  detail = client.get(f"/api/chats/{parent}", headers=headers)
+  assert detail.status_code == 200
+  assert detail.json()["background_helpers"] == summary
+  preview = client.get(f"/api/chats/{parent}/helpers/{delegation}", headers=headers)
+  assert preview.status_code == 200
+  assert preview.json()["status"] == expected
+  assert client.get(f"/api/chats/{child}/helpers/{delegation}", headers=headers).status_code == 404

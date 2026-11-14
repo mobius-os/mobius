@@ -39,3 +39,14 @@ export function helperPresentation(status) {
   const [state, label, dot] = settled[status] || ['stopped', 'Stopped', 'failed']
   return { state, label, dot }
 }
+
+
+// A paused or asking helper still owns unfinished work and may resume without
+// its former footer row returning. Only terminal outcomes stop preview refresh.
+const TERMINAL_HELPER_STATUSES = new Set([
+  'completed', 'done', 'failed', 'needs_review', 'interrupted', 'stopped', 'cancelled', 'killed',
+])
+
+export function isTerminalHelperStatus(status) {
+  return TERMINAL_HELPER_STATUSES.has(status)
+}

@@ -6,12 +6,12 @@ import { apiFetch } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
-import { helperPresentation } from './workingHelper.js'
+import { helperPresentation, isTerminalHelperStatus } from './workingHelper.js'
 import { isPlainLeftClick } from './internalLink.js'
 import './HelperConversation.css'
 
-// A running helper keeps writing its conversation; re-read it on this cadence
-// while the dialog is open. A settled helper is read once.
+// Unfinished helpers may resume even after their footer row disappears. Keep
+// reading while the preview is open; terminal or unavailable helpers stop.
 const LIVE_REFRESH_MS = 3000
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
@@ -42,7 +42,9 @@ export default function HelperConversation({
   const bodyRef = useRef(null)
   const followRef = useRef(true)
   const titleId = useId()
-  const presentation = helperPresentation(state.status || status)
+  const currentStatus = state.status || status
+  const presentation = helperPresentation(currentStatus)
+  const refresh = !!currentStatus && !isTerminalHelperStatus(currentStatus) && state.phase !== 'unavailable'
   const running = presentation.state === 'working'
 
   useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose })
@@ -60,14 +62,14 @@ export default function HelperConversation({
           ? prev
           : { phase: 'error', message: error?.message || 'Could not load this conversation.' })
       }
-      if (running && !controller.signal.aborted) timer = setTimeout(load, LIVE_REFRESH_MS)
+      if (refresh && !controller.signal.aborted) timer = setTimeout(load, LIVE_REFRESH_MS)
     }
     load()
     return () => {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [chatId, taskId, running, status])
+  }, [chatId, taskId, refresh, status])
 
   // Keep a live conversation on its newest step unless the reader scrolled up.
   useEffect(() => {
