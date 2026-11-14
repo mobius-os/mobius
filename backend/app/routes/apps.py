@@ -608,6 +608,10 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.ChatAppArtifact).filter(
     models.ChatAppArtifact.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  # A reused app id must not inherit the old app's spent or cancelled scopes.
+  db.query(models.AppChatScopeStart).filter(
+    models.AppChatScopeStart.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   # Native Projects snapshot their provider metadata and own a separate root;
   # uninstalling the provider must not delete or invalidate those projects.
   db.query(models.Project).filter(
@@ -644,6 +648,40 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     )
 
 
+def _has_expired_app_tombstone(db: Session, cutoff) -> bool:
+  return (
+    db.query(models.App.id)
+    .filter(models.App.deleted_at.isnot(None), models.App.deleted_at < cutoff)
+    .first()
+  ) is not None
+
+
+def _live_apps_for_drawer(db: Session) -> list[models.App]:
+  apps = (
+    db.query(models.App)
+    # Drawer metadata only. AppOut excludes both payload columns, so hydrating
+    # every source file and icon blob here creates tens of MiB of avoidable
+    # allocation on each cold shell load. Keep ORM rows for the existing
+    # activity/preview annotators while deferring the two heavyweight fields.
+    .options(
+      defer(models.App.jsx_source),
+      defer(models.App.icon_png),
+      defer(models.App.icon_override_png),
+      defer(models.App.project_templates_json),
+    )
+    .filter(models.App.deleted_at.is_(None))
+    .order_by(
+      models.App.pinned_at.is_(None),
+      models.App.pinned_at.desc(),
+      models.App.created_at,
+    )
+    .all()
+  )
+  return app_badge.annotate_apps(db, app_recency.annotate_apps(
+    db, app_activity.annotate_apps(db, apps)
+  ))
+
+
 @router.get("/", response_model=list[schemas.AppOut])
 async def list_apps(
   db: Session = Depends(get_db),
@@ -664,11 +702,12 @@ async def list_apps(
   reinstall is reviving, re-opening the slug-flip race (feature 110).
   """
   cutoff = now_naive_utc() - APP_SOFT_DELETE_TTL
-  has_stale = (
-    db.query(models.App.id)
-    .filter(models.App.deleted_at.isnot(None), models.App.deleted_at < cutoff)
-    .first()
-  )
+  # Every shell load and app-list refresh lands here. Both reads run in a
+  # worker thread: on a busy disk they can take seconds, and on the event loop
+  # that would stall every other request and stream with them. They are
+  # settled because the worker uses the request session: a cancelled request
+  # must not close it until the read is done.
+  has_stale = await settled.run_settled(_has_expired_app_tombstone, db, cutoff)
   if has_stale:
     async with fs_locks.install_uninstall_lock():
       stale = (
@@ -696,29 +735,7 @@ async def list_apps(
               "hard-delete purge failed for app %s; leaving tombstone", app.id
             )
             db.rollback()
-  apps = (
-    db.query(models.App)
-    # Drawer metadata only. AppOut excludes both payload columns, so hydrating
-    # every source file and icon blob here creates tens of MiB of avoidable
-    # allocation on each cold shell load. Keep ORM rows for the existing
-    # activity/preview annotators while deferring the two heavyweight fields.
-    .options(
-      defer(models.App.jsx_source),
-      defer(models.App.icon_png),
-      defer(models.App.icon_override_png),
-      defer(models.App.project_templates_json),
-    )
-    .filter(models.App.deleted_at.is_(None))
-    .order_by(
-      models.App.pinned_at.is_(None),
-      models.App.pinned_at.desc(),
-      models.App.created_at,
-    )
-    .all()
-  )
-  return app_badge.annotate_apps(db, app_recency.annotate_apps(
-    db, app_activity.annotate_apps(db, apps)
-  ))
+  return await settled.run_settled(_live_apps_for_drawer, db)
 
 
 @router.get("/uninstalled", response_model=list[schemas.UninstalledAppOut])
@@ -2418,6 +2435,7 @@ async def save_store_listing(
   edit = store_listing_source.ListingEdit(
     tagline=body.tagline,
     description=body.description,
+    license=body.license,
     icon=_listing_image(body.icon, "app icon"),
     hero=_listing_image(body.hero, "banner image"),
     screenshots=tuple(

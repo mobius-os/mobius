@@ -53,7 +53,11 @@ class DelegationSubmit(BaseModel):
   app_id: int | None = Field(default=None, gt=0)
   parent_chat_id: str = Field(min_length=1, max_length=64)
   task_key: str = Field(min_length=1, max_length=128)
-  prompt: str = Field(min_length=1, max_length=200_000)
+  # Uncapped like an owner message: it becomes the helper's first user
+  # message over the provider's stdin/JSON-RPC stream (no argv limit). A prompt
+  # beyond the model's context fails that helper's turn with the provider's own
+  # context-length error, reported to this parent like any failed helper turn.
+  prompt: str = Field(min_length=1)
   provider: str
   model: str | None = Field(default=None, max_length=256)
   effort: str | None = Field(default=None, max_length=32)
@@ -128,15 +132,33 @@ def _require_submitter(
   return parent
 
 
+def _app_reads_all_helpers(db: Session, principal: Principal) -> bool:
+  """Whether an app holds the owner-reviewed grant to observe every helper.
+
+  The grant lives in the accepted capability contract, like the other
+  contract-only grants, so a later app version that omits it loses access on
+  the next request. It covers reading helper records only: their history and
+  every mutation stay with the helper's own app.
+  """
+  if principal.app_id is None or principal.delegation_id is not None:
+    return False
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  contract = app.capability_contract if app and isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  return data.get("helper_activity_read") is True
+
+
 def _row_for_principal(
-  db: Session, delegation_id: str, principal: Principal,
+  db: Session, delegation_id: str, principal: Principal, *, observe: bool = False,
 ) -> models.Delegation:
   query = db.query(models.Delegation).filter(
     models.Delegation.id == delegation_id,
   )
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
-  elif principal.app_id is not None:
+  elif principal.app_id is not None and not (
+    observe and _app_reads_all_helpers(db, principal)
+  ):
     query = query.filter(models.Delegation.app_id == principal.app_id)
   row = query.first()
   if row is None:
@@ -418,7 +440,7 @@ def list_delegations(
   query = db.query(models.Delegation)
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
-  elif principal.app_id is not None:
+  elif principal.app_id is not None and not _app_reads_all_helpers(db, principal):
     query = query.filter(models.Delegation.app_id == principal.app_id)
   elif app_id is not None:
     query = query.filter(models.Delegation.app_id == app_id)
@@ -435,7 +457,11 @@ def get_delegation(
   principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
-  row = _row_for_principal(db, delegation_id, principal)
+  row = _row_for_principal(db, delegation_id, principal, observe=True)
+  if include_history and principal.app_id is not None and row.app_id != principal.app_id:
+    raise HTTPException(
+      status_code=403, detail="Only the helper's own app may read its history.",
+    )
   payload = serialize_delegation(db, row)
   if include_history:
     child = db.query(models.Chat).filter(models.Chat.id == row.child_chat_id).first()
@@ -465,11 +491,8 @@ def read_delegation_result(
     )
   payload = serialize_delegation(db, row)
   # A settled outcome is received even without report text (a failure that
-  # wrote nothing); a truncated report and still-working helpers stay owed.
-  if (
-    not payload.get("result_truncated")
-    and record_result_read_by_parent(db, row)
-  ):
+  # wrote nothing); still-working helpers stay owed.
+  if record_result_read_by_parent(db, row):
     db.commit()
     publish_parent_waiting_changed(row.parent_chat_id)
   return payload
@@ -533,7 +556,7 @@ async def cancel_delegation(
 
 
 class DelegationMessage(BaseModel):
-  message: str = Field(min_length=1, max_length=200_000)
+  message: str = Field(min_length=1)
   # Correlates an answer with the helper's exact question; required while the
   # helper is waiting, so a retried answer can never become a fresh follow-up.
   question_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -814,8 +837,8 @@ def ask_parent(
 
 
 class DelegationQuestionAsk(BaseModel):
-  question: str = Field(min_length=1, max_length=200_000)
-  options: list[str] = Field(default_factory=list, max_length=16)
+  question: str = Field(min_length=1)
+  options: list[str] = Field(default_factory=list)
 
   @field_validator("question")
   @classmethod
@@ -831,8 +854,6 @@ class DelegationQuestionAsk(BaseModel):
     cleaned = [value.strip() for value in values]
     if any(not value for value in cleaned):
       raise ValueError("options must not be empty")
-    if any(len(value) > 200_000 for value in cleaned):
-      raise ValueError("options must be at most 200000 characters")
     return cleaned
 
 

@@ -423,11 +423,13 @@ def test_chat_usage_reports_totals_and_historic_coverage(
 
   assert response.status_code == 200
   payload = response.json()
-  assert payload["coverage"] == {
-    "runs": 2,
-    "runs_with_usage": 1,
-    "runs_with_cost": 1,
-  }
+  assert payload["coverage"]["runs"] == 2
+  assert payload["coverage"]["runs_with_usage"] == 1
+  assert payload["coverage"]["runs_with_cost"] == 1
+  # The unmeasured historic run keeps the observed sums from reading as a
+  # complete chat aggregate.
+  assert payload["coverage"]["runs_by_quality"]["final"] == 1
+  assert payload["coverage"]["runs_by_quality"]["missing"] == 1
   assert payload["totals"] == {
     "input_tokens": 900,
     "output_tokens": 200,
@@ -443,6 +445,9 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   assert measured["provider_session_id"] == "thread-1"
   assert measured["model_context_window"] == 200_000
   assert measured["usage"]["calculation"] == "thread_delta"
+  assert measured["usage_quality"] == "final"
+  historic = next(run for run in payload["runs"] if run["id"] == "historic-run")
+  assert historic["usage_quality"] == "missing"
 
 
 def test_current_chat_usage_is_bounded_to_selected_provider_session(

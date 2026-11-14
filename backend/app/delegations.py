@@ -28,7 +28,9 @@ from app import transcript_rows
 from app import auth, models
 from app.settled import run_settled
 from app.browser_access import BrowserLineage, require_live
-from app.continuations import HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON
+from app.continuations import (
+  HELPER_ANSWER_CID_PREFIX, HELPER_ANSWER_REASON, has_runnable_pending,
+)
 from app.timeutil import now_naive_utc
 
 
@@ -718,8 +720,8 @@ def _assistant_result_from_newest(messages, *, run_ids: set[str] | None = None) 
       return "\n\n".join([content.strip(), *later_error])
   return "\n\n".join(later_error)
 
-_SAME_ATTEMPT_RESUME_REASONS = frozenset({
-  "restart", "usage_limit", "memory", "storage", "model_capacity", "compaction",
+_SAME_ATTEMPT_RESUME_REASONS = models.RESOURCE_PARK_REASONS | frozenset({
+  "restart", "usage_limit", "model_capacity", "compaction",
 })
 
 
@@ -1297,8 +1299,11 @@ def question_view(question: models.DelegationQuestion) -> dict:
   }
 
 
+# Automatic notices repeat in the parent's provider context, so they carry a
+# bounded preview; the saved question and choices stay whole for explicit reads.
 _AUTOMATIC_QUESTION_MAX = 1000
 _AUTOMATIC_OPTION_MAX = 120
+_AUTOMATIC_OPTIONS_SHOWN = 16
 
 
 def _automatic_question_preview(view: dict, delegation_id: str) -> dict:
@@ -1306,14 +1311,22 @@ def _automatic_question_preview(view: dict, delegation_id: str) -> dict:
   question = view["question"]
   options = view["options"]
   clipped = question[:_AUTOMATIC_QUESTION_MAX]
-  clipped_options = [option[:_AUTOMATIC_OPTION_MAX] for option in options]
+  clipped_options = [
+    option[:_AUTOMATIC_OPTION_MAX] for option in options[:_AUTOMATIC_OPTIONS_SHOWN]
+  ]
   if clipped == question and clipped_options == options:
     return view
-  return {
+  preview = {
     **view, "question": clipped, "options": clipped_options,
     "preview_truncated": True,
     "full_question_url": f"/api/delegations/{delegation_id}",
   }
+  if len(options) > len(clipped_options):
+    preview["options_omitted"] = (
+      f"{len(options) - len(clipped_options)} more choices; "
+      "full_question_url has the whole question and every choice"
+    )
+  return preview
 
 
 def helper_answer_content(question: models.DelegationQuestion, answer: str) -> str:
@@ -1917,8 +1930,8 @@ def delegation_execution_token(
   )
 
 
-def mark_cancelled(db: Session, row: models.Delegation) -> None:
-  """Latch cancellation and its Workflows terminal projection idempotently."""
+def latch_cancelled(db: Session, row: models.Delegation) -> None:
+  """Stage cancellation without committing, for a caller that commits it with other writes."""
   child = db.query(models.Chat).filter(
     models.Chat.id == row.child_chat_id,
   ).first()
@@ -1927,6 +1940,11 @@ def mark_cancelled(db: Session, row: models.Delegation) -> None:
     child.auto_resume_on_limit = False
   if row.cancelled_at is None:
     row.cancelled_at = now_naive_utc()
+
+
+def mark_cancelled(db: Session, row: models.Delegation) -> None:
+  """Latch cancellation and its Workflows terminal projection idempotently."""
+  latch_cancelled(db, row)
   # Stage cancellation before recording the terminal lifecycle fact.
   # ``record_event`` commits both when the event is new; the explicit commit
   # covers an idempotent replay where that deterministic event already exists.
@@ -3265,7 +3283,7 @@ def safe_parent_activity_startup_writer_orphan(
     or physical.status != "running"
     or physical.provider_execution_admitted is not False
     or chat.pending_question_id is not None
-    or bool(chat.pending_messages)
+    or has_runnable_pending(chat.pending_messages)
     or (chat.live_assistant or {}).get("id") != physical.id
     or bool((chat.live_assistant or {}).get("blocks") or [])
   ):
@@ -3426,7 +3444,7 @@ def _plan_result_steer(
       return None
     # Never jump ahead of owner-authored or other queued work. Sends queue
     # under the same chat queue lock the caller holds across this read.
-    if list(chat.pending_messages or []):
+    if has_runnable_pending(chat.pending_messages):
       return None
     # A result the live turn already admitted into its context latches only
     # at that turn's Finalize; steering it in again would be a duplicate.

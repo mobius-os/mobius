@@ -20,6 +20,7 @@ import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  previousPageDied,
   readRestoredCanvas,
   readStoredChatId,
 } from '../lib/navigationPersistence.js'
@@ -101,6 +102,11 @@ if (deepLink?.view === 'chat' && deepLink.focusQuestion) {
   requestChatQuestionReveal(deepLink.chatId, deepLink.questionId)
 }
 
+// Read once per page load: the browser killed this tab's previous page. The
+// workspace boots without any app mounted (paneModel.withoutBootApps) and the
+// cold-restored app is not pre-mounted, so a crashing app cannot loop.
+export const recoveringFromCrash = previousPageDied()
+
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
 // instead of defaulting to a chat. Only the canvas needs an explicit
@@ -119,7 +125,8 @@ const returnView = ownerWorkspace ? consumeReturnView() : null
 // live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
 // to chat. See ARCHITECTURE.md (Navigation back-stack + drawer model).
 export const coldRestoredCanvasAppId =
-  (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
+  (!recoveringFromCrash && !shellReload?.activeView && !deepLink?.view
+    && restored?.view === 'canvas')
     ? restored.appId
     : null
 
@@ -209,6 +216,9 @@ export default function useNavigation({
   // An explicit tap/swipe close can start the panel transition immediately
   // while drawerOpenRef remains true until Back consumes the drawer sentinel.
   const [drawerVisible, setDrawerVisible] = useState(false)
+  // Set from the opening tap until the drawer commits. An app under the opening
+  // drawer stops competing for the device at once, not two painted frames later.
+  const [drawerOpening, setDrawerOpening] = useState(false)
   // Android's embedded-surface hit-test map can lag the input that opens the
   // drawer. When opening over an app, wait through one painted frame before
   // exposing the scrim so that input/compositor ownership settles first. The
@@ -664,10 +674,12 @@ export default function useNavigation({
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
+      setDrawerOpening(true)
       drawerPrepareRafRef.current = requestAnimationFrame(() => {
         drawerPrepareRafRef.current = requestAnimationFrame(() => {
           drawerPrepareRafRef.current = 0
           drawerPreparingRef.current = false
+          setDrawerOpening(false)
           commitDrawerOpen()
         })
       })
@@ -683,6 +695,7 @@ export default function useNavigation({
       drawerPrepareRafRef.current = 0
     }
     drawerPreparingRef.current = false
+    setDrawerOpening(false)
     return true
   }
 
@@ -1506,6 +1519,18 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('app', initialNav.appId))
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
+      }
+
+      // A page killed while showing an app (iOS Safari kills a page that runs out
+      // of memory, then reloads it) must not reopen that app on its own: it would
+      // crash again until Safari gives up with "A problem repeatedly occurred".
+      // The restored workspace already mounts no app (a restored app screen is
+      // the empty home); a reload or launch target that names an app is
+      // overridden here. Go home (the latest chat, or the empty chat home); the
+      // app stays one tap away.
+      if (recoveringFromCrash && snapshotRoute().view === 'canvas') {
+        restoreRoute(navRoute('chat', null, null, bootPaneId, { homeSeed: true }))
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
 
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
@@ -2343,6 +2368,7 @@ export default function useNavigation({
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
+    drawerOpening,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings

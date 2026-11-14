@@ -40,6 +40,7 @@ from app.compiler import (
 from app.config import get_settings
 from app.manifest_identity import requested_manifest_source
 from app.manifest_contract import (
+  BOOLEAN_PERMISSIONS,
   MANIFEST_MAX_BYTES,
   PACKAGE_MAX_BYTES,
   ManifestContractError,
@@ -604,6 +605,24 @@ def _apply_local_manifest_runtime(
   )
 
 
+def _ignored_local_grant_warnings(app: models.App, manifest: dict) -> tuple[str, ...]:
+  """Name the server grants a local manifest declares but the owner never gave.
+
+  Only a reviewed Store install sets a grant that has its own App column, so a
+  local manifest's declaration of one is silently inert. Say so on the apply
+  result instead of letting the first sign be a 403 that blames the manifest.
+  """
+  declared = manifest.get("permissions") or {}
+  return tuple(
+    f"permissions.{key} is ignored for a local app; only a Store-installed "
+    "app can hold it"
+    for key in BOOLEAN_PERMISSIONS
+    if key in models.App.__table__.columns
+    and declared.get(key) is True
+    and not getattr(app, key)
+  )
+
+
 def _live_runtime_state(app: models.App) -> tuple:
   """Fields whose manifest-driven changes make an apply non-empty."""
   return (
@@ -771,9 +790,10 @@ async def _apply_source_revision(
         provider = manifest.get("model_provider")
         if (not store_managed and isinstance(provider, dict)
             and provider.get("transport") == "identity_broker"):
-          # The broker signs with the owner's Möbius account, so only the
-          # reviewed Möbius · You package may route turns through it. Local
-          # apps declare their own HTTPS endpoint and app-secret key.
+          # The broker signs with the owner's Möbius account. The platform
+          # owns that provider and ignores this declaration, but only the
+          # reviewed Möbius · You package may still carry it. Local apps
+          # declare their own HTTPS endpoint and app-secret key.
           raise AppApplyError(
             "local_model_broker",
             "Local apps may declare an HTTPS model provider with their own "
@@ -994,6 +1014,8 @@ async def _apply_source_revision(
           warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
         elif store_divergence_warning:
           warnings = (*warnings, store_divergence_warning)
+        elif not store_managed:
+          warnings = (*warnings, *_ignored_local_grant_warnings(app, manifest))
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
@@ -1035,6 +1057,8 @@ async def _apply_source_revision(
         warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
       elif store_divergence_warning:
         warnings = (*warnings, store_divergence_warning)
+      elif not store_managed:
+        warnings = (*warnings, *_ignored_local_grant_warnings(app, manifest))
       return ApplyResult(
         app=app,
         mode="created" if created else "updated",

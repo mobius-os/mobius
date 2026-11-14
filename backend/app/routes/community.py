@@ -30,6 +30,7 @@ from app.community_publish import (
   accepted_history_contains,
   build_public_snapshot,
   delete_publication_journal,
+  keeps_a_listed_license,
   list_publication_journals,
   new_publication_journal,
   public_store_listing,
@@ -45,7 +46,7 @@ from app.deps import (
   Principal, get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_manage_apps,
-  reject_cross_site, require_nondelegated_owner_control,
+  reject_cross_site, require_account_owner, require_account_owner_control,
 )
 
 
@@ -81,8 +82,9 @@ def _store_github_owner_control(
   owner: models.Owner = Depends(_store_github_owner),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Require explicit owner confirmation without dropping Store app grants."""
-  require_nondelegated_owner_control(principal)
+  """Publish under the owner's GitHub and Möbius identity: the owner (or a
+  Store app acting for them) confirms it, never a helper or a guest."""
+  require_account_owner_control(principal)
   return owner
 
 
@@ -90,8 +92,9 @@ def _store_owner_control(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Protect public expression while preserving the Store app capability."""
-  require_nondelegated_owner_control(principal)
+  """Protect public expression under the owner's identity (reviews,
+  withdrawals, install receipts) while preserving the Store app capability."""
+  require_account_owner_control(principal)
   return owner
 
 
@@ -317,6 +320,40 @@ def _remote_publication_is_current(
   )
 
 
+def _local_app_id(app: models.App) -> str:
+  return f"app:{app.id}:{app.slug}"
+
+
+async def _listed_in_store(app: models.App, files: list[dict[str, str]]) -> bool:
+  """Whether the Store lists this app, when its license makes that matter.
+
+  An app the Store already lists may keep publishing under another free
+  license it declares; the Host admits that update only when its listed
+  revision declares the same one. A listing is this identity's publication
+  of the app linked to a listed revision. Any other license never asks.
+  """
+  if not keeps_a_listed_license(files):
+    return False
+  local_app_id = _local_app_id(app)
+  offset: object = 0
+  while isinstance(offset, int) and offset <= 10_000:
+    payload, _, _ = await _broker_result(
+      "GET", f"{COMMUNITY_PREFIX}/publications",
+      params={"limit": 100, "offset": offset},
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+      return False
+    if any(
+      isinstance(item, dict)
+      and item.get("local_app_id") == local_app_id
+      and item.get("revision_id")
+      for item in payload["items"]
+    ):
+      return True
+    offset = payload.get("next_offset")
+  return False
+
+
 def _publication_journal(
   *,
   local_app_id: str,
@@ -452,14 +489,14 @@ async def _github_json(
   return payload, response.status_code
 
 
-@router.get("/identity")
+@router.get("/identity", dependencies=[Depends(require_account_owner)])
 async def community_identity(
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ) -> JSONResponse:
   return await _request("GET", "/identity")
 
 
-@router.get("/github-status")
+@router.get("/github-status", dependencies=[Depends(require_account_owner)])
 async def community_github_status(
   _: models.Owner = Depends(_store_github_owner),
 ) -> dict[str, str | bool]:
@@ -467,7 +504,8 @@ async def community_github_status(
 
   Connection setup and credential details remain owned by Contribute. The
   Store inherits the already-reviewed local authority without receiving the
-  token, OAuth controls, scopes, or resumable device-flow state.
+  token, OAuth controls, scopes, or resumable device-flow state. It is the
+  owner's account, so never a guest's.
   """
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
@@ -506,7 +544,7 @@ async def list_community_apps(
   )
 
 
-@router.get("/publications")
+@router.get("/publications", dependencies=[Depends(require_account_owner)])
 async def list_community_publications(
   limit: int = Query(default=100, ge=1, le=100),
   offset: int = Query(default=0, ge=0, le=10_000),
@@ -624,13 +662,14 @@ async def publish_local_app_to_github(
   try:
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       accepted_commit, files = await settled.run_settled(build_public_snapshot, app)
-    await asyncio.to_thread(public_store_listing, files)
+    listed = await _listed_in_store(app, files)
+    await asyncio.to_thread(public_store_listing, files, listed=listed)
   except CommunityPublicationError as exc:
     raise HTTPException(
       exc.status_code, {"code": exc.code, "message": exc.detail},
     ) from exc
 
-  local_app_id = f"app:{app.id}:{app.slug}"
+  local_app_id = _local_app_id(app)
   async with _publication_lock(local_app_id):
     repository_name = body.repository_name.casefold()
     journal = _publication_journal(
@@ -903,7 +942,9 @@ async def _publish_local_source(
     return repository, source_commit_sha
 
 
-@router.get("/publications/github/preview")
+@router.get(
+  "/publications/github/preview", dependencies=[Depends(require_account_owner)],
+)
 async def preview_local_app_publication(
   app_id: int = Query(gt=0),
   db: Session = Depends(get_db),
@@ -924,9 +965,17 @@ async def preview_local_app_publication(
       accepted_commit, files, problems = await settled.run_settled(
         read_public_snapshot, app,
       )
+    try:
+      listed = await _listed_in_store(app, files)
+    except HTTPException:
+      # Without the Store's answer, the License item says what a new
+      # listing needs; publishing asks again.
+      listed = False
     # The review is pure work on the bytes already read (decoding images,
     # scanning for metadata), so it holds no lock.
-    review = await asyncio.to_thread(store_listing_review, files, problems)
+    review = await asyncio.to_thread(
+      store_listing_review, files, problems, listed=listed,
+    )
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       await settled.run_settled(
         store_listing_source.note_what_saving_fixes,
@@ -953,6 +1002,7 @@ async def preview_local_app_publication(
     "checklist": review["checklist"],
     "listing": review["listing"],
     "draft": review["draft"],
+    "license_options": review["license_options"],
   }
 
 

@@ -123,13 +123,6 @@ async def test_mobius_switch_filters_picker_and_default_without_hiding_other_mod
   data_dir = str(tmp_path)
   assert providers.mobius_models_enabled(data_dir)
   monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
-  declaration = {
-    "name": "Möbius", "base_url": "http://127.0.0.1:8765/v1",
-    "default_model": "inkling", "transport": "identity_broker",
-    "models": [{"id": "spark", "label": "Spark", "effort_levels": ["minimal", "low", "medium", "high", "max"]},
-               {"id": "inkling", "label": "Evolve"}],
-  }
-  providers.PROVIDERS["mobius"].set_declaration(6, declaration)
   providers.invalidate_model_cache()
   try:
     for provider_id in providers.PROVIDERS:
@@ -147,11 +140,10 @@ async def test_mobius_switch_filters_picker_and_default_without_hiding_other_mod
     assert "mobius" not in after
     assert "claude" in after and "codex" in after
     assert providers.PROVIDERS["mobius"].check_auth(data_dir) == (
-      "This model provider is turned off in its app."
+      "Möbius models are turned off in Settings."
     )
     assert providers.resolve_default_provider(data_dir, "mobius") != "mobius"
   finally:
-    providers.PROVIDERS["mobius"].set_declaration(None, None)
     providers.invalidate_model_cache()
 
 
@@ -439,9 +431,8 @@ async def test_mobius_registry_uses_accepted_app_catalog_without_broker_request(
   monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
 
   provider = providers.MobiusProvider()
-  provider.set_declaration(6, {"name": "Möbius", "base_url": "http://127.0.0.1:8765/v1", "models": [{"id": "inkling", "label": "Evolve"}]})
   rows = await provider.fetch_models(str(tmp_path))
-  assert rows == [{"id": "inkling", "label": "Evolve"}]
+  assert rows == provider.declaration["models"]
 
 
 # --- Expired-token refresh (the 401 root cause) -----------------------

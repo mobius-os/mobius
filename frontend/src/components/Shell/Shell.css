@@ -108,7 +108,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
   border-radius: 999px;
   background: color-mix(in srgb, var(--surface) 94%, transparent);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-size: 12px;
   font-weight: 680;
@@ -407,6 +407,21 @@
   pointer-events: auto;
 }
 
+/* An app frame can't read the device's bottom inset (env() reads 0 inside it),
+   and outside full immersive its --mobius-safe-bottom is 0 too (see
+   lib/safeAreaInsets.js), so the shell keeps the frame above the home
+   indicator / navigation bar. The strip below shows the shell's --bg. While
+   the shell is fitted above a keyboard, --shell-bottom-inset is 0: the
+   keyboard covers the bar, so the frame rests directly on it. Full immersive
+   apps get the real insets and stay full-bleed. */
+.shell__app-view {
+  padding-bottom: var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
+
+.shell--immersive .shell__app-view {
+  padding-bottom: 0;
+}
+
 /* Chat entry keeps the outgoing surface mounted only as a geometry/runtime
    owner while the incoming ChatView settles below. Its content is hidden
    immediately: showing the previous chat OR app after the drawer has closed
@@ -449,9 +464,16 @@
   display: grid;
   place-items: center;
   background: var(--bg);
-  color: var(--muted);
+  /* Most swaps finish within a frame or two; flashing a label then reads as a
+     loading screen. The words appear only when opening is genuinely slow. */
+  color: transparent;
+  animation: shell-opening-label 0s linear 400ms forwards;
   font-size: 12px;
   letter-spacing: 0.01em;
+}
+
+@keyframes shell-opening-label {
+  to { color: var(--muted); }
 }
 
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */

@@ -148,9 +148,10 @@ export default defineConfig({
       use: { storageState: AUTH_FILE },
     },
     {
-      // Security checks that must prove their result without a login or owner
-      // state. Keeping these in a dependency-free project prevents auth.setup
-      // failures from masking whether the hostile request was actually tested.
+      // Checks that must prove their result without a login or owner state:
+      // security checks, and fixture-only browser contracts such as
+      // theme-cascade. Keeping these in a dependency-free project prevents
+      // auth.setup failures from masking whether the case was actually tested.
       name: 'tests-unauthenticated',
       testMatch: /\.unauth\.spec\.mjs$/,
       use: { storageState: { cookies: [], origins: [] } },

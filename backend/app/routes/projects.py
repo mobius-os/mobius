@@ -49,14 +49,21 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
-  get_project_principal, reject_cross_site, resolve_project_principal,
+  get_project_principal, reject_cross_site, require_account_owner_control,
+  resolve_project_principal,
 )
 from app.path_utils import validate_path_within_base
 from app.storage_io import make_parent_folders, require_parent_folders
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
-from app.theme import DEFAULT_THEME, theme_data
-from app.project_retention import PROJECT_LIFECYCLE_LOCK, serialize_project_lifecycle
+from app.theme import DEFAULT_THEME, shipped_palettes_css, theme_data
+from app.project_retention import (
+  PROJECT_LIFECYCLE_LOCK,
+  RootStillAssembling,
+  creation_staging_root,
+  place_and_commit_new_root,
+  serialize_project_lifecycle,
+)
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 
@@ -406,6 +413,9 @@ def _project_chat_response(chat: models.Chat) -> dict[str, Any]:
   return {
     "id": chat.id,
     "title": chat.title,
+    # An owner-chosen name marks a chat kept for later, so a project's New
+    # chat never reopens it as a blank.
+    "title_locked": bool(chat.title_locked),
     "has_messages": bool(chat.has_messages),
     "provider": chat.provider,
     "created_at": chat.created_at,
@@ -1194,29 +1204,28 @@ def create_project(
     root = (Path(get_settings().data_dir) / root_locator).resolve()
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
-    root.mkdir(parents=True)
-    try:
-      _copy_template_files(root, template, app)
-      snapshot = _safe_template(template, app)
-      # Declared previews become buildable artifacts up front, so the file
-      # grid, artifact list, and build button share one explicit registry.
-      artifacts = _declared_previews_to_artifacts(snapshot, root)
-      project = models.Project(
-        id=project_id,
-        name=body.name,
-        project_type=_template_key(template, app),
-        root_path=root_locator.as_posix(),
-        chat_id=None,
-        source_app_id=app.id if app is not None else None,
-        template_snapshot_json=snapshot,
-        artifacts_json=artifacts or None,
-      )
-      db.add(project)
-      db.commit()
-    except Exception:
-      db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
-      raise
+    with creation_staging_root(root) as staging:
+      try:
+        _copy_template_files(staging, template, app)
+        snapshot = _safe_template(template, app)
+        # Declared previews become buildable artifacts up front, so the file
+        # grid, artifact list, and build button share one explicit registry.
+        artifacts = _declared_previews_to_artifacts(snapshot, staging)
+        project = models.Project(
+          id=project_id,
+          name=body.name,
+          project_type=_template_key(template, app),
+          root_path=root_locator.as_posix(),
+          chat_id=None,
+          source_app_id=app.id if app is not None else None,
+          template_snapshot_json=snapshot,
+          artifacts_json=artifacts or None,
+        )
+        db.add(project)
+        place_and_commit_new_root(db, staging, root)
+      except Exception:
+        db.rollback()
+        raise
   db.refresh(project)
   return _project_response(project)
 
@@ -1231,86 +1240,100 @@ def import_github_project(
   token = github_auth.get_token()
   if not token:
     raise HTTPException(409, "Connect GitHub before importing a repository.")
-  with PROJECT_LIFECYCLE_LOCK:
-    if body.recovery_request_id:
-      project_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL, f"mobius:github-project:{body.recovery_request_id}",
-      ))
-      existing = db.query(models.Project).filter(models.Project.id == project_id).first()
-      if existing is not None:
-        if existing.deleted_at is not None:
-          raise HTTPException(409, "Project was deleted.")
-        return _project_response(existing, _live_project_chat_rows(db, existing.id))
-    else:
-      project_id = str(uuid.uuid4())
+  if body.recovery_request_id:
+    project_id = str(uuid.uuid5(
+      uuid.NAMESPACE_URL, f"mobius:github-project:{body.recovery_request_id}",
+    ))
+  else:
+    project_id = str(uuid.uuid4())
+  root_locator = Path("projects") / project_id
+  root = (Path(get_settings().data_dir) / root_locator).resolve()
 
-    root_locator = Path("projects") / project_id
-    root = (Path(get_settings().data_dir) / root_locator).resolve()
+  def existing_import() -> dict[str, Any] | None:
+    existing = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if existing is None:
+      return None
+    if existing.deleted_at is not None:
+      raise HTTPException(409, "Project was deleted.")
+    return _project_response(existing, _live_project_chat_rows(db, existing.id))
+
+  with PROJECT_LIFECYCLE_LOCK:
+    existing = existing_import()
+    if existing is not None:
+      return existing
     if root.exists():
       raise HTTPException(409, "Project root already exists.")
-    env = {
-      **os.environ,
-      "GH_TOKEN": token,
-      "GIT_TERMINAL_PROMPT": "0",
-      "LC_ALL": "C",
-    }
-    try:
-      result = subprocess.run(
-        ["gh", "repo", "clone", body.repository, str(root), "--", "--depth=1"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        env=env,
-        timeout=120,
-        check=False,
-      )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-      shutil.rmtree(root, ignore_errors=True)
-      raise HTTPException(502, "GitHub import did not finish in time.") from exc
-    if result.returncode != 0:
-      shutil.rmtree(root, ignore_errors=True)
-      lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
-      detail = lines[-1][:300] if lines else "GitHub could not clone that repository."
-      raise HTTPException(502, detail)
-
-    repository_url = f"https://github.com/{body.repository}"
-    snapshot: dict[str, Any] = {
-      "key": "github:repository",
-      "id": "repository",
-      "name": "GitHub repository",
-      "description": f"Imported from {body.repository}",
-      "guidance": (
-        "Work inside this project root. Preview and test changes locally. "
-        "The owner controls commits and any later publication."
-      ),
-      "skills": [],
-      "dependencies": [],
-      "previews": [],
-      "actions": [],
-      "artifact_types": [],
-      "files": {},
-      "repository": {"slug": body.repository, "url": repository_url},
-      "source_app_id": None,
-      "source_app_name": None,
-      "source_app_version": None,
-    }
-    try:
-      artifacts = _declared_previews_to_artifacts(snapshot, root)
-      project = models.Project(
-        id=project_id,
-        name=body.name or body.repository.split("/", 1)[1],
-        project_type="github:repository",
-        root_path=root_locator.as_posix(),
-        chat_id=None,
-        source_app_id=None,
-        template_snapshot_json=snapshot,
-        artifacts_json=artifacts or None,
-      )
-      db.add(project)
-      db.commit()
-    except Exception:
-      db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
-      raise
+  env = {
+    **os.environ,
+    "GH_TOKEN": token,
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C",
+  }
+  repository_url = f"https://github.com/{body.repository}"
+  snapshot: dict[str, Any] = {
+    "key": "github:repository",
+    "id": "repository",
+    "name": "GitHub repository",
+    "description": f"Imported from {body.repository}",
+    "guidance": (
+      "Work inside this project root. Preview and test changes locally. "
+      "The owner controls commits and any later publication."
+    ),
+    "skills": [],
+    "dependencies": [],
+    "previews": [],
+    "actions": [],
+    "artifact_types": [],
+    "files": {},
+    "repository": {"slug": body.repository, "url": repository_url},
+    "source_app_id": None,
+    "source_app_name": None,
+    "source_app_version": None,
+  }
+  try:
+    with creation_staging_root(root) as staging:
+      # The clone can take minutes, so it runs outside PROJECT_LIFECYCLE_LOCK:
+      # chat deletion and other retention callers wait on that lock.
+      try:
+        result = subprocess.run(
+          ["gh", "repo", "clone", body.repository, str(staging), "--", "--depth=1"],
+          stdin=subprocess.DEVNULL,
+          capture_output=True,
+          env=env,
+          timeout=120,
+          check=False,
+        )
+      except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(502, "GitHub import did not finish in time.") from exc
+      if result.returncode != 0:
+        lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = lines[-1][:300] if lines else "GitHub could not clone that repository."
+        raise HTTPException(502, detail)
+      with PROJECT_LIFECYCLE_LOCK:
+        existing = existing_import()
+        if existing is not None:
+          return existing
+        if root.exists():
+          raise HTTPException(409, "Project root already exists.")
+        try:
+          artifacts = _declared_previews_to_artifacts(snapshot, staging)
+          project = models.Project(
+            id=project_id,
+            name=body.name or body.repository.split("/", 1)[1],
+            project_type="github:repository",
+            root_path=root_locator.as_posix(),
+            chat_id=None,
+            source_app_id=None,
+            template_snapshot_json=snapshot,
+            artifacts_json=artifacts or None,
+          )
+          db.add(project)
+          place_and_commit_new_root(db, staging, root)
+        except Exception:
+          db.rollback()
+          raise
+  except RootStillAssembling as exc:
+    raise HTTPException(409, "This repository import is still in progress.") from exc
   db.refresh(project)
   return _project_response(project)
 
@@ -1883,6 +1906,7 @@ def list_project_agent_messages(
     "broadcast": row["broadcast"],
     "body": row["body"],
     "created_at": row["created_at"],
+    **{key: row[key] for key in ("truncated", "body_chars") if key in row},
   } for row in rows]
 
 
@@ -2519,7 +2543,8 @@ async def pull_project_git_remote(
 
 
 @router.post(
-  "/{project_id}/git/push", dependencies=[Depends(reject_cross_site)],
+  "/{project_id}/git/push",
+  dependencies=[Depends(reject_cross_site), Depends(require_account_owner_control)],
 )
 def push_project_git_remote(
   project_id: str,
@@ -2693,7 +2718,7 @@ def get_project_theme_source(
   principal: ProjectPrincipal = Depends(get_project_principal),
   db: Session = Depends(get_db),
 ):
-  """Inspect the two fixed CSS sources without effective-theme augmentation.
+  """Inspect the saved stylesheet and the shipped defaults, unaugmented.
 
   No caller-supplied path: project membership grants only this theme resource,
   not access to shared storage. Keep absence distinct from an empty override.
@@ -2707,6 +2732,7 @@ def get_project_theme_source(
     pass
   else:
     files.append({"name": "theme.css", "content": content})
+  files.append({"name": "palettes.css", "content": shipped_palettes_css()})
   files.append({"name": "default-theme.css", "content": DEFAULT_THEME})
   return {"files": files}
 

@@ -175,9 +175,9 @@ field() {  # <json> <python expression over d>; JSON on stdin (a preview can exc
 # own proof; an unknown code fails closed.
 MIXED_REASON_CODES="host_helper_migration host_operator_tooling container_image_definition
   container_build_context frontend_dependencies sqlite_runtime legacy_python_runtime
-  served_runtime_module baked_runtime platform_skill_templates self_hosted_topology_source
-  railway_topology_source commit_launcher live_maintenance_tooling backend_development_source
-  server_runtime live_source"
+  served_runtime_module baked_runtime baked_platform_boot platform_skill_templates
+  self_hosted_topology_source railway_topology_source commit_launcher live_maintenance_tooling
+  backend_development_source server_runtime live_source"
 
 mixed_review() {  # <preview json> <previous> <target>: exactly the pinned image plus helper span
   python3 -c '
@@ -350,7 +350,10 @@ HELPER
 probe() {  # <command>
   local cid backend
   cid=$(app_container) || fail "cannot identify the app"
-  backend=$(docker exec -u mobius "$cid" sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"') \
+  # -o, not -n: the server is the oldest match; a child it is starting (say, a
+  # build in the frontend folder) carries the server's command line in its own
+  # cwd until it execs.
+  backend=$(docker exec -u mobius "$cid" sh -c 'readlink "/proc/$(pgrep -o -u mobius -f "/bin/uvicorn app\.main:app")/cwd"') \
     && [[ -n $backend ]] || fail "cannot locate the serving uvicorn process"
   docker cp "$ROOT/scripts/transcript_rollback_probe.py" "$cid:/tmp/probe.py" || fail "cannot copy the transcript probe"
   docker exec -u mobius -w "$backend" -e PYTHONPATH="$backend" "$cid" python3 /tmp/probe.py "$1" \

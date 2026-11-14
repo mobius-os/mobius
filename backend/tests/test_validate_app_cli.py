@@ -133,6 +133,28 @@ def test_validator_rejects_a_bundle_compile_failure(tmp_path):
   assert "resolves to no file" in result.stderr
 
 
+def test_validator_names_a_killed_compiler_instead_of_its_exit_code(
+  tmp_path, monkeypatch, capsys,
+):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  script = runpy.run_path(str(SCRIPT))
+  killed = [
+    sys.executable, "-c",
+    "import os, signal; os.kill(os.getpid(), signal.SIGKILL)",
+  ]
+  monkeypatch.setitem(
+    script["main"].__globals__, "rolldown_command", lambda *_a, **_k: killed,
+  )
+  monkeypatch.setattr(sys, "argv", [str(SCRIPT), str(tmp_path)])
+
+  code = script["main"]()
+  err = capsys.readouterr().err
+
+  assert code == 1
+  assert "killed by SIGKILL" in err
+  assert "Rolldown exited" not in err
+
+
 def test_validator_rejects_a_compilable_module_without_default_export(tmp_path):
   _write_app(tmp_path, "export const value = 1")
   result = _run(tmp_path)

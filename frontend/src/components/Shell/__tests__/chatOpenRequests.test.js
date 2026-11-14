@@ -130,11 +130,9 @@ test('a deep link reads only the chat it opens, without a startup recovery read'
   assert.equal(count(requests, '/api/apps/chat-artifacts/target'), 1)
   assert.equal(count(requests, '/api/ready'), 1, 'one startup readiness probe')
   assert.equal(count(requests, '/api/chats'), 1, 'one live list read: the stream-open barrier')
-  // Activation reads the page; the stream-open reconcile then reads it once
-  // more, after the list.
-  assert.equal(count(requests, detail), 2)
-  assert.ok(requests.indexOf('/api/chats') < requests.lastIndexOf(detail),
-    'the reconcile read follows the barrier list read')
+  // Activation reads the page; the stream-open reconcile's runtime read proves
+  // that transcript current, so it does not read the page again.
+  assert.equal(count(requests, detail), 1)
 })
 
 test('a drawer tap reads the chat it opens once', { skip }, async () => {

@@ -467,6 +467,8 @@ jobs:
         run: |
           npm run lint
           npm run test:coverage
+      - name: Test the pre-push gate on a read-only dependency loan
+        run: scripts/test-prepush-dependency-loan.sh
       - name: Run static app packager tests
         run: npm run test:packager
       - name: Run dependency safety check tests
@@ -507,10 +509,11 @@ jobs:
     # own updater. A change it refuses (as the previous updater refused Python
     # package changes, #1469) strands every instance, and tests of the new
     # code alone cannot see it. Install each candidate from the release owners
-    # run, through the same HTTP calls Settings makes. The host helper is stood
-    # in for (its own code is not exercised here) and the Settings UI is not
-    # driven. Pull requests that cannot affect this path finish at once, so
-    # the job can be required.
+    # run, through the same HTTP calls Settings makes, then press Restart now
+    # and require the boot to rerun inside the same container. The host helper
+    # is stood in for (its own code is not exercised here) and the Settings UI
+    # is not driven. Pull requests that cannot affect this path finish at once,
+    # so the job can be required.
     timeout-minutes: 40
     needs: privacy
     permissions:

@@ -293,6 +293,9 @@ def public_access_declaration_from_contract(
 # Capability ids are stable names. Each capability evolves independently via
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
+NETWORK_DIRECT_CAPABILITY = "network.direct"
+_DIRECT_ORIGIN_LIMIT = 8
+
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
   # Runs accepted app code in a hidden frame while one of its chat blocks is
   # near the viewport. See CAPABILITIES.md "Passive transcript sessions".
@@ -307,6 +310,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "for example publish a change."
     ),
     "risk": "execution",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
+  # Lets a passive chat block offer a host-drawn "Fix in chat" button that
+  # sends a host-written request naming what the app flagged into that chat
+  # as the owner's own message. Only for an app also admitted to
+  # chat.blocks.passive.
+  "chat.blocks.ask": {
+    "version": 1,
+    "kind": "session",
+    "title": "Ask this chat's agent from its chat blocks",
+    "description": (
+      "Show a Fix in chat button on this app's chat blocks. When you press "
+      "it, Möbius sends your message to that chat asking its agent to fix "
+      "the items the block names. The app cannot choose the wording, and you "
+      "see the exact message in the chat."
+    ),
+    "risk": "messages",
     "lifecycle": "passive_frame",
     "default_limits": {},
     "hard_limits": {},
@@ -420,6 +442,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "max_bytes": (64 * 1024, 256 * 1024 * 1024),
     },
   },
+  # Adds the declared exact HTTPS origins to this app's own frame policy, so
+  # its screen can load images from and send requests to those sites directly
+  # (a provider whose terms require end-user-client delivery, for example).
+  # The origins are the grant: adding one asks the owner again.
+  NETWORK_DIRECT_CAPABILITY: {
+    "version": 1,
+    "kind": "frame_policy",
+    "title": "Connect to outside sites",
+    "description": (
+      "Let this app's screen load images from, and send requests to, the "
+      "sites listed here. Those sites see your device's internet address and "
+      "what the app asks them for."
+    ),
+    "risk": "network",
+    "lifecycle": "active_frame",
+    "default_limits": {},
+    "hard_limits": {},
+    "origins": True,
+  },
   "workspace.screen-control": {
     "version": 1,
     "kind": "session",
@@ -503,7 +544,7 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
         )
       limits[key] = int(value)
 
-    normalized[capability_id] = {
+    entry = {
       "version": definition["version"],
       "kind": definition["kind"],
       "title": definition["title"],
@@ -513,7 +554,47 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
       "reason": reason.strip() if isinstance(reason, str) else None,
       "limits": limits,
     }
+    if definition.get("origins"):
+      entry["origins"] = _normalize_direct_origins(capability_id, raw.get("origins"))
+    elif "origins" in raw:
+      raise ValueError(f"Capability `{capability_id}` does not take origins.")
+    normalized[capability_id] = entry
   return normalized
+
+
+def _normalize_direct_origins(capability_id: str, raw: Any) -> list[str]:
+  """Exact, distinct HTTPS origins: no wildcard, path, credential or port games."""
+  if not isinstance(raw, list) or not raw or len(raw) > _DIRECT_ORIGIN_LIMIT:
+    raise ValueError(
+      f"Capability `{capability_id}` origins must list 1-{_DIRECT_ORIGIN_LIMIT} "
+      "HTTPS origins."
+    )
+  origins: list[str] = []
+  for value in raw:
+    try:
+      parsed = urlsplit(value.strip()) if isinstance(value, str) else None
+      port = parsed.port if parsed else None
+    except ValueError:
+      parsed = None
+    host = (parsed.hostname or "").lower() if parsed else ""
+    if (
+      parsed is None
+      or parsed.scheme != "https"
+      or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host)
+      or parsed.username is not None
+      or parsed.password is not None
+      or parsed.path not in ("", "/")
+      or parsed.query
+      or parsed.fragment
+    ):
+      raise ValueError(
+        f"Capability `{capability_id}` origin `{value}` must be an exact "
+        "HTTPS origin such as https://media.example.com."
+      )
+    origins.append(f"https://{host}" if port in (None, 443) else f"https://{host}:{port}")
+  if len(set(origins)) != len(origins):
+    raise ValueError(f"Capability `{capability_id}` origins contain duplicates.")
+  return sorted(origins)
 
 
 def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -597,7 +678,9 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connections_manage": bool(perms.get("connections_manage", False)),
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
+      "credits_manage": bool(perms.get("credits_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "helper_activity_read": bool(perms.get("helper_activity_read", False)),
       "location_history_read": bool(perms.get("location_history_read", False)),
     },
     "background": (
@@ -619,6 +702,10 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   }
   if perms.get("job_secret_read"):
     contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
+  if perms.get("spend_credits"):
+    contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
+  if perms.get("check_credits_charges"):
+    contract["data"]["check_credits_charges"] = sorted(perms["check_credits_charges"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -681,7 +768,25 @@ def runtime_declaration_from_contract(
       "reason": value.get("reason"),
       "limits": dict(value.get("limits") or {}),
     }
+    if isinstance(value.get("origins"), list):
+      declaration[capability_id]["origins"] = list(value["origins"])
   return declaration
+
+
+def direct_network_origins(contract: dict[str, Any] | None) -> list[str]:
+  """The outside origins a contract's ``network.direct`` grant names, if any."""
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(NETWORK_DIRECT_CAPABILITY) if isinstance(runtime, dict) else None
+  if not isinstance(grant, dict) or grant.get("version") != 1:
+    return []
+  origins = grant.get("origins")
+  if not isinstance(origins, list):
+    return []
+  # Re-validate: a stored contract is data, and this feeds a CSP header.
+  try:
+    return _normalize_direct_origins(NETWORK_DIRECT_CAPABILITY, origins)
+  except ValueError:
+    return []
 
 
 def agent_tools_from_contract(contract: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -722,6 +827,13 @@ def contract_from_app_state(
     )
   if tools is None:
     tools = agent_tools_from_contract(getattr(app, "capability_contract", None))
+  # Contract-only grants have no App column. An explicit mapping (manifest
+  # apply) is authoritative; otherwise keep what the stored contract accepted.
+  contract_grants = contract_permissions
+  if contract_grants is None:
+    stored = getattr(app, "capability_contract", None)
+    stored_data = stored.get("data") if isinstance(stored, dict) else None
+    contract_grants = stored_data if isinstance(stored_data, dict) else {}
   manifest = {
     "system_prompt": getattr(app, "system_prompt_file", None),
     "embeds_agent": bool(getattr(app, "embeds_agent", False)),
@@ -737,21 +849,20 @@ def contract_from_app_state(
       "connections_manage": bool(getattr(app, "connections_manage", False)),
       "connect_manage": bool(getattr(app, "connect_manage", False)),
       # Manifest apply passes an explicit mapping: omission revokes. An
-      # unrelated row projection (no mapping) retains reviewed job access.
-      "job_secret_read": (
-        contract_permissions if contract_permissions is not None else
-        (getattr(app, "capability_contract", None) or {}).get("data", {})
-      ).get("job_secret_read", []),
-      # These contract-only grants must be declared on every local apply.
-      "identity_manage": bool(
-        (contract_permissions or {}).get("identity_manage", False)
-      ),
-      "railway_manage": bool(
-        (contract_permissions or {}).get("railway_manage", False)
+      # unrelated row projection (no mapping, e.g. a PATCH of pinned or
+      # chat_log_access) retains every contract-only grant the owner accepted.
+      "job_secret_read": contract_grants.get("job_secret_read", []),
+      "identity_manage": bool(contract_grants.get("identity_manage", False)),
+      "credits_manage": bool(contract_grants.get("credits_manage", False)),
+      "railway_manage": bool(contract_grants.get("railway_manage", False)),
+      "helper_activity_read": bool(
+        contract_grants.get("helper_activity_read", False)
       ),
       "location_history_read": bool(
-        (contract_permissions or {}).get("location_history_read", False)
+        contract_grants.get("location_history_read", False)
       ),
+      "spend_credits": contract_grants.get("spend_credits", []),
+      "check_credits_charges": contract_grants.get("check_credits_charges", []),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
@@ -982,12 +1093,13 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "data.location_history_read", "public.storage.read",
+  "data.credits_manage", "data.railway_manage", "data.helper_activity_read",
+  "data.location_history_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools", "data.job_secret_read",
-  "public.network",
+  "agent.skills", "agent.tools", "data.job_secret_read", "data.spend_credits",
+  "data.check_credits_charges", "public.network",
 }
 
 
@@ -1096,6 +1208,11 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     suffix = path.removeprefix(prefix)
     if suffix == "reason":
       return False  # Explanatory copy grants no additional access.
+    if suffix == "origins":
+      # Dropping a site narrows the grant; any new site widens it.
+      return not isinstance(before, list) or not isinstance(after, list) or any(
+        item not in before for item in after
+      )
     limit_key = suffix.removeprefix("limits.")
     if suffix.startswith("limits.") and limit_key in definition["hard_limits"]:
       if after is None:
@@ -1114,6 +1231,7 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
 
 
 PASSIVE_BLOCK_CAPABILITY = "chat.blocks.passive"
+PASSIVE_ASK_CAPABILITY = "chat.blocks.ask"
 
 
 class _RuntimeManifestUnavailable(Exception):
@@ -1121,8 +1239,11 @@ class _RuntimeManifestUnavailable(Exception):
 
 
 @lru_cache(maxsize=512)
-def _applied_passive_digest(app_id: int, runtime_revision: str, compiled_path: str) -> str | None:
-  """Digest of one immutable (runtime revision, compiled bundle) pair.
+def _applied_passive_admission(
+  app_id: int, runtime_revision: str, compiled_path: str,
+) -> tuple[str | None, bool]:
+  """Digest of one immutable (runtime revision, compiled bundle) pair, and
+  whether that revision also declares chat.blocks.ask.
 
   Both inputs are content addressed, so the answer can never change for this
   key: a new Apply produces a new revision and bundle name. The editable source
@@ -1134,24 +1255,49 @@ def _applied_passive_digest(app_id: int, runtime_revision: str, compiled_path: s
 
   digest = app_bundle_digest(app_id, compiled_path)
   if digest is None:
-    return None
+    return None, False
   try:
     root = runtime_parent(app_id) / runtime_revision
     if not root.is_dir():
       raise _RuntimeManifestUnavailable
     manifest_path = root / "mobius.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
-      return None
+      return None, False
     with manifest_path.open("rb") as handle:
       raw = handle.read(MANIFEST_MAX_BYTES + 1)
     if len(raw) > MANIFEST_MAX_BYTES:
-      return None
-    declaration = normalize_runtime_capabilities(json.loads(raw)).get(PASSIVE_BLOCK_CAPABILITY)
+      return None, False
+    declared = normalize_runtime_capabilities(json.loads(raw))
   except (AppliedRuntimeUnavailable, OSError) as exc:
     raise _RuntimeManifestUnavailable from exc
   except (ValueError, TypeError, AttributeError):
-    return None
-  return digest if declaration and declaration["version"] == 1 else None
+    return None, False
+  passive = declared.get(PASSIVE_BLOCK_CAPABILITY)
+  if not passive or passive["version"] != 1:
+    return None, False
+  ask = declared.get(PASSIVE_ASK_CAPABILITY)
+  return digest, bool(ask and ask["version"] == 1)
+
+
+def _granted(app: Any, capability: str) -> bool:
+  contract = getattr(app, "capability_contract", None)
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(capability) if isinstance(runtime, dict) else None
+  return isinstance(grant, dict) and type(grant.get("version")) is int and grant["version"] == 1
+
+
+def _passive_admission(app: Any) -> tuple[str | None, bool]:
+  if not _granted(app, PASSIVE_BLOCK_CAPABILITY):
+    return None, False
+  revision = getattr(app, "runtime_revision", None)
+  compiled = getattr(app, "compiled_path", None)
+  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
+      or not isinstance(compiled, str) or not compiled:
+    return None, False
+  try:
+    return _applied_passive_admission(int(app.id), revision, compiled)
+  except _RuntimeManifestUnavailable:
+    return None, False
 
 
 def passive_block_module_digest(app: Any) -> str | None:
@@ -1163,17 +1309,14 @@ def passive_block_module_digest(app: Any) -> str | None:
   immediate) and the immutable applied declaration, and return the compiled
   content address the frame verifies before evaluating module bytes.
   """
-  contract = getattr(app, "capability_contract", None)
-  runtime = contract.get("runtime") if isinstance(contract, dict) else None
-  grant = runtime.get(PASSIVE_BLOCK_CAPABILITY) if isinstance(runtime, dict) else None
-  if not isinstance(grant, dict) or type(grant.get("version")) is not int or grant["version"] != 1:
-    return None
-  revision = getattr(app, "runtime_revision", None)
-  compiled = getattr(app, "compiled_path", None)
-  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
-      or not isinstance(compiled, str) or not compiled:
-    return None
-  try:
-    return _applied_passive_digest(int(app.id), revision, compiled)
-  except _RuntimeManifestUnavailable:
-    return None
+  return _passive_admission(app)[0]
+
+
+def passive_block_ask(app: Any) -> bool:
+  """Admit host-drawn asks on this app's passive blocks.
+
+  Exactly as for passive execution: the owner's live chat.blocks.ask grant,
+  the applied revision's own declaration, and passive admission itself.
+  """
+  digest, declared = _passive_admission(app)
+  return bool(digest) and declared and _granted(app, PASSIVE_ASK_CAPABILITY)

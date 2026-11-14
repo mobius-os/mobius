@@ -34,12 +34,8 @@ import { cidOf } from '../messageIdentity.js'
  *   - attachments?: array
  *
  * Critical contract: pendingMessagesRef.current MUST update
- * SYNCHRONOUSLY on every mutation. handleStop's
- * fetchGenRef.current++ / pendingMessagesRef.current = [] sequence
- * runs BEFORE the await on /chat/stop; if any mutation here only
- * scheduled a render, the natural onStreamEnd handler could read
- * stale ref contents and re-fire fetchMessages({force:true}),
- * overwriting the just-promoted partial.
+ * SYNCHRONOUSLY on every mutation: doSend and the natural onStreamEnd
+ * handler read it in the same task as a mutation.
  *
  * Reconcile contract: hydrate() is a MERGE, not a wholesale replace.
  * It must never drop an optimistic-only entry whose own persistence
@@ -75,11 +71,22 @@ import { cidOf } from '../messageIdentity.js'
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
  *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
+ *   releaseHolds: () => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
- *   clear: () => void,
  * }}
  */
+
+// Mirrors the server: starting a message with positive owner proof releases
+// the rows a Stop held, so they follow it (continuations.releases_holds). The
+// server stamps that proof (`_owner_input_at`) on the owner's send; a row this
+// device just typed is the owner's own send too. An app's, a guest's or an
+// agent's row, or a hidden carrier, leaves them held.
+function _releasesHolds(row, typedHere) {
+  return !!row && !row.hidden && !row.held
+    && row._initiated_by_app_id == null && row._browser_grant_id == null
+    && (row._owner_input_at != null || typedHere)
+}
 
 function _fromServerList(serverList) {
   return (serverList || []).map(m => ({
@@ -325,7 +332,11 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const current = pendingMessagesRef.current
     const promotedGroup = current.filter(m => wanted.has(cidOf(m)))
     if (promotedGroup.length === 0) return null
-    const kept = current.filter(m => !wanted.has(cidOf(m)))
+    const remaining = current.filter(m => !wanted.has(cidOf(m)))
+    const typedHere = m => inFlightCidsRef.current.has(m.cid) || localMessageCidsRef.current.has(m.cid)
+    const kept = promotedGroup.some(m => _releasesHolds(m, typedHere(m)))
+      ? remaining.map(m => (m.held ? { ...m, held: false } : m))
+      : remaining
     for (const m of promotedGroup) {
       if (m.cid != null) {
         inFlightCidsRef.current.delete(m.cid)
@@ -340,6 +351,13 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
   }, [acknowledgeServerIntent, releaseSteerReservation])
+
+  // The owner's empty Send released every hold on the server.
+  const releaseHolds = useCallback(() => {
+    apply(prev => (prev.some(m => m.held)
+      ? prev.map(m => (m.held ? { ...m, held: false } : m))
+      : prev))
+  }, [apply])
 
   const cancelByCid = useCallback((cid) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
@@ -433,7 +451,9 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const next = [...reconciled, ...preservedInFlight, ...preservedMissing]
     pendingMessagesRef.current = next
     setPendingMessages(next)
-    const nextCidSet = new Set(next.map(m => cidOf(m)))
+    // A held row is in flight to no turn (a Stop ended the steer it was
+    // reserved for), so it shows in the tray again.
+    const nextCidSet = new Set(next.filter(m => !m.held).map(m => cidOf(m)))
     applySteerReservations(prev => {
       const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
       return kept.size === prev.size ? prev : kept
@@ -453,6 +473,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [hydrate])
 
+  // A chat or principal switch starts from an empty queue.
   const clear = useCallback(() => {
     if (initialReadPendingRef.current) {
       for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
@@ -600,7 +621,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     restoreByCid,
     hydrate,
     hydrateFromTranscript,
-    clear,
+    releaseHolds,
     markInFlight,
     clearInFlight,
   }

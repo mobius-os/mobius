@@ -202,6 +202,45 @@ async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
   assert ctx.failed_tasks == ["configure Claude settings defaults"]
 
 
+@pytest.mark.parametrize(
+  ("installed", "failure"),
+  [
+    ("1.2.3", None),
+    ("1.2.2", "openai-codex is 1.2.2 but the Dockerfile pins 1.2.3"),
+    (None, "openai-codex is not installed but the Dockerfile pins 1.2.3"),
+  ],
+)
+def test_codex_sdk_pin_check_names_an_image_behind_the_source(
+  monkeypatch, tmp_path, installed, failure,
+):
+  import importlib.metadata
+
+  def version(name):
+    assert name == "openai-codex"
+    if installed is None:
+      raise importlib.metadata.PackageNotFoundError(name)
+    return installed
+
+  dockerfile = tmp_path / "Dockerfile"
+  dockerfile.write_text("ARG CODEX_SDK_VERSION=1.2.3\n")
+  monkeypatch.setattr(startup, "_DOCKERFILE", dockerfile)
+  monkeypatch.setattr(importlib.metadata, "version", version)
+
+  if failure is None:
+    startup._check_codex_sdk_pin(context())
+  else:
+    with pytest.raises(RuntimeError, match=failure):
+      startup._check_codex_sdk_pin(context())
+
+
+def test_codex_sdk_pin_check_skips_the_baked_fallback_platform(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(startup, "_DOCKERFILE", tmp_path / "Dockerfile")
+
+  startup._check_codex_sdk_pin(context())
+
+
 def test_active_assistant_backfill_command_is_available_to_startup():
   """Keep the startup task and its writer-owned command in one release."""
   from app.chat_writer import BackfillAssistantIdentity

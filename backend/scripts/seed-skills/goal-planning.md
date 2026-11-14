@@ -70,9 +70,8 @@ tasks as id, title and status with `has_result`/`has_note` flags;
 constraints, children and prerequisite results. A helper's brief is its own
 branch, and `read_goal` with no task re-reads it.
 
-Statuses are pending, running, completed, blocked, failed, and cancelled;
-notes and results hold up to 1000 characters. Keep evidence there and work
-deepest leaves.
+Statuses are pending, running, completed, blocked, failed, and cancelled.
+Keep evidence in notes and results. Work deepest leaves.
 Children inherit ancestor dependencies and make a parent **Ready to verify**,
 not complete. Verify upward; cancelled prerequisites are settled. Plans may
 change; outcomes may not. Settled tasks do not close the Goal. To work on a
@@ -84,6 +83,9 @@ an automatic result or an old recovery cannot undo a hold. If attachment is
 refused, preserve the Goal rather than minting a replacement. An unrelated
 follow-up must remain separate. Terminal outcomes cannot reopen. A legacy interruption without recorded intent
 is unknown, not evidence that the owner paused the work.
+
+After promoting or attaching, re-claim this chat's earlier-turn action with
+`claim_agent_work` and the exact same work key; older claims are not adopted automatically.
 
 ### Responsibility, handoffs and outcomes
 

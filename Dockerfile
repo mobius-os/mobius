@@ -56,8 +56,8 @@ RUN useradd -m -s /bin/bash mobius
 # turns at it. amd64 browsers come from the pinned layer that follows.
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CODEX_VERSION=0.163.0
-ARG CODEX_SDK_VERSION=0.163.0
+ARG CODEX_VERSION=0.167.2
+ARG CODEX_SDK_VERSION=0.167.2
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git iproute2 jq poppler-utils procps ripgrep sudo tini unzip util-linux xxd \
@@ -90,9 +90,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # discovery never selects it implicitly. Both live in /opt/agent-browser so
 # root and the mobius user share one copy via the symlinks below. A separate
 # layer after apt/npm, so a Chrome bump does not reinstall system packages.
-ARG CHROME_VERSION=156.0.8078.80
-ARG CHROME_SHA256=b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7
-ARG CHROME_HEADLESS_SHELL_SHA256=547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4
+ARG CHROME_VERSION=157.0.8103.38
+ARG CHROME_SHA256=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
+ARG CHROME_HEADLESS_SHELL_SHA256=deafffa74660b34853a4119c361fd427ac8c9fcb62db51ddb8a797cd83a4ba2d
 RUN set -eu; \
     browsers=/opt/agent-browser/browsers; \
     mkdir -p "$browsers"; \
@@ -300,13 +300,13 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-      --engine-strict --strict-allow-scripts katex@0.19.0 \
-    && mkdir -p /app/static/vendor/katex@0.19.0/fonts \
-    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.19.0/ \
-    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.19.0/ \
-    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.19.0/ \
-    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.19.0/fonts/ \
-    && ln -s katex@0.19.0 /app/static/vendor/katex \
+      --engine-strict --strict-allow-scripts katex@0.19.1 \
+    && mkdir -p /app/static/vendor/katex@0.19.1/fonts \
+    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.19.1/ \
+    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.19.1/ \
+    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.19.1/ \
+    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.19.1/fonts/ \
+    && ln -s katex@0.19.1 /app/static/vendor/katex \
     && cd / && rm -rf /tmp/katex-install /root/.npm
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
@@ -526,11 +526,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
 # reaped on every runtime, including hosts that inject no init of their own
 # (Railway). `-s` (subreaper) keeps reaping working whether tini is PID 1 or a
 # child of another init (Compose's docker-init).
-# `-e 143` reports a SIGTERM stop as a clean exit 0. Every planned stop (an
-# in-app restart, a host or Railway redeploy) ends in SIGTERM, and both `su`
-# and uvicorn re-raise it after shutting down, so without the remap Railway
-# records each planned restart as "Deployment crashed" and emails the owner.
-# Real failures keep their own status, and SIGKILL/OOM still exits 137. Both
-# restart policies (railway.toml ALWAYS, Compose unless-stopped) revive exit 0.
-ENTRYPOINT ["/usr/bin/tini", "-s", "-e", "143", "--"]
+# The container supervisor reruns the boot in place for an in-app restart, so a
+# restart never depends on the host's restart policy (Railway's default
+# ON_FAILURE never revives a clean stop) and the host never sees it. Host stops
+# and crashes still end the container with their own status; see its docstring.
+# `-e 143` reports a host's SIGTERM stop (a redeploy or `docker stop`) as a
+# clean exit 0: `su` and uvicorn re-raise SIGTERM after shutting down, so
+# without the remap Railway records each one as "Deployment crashed" and emails
+# the owner. Real failures keep their own status, and SIGKILL/OOM still exits 137.
+ENTRYPOINT ["/usr/bin/tini", "-s", "-e", "143", "--", "python3", "-I", "/app/runtime/container_supervisor.py"]
 CMD ["./scripts/entrypoint.sh"]

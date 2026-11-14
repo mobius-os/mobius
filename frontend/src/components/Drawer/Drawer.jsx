@@ -40,21 +40,17 @@ import {
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
   settleDrawerSwipe,
+  watchDismissPointerEnd,
 } from '../../lib/drawerLifecycle.js'
-import {
-  PRESS_MENU_HOLD_MS,
-  PRE_HOLD_MOVE_PX,
-} from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
-import { createPinnedMutationQueue } from './pinnedMutationQueue.js'
+import InlineRenameInput from './InlineRenameInput.jsx'
+import useItemMenuGestures, { itemMenuPlacement } from './useItemMenuGestures.js'
 import {
   buildDrawerSections,
   filterInstalledApps,
   findDrawerMenuItem,
-  nextPendingPinnedAt,
-  projectPendingDrawerPins,
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
@@ -99,7 +95,6 @@ function writeListTab(tab) {
 // downstream.
 const EMPTY_SET = new Set()
 const EMPTY_LIST = []
-const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
 
 // Content still below the viewport bottom, in the scroller's own units.
 function scrollBelowViewport(root) {
@@ -147,6 +142,10 @@ export default function Drawer({
   onDeleteChat,
   // Owner filing: (chatId, archived) moves a chat between Recents and Archived.
   onSetChatArchived,
+  // Shell owns chat rename and every pin, so a project page's Chats list acts
+  // through the same paths: (chatId, title), and usePinnedItemMutations().
+  onRenameChat,
+  pins,
   onDeleteApp,
   onDeleteAppData,
   onNotice,
@@ -214,13 +213,6 @@ export default function Drawer({
   )
   const resizeRef = useRef(null)
   const pinnedReorderGenerationRef = useRef(0)
-  const pinMutationGenerationRef = useRef(0)
-  const pinMutationQueueRef = useRef(null)
-  if (pinMutationQueueRef.current === null) {
-    pinMutationQueueRef.current = createPinnedMutationQueue()
-  }
-  const lastPendingPinnedAtRef = useRef(null)
-  const [pendingPins, setPendingPins] = useState(() => new Map())
   const [pinnedOrderHandoff, setPinnedOrderHandoff] = useState(null)
   // Recents and Archived are two lists in one panel, windowed by the same
   // machinery below; each device remembers which one it shows.
@@ -239,12 +231,8 @@ export default function Drawer({
     setListTab(tab)
     writeListTab(tab)
   }, [])
-  const projectedDrawerItems = useMemo(() => projectPendingDrawerPins(
-    chats,
-    apps,
-    projects,
-    pendingPins,
-  ), [chats, apps, projects, pendingPins])
+  // Pins still in flight are already applied; Shell owns pin mutations.
+  const projectedDrawerItems = pins.projectedItems
   const {
     pinned: basePinnedItems,
     recents: allRecents,
@@ -456,24 +444,15 @@ export default function Drawer({
   useEffect(() => {
     if (openMenu && !activeMenuItem) closeItemMenu()
   }, [openMenu, activeMenuItem, closeItemMenu])
-  const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
-  // Mirrors `renaming` synchronously (not via useEffect — that's one render
-  // behind) so outside-tap cancellation sees the current edit immediately.
-  const renamingRef = useRef(null)
-  const overlayCancelRef = useRef(false)
+  const [renaming, setRenaming] = useState(null) // { kind, id, surface } | null
   // Closing on pointerdown makes the drawer feel immediate, but WebKit may
   // retarget the compatibility click from that same touch to content revealed
   // beneath the scrim. Keep ownership of exactly that click. A new pointer or
   // keyboard activation clears a stale claim first, so a touch sequence that
   // produces no click cannot poison the owner's next action.
   const outsideDismissClickRef = useRef(false)
-  const renaming = renamingState
-  const setRenaming = useCallback((next) => {
-    renamingRef.current = next
-    setRenamingState(next)
-  }, [])
   // The app whose "Add to home screen" sheet is open,
-  // or null. Mirrors openMenu/renamingState — one at a time, owned here
+  // or null. Mirrors openMenu/renaming — one at a time, owned here
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
   const [appQuery, setAppQuery] = useState('')
@@ -558,12 +537,8 @@ export default function Drawer({
     submitRename(kind, id, previous, next) {
       const current = rowActionInputsRef.current
       current.setRenaming(null)
-      if (current.overlayCancelRef.current) {
-        current.overlayCancelRef.current = false
-        return
-      }
       if (!next || next === previous) return
-      if (kind === 'chat') current.renameChat(id, next)
+      if (kind === 'chat') current.onRenameChat(id, next)
       else if (kind === 'project') current.renameProject(id, next)
       else current.renameApp(id, next)
     },
@@ -577,10 +552,7 @@ export default function Drawer({
       })
     },
     pin(kind, id, next) {
-      const current = rowActionInputsRef.current
-      if (kind === 'chat') current.pinChat(id, next)
-      else if (kind === 'project') current.pinProject(id, next)
-      else current.pinApp(id, next)
+      rowActionInputsRef.current.pins.pin(kind, id, next)
     },
     reorderPinned(orderedKeys) {
       return rowActionInputsRef.current.reorderPinned(orderedKeys)
@@ -608,6 +580,7 @@ export default function Drawer({
     },
   }), [])
 
+  const [dismissPointerId, setDismissPointerId] = useState(null)
   function handleOverlayPointerDown(e) {
     // Pointerdown is the canonical dismiss event. Waiting for `click` is
     // unreliable on touchscreens: even a tiny pan can suppress the synthetic
@@ -615,20 +588,20 @@ export default function Drawer({
     // content underneath. Primary pointerdown both acknowledges the outside
     // tap immediately and pairs with the scrim's touch-action:none contract.
     if (e.button !== 0 || !e.isPrimary) return
-    if (renamingRef.current || overlayCancelRef.current) {
-      // Defensive fallback for browsers that reach the overlay before the
-      // rename row's document-capture listener. Cancel the rename and let this
-      // same outside gesture close the drawer; one tap should never be needed
-      // merely to clear an intermediate drawer state.
-      overlayCancelRef.current = true
-      renamingRef.current = null
-      setRenaming(null)
-    }
     outsideDismissClickRef.current = true
     e.preventDefault()
     e.stopPropagation()
+    // The scrim keeps owning this touch until it lifts. Releasing hit testing
+    // mid-gesture lets the rest of a dismissing drag fall through and scroll
+    // the content beneath, which can cost the next tap its click.
+    setDismissPointerId(e.pointerId)
     onClose?.()
   }
+
+  useEffect(() => {
+    if (dismissPointerId == null) return undefined
+    return watchDismissPointerEnd(dismissPointerId, () => setDismissPointerId(null))
+  }, [dismissPointerId])
 
   useEffect(() => {
     function releaseStaleDismissClaim() {
@@ -660,10 +633,6 @@ export default function Drawer({
   }
   function refreshApps() {
     return appQueries.list.invalidate(queryClient)
-  }
-
-  async function renameChat(id, title) {
-    if (await saveDrawerRename(() => api.chats.update(id, { title }), onNotice)) refreshChats()
   }
 
   async function renameApp(id, name) {
@@ -707,87 +676,6 @@ export default function Drawer({
     return updated
   }
 
-  function mutatePin(kind, id, pinned, { queryKey, request, recover }) {
-    const generation = ++pinMutationGenerationRef.current
-    const intentWitness = reservePinnedIntent()
-    const itemKey = `${kind}:${id}`
-    const optimisticPinnedAt = pinned
-      ? nextPendingPinnedAt(
-        projectedDrawerItems.chats,
-        projectedDrawerItems.apps,
-        projectedDrawerItems.projects,
-        { previous: lastPendingPinnedAtRef.current },
-      )
-      : null
-    if (optimisticPinnedAt) lastPendingPinnedAtRef.current = optimisticPinnedAt
-    const pending = {
-      generation,
-      pinned,
-      pinnedAt: optimisticPinnedAt,
-    }
-    setPendingPins(current => new Map(current).set(itemKey, pending))
-
-    return pinMutationQueueRef.current.enqueue(async () => {
-      try {
-        const updated = await request(await intentWitness)
-        const persistedPinnedAt = updated?.pinned_at ?? null
-        if (pinned && !persistedPinnedAt) {
-          throw new Error('Pin update returned no canonical rank')
-        }
-
-        // Retire any list request that began before the committed write, then
-        // place the server's exact rank in the canonical cache. The pending
-        // projection keeps the owner's choice visible until this queue item
-        // retires, but never becomes durable ordering truth.
-        try {
-          await queryClient.cancelQueries({ queryKey, exact: true })
-        } catch {}
-        const applyPersistedPin = list => (list || []).map(item => (
-          String(item.id) === String(id)
-            ? { ...item, pinned_at: persistedPinnedAt }
-            : item
-        ))
-        queryClient.setQueryData(queryKey, applyPersistedPin)
-      } catch {
-        onNotice?.(`Couldn’t ${pinned ? 'pin' : 'unpin'} that item.`, { variant: 'error' })
-        // A timeout can race a successful server commit. Recovery is outside
-        // the queue so one unavailable list read cannot block later intent.
-        void Promise.resolve().then(recover).catch(() => {})
-      } finally {
-        setPendingPins(current => {
-          if (current.get(itemKey)?.generation !== generation) return current
-          const next = new Map(current)
-          next.delete(itemKey)
-          return next
-        })
-      }
-    })
-  }
-
-  function pinChat(id, pinned) {
-    return mutatePin('chat', id, pinned, {
-      queryKey: chatQueries.keys.all,
-      request: witness => api.chats.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshChats,
-    })
-  }
-
-  function pinApp(id, pinned) {
-    return mutatePin('app', id, pinned, {
-      queryKey: appQueries.keys.all,
-      request: witness => api.apps.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshApps,
-    })
-  }
-
-  function pinProject(id, pinned) {
-    return mutatePin('project', id, pinned, {
-      queryKey: projectQueries.keys.all,
-      request: witness => api.projects.setPinned(id, pinned, { intentWitness: witness }),
-      recover: () => projectQueries.list.invalidate(queryClient),
-    })
-  }
-
   // Persist a new order for the one combined pinned list (chats, apps, and
   // projects share it). The visible handoff remains authoritative until the
   // ONE atomic server transaction returns exact ranks for all three query
@@ -796,7 +684,7 @@ export default function Drawer({
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
     const generation = ++pinnedReorderGenerationRef.current
     const intentWitness = reservePinnedIntent()
-    return pinMutationQueueRef.current.enqueue(async () => {
+    return pins.enqueue(async () => {
       if (generation !== pinnedReorderGenerationRef.current) return false
       const currentPinned = buildDrawerSections(
         queryClient.getQueryData(chatQueries.keys.all) || chats,
@@ -982,11 +870,13 @@ export default function Drawer({
   }, [open, persistent])
 
   // Keep only the panel's still-visible footprint hit-testable while it slides
-  // away. The full-screen visual scrim stops owning input as soon as close is
-  // acknowledged; a geometry-matched shield follows the panel until its
-  // transition ends. This keeps uncovered controls live without allowing taps
-  // through visible drawer pixels. transitionend and animationend release on
-  // the real end of the slide; the watchdog bounds a dropped end event.
+  // away. The full-screen visual scrim stops owning new input as soon as close
+  // is acknowledged (only the touch that dismissed it stays owned until it
+  // lifts; see handleOverlayPointerDown); a geometry-matched shield follows
+  // the panel until its transition ends. This keeps uncovered controls live
+  // without allowing taps through visible drawer pixels. transitionend and
+  // animationend release on the real end of the slide; the watchdog bounds a
+  // dropped end event.
   const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
     if (open && !persistent) {
@@ -1190,6 +1080,7 @@ export default function Drawer({
     projects,
     onDeleteChat,
     onSetChatArchived,
+    onRenameChat,
     onDeleteApp,
     onDeleteAppData,
     onNotice,
@@ -1200,13 +1091,9 @@ export default function Drawer({
     setInstallingApp,
     resetAppsSurfaceUi,
     setSharingApp,
-    overlayCancelRef,
-    renameChat,
     renameApp,
     renameProject,
-    pinChat,
-    pinApp,
-    pinProject,
+    pins,
     reorderPinned,
   }
 
@@ -1215,7 +1102,7 @@ export default function Drawer({
       {!persistent && (
         <>
           <div
-            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
+            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}${!open && dismissPointerId != null ? ' drawer-overlay--dismissing' : ''}`}
             onPointerDown={handleOverlayPointerDown}
           />
           <div
@@ -1400,6 +1287,10 @@ export default function Drawer({
                         aria-selected={listTab === tab}
                         aria-controls="drawer-list-panel"
                         tabIndex={listTab === tab ? 0 : -1}
+                        // A pointer press switches lists without taking focus:
+                        // a mouse-focused tab would show the keyboard ring after
+                        // any later key press, even Shift or Alt-Tab.
+                        onMouseDown={event => event.preventDefault()}
                         onClick={() => selectListTab(tab)}
                       >
                         {tab === 'recents' ? 'Recents' : 'Archived'}
@@ -1709,64 +1600,21 @@ const DrawerRow = memo(function DrawerRow({
             : 'Manual recovery needed'
   const slug = item.slug
   const wrapRef = useRef(null)
-  const inputRef = useRef(null)
-  const holdTimerRef = useRef(null)
-  const holdOriginRef = useRef(null)
   const itemButtonRef = useRef(null)
-  const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
-  const secondaryReleaseCleanupRef = useRef(null)
   const drawerGestureHandlerRef = useRef(null)
-  // iOS may dispatch its long-press contextmenu AFTER pointercancel. Keep the
-  // touch provenance independent of the live pointer session so that delayed
-  // native event cannot open actions before a release. It expires, and keyboard
-  // or mouse input clears it, so accessibility and desktop context menus remain.
-  const touchMenuPointerAtRef = useRef(0)
-  // Cancel-on-outside-tap during rename. Capture-phase listeners on
-  // pointerdown AND click anywhere outside the rename input normally call
-  // preventDefault + stopPropagation so another row, Settings, or New chat
-  // does NOT fire its own click — the rename just exits. The scrim is the one
-  // exception: it remains a reliable drawer-close surface, so a scrim tap
-  // cancels the rename and continues to Drawer.handleOverlayPointerDown.
-  // Both events are needed: pointerdown prevents focus shift,
-  // click is a separate event that some browsers fire regardless.
-  // `cancelingRef` tells `commitRename` to bail when the impending
-  // blur fires, so the value is discarded rather than committed.
-  // `swallowClickRef` tracks that a cancel just happened so the
-  // click listener knows to swallow the following click event.
-  const cancelingRef = useRef(false)
-  const swallowClickRef = useRef(false)
-  useEffect(() => {
-    if (!renaming) return
-    function onOutsidePointer(e) {
-      const inputEl = inputRef.current
-      if (!inputEl || inputEl.contains(e.target)) return
-      cancelingRef.current = true
-      actions.cancelRename()
-      if (e.target?.closest?.('.drawer-overlay')) return
-      e.preventDefault()
-      e.stopPropagation()
-      swallowClickRef.current = true
-    }
-    function onOutsideClick(e) {
-      if (!swallowClickRef.current) return
-      swallowClickRef.current = false
-      e.preventDefault()
-      e.stopPropagation()
-    }
-    document.addEventListener('pointerdown', onOutsidePointer, true)
-    document.addEventListener('click', onOutsideClick, true)
-    return () => {
-      document.removeEventListener('pointerdown', onOutsidePointer, true)
-      document.removeEventListener('click', onOutsideClick, true)
-    }
-  }, [renaming, actions])
+  const {
+    triggerProps: cardMenuTriggerProps,
+    consumeHeldClick,
+    openItemMenu,
+    openMenuFromKey,
+    recordItemMenuPointer,
+    beginSecondaryMenuPress,
+  } = useItemMenuGestures(openItemMenuAt)
 
   useEffect(() => () => {
-    if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
     reorderCleanupRef.current?.()
-    secondaryReleaseCleanupRef.current?.()
   }, [])
 
   drawerGestureHandlerRef.current = {
@@ -1785,72 +1633,7 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [drawerRowGesturesRef, id, kind, variant])
 
-  // Autofocus + select-all on rename open so the user can either retype from
-  // scratch or tap into the existing name to edit it. Defer one frame: opening
-  // rename tears down the action menu, and focusing synchronously here races
-  // the browser moving focus off the just-unmounted menu item, which overrides
-  // the editor focus. A frame later the teardown has settled and focus sticks.
-  useEffect(() => {
-    if (!renaming) return undefined
-    const frame = requestAnimationFrame(() => {
-      const input = inputRef.current
-      if (!input) return
-      input.focus()
-      input.select()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [renaming])
-
-  function commitRename() {
-    if (cancelingRef.current) {
-      cancelingRef.current = false
-      return  // outside-tap canceled — discard the value
-    }
-    const value = inputRef.current?.value || ''
-    actions.submitRename(kind, id, label, value.trim())
-  }
-
-  function onRenameBlur() {
-    const input = inputRef.current
-    requestAnimationFrame(() => {
-      const active = document.activeElement
-      if (active === input) return
-      // Closing the action menu calls history.back() to release its Back-stack
-      // entry; that popstate drops focus to <body> a frame later. That is the
-      // app moving focus, not the user leaving the field, so reclaim it instead
-      // of committing — otherwise the just-opened editor blur-commits and
-      // vanishes. A real exit tabs to another control; outside-pointer and
-      // Escape cancel through their own paths (cancelingRef).
-      const focusDropped = !active
-        || active === document.body
-        || active === document.documentElement
-      if (focusDropped && input?.isConnected && !cancelingRef.current) {
-        input.focus()
-        return
-      }
-      commitRename()
-    })
-  }
-
-  function onInputKeyDown(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-    else if (e.key === 'Escape') { e.preventDefault(); actions.cancelRename() }
-  }
-
   // Every app card and drawer row enters the same placed action-menu path.
-  // Pointer gestures use their real release point; keyboard invocations fall
-  // back to the bottom-center of the focused item instead of the event's 0,0.
-  function itemMenuPlacement(point) {
-    const rect = itemButtonRef.current?.getBoundingClientRect()
-    const hasPoint = Number.isFinite(Number(point?.x))
-      && Number.isFinite(Number(point?.y))
-      && (Number(point.x) !== 0 || Number(point.y) !== 0)
-    return {
-      clientX: hasPoint ? Number(point.x) : (rect?.left || 0) + (rect?.width || 0) / 2,
-      clientY: hasPoint ? Number(point.y) : rect?.bottom || 0,
-    }
-  }
-
   function openItemMenuAt(
     point,
     trigger = itemButtonRef.current,
@@ -1860,132 +1643,29 @@ const DrawerRow = memo(function DrawerRow({
       kind,
       id,
       surface,
-      placement: itemMenuPlacement(point),
+      placement: itemMenuPlacement(point, itemButtonRef.current),
       focusFirstAction,
       restoreFocusTarget: trigger,
     })
   }
 
-  function suppressTouchContextMenu(event) {
-    // On Android, contextmenu is itself a PointerEvent and may arrive before
-    // pointerup or pointercancel. Stop it during capture so React's bubble-phase
-    // menu opener cannot mistake the browser's hold threshold for our release.
-    // Provenance remains as a fallback for browsers that expose it as a plain
-    // MouseEvent; keyboard input clears that provenance below.
-    const contextPointerType = event.nativeEvent?.pointerType || ''
-    const freshTouchPointer = touchMenuPointerAtRef.current > 0
-      && performance.now() - touchMenuPointerAtRef.current < TOUCH_CONTEXT_MENU_PROVENANCE_MS
-    const fromTouch = contextPointerType === 'touch' || contextPointerType === 'pen'
-    if (event.type !== 'contextmenu' || (!fromTouch && !freshTouchPointer)) return false
-    event.preventDefault()
-    event.stopPropagation()
-    event.nativeEvent?.stopImmediatePropagation?.()
-    return true
-  }
-
-  function openItemMenu(event) {
-    // Touch menus open only from the shared gesture controller during its
-    // stationary hold. Native contextmenu would steal that timing and re-open
-    // actions on release, so suppress it; mouse and keyboard remain semantic.
-    if (suppressTouchContextMenu(event)) return
-    event.preventDefault()
-    event.stopPropagation()
-    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
-    // UP below owns that gesture and opens only after release, so focus cannot
-    // snap back to the source or select a collision-flipped menu item.
-    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
-    openItemMenuAt({
-      x: event.clientX,
-      y: event.clientY,
-    }, event.currentTarget, {
-      focusFirstAction: event.type === 'keydown',
-    })
-  }
-
-  function recordItemMenuPointer(event) {
-    touchMenuPointerAtRef.current = event.pointerType === 'mouse'
-      ? 0
-      : performance.now()
-  }
-
-  function beginSecondaryMenuPress(event) {
-    if (event.pointerType !== 'mouse' || event.button !== 2) return false
-    event.preventDefault()
-    secondaryReleaseCleanupRef.current?.()
-    const sourceBtn = event.currentTarget
-    const pointerId = event.pointerId
-    const openingPoint = { x: event.clientX, y: event.clientY }
-    let timer = null
-    const cleanup = () => {
-      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
-      window.removeEventListener('pointercancel', cleanup, true)
-      window.removeEventListener('blur', cleanup, true)
-      if (timer !== null) clearTimeout(timer)
-      if (secondaryReleaseCleanupRef.current === cleanup) {
-        secondaryReleaseCleanupRef.current = null
-      }
-    }
-    const onSecondaryPointerUp = upEvent => {
-      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
-      upEvent.preventDefault()
-      cleanup()
-      openItemMenuAt(openingPoint, sourceBtn)
-    }
-    window.addEventListener('pointerup', onSecondaryPointerUp, true)
-    window.addEventListener('pointercancel', cleanup, true)
-    window.addEventListener('blur', cleanup, true)
-    timer = setTimeout(cleanup, 1500)
-    secondaryReleaseCleanupRef.current = cleanup
-    return true
-  }
-
   if (renaming) {
-    if (variant === 'card') {
-      return (
-        <div className="apps-directory__card apps-directory__card--editing">
-          <input
-            ref={inputRef}
-            className="drawer__rename-input"
-            defaultValue={label}
-            maxLength={drawerNameMaxLength(kind)}
-            onKeyDown={onInputKeyDown}
-            onBlur={onRenameBlur}
-            aria-label="Rename app"
-          />
-        </div>
-      )
-    }
-    return (
-      <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>
-        <input
-          ref={inputRef}
-          className="drawer__rename-input"
-          defaultValue={label}
-          maxLength={drawerNameMaxLength(kind)}
-          onKeyDown={onInputKeyDown}
-          onBlur={onRenameBlur}
-          aria-label={`Rename ${kind}`}
-        />
-      </div>
+    const editor = (
+      <InlineRenameInput
+        className="drawer__rename-input"
+        initialValue={label}
+        maxLength={drawerNameMaxLength(kind)}
+        ariaLabel={variant === 'card' ? 'Rename app' : `Rename ${kind}`}
+        onSubmit={next => actions.submitRename(kind, id, label, next)}
+        onCancel={actions.cancelRename}
+      />
     )
+    return variant === 'card'
+      ? <div className="apps-directory__card apps-directory__card--editing">{editor}</div>
+      : <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>{editor}</div>
   }
 
   if (variant === 'card') {
-    function beginCardHold(event) {
-      if (event.pointerType === 'mouse' || event.button !== 0) return
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdOriginRef.current = { x: event.clientX, y: event.clientY }
-      holdTimerRef.current = setTimeout(() => {
-        holdTimerRef.current = null
-        suppressCardClickRef.current = true
-        openItemMenuAt(holdOriginRef.current)
-      }, PRESS_MENU_HOLD_MS)
-    }
-    function cancelCardHold() {
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
-      holdOriginRef.current = null
-    }
     return (
       <div className="apps-directory__card">
         <button
@@ -1994,33 +1674,10 @@ const DrawerRow = memo(function DrawerRow({
           className="apps-directory__card-main"
           aria-label={`Open ${label}`}
           onClick={() => {
-            if (suppressCardClickRef.current) {
-              suppressCardClickRef.current = false
-              return
-            }
+            if (consumeHeldClick()) return
             actions.select(kind, id)
           }}
-          onContextMenuCapture={suppressTouchContextMenu}
-          onContextMenu={openItemMenu}
-          onPointerDown={event => {
-            recordItemMenuPointer(event)
-            if (beginSecondaryMenuPress(event)) return
-            beginCardHold(event)
-          }}
-          onPointerUp={cancelCardHold}
-          onPointerCancel={cancelCardHold}
-          onPointerMove={event => {
-            const origin = holdOriginRef.current
-            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > PRE_HOLD_MOVE_PX) {
-              cancelCardHold()
-            }
-          }}
-          onKeyDown={event => {
-            touchMenuPointerAtRef.current = 0
-            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-              openItemMenu(event)
-            }
-          }}
+          {...cardMenuTriggerProps}
         >
           <AppIcon
             item={item}
@@ -2282,10 +1939,7 @@ const DrawerRow = memo(function DrawerRow({
         onContextMenu={openItemMenu}
         onKeyDown={event => {
           suppressRowClickRef.current = false
-          touchMenuPointerAtRef.current = 0
-          if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-            openItemMenu(event)
-          }
+          openMenuFromKey(event)
         }}
       >
         {kind === 'app' && (

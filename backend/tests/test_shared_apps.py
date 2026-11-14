@@ -434,6 +434,33 @@ def test_expired_shared_app_removal_deletes_its_owned_snapshot(client, auth, db)
   assert not snapshot_root.parent.exists()
 
 
+def test_shared_app_snapshot_is_assembled_in_a_marked_folder_the_sweep_finishes(
+  client, auth, db, monkeypatch,
+):
+  project, _output = _built_project(client, auth, db)
+  staged = []
+
+  def interrupted_copy(_source, target):
+    staged.append(Path(target))
+    Path(target).mkdir(parents=True)
+    raise OSError("disk full")
+
+  monkeypatch.setattr(shared_apps.shutil, "copytree", interrupted_copy)
+  with pytest.raises(OSError, match="disk full"):
+    client.post(
+      "/api/shared-apps", headers=auth,
+      json={"project_id": project.id, "artifact_id": "website"},
+    )
+  assert staged[0].parent.name.startswith(".creating-")
+  assert not staged[0].parent.exists()
+  assert db.query(models.SharedAppInstance).count() == 0
+
+  # A killed process runs no cleanup and leaves its half-copied snapshot.
+  staged[0].mkdir(parents=True)
+  purge_expired_shared_apps(db)
+  assert not staged[0].parent.exists()
+
+
 def test_project_removal_recovers_its_shared_app_but_not_old_guest_access(client, auth, db):
   project, _output = _built_project(client, auth, db)
   instance = _create_instance(client, auth, project.id)
