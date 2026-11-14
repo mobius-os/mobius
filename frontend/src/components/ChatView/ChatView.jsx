@@ -926,11 +926,12 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
-  // tray's pencil and × reach the chat box; it reports which queued message
-  // the box is editing for the tray's "In the chat box" tag.
+  // ChatInputBar installs `{ open(cid), setAside(cid), back(fromKeyboard) }`
+  // here so the queue tray's pencil, × and Stop editing reach the chat box; it
+  // reports which queued message the box is editing and whether it is saving,
+  // for the row that offers Stop editing.
   const queuedComposerRef = useRef(null)
-  const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
+  const [queuedInComposer, setQueuedInComposer] = useState(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -6446,7 +6447,9 @@ export default function ChatView({
             }}
             onRetry={handleRetryRejected}
             onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
-            inComposerCid={queuedInComposerCid}
+            onStopEditing={fromKeyboard => queuedComposerRef.current?.back(fromKeyboard)}
+            inComposerCid={queuedInComposer?.cid ?? null}
+            inComposerSaving={!!queuedInComposer?.saving}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
@@ -6520,7 +6523,7 @@ export default function ChatView({
           onSaveQueued={handleUpdatePending}
           draftAside={composerDraftAside}
           queuedComposerRef={queuedComposerRef}
-          onQueuedInComposerChange={setQueuedInComposerCid}
+          onQueuedInComposerChange={setQueuedInComposer}
           provider={chatInfo?.provider}
           projectRef={chatInfo?.project || null}
           leftButtons={

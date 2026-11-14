@@ -21,7 +21,8 @@ const vite = await createSsrRenderServer({
       if (id === 'question-card-hooks') return '\0question-card-hooks'
     },
     load(id) {
-      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null; export const useId = () => 'qcard';`
+      // The card's only context is the local answer outbox; a test sets it here.
+      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => globalThis.__questionCardLocalAnswers ?? null; export const useId = () => 'qcard';`
     },
   }],
 })
@@ -81,6 +82,32 @@ test('Stop keeps a live card\'s hint, paperclip, and Submit in place, inert', ()
   try {
     assert.deepEqual(controls(history.result.current), [])
   } finally { history.unmount() }
+})
+
+test('a delivered answer awaiting its transcript keeps its status and inert slot when the question closes', () => {
+  // The outbox retried an answer and the server took it, so the chat no longer
+  // has a pending question, but the transcript has not recorded the answer yet.
+  globalThis.__questionCardLocalAnswers = [{
+    chatId: 'delivered-chat', deliveryOutcome: 'delivered',
+    body: { question_id: 'delivered-card', answers: { 'First?': 'A', 'Second?': 'B' } },
+  }]
+  const props = { chatId: 'delivered-chat', questionId: 'delivered-card', questions, onAnswer: () => true }
+  const rows = tree => elements(tree)
+    .map(node => node.props?.className?.split?.(' ')[0])
+    .filter(name => ['qcard__hint', 'qcard__attach', 'qcard__queue-status', 'qcard__submit'].includes(name))
+  const card = renderHook(QuestionCard, props)
+  try {
+    const live = rows(card.result.current)
+    assert.ok(live.includes('qcard__queue-status'))
+    card.rerender({ ...props, onAnswer: undefined, disabled: true })
+    assert.deepEqual(rows(card.result.current), live,
+      'closing the question must not collapse the card while its answer is confirmed')
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props.children, 'Confirming answer…')
+  } finally {
+    card.unmount()
+    delete globalThis.__questionCardLocalAnswers
+  }
 })
 
 test('pasting into question two keeps the file with that answer, upload gates submit, and submission locks all attachment edits', async () => {
