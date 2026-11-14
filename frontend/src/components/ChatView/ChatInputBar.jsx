@@ -333,8 +333,8 @@ export function PrimaryAction({
  *   draftAside         — { set, take }: keeps the draft stored while history
  *                        shows another message, and hands it back.
  *   queuedComposerRef  — caller-owned ref. The bar installs
- *                        `{ open(cid), setAside(cid) }` so the queue tray's
- *                        pencil and × reach the chat box.
+ *                        `{ open(cid), setAside(cid), back() }` so the queue
+ *                        tray's pencil, × and Stop editing reach the chat box.
  *   onQueuedInComposerChange — receives the cid of the queued message the
  *                        box is editing, or null, for the tray's tag.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
@@ -528,7 +528,7 @@ export default function ChatInputBar({
     saveQueued: onSaveQueued,
     draftAside,
   })
-  const { open: openInComposer, setAside: setAsideFromComposer } = composerHistory
+  const { open: openInComposer, setAside: setAsideFromComposer, escape: backToDraft } = composerHistory
 
   // The queue tray is ChatView's sibling of this bar; its pencil and × reach
   // the box through this caller-owned ref, like attachTriggerRef above.
@@ -541,9 +541,10 @@ export default function ChatInputBar({
         focusComposerElement(inputRef?.current)
       },
       setAside: setAsideFromComposer,
+      back: backToDraft,
     }
     return () => { queuedComposerRef.current = null }
-  }, [queuedComposerRef, openInComposer, setAsideFromComposer, inputRef])
+  }, [queuedComposerRef, openInComposer, setAsideFromComposer, backToDraft, inputRef])
 
   // The tray tags the row open here; a chat box that goes away takes its
   // tag with it.

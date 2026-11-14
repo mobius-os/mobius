@@ -17,9 +17,9 @@ const items = [
   { cid: 'q2', content: 'Also update the changelog' },
 ]
 
-test('the queued message open in the chat box is tagged instead of offering the pencil', () => {
+test('the queued message open in the chat box offers Stop editing instead of the pencil', () => {
   const html = renderToStaticMarkup(createElement(QueuedMessages, { items, inComposerCid: 'q2' }))
-  assert.match(html, /queued__row queued__row--in-composer[^>]*>[\s\S]*Also update the changelog[\s\S]*In the chat box/)
+  assert.match(html, /queued__row queued__row--in-composer[^>]*>[\s\S]*Also update the changelog[\s\S]*<button[^>]*class="queued__in-composer"[^>]*>Stop editing<\/button>/)
   assert.equal(html.match(/aria-label="Edit queued message"/g)?.length, 1,
     'only the other row keeps its pencil')
 })
@@ -36,7 +36,7 @@ test('the row open in the chat box offers no Send now, which would skip the edit
   }))
   assert.equal(html.match(/aria-label="Send this queued message now"/g)?.length, 1,
     'only the other row can be sent now')
-  assert.match(html, /queued__row--in-composer(?:(?!queued__row ).)*In the chat box/s)
+  assert.match(html, /queued__row--in-composer(?:(?!queued__row ).)*Stop editing/s)
   assert.doesNotMatch(html, /queued__row--in-composer(?:(?!queued__row ).)*queued__steer/s)
 })
 
@@ -186,4 +186,35 @@ test('a message queued during a turn is not captioned as waiting for the owner',
     items: [{ ...items[0], held: true }, items[1]], turnActive: true,
   }))
   assert.match(html, /1 waiting for you; the rest send after this turn/)
+})
+
+test('editing a queued message shows no strip unless it has to warn', async () => {
+  const { composerHistoryStripCopy } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
+  const position = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
+  assert.equal(composerHistoryStripCopy(position), null, 'the tray row marks it instead')
+  assert.deepEqual(composerHistoryStripCopy(position, { saving: true }),
+    { title: 'Saving the queued message…', srOnly: true }, 'a save in progress is still announced')
+  assert.equal(composerHistoryStripCopy(position, { note: 'Could not save' }).warn, true,
+    'a failed save still says so')
+  assert.equal(composerHistoryStripCopy({ kind: 'sent' }).title, 'Earlier message',
+    'browsing earlier messages keeps its strip')
+})
+
+test('every queued action, Edit included, lights its own fill on hover', async () => {
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  // The row's hover is the wells' resting fill, so a colour change alone left
+  // Edit invisible against it.
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.queued__action:not\(:disabled\):hover \{\s*background: color-mix/,
+    'a fill of its own, for fine pointers only')
+})
+
+test('Stop editing reaches the chat box’s own return to the draft', async () => {
+  const { readFileSync } = await import('node:fs')
+  const bar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+  const view = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  // Esc and Stop editing share composerHistory.escape, so both restore the draft.
+  assert.match(bar, /escape: backToDraft \} = composerHistory/)
+  assert.match(bar, /back: backToDraft,/)
+  assert.match(view, /onStopEditing=\{\(\) => queuedComposerRef\.current\?\.back\(\)\}/)
 })

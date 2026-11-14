@@ -4901,9 +4901,9 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   white-space: nowrap;
 }
 
-/* The queued message open in the chat box (ChatInputBar's history strip says
-   "Editing queued message N of M"). The row stays in place, tinted, and its
-   pencil becomes a quiet label so the owner can see where the edit will land. */
+/* The queued message open in the chat box. The row stays in place, tinted, so
+   the owner can see where the edit will land, and its pencil becomes Stop
+   editing, which hands the chat box back to the draft without saving. */
 .queued__row--in-composer {
   background: color-mix(in srgb, var(--accent) 8%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
@@ -4915,12 +4915,23 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 .queued__in-composer {
   flex-shrink: 0;
-  align-self: center;
-  margin: 0 4px 0 2px;
+  height: 30px;
+  margin: 3px 4px 0 2px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
   font-size: 11.5px;
   line-height: 1.2;
-  color: var(--accent-text, var(--accent)); /* CONTRACT: matches the strip's draft chip */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: accent text on the tinted row */
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.queued__in-composer:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus ring on the visible well */
 }
 
 /* Compact, evenly spaced send / edit / cancel wells. The button IS the visible
@@ -4954,6 +4965,21 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 .queued__action:not(:disabled):hover {
   color: var(--text);
+}
+
+/* Every action needs a fill of its own on hover: a colour change alone left
+   Edit without a highlight, unlike Send now and Cancel. Fine pointers only: a
+   touch tap leaves :hover on the tapped button. Send now's and Cancel's own
+   fills follow and win. */
+@media (hover: hover) and (pointer: fine) {
+  .queued__action:not(:disabled):hover {
+    background: color-mix(in srgb, var(--text) 9%, var(--surface-2)); /* CONTRACT: neutral raised fill on opaque surface */
+    border-color: color-mix(in srgb, var(--text) 22%, var(--border-light));
+  }
+
+  .queued__in-composer:hover {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
+  }
 }
 
 .queued__steer:not(:disabled):hover {
