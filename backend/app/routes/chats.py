@@ -1014,7 +1014,7 @@ def _chat_detail_response(
       serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)
     ] if expose_session else [],
     "background_helpers": (
-      serialize_background_helpers(db, chat.id)
+      serialize_background_helpers(db, chat.id, goal=goal)
       if expose_session else {"count": 0, "items": []}
     ),
   }
@@ -2126,6 +2126,7 @@ def get_chat_runtime(
   )
   running = is_chat_running(chat.id)
   run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
+  goal = presented_goal(db, chat.id, include_foreign_context=principal.scope != "chat_embed")
   response = {
     "running": running,
     "compacting": compaction_kind(chat.id),
@@ -2140,7 +2141,7 @@ def get_chat_runtime(
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "continuation_wait": continuation_wait_for_chat(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
-    "goal": presented_goal(db, chat.id, include_foreign_context=principal.scope != "chat_embed"),
+    "goal": goal,
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
@@ -2148,7 +2149,7 @@ def get_chat_runtime(
       serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)
     ] if principal.scope != "chat_embed" else [],
     "background_helpers": (
-      serialize_background_helpers(db, chat.id)
+      serialize_background_helpers(db, chat.id, goal=goal)
       if principal.scope != "chat_embed" else {"count": 0, "items": []}
     ),
   }

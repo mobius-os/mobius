@@ -17,41 +17,19 @@ export function goalHelpers(goal) {
   return helpers
 }
 
-/**
- * One row per helper this chat is still owed work from, for the foot's
- * helper list: background helpers first (they own this chat's next wake),
- * then this chat's own Goal helpers that are still working or asking their
- * coordinating agent, each helper once. Rows carry only what both sources
- * project (id, name, provider, status); a helper's live step and clock stay
- * on its transcript row until one live projection carries them.
- *
- * Only direct helpers are listed: a nested helper's conversation belongs to
- * the helper that started it, so it cannot be opened from this chat.
- * `cappedBackgroundCount` is the source total when its items were capped.
- * Goal rows may overlap omitted background helpers or be disjoint; neither
- * an exact union total nor an additional unseen count can be inferred.
+/** Select the server-deduplicated, bounded view for the currently shown Goal.
+ * Never union a capped source in the browser: omitted membership is unknown.
  */
 export function trayHelpers(backgroundHelpers, goal) {
-  const rows = []
-  const seen = new Set()
-  const add = item => {
-    if (!item?.id || seen.has(item.id)) return
-    seen.add(item.id)
-    rows.push({
-      delegation_id: item.id,
-      task_key: item.task_key || item.title || null,
-      provider: item.provider || null,
-      status: item.status || null,
-    })
-  }
-  const items = backgroundHelpers?.items || []
-  items.forEach(add)
-  ;(goal?.plan?.delegations || [])
-    .filter(node => isWorkingHelperStatus(node?.status) || isHelperAwaitingParent(node))
-    .forEach(add)
-  const count = Number(backgroundHelpers?.count) || 0
-  const cappedBackgroundCount = count > items.length ? count : 0
-  return { rows, cappedBackgroundCount }
+  const projected = goal?.id && backgroundHelpers?.with_goal?.goal_id === goal.id
+    ? backgroundHelpers.with_goal : backgroundHelpers
+  const rows = (projected?.items || []).map(item => ({
+    delegation_id: item.id,
+    task_key: item.task_key || item.title || null,
+    provider: item.provider || null,
+    status: item.status || null,
+  }))
+  return { rows, unlistedHelpers: Math.max(0, (projected?.count || 0) - rows.length) }
 }
 
 /**
@@ -60,10 +38,11 @@ export function trayHelpers(backgroundHelpers, goal) {
  * owner input; a saved owner card (`owner_input` handoff) outranks helper
  * work, which stays visible in the Goal details.
  */
-export function goalHelperWaitingLabel(goal, { turnActive = false } = {}) {
+export function goalHelperWaitingLabel(goal, { turnActive = false, directHelpersInTray = false } = {}) {
   if (turnActive || !['active', 'paused'].includes(goal?.status)) return null
   if (goal.handoff?.kind === 'owner_input') return null
-  const helpers = goalHelpers(goal)
+  const direct = new Set(directHelpersInTray ? (goal.plan?.delegations || []).map(node => node.id) : [])
+  const helpers = goalHelpers(goal).filter(node => !direct.has(node.id))
   const working = helpers.filter(node => isWorkingHelperStatus(node.status)).length
   const asking = helpers.filter(isHelperAwaitingParent).length
   if (!working && !asking) return null

@@ -96,14 +96,14 @@ export function WaitCard({
 // One row per helper, the same row the transcript shows at its launch, so a
 // tap opens that helper's conversation. Status only: the live step and clock
 // are not in this projection yet.
-function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', cappedBackgroundCount = 0, automatic = false }) {
+function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', unlistedHelpers = 0, automatic = false }) {
   return (
     <section className="chat__wait-card chat__helper-list" aria-label={label}>
       {helpers.map(helper => (
         <HelperRowLine key={helper.delegation_id} event={helper} chatId={chatId}
-          onOpen={event => onOpenHelper({ id: helper.delegation_id, host: event.currentTarget.closest('.chat') })} />
+          onOpen={event => onOpenHelper({ helper, chatId, host: event.currentTarget.closest('.chat') })} />
       ))}
-      <HandoffNotes cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
+      <HandoffNotes unlistedHelpers={unlistedHelpers} automatic={automatic} />
     </section>
   )
 }
@@ -119,15 +119,15 @@ const HelperList = memo(HelperListRows, (before, after) => (
   before.chatId === after.chatId
   && before.onOpenHelper === after.onOpenHelper
   && before.label === after.label
-  && before.cappedBackgroundCount === after.cappedBackgroundCount
+  && before.unlistedHelpers === after.unlistedHelpers
   && before.automatic === after.automatic
   && sameHelperRows(before.helpers, after.helpers)
 ))
 
-function HandoffNotes({ cappedBackgroundCount, automatic }) {
+function HandoffNotes({ unlistedHelpers, automatic }) {
   return <>
-    {cappedBackgroundCount > 0 && <p className="chat__helper-list-note">
-      {`Background list capped (${cappedBackgroundCount} total); some may also appear as Goal helpers.`}
+    {unlistedHelpers > 0 && <p className="chat__helper-list-note">
+      {`${unlistedHelpers} more ${unlistedHelpers === 1 ? 'helper' : 'helpers'}`}
     </p>}
     {automatic && <p className="chat__helper-list-note">This chat resumes when they finish</p>}
   </>
@@ -196,9 +196,10 @@ function useWaitStops(onCancel) {
 }
 
 export default function WaitingChip({
+  hidden = false,
   waits = [],
   helpers = [],
-  cappedBackgroundCount = 0,
+  unlistedHelpers = 0,
   resourcePause,
   handoff = null,
   chatId,
@@ -215,12 +216,15 @@ export default function WaitingChip({
   const [stops, stopWait] = useWaitStops(onCancel)
   const [openHelper, setOpenHelper] = useState(null)
   const [listOpen, setListOpen] = useDisclosureState(chatId, HANDOFF_LIST_DISCLOSURE)
-  const conversationHelper = openHelper && helpers.find(helper => helper.delegation_id === openHelper.id)
-  // A helper that leaves the stack takes its conversation with it, and a
-  // later return does not reopen it.
-  if (openHelper && !conversationHelper) setOpenHelper(null)
-  const hasHelpers = helpers.length > 0 || cappedBackgroundCount > 0
-  if (!waits.length && !hasHelpers && !resourcePause) return null
+  // The reader owns the preview lifetime, not the transient list membership.
+  // Keep the latest row snapshot; the conversation endpoint owns live status
+  // after its row leaves. A different parent chat must never inherit it.
+  const latestHelper = openHelper && helpers.find(helper => helper.delegation_id === openHelper.helper.delegation_id)
+  if (openHelper && openHelper.chatId !== chatId) setOpenHelper(null)
+  else if (latestHelper && latestHelper !== openHelper.helper) setOpenHelper({ ...openHelper, helper: latestHelper })
+  const conversationHelper = openHelper?.chatId === chatId ? latestHelper || openHelper.helper : null
+  const hasHelpers = helpers.length > 0 || unlistedHelpers > 0
+  if (!waits.length && !hasHelpers && !resourcePause && !conversationHelper) return null
 
   const toggle = key => setExpanded(current => ({ key: current.key === key ? null : key, command: false }))
   const automatic = handoff?.kind === 'automatic'
@@ -237,10 +241,10 @@ export default function WaitingChip({
       onRevealRecovery={onRevealRecovery}
     />
   )
-  const summarized = shouldSummarizeHandoffs({ helpers, waits, cappedBackgroundCount })
+  const summarized = shouldSummarizeHandoffs({ helpers, waits, unlistedHelpers })
   const groups = summarized ? handoffGroups({ helpers, waits }) : []
   return <>
-    <section className={`chat__waits chat__handoffs${summarized && listOpen ? ' chat__handoffs--open' : ''}`} aria-label="Handoffs">
+    {!hidden && (waits.length > 0 || hasHelpers || resourcePause) && <section className={`chat__waits chat__handoffs${summarized && listOpen ? ' chat__handoffs--open' : ''}`} aria-label="Handoffs">
       {resourcePause && (
         <ResourceCard
           resourcePause={resourcePause}
@@ -252,7 +256,7 @@ export default function WaitingChip({
       )}
       {summarized ? <>
         <HandoffSummary
-          label={handoffSummaryLabel({ helpers, waits, cappedBackgroundCount })}
+          label={handoffSummaryLabel({ helpers, waits, unlistedHelpers })}
           open={listOpen}
           onToggle={() => setListOpen(value => !value)}
         />
@@ -265,19 +269,19 @@ export default function WaitingChip({
             {group.waits.map(waitCard)}
           </div>
         ))}
-        {listOpen && (cappedBackgroundCount > 0 || automatic) && (
+        {listOpen && (unlistedHelpers > 0 || automatic) && (
           <section className="chat__wait-card chat__handoff-notes">
-            <HandoffNotes cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
+            <HandoffNotes unlistedHelpers={unlistedHelpers} automatic={automatic} />
           </section>
         )}
       </> : <>
         {hasHelpers && (
           <HelperList helpers={helpers} chatId={chatId} onOpenHelper={setOpenHelper}
-            cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
+            unlistedHelpers={unlistedHelpers} automatic={automatic} />
         )}
         {waits.map(waitCard)}
       </>}
-    </section>
+    </section>}
     {conversationHelper && <HelperEventConversation
       event={conversationHelper}
       chatId={chatId}

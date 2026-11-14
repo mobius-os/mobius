@@ -22,3 +22,20 @@ export const HELPER_AWAITING_PARENT_LABEL = 'Waiting for coordinating agent'
 export function isHelperAwaitingParent(item) {
   return item?.status === 'needs_input'
 }
+
+/** One vocabulary for delegated and provider-native helper rows and previews. */
+export function helperPresentation(status) {
+  if (status === 'paused') return { state: 'on_hold', label: 'On hold', dot: 'failed' }
+  if (isWorkingHelperStatus(status)) return { state: 'working', label: 'Working', dot: 'running' }
+  const settled = {
+    completed: ['finished', 'Finished', 'done'],
+    done: ['finished', 'Finished', 'done'],
+    needs_input: ['asking', HELPER_AWAITING_PARENT_LABEL, 'running'],
+    waiting: ['asking', HELPER_AWAITING_PARENT_LABEL, 'running'],
+    failed: ['failed', 'Failed', 'failed'],
+    needs_review: ['needs_review', 'Needs review', 'failed'],
+    interrupted: ['interrupted', 'Interrupted', 'failed'],
+  }
+  const [state, label, dot] = settled[status] || ['stopped', 'Stopped', 'failed']
+  return { state, label, dot }
+}

@@ -720,6 +720,7 @@ def test_the_conversation_panel_shows_a_helpers_own_steps(client, owner_token, d
   assert response.status_code == 200, response.text
   body = response.json()
   assert body["provider"] == "claude" and body["child_chat_id"] == child_id
+  assert body["status"] == "completed"
   assert [b.get("role") or b.get("type") for b in body["blocks"]] == ["user", "tool", "assistant"]
   assert body["blocks"][0]["content"] == "Do the bounded task."
   # Only the parent that spawned the helper can open it.

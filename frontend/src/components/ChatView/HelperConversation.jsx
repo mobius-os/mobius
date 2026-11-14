@@ -6,7 +6,7 @@ import { apiFetch } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
-import { HELPER_AWAITING_PARENT_LABEL } from './workingHelper.js'
+import { helperPresentation } from './workingHelper.js'
 import { isPlainLeftClick } from './internalLink.js'
 import './HelperConversation.css'
 
@@ -15,7 +15,6 @@ import './HelperConversation.css'
 const LIVE_REFRESH_MS = 3000
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
-const STATUS_LABELS = { running: 'Working', done: 'Finished', failed: 'Failed', waiting: HELPER_AWAITING_PARENT_LABEL }
 
 async function readConversation(chatId, taskId, signal) {
   const response = await apiFetch(
@@ -26,7 +25,7 @@ async function readConversation(chatId, taskId, signal) {
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
   const data = await response.json()
   return {
-    phase: 'ready', blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider,
+    phase: 'ready', status: data.status, blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider,
     // A Möbius helper's conversation is its own chat; link to the full chat.
     childChatId: data.child_chat_id || null,
   }
@@ -43,7 +42,8 @@ export default function HelperConversation({
   const bodyRef = useRef(null)
   const followRef = useRef(true)
   const titleId = useId()
-  const running = status === 'running'
+  const presentation = helperPresentation(state.status || status)
+  const running = presentation.state === 'working'
 
   useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose })
 
@@ -67,7 +67,7 @@ export default function HelperConversation({
       controller.abort()
       clearTimeout(timer)
     }
-  }, [chatId, taskId, running])
+  }, [chatId, taskId, running, status])
 
   // Keep a live conversation on its newest step unless the reader scrolled up.
   useEffect(() => {
@@ -75,7 +75,7 @@ export default function HelperConversation({
     if (body && state.phase === 'ready' && followRef.current) body.scrollTop = body.scrollHeight
   }, [state])
 
-  const subtitle = [PROVIDER_NAMES[state.provider], STATUS_LABELS[status] || 'Stopped', 'read-only']
+  const subtitle = [PROVIDER_NAMES[state.provider], presentation.label, 'read-only']
     .filter(Boolean).join(' · ')
 
   return createPortal(

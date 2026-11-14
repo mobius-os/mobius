@@ -5827,7 +5827,7 @@ export default function ChatView({
   const progressRail = progressRailViewModel(
     progressGoal,
     buildPhaseRail,
-    { turnActive },
+    { turnActive, directHelpersInTray: !hasPendingQuestion && backgroundHelpers.with_goal?.goal_id === progressGoal?.id },
   ).map(item => {
     if (item.key !== 'goal') return item
     // The Goal step owns a two-tap clear affordance and the plan details.
@@ -6414,19 +6414,18 @@ export default function ChatView({
               park) stays beside the composer through running turns. A saved
               owner question outranks it, as it does the Goal helper headline,
               and needs the room. Its height joins the measured foot. */}
-          {!hasPendingQuestion && (
-            <WaitingChip
-              waits={armedWaits}
-              helpers={ownedHelpers.rows}
-              cappedBackgroundCount={ownedHelpers.cappedBackgroundCount}
-              resourcePause={footResourcePause}
-              handoff={turnActive ? null : serverHandoff}
-              chatId={chatId}
-              onCancel={handleCancelWait}
-              onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
-              onInternalNav={internalNav}
-            />
-          )}
+          <WaitingChip
+            hidden={hasPendingQuestion}
+            waits={armedWaits}
+            helpers={ownedHelpers.rows}
+            unlistedHelpers={ownedHelpers.unlistedHelpers}
+            resourcePause={footResourcePause}
+            handoff={turnActive ? null : serverHandoff}
+            chatId={chatId}
+            onCancel={handleCancelWait}
+            onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
+            onInternalNav={internalNav}
+          />
         </div>
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
         {archived && !provisionalNewChat && (

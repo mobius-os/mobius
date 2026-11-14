@@ -77,7 +77,7 @@ test('an open helper conversation stays open while its helper moves from Working
   const group = helperButton(view.container, 0).closest('[role="group"]')
   assert.match(group.getAttribute('aria-label'), /^Waiting/)
   // Still the same conversation, now saying its helper waits on its coordinator.
-  assert.equal(dialogs(view.container)[0]?.getAttribute('data-status'), 'waiting')
+  assert.equal(dialogs(view.container)[0]?.getAttribute('data-status'), 'needs_input')
   assert.deepEqual(dialogEvents, ['open del-0'])
   view.unmount()
 })
@@ -94,19 +94,25 @@ test('an open helper conversation stays open when another helper leaves and the 
   view.unmount()
 })
 
-test('a helper that leaves the tray closes its conversation and does not reopen it on return', () => {
-  const view = mountTray({ helpers: [0, 1].map(i => helper(i)) })
+test('a departing helper keeps its preview until the reader closes it, and returning does not reopen it', () => {
+  const view = mountTray({ helpers: [helper(0), helper(1)] })
   click(helperButton(view.container, 1))
-
-  view.rerender({ helpers: [helper(0)] })
-  assert.equal(dialogs(view.container).length, 0)
-  view.rerender({ helpers: [0, 1].map(i => helper(i)) })
-  assert.equal(dialogs(view.container).length, 0, 'a returning row is closed until tapped again')
-  assert.deepEqual(dialogEvents, ['open del-1', 'close del-1'])
-
-  click(helperButton(view.container, 0))
+  view.rerender({ helpers: [helper(1, 'completed')] })
+  assert.equal(dialogs(view.container)[0]?.getAttribute('data-status'), 'completed')
+  view.rerender({ helpers: [] })
+  assert.equal(dialogs(view.container)[0]?.getAttribute('data-task'), 'del-1')
+  assert.equal(dialogs(view.container)[0]?.getAttribute('data-status'), 'completed')
+  assert.deepEqual(dialogEvents, ['open del-1'])
+  view.rerender({ helpers: [], hidden: true })
+  assert.equal(dialogs(view.container).length, 1, 'owner input may hide rows, not the open preview')
   click(dialogs(view.container)[0])
-  assert.equal(dialogs(view.container).length, 0, 'closing the dialog closes it')
+  assert.equal(dialogs(view.container).length, 0)
+  view.rerender({ helpers: [helper(1)] })
+  assert.equal(dialogs(view.container).length, 0)
+  click(helperButton(view.container, 1))
+  assert.equal(dialogs(view.container).length, 1, 'explicitly reopening still works')
+  view.rerender({ chatId: 'different-parent' })
+  assert.equal(dialogs(view.container).length, 0, 'a different parent cannot inherit a preview')
   view.unmount()
 })
 

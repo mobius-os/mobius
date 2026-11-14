@@ -183,10 +183,10 @@ test('helpers are one openable row each, never a "Waiting on N helpers" count', 
   const capped = renderWithModels(h(WaitingChip, {
     chatId: 'parent-chat',
     helpers: [{ delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' }],
-    cappedBackgroundCount: 3,
+    unlistedHelpers: 3,
   }))
   // A server-capped list is already more than a few rows: it folds into the summary.
-  assert.match(capped, /1 helper working · Background list capped \(3 total\)/)
+  assert.match(capped, /1 helper working · 3 more helpers/)
   // Only a server-owned automatic handoff may promise the chat resumes.
   assert.match(html, /This chat resumes when they finish/)
   assert.doesNotMatch(capped, /resumes/)

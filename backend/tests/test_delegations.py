@@ -4121,3 +4121,30 @@ def test_queued_helper_result_resolves_a_root_shared_by_several_helpers(db):
   queued = {"role": "user", "hidden": True, "kind": DELEGATION_RESULT_MESSAGE_KIND,
             "source_work_id": "q1", "cid": "delegation-result:x", "content": "r"}
   assert queued_continuation_root(db, "p3", queued) == "q1"
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_footer_helper_union_counts_before_capping(db, monkeypatch, overlap):
+  from types import SimpleNamespace
+  from app import delegations
+
+  background = [SimpleNamespace(id=f"bg-{i}", task_key=f"Helper {i}",
+                                provider="codex") for i in range(20)]
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows",
+                      lambda *_: [(row, "running") for row in background])
+  nodes = [{"id": f"{'bg' if overlap else 'goal'}-{i}", "status": "running"}
+           for i in range(20)]
+  nodes[0]["children"] = [{"id": "nested", "status": "running"}]
+  nodes.append({"id": "settled", "status": "completed"})
+  goal = {"id": "goal", "status": "active", "plan": {"delegations": nodes}}
+  result = serialize_background_helpers(db, "parent", goal=goal)
+  assert result["count"] == 20  # Only background work owns automatic wake.
+  assert len(result["items"]) == 16
+  union = result["with_goal"]
+  assert union["goal_id"] == "goal"
+  assert union["count"] == (20 if overlap else 40)
+  assert len(union["items"]) == 16
+  assert len({row["id"] for row in union["items"]}) == 16
+  assert "with_goal" not in serialize_background_helpers(
+    db, "parent", goal={**goal, "status": "completed"},
+  )

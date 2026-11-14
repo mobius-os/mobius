@@ -2527,22 +2527,43 @@ def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
   }
 
 
-def serialize_background_helpers(db: Session, parent_chat_id: str) -> dict:
-  """Compact owner-facing helper summary; child transcripts stay private."""
+def serialize_background_helpers(
+  db: Session, parent_chat_id: str, *, goal: dict | None = None,
+) -> dict:
+  """Bounded helper rows with exact totals, before either source is capped.
+
+  Background work alone owns automatic wake eligibility. The optional Goal
+  view unions direct, unsettled Goal helpers for the footer without changing
+  that wake count. Keeping both bounded views lets the reader hide a retained
+  Goal during an unrelated turn without guessing omitted membership.
+  """
   rows = _self_resuming_helper_rows(db, {parent_chat_id})
-  return {
-    "count": len(rows),
-    "items": [
-      {
-        "id": row.id,
-        "task_key": row.task_key,
-        "title": row.task_key,
-        "provider": row.provider,
-        "status": status,
-      }
-      for row, status in rows[:BACKGROUND_HELPER_ITEM_LIMIT]
-    ],
+  items = {
+    row.id: {
+      "id": row.id, "task_key": row.task_key, "title": row.task_key,
+      "provider": row.provider, "status": status,
+    }
+    for row, status in rows
   }
+  result = {
+    "count": len(items),
+    "items": list(items.values())[:BACKGROUND_HELPER_ITEM_LIMIT],
+  }
+  if goal and goal.get("status") in {"active", "paused"}:
+    eligible = ACTIVE_DELEGATION_STATUSES | AWAITING_INPUT_DELEGATION_STATUSES
+    for node in (goal.get("plan") or {}).get("delegations", []):
+      if node.get("id") and node.get("status") in eligible:
+        items.setdefault(node["id"], {
+          "id": node["id"], "task_key": node.get("task_key"),
+          "title": node.get("title"), "provider": node.get("provider"),
+          "status": node["status"],
+        })
+    result["with_goal"] = {
+      "goal_id": goal["id"],
+      "count": len(items),
+      "items": list(items.values())[:BACKGROUND_HELPER_ITEM_LIMIT],
+    }
+  return result
 
 
 def publish_parent_waiting_changed(parent_chat_id: str) -> None:

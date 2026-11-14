@@ -108,15 +108,15 @@ test('the helper list has each helper once: background helpers, then direct Goal
   const asking = { id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input', children: [] }
   const owned = structuredClone(goal)
   owned.plan.delegations.push(settled, asking)
-  const { rows, cappedBackgroundCount } = trayHelpers(background, owned)
+  const { rows, unlistedHelpers } = trayHelpers({ ...background, with_goal: { goal_id: owned.id, count: 3, items: [...background.items, asking] } }, owned)
   // A Goal helper the background list already has is not repeated; a settled
   // Goal helper is history, and a nested helper belongs to its own parent.
   assert.deepEqual(rows.map(row => row.delegation_id), ['parent', 'goal-b-helper', 'asking'])
   assert.deepEqual(rows[2], { delegation_id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input' })
-  assert.equal(cappedBackgroundCount, 0)
-  assert.deepEqual(trayHelpers(null, null), { rows: [], cappedBackgroundCount: 0 })
+  assert.equal(unlistedHelpers, 0)
+  assert.deepEqual(trayHelpers(null, null), { rows: [], unlistedHelpers: 0 })
   // Preserve the capped source total without claiming an unseen union count.
-  assert.equal(trayHelpers({ count: 20, items: background.items }, null).cappedBackgroundCount, 20)
+  assert.equal(trayHelpers({ count: 20, items: background.items }, null).unlistedHelpers, 18)
 })
 
 test('helper counts never invent automatic wake ownership or optional recovery actions', () => {
@@ -155,4 +155,15 @@ test('an inherited nested helper affects its task without adding checklist rows'
   assert.match(html, /chat__goal-task--running/)
   assert.match(html, /In progress/)
   assert.equal((html.match(/role="listitem"/g) || []).length, 2)
+})
+
+
+test('Goal headline omits direct helper counts already in the tray but retains nested coordination', () => {
+  assert.equal(goalHelperWaitingLabel(goal, { directHelpersInTray: true }),
+    'Helper waiting for coordinating agent · resumes automatically')
+  const directOnly = structuredClone(goal)
+  directOnly.plan.delegations[0].children = []
+  assert.equal(goalHelperWaitingLabel(directOnly, { directHelpersInTray: true }), null)
+  const [rail] = progressRailViewModel(directOnly, [], { directHelpersInTray: true })
+  assert.doesNotMatch(rail.label, /helper/)
 })

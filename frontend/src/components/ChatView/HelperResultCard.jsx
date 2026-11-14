@@ -6,7 +6,7 @@ import { peerTime } from './peerTimeline.js'
 import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
-import { HELPER_AWAITING_PARENT_LABEL, isWorkingHelper } from './workingHelper.js'
+import { helperPresentation, isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
@@ -50,22 +50,6 @@ function useElapsed(startedAt, running) {
 }
 
 
-// What a settled helper's row says in place of its live step.
-const SETTLED = {
-  completed: ['done', 'Helper finished'],
-  failed: ['failed', 'Failed'],
-  needs_review: ['failed', 'Needs review'],
-  interrupted: ['failed', 'Interrupted'],
-  // Paused on its question to this chat's agent: not finished, not failed.
-  needs_input: ['running', HELPER_AWAITING_PARENT_LABEL],
-}
-
-// What the helper's conversation says about it, from the same event its row shows.
-function helperConversationStatus(event) {
-  if (isWorkingHelper({ ...event, type: 'helper_result' })) return event.status === 'paused' ? 'stopped' : 'running'
-  return { completed: 'done', failed: 'failed', needs_input: 'waiting' }[event.status] || 'stopped'
-}
-
 /* A helper's conversation (task, steps and result) over this chat, read-only
    and updating live while it works. Its owner decides how long it stays open:
    a row that can remount (the foot's regrouping list) must not own it. */
@@ -74,7 +58,7 @@ export function HelperEventConversation({ event, chatId, host, onClose, onIntern
     chatId={chatId}
     taskId={event.delegation_id}
     name={event.task_key || 'Helper'}
-    status={helperConversationStatus(event)}
+    status={event.status}
     host={host}
     onClose={onClose}
     onInternalNav={onInternalNav}
@@ -90,9 +74,8 @@ export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
   const working = isWorkingHelper({ ...event, type: 'helper_result' })
   const paused = event.status === 'paused'
   const live = useElapsed(event.started_at, working && !paused)
-  const [dot, outcome] = working
-    ? [paused ? 'failed' : 'running', paused ? 'On hold' : helperStep(event) || 'Working']
-    : SETTLED[event.status] || ['failed', 'Stopped']
+  const { dot, label } = helperPresentation(event.status)
+  const outcome = working && !paused ? helperStep(event) || label : label
   const elapsed = working
     ? live
     : Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
