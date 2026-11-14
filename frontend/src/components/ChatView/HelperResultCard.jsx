@@ -10,6 +10,7 @@ import { HELPER_AWAITING_PARENT_LABEL, isWorkingHelper } from './workingHelper.j
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { helperTitle } from './helperTitle.js'
 import { modelDisplayName } from './chatUsageFormat.js'
 import { modelQueries } from '../../hooks/queries.js'
 import { catalogProviders } from '../../lib/modelCatalog.js'
@@ -67,7 +68,7 @@ const SETTLED = {
 export function HelperRow({ event, chatId, onInternalNav }) {
   const [open, setOpen] = useState(false)
   const rowRef = useRef(null)
-  const name = event.task_key || 'Helper'
+  const name = helperTitle(event)
   const working = isWorkingHelper({ ...event, type: 'helper_result' })
   const paused = event.status === 'paused'
   const live = useElapsed(event.started_at, working && !paused)

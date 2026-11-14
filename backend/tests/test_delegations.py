@@ -35,9 +35,12 @@ from app.delegations import (
   limit_resume_delegation,
   mark_cancelled,
   parent_root_run_id,
+  helper_title,
   policy_for_chat,
   serialize_background_helpers,
 )
+from app import chat_writer
+from app.chat_titles import apply_generated_title
 from test_app_fixtures import create_local_app
 
 
@@ -1283,7 +1286,8 @@ def test_background_helper_projection_owns_waiting_until_parent_wake(
     "items": [{
       "id": delegation_id,
       "task_key": "task-waiting-owner",
-      "title": "task-waiting-owner",
+      # The seeded helper's own chat is named "Child".
+      "title": "Child",
       "provider": "claude",
       "status": "running",
     }],
@@ -3996,6 +4000,63 @@ def test_long_question_and_result_are_durable_but_automatic_notice_is_bounded(db
   payload = delegations_mod.serialize_delegation(db, row)
   assert payload["result"] == report.strip()
   assert "result_truncated" not in payload
+
+
+def test_helper_title_is_its_locked_chat_title_with_a_readable_fallback(
+  client, owner_token, db, monkeypatch,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  parent_chat_id = _parent_with_run(client, owner_token, db)
+  starts = []
+
+  async def fake_start(**kwargs):
+    starts.append(kwargs)
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
+  )
+  body = {
+    "parent_chat_id": parent_chat_id, "task_key": "fix-tray.close_v2",
+    "prompt": "Fix the tray.", "provider": "codex", "scope": "write",
+    "title": "  Fixing the tray's\n closing conversation ",
+  }
+  created = client.post("/api/delegations", json=body, headers=auth)
+  assert created.status_code == 201, created.text
+  title = "Fixing the tray's closing conversation"
+  assert created.json()["title"] == title
+  assert starts[-1]["title"] == title
+  row = db.get(models.Delegation, created.json()["id"])
+  child = db.get(models.Chat, row.child_chat_id)
+  assert (child.title, child.title_locked) == (title, True)
+
+  # The name is chosen at spawn: an attach, the first-message fallback and the
+  # helper's own chat checkpoint never rename it.
+  attached = client.post(
+    "/api/delegations", json={**body, "title": "Another"}, headers=auth,
+  )
+  assert attached.json()["attached"] is True
+  assert attached.json()["title"] == title
+  chat_writer._name_chat_from_first_message(child, "Fix the tray.")
+  assert not apply_generated_title(child, "A helper-chosen name")
+  assert helper_title(db, row) == title
+
+  untitled = client.post("/api/delegations", json={
+    **body, "task_key": "audit-restart", "title": None,
+  }, headers=auth)
+  assert untitled.json()["title"] == "Audit restart"
+  listed = client.get(
+    f"/api/delegations?parent_chat_id={parent_chat_id}", headers=auth,
+  )
+  assert listed.status_code == 200, listed.text
+  assert {item["task_key"]: item["title"] for item in listed.json()["items"]} == {
+    "fix-tray.close_v2": title, "audit-restart": "Audit restart",
+  }
+
+  # Helpers from before titles keep their generated chat name.
+  child.title = "Delegation · fix-tray.close_v2"
+  db.commit()
+  assert helper_title(db, row) == "Fix tray close v2"
 
 
 def test_same_task_key_can_be_reused_by_a_new_goal_on_one_physical_run(db, chat):

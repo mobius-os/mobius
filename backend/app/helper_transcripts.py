@@ -107,6 +107,7 @@ def _delegation_conversation(db: Session, delegation: models.Delegation) -> dict
   ).first()
   if child is None:
     return None
+  from app.delegations import helper_chat_title
   blocks: list[dict] = []
   for message in materialized_messages(child):
     if not isinstance(message, dict) or message.get("hidden"):
@@ -135,6 +136,7 @@ def _delegation_conversation(db: Session, delegation: models.Delegation) -> dict
     "child_chat_id": delegation.child_chat_id,
     "blocks": blocks[-MAX_BLOCKS:],
     "truncated": len(blocks) > MAX_BLOCKS,
+    "title": helper_chat_title(child.title, delegation.task_key),
   }
 
 

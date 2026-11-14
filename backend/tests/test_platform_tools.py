@@ -188,6 +188,31 @@ def test_spawn_forwards_an_explicit_goal_task_without_guessing(
   assert schema["properties"]["plan_task"]["maxLength"] == 128
 
 
+def test_spawn_forwards_an_optional_title_and_lists_it(monkeypatch):
+  monkeypatch.setenv("MOBIUS_AGENT_PROVIDER", "codex")
+  monkeypatch.setenv("MOBIUS_AGENT_MODEL", "current")
+  monkeypatch.setenv("CHAT_ID", "parent")
+  control = _control_module()
+  sent = []
+  def api(method, path, body=None):
+    if path.endswith("/capabilities"):
+      return {"connections": {"codex": {"configured": True}},
+              "models": {"codex": [{"id": "current"}]}}
+    sent.append(body)
+    return {"id": "child", "task_key": "review", "title": "Reviewing the diff"}
+  monkeypatch.setattr(control, "_agent_api_call", api)
+  view = control._call_spawn_agent({
+    "name": "review", "task": "Review", "title": "  Reviewing the diff ",
+  })
+  assert sent[-1]["title"] == "Reviewing the diff"
+  assert view["title"] == "Reviewing the diff"
+  control._call_spawn_agent({"name": "review", "task": "Review", "title": " "})
+  assert "title" not in sent[-1]
+  schema = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]
+  assert "title" in schema["properties"] and "title" not in schema["required"]
+  assert set(schema["properties"]["title"]) == {"type", "description"}
+
+
 def test_claude_pointer_does_not_replace_missing_helpers_with_a_provider_cli():
   text = (Path(__file__).resolve().parents[1] / "scripts/seed-skills/claude.md").read_text()
   assert "current tool list" in text

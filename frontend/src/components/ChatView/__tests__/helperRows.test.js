@@ -60,7 +60,7 @@ test('a working helper row shows its name, engine, current step, and clock', () 
       started_at: started, activity: { tool: 'shell', summary: 'npm test' },
     },
   }))
-  assert.match(html, /audit-login/)
+  assert.match(html, /Audit login/)
   assert.match(html, /GPT-6-Luna · Running npm test/)
   assert.match(html, /chat__subagent-elapsed">1m 1[45]s</)
   assert.match(html, /<button[^>]*aria-haspopup="dialog"/)
@@ -99,7 +99,7 @@ test('a finished helper keeps its row with its engine and how long it took', () 
     event: { ...working, id: 'delegation:d1:completed', status: 'completed', delegation_id: 'd1',
              provider: 'claude', model: 'claude-opus-4-8', duration_ms: 12_000, body: 'Done.' },
   }))
-  assert.match(html, /audit-login/)
+  assert.match(html, /Audit login/)
   assert.match(html, /Opus 4.8 · Helper finished/)
   assert.match(html, /12s/)
 })
@@ -111,7 +111,7 @@ test('a cutover-interrupted helper visibly keeps its conversation', () => {
              delegation_id: 'd1', provider: 'codex', model: 'gpt-6-luna' },
   }))
   assert.match(html, /GPT-6-Luna · Interrupted/)
-  assert.match(html, /aria-label="audit-login: [^"]*Open its conversation"/)
+  assert.match(html, /aria-label="Audit login: [^"]*Open its conversation"/)
   assert.doesNotMatch(html, /chat__subagent--running/)
 })
 
@@ -157,7 +157,7 @@ test('an open group draws each helper once, as its launch step, in order', async
   const row = html.indexOf('chat__helper-working')
   assert.ok(html.indexOf('git status') < row && row < html.indexOf('npm test'),
     'the row stands where the helper was launched')
-  assert.match(html, /aria-label="audit-login: [^"]*Open its conversation"/)
+  assert.match(html, /aria-label="Audit login: [^"]*Open its conversation"/)
   _resetDisclosureStateForTests()
 })
 
