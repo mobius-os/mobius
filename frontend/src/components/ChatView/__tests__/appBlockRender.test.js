@@ -43,10 +43,11 @@ test('an action and the expand control only name views the reader can open', () 
   assert.doesNotMatch(html, /md-app-block__view/)
 })
 
-test('link-only blocks have no expand control or action', () => {
+test('link-only blocks open the same app intent through their title, without duplicate navigation', () => {
   const html = render({ ...base, inline: false, action: { label: 'Send', intent: 'send:1' } })
   assert.doesNotMatch(html, /md-app-block__toggle|md-app-block__action/)
-  assert.match(html, /<span class="md-app-block__sr-only">Open in <\/span>Example/)
+  assert.match(html, /<strong><a class="md-app-block__title-link" href="\/shell\/\?app=example&amp;intent=open%3Aitem-42">Item 42<\/a><\/strong>/)
+  assert.doesNotMatch(html, /md-app-block__open|<iframe/)
 })
 
 test('items render as generic linked rows with their own badges, facts and actions', () => {

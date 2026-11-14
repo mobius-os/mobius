@@ -166,7 +166,9 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   const footerStatus = block.statusPlacement === 'footer'
   const status = <>
       <TitleMark tone={block.titleTone} busy={block.titleBusy} />
-      <strong>{block.title}</strong>
+      <strong>{!block.inline
+        ? <AppLink className="md-app-block__title-link" href={block.href} onInternalNav={onInternalNav}>{block.title}</AppLink>
+        : block.title}</strong>
       <Badges badges={block.badges} />
     </>
   const jump = folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
@@ -175,7 +177,7 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
     {footerStatus ? null : <header>
       {status}{jump}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
-      {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
+      {!block.inline || (folded && onJump) ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
         {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
         <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
     </header>}

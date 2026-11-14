@@ -15,6 +15,10 @@
   color:var(--muted); font-size:13px; text-decoration:none; white-space:nowrap; }
 .md-app-block__open:hover { color:var(--text); background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__open:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+/* Link-only snapshots use their title as the app entry, without a duplicate label. */
+.md-app-block a.md-app-block__title-link { display:flex; align-items:center; box-sizing:border-box; min-height:44px; padding:4px 12px 4px 0; color:var(--text); text-decoration:none; text-underline-offset:2px; }
+.md-app-block a.md-app-block__title-link:hover { text-decoration:underline; }
+.md-app-block a.md-app-block__title-link:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
 .md-app-block__source { margin:-6px 0 0; padding:0 16px 10px; color:var(--muted); font-size:12px; }
 .md-app-block__facts { display:flex; flex-wrap:wrap; gap:6px 20px; padding:0 16px 12px; margin:0; }
 /* A fact never overflows the block: the label takes at most 40% of its line
