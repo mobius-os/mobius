@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import tempfile
 import hashlib
 import json
 import logging
@@ -407,7 +409,28 @@ class CodexHelperHost(Host):
   def __init__(self, key: HostKey, *, sdk: dict, config: Any):
     super().__init__(key)
     self._sdk = sdk
-    self._config = config
+    self._config = copy.copy(config)
+    self._catalogue_directory = None
+    # A custom-provider catalogue can belong to a single turn. This process
+    # serves many turns, so retain its own copy until the host is closed.
+    for override in getattr(config, "config_overrides", ()):
+      if override.startswith("model_catalog_json="):
+        source = Path(json.loads(override.split("=", 1)[1]))
+        content = source.read_bytes()
+        self._catalogue_directory = tempfile.TemporaryDirectory(prefix="mobius-host-models-")
+        destination = Path(self._catalogue_directory.name) / "catalog.json"
+        destination.write_bytes(content)
+        replacement = f"model_catalog_json={json.dumps(str(destination))}"
+        self._config.config_overrides = tuple(
+          replacement if value == override else value
+          for value in config.config_overrides
+        )
+        if config.launch_args_override is not None:
+          self._config.launch_args_override = tuple(
+            replacement if value == override else value
+            for value in config.launch_args_override
+          )
+        break
     self._context: Any = None
     self.client: Any = None
     self.process_group_id: int | None = None
@@ -499,6 +522,9 @@ class CodexHelperHost(Host):
       with contextlib.suppress(Exception):
         self._executor.close()
       self._executor = None
+    if self._catalogue_directory is not None:
+      self._catalogue_directory.cleanup()
+      self._catalogue_directory = None
 
 
 def codex_turn_thread_config(
