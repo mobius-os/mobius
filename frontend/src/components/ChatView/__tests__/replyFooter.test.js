@@ -21,11 +21,11 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { agentStretches, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
+const { agentStretches, footerCopyParts, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
-const proseText = messages => replyProse(messages).map(part => part.markdown).join('\n\n')
+const proseText = (messages, options) => replyProse(messages, options).map(part => part.markdown).join('\n\n')
 
 const turn = {
   role: 'assistant',
@@ -137,18 +137,24 @@ test('tools and thinking never copy; prose reads across rows and skips hidden or
   ]), 'Part one.\n\nPart two.')
 })
 
-test('an open card copies; answered and sealed cards do not', () => {
-  const card = { type: 'question', questions: [{
+test('an open card copies; answered, completed, stopped and sealed cards do not', () => {
+  const card = { type: 'question', question_id: 'logs', questions: [{
     question: 'What did the logs show?',
     options: [{ label: 'Nothing unusual' }, { label: 'Something else' }],
   }] }
   const blocks = [{ type: 'text', content: 'Checking the logs:' }, { type: 'tool', tool: 'Bash' }]
-  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, card] }]),
+  const open = { liveQuestionId: 'logs' }
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, card] }], open),
     'Checking the logs:\n\nWhat did the logs show?\n- Nothing unusual\n- Something else')
-  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, { ...card, answers: { 0: 'A' } }] }]),
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, { ...card, answers: { 0: 'A' } }] }], open),
     'Checking the logs:')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, card] }]), 'Checking the logs:',
+    'no longer the chat’s open question: stopped or superseded')
   assert.equal(proseText([{ role: 'assistant', blocks: [...blocks,
-    { type: 'question', secure_input: { fields: [] }, questions: [{ question: 'Service API key' }] }] }]),
+    { ...card, platform_action: { type: 'restart', version: 2, status: 'activated' } }] }], open),
+  'Checking the logs:', 'a restart card already acted on')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks,
+    { type: 'question', question_id: 'logs', secure_input: { fields: [] }, questions: [{ question: 'Service API key' }] }] }], open),
   'Checking the logs:')
 })
 
@@ -156,7 +162,8 @@ test('the footer shows an older reply’s date and time, with the full date on h
   // Recent replies read "23 minutes ago" (dateTimeFormat.test); this one is
   // weeks old, so it shows its date.
   const html = renderReply([turn])
-  assert.match(html, /<time class="chat__ts" title="21st Oct 2026, \d\d:\d\d">21st Oct 2026, /)
+  assert.match(renderReply([{ ...turn, run_ended_ts: turn.ts }]), /<time class="chat__ts" title="21st Oct 2026, \d\d:\d\d">21st Oct 2026, /)
+  assert.match(html, /title="Started 21st Oct 2026, /, 'a run not yet known to have ended reads as its start')
 })
 
 test('the footer offers Copy without Try again', () => {
@@ -193,10 +200,10 @@ test('Copy locates the prose blocks MsgContent renders, after its duplicate-text
     { role: 'assistant', blocks: [
       { type: 'tool', tool: 'Bash' },
       { type: 'text', content: 'Review res' },
-      { type: 'question', questions: [{ question: 'Merge?' }] },
+      { type: 'question', question_id: 'merge', questions: [{ question: 'Merge?' }] },
       { type: 'text', content: 'Review result' },
     ] },
-  ]), [{ message: 1, block: 1, markdown: 'Review result' }, { markdown: 'Merge?' }])
+  ], { liveQuestionId: 'merge' }), [{ message: 1, block: 1, markdown: 'Review result' }, { markdown: 'Merge?' }])
 })
 
 test('Copy numbers prose blocks as they render, past deliverables and a card’s tool twin', () => {
@@ -345,16 +352,54 @@ test('Copy’s parts come from the stretch’s replies as they render, each nami
     'nothing to copy, so no Copy')
 })
 
-test('the footer reads when the reply settled: its last row’s time', () => {
+test('the footer reads when the reply’s run ended, or says it is the start', () => {
   const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
-  const later = Date.UTC(2026, 9, 22, 7, 5)
-  const messages = [row('run'), steer, row('run:assistant:1', { ts: later })]
-  const group = assistantReplyGroups(messages).get(0)
-  const html = renderWithModels(createElement(PeerTimelineContext.Provider,
-    { value: { tools: new Map(), positions: new Map() } },
-    createElement(Reply, {
-      replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
-      useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
-    })))
-  assert.match(actionRow(html), /<time class="chat__ts" title="22nd Oct 2026, /)
+  const ended = Date.UTC(2026, 9, 22, 7, 5)
+  const footerTime = messages => {
+    const group = assistantReplyGroups(messages).get(0)
+    return actionRow(renderWithModels(createElement(PeerTimelineContext.Provider,
+      { value: { tools: new Map(), positions: new Map() } },
+      createElement(Reply, {
+        replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
+        useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
+      }))))
+  }
+  assert.match(footerTime([row('run'), steer, row('run:assistant:1', { run_ended_ts: ended })]),
+    /<time class="chat__ts" title="22nd Oct 2026, \d\d:\d\d">22nd Oct 2026, /,
+    'the server’s end of the run that wrote the last row')
+  assert.match(footerTime([row('run'), steer, row('run:assistant:1')]),
+    /<time class="chat__ts" title="Started 21st Oct 2026, \d\d:\d\d">Started 21st Oct 2026, /,
+    'without it, the reply’s start, named as such')
+})
+
+test('a stretch whose start was read copies as the same stretch wholly loaded, peer notes included', () => {
+  // One run split by a hidden steer whose seam carries a peer note: the note
+  // keeps the replay from joining, so the parts depend on the note slots.
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const sealed = { role: 'assistant', id: 'run', ts: turn.ts, content: 'The frame', blocks: [{ type: 'text', content: 'The frame' }] }
+  const continuation = { role: 'assistant', id: 'run:assistant:1', ts: turn.ts, blocks: [{ type: 'text', content: 'The framework survives.' }] }
+  const note = [{ id: 'note', type: 'peer_message' }]
+  const partsOf = (messages, { slots = new Map(), offset = 0, startRows } = {}) => {
+    const replyGroups = assistantReplyGroups(messages, { slots, offset })
+    const footer = replyFooter({
+      messages, replyGroups, stretches: agentStretches(messages, replyGroups),
+      lastVisibleIndex: messages.findLastIndex(message => !message.hidden), offset,
+    })
+    return footerCopyParts(footer, { startRows, messages, offset, slots })
+  }
+  const loaded = [ownerRow, sealed, steer, continuation]
+  const whole = partsOf(loaded, { slots: new Map([[2, note]]) })
+  const page = [steer, continuation]
+  assert.equal(partsOf(page, { offset: 2, slots: new Map([[0, note]]) }), null,
+    'unknown until the start is read, so no Copy yet')
+  assert.deepEqual(partsOf(page, { offset: 2, slots: new Map([[0, note]]), startRows: [sealed] }), whole,
+    'the read start joins the loaded rows with the transcript’s own note slots')
+  assert.notDeepEqual(partsOf(loaded), whole, 'the note does change how the reply reads')
+})
+
+test('Copy has no parts until the footer settles', () => {
+  const messages = [ownerRow, row('a')]
+  const footer = footerOf(messages)
+  assert.equal(footerCopyParts({ ...footer, state: 'working' }, { messages }), null)
+  assert.equal(footerCopyParts(null, { messages }), null)
 })

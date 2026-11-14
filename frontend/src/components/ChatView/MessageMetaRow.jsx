@@ -1,7 +1,7 @@
 /* MessageMetaRow keeps a message's time and actions in one row: its time,
    Copy, and on the chat's reply footer (`side="start"`) Branch. Beside an
    owner message's bubble it is revealed on tap; the reply footer reads how
-   long ago the reply settled, aligned with the reply's prose, and appears
+   long ago the reply settled (or, until that is known, began), aligned with the reply's prose, and appears
    when the reply is tapped, keyboard-focused, or hovered with a fine pointer.
    `copy(button)` returns the clipboard payload (see MessageCopyButton);
    `branch()` opens a new chat continuing through this reply. */
@@ -31,6 +31,7 @@ function useMinuteClock(ticking) {
 
 export default function MessageMetaRow({
   timestamp,
+  timeIsStart = false,
   copy,
   branch,
   side = 'end',
@@ -42,8 +43,12 @@ export default function MessageMetaRow({
   // to show yet (a streaming reply); the overlay row beside a bubble does not.
   if (!footer && !timestamp && !copy) return null
 
+  // A footer time that is only when the reply began says so.
+  const recent = timestamp && formatRecentDateTime(timestamp, now)
   const time = timestamp && (footer
-    ? <time className="chat__ts" title={formatDateTime(timestamp)}>{formatRecentDateTime(timestamp, now)}</time>
+    ? <time className="chat__ts" title={`${timeIsStart ? 'Started ' : ''}${formatDateTime(timestamp)}`}>
+      {timeIsStart ? `Started ${recent === 'Just now' ? 'just now' : recent}` : recent}
+    </time>
     : <time className="chat__ts">{formatDateTime(timestamp)}</time>)
   // CSS owns hiding: a hidden owner row leaves the focus order and the
   // accessibility tree, and a revealed one rejoins both; the reply footer

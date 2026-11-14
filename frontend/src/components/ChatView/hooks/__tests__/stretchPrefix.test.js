@@ -3,7 +3,8 @@
    the whole stretch is projected as the transcript shows it. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readStretchStart } from '../useStretchPrefix.js'
+import { readStretchStart, useStretchPrefix } from '../useStretchPrefix.js'
+import { renderHook } from './react-hook-shim.mjs'
 import { markdownHtml, stretchClipboard, stretchTail } from '../../messageCopy.js'
 import { stretchProse as stretchParts } from '../../replyFooter.js'
 import { assistantReplyGroups } from '../../assistantReplies.js'
@@ -124,4 +125,59 @@ test('the read start drops raw HTML as the transcript does, keeping text between
   const inline = markdownHtml('Click <button>Continue</button> to proceed.')
   assert.doesNotMatch(inline, /<button/)
   assert.match(inline, /Click Continue to proceed\./)
+})
+
+const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
+function reader() {
+  const calls = []
+  const request = (url, options) => new Promise((resolve, reject) => calls.push({ url, options, resolve, reject }))
+  return { calls, request }
+}
+const page = messages => ({ ok: true, json: async () => ({ offset: 0, messages }) })
+
+test('the start is read only when asked, with the history reads’ timeout, and kept', async () => {
+  const { calls, request } = reader()
+  const hook = renderHook(useStretchPrefix, 'chat', 40, { timeoutMs: 15000, request })
+  assert.deepEqual(hook.result.current[0], null)
+  assert.equal(calls.length, 0, 'opening the chat reads nothing')
+  hook.result.current[1]()
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].url, /^\/chats\/chat\?limit=100&before=40&compact=1$/)
+  assert.equal(calls[0].options.timeoutMs, 15000)
+  calls[0].resolve(page([owner('Go'), reply('one')]))
+  await flush()
+  assert.deepEqual(hook.result.current[0], [reply('one')])
+  hook.result.current[1]()
+  assert.equal(calls.length, 1, 'a read start is not read again')
+  hook.unmount()
+})
+
+test('a failed or timed-out read is retried on the next request', async () => {
+  const { calls, request } = reader()
+  const hook = renderHook(useStretchPrefix, 'chat', 40, { request })
+  hook.result.current[1]()
+  calls[0].reject(new DOMException('timed out', 'AbortError'))
+  await flush()
+  assert.equal(hook.result.current[0], null)
+  hook.result.current[1]()
+  assert.equal(calls.length, 2, 'the next hover or focus reads again')
+  calls[1].resolve(page([owner('Go'), reply('one')]))
+  await flush()
+  assert.deepEqual(hook.result.current[0], [reply('one')])
+  hook.unmount()
+})
+
+test('switching chat or unmounting aborts the read, and a stale result is never shown', async () => {
+  const { calls, request } = reader()
+  const hook = renderHook(useStretchPrefix, 'chat', 40, { request })
+  hook.result.current[1]()
+  hook.rerender('other', 40, { request })
+  assert.equal(calls[0].options.signal.aborted, true, 'the old chat’s read is aborted')
+  calls[0].resolve(page([owner('Go'), reply('old chat')]))
+  await flush()
+  assert.equal(hook.result.current[0], null, 'nothing from the old chat')
+  hook.result.current[1]()
+  assert.equal(calls.length, 2)
+  hook.unmount()
+  assert.equal(calls[1].options.signal.aborted, true, 'unmounting aborts too')
 })

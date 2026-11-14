@@ -91,8 +91,10 @@ test('the live surface keeps the message and owns it while it shows the card', (
 })
 
 test('Copy reads the closing message as the reply’s prose', () => {
-  assert.deepEqual(replyProse([message]).map(part => part.markdown),
+  assert.deepEqual(replyProse([message], { liveQuestionId: 'card-1' }).map(part => part.markdown),
     ['Checking the build.', card.message, 'Ship it today?'])
+  assert.deepEqual(replyProse([message]).map(part => part.markdown),
+    ['Checking the build.', card.message], 'a stopped or superseded card is closed: its question does not copy')
 })
 
 test('a hostile closing message gets the same guards as any reply prose', () => {

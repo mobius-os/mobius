@@ -1,7 +1,7 @@
 /* The chat's one reply footer: which reply holds it, in what state, and the
    agent's stretch it copies (everything the agent said since the owner last
    spoke). Pure, so ChatView only wires its result. */
-import { presentAssistantActivity, presentAssistantReply } from './assistantReplies.js'
+import { assistantReplyGroups, presentAssistantActivity, presentAssistantReply } from './assistantReplies.js'
 import { replyProse } from './messageCopy.js'
 
 /** The agent's stretches: each reply that ends one, mapped to the replies in
@@ -58,11 +58,36 @@ export function replyFooter({
  *  peer timeline's), then read by `replyProse`. A prose part names the
  *  rendered row that shows it by `key`, with its `block`; a card part has
  *  only its `markdown`. Copy's visibility and its text both come from here. */
-export function stretchProse(groups, positions = new Map()) {
+export function stretchProse(groups, positions = new Map(), liveQuestionId = null) {
   return groups.flatMap(group => {
     const options = { positions }
     const rows = presentAssistantActivity(presentAssistantReply(group.presentationRows, options), options).rows
-    return replyProse(rows.map(row => row.message)).map(({ message, ...part }) => (
+    return replyProse(rows.map(row => row.message), { liveQuestionId }).map(({ message, ...part }) => (
       Number.isInteger(part.block) ? { ...part, key: rows[message].key } : part))
   })
+}
+
+/** Copy's parts for `footer` (see replyFooter), or null while they are not
+ *  known: the footer has not settled, or its stretch began before the loaded
+ *  page and `startRows` (that start, see useStretchPrefix) is not read yet.
+ *  `messages`, `slots` and `positions` are the transcript's peer timeline,
+ *  `offset` its first row's index, `displayKeys` its row keys and
+ *  `liveQuestionId` the chat's open question. A stretch
+ *  wholly on the page uses the transcript's own reply groups; one with a read
+ *  start is regrouped with that start before the loaded rows, with the same
+ *  peer-note slots, so a reply split across the page's edge copies as one and
+ *  both cases project exactly as the transcript does. */
+export function footerCopyParts(footer, {
+  startRows, messages, offset = 0, slots = new Map(), positions, displayKeys, liveQuestionId,
+}) {
+  if (footer?.state !== 'settled') return null
+  if (!footer.truncated) return stretchProse(footer.groups, positions, liveQuestionId)
+  if (!startRows) return null
+  const shift = startRows.length
+  const rows = [...startRows, ...messages.slice(0, footer.group.end + 1)]
+  const groups = assistantReplyGroups(rows, {
+    offset: offset - shift, displayKeys,
+    slots: new Map([...slots].map(([index, notes]) => [index + shift, notes])),
+  })
+  return stretchProse([...new Set(groups.values())], positions, liveQuestionId)
 }

@@ -64,9 +64,8 @@ test('owner rows copy their own text; a reply copies only from its one end row',
 
 test('the chat has one reply footer, on the reply at its very end', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  // Hover reveals only the footer's Branch and time, never a row.
-  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta\s*[,{]/,
-    'hovering a reply must not reveal another row above the current reply')
+  // Only the chat's last reply has a footer row at all (replyFooter.test),
+  // so hovering an earlier reply has nothing to reveal.
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,

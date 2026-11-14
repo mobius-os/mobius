@@ -17,7 +17,7 @@ import {
 } from './groupBlocks.js'
 import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
-import { isDurableRestartOffer } from './restartCard.js'
+import { questionCardOpen } from './questionOpen.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -61,16 +61,10 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
-  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
-    && block?.type === 'question'
-    && !block.answers
-    && (
-      durableRestart
-      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
-    )
+    && questionCardOpen(block, isLastMsg ? liveQuestionId : null)
   )
 }
 

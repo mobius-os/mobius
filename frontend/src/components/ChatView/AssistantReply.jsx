@@ -81,6 +81,7 @@ function AssistantReply({
   const branchThroughId = rows[rows.length - 1].message.id
   const metaKey = presentationRows[0].key
   const settled = footer === 'settled' && !isStreaming
+  const endedAt = presentationRows.at(-1).message.run_ended_ts
   // A stretch lists its References once, after its last reply.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
@@ -150,9 +151,11 @@ function AssistantReply({
         gap. It is mounted while the agent works too, empty: settling fills
         the reserved line instead of adding one under a followed transcript. */}
     {footer && <MessageMetaRow
-      // When the reply settled, as near as the transcript records it: its
-      // last row's time (a row keeps the time it began).
-      timestamp={settled ? presentationRows.findLast(row => row.message.ts != null)?.message.ts : null}
+      // When the reply settled: when the run that wrote its last row ended.
+      // Until the server reports that, its start, and the row says so (a
+      // row's own time is when it began).
+      timestamp={settled ? (endedAt ?? presentationRows[0].message.ts) : null}
+      timeIsStart={endedAt == null}
       copy={settled ? copy : undefined}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.

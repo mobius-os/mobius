@@ -5,6 +5,7 @@ import { renderedBlockEntries, repairInterleavedQuestionText } from './streamRed
 import { markdownClipboardHtml, plainTextFromFragment } from './markdownClipboard.js'
 import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
 import { mathTokens } from './markdown/mathTokens.js'
+import { questionCardOpen } from './questionOpen.js'
 
 const isSystemRow = msg => !msg || msg.kind === 'compaction'
   || isContinuationMessage(msg) || isSideQuestionMessage(msg)
@@ -30,9 +31,10 @@ export function messageCopyText(msg) {
 }
 
 /** An open question card as copyable text: each question, then its choices
- * as a list. Answered cards and sealed secret cards never copy. */
-function questionCopyText(block) {
-  if (block.secure_input || block.answers) return ''
+ * as a list. Closed cards (see questionCardOpen) and sealed secret cards
+ * never copy. */
+function questionCopyText(block, liveQuestionId) {
+  if (block.secure_input || !questionCardOpen(block, liveQuestionId)) return ''
   return (block.questions || []).map(question => [
     question?.question?.trim(),
     ...(question?.options || []).map(option => option?.label && `- ${option.label}`),
@@ -40,15 +42,16 @@ function questionCopyText(block) {
 }
 
 /** Everything a reply said, in order: each prose block (a card's closing
- *  message is prose too) and any still-open question card. Tool output,
- *  thinking, answered cards and error chrome never copy (each has its own
+ *  message is prose too) and any still-open question card (`liveQuestionId`
+ *  is the chat's open question). Tool output, thinking, closed cards and
+ *  error chrome never copy (each has its own
  *  surface), and provider text that only repeats an error is that error.
  *
  *  Each part with a `block` locates its rendered element: `message` indexes
  *  the given rows and `block` is the position MsgContent renders it at as
  *  `data-markdown-block` (renderedBlockEntries), so Copy reads the text the
  *  owner sees. A card part has only its `markdown`. */
-export function replyProse(messages) {
+export function replyProse(messages, { liveQuestionId = null } = {}) {
   const rows = messages.map(msg => (msg.hidden || isSystemRow(msg) ? [] : renderedBlockEntries(
     repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
       ? msg.blocks : [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }]),
@@ -59,7 +62,7 @@ export function replyProse(messages) {
   rows.forEach((entries, message) => {
     entries.forEach(({ item: block, idx: index }) => {
       if (block?.type === 'question') {
-        const markdown = questionCopyText(block)
+        const markdown = questionCopyText(block, liveQuestionId)
         if (markdown) parts.push({ markdown })
       } else if (block?.type === 'text' && block.content?.trim()) {
         const markdown = (block.markdown_range

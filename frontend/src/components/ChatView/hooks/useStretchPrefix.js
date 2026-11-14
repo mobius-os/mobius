@@ -35,22 +35,26 @@ export async function readStretchStart(fetchPage, before) {
 
 /** `[rows, request]`: the stretch's rows before `before` (the loaded page's
  *  first index; 0 when the stretch starts on the page), null until `request()`
- *  has been called and the read has finished. A failed read stays null and a
- *  later `request()` tries again. */
-export function useStretchPrefix(chatId, before) {
+ *  has been called and the read has finished. Each page read has the same
+ *  `timeoutMs` as the transcript's other history reads, and a chat switch or
+ *  unmount aborts it. A failed or timed-out read stays null and the next
+ *  `request()` tries again. */
+export function useStretchPrefix(chatId, before, { timeoutMs, request = apiFetch } = {}) {
   const key = before > 0 ? `${chatId}:${before}` : null
   const [wanted, setWanted] = useState(null)
   const [start, setStart] = useState({ key: null, rows: null })
+  const loaded = start.key === key
   useEffect(() => {
-    if (!key || wanted !== key) return undefined
-    let cancelled = false
-    const fetchPage = cursor => apiFetch(`/chats/${chatId}?limit=${PAGE_SIZE}&before=${cursor}&compact=1`)
-      .then(response => jsonOrThrow(response, 'Earlier messages failed to load'))
+    if (!key || wanted !== key || loaded) return undefined
+    const controller = new AbortController()
+    const fetchPage = cursor => request(`/chats/${chatId}?limit=${PAGE_SIZE}&before=${cursor}&compact=1`, {
+      timeoutMs, signal: controller.signal,
+    }).then(response => jsonOrThrow(response, 'Earlier messages failed to load'))
     readStretchStart(fetchPage, before)
-      .then(rows => { if (!cancelled) setStart({ key, rows }) })
-      .catch(() => { if (!cancelled) setWanted(null) })
-    return () => { cancelled = true }
-  }, [chatId, before, key, wanted])
-  const request = useCallback(() => { if (key) setWanted(key) }, [key])
-  return [start.key === key ? start.rows : null, request]
+      .then(rows => { if (!controller.signal.aborted) setStart({ key, rows }) })
+      .catch(() => { if (!controller.signal.aborted) setWanted(null) })
+    return () => controller.abort()
+  }, [chatId, before, key, wanted, loaded, timeoutMs, request])
+  const requestStart = useCallback(() => { if (key) setWanted(key) }, [key])
+  return [loaded ? start.rows : null, requestStart]
 }
