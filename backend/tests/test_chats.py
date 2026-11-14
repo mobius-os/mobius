@@ -1457,3 +1457,27 @@ def test_compact_park_handoff_never_selects_chat_transcript(chat, db):
   assert chat_reads
   assert all("messages_v1" not in query for query in chat_reads)
   assert not any("FROM chat_messages" in query for query in queries)
+
+
+def test_detail_carries_when_each_reply_run_ended_without_changing_row_identity(client, auth, db):
+  """A row's `ts` is when its turn started; the footer needs when it ended."""
+  db.add(create_chat(id="run-ended", title="Ended", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "done-run", "content": "a", "ts": 2},
+    {"role": "user", "hidden": True, "steered": True, "content": "note", "ts": 3},
+    {"role": "assistant", "id": "done-run:assistant:1", "content": "b", "ts": 4},
+    {"role": "assistant", "id": "open-run", "content": "c", "ts": 5},
+    {"role": "assistant", "content": "legacy", "ts": 6},
+  ]))
+  ended = datetime(2026, 11, 14, 9, 30)  # stored naive, in UTC
+  db.add(models.ChatRun(id="done-run", chat_id="run-ended", status="completed", ended_at=ended))
+  db.add(models.ChatRun(id="open-run", chat_id="run-ended", status="running"))
+  db.commit()
+
+  rows = client.get("/api/chats/run-ended?limit=10", headers=auth).json()["messages"]
+
+  ended_ms = round(ended.replace(tzinfo=UTC).timestamp() * 1000)
+  assert [row.get("run_ended_ts") for row in rows] == [None, ended_ms, None, ended_ms, None, None]
+  assert [row["ts"] for row in rows] == [1, 2, 3, 4, 5, 6], "row identity is untouched"
+  stored = transcript_rows.at(db, db.get(models.Chat, "run-ended"), 1)
+  assert "run_ended_ts" not in stored, "the field is read-side only"

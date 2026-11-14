@@ -57,7 +57,7 @@ export function replyFooter({
  *  every group projected as AssistantReply projects it (`positions` are the
  *  peer timeline's), then read by `replyProse`. A prose part names the
  *  rendered row that shows it by `key`, with its `block`; a card part has
- *  only its `markdown`. Copy's visibility and its text both come from here. */
+ *  its `markdown` and its `card` text. Copy's visibility and its text both come from here. */
 export function stretchProse(groups, positions = new Map(), liveQuestionId = null) {
   return groups.flatMap(group => {
     const options = { positions }

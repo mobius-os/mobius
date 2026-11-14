@@ -77,9 +77,7 @@ test('the chat has one reply footer, on the reply at its very end', () => {
 })
 
 test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
-  assert.ok(metaRow.indexOf('{time}') < metaRow.indexOf('<MessageCopyButton read={copy} />')
-    && metaRow.indexOf('<MessageCopyButton read={copy} />') < metaRow.indexOf('<MessageBranchButton branch={branch} />'),
-  'time, Copy, Branch')
+  // The order time, Copy, Branch is rendered behaviour: replyFooter.test.js.
   const footerCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.match(footerCss, /\n\.chat__reply > \.chat__msg-meta--start \{ visibility: inherit; \}/,
     'on every device the transparent footer stays focusable')

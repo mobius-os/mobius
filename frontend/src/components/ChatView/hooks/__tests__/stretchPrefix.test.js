@@ -5,7 +5,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readStretchStart, useStretchPrefix } from '../useStretchPrefix.js'
 import { renderHook } from './react-hook-shim.mjs'
-import { markdownHtml, stretchClipboard, stretchTail } from '../../messageCopy.js'
+import { replyProse, stretchClipboard, stretchTail } from '../../messageCopy.js'
+import { inlineMarkdownHtml, markdownHtml } from '../../markdown/markdownParser.js'
 import { stretchProse as stretchParts } from '../../replyFooter.js'
 import { assistantReplyGroups } from '../../assistantReplies.js'
 import { projectSettledSteerContinuations } from '../../steerContinuity.js'
@@ -91,7 +92,7 @@ test('a rendered part reads the screen; one before the loaded page reads its Mar
     assert.deepEqual(stretchClipboard([
       { key: 'earlier', block: 0, markdown: '**Before**' },
       { key: 'row-1', block: 0, markdown: '**Result**' },
-      { markdown: 'Merge?\n- Yes' },
+      { markdown: 'Merge?\n- Yes', card: { questions: [{ question: 'Merge?', options: ['Yes'] }] } },
     ], list), {
       markdown: '**Before**\n\n**Result**\n\nMerge?\n- Yes',
       plainText: 'Before\n\nResult\n\nMerge?\n- Yes',
@@ -180,4 +181,29 @@ test('switching chat or unmounting aborts the read, and a stale result is never 
   assert.equal(calls.length, 2)
   hook.unmount()
   assert.equal(calls[1].options.signal.aborted, true, 'unmounting aborts too')
+})
+
+test('an open card copies as the card shows it, through the chat’s one parser', () => {
+  const card = { type: 'question', question_id: 'q', questions: [{
+    question: 'Ship **v2** or `Promise<void>`?',
+    options: [{ label: '1. Fast' }, { label: '*Careful*' }],
+  }] }
+  const parts = replyProse([{ role: 'assistant', blocks: [card] }], { liveQuestionId: 'q' })
+  assert.equal(parts[0].markdown, 'Ship **v2** or `Promise<void>`?\n- 1. Fast\n- *Careful*',
+    'the Markdown carrier keeps the source')
+  assert.match(markdownHtml('Return Promise<void> now', { literalTags: true }), /Promise&lt;void&gt;/,
+    'tag-like text stays literal, as the card renders it')
+  assert.doesNotMatch(inlineMarkdownHtml('1. Fast'), /<ol|<li/, 'a choice label is one inline line')
+  const previous = globalThis.document
+  const decode = html => html.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+  globalThis.document = { createElement: () => ({
+    set innerHTML(html) { this.content = { nodeType: 3, nodeValue: decode(html) } },
+  }) }
+  try {
+    assert.equal(stretchClipboard(parts, null).plainText,
+      'Ship v2 or Promise<void>?\n- 1. Fast\n- Careful', 'no Markdown punctuation')
+  } finally {
+    globalThis.document = previous
+  }
 })

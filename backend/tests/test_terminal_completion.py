@@ -1363,6 +1363,39 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   assert "done" in published
 
 
+
+def test_done_carries_when_the_run_ended_as_chat_detail_reads_it(monkeypatch):
+  """The client promotes a finished reply from the stream without a refetch,
+  so the final `done` event carries the same run end time a chat detail read
+  later puts on the reply's rows."""
+  from app.run_end_times import run_ended_ts
+  from app.routes.chats import _chat_detail_response
+  _seed_owner_and_creds()
+  _seed_chat("t-ended", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], running="running", run_token="rt-ended")
+  _patch_claude_runner(monkeypatch)
+  chat_mod.mark_starting("t-ended")
+  gen = chat_mod.current_run_generation("t-ended")
+  bc = create_broadcast("t-ended")
+  events = []
+  orig = bc.publish
+  bc.publish = lambda event: (events.append(event), orig(event))[1]
+  asyncio.run(chat_mod.run_chat(
+    [chat_mod.schemas.ChatMessage(role="user", content="hi")],
+    chat_id="t-ended", session_id="sess", provider_id="claude",
+    run_gen=gen, run_token="rt-ended",
+  ))
+  _drain_actor()
+
+  done = [event for event in events if event.get("type") == "done"]
+  assert len(done) == 1
+  with SessionLocal() as db:
+    ended = run_ended_ts(db, "t-ended", {"rt-ended"})["rt-ended"]
+    reply = _chat_detail_response(db.get(models.Chat, "t-ended"), db=db)["messages"][-1]
+  assert done[0]["run_ended_ts"] == ended
+  assert (reply["role"], reply["run_ended_ts"]) == ("assistant", ended)
+
+
 # -- 11. no-owner setup cleanup: marker cleared, pending held ---------------
 def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   """The no-owner setup-error early return routes through the bounded

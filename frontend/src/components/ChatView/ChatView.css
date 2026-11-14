@@ -489,12 +489,12 @@
   align-self: flex-start;
   margin: 6px 0 0;
   padding: 0 8px;
+  gap: 0;
 }
 /* The footer's actions are equal 24px square buttons, icon centred, side by
    side; the time sits the same distance from Copy's icon as Copy's icon from
    Branch's. Without a time, Copy is pulled back so its icon lines up with
    the reply's prose. */
-.chat__msg-meta--start { gap: 0; }
 .chat__msg-meta--start > .chat__ts { margin-right: 5px; }
 .chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed) {
   width: 24px;

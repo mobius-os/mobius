@@ -24,6 +24,7 @@ const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/As
 const { agentStretches, footerCopyParts, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
+const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
 const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
 const proseText = (messages, options) => replyProse(messages, options).map(part => part.markdown).join('\n\n')
 
@@ -100,6 +101,9 @@ test('a stretch lists its References once, after its last reply', () => {
     'a reply inside a stretch lists none')
   assert.match(renderReply([turn], { stretchSourceRows: [sourced] }), /References/,
     'the stretch’s last reply lists the sources of the replies before it')
+  assert.match(renderReply([sourced]), /References/, 'its own sources too')
+  assert.doesNotMatch(renderReply([sourced], { isStreaming: true }), /chat__sources/,
+    'only once the reply has settled')
 })
 
 test('while the agent works the footer line is reserved but empty', () => {
@@ -203,7 +207,8 @@ test('Copy locates the prose blocks MsgContent renders, after its duplicate-text
       { type: 'question', question_id: 'merge', questions: [{ question: 'Merge?' }] },
       { type: 'text', content: 'Review result' },
     ] },
-  ], { liveQuestionId: 'merge' }), [{ message: 1, block: 1, markdown: 'Review result' }, { markdown: 'Merge?' }])
+  ], { liveQuestionId: 'merge' }), [{ message: 1, block: 1, markdown: 'Review result' },
+    { markdown: 'Merge?', card: { questions: [{ question: 'Merge?', options: [] }] } }])
 })
 
 test('Copy numbers prose blocks as they render, past deliverables and a card’s tool twin', () => {
@@ -402,4 +407,15 @@ test('Copy has no parts until the footer settles', () => {
   const footer = footerOf(messages)
   assert.equal(footerCopyParts({ ...footer, state: 'working' }, { messages }), null)
   assert.equal(footerCopyParts(null, { messages }), null)
+})
+
+test('every action row reads time, then Copy, then Branch', () => {
+  for (const side of ['end', 'start']) {
+    const html = renderWithModels(createElement(MetaRow, {
+      timestamp: turn.ts, copy: () => null, branch: () => {}, side,
+    }))
+    const at = needle => html.indexOf(needle)
+    assert.ok(at('<time') >= 0 && at('<time') < at('aria-label="Copy message"')
+      && at('aria-label="Copy message"') < at('aria-label="Branch in new chat"'), side)
+  }
 })

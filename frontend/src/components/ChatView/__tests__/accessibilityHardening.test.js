@@ -141,7 +141,6 @@ test('message references are an accessible lazy disclosure with safe links', () 
   const source = read('../MessageSources.jsx')
   const sourceRead = read('../hooks/useMessageSources.js')
   const sourcePaths = read('../messageSources.js')
-  const reply = read('../AssistantReply.jsx')
   const css = read('../ChatView.css')
   const favicon = read('../SourceFavicon.jsx')
 
@@ -157,12 +156,8 @@ test('message references are an accessible lazy disclosure with safe links', () 
     'the metadata read must not begin before expansion')
   assert.match(source,
     /<ul className="chat__sources-list" aria-label="References for this answer">/)
-  assert.match(reply, /!isStreaming && referenceRows && <MessageSources/,
-    'the collapsed reference row should appear only after the whole reply settles, at its stretch’s end')
-  assert.match(reply, /referenceRows = stretchSourceRows\s*&& \[\.\.\.stretchSourceRows, \.\.\.sourceRows\.map\(row => row\.message\)\]/,
-    'the stretch’s last reply passes every source row of the stretch, including folded rows')
-  assert.match(reply, /refs=\{referenceRows\.flatMap/,
-    'References keep original indices from every source row')
+  // Where a reply's References appear (after it settles, once per stretch,
+  // with every source row) is rendered behaviour: replyFooter.test.js.
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.doesNotMatch(source, /source\.snippet|chat__source-snippet|chat__source-rank/,

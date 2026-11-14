@@ -1,7 +1,5 @@
 """Materialized row reads retain legacy coordinates without loading full bodies."""
 
-from datetime import UTC
-
 import pytest
 
 from app import chat_writer, transcript_rows
@@ -123,29 +121,3 @@ def test_detail_read_owner_pins_live_count_coordinates_and_bodies(db, monkeypatc
   assert [m["content"] for m in payload["messages"]] == ["original"]
   db.rollback()
   assert transcript_rows.count(db, chat) == 2
-
-
-def test_detail_carries_when_each_reply_run_ended_without_changing_row_identity(db):
-  """A row's `ts` is when its turn started; the footer needs when it ended."""
-  from datetime import datetime
-  from app import models
-  from app.routes.chats import _chat_detail_response
-  chat = chat_writer.create_chat(id="reader-run-ended", messages=[
-    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
-    {"role": "assistant", "id": "done-run", "content": "a", "ts": 2},
-    {"role": "user", "hidden": True, "steered": True, "content": "note", "ts": 3},
-    {"role": "assistant", "id": "done-run:assistant:1", "content": "b", "ts": 4},
-    {"role": "assistant", "id": "open-run", "content": "c", "ts": 5},
-    {"role": "assistant", "content": "legacy", "ts": 6},
-  ])
-  db.add(chat)
-  ended = datetime(2026, 11, 14, 9, 30)  # stored naive, in UTC
-  db.add(models.ChatRun(id="done-run", chat_id=chat.id, status="completed", ended_at=ended))
-  db.add(models.ChatRun(id="open-run", chat_id=chat.id, status="running"))
-  db.commit()
-  rows = _chat_detail_response(chat, db=db)["messages"]
-  ended_ms = round(ended.replace(tzinfo=UTC).timestamp() * 1000)
-  assert [row.get("run_ended_ts") for row in rows] == [None, ended_ms, None, ended_ms, None, None]
-  assert [row["ts"] for row in rows] == [1, 2, 3, 4, 5, 6], "row identity is untouched"
-  stored = transcript_rows.at(db, chat, 1)
-  assert "run_ended_ts" not in stored, "the field is read-side only"

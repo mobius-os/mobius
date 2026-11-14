@@ -1880,7 +1880,7 @@ export default function ChatView({
       // onNeedsRefresh below is the authority for whether the run truly ended.
       promoteStreamToMessages({ keepTurnOpen: true })
     },
-    onStreamEnd: ({ continues, promotedMessage } = {}) => {
+    onStreamEnd: ({ continues, promotedMessage, runEndedTs } = {}) => {
       dispatchQuestionFollowHandoff({ type: 'stream_ended' })
       if (embedded && continues === false) setEmbeddedRunActive(false)
       const continuation = continues ? queuedContinuationRef.current : null
@@ -1903,6 +1903,7 @@ export default function ChatView({
       promoteStreamToMessages({
         followingMessages: promotedRows,
         authoritativeCut: true,
+        runEndedTs,
       })
       if (continues) {
         // The next physical run has been created but its assistant identity is
@@ -2359,6 +2360,7 @@ export default function ChatView({
     items: explicitItems = null,
     assistantMessageId: explicitAssistantMessageId = undefined,
     authoritativeCut = false,
+    runEndedTs = null,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
@@ -2430,6 +2432,7 @@ export default function ChatView({
       promotedItems: items,
       assistantMessageId,
       bridgeTs,
+      runEndedTs,
       followingMessages: following,
       commitMessages,
     })
@@ -5933,26 +5936,26 @@ export default function ChatView({
   // Answering a card starts the turn the moment it is submitted, before the
   // server acknowledges it; a failed answer clears this and the footer returns.
   const turnStarting = turnActive || questionFollowHandoff != null
-  // The settled footer reply's end, recorded from committed renders only, so
-  // a discarded render cannot name a reply (see replyFooter).
-  const settledFooterEndRef = useRef(null)
+  // The settled footer reply's end (see replyFooter). It is state set from a
+  // committed render's layout effect, so a discarded render cannot name a
+  // reply, and it updates before paint.
+  const [settledEnd, setSettledEnd] = useState(null)
   // One footer for the whole chat, on the reply at its very end. Once the
   // owner speaks or answers a card there is none until the next reply starts,
   // so that reply's Thinking takes the footer's place instead of appearing
   // below it.
   const footerLiveIndex = showActiveAssistantSurface
     ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
-  const settledEnd = settledFooterEndRef.current
   const footer = useMemo(() => replyFooter({
     messages: peerTimeline.messages, replyGroups, stretches, liveIndex: footerLiveIndex,
     lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd,
   }), [peerTimeline.messages, replyGroups, stretches, footerLiveIndex,
     lastVisibleMessageIndex, offset, turnStarting, settledEnd])
   const footerGroup = footer?.group ?? null
-  const settledFooterEnd = turnStarting ? null : footer?.end ?? null
+  const footerEnd = footer?.end ?? null
   useLayoutEffect(() => {
-    if (!turnStarting) settledFooterEndRef.current = settledFooterEnd
-  }, [turnStarting, settledFooterEnd])
+    if (!turnStarting) setSettledEnd(footerEnd)
+  }, [turnStarting, footerEnd])
   // A stretch that began before the loaded page reads its start only when
   // the footer is about to be used.
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(

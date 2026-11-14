@@ -3031,6 +3031,24 @@ def _finalize_broadcast_if_running(chat_id: str) -> None:
   _publish_chat_run_finished(chat_id)
 
 
+def _run_ended_fields(chat_id: str, run_token: str | None) -> dict:
+  """`run_ended_ts` for a turn's final `done` event once its run has ended,
+  so the client stamps the reply it promotes from the stream with the same
+  end time a later chat detail read carries (app.run_end_times)."""
+  from app.database import SessionLocal
+  from app.run_end_times import run_ended_ts
+  if not run_token:
+    return {}
+  try:
+    with SessionLocal() as read_db:
+      ended = run_ended_ts(read_db, chat_id, {run_token}).get(run_token)
+  except Exception:
+    # The end time is presentation only; it must never hold up `done`.
+    _get_logger().warning("run end time unreadable chat_id=%s", chat_id, exc_info=True)
+    return {}
+  return {"run_ended_ts": ended} if ended is not None else {}
+
+
 def _publish_chat_run_finished(chat_id: str) -> None:
   if chat_id:
     get_system_broadcast().publish({
@@ -4864,7 +4882,7 @@ async def _complete_turn(
       sink=sink, chat_id=chat_id, run_gen=run_gen,
     )
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done", "cost_usd": cost_usd})
+    bc.publish({"type": "done", "cost_usd": cost_usd, **_run_ended_fields(chat_id, sink.run_token)})
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
       _publish_chat_run_finished(chat_id)
@@ -5034,7 +5052,7 @@ async def _complete_turn(
     })
   # Any error event was already broadcast via sink.publish before
   # finalize; don't re-emit it here (it would double-deliver).
-  bc.publish({"type": "done", "cost_usd": cost_usd})
+  bc.publish({"type": "done", "cost_usd": cost_usd, **_run_ended_fields(chat_id, sink.run_token)})
   bc.mark_completed()
   if not next_user:
     _publish_chat_run_finished(chat_id)

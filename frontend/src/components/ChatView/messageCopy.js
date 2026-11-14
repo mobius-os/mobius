@@ -1,10 +1,9 @@
-import { Marked } from 'marked'
 import { stripAugmentation } from './msgText.js'
 import { isContinuationMessage, isSideQuestionMessage } from './chatRuntimeState.js'
 import { renderedBlockEntries, repairInterleavedQuestionText } from './streamReducers.js'
 import { markdownClipboardHtml, plainTextFromFragment } from './markdownClipboard.js'
 import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
-import { mathTokens } from './markdown/mathTokens.js'
+import { inlineMarkdownHtml, markdownHtml } from './markdown/markdownParser.js'
 import { questionCardOpen } from './questionOpen.js'
 
 const isSystemRow = msg => !msg || msg.kind === 'compaction'
@@ -30,15 +29,20 @@ export function messageCopyText(msg) {
   return msg.content ? clean(msg.content).trim() : ''
 }
 
-/** An open question card as copyable text: each question, then its choices
- * as a list. Closed cards (see questionCardOpen) and sealed secret cards
- * never copy. */
-function questionCopyText(block, liveQuestionId) {
-  if (block.secure_input || !questionCardOpen(block, liveQuestionId)) return ''
-  return (block.questions || []).map(question => [
-    question?.question?.trim(),
-    ...(question?.options || []).map(option => option?.label && `- ${option.label}`),
-  ].filter(Boolean).join('\n')).filter(Boolean).join('\n\n')
+/** An open question card's copy part: each question, then its choices as a
+ * list, in `markdown` and as `card` (its text, for the plain text the card
+ * shows). Closed cards (see questionCardOpen) and sealed secret cards never
+ * copy. */
+function questionCopyPart(block, liveQuestionId) {
+  if (block.secure_input || !questionCardOpen(block, liveQuestionId)) return null
+  const questions = (block.questions || []).map(question => ({
+    question: question?.question?.trim() || '',
+    options: (question?.options || []).map(option => option?.label).filter(Boolean),
+  })).filter(question => question.question || question.options.length)
+  const markdown = questions.map(({ question, options }) => [
+    question, ...options.map(label => `- ${label}`),
+  ].filter(Boolean).join('\n')).join('\n\n')
+  return markdown ? { markdown, card: { questions } } : null
 }
 
 /** Everything a reply said, in order: each prose block (a card's closing
@@ -50,7 +54,7 @@ function questionCopyText(block, liveQuestionId) {
  *  Each part with a `block` locates its rendered element: `message` indexes
  *  the given rows and `block` is the position MsgContent renders it at as
  *  `data-markdown-block` (renderedBlockEntries), so Copy reads the text the
- *  owner sees. A card part has only its `markdown`. */
+ *  owner sees. A card part has its `markdown` and its `card` text. */
 export function replyProse(messages, { liveQuestionId = null } = {}) {
   const rows = messages.map(msg => (msg.hidden || isSystemRow(msg) ? [] : renderedBlockEntries(
     repairInterleavedQuestionText(Array.isArray(msg.blocks) && msg.blocks.length
@@ -62,8 +66,8 @@ export function replyProse(messages, { liveQuestionId = null } = {}) {
   rows.forEach((entries, message) => {
     entries.forEach(({ item: block, idx: index }) => {
       if (block?.type === 'question') {
-        const markdown = questionCopyText(block, liveQuestionId)
-        if (markdown) parts.push({ markdown })
+        const part = questionCopyPart(block, liveQuestionId)
+        if (part) parts.push(part)
       } else if (block?.type === 'text' && block.content?.trim()) {
         const markdown = (block.markdown_range
           ? markdownRangeSource(block.markdown_range) : block.content).trim()
@@ -91,33 +95,22 @@ function renderedTextBlock(listElement, rowKey, block) {
     .find(element => element.closest('li.chat__msg') === row) || null
 }
 
-const escapeHtml = text => text.replace(/[&<>"]/g, char => (
-  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]))
-// Math renders as the TeX annotation KaTeX carries, which is what the
-// clipboard rules read from the transcript.
-const texHtml = (tag, className) => token => `<${tag} class="${className}">`
-  + `<annotation encoding="application/x-tex">${escapeHtml(token.text)}</annotation></${tag}>`
-const markdownParser = new Marked({ gfm: true })
-markdownParser.use(mathTokens(), { extensions: [
-  { name: 'inlineKatex', renderer: texHtml('span', 'katex') },
-  { name: 'blockKatex', renderer: texHtml('div', 'md-math-block') },
-  // Raw HTML renders as nothing, as in the transcript: an HTML block is not
-  // shown, and an inline tag drops while the text between tags stays.
-], renderer: { html: () => '' } })
-
-/** Markdown as plain HTML: the chat's Markdown parser and math tokens without
- *  the live renderer's effects or app context, so an image keeps its alt text
- *  and an app link stays a link. */
-export function markdownHtml(text) {
-  return markdownParser.parse(text)
+/** HTML's plain text by the transcript's clipboard rules, read from an inert
+ *  template (nothing in it loads). */
+function htmlPlainText(html) {
+  const template = document.createElement('template')
+  template.innerHTML = html
+  return plainTextFromFragment(template.content)
 }
 
-/** Markdown's plain text by the transcript's clipboard rules, read from an
- *  inert template (nothing in it loads). */
-function markdownPlainText(text) {
-  const template = document.createElement('template')
-  template.innerHTML = markdownHtml(text)
-  return plainTextFromFragment(template.content)
+/** An open card's plain text as the card shows it: each question rendered as
+ *  QuestionCard renders it (tag-like text literal), then each choice as its
+ *  inline label. */
+function cardPlainText(card) {
+  return card.questions.map(({ question, options }) => [
+    question && htmlPlainText(markdownHtml(question, { literalTags: true })),
+    ...options.map(label => `- ${htmlPlainText(inlineMarkdownHtml(label))}`),
+  ].filter(Boolean).join('\n')).filter(Boolean).join('\n\n')
 }
 
 /** The clipboard payload of `parts` (see `stretchProse`): the Markdown source
@@ -125,15 +118,19 @@ function markdownPlainText(text) {
  *  in `listElement` reads its plain text from the screen exactly as a text
  *  selection would (no Markdown punctuation, escapes, or private image
  *  addresses); one that is not (a stretch's start before the loaded page)
- *  reads it from its Markdown's HTML. Null when no part has plain text. */
+ *  reads it from its Markdown's HTML, and an open card reads as the card
+ *  renders it. All of them go through the chat's one Markdown parser. Null
+ *  when no part has plain text. */
 export function stretchClipboard(parts, listElement) {
   const markdown = []
   const plain = []
   for (const part of parts) {
-    let plainText = part.markdown
-    if (Number.isInteger(part.block)) {
+    let plainText
+    if (part.card) {
+      plainText = cardPlainText(part.card)
+    } else {
       const element = renderedTextBlock(listElement, part.key, part.block)
-      plainText = element ? plainTextFromFragment(element) : markdownPlainText(part.markdown)
+      plainText = element ? plainTextFromFragment(element) : htmlPlainText(markdownHtml(part.markdown))
     }
     markdown.push(part.markdown)
     if (plainText) plain.push(plainText)

@@ -96,7 +96,7 @@ function MarkdownCopySurface({ msg, markdownByIndex, children }) {
 
 /** Owner text renders through the same formatter as replies, with the
  * owner-text rules (typed line breaks and tag-like text stay as typed; see
- * BlockRenderer's `configuredMarked`). A `/goal` command keeps its Goal tag. */
+ * markdownParser.js). A `/goal` command keeps its Goal tag. */
 function UserMessageText({ text, onInternalNav, mediaDimensions }) {
   const goalObjective = goalMessageObjectiveFromText(text)
   if (!goalObjective) {
