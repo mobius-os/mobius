@@ -77,6 +77,8 @@ class FakeElement extends FakeNode {
   getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null }
   hasAttribute(name) { return this.attributes.has(name) }
   removeAttribute(name) { this.attributes.delete(name) }
+  get id() { return this.getAttribute('id') || '' }
+  set id(value) { this.setAttribute('id', value) }
   get className() { return this.getAttribute('class') || '' }
   matches(selector) {
     const attribute = selector.match(/^\[([\w-]+)(?:="([^"]*)")?\]$/)
@@ -112,6 +114,7 @@ function createDocument() {
   document.createTextNode = text => new FakeText(document, text)
   document.documentElement = document.appendChild(document.createElement('html'))
   document.body = document.documentElement.appendChild(document.createElement('body'))
+  document.getElementById = id => document.documentElement.querySelector(`[id="${id}"]`)
   document.activeElement = document.body
   return document
 }

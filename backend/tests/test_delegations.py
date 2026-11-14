@@ -4148,3 +4148,20 @@ def test_footer_helper_union_counts_before_capping(db, monkeypatch, overlap):
   assert "with_goal" not in serialize_background_helpers(
     db, "parent", goal={**goal, "status": "completed"},
   )
+
+
+def test_footer_goal_helpers_do_not_invent_background_wake_ownership(db, monkeypatch):
+  from app import delegations
+
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows", lambda *_: [])
+  goal = {"id": "goal", "status": "paused", "plan": {"delegations": [
+    {"id": "direct", "status": "needs_input", "children": [
+      {"id": "nested", "status": "running"},
+    ]},
+    {"id": "settled", "status": "completed"},
+  ]}}
+  summary = serialize_background_helpers(db, "parent", goal=goal)
+  assert summary["count"] == 0
+  assert summary["items"] == []
+  assert summary["with_goal"]["count"] == 1
+  assert [row["id"] for row in summary["with_goal"]["items"]] == ["direct"]

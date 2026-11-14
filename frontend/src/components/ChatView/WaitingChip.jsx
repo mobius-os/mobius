@@ -222,7 +222,7 @@ export default function WaitingChip({
   const latestHelper = openHelper && helpers.find(helper => helper.delegation_id === openHelper.helper.delegation_id)
   if (openHelper && openHelper.chatId !== chatId) setOpenHelper(null)
   else if (latestHelper && latestHelper !== openHelper.helper) setOpenHelper({ ...openHelper, helper: latestHelper })
-  const conversationHelper = openHelper?.chatId === chatId ? latestHelper || openHelper.helper : null
+  const conversationHelper = openHelper && openHelper.chatId === chatId ? latestHelper || openHelper.helper : null
   const hasHelpers = helpers.length > 0 || unlistedHelpers > 0
   if (!waits.length && !hasHelpers && !resourcePause && !conversationHelper) return null
 
