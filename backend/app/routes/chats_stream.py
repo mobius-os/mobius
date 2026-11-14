@@ -196,17 +196,54 @@ async def _send_queue(
   })
 
 
-def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Return whether a parent delegation owns this chat's send lifecycle.
+def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
+  """The parent chat whose delegation owns this chat's send lifecycle, if any.
 
   Keep the send gate beside the route that enforces it. Delegation policy
   loading is intentionally a separate concern and may evolve independently;
   this guard only needs the durable ownership row already available through
   the request session.
   """
-  return db.query(models.Delegation.id).filter(
+  return db.query(models.Delegation.parent_chat_id).filter(
     models.Delegation.child_chat_id == chat_id,
-  ).first() is not None
+  ).limit(1).scalar()
+
+
+def _owner_chat_above(db: Session, chat_id: str, parent_chat_id: str) -> str | None:
+  """The nearest live chat above a helper that accepts owner messages.
+
+  A nested helper's parent is itself a helper chat and refuses owner sends
+  too, so walk the delegation rows up to the first chat no delegation owns.
+  A cycle or a deleted chat yields None: there is nowhere useful to link.
+  """
+  seen = {chat_id}
+  while parent_chat_id not in seen:
+    seen.add(parent_chat_id)
+    above = _delegation_manages_chat(db, parent_chat_id)
+    if above is None:
+      live = db.query(models.Chat.id).filter(
+        models.Chat.id == parent_chat_id,
+        models.Chat.deleted_at.is_(None),
+      ).first()
+      return parent_chat_id if live is not None else None
+    parent_chat_id = above
+  return None
+
+
+def _delegation_managed_conflict(
+  db: Session, chat_id: str, parent_chat_id: str,
+) -> HTTPException:
+  # A helper chat is messaged through its parent (message_agent), never
+  # directly, so the refusal names that route and, when it can, links the
+  # chat where the owner can actually write.
+  detail = {
+    "code": "delegation_managed",
+    "message": "This is a helper's chat. Message it from its parent chat.",
+  }
+  owner_chat_id = _owner_chat_above(db, chat_id, parent_chat_id)
+  if owner_chat_id is not None:
+    detail["parent_chat_id"] = owner_chat_id
+  return HTTPException(status_code=409, detail=detail)
 
 
 def _pending_question_open_conflict() -> HTTPException:
@@ -1123,14 +1160,9 @@ async def _send_message_impl(
         "message": "Clear the Goal from its confirmed × control instead.",
       },
     )
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -1492,14 +1524,9 @@ async def _send_message_locked(
     return duplicate
   await sweep_expired_uploads(db, chat, attachment_names(body.attachments))
 
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
 
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(

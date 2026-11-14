@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   detachedSendFailureMessage,
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
@@ -16,6 +17,9 @@ import {
   chatHttpError,
   isQuestionStateChangedError,
 } from '../sendErrors.js'
+import { renderHook } from '../hooks/__tests__/react-hook-shim.mjs'
+import useComposerDraftState from '../hooks/useComposerDraftState.js'
+import { loadFailedSendAttempt, saveFailedSendAttempt } from '../sendAttemptRecovery.js'
 
 test('settled question errors trigger authoritative card reconciliation', () => {
   assert.equal(isQuestionStateChangedError({ status: 410 }), true)
@@ -219,10 +223,76 @@ test('a refused empty Send says the queue is unchanged, never that a draft came 
 
 test('a refused empty Send shows the server\'s reason instead of inviting a retry', () => {
   const message = queueSendFailureMessage(new ChatHttpError(409, {
-    code: 'delegation_managed',
-    detail: 'This evaluator chat is managed by its parent workflow.',
+    code: 'goal_clear_retired',
+    detail: 'Clear the Goal from its confirmed × control instead.',
   }))
-  assert.match(message, /managed by its parent workflow/)
+  assert.match(message, /confirmed × control/)
   assert.match(message, /unchanged/)
   assert.doesNotMatch(message, /try again/i)
+})
+
+test('a helper chat refusal says whose chat it is and never invites a retry', async () => {
+  const response = new Response(JSON.stringify({ detail: {
+    code: 'delegation_managed',
+    message: "This is a helper's chat. Message it from its parent chat.",
+    parent_chat_id: 'parent-chat',
+  } }), { status: 409 })
+  const error = await chatHttpError(response)
+  assert.equal(isHelperChatSendFailure(error), true)
+  assert.equal(error.parentChatId, 'parent-chat')
+  for (const message of [
+    sendFailureMessage(error),
+    detachedSendFailureMessage(error),
+    queueSendFailureMessage(error),
+  ]) {
+    assert.match(message, /^This is a helper’s chat\. Message it from its parent chat\./)
+    assert.doesNotMatch(message, /try again|send it again|evaluator|workflow/i)
+  }
+  assert.match(queueSendFailureMessage(error), /queued messages are unchanged/)
+  // Other conflicts keep their own handling.
+  assert.equal(isHelperChatSendFailure(new ChatHttpError(409, { code: 'pending_question_open' })), false)
+  assert.equal(new ChatHttpError(409).parentChatId, null)
+})
+
+test('a helper chat refusal settles an earlier lost send so reconciliation keeps the notice', () => {
+  const previousStorage = globalThis.sessionStorage
+  const previousFrame = globalThis.requestAnimationFrame
+  globalThis.requestAnimationFrame = () => 0
+  const values = new Map()
+  globalThis.sessionStorage = {
+    get length() { return values.size },
+    key(index) { return [...values.keys()][index] ?? null },
+    getItem(key) { return values.has(key) ? values.get(key) : null },
+    setItem(key, value) { values.set(key, String(value)) },
+    removeItem(key) { values.delete(key) },
+  }
+  try {
+    // An earlier send of this draft was lost, or an older build saved it.
+    saveFailedSendAttempt('helper-chat', {
+      cid: 'cid-lost', draftIdentity: 'draft-lost', text: 'hello helper', attachments: [],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'helper-chat', hidden: false, inputRef: { current: null },
+    }))
+    assert.equal(hook.result.current.failedSendAttemptRef.current?.cid, 'cid-lost')
+
+    // ChatView's keepFailedDraft for the unedited resend the server refused.
+    const error = new ChatHttpError(409, { code: 'delegation_managed', parentChatId: 'parent' })
+    assert.equal(isHelperChatSendFailure(error), true)
+    hook.result.current.clearFailedAttempt()
+    hook.result.current.restoreComposerText('hello helper', { preserveFailedAttempt: true })
+    hook.result.current.setSendFailure(sendFailureMessage(error))
+
+    assert.equal(hook.result.current.failedSendAttemptRef.current, null)
+    assert.equal(loadFailedSendAttempt('helper-chat'), null)
+    // A later authoritative transcript read has nothing to report missing.
+    assert.equal(hook.result.current.reconcileFailedAttempt([], [], { reportMissing: true }), 'none')
+    assert.match(hook.result.current.sendFailure, /^This is a helper’s chat\./)
+    assert.equal(hook.result.current.input, 'hello helper')
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+    globalThis.requestAnimationFrame = previousFrame
+  }
 })

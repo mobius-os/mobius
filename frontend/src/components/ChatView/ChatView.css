@@ -2506,6 +2506,15 @@
   text-align: center;
 }
 
+/* The helper-chat refusal links back to the parent chat. The foot is
+   pointer-transparent, so the link opts back in. */
+.chat__offline-note-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  pointer-events: auto;
+}
+
 /* ── Composer history strip (ChatInputBar contract 8) ─────────────────────
    Shown above the pill while ↑/↓ or the queue's pencil puts another message
    in the box: what it is, what Enter does, and that the draft is kept. Same
