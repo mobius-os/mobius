@@ -108,15 +108,15 @@ test('the helper list has each helper once: background helpers, then direct Goal
   const asking = { id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input', children: [] }
   const owned = structuredClone(goal)
   owned.plan.delegations.push(settled, asking)
-  const { rows, unlisted } = trayHelpers(background, owned)
+  const { rows, cappedBackgroundCount } = trayHelpers(background, owned)
   // A Goal helper the background list already has is not repeated; a settled
   // Goal helper is history, and a nested helper belongs to its own parent.
   assert.deepEqual(rows.map(row => row.delegation_id), ['parent', 'goal-b-helper', 'asking'])
   assert.deepEqual(rows[2], { delegation_id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input' })
-  assert.equal(unlisted, 0)
-  assert.deepEqual(trayHelpers(null, null), { rows: [], unlisted: 0 })
-  // The server caps listed items; the rest are counted, never invented.
-  assert.equal(trayHelpers({ count: 20, items: background.items }, null).unlisted, 18)
+  assert.equal(cappedBackgroundCount, 0)
+  assert.deepEqual(trayHelpers(null, null), { rows: [], cappedBackgroundCount: 0 })
+  // Preserve the capped source total without claiming an unseen union count.
+  assert.equal(trayHelpers({ count: 20, items: background.items }, null).cappedBackgroundCount, 20)
 })
 
 test('helper counts never invent automatic wake ownership or optional recovery actions', () => {

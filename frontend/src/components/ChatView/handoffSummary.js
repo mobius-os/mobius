@@ -22,8 +22,8 @@ export function helperState(helper) {
   return 'stopped'
 }
 
-export function shouldSummarizeHandoffs({ helpers = [], waits = [], unlistedHelpers = 0 }) {
-  return unlistedHelpers > 0 || helpers.length + waits.length > HANDOFF_ROW_LIMIT
+export function shouldSummarizeHandoffs({ helpers = [], waits = [], cappedBackgroundCount = 0 }) {
+  return cappedBackgroundCount > 0 || helpers.length + waits.length > HANDOFF_ROW_LIMIT
 }
 
 const GROUPS = [
@@ -53,7 +53,7 @@ export function handoffGroups({ helpers = [], waits = [] }) {
 const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`
 
 /** "1 needs you · 12 helpers working · 2 waiting on coordinator · 3 waits". */
-export function handoffSummaryLabel({ helpers = [], waits = [], unlistedHelpers = 0 }) {
+export function handoffSummaryLabel({ helpers = [], waits = [], cappedBackgroundCount = 0 }) {
   const helperCounts = { working: 0, on_hold: 0, asking: 0, finished: 0, stopped: 0 }
   for (const helper of helpers) helperCounts[helperState(helper)] += 1
   const needsYou = waits.filter(waitNeedsOwner).length
@@ -66,6 +66,6 @@ export function handoffSummaryLabel({ helpers = [], waits = [], unlistedHelpers 
     otherWaits ? plural(otherWaits, 'wait', 'waits') : null,
     helperCounts.finished ? `${helperCounts.finished} finished` : null,
     helperCounts.stopped ? `${helperCounts.stopped} stopped` : null,
-    unlistedHelpers ? plural(unlistedHelpers, 'more helper', 'more helpers') : null,
+    cappedBackgroundCount ? `Background list capped (${cappedBackgroundCount} total)` : null,
   ].filter(Boolean).join(' · ')
 }

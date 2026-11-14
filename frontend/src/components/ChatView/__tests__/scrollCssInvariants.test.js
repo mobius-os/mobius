@@ -142,3 +142,10 @@ test('.spacer-dynamic has no CSS transition (instant height change)', () => {
   const body = ruleBody('.spacer-dynamic')
   assert.doesNotMatch(body, /transition/)
 })
+
+test('the handoff stack respects measured keyboard room and owns the only helper scroller', () => {
+  const stack = ruleBody('.chat__foot .chat__waits')
+  assert.match(stack, /max-height: min\(40dvh, calc\(var\(--composer-room, 100dvh\) \* 0\.4\)\)/)
+  assert.match(stack, /overflow-y: auto/)
+  assert.doesNotMatch(ruleBody('.chat__helper-list'), /max-height|overflow/)
+})

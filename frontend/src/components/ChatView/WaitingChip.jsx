@@ -96,14 +96,14 @@ export function WaitCard({
 // One row per helper, the same row the transcript shows at its launch, so a
 // tap opens that helper's conversation. Status only: the live step and clock
 // are not in this projection yet.
-function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', unlisted = 0, automatic = false }) {
+function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', cappedBackgroundCount = 0, automatic = false }) {
   return (
     <section className="chat__wait-card chat__helper-list" aria-label={label}>
       {helpers.map(helper => (
         <HelperRowLine key={helper.delegation_id} event={helper} chatId={chatId}
           onOpen={event => onOpenHelper({ id: helper.delegation_id, host: event.currentTarget.closest('.chat') })} />
       ))}
-      <HandoffNotes unlisted={unlisted} automatic={automatic} />
+      <HandoffNotes cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
     </section>
   )
 }
@@ -119,15 +119,15 @@ const HelperList = memo(HelperListRows, (before, after) => (
   before.chatId === after.chatId
   && before.onOpenHelper === after.onOpenHelper
   && before.label === after.label
-  && before.unlisted === after.unlisted
+  && before.cappedBackgroundCount === after.cappedBackgroundCount
   && before.automatic === after.automatic
   && sameHelperRows(before.helpers, after.helpers)
 ))
 
-function HandoffNotes({ unlisted, automatic }) {
+function HandoffNotes({ cappedBackgroundCount, automatic }) {
   return <>
-    {unlisted > 0 && <p className="chat__helper-list-note">
-      {`and ${unlisted} more ${unlisted === 1 ? 'helper' : 'helpers'}`}
+    {cappedBackgroundCount > 0 && <p className="chat__helper-list-note">
+      {`Background list capped (${cappedBackgroundCount} total); some may also appear as Goal helpers.`}
     </p>}
     {automatic && <p className="chat__helper-list-note">This chat resumes when they finish</p>}
   </>
@@ -198,7 +198,7 @@ function useWaitStops(onCancel) {
 export default function WaitingChip({
   waits = [],
   helpers = [],
-  unlistedHelpers = 0,
+  cappedBackgroundCount = 0,
   resourcePause,
   handoff = null,
   chatId,
@@ -219,7 +219,7 @@ export default function WaitingChip({
   // A helper that leaves the stack takes its conversation with it, and a
   // later return does not reopen it.
   if (openHelper && !conversationHelper) setOpenHelper(null)
-  const hasHelpers = helpers.length > 0 || unlistedHelpers > 0
+  const hasHelpers = helpers.length > 0 || cappedBackgroundCount > 0
   if (!waits.length && !hasHelpers && !resourcePause) return null
 
   const toggle = key => setExpanded(current => ({ key: current.key === key ? null : key, command: false }))
@@ -237,7 +237,7 @@ export default function WaitingChip({
       onRevealRecovery={onRevealRecovery}
     />
   )
-  const summarized = shouldSummarizeHandoffs({ helpers, waits, unlistedHelpers })
+  const summarized = shouldSummarizeHandoffs({ helpers, waits, cappedBackgroundCount })
   const groups = summarized ? handoffGroups({ helpers, waits }) : []
   return <>
     <section className={`chat__waits chat__handoffs${summarized && listOpen ? ' chat__handoffs--open' : ''}`} aria-label="Handoffs">
@@ -252,7 +252,7 @@ export default function WaitingChip({
       )}
       {summarized ? <>
         <HandoffSummary
-          label={handoffSummaryLabel({ helpers, waits, unlistedHelpers })}
+          label={handoffSummaryLabel({ helpers, waits, cappedBackgroundCount })}
           open={listOpen}
           onToggle={() => setListOpen(value => !value)}
         />
@@ -265,15 +265,15 @@ export default function WaitingChip({
             {group.waits.map(waitCard)}
           </div>
         ))}
-        {listOpen && (unlistedHelpers > 0 || automatic) && (
+        {listOpen && (cappedBackgroundCount > 0 || automatic) && (
           <section className="chat__wait-card chat__handoff-notes">
-            <HandoffNotes unlisted={unlistedHelpers} automatic={automatic} />
+            <HandoffNotes cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
           </section>
         )}
       </> : <>
         {hasHelpers && (
           <HelperList helpers={helpers} chatId={chatId} onOpenHelper={setOpenHelper}
-            unlisted={unlistedHelpers} automatic={automatic} />
+            cappedBackgroundCount={cappedBackgroundCount} automatic={automatic} />
         )}
         {waits.map(waitCard)}
       </>}

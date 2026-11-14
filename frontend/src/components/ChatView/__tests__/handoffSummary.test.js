@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { trayHelpers } from '../goalHelpers.js'
 
 import {
   HANDOFF_ROW_LIMIT,
@@ -17,7 +18,7 @@ test('a few handoffs show as rows; one more, or a capped list, folds into a summ
   assert.equal(HANDOFF_ROW_LIMIT, 3)
   assert.equal(shouldSummarizeHandoffs({ helpers: [helper('a', 'running'), helper('b', 'running')], waits: [wait('w')] }), false)
   assert.equal(shouldSummarizeHandoffs({ helpers: [helper('a', 'running'), helper('b', 'running')], waits: [wait('w'), wait('x')] }), true)
-  assert.equal(shouldSummarizeHandoffs({ helpers: [helper('a', 'running')], unlistedHelpers: 4 }), true)
+  assert.equal(shouldSummarizeHandoffs({ helpers: [helper('a', 'running')], cappedBackgroundCount: 4 }), true)
   assert.equal(shouldSummarizeHandoffs({}), false)
 })
 
@@ -27,8 +28,8 @@ test('the summary counts calmly by state, owner first, and never names a helper'
     helper('ask-1', 'needs_input'), helper('ask-2', 'needs_input'),
     helper('held', 'paused'), helper('done', 'completed'), helper('broke', 'failed'),
   ]
-  const label = handoffSummaryLabel({ helpers, waits: [ownerWait('o'), wait('a'), wait('b'), wait('c')], unlistedHelpers: 2 })
-  assert.equal(label, '1 needs you · 12 helpers working · 1 on hold · 2 waiting on coordinator · 3 waits · 1 finished · 1 stopped · 2 more helpers')
+  const label = handoffSummaryLabel({ helpers, waits: [ownerWait('o'), wait('a'), wait('b'), wait('c')], cappedBackgroundCount: 2 })
+  assert.equal(label, '1 needs you · 12 helpers working · 1 on hold · 2 waiting on coordinator · 3 waits · 1 finished · 1 stopped · Background list capped (2 total)')
   assert.equal(handoffSummaryLabel({ helpers: [helper('a', 'running')], waits: [wait('w')] }), '1 helper working · 1 wait')
   assert.doesNotMatch(label, /h0|ask-1|held/)
 })
@@ -46,3 +47,20 @@ test('expanded rows group by who acts next: needs you, working, waiting, finishe
   assert.deepEqual(handoffGroups({ helpers: [helper('run', 'running')] }).map(group => group.key), ['working'])
   assert.equal(helperState(helper('x', 'interrupted')), 'stopped')
 })
+
+// Source totals cannot identify membership in a union with uncapped Goal rows.
+// In particular, subtracting all Goal rows would hide disjoint background work.
+for (const overlap of [true, false]) {
+  test(`capped background and ${overlap ? 'overlapping' : 'disjoint'} Goal populations preserve rows without inventing an unseen union`, () => {
+    const background = Array.from({ length: 20 }, (_, i) => ({ id: `bg-${i}`, status: 'running' }))
+    const goal = { plan: { delegations: overlap ? background :
+      Array.from({ length: 20 }, (_, i) => ({ id: `goal-${i}`, status: 'running' })) } }
+    const { rows, cappedBackgroundCount } = trayHelpers({ count: 20, items: background.slice(0, 16) }, goal)
+    assert.equal(rows.length, overlap ? 20 : 36)
+    assert.equal(new Set(rows.map(row => row.delegation_id)).size, rows.length)
+    assert.equal(cappedBackgroundCount, 20)
+    assert.equal(handoffSummaryLabel({ helpers: rows, cappedBackgroundCount }),
+      `${rows.length} helpers working · Background list capped (20 total)`)
+    assert.doesNotMatch(handoffSummaryLabel({ helpers: rows, cappedBackgroundCount }), /more helpers/)
+  })
+}

@@ -6418,7 +6418,7 @@ export default function ChatView({
             <WaitingChip
               waits={armedWaits}
               helpers={ownedHelpers.rows}
-              unlistedHelpers={ownedHelpers.unlisted}
+              cappedBackgroundCount={ownedHelpers.cappedBackgroundCount}
               resourcePause={footResourcePause}
               handoff={turnActive ? null : serverHandoff}
               chatId={chatId}

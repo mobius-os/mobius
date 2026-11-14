@@ -27,7 +27,9 @@ export function goalHelpers(goal) {
  *
  * Only direct helpers are listed: a nested helper's conversation belongs to
  * the helper that started it, so it cannot be opened from this chat.
- * `unlisted` counts background helpers the server capped out of `items`.
+ * `cappedBackgroundCount` is the source total when its items were capped.
+ * Goal rows may overlap omitted background helpers or be disjoint; neither
+ * an exact union total nor an additional unseen count can be inferred.
  */
 export function trayHelpers(backgroundHelpers, goal) {
   const rows = []
@@ -47,8 +49,9 @@ export function trayHelpers(backgroundHelpers, goal) {
   ;(goal?.plan?.delegations || [])
     .filter(node => isWorkingHelperStatus(node?.status) || isHelperAwaitingParent(node))
     .forEach(add)
-  const unlisted = Math.max(0, (Number(backgroundHelpers?.count) || 0) - items.length)
-  return { rows, unlisted }
+  const count = Number(backgroundHelpers?.count) || 0
+  const cappedBackgroundCount = count > items.length ? count : 0
+  return { rows, cappedBackgroundCount }
 }
 
 /**
