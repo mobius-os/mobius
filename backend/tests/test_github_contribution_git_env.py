@@ -146,7 +146,7 @@ def test_a_gate_that_does_not_finish_is_refused_not_ambiguous(checkout, tmp_path
   assert branch_at(remote) is None
 
 
-def test_nothing_the_gate_starts_outlives_it(checkout, tmp_path):
+def test_the_gates_process_group_is_killed_when_it_ends(checkout, tmp_path):
   pid_file = tmp_path / "child"
   install_hook(checkout, f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\n")
 
@@ -154,6 +154,24 @@ def test_nothing_the_gate_starts_outlives_it(checkout, tmp_path):
 
   stat = Path(f"/proc/{pid_file.read_text().strip()}/stat")
   assert not stat.exists() or stat.read_text().split(") ", 1)[1].startswith("Z")
+
+
+def test_a_hook_without_an_interpreter_line_runs_through_sh_like_git(checkout, tmp_path):
+  marker = tmp_path / "ran"
+  install_hook(checkout, f"touch {marker}\n")
+  remote = bare_remote(tmp_path)
+
+  assert git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="").returncode == 0
+  assert marker.exists()
+
+
+def test_a_gate_that_cannot_start_is_refused_not_ambiguous(checkout, tmp_path):
+  install_hook(checkout, "#!/nonexistent/interpreter\n")
+  remote = bare_remote(tmp_path)
+
+  with pytest.raises(git_ops.PushGateRefused):
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
+  assert branch_at(remote) is None
 
 
 def test_the_gate_cannot_find_gh_credentials_in_the_home(checkout, tmp_path, monkeypatch):
@@ -200,49 +218,100 @@ def test_the_platform_gate_refuses_a_reverted_private_path_without_the_token(
   assert branch_at(remote) is None
 
 
-# -- transports the checkout's config could turn into programs -----------------
+# -- checkout config while the token is present -------------------------------
 
 @pytest.fixture
 def https_only(monkeypatch):
   monkeypatch.setattr(git_ops, "_ALLOWED_PROTOCOLS", "https")
 
 
-def test_an_ext_insteadof_never_runs(checkout, tmp_path, https_only):
-  script, marker = probe(tmp_path, "ext")
-  url = "https://github.com/owner/repo.git"
-  plain_git(checkout, "config", "--local", f"url.ext::{script}.insteadOf", url, check=True)
-  plain_git(checkout, "config", "--local", "protocol.ext.allow", "always", check=True)
-  plain_git(checkout, "fetch", url)
+def refused_names(checkout: Path) -> str:
+  with pytest.raises(git_ops.UnapprovedCheckoutConfig) as refused:
+    git_ops._git(checkout, "fetch", "https://github.com/owner/repo.git")
+  return refused.value.message
+
+
+def test_a_contribute_checkout_passes_the_config_allowlist(checkout, tmp_path):
+  for key, value in (
+    ("remote.origin.url", "https://github.com/owner/repo.git"),
+    ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
+    ("remote.origin.gh-resolved", "base"),
+    ("branch.fix/v1.2.remote", "origin"), ("branch.fix/v1.2.merge", "refs/heads/fix/v1.2"),
+    ("branch.fix/v1.2.pushRemote", "fork"),
+    ("user.name", "x"), ("user.email", "x@x"),
+    ("core.hooksPath", str(checkout / ".git" / "hooks")),
+    ("extensions.worktreeConfig", "true"),
+  ):
+    plain_git(checkout, "config", "--local", key, value, check=True)
+  review = tmp_path / "review"
+  plain_git(checkout, "worktree", "add", "-q", str(review), check=True)
+  plain_git(review, "config", "--worktree", "core.sparseCheckout", "true", check=True)
+  plain_git(review, "config", "--worktree", "core.sparseCheckoutCone", "true", check=True)
+
+  for repo in (checkout, review):
+    assert git_ops.unapproved_config(repo, git_ops._CONTRIBUTION_CHECKOUT_CONFIG) is None
+
+
+def test_an_alternate_refs_command_never_runs_during_fetch(checkout, tmp_path):
+  script, marker = probe(tmp_path, "alternate-refs")
+  other = bare_remote(tmp_path)
+  (checkout / ".git" / "objects" / "info" / "alternates").write_text(f"{other}/objects\n")
+  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", str(script), check=True)
+  source = tmp_path / "source.git"
+  subprocess.run(["git", "clone", "-q", "--bare", str(checkout), str(source)], check=True)
+  plain_git(checkout, "fetch", "-q", str(source))
   assert marker.exists()
   marker.unlink()
 
-  git_ops._git(checkout, "fetch", url, check=False)
+  assert "core.alternaterefscommand" in refused_names(checkout)
   assert not marker.exists()
 
 
-def test_a_remote_upload_pack_never_runs(checkout, tmp_path, https_only):
-  script, marker = probe(tmp_path, "upload-pack")
-  plain_git(checkout, "remote", "add", "up", str(bare_remote(tmp_path)), check=True)
-  plain_git(checkout, "config", "--local", "remote.up.uploadpack", str(script), check=True)
-  plain_git(checkout, "fetch", "up")
+def test_a_push_signing_program_never_runs_during_push(checkout, tmp_path):
+  script, marker = probe(tmp_path, "gpg")
+  remote = bare_remote(tmp_path)
+  plain_git(remote, "config", "receive.certNonceSeed", "probe", check=True)
+  plain_git(checkout, "config", "--local", "push.gpgSign", "if-asked", check=True)
+  plain_git(checkout, "config", "--local", "gpg.program", str(script), check=True)
+  plain_git(checkout, "-c", "user.name=x", "-c", "user.email=x@x",
+            "push", "-q", str(remote), "HEAD:refs/heads/probe")
   assert marker.exists()
   marker.unlink()
 
-  git_ops._git(checkout, "fetch", "up", check=False)
+  with pytest.raises(git_ops.UnapprovedCheckoutConfig) as refused:
+    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
+  assert "push.gpgsign" in refused.value.message
   assert not marker.exists()
+  assert branch_at(remote) is None
 
 
-def test_a_remote_receive_pack_never_runs(checkout, tmp_path, https_only):
-  script, marker = probe(tmp_path, "receive-pack")
-  plain_git(checkout, "remote", "add", "rp", str(bare_remote(tmp_path)), check=True)
-  plain_git(checkout, "config", "--local", "remote.rp.receivepack", str(script), check=True)
-  plain_git(checkout, "push", "rp", "HEAD:refs/heads/probe")
-  assert marker.exists()
-  marker.unlink()
+@pytest.mark.parametrize("key, value", [
+  ("url.ext::{script}.insteadOf", "https://github.com/owner/repo.git"),
+  ("remote.origin.uploadpack", "{script}"),
+  ("remote.origin.receivepack", "{script}"),
+  # Git cannot even read config that includes a non-config file: refused too.
+  ("include.path", "{script}"),
+])
+def test_other_program_naming_settings_are_refused_before_any_network_command(
+  checkout, tmp_path, key, value,
+):
+  script, _marker = probe(tmp_path, "named")
+  plain_git(checkout, "config", "--local", key.format(script=script), value.format(script=script),
+            check=True)
+  message = refused_names(checkout)
+  assert key.split(".")[0] in message or "unreadable" in message
 
-  pushed = git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic", lease="")
-  assert pushed.returncode != 0
-  assert not marker.exists()
+
+def test_gh_in_a_checkout_follows_the_same_config_rule(checkout, tmp_path):
+  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", "true", check=True)
+  with pytest.raises(git_ops.UnapprovedCheckoutConfig):
+    git_ops._gh(checkout, "repo", "view")
+
+
+def test_only_https_transport_is_allowed(checkout, tmp_path, https_only):
+  fetched = git_ops._git(checkout, "fetch", str(bare_remote(tmp_path)), check=False)
+  assert fetched.returncode != 0
+  assert "transport 'file' not allowed" in fetched.stderr
 
 
 @pytest.mark.parametrize("key", ["credential.helper", "core.askPass"])

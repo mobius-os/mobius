@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.parse import quote
@@ -102,9 +104,10 @@ _GITHUB_AUTH_ENV = frozenset({
   "GH_CONFIG_DIR",
 })
 # Command-scope config, exactly like ``-c``: it outranks the checkout's own
-# config and reaches nested repositories, so no program the checkout names
-# (fsmonitor, hooks, ssh, credential helper) runs. The empty helper drops
-# every helper configured so far.
+# config and reaches nested repositories. Network commands rely on the
+# allowlist below; these few keep the programs local commands would most
+# often start (fsmonitor, hooks, ssh, credential helper) from running at all.
+# The empty helper drops every helper configured so far.
 _INERT_CONFIG = (
   ("core.fsmonitor", "false"), ("submodule.recurse", "false"),
   ("core.hooksPath", "/dev/null"), ("core.sshCommand", "false"),
@@ -116,14 +119,39 @@ _NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
 # Contribution remotes are GitHub over https. Local paths, ssh and ext:: are
 # refused: their transports run programs the checkout's config can name.
 _ALLOWED_PROTOCOLS = "https"
+# The only settings a contribution checkout's own config (local and worktree
+# scope) may carry when the token is present. Git keeps adding settings that
+# start programs, so network commands check names against this allowlist
+# instead of overriding a list of known-dangerous ones.
+_CONTRIBUTION_CHECKOUT_CONFIG = (
+  # Repository format and filesystem facts Git writes at init or clone.
+  "core.repositoryformatversion", "core.filemode", "core.bare",
+  "core.logallrefupdates", "core.symlinks", "core.ignorecase",
+  "core.precomposeunicode", "extensions.worktreeconfig",
+  # The platform points this at its installed gate. Hooks never run inside
+  # contribution Git (the gate runs as its own step), so the value is inert.
+  "core.hookspath",
+  # Sparse review worktrees.
+  "core.sparsecheckout", "core.sparsecheckoutcone",
+  # Remotes and tracking. URLs still pass the https-only transport rule; gh
+  # marks the repository it resolved.
+  "remote.*.url", "remote.*.fetch", "remote.*.gh-resolved",
+  "branch.*.remote", "branch.*.merge", "branch.*.pushremote",
+  # Partial clones name their promisor remote and filter.
+  "remote.*.promisor", "remote.*.partialclonefilter",
+  # Identity; contribution commits are written with explicit identity anyway.
+  "user.name", "user.email",
+)
 
 
 def _git_env(repo: Path, *, network: bool = False) -> dict:
   """The one environment for every contribution Git and gh command.
 
   Global and system config are ignored, nothing prompts, only https transport
-  is allowed, and the programs a checkout's config can name (fsmonitor, hooks,
-  credential helper, askpass, ssh, pager, editor) are inert. GitHub
+  is allowed, and the commonest programs a checkout's config can name
+  (fsmonitor, hooks, credential helper, askpass, ssh, pager, editor) are
+  inert. ``_git`` and ``_gh`` also refuse a network command when the
+  checkout's own config sets anything outside an allowlist. GitHub
   credentials are present only for ``network`` commands (fetch, push,
   ls-remote and gh); a local command never carries them. The checkout's
   config still shapes https transport (proxy and TLS settings among them),
@@ -200,22 +228,72 @@ def _git(
   check: bool = True,
 ) -> subprocess.CompletedProcess:
   timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
+  network = args[:1] in _NETWORK_GIT
+  if network:
+    _assert_network_ready(repo)
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
     timeout=timeout,
-    env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
+    env=_git_env(repo, network=network),
   )
 
 
-class PushGateRefused(ContributionSubmitError):
-  """The repository's pre-push gate refused or did not finish; nothing was pushed."""
+class RefusedBeforeSending(ContributionSubmitError):
+  """A network command was refused locally; nothing reached GitHub."""
+
+
+class PushGateRefused(RefusedBeforeSending):
+  """The repository's pre-push gate refused or did not finish."""
 
   def __init__(self, transcript: str):
     refused = push_gate_refused(transcript)
     super().__init__(refused.message, code=refused.code, detail=refused.detail)
-    self.transcript = transcript
+
+
+class UnapprovedCheckoutConfig(RefusedBeforeSending):
+  """The checkout's own Git config sets something outside the allowlist."""
+
+  def __init__(self, name: str):
+    super().__init__(
+      f"This checkout's Git configuration sets {name}, which Möbius does not "
+      "allow while it talks to GitHub. Nothing was sent. Remove the setting "
+      "or prepare the contribution again.",
+      code="checkout_config_unapproved",
+    )
+
+
+UNREADABLE_CONFIG = "an unreadable setting"
+
+
+def unapproved_config(repo: Path, allowed: tuple[str, ...]) -> str | None:
+  """The first setting in ``repo``'s own config (local and worktree scope)
+  outside ``allowed``, or None. Includes are not followed: an include is
+  itself a setting no allowlist names. Only names are read, never values,
+  and unreadable config counts as unapproved.
+  """
+  listed = _git(
+    repo, "config", "--no-includes", "--show-scope", "--name-only", "--list", check=False,
+  )
+  if listed.returncode != 0:
+    return UNREADABLE_CONFIG
+  names = [
+    name.lower() for scope, _, name in
+    (line.partition("\t") for line in listed.stdout.splitlines())
+    if scope in ("local", "worktree")
+  ]
+  return next(
+    (name for name in names if not any(fnmatchcase(name, rule) for rule in allowed)),
+    None,
+  )
+
+
+def _assert_network_ready(repo: Path) -> None:
+  """Refuse a network command in a checkout whose config is not allowlisted."""
+  name = unapproved_config(repo, _CONTRIBUTION_CHECKOUT_CONFIG)
+  if name is not None:
+    raise UnapprovedCheckoutConfig(name)
 
 
 def push(
@@ -225,21 +303,26 @@ def push(
 
   The gate runs once, as its own local step, then the token-bearing push
   sends the same commit id. ``lease`` is the expected remote tip ("" for
-  absent). Raises ``PushGateRefused`` when the gate refuses or times out,
-  and otherwise returns the push's result unchecked.
+  absent). Raises ``RefusedBeforeSending`` when the gate refuses or times
+  out or the checkout's config is not allowlisted, and otherwise returns
+  the push's result unchecked.
   """
   _pre_push_gate(repo, remote, commit, ref, lease)
   return _send_push(repo, remote, commit, ref, lease)
+
+
+def _exact_commit(commit: str) -> str:
+  if not _FULL_GIT_OID.match(commit):
+    raise ContributionSubmitError("Only an exact commit id can be pushed.")
+  return commit
 
 
 def _send_push(
   repo: Path, remote: str, commit: str, ref: str, lease: str,
 ) -> subprocess.CompletedProcess:
   """The network push alone, hooks inert; callers run the gate first."""
-  if not _FULL_GIT_OID.match(commit):
-    raise ContributionSubmitError("Only an exact commit id can be pushed.")
   return _git(
-    repo, "push", f"--force-with-lease={ref}:{lease}", remote, f"{commit}:{ref}",
+    repo, "push", f"--force-with-lease={ref}:{lease}", remote, f"{_exact_commit(commit)}:{ref}",
     check=False,
   )
 
@@ -254,7 +337,8 @@ def _pre_push_gate(
   its gate. Like Git, it passes the pushed commit on stdin; checks the hook
   makes of HEAD or the working tree see the checkout as it is, as they did
   inside a push. It runs in its own process group, which is killed when it
-  ends, so nothing it starts outlives it into the token-bearing push.
+  ends; a child that starts its own session leaves that group and can
+  outlive it, though it never had credentials in its environment.
   """
   try:
     common = _git(
@@ -268,17 +352,27 @@ def _pre_push_gate(
     # Still local: nothing was sent, so this is a refusal, never ambiguous.
     raise PushGateRefused(f"Git could not prepare the pre-push checks: {exc}") from exc
   url = named.stdout.strip() if named.returncode == 0 else remote
-  if not _FULL_GIT_OID.match(commit):
-    raise ContributionSubmitError("Only an exact commit id can be pushed.")
-  line = f"{commit} {commit} {ref} {lease or '0' * 40}\n"
+  line = f"{_exact_commit(commit)} {commit} {ref} {lease or '0' * 40}\n"
   with _scratch_home(_git_env(repo)) as env, \
       tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as output:
     stdin.write(line)
     stdin.seek(0)
-    proc = subprocess.Popen(
-      [str(hook), remote, url], cwd=str(repo), env=env, stdin=stdin,
-      stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
-    )
+    def start(argv: list[str]) -> subprocess.Popen:
+      return subprocess.Popen(
+        argv, cwd=str(repo), env=env, stdin=stdin,
+        stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+      )
+
+    try:
+      try:
+        proc = start([str(hook), remote, url])
+      except OSError as exc:
+        if exc.errno != errno.ENOEXEC:
+          raise
+        # Like Git, run a hook without an interpreter line through sh.
+        proc = start(["/bin/sh", str(hook), remote, url])
+    except OSError as exc:
+      raise PushGateRefused(f"The pre-push checks could not start: {exc}") from exc
     try:
       returncode = proc.wait(timeout=_PUSH_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -301,6 +395,10 @@ def _pre_push_gate(
 
 def _gh(repo: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
+  # Beyond plain API calls, gh runs Git in the checkout with the token, so
+  # the same config rule applies there.
+  if args[:1] != ("api",) and _git(repo, "rev-parse", "--git-dir", check=False).returncode == 0:
+    _assert_network_ready(repo)
   return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text,
                   env=_git_env(repo, network=True))
 

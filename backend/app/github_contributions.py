@@ -37,7 +37,7 @@ from app import (
   settled,
 )
 from app.config import get_settings
-from app.contribution_errors import ContributionSubmitError, push_gate_refused, push_rejected
+from app.contribution_errors import ContributionSubmitError, push_rejected
 from app.github_connection import has_full_pr_access
 from app.manifest_identity import RAW_GITHUB_HOST, parse_root_manifest
 from app.terminal_output import readable_output
@@ -4491,7 +4491,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
-        gate_refused = False
+        refused_locally = None
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4513,8 +4513,8 @@ def _submit_prepared_pr(
             last_push_error = _push_branch(
               repo, push_remote, branch, push_source_sha, remote_before_push,
             )
-        except _git_ops.PushGateRefused as exc:
-          last_push_error, gate_refused = exc.transcript or exc.message, True
+        except _git_ops.RefusedBeforeSending as exc:
+          last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4539,7 +4539,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or (not gate_refused and _is_transient_push_error(last_push_error))
+            or (refused_locally is None and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4565,8 +4565,12 @@ def _submit_prepared_pr(
                 "head_repository": upstream_repo, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            explain = push_gate_refused if gate_refused else push_rejected
-            raise explain(last_push_error, record_patch=record_patch)
+            if refused_locally is not None:
+              raise ContributionSubmitError(
+                refused_locally.message, code=refused_locally.code,
+                detail=refused_locally.detail, record_patch=record_patch,
+              ) from refused_locally
+            raise push_rejected(last_push_error, record_patch=record_patch)
 
     else:
       if public_branch_recovery:
@@ -4607,7 +4611,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
-        gate_refused = False
+        refused_locally = None
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4629,8 +4633,8 @@ def _submit_prepared_pr(
             last_push_error = _push_topic_branch(
               repo, branch, push_source_sha, remote_before_push,
             )
-        except _git_ops.PushGateRefused as exc:
-          last_push_error, gate_refused = exc.transcript or exc.message, True
+        except _git_ops.RefusedBeforeSending as exc:
+          last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4655,7 +4659,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or (not gate_refused and _is_transient_push_error(last_push_error))
+            or (refused_locally is None and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4681,8 +4685,12 @@ def _submit_prepared_pr(
                 "head_repository": fork_slug, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            explain = push_gate_refused if gate_refused else push_rejected
-            raise explain(last_push_error, record_patch=record_patch)
+            if refused_locally is not None:
+              raise ContributionSubmitError(
+                refused_locally.message, code=refused_locally.code,
+                detail=refused_locally.detail, record_patch=record_patch,
+              ) from refused_locally
+            raise push_rejected(last_push_error, record_patch=record_patch)
 
       published_repo = fork_slug
     pushed_branch_url = (
@@ -5131,6 +5139,12 @@ def _push_stack_tip_with_lease(
   for attempt in range(_PUSH_RETRIES):
     try:
       proc = _git_ops._send_push(repo, remote, landed_sha, ref, expected_base)
+    except _git_ops.RefusedBeforeSending:
+      # Nothing left this time, but an earlier attempt's outcome is unknown.
+      if not saw_ambiguous_attempt:
+        raise
+      last_actual = None
+      break
     except (subprocess.TimeoutExpired, OSError) as exc:
       proc = None
       last_error = str(exc)
