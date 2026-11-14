@@ -201,7 +201,7 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
    Keep controls at their natural size; wrap the footer on narrow cards. */
 .md-app-block--footer-status:not(.md-app-block--folded) { padding-top:12px; }
 .md-app-block--footer-status > footer { flex-wrap:wrap; }
-.md-app-block__footer-status { display:flex; flex:1 1 100px; align-items:center; gap:6px; min-width:0; margin-right:auto; }
+.md-app-block__footer-status { display:flex; flex:1 1 80px; align-items:center; gap:6px; min-width:0; margin-right:auto; }
 .md-app-block__footer-status strong { min-width:0; font-size:13px; font-weight:500; overflow-wrap:anywhere; }
 .md-app-block--footer-status > footer > .md-app-block__session,
 .md-app-block--footer-status > footer .md-app-block__session-row,
