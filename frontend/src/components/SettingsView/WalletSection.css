@@ -1,6 +1,6 @@
 /* Wallet-specific amount choices, cancellation waiver and activity figures.
    Group, row, notice and button presentation comes from shared Settings CSS. */
-.settings__btn.credits__amount-choice { border-radius: 999px; font-variant-numeric: tabular-nums; }
+.settings__btn.credits__amount-choice { min-width: 0; padding-inline: 16px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 .settings__btn.credits__amount-choice--on {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
@@ -23,5 +23,63 @@
   accent-color: var(--accent);
 }
 
-.credits__activity-amount { font-variant-numeric: tabular-nums; color: var(--text); }
-.credits__activity-amount--in { color: var(--green-text, var(--green)); }
+.credits__amounts-row { margin: 4px 0 12px; }
+
+/* Recent activity: one row per line, direction shown by icon and amount. */
+.wallet-activity { margin: 0; padding: 0; list-style: none; }
+.wallet-activity > .settings-item:not(:first-child) { border-top: 1px solid var(--border); }
+.settings-item__icon.wallet-activity__icon { width: 32px; height: 32px; color: var(--muted); }
+.settings-item__icon.wallet-activity__icon--in {
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  color: var(--green-text, var(--green));
+}
+.wallet-activity__amount {
+  flex: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.wallet-activity__amount--in { color: var(--green-text, var(--green)); }
+.wallet-activity__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.wallet-activity__status {
+  justify-content: center;
+  gap: 12px;
+  min-height: 48px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.wallet-activity__sentinel { height: 1px; }
+
+/* Recent activity window: fixed height, scrolls on its own, day headings
+   stay pinned while their lines pass under them. */
+.settings-list.wallet-window {
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.settings-list.wallet-window > :not(:first-child) { border-top: 0; }
+.settings-list.wallet-window:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wallet-day__title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 16px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.wallet-day + .wallet-day .wallet-day__title { border-top: 1px solid var(--border); }

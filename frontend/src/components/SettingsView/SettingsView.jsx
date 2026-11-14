@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ArrowLeft, Bell, Folder, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, Bell, Credits, Folder, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
@@ -28,9 +28,7 @@ import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
-import WalletSection, { WalletConnect } from './WalletSection.jsx'
-import { useWallet } from './useWallet.js'
-import { creditsSection } from '../../lib/creditsWallet.js'
+import AccountCredits from './AccountCredits.jsx'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -48,6 +46,8 @@ const MobiusLogo = PROVIDER_INFO.mobius?.Logo
 const SHARED_FOLDERS_PAGE = 'shared-folders'
 const NOTIFICATIONS_ELSEWHERE_PAGE = 'notifications-elsewhere'
 const MOBIUS_ACCOUNT_PAGE = 'mobius-account'
+// Opened from the account page; its back arrow returns there.
+const CREDITS_PAGE = 'credits'
 
 const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
@@ -249,7 +249,6 @@ export default function SettingsView({
   // The owner's own accounts (Möbius with its model credit, and GitHub) are
   // never shown to a shared-browser guest, and their reads never run.
   const showOwnerAccounts = !isSharedBrowserAuth()
-  const wallet = useWallet({ active: active && showOwnerAccounts })
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -273,7 +272,8 @@ export default function SettingsView({
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
   const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
   const notificationsElsewhereOpen = detailPage === NOTIFICATIONS_ELSEWHERE_PAGE
-  const selectedProvider = sharedFoldersOpen || mobiusAccountOpen || notificationsElsewhereOpen ? null : detailPage
+  const creditsOpen = detailPage === CREDITS_PAGE
+  const selectedProvider = sharedFoldersOpen || mobiusAccountOpen || creditsOpen || notificationsElsewhereOpen ? null : detailPage
   const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
@@ -434,7 +434,7 @@ export default function SettingsView({
   }, [settingsQuery.data])
 
   const openDetailPage = useCallback((page) => {
-    if (page === MOBIUS_ACCOUNT_PAGE && !showOwnerAccounts) return
+    if ((page === MOBIUS_ACCOUNT_PAGE || page === CREDITS_PAGE) && !showOwnerAccounts) return
     // Remember who was connected when the page opened, so a provider that
     // connects from its page gets the curated first-connection defaults.
     authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
@@ -942,7 +942,24 @@ export default function SettingsView({
         onBack={closeDetailPage}
       />
     )
-    detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+    // Credits are the owner's money: a guest neither sees nor reads them.
+    detailBody = (
+      <MobiusAccountPage
+        active={active}
+        onOpenCredits={showOwnerAccounts ? () => openDetailPage(CREDITS_PAGE) : null}
+        onOpenModels={() => openDetailPage('mobius')}
+      />
+    )
+  } else if (creditsOpen) {
+    subhead = (
+      <SettingsSubhead
+        title="Credits"
+        mark={<Credits width={20} height={20} />}
+        subtitle={<span>Balance and activity</span>}
+        onBack={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)}
+      />
+    )
+    detailBody = <AccountCredits active={active} />
   } else if (notificationsElsewhereOpen) {
     subhead = <SettingsSubhead title="Notifications elsewhere" mark={<Bell width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = <NotificationChannelsPage active={active} />
@@ -1156,26 +1173,6 @@ export default function SettingsView({
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
 
         <NotificationChannelsSummary active={active} onOpen={() => openDetailPage(NOTIFICATIONS_ELSEWHERE_PAGE)} />
-
-        {showOwnerAccounts && creditsSection(wallet.summary) === 'wallet' && (
-          <WalletSection
-            summary={wallet.summary}
-            terms={wallet.terms}
-            activity={wallet.activity}
-            busy={wallet.busy}
-            notice={wallet.notice}
-            refusal={wallet.refusal}
-            onBuy={wallet.buy}
-            onReconnect={wallet.pairWithAccount}
-          />
-        )}
-        {showOwnerAccounts && creditsSection(wallet.summary) === 'connect' && (
-          <WalletConnect
-            busy={wallet.busy}
-            refusal={wallet.refusal}
-            onConnect={wallet.pairWithAccount}
-          />
-        )}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

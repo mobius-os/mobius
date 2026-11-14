@@ -1,11 +1,16 @@
-/* Settings → Credits for a paired Möbius: the wallet apps spend from. */
+/* The Credits page for a paired Möbius: the wallet apps spend from, and its history. */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import WalletSection, { WalletConnect } from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, canReconnect, checkoutPage, creditsSection, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import WalletSection, { ActivityRow, WalletBuyForm, WalletConnect } from '../../components/SettingsView/WalletSection.jsx'
+import ActivityWindow, { ACTIVITY_KEY, RecentActivity } from '../../components/SettingsView/ActivityWindow.jsx'
+import {
+  activityDays, activityLabel, activityTime, canReconnect, checkoutPage, creditsSection,
+  openStripeWindow, settleTopup, termsFor, walletGlance,
+} from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -15,27 +20,115 @@ const SUMMARY = {
 const TERMS = { currency: 'usd', amounts_cents: [500, 1000], waiver_required: true, stripe_mode: 'test' }
 
 const render = props => renderToStaticMarkup(createElement(WalletSection, {
-  summary: SUMMARY, terms: TERMS, activity: [], ...props,
+  summary: SUMMARY, terms: TERMS, ...props,
 }))
 
 test('the wallet balance is the headline and names where it is kept', () => {
   const html = render({})
   assert.match(html, /2\.25/)
   assert.match(html, /Kept by www\.mobius\.you/)
+  // Amounts open under the balance only once Add credits is pressed.
+  assert.match(html, /<button[^>]*aria-expanded="false"[^>]*>Add credits/)
+  assert.doesNotMatch(html, /\$5/)
+})
+
+test('adding credits offers the service amounts, the test-mode note and the waiver', () => {
+  const html = renderToStaticMarkup(createElement(WalletBuyForm, {
+    terms: TERMS, busy: false, onBuy: () => {}, onCancel: () => {},
+  }))
   assert.match(html, /\$5/)
+  assert.match(html, /\$10/)
+  assert.match(html, /test mode — no real money moves/)
+  assert.match(html, /name="waiver"/)
+  assert.match(html, /lose my right to cancel/)
+  assert.match(html, />Buy \$5 of credits</)
+  assert.match(html, />Cancel</)
 })
 
 test('a paid app run shows in recent activity with who was paid', () => {
-  const html = render({ activity: [{
+  const html = renderToStaticMarkup(createElement(ActivityRow, { when: '15:25', entry: {
     id: 't1', at: '2026-11-03T15:25:58Z', kind: 'app_call', amount: '-0.50',
     description: 'Used ana/prompts/run-659eab7c',
-  }] })
+  } }))
   assert.match(html, /Paid @ana in prompts/)
-  assert.match(html, /-0\.50/)
+  assert.match(html, /−0\.50/)
+  assert.doesNotMatch(html, /wallet-activity__icon--in/)
+})
+
+test('recent activity is a scrolling window of the whole history, grouped by day, top-ups marked', () => {
+  const client = new QueryClient()
+  const at = d => new Date(2026, 10, d, 12).toISOString()
+  client.setQueryData([ACTIVITY_KEY, 'p1'], {
+    pageParams: [null],
+    pages: [{ next_cursor: 'c', transactions: [
+      { id: 'a', at: at(10), kind: 'topup', amount: '5.00', description: 'Bought credits' },
+      { id: 'b', at: at(10), kind: 'app_call', amount: '-0.10', description: 'Used ana/prompts/run' },
+      { id: 'c', at: at(9), kind: 'app_call', amount: '-5.00', description: 'Used ana/prompts/run' },
+    ] }],
+  })
+  const window = renderToStaticMarkup(createElement(QueryClientProvider, { client },
+    createElement(ActivityWindow, { pairing: 'p1' })))
+  assert.match(window, /class="settings-list wallet-window"/)
+  assert.equal((window.match(/class="wallet-day__title"/g) || []).length, 2)
+  assert.equal((window.match(/<li class="settings-item"/g) || []).length, 3)
+  assert.match(window, /wallet-activity__icon--in/)
+  assert.match(window, /\+5\.00/)
+  // More history exists, so the window watches for the end of its scroll.
+  assert.match(window, /wallet-activity__sentinel/)
+
+  assert.match(renderToStaticMarkup(createElement(RecentActivity, null, createElement('div', null, 'history'))),
+    /Recent activity[^]*history/)
+  assert.doesNotMatch(render(), /Recent activity/)
+})
+
+test('a failed older page waits for Try again instead of retrying in a loop', () => {
+  const client = new QueryClient()
+  const query = client.getQueryCache().build(client, { queryKey: [ACTIVITY_KEY, 'p1'] })
+  query.setState({
+    status: 'error',
+    error: new Error('service unavailable'),
+    data: { pageParams: [null], pages: [{ next_cursor: 'c', transactions: [
+      { id: 'a', at: new Date(2026, 10, 10, 12).toISOString(), kind: 'topup', amount: '5.00', description: 'Bought credits' },
+    ] }] },
+    fetchStatus: 'idle',
+    fetchMeta: { fetchMore: { direction: 'forward' } },
+  })
+  const window = renderToStaticMarkup(createElement(QueryClientProvider, { client },
+    createElement(ActivityWindow, { pairing: 'p1' })))
+  // The lines already read stay; the end of the window is no longer watched.
+  assert.match(window, /Bought credits/)
+  assert.match(window, /More activity could not be loaded/)
+  assert.match(window, />Try again</)
+  assert.doesNotMatch(window, /wallet-activity__sentinel/)
+})
+
+test('the full history groups under day headings, newest first, one group per day across pages', () => {
+  const now = new Date(2026, 10, 12, 13, 0)
+  const at = (d, h) => new Date(2026, 10, d, h).toISOString()
+  const days = activityDays([
+    { id: 'a', at: at(12, 9) }, { id: 'b', at: at(12, 8) },
+    { id: 'c', at: at(11, 20) },
+    { id: 'd', at: at(9, 15) }, { id: 'e', at: at(9, 14) },
+    { id: 'f', at: new Date(2025, 11, 30, 8).toISOString() },
+  ], now, 'en-GB')
+  assert.deepEqual(days.map(day => day.label), ['Today', 'Yesterday', '9 November', '30 December 2025'])
+  assert.deepEqual(days.map(day => day.entries.map(e => e.id).join('')), ['ab', 'c', 'de', 'f'])
+  assert.match(activityTime(at(9, 15), 'en-GB'), /^15:00$/)
+})
+
+test('the account page row shows the spendable balance, a debt, or that credits are not connected', () => {
+  assert.deepEqual(walletGlance(SUMMARY), { kind: 'balance', figure: '2.25' })
+  assert.deepEqual(walletGlance({ ...SUMMARY, balance: { balance: '-1.25', available: '0.00' } }), { kind: 'owed', figure: '1.25' })
+  assert.deepEqual(walletGlance({ mode: 'unpaired', can_pair_with_account: true }), { kind: 'unconnected' })
+  // Nothing trustworthy to show: still loading, unreadable, or no credits here.
+  assert.equal(walletGlance(undefined), null)
+  assert.equal(walletGlance({ mode: 'customer', error: { message: 'Offline' } }), null)
+  assert.equal(walletGlance({ mode: 'unknown' }), null)
 })
 
 test('without the service terms no amounts are offered', () => {
-  assert.doesNotMatch(render({ terms: null }), /Buy /)
+  assert.doesNotMatch(render({ terms: null }), /Buy |Add credits/)
+  assert.match(render({}), /Add credits/)
 })
 
 test('settings offers one-tap connect only to an unpaired Möbius launched from mobius.you', () => {
@@ -158,8 +251,7 @@ test('the wallet uses shared Settings groups, rows, badges and buttons', () => {
   assert.match(html, /Credits wallet/)
   assert.match(html, /Pays for apps that charge per use/)
   assert.match(html, /You owe 1\.25 credits/)
-  assert.match(html, /name="waiver"/)
-  assert.match(html, /lose my right to cancel/)
+  assert.match(html, /Add credits/)
 })
 
 test('wallet notices, refusals and unavailable balances remain readable', () => {
