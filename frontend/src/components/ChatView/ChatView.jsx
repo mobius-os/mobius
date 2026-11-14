@@ -923,9 +923,9 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
-  // tray's pencil and × reach the chat box; it reports which queued message
-  // the box is editing for the tray's "In the chat box" tag.
+  // ChatInputBar installs `{ open(cid), setAside(cid), back() }` here so the
+  // queue tray's pencil, × and Stop editing reach the chat box; it reports
+  // which queued message the box is editing, the row that offers Stop editing.
   const queuedComposerRef = useRef(null)
   const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
   // The model/effort picker can accept another choice before the prior save

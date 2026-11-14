@@ -3,7 +3,8 @@
  * Its × is the touch and pointer equivalent of Esc. A queued message being
  * edited needs no strip: the queue tray marks its row and offers Stop editing,
  * so the strip appears for it only to warn (a save that failed), and a save in
- * progress is announced to screen readers alone. */
+ * progress is announced to screen readers alone, through the status region
+ * every position shares. */
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 
 const DRAFT_PREVIEW_LENGTH = 34
@@ -33,10 +34,8 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
     if (!note) return saving ? { title: 'Saving the queued message…', srOnly: true } : null
     return {
       title: `Editing queued message ${position.queuedNumber} of ${position.queuedCount}`,
-      hint: note || (saving
-        ? 'Saving…'
-        : (touch ? 'Send saves it' : 'Enter saves it, Esc goes back')),
-      warn: !!note,
+      hint: note,
+      warn: true,
     }
   }
   return {
@@ -60,15 +59,18 @@ export default function ComposerHistoryStrip({
   position, note, saving, touch, draftFileCount = 0, onBack,
 }) {
   const copy = composerHistoryStripCopy(position, { touch, saving, note })
-  if (!copy) return null
-  if (copy.srOnly) return <span className="chat__sr-only" role="status" aria-live="polite">{copy.title}</span>
+  // One status region that stays mounted and changes its text: many screen
+  // readers skip a live region that arrives already holding its message.
+  const status = (
+    <span className="chat__sr-only" role="status" aria-live="polite">
+      {copy ? [copy.title, copy.hint].filter(Boolean).join('. ') : ''}
+    </span>
+  )
+  if (!copy || copy.srOnly) return status
   const draft = composerDraftPreview(position.draft, draftFileCount)
-  return (
-    <div
-      className={`chat__history-strip${copy.warn ? ' chat__history-strip--warn' : ''}`}
-      role="status"
-      aria-live="polite"
-    >
+  return (<>
+    {status}
+    <div className={`chat__history-strip${copy.warn ? ' chat__history-strip--warn' : ''}`}>
       <span className="chat__history-strip-text">
         <b className="chat__history-strip-title">{copy.title}</b>
         {' '}
@@ -91,5 +93,5 @@ export default function ComposerHistoryStrip({
         <X width={14} height={14} aria-hidden="true" />
       </button>
     </div>
-  )
+  </>)
 }

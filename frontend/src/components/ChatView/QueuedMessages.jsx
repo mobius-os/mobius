@@ -27,9 +27,9 @@ import {
  * Each queued message is itself a collapsible row showing a truncated
  * first line. Click the row to expand and see the full content. The pencil
  * opens the message in the chat box (ChatInputBar's history), where Enter
- * saves it in the same queue position; while it is open there the row says
- * so instead of offering the pencil. The X cancels (DELETE the pending
- * message on the backend).
+ * saves it in the same queue position; while it is open there the row offers
+ * Stop editing instead of the pencil, and stays shown even when the tray is
+ * collapsed. The X cancels (DELETE the pending message on the backend).
  *
  * Visual model: a soft, slightly raised stack — distinct from the chat
  * transcript so it's clear these are "not yet sent" turns. Lives between
@@ -82,10 +82,14 @@ export default function QueuedMessages({
   }
 
   const itemsId = 'queued-items'
+  // A collapsed tray still shows the row open in the chat box: with no strip
+  // above the box, that row and its Stop editing are the edit's only cue and
+  // its only touch exit.
+  const shownItems = collapsed ? items.filter(msg => keyOf(msg) === inComposerCid) : items
 
   return (
     <div
-      className={`queued${collapsed ? ' queued--collapsed' : ''}`}
+      className={`queued${shownItems.length ? '' : ' queued--collapsed'}`}
       role="list"
       aria-label="Queued messages"
     >
@@ -131,9 +135,9 @@ export default function QueuedMessages({
         </button>
       )}
       </div>
-      {!collapsed && (
+      {shownItems.length > 0 && (
         <div id={itemsId} className="queued__items">
-          {items.map(msg => {
+          {shownItems.map(msg => {
             const key = keyOf(msg)
             const text = stripAugmentation(msg.content || '')
             const isExpanded = expanded.has(key)

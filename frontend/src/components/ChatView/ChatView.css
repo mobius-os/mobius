@@ -4918,7 +4918,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   height: 30px;
   margin: 3px 4px 0 2px;
   padding: 0 8px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: none;
   font: inherit;
@@ -4927,7 +4927,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   color: var(--accent-text, var(--accent)); /* CONTRACT: accent text on the tinted row */
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 0.15s;
+  transition: background-color 0.15s, border-color 0.15s;
 }
 .queued__in-composer:focus-visible {
   outline: none;
@@ -4978,7 +4978,8 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   }
 
   .queued__in-composer:hover {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
+    background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: accent wash on opaque fill, clear of the row's own */
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
   }
 }
 

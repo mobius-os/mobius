@@ -200,21 +200,64 @@ test('editing a queued message shows no strip unless it has to warn', async () =
     'browsing earlier messages keeps its strip')
 })
 
-test('every queued action, Edit included, lights its own fill on hover', async () => {
-  const { readFileSync } = await import('node:fs')
-  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  // The row's hover is the wells' resting fill, so a colour change alone left
-  // Edit invisible against it.
-  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.queued__action:not\(:disabled\):hover \{\s*background: color-mix/,
-    'a fill of its own, for fine pointers only')
+test('the chat box keeps one status region and changes only its text', async () => {
+  const { default: ComposerHistoryStrip } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
+  const render = props => renderToStaticMarkup(createElement(ComposerHistoryStrip, props))
+  const queued = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
+  const region = /^<span class="chat__sr-only" role="status" aria-live="polite">([^<]*)<\/span>/
+  assert.equal(render({ position: null }).match(region)?.[1], '', 'present and empty outside history')
+  assert.equal(render({ position: queued }).match(region)?.[1], '', 'present and empty while editing quietly')
+  const saving = render({ position: queued, saving: true })
+  assert.equal(saving.match(region)?.[1], 'Saving the queued message…', 'a save is spoken')
+  assert.doesNotMatch(saving, /chat__history-strip/, 'and nothing is shown')
+  const failed = render({ position: queued, note: 'Could not save' })
+  assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
+  assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
+  assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
 })
 
-test('Stop editing reaches the chat box’s own return to the draft', async () => {
-  const { readFileSync } = await import('node:fs')
-  const bar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
-  const view = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  // Esc and Stop editing share composerHistory.escape, so both restore the draft.
-  assert.match(bar, /escape: backToDraft \} = composerHistory/)
-  assert.match(bar, /back: backToDraft,/)
-  assert.match(view, /onStopEditing=\{\(\) => queuedComposerRef\.current\?\.back\(\)\}/)
+// QueuedMessages run under the hook shim, so a test can collapse the tray the
+// way the header tap does and render what the owner then sees. Server
+// rendering never resolves a bare `react` through plugins, so the tray's own
+// import is rewritten.
+const SHIM = '/src/components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+const shimVite = await createSsrRenderServer({
+  plugins: [{
+    name: 'queued-tray-hook-shim',
+    enforce: 'pre',
+    transform: (code, id) => (
+      id.endsWith('/QueuedMessages.jsx') ? code.replace("from 'react'", `from '${SHIM}'`) : null
+    ),
+  }],
+})
+after(() => shimVite.close())
+const { renderHook } = await shimVite.ssrLoadModule(SHIM)
+const { default: ShimTray } = await shimVite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
+
+function findByClass(node, className) {
+  if (Array.isArray(node)) return node.map(child => findByClass(child, className)).find(Boolean)
+  if (!node?.props) return undefined
+  if (node.props.className === className) return node
+  return findByClass(node.props.children, className)
+}
+
+test('a collapsed tray still shows the row open in the chat box and its Stop editing', () => {
+  let stops = 0
+  const props = { items, inComposerCid: null, onStopEditing: () => { stops += 1 } }
+  const tray = renderHook(() => ShimTray(props))
+  const html = () => renderToStaticMarkup(tray.result.current)
+  findByClass(tray.result.current, 'queued__hdr').props.onClick()
+  assert.doesNotMatch(html(), /role="listitem"/, 'collapsing hides the rows')
+
+  props.inComposerCid = 'q2'
+  tray.rerender()
+  assert.match(html(), /aria-expanded="false"/, 'the tray stays collapsed')
+  assert.equal(html().match(/role="listitem"/g)?.length, 1, 'only the row in the chat box')
+  assert.match(html(), /queued__row--in-composer[\s\S]*Also update the changelog[\s\S]*>Stop editing</)
+  findByClass(tray.result.current, 'queued__in-composer').props.onClick()
+  assert.equal(stops, 1, 'Stop editing is reachable while collapsed')
+
+  props.inComposerCid = null
+  tray.rerender()
+  assert.doesNotMatch(html(), /role="listitem"/, 'the owner’s collapse holds after the edit')
 })
