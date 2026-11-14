@@ -86,11 +86,11 @@ function AssistantReply({
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
   const references = !isStreaming && referenceRows && <MessageSources
-      chatId={chatId}
-      groups={referenceRows.map(message => message.blocks)}
-      refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
-      disclosureKey={`${rows[lastVisibleRow].key}:references`}
-    />
+    chatId={chatId}
+    groups={referenceRows.map(message => message.blocks)}
+    refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
+    disclosureKey={`${rows[lastVisibleRow].key}:references`}
+  />
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.

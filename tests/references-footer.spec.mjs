@@ -13,7 +13,7 @@ attachCleanup()
 for (const touch of [false, true]) {
   test.describe(touch ? 'touch References footer' : 'desktop References footer', () => {
     test.use({ serviceWorkers: 'block', hasTouch: touch,
-      viewport: { width: touch ? 390 : 1720, height: 844 } })
+      viewport: { width: touch ? 320 : 1720, height: 844 } })
 
     test('one row, open past the reveal timeout, collapsed back to auto-hide', async ({ page }) => {
       const f = await mountReplyFooter(page, BASE, { sources })
@@ -55,6 +55,36 @@ for (const touch of [false, true]) {
       await expect(footer.locator('.chat__sources-body')).toBeHidden()
       await expect.poll(() => footer.evaluate(el => getComputedStyle(el).opacity),
         { timeout: 7000 }).toBe('0')
+    })
+
+    test('lazy references hold the footer through loading, failure and retry', async ({ page }) => {
+      let requests = 0
+      let release
+      const loading = new Promise(resolve => { release = resolve })
+      await page.route('**/message-sources?*', async route => {
+        requests += 1
+        if (requests === 1) {
+          await loading
+          await route.fulfill({ status: 503, json: { detail: 'Fixture failure' } })
+        } else await route.fulfill({ json: { sources } })
+      })
+      const f = await mountReplyFooter(page, BASE, { sourceRef: { message_index: 3, count: 2 } })
+      const footer = f.replies.last().locator('.chat__msg-meta--start')
+      const toggle = footer.getByRole('button', { name: 'References 2' })
+      expect(requests).toBe(0)
+      await f.replies.last().locator('.chat__text--assistant').first().click()
+      await toggle.click()
+      try {
+        await expect(footer.getByText('Loading references…')).toBeVisible()
+        await toggle.evaluate(el => el.blur())
+        await page.mouse.move(0, 0)
+        await expect(footer).not.toHaveClass(/chat__msg-meta--visible/, { timeout: 7000 })
+        await expect.poll(() => footer.evaluate(el => getComputedStyle(el).opacity)).toBe('1')
+      } finally { release() }
+      await expect(footer.getByText('Some references could not load.')).toBeVisible()
+      await footer.getByRole('button', { name: 'Retry', exact: true }).click()
+      await expect(footer.getByRole('link')).toHaveCount(2)
+      expect(requests).toBe(2)
     })
 
     test('keyboard expansion and saved open state preserve the full footer', async ({ page }) => {

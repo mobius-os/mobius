@@ -4,7 +4,7 @@ import { createTaggedChat } from './_chatTracker.mjs'
 import { mockDeliveryReady, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 export async function mountReplyFooter(page, base, {
-  running = false, pendingQuestion = false, sources = [],
+  running = false, pendingQuestion = false, sources = [], sourceRef = null,
   latestAnswer = 'Latest completed answer.\n\n' + 'Answer detail. '.repeat(100),
 } = {}) {
   await page.goto(base, { waitUntil: 'domcontentloaded' })
@@ -18,6 +18,7 @@ export async function mountReplyFooter(page, base, {
     { role: 'user', content: 'Second question', cid: 'footer-second', ts: 3 },
     assistant('footer-latest', latestAnswer, 4),
   ]
+  if (sourceRef) messages.at(-1).source_ref = sourceRef
   if (sources.length) messages.at(-1).blocks.push({
     type: 'tool', tool: 'WebSearch', status: 'done', sources,
   })

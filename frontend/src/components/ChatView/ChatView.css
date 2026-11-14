@@ -496,14 +496,21 @@
 /* References share the action line; only their expanded body takes a new
    line. Its open disclosure, not a second timer, owns the visibility hold. */
 .chat__msg-meta--start:has(> .chat__sources) {
-  width: auto;
-  flex-wrap: wrap;
+  display: grid;
+  box-sizing: border-box;
+  width: 100%;
+  grid-template-columns: minmax(0, max-content) repeat(2, max-content) minmax(max-content, 1fr);
   height: auto;
   min-height: 28px;
 }
+.chat__msg-meta--start:has(> .chat__sources) > .chat__ts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .chat__msg-meta--start > .chat__sources { display: contents; }
-.chat__msg-meta--start .chat__sources-toggle { margin-left: 6px; }
-.chat__msg-meta--start .chat__sources-body { flex-basis: 100%; }
+.chat__msg-meta--start .chat__sources-toggle { margin-left: 6px; justify-self: start; }
+.chat__msg-meta--start .chat__sources-body { grid-column: 1 / -1; }
 .chat__msg-meta--start:has(> .chat__sources--open) {
   opacity: 1;
   visibility: inherit;
