@@ -416,7 +416,7 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
   } finally { card.unmount(); globalThis.fetch = originalFetch }
 })
 
-test('Markdown choice links and child controls do not choose an answer; keyboard choices preserve raw labels', async () => {
+test('explanation controls keep their clicks, explanation text picks, and keys pick the raw label', async () => {
   const question = 'Install **both**?'
   const label = '**Update**'
   let posted
@@ -425,21 +425,18 @@ test('Markdown choice links and child controls do not choose an answer; keyboard
     onAnswer: (...args) => { posted = args },
   })
   const option = () => find(card.result.current, node => node.props?.role === 'radio')
-  // The choice itself is a role="radio" control; only controls nested inside
-  // it, such as a Markdown link or copy button, keep the click.
-  const choice = { contains: node => node !== null }
+  const container = () => find(card.result.current, node => node.props?.className?.split(' ').includes('qcard__opt'))
+  const inside = { contains: () => true }
   try {
     // A portaled image lightbox bubbles its backdrop click through React.
-    option().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
+    container().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
+    // A link, preview or copy button in the explanation, or the choice itself
+    // (which handles its own click), resolves to a control.
+    container().props.onClick({ detail: 0, currentTarget: inside, target: { closest: () => ({ tagName: 'A' }) } })
     assert.equal(option().props['aria-checked'], false)
-    for (const tag of ['a', 'button']) {
-      option().props.onClick({ detail: 0, currentTarget: choice, target: { closest: () => ({ tagName: tag }) } })
-      assert.equal(option().props['aria-checked'], false)
-    }
-    const surface = {}
-    option().props.onKeyDown({ key: 'Enter', currentTarget: surface, target: {}, preventDefault: () => assert.fail('child keys must stay with the child') })
+    option().props.onKeyDown({ key: 'Enter', repeat: true, preventDefault: () => assert.fail('held keys repeat nothing') })
     assert.equal(option().props['aria-checked'], false)
-    option().props.onKeyDown({ key: ' ', currentTarget: surface, target: surface, preventDefault: () => {} })
+    option().props.onKeyDown({ key: ' ', preventDefault: () => {} })
     assert.equal(option().props['aria-checked'], true)
     await submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
     assert.equal(posted[0], `- ${question}: ${label}`)
@@ -447,24 +444,21 @@ test('Markdown choice links and child controls do not choose an answer; keyboard
   } finally { card.unmount() }
 })
 
-test('clicking formatted option text toggles multi-select without altering Markdown labels', () => {
+test('the label control and explanation text both toggle multi-select without altering Markdown labels', () => {
   const card = renderHook(QuestionCard, { chatId: 'markdown-multi', questionId: 'markdown-multi-q',
-    questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`' }] }],
+    questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`', description: 'Plain text' }] }],
   })
   const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
-  // Text inside a choice resolves to the choice itself (role="checkbox"); a
-  // control that only wraps the choice from outside must not block the toggle.
-  const click = (index, control = 'choice') => {
-    const choice = { contains: node => node === choice || node === text }
-    const text = { closest: () => control === 'choice' ? choice : { outside: true } }
-    options()[index].props.onClick({ detail: 0, currentTarget: choice, target: text })
-  }
+  const containers = () => elements(card.result.current).filter(node => node.props?.className?.split(' ').includes('qcard__opt'))
   try {
-    click(0)
-    click(1, 'outside')
+    options()[0].props.onClick({ detail: 0 })
+    containers()[1].props.onClick({ detail: 0, currentTarget: { contains: () => true }, target: { closest: () => null } })
     assert.deepEqual(options().map(node => node.props['aria-checked']), [true, true])
-    click(0)
+    options()[0].props.onClick({ detail: 0 })
     assert.deepEqual(options().map(node => node.props['aria-checked']), [false, true])
+    const described = options()[1]
+    assert.equal(find(containers()[1], node => node.props?.id === described.props['aria-describedby']).props.className, 'qcard__opt-desc')
+    assert.equal(options()[0].props['aria-describedby'], undefined)
   } finally { card.unmount() }
 })
 
@@ -478,7 +472,7 @@ test('an incomplete Submit focuses the first Markdown answer choice', () => {
   const questionNode = {
     scrollIntoView: () => {},
     querySelector: selector => {
-      assert.equal(selector, '.qcard__opt[tabindex="0"], textarea')
+      assert.equal(selector, '.qcard__opt-choice[tabindex="0"], textarea')
       return { focus: () => { focused = true } }
     },
   }

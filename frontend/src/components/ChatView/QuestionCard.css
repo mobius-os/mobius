@@ -148,6 +148,9 @@
   background: transparent;
   color: var(--text);
   font-size: 13px;
+  /* Native-button metrics, so a div choice lines up with a button one. */
+  line-height: normal;
+  text-align: center;
   min-width: 0;
   max-width: 100%;
   cursor: pointer;
@@ -167,10 +170,27 @@
 /* Option description — inline under the label (a title= tooltip is invisible
    on touch). Quiet by design: small, muted, left-aligned with the label. The
    mark stays top-aligned so a two-line option still reads as one choice. */
-.qcard__opt:has(.qcard__opt-body) {
+.qcard__opt:has(.qcard__opt-body),
+.qcard__opt:has(> .qcard__opt-desc) {
   flex: 1 1 220px;
   align-items: flex-start;
   text-align: left;
+}
+/* A Q&A choice: the radio/checkbox holds the mark and label; its explanation
+   sits below, outside the control, aligned with the label past the mark. */
+.qcard__opt:has(> .qcard__opt-desc) {
+  flex-direction: column;
+  gap: 2px;
+}
+.qcard__opt-choice {
+  display: flex;
+  align-items: inherit;
+  gap: 7px;
+  min-width: 0;
+  outline: none;
+}
+.qcard__opt > .qcard__opt-desc {
+  padding-left: 21px; /* mark width + gap */
 }
 .qcard__opt-body {
   display: flex;
@@ -186,7 +206,8 @@
 .qcard__opt:active:not(.qcard__opt--static) {
   opacity: .75;
 }
-.qcard__opt:focus-visible {
+.qcard__opt:focus-visible,
+.qcard__opt:has(> .qcard__opt-choice:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

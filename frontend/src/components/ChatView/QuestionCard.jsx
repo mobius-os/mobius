@@ -289,7 +289,7 @@ export default function QuestionCard({
     if (!node) return
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
     node.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
-    node.querySelector('.qcard__opt[tabindex="0"], textarea')?.focus({ preventScroll: true })
+    node.querySelector('.qcard__opt-choice[tabindex="0"], textarea')?.focus({ preventScroll: true })
   }
 
   function selectOption(question, label) {
@@ -510,9 +510,9 @@ export default function QuestionCard({
             data-question-index={qi}
           >
             {q.header && (
-              <div className="qcard__header"><InlineMarkdown text={q.header} onInternalNav={onInternalNav} /></div>
+              <div className="qcard__header"><InlineMarkdown text={q.header} /></div>
             )}
-            <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} onInternalNav={onInternalNav} /></div>
+            <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} literalTags onInternalNav={onInternalNav} /></div>
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
@@ -546,59 +546,61 @@ export default function QuestionCard({
                   ? isChosen
                   : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
                 const dimmed = answered && !isChosen
+                const descriptionId = opt.description ? `${questionTextId}-opt${oi}` : undefined
+                const pick = (event) => {
+                  const selectionBeforePointer = pointerSelectionRef.current
+                  pointerSelectionRef.current = null
+                  if (
+                    event.detail !== 0
+                    && pointerSelectionChangedWithin(selectionBeforePointer, event.currentTarget)
+                  ) return
+                  selectOption(q.question, opt.label)
+                }
                 return (
                   <div
                     key={oi}
-                    tabIndex={inactive ? undefined : 0}
-                    role={isMulti ? 'checkbox' : 'radio'}
-                    aria-checked={isActive}
-                    aria-disabled={inactive || undefined}
                     className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}${inactive ? ' qcard__opt--static' : ''}`}
                     onPointerDown={inactive ? undefined : () => {
                       pointerSelectionRef.current = textSelectionSnapshot()
                     }}
+                    // A tap on the explanation text picks the choice too.
+                    // Its links, image previews (including the portaled
+                    // lightbox) and copy buttons, and the choice itself, keep
+                    // their own clicks.
                     onClick={inactive ? undefined : (event) => {
-                      const selectionBeforePointer = pointerSelectionRef.current
-                      pointerSelectionRef.current = null
-                      // Markdown links, image previews and code-copy buttons
-                      // act independently of the surrounding answer choice.
-                      // Portaled previews (the image lightbox) bubble React
-                      // events here from outside the DOM subtree of this option.
-                      const choice = event.currentTarget
-                      if (!choice.contains(event.target)) return
-                      const control = event.target.closest(INTERACTIVE_TARGET)
-                      if (control !== choice && choice.contains(control)) return
-                      if (
-                        event.detail !== 0
-                        && pointerSelectionChangedWithin(
-                          selectionBeforePointer,
-                          event.currentTarget,
-                        )
-                      ) return
-                      selectOption(q.question, opt.label)
-                    }}
-                    onKeyDown={inactive ? undefined : (event) => {
-                      if (event.target !== event.currentTarget || event.repeat) return
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        selectOption(q.question, opt.label)
-                      }
+                      if (!event.currentTarget.contains(event.target)) return
+                      if (event.target.closest(INTERACTIVE_TARGET)) return
+                      pick(event)
                     }}
                   >
-                    <span
-                      className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
-                      aria-hidden="true"
-                    />
-                    {/* Keep explanations visible on touch; Markdown may
-                        contain links and controls, so the choice itself is
-                        not a native button containing nested controls. */}
-                    {opt.description ? (
-                      <div className="qcard__opt-body">
-                        <span className="qcard__opt-label"><InlineMarkdown text={opt.label} onInternalNav={onInternalNav} /></span>
-                        <div className="qcard__opt-desc"><StandardMarkdown text={opt.description} onInternalNav={onInternalNav} /></div>
+                    {/* The control holds only the formatted label, so it never
+                        nests links or buttons. The explanation stays visible
+                        on touch as its own content, described to assistive
+                        technology through aria-describedby. */}
+                    <div
+                      className="qcard__opt-choice"
+                      tabIndex={inactive ? undefined : 0}
+                      role={isMulti ? 'checkbox' : 'radio'}
+                      aria-checked={isActive}
+                      aria-disabled={inactive || undefined}
+                      aria-describedby={descriptionId}
+                      onClick={inactive ? undefined : pick}
+                      onKeyDown={inactive ? undefined : (event) => {
+                        if (event.repeat || (event.key !== 'Enter' && event.key !== ' ')) return
+                        event.preventDefault()
+                        selectOption(q.question, opt.label)
+                      }}
+                    >
+                      <span
+                        className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
+                        aria-hidden="true"
+                      />
+                      <span className="qcard__opt-label"><InlineMarkdown text={opt.label} /></span>
+                    </div>
+                    {opt.description && (
+                      <div className="qcard__opt-desc" id={descriptionId}>
+                        <StandardMarkdown text={opt.description} literalTags onInternalNav={onInternalNav} />
                       </div>
-                    ) : (
-                      <span className="qcard__opt-label"><InlineMarkdown text={opt.label} onInternalNav={onInternalNav} /></span>
                     )}
                   </div>
                 )

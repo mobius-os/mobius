@@ -69,3 +69,29 @@ test('screen-reader names come from the rendered question, not its Markdown sour
   assert.match(html, new RegExp(`aria-label="Attach a photo or file to your answer to:" aria-labelledby="[^" ]+ ${id}"`))
   assert.doesNotMatch(html, /aria-label[^>]*\*\*/)
 })
+
+test('tag-like text stays visible in every Q&A field while raw HTML stays inert', () => {
+  const html = render({ questions: [{ header: 'Type <T>', question: 'Pick a return type for <Foo>?\n\n<script>alert(1)</script>', options: [
+    { label: 'Return Promise<void>', description: 'Like `Promise<string>` but <b>empty</b>' },
+    { label: 'Return Promise<string>' },
+  ] }] })
+  assert.match(html, /Type &lt;T&gt;/)
+  assert.match(html, /Pick a return type for &lt;Foo&gt;\?/)
+  assert.match(html, /Return Promise&lt;void&gt;/)
+  assert.match(html, /Return Promise&lt;string&gt;/)
+  assert.match(html, /&lt;b&gt;empty&lt;\/b&gt;/)
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/)
+  assert.doesNotMatch(html, /<script|<b>/)
+})
+
+test('a choice control holds only its label; links live in the described explanation', () => {
+  const html = render({ questions: [{ question: 'Update?', options: [
+    { label: 'See [docs](https://example.com/docs) ![logo](https://example.com/a.png)', description: 'Read [notes](https://example.com/notes).' },
+  ] }] })
+  const choice = html.match(/<div class="qcard__opt-choice"[^>]*>([\s\S]*?)<\/div>/)
+  assert.ok(choice)
+  assert.doesNotMatch(choice[1], /<a |<button|<img/)
+  assert.match(choice[1], /See docs logo/)
+  const describedBy = choice[0].match(/aria-describedby="([^"]+)"/)[1]
+  assert.match(html, new RegExp(`<div class="qcard__opt-desc" id="${describedBy}">[\\s\\S]*href="https://example.com/notes"`))
+})
