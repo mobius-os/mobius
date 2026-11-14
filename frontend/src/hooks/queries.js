@@ -420,7 +420,11 @@ function markProviderConnected(queryClient, providerId) {
 async function fetchModelRegistry() {
   const res = await api.models.list()
   const data = await jsonOrThrow(res, 'model registry fetch failed:')
-  return data?.providers || {}
+  return {
+    providers: data?.providers || {},
+    defaults: data?.defaults || {},
+    replacements: data?.replacements || {},
+  }
 }
 
 // These are three cheap, read-only attempts after the initial request. The

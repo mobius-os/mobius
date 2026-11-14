@@ -5,6 +5,7 @@ import { ArrowLeft, Bell, Folder, Moon, Sun } from '@openai/apps-sdk-ui/componen
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
+import { catalogDefault, catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
@@ -55,7 +56,6 @@ const PROVIDER_CHOICES = [
   { id: 'codex', label: 'OpenAI Codex' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
-  mobius: 'evolve',
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
 }
@@ -65,8 +65,10 @@ function defaultEffort(provider) {
   return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
 }
 
-function defaultBackgroundModel(provider) {
-  return DEFAULT_BACKGROUND_MODELS[provider] || ''
+function defaultBackgroundModel(provider, catalog) {
+  return provider === 'mobius'
+    ? catalogDefault(catalog, provider)
+    : (DEFAULT_BACKGROUND_MODELS[provider] || '')
 }
 
 function isKnownProvider(provider) {
@@ -78,7 +80,7 @@ function providerFromSettings(settings) {
 }
 
 
-function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
+function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude', catalog = null) {
   const rows = []
   const seen = new Set()
   const resolvedDefaultProvider = isKnownProvider(defaultProvider)
@@ -90,7 +92,7 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
     if (!provider || seen.has(provider)) return
     rows.push({
       provider,
-      model: choice?.model || defaultBackgroundModel(provider),
+      model: choice?.model || defaultBackgroundModel(provider, catalog),
       effort: choice?.effort || defaultEffort(provider),
       enabled: Object.prototype.hasOwnProperty.call(choice || {}, 'enabled')
         ? choice.enabled !== false
@@ -119,6 +121,7 @@ function providerOffLabel(provider, status) {
 
 function BackgroundProviderRow({
   row,
+  defaultModel,
   status,
   providerInfo,
   index,
@@ -142,7 +145,7 @@ function BackgroundProviderRow({
   const offLabel = configured ? '' : providerOffLabel(row.provider, status)
   const enabled = configured && row.enabled !== false
   const selectedModel = enabled
-    ? (row.model || defaultBackgroundModel(row.provider))
+    ? (row.model || defaultModel)
     : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
   const modelLabel = enabled
@@ -428,6 +431,7 @@ export default function SettingsView({
     const next = normalizeBackgroundAgents(
       settingsQuery.data.background_agents,
       providerFromSettings(settingsQuery.data),
+      modelRegistryQuery.data,
     )
     backgroundDraftRef.current = next
     setBackgroundDraft(next)
@@ -455,6 +459,7 @@ export default function SettingsView({
     normalizeBackgroundAgents(
       settingsQuery.data?.background_agents,
       providerFromSettings(settingsQuery.data),
+      modelRegistryQuery.data,
     ), configuredProviders)
 
   useSettingsFocus({
@@ -471,9 +476,8 @@ export default function SettingsView({
 
   const modelsForProvider = useCallback((provider) => {
     if (!provider) return []
-    const rows = Array.isArray(modelRegistryQuery.data?.[provider])
-      ? modelRegistryQuery.data[provider]
-      : null
+    const providerRows = catalogProviders(modelRegistryQuery.data)?.[provider]
+    const rows = Array.isArray(providerRows) ? providerRows : null
     if (rows && rows.length) {
       return rows.map((m) => ({
         id: m.id,
@@ -501,7 +505,13 @@ export default function SettingsView({
           const isEnabled = row.enabled !== false
           const choice = {
             provider: row.provider,
-            model: isEnabled ? (row.model || null) : null,
+            model: isEnabled ? (
+              selectedCatalogModel(
+                modelRegistryQuery.data,
+                row.provider,
+                row.model || defaultBackgroundModel(row.provider, modelRegistryQuery.data),
+              ) || null
+            ) : null,
             effort: isEnabled ? (row.effort || null) : null,
           }
           if (includeEnabled) choice.enabled = isEnabled
@@ -533,7 +543,7 @@ export default function SettingsView({
     })
     backgroundSaveChainRef.current = save
     return save
-  }, [queryClient])
+  }, [queryClient, modelRegistryQuery.data])
 
   // The draft is the owner's saved order. Connected-first grouping is applied
   // only when rendering (see effectiveBackgroundDraft), never persisted.
@@ -542,6 +552,7 @@ export default function SettingsView({
       normalizeBackgroundAgents(
         settingsQuery.data?.background_agents,
         providerFromSettings(settingsQuery.data),
+        modelRegistryQuery.data,
       )
     const next = typeof updater === 'function' ? updater(current) : updater
     if (disablesLastConnectedProvider(current, next, configuredProvidersRef.current)) {
@@ -551,7 +562,7 @@ export default function SettingsView({
     backgroundDraftRef.current = next
     setBackgroundDraft(next)
     persistBackgroundAgents(next)
-  }, [persistBackgroundAgents, settingsQuery.data])
+  }, [persistBackgroundAgents, settingsQuery.data, modelRegistryQuery.data])
 
   const setBackgroundProviderChoice = useCallback((provider, patch) => {
     updateBackgroundDraft((current) => current.map((row) => {
@@ -566,10 +577,11 @@ export default function SettingsView({
       normalizeBackgroundAgents(
         settingsQuery.data?.background_agents,
         providerFromSettings(settingsQuery.data),
+        modelRegistryQuery.data,
       )
     const next = moveConnectedProvider(current, fromIndex, toIndex, configuredProvidersRef.current)
     if (next) updateBackgroundDraft(next)
-  }, [settingsQuery.data, updateBackgroundDraft])
+  }, [settingsQuery.data, modelRegistryQuery.data, updateBackgroundDraft])
 
   useEffect(() => {
     backgroundDragRef.current = backgroundDrag
@@ -738,14 +750,28 @@ export default function SettingsView({
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
     const newlyConnected = !providersBefore.has(provider)
     if (newlyConnected) {
+      // Account linking may change the service catalogue. Do not persist a
+      // retired hard-coded model when the connection establishes its default.
+      let connectedCatalog = modelRegistryQuery.data
+      if (provider === 'mobius' && !catalogDefault(connectedCatalog, provider)) {
+        try {
+          connectedCatalog = await queryClient.fetchQuery({
+            ...modelQueries.registry.options(), staleTime: 0,
+          })
+        } catch {
+          // An unavailable registry leaves the model unselected; the backend
+          // owns execution fallback and the picker can retry discovery.
+        }
+      }
       const current = backgroundDraftRef.current || normalizeBackgroundAgents(
         settingsQuery.data?.background_agents,
         providerFromSettings(settingsQuery.data),
+        connectedCatalog,
       )
       const connectedRow = {
         ...(current.find(row => row.provider === provider) || { provider }),
         enabled: true,
-        model: defaultBackgroundModel(provider),
+        model: defaultBackgroundModel(provider, connectedCatalog),
         effort: defaultEffort(provider),
       }
       const rest = current.filter(row => row.provider !== provider)
@@ -766,7 +792,7 @@ export default function SettingsView({
     settingsQueries.owner.invalidate(queryClient)
     settingsQueries.providerUsage.invalidate(queryClient, provider)
     setConnectionEpoch(epoch => epoch + 1)
-  }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
+  }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data, modelRegistryQuery.data])
   const onProviderDisconnected = useCallback((provider) => {
     // A later reconnect from this page counts as a first connection again.
     const remaining = new Set(configuredProvidersRef.current)
@@ -1000,11 +1026,11 @@ export default function SettingsView({
           models={modelsForProvider(selectedProvider)}
           configured={configured}
           enabled={configured && row.enabled !== false}
-          model={row.model || defaultBackgroundModel(selectedProvider)}
+          model={selectedCatalogModel(modelRegistryQuery.data, selectedProvider, row.model || defaultBackgroundModel(selectedProvider, modelRegistryQuery.data))}
           effort={row.effort}
           onModelChange={(model, effort) => setBackgroundProviderChoice(selectedProvider, {
             enabled: !!model,
-            model: model || defaultBackgroundModel(selectedProvider),
+            model: model || defaultBackgroundModel(selectedProvider, modelRegistryQuery.data),
             ...(effort ? { effort } : {}),
           })}
           onEffortChange={(effort) => setBackgroundProviderChoice(selectedProvider, { effort })}
@@ -1116,7 +1142,8 @@ export default function SettingsView({
                 <BackgroundProviderRow
                   status={providerStatusQuery.data?.[row.provider]}
                   key={row.provider}
-                  row={row}
+                  row={{ ...row, model: selectedCatalogModel(modelRegistryQuery.data, row.provider, row.model) }}
+                  defaultModel={defaultBackgroundModel(row.provider, modelRegistryQuery.data)}
                   providerInfo={modelProviderInfo[row.provider]}
                   index={index}
                   models={modelsForProvider(row.provider)}
